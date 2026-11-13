@@ -30,25 +30,14 @@ function bindingProvider(binding: { provider: string }): AgentProfileId {
   return isAgentProfileId(binding.provider) ? binding.provider : 'claude-code'
 }
 
+import { mapSession, type SessionRow as CanonicalSessionRow } from '../domain/session-repository'
 import { runtimeMessages } from '../i18n/messages'
 import type { RuntimeDatabase } from '../storage/database'
 import type { DomainTransactionManager } from '../storage/domain-transaction'
 import { projectSceneGraphFrom } from './session-graph-repository'
 
-interface SessionRow {
-  id: string
-  task_id: string
-  execution_context_id: string
-  kind: SessionKind
-  status: SessionStatus
+type SessionRow = CanonicalSessionRow & {
   work_status: SessionWorkStatus
-  title: string
-  cwd: string
-  created_at: number
-  updated_at: number
-  last_activity_at: number
-  archived_at: number | null
-  version: number
 }
 
 interface BindingRow {
@@ -615,23 +604,6 @@ function requireBinding(
   return requireRow(tx.get<BindingRow>(
     'SELECT * FROM provider_bindings WHERE id = ?', bindingId
   ), 'ProviderBinding')
-}
-
-function mapSession(row: SessionRow): Session {
-  return {
-    id: row.id,
-    taskId: row.task_id,
-    executionContextId: row.execution_context_id,
-    kind: row.kind,
-    status: row.status,
-    title: row.title,
-    cwd: row.cwd,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-    lastActivityAt: row.last_activity_at,
-    ...(row.archived_at === null ? {} : { archivedAt: row.archived_at }),
-    version: row.version
-  }
 }
 
 function mapBinding(row: BindingRow): ProviderBinding {

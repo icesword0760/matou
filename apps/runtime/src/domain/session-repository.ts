@@ -34,7 +34,7 @@ export class StaleForkProviderIdentityError extends Error {
   }
 }
 
-interface SessionRow {
+export interface SessionRow {
   id: string
   task_id: string
   execution_context_id: string
@@ -1036,7 +1036,8 @@ function emitSessionEvent(
   })
 }
 
-function mapSession(row: SessionRow): Session {
+/** Map a raw SQLite `sessions` table row into the canonical domain `Session`. */
+export function mapSession(row: SessionRow): Session {
   return {
     id: row.id,
     taskId: row.task_id,

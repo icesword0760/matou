@@ -460,6 +460,74 @@ describe('ProviderModeService', () => {
       body: 'antigravity conversation missing'
     })
   })
+
+  it('preserves titleSource and providerTitle across observeHook, transitions, and hierarchy queries', () => {
+    const claudeTree = bootstrapClaudeTree()
+    database.run(
+      `UPDATE sessions
+       SET title = '手工锁定标题', title_source = 'manual', provider_title = '自动汇总标题'
+       WHERE id = ?`,
+      claudeTree.parentSessionId
+    )
+    const claudeAfterHook = providerModes.observeHook(command('claude-hook-preserve-title'), {
+      sessionId: claudeTree.parentSessionId,
+      providerSessionId: 'provider-parent',
+      eventName: 'Stop',
+      provider: 'claude-code',
+      now: 40
+    })
+    expect(claudeAfterHook.session).toMatchObject({
+      title: '手工锁定标题',
+      titleSource: 'manual',
+      providerTitle: '自动汇总标题'
+    })
+
+    database.run(
+      `UPDATE sessions SET kind = 'antigravity' WHERE id = ?`,
+      claudeTree.parentSessionId
+    )
+    database.run(
+      `UPDATE provider_bindings SET provider = 'antigravity', provider_session_id = 'agy-parent-1'
+       WHERE id = 'binding-parent'`
+    )
+    const agyAfterHook = providerModes.observeHook(command('agy-hook-preserve-title'), {
+      sessionId: claudeTree.parentSessionId,
+      providerSessionId: 'agy-parent-1',
+      eventName: 'PreInvocation',
+      provider: 'antigravity',
+      now: 41
+    })
+    expect(agyAfterHook.session).toMatchObject({
+      kind: 'antigravity',
+      title: '手工锁定标题',
+      titleSource: 'manual',
+      providerTitle: '自动汇总标题'
+    })
+
+    const modeEvent = database.get<{ payload_json: string }>(
+      `SELECT payload_json FROM domain_events
+       WHERE event_type = 'session.mode-changed' AND session_id = ?
+       ORDER BY seq DESC LIMIT 1`,
+      claudeTree.parentSessionId
+    )
+    expect(JSON.parse(modeEvent!.payload_json).session).toMatchObject({
+      title: '手工锁定标题',
+      titleSource: 'manual',
+      providerTitle: '自动汇总标题'
+    })
+
+    const snapshot = hierarchy.activateSession({
+      windowId: 'window-1',
+      sessionId: claudeTree.parentSessionId,
+      now: 42
+    })
+    expect(snapshot.session).toMatchObject({
+      id: claudeTree.parentSessionId,
+      title: '手工锁定标题',
+      titleSource: 'manual',
+      providerTitle: '自动汇总标题'
+    })
+  })
 })
 
 function bootstrapClaudeTree(options: { canFork?: boolean } = {}) {

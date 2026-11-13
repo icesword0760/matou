@@ -630,4 +630,33 @@ describe('RuntimeProjectionStore', () => {
       expect.objectContaining({ sessionId: 'session-1', title: '修复卡片标题同步' })
     ])
   })
+
+  it('keeps manual titleSource when a subsequent session.mode-changed event updates runtime state', () => {
+    const store = new RuntimeProjectionStore()
+    store.replace({
+      runtimeGeneration: 'generation-1', eventSequence: 1,
+      workspaces: [], tasks: [], relations: [], scenes: [],
+      sessions: [{ id: 'session-1', kind: 'antigravity', title: '手工锁定标题', titleSource: 'manual', providerTitle: '自动标题' }],
+      sessionGraphs: {
+        'scene-1': {
+          sceneId: 'scene-1', nodes: [{ sessionId: 'session-1', title: '手工锁定标题' }], edges: []
+        }
+      }
+    })
+    store.applyBatch('generation-1', [{
+      sequence: 2, eventId: 'mode-2', eventType: 'session.mode-changed',
+      aggregateType: 'session', aggregateId: 'session-1', sessionId: 'session-1',
+      payload: {
+        session: { id: 'session-1', kind: 'antigravity', title: '手工锁定标题', titleSource: 'manual', providerTitle: '自动标题' },
+        graph: {
+          sceneId: 'scene-1', nodes: [{ sessionId: 'session-1', title: '手工锁定标题', workStatus: 'idle' }], edges: []
+        }
+      },
+      schemaVersion: 1, commandId: 'mode-command', occurredAt: 2
+    }])
+
+    expect(store.view().sessions).toEqual([
+      expect.objectContaining({ title: '手工锁定标题', titleSource: 'manual', providerTitle: '自动标题' })
+    ])
+  })
 })

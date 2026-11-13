@@ -18,6 +18,7 @@ import {
 import { HierarchyConflictError } from './hierarchy-errors'
 import { createHierarchyIds, type HierarchyIds } from './hierarchy-ids'
 import { WorkspacePathInvalidError } from './workspace-path-service'
+import { mapSession, type SessionRow } from '../domain/session-repository'
 import { EntityMissingError } from '../errors'
 import { runtimeMessages } from '../i18n/messages'
 import type { DatabaseTransaction, RuntimeDatabase } from '../storage/database'
@@ -71,21 +72,6 @@ interface SceneRow {
   created_at: number
   updated_at: number
   archived_at: number | null
-}
-
-interface SessionRow {
-  id: string
-  task_id: string
-  execution_context_id: string
-  kind: Session['kind']
-  status: Session['status']
-  title: string
-  cwd: string
-  created_at: number
-  updated_at: number
-  last_activity_at: number
-  archived_at: number | null
-  version: number
 }
 
 interface ContextRow {
@@ -2684,23 +2670,6 @@ function mapScene(row: SceneRow): Scene {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     ...(row.archived_at === null ? {} : { archivedAt: row.archived_at })
-  }
-}
-
-function mapSession(row: SessionRow): Session {
-  return {
-    id: row.id,
-    taskId: row.task_id,
-    executionContextId: row.execution_context_id,
-    kind: row.kind,
-    status: row.status,
-    title: row.title,
-    cwd: row.cwd,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-    lastActivityAt: row.last_activity_at,
-    ...(row.archived_at === null ? {} : { archivedAt: row.archived_at }),
-    version: row.version
   }
 }
 

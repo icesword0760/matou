@@ -6,6 +6,7 @@ import type {
   SessionRelation
 } from '@matou/domain'
 
+import { mapSession, type SessionRow } from '../domain/session-repository'
 import type { DatabaseTransaction, RuntimeDatabase } from '../storage/database'
 import type { DomainTransactionManager } from '../storage/domain-transaction'
 
@@ -33,21 +34,6 @@ interface HistoryRow {
   metadata_json: string
   command_id: string
   occurred_at: number
-}
-
-interface SessionRow {
-  id: string
-  task_id: string
-  execution_context_id: string
-  kind: Session['kind']
-  status: Session['status']
-  title: string
-  cwd: string
-  created_at: number
-  updated_at: number
-  last_activity_at: number
-  archived_at: number | null
-  version: number
 }
 
 export type RelationOperation = 'created' | 'revoked' | 'restored' | 'metadata-updated'
@@ -506,23 +492,6 @@ function mapCurrent(row: CurrentRow): SessionRelation {
     metadata: JSON.parse(row.metadata_json) as unknown,
     createdAt: row.created_at,
     updatedAt: row.updated_at
-  }
-}
-
-function mapSession(row: SessionRow): Session {
-  return {
-    id: row.id,
-    taskId: row.task_id,
-    executionContextId: row.execution_context_id,
-    kind: row.kind,
-    status: row.status,
-    title: row.title,
-    cwd: row.cwd,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-    lastActivityAt: row.last_activity_at,
-    ...(row.archived_at === null ? {} : { archivedAt: row.archived_at }),
-    version: row.version
   }
 }
 
