@@ -1,0 +1,503 @@
+.status-info button.status-field.egress-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 7px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  font-size: 10px;
+  line-height: 1.4;
+  white-space: nowrap;
+  max-width: 220px;
+  transition: background .15s ease, color .15s ease, border-color .15s ease;
+}
+
+.egress-chip__dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  flex: none;
+  background: currentColor;
+}
+
+.egress-chip__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.status-info button.status-field.egress-chip.is-neutral,
+.status-info button.status-field.egress-chip.is-ok {
+  color: #8b949e;
+  background: transparent;
+}
+
+.status-info button.status-field.egress-chip.is-ok .egress-chip__dot {
+  background: #22c55e;
+}
+
+.status-info button.status-field.egress-chip.is-warn {
+  color: #d29922;
+  background: rgba(210, 153, 34, .12);
+}
+
+.status-info button.status-field.egress-chip.is-danger {
+  color: #f47067;
+  background: rgba(228, 93, 85, .15);
+}
+
+.status-info button.status-field.egress-chip.is-danger-outline {
+  color: #f47067;
+  border-color: rgba(244, 112, 103, .65);
+  background: transparent;
+}
+
+.hierarchy-shell[data-theme="light"] .status-info button.status-field.egress-chip.is-neutral,
+.hierarchy-shell[data-theme="light"] .status-info button.status-field.egress-chip.is-ok,
+.detached-terminal-app[data-theme="light"] .status-info button.status-field.egress-chip.is-neutral,
+.detached-terminal-app[data-theme="light"] .status-info button.status-field.egress-chip.is-ok {
+  color: #606572;
+}
+
+.hierarchy-shell[data-theme="light"] .status-info button.status-field.egress-chip.is-warn,
+.detached-terminal-app[data-theme="light"] .status-info button.status-field.egress-chip.is-warn {
+  color: #9a6700;
+  background: rgba(210, 153, 34, .14);
+}
+
+.hierarchy-shell[data-theme="light"] .status-info button.status-field.egress-chip.is-danger,
+.detached-terminal-app[data-theme="light"] .status-info button.status-field.egress-chip.is-danger {
+  color: #b42318;
+  background: #feeceb;
+}
+
+.hierarchy-shell[data-theme="light"] .status-info button.status-field.egress-chip.is-danger-outline,
+.detached-terminal-app[data-theme="light"] .status-info button.status-field.egress-chip.is-danger-outline {
+  color: #b42318;
+  border-color: rgba(180, 35, 24, .55);
+  background: transparent;
+}
+
+.egress-panel {
+  --eg-bg: #fff;
+  --eg-surface: #f7f9fc;
+  --eg-border: #d9e3f1;
+  --eg-text: #283446;
+  --eg-muted: #687b96;
+  --eg-accent: #287cdd;
+  --eg-pass: #1f883d;
+  --eg-warn: #9a6700;
+  --eg-warn-bg: #fff8e8;
+  --eg-danger: #c53929;
+  --eg-danger-bg: #fff2f0;
+  position: fixed;
+  z-index: 1500;
+  right: 12px;
+  bottom: 46px;
+  width: min(440px, calc(100vw - 24px));
+  max-height: calc(100dvh - 70px);
+  display: flex;
+  flex-direction: column;
+  background: var(--eg-bg);
+  color: var(--eg-text);
+  border: 1px solid var(--eg-border);
+  border-radius: 12px;
+  box-shadow: 0 16px 42px #263d6126, 0 3px 10px #263d610c;
+  font: 12px/1.5 -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  text-align: left;
+  overflow: hidden;
+}
+
+.egress-panel * {
+  box-sizing: border-box;
+}
+
+[data-theme=dark] .egress-panel {
+  --eg-bg: #1e242d;
+  --eg-surface: #252c37;
+  --eg-border: #364152;
+  --eg-text: #e1e6ed;
+  --eg-muted: #9aa9be;
+  --eg-accent: #58a6ff;
+  --eg-pass: #3fb950;
+  --eg-warn: #d29922;
+  --eg-warn-bg: rgba(210, 153, 34, .12);
+  --eg-danger: #f47067;
+  --eg-danger-bg: rgba(228, 93, 85, .14);
+  box-shadow: 0 16px 42px #00000066;
+}
+
+.egress-panel__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--eg-border);
+  flex: none;
+}
+
+.egress-panel__heading {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+
+.egress-panel__heading h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.egress-panel__checked-at {
+  font-size: 11px;
+  color: var(--eg-muted);
+  white-space: nowrap;
+}
+
+.egress-panel__header-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+
+.egress-panel__close {
+  width: 26px;
+  height: 26px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--eg-muted);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.egress-panel__close:hover {
+  background: rgba(127, 145, 170, .14);
+  color: var(--eg-text);
+}
+
+.egress-btn {
+  padding: 4px 10px;
+  border: 1px solid var(--eg-border);
+  border-radius: 6px;
+  background: var(--eg-surface);
+  color: var(--eg-text);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.egress-btn:hover:not(:disabled) {
+  border-color: var(--eg-accent);
+  color: var(--eg-accent);
+}
+
+.egress-btn:disabled {
+  opacity: .55;
+  cursor: default;
+}
+
+.egress-btn--subtle {
+  padding: 2px 8px;
+  border-color: var(--eg-danger);
+  color: var(--eg-danger);
+  background: transparent;
+}
+
+.egress-panel__scroll {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  min-height: 0;
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.egress-section__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.egress-section__header h3 {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 650;
+  color: var(--eg-muted);
+  letter-spacing: .02em;
+}
+
+.egress-check-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.egress-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--eg-border);
+  background: var(--eg-surface);
+}
+
+.egress-check.is-warn {
+  background: var(--eg-warn-bg);
+  border-color: rgba(210, 153, 34, .35);
+}
+
+.egress-check.is-fail {
+  background: var(--eg-danger-bg);
+  border-color: rgba(228, 93, 85, .38);
+}
+
+.egress-check__badge {
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 10px;
+  font-weight: 700;
+  flex: none;
+  margin-top: 1px;
+}
+
+.egress-check__badge.is-pass {
+  color: var(--eg-pass);
+  background: rgba(63, 185, 80, .14);
+}
+
+.egress-check__badge.is-warn,
+.egress-check__badge.is-unknown {
+  color: var(--eg-warn);
+  background: rgba(210, 153, 34, .18);
+}
+
+.egress-check__badge.is-fail {
+  color: var(--eg-danger);
+  background: rgba(228, 93, 85, .2);
+}
+
+.egress-check__body {
+  min-width: 0;
+  flex: 1;
+}
+
+.egress-check__title {
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.egress-check__detail {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--eg-muted);
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.egress-check.is-fail .egress-check__detail {
+  color: var(--eg-danger);
+}
+
+.egress-check.is-warn .egress-check__detail {
+  color: var(--eg-warn);
+}
+
+.egress-controls {
+  padding-top: 10px;
+  border-top: 1px solid var(--eg-border);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.egress-rule-fieldset {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.egress-rule-fieldset legend {
+  font-size: 11px;
+  font-weight: 650;
+  color: var(--eg-muted);
+  margin-bottom: 6px;
+}
+
+.egress-rule-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+}
+
+.egress-radio,
+.egress-toggle {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: 7px;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.egress-radio input,
+.egress-toggle input {
+  margin-top: 2px;
+  accent-color: var(--eg-accent);
+  cursor: pointer;
+}
+
+.egress-reference {
+  padding-top: 10px;
+  border-top: 1px solid var(--eg-border);
+}
+
+.egress-reference__title {
+  font-size: 11px;
+  font-weight: 650;
+  color: var(--eg-muted);
+  margin-bottom: 6px;
+}
+
+.egress-reference__links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 5px;
+}
+
+.egress-link-btn {
+  padding: 3px 8px;
+  border: 1px solid var(--eg-border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--eg-accent);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.egress-link-btn:hover {
+  background: rgba(40, 124, 221, .08);
+}
+
+.egress-reference__note {
+  margin: 0;
+  font-size: 11px;
+  color: var(--eg-muted);
+}
+
+.egress-panel__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--eg-border);
+  background: var(--eg-surface);
+  flex: none;
+}
+
+.egress-panel__sampling-note {
+  font-size: 10px;
+  color: var(--eg-muted);
+  line-height: 1.4;
+}
+
+.egress-panel__copy-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+
+.egress-copied-hint {
+  font-size: 11px;
+  color: var(--eg-pass);
+  font-weight: 600;
+}
+
+/* Freeze / resume banner at top of terminal pane */
+.egress-freeze-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  border-top: 1px solid rgba(228, 93, 85, .3);
+  border-bottom: 1px solid rgba(228, 93, 85, .3);
+  color: #f0b1ad;
+  background: #2b1919;
+  font-size: 11px;
+  line-height: 1.4;
+  flex: none;
+}
+
+.egress-freeze-banner__message {
+  min-width: 0;
+  flex: 1;
+}
+
+.egress-freeze-banner__actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+
+.egress-freeze-banner__actions button {
+  padding: 3px 8px;
+  border: 1px solid rgba(228, 93, 85, .45);
+  border-radius: 5px;
+  color: #f2b7b3;
+  background: rgba(228, 93, 85, .08);
+  font: inherit;
+  cursor: pointer;
+}
+
+.egress-freeze-banner__actions button:hover:not(:disabled) {
+  background: rgba(228, 93, 85, .2);
+}
+
+.egress-freeze-banner.is-resumed {
+  border-color: rgba(63, 185, 80, .3);
+  color: #9be9a8;
+  background: #14261a;
+}
+
+.hierarchy-shell[data-theme="light"] .egress-freeze-banner,
+.detached-terminal-app[data-theme="light"] .egress-freeze-banner {
+  border-color: #edc2bf;
+  color: #9b2f2a;
+  background: #fff3f2;
+}
+
+.hierarchy-shell[data-theme="light"] .egress-freeze-banner__actions button,
+.detached-terminal-app[data-theme="light"] .egress-freeze-banner__actions button {
+  border-color: #e4a39f;
+  color: #9b2f2a;
+  background: #fff;
+}
+
+.hierarchy-shell[data-theme="light"] .egress-freeze-banner.is-resumed,
+.detached-terminal-app[data-theme="light"] .egress-freeze-banner.is-resumed {
+  border-color: #bfe6c7;
+  color: #1f6f34;
+  background: #effbf2;
+}

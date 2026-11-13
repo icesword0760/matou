@@ -1,5 +1,6 @@
 import {
   PROTOCOL_VERSION,
+  type EgressStatusWire,
   type HostNavigationRequestWire,
   type HostNavigationResultWire,
   type RpcMethod,
@@ -92,6 +93,9 @@ export class RuntimeClient {
   readonly #recoveryListeners = new Set<(status: SessionRecoveryStatus) => void>()
   readonly #recoveryResetListeners = new Set<() => void>()
   readonly #recoveryStatuses = new Map<string, SessionRecoveryStatus>()
+  readonly #egressStatusListeners = new Set<(status: EgressStatusWire) => void>()
+  readonly #egressReconnectListeners = new Set<() => void>()
+  #egressStatus: EgressStatusWire | undefined
   readonly #readyWaiters = new Set<() => void>()
   #port: RuntimeClientPort
   #ready = false
@@ -136,6 +140,8 @@ export class RuntimeClient {
       this.#requests.delete(requestId)
     }
     this.#bindPort(port)
+    this.#egressStatus = undefined
+    for (const listener of this.#egressReconnectListeners) listener()
   }
 
   dispose(): void {
@@ -149,6 +155,8 @@ export class RuntimeClient {
     this.#projectionListeners.clear()
     this.#recoveryListeners.clear()
     this.#recoveryResetListeners.clear()
+    this.#egressStatusListeners.clear()
+    this.#egressReconnectListeners.clear()
     for (const [requestId, pending] of this.#requests) {
       clearTimeout(pending.timeout)
       pending.reject(new Error('Runtime client was disposed before the request completed'))
@@ -271,6 +279,19 @@ export class RuntimeClient {
     return () => {
       this.#recoveryListeners.delete(listener)
       if (onReset) this.#recoveryResetListeners.delete(onReset)
+    }
+  }
+
+  subscribeEgressStatus(
+    listener: (status: EgressStatusWire) => void,
+    onReconnect?: () => void
+  ): () => void {
+    this.#egressStatusListeners.add(listener)
+    if (onReconnect) this.#egressReconnectListeners.add(onReconnect)
+    if (this.#egressStatus !== undefined) listener(this.#egressStatus)
+    return () => {
+      this.#egressStatusListeners.delete(listener)
+      if (onReconnect) this.#egressReconnectListeners.delete(onReconnect)
     }
   }
 
@@ -558,6 +579,11 @@ export class RuntimeClient {
     }
     if (message.type === 'events.batch' || message.type === 'terminal.hud') {
       for (const listener of this.#projectionListeners) listener(message)
+      return
+    }
+    if (message.type === 'egress.status') {
+      this.#egressStatus = message.status
+      for (const listener of this.#egressStatusListeners) listener(message.status)
     }
   }
 

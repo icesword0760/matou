@@ -812,6 +812,43 @@ describe('RuntimeClient', () => {
       type: 'protocol.error', code: 'WORKSPACE_PATH_INVALID', sessionId: 'session-2'
     })])
   })
+
+  it('delivers pushed egress.status updates and notifies reconnect listeners on replacePort', () => {
+    const port = new FakePort()
+    const client = new RuntimeClient(port, { clientId: 'renderer-1' })
+    const statuses: any[] = []
+    let reconnects = 0
+    const unsubscribe = client.subscribeEgressStatus(
+      (status) => statuses.push(status),
+      () => { reconnects += 1 }
+    )
+    const sampleStatus = {
+      state: 'ok',
+      protectionEnabled: true,
+      ruleMode: 'country',
+      checkedAt: 1_700_000_000_000,
+      families: [],
+      checks: [],
+      sessionFamilies: {}
+    }
+    port.deliver({
+      type: 'egress.status',
+      protocolVersion: PROTOCOL_VERSION,
+      status: sampleStatus
+    })
+    expect(statuses).toEqual([sampleStatus])
+
+    // Late subscribers receive the cached status right away.
+    const lateStatuses: any[] = []
+    const unsubscribeLate = client.subscribeEgressStatus((status) => lateStatuses.push(status))
+    expect(lateStatuses).toEqual([sampleStatus])
+
+    client.replacePort(new FakePort())
+    expect(reconnects).toBe(1)
+
+    unsubscribe()
+    unsubscribeLate()
+  })
 })
 
 class FakePort implements RuntimeClientPort {
