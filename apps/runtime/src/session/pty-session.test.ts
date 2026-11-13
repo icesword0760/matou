@@ -1,12 +1,14 @@
+import { execFile } from 'node:child_process'
 import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { promisify } from 'node:util'
 
 import { afterEach, describe, expect, it } from 'vitest'
 
 import type { RuntimeMessage } from '@matou/contracts'
 
-import { PtySession } from './pty-session'
+import { PtySession, SessionEgressFrozenError } from './pty-session'
 import { readSessionJournalBounds } from '../journal/journal-range-reader'
 import { CALLER_SESSION_MARKERS } from './independent-session-environment'
 
@@ -412,6 +414,163 @@ describe('PtySession durability recovery', () => {
     } finally {
       if (previousShell === undefined) delete process.env.SHELL
       else process.env.SHELL = previousShell
+    }
+  })
+})
+
+const execFileAsync = promisify(execFile)
+
+async function readProcessStat(pid: number): Promise<string> {
+  const { stdout } = await execFileAsync('ps', ['-o', 'stat=', '-p', String(pid)])
+  return stdout.trim()
+}
+
+describe('PtySession egress freeze', () => {
+  it('blocks write with SessionEgressFrozenError while allowing resize, screen snapshot and frame reads', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'matou-pty-egress-freeze-'))
+    roots.push(root)
+    const previousShell = process.env.SHELL
+    process.env.SHELL = '/bin/sh'
+    let session: PtySession | undefined
+    let output = ''
+    try {
+      session = await PtySession.create({
+        sessionId: 'egress-freeze-ops', executionContextId: 'local-default',
+        cols: 80, rows: 24, cwd: root, dataRoot: root, profile: 'shell',
+        send: () => {},
+        onOutput: (data) => { output += data }
+      })
+      session.write('echo BEFORE_FREEZE\n')
+      await waitUntil(() => output.includes('BEFORE_FREEZE'))
+
+      await session.setEgressFrozen(true)
+      expect(session.egressFrozen).toBe(true)
+      expect(() => session!.write('x')).toThrow(SessionEgressFrozenError)
+
+      session.resize(100, 30)
+      await expect(session.snapshotScreen()).resolves.toMatchObject({ cols: 100, rows: 30 })
+      await expect(session.captureReplayScreen()).resolves.toMatchObject({ cols: 100, rows: 30 })
+      const frames = await session.readFrames()
+      expect(frames.some((frame) => frame.kind === 'resize' && frame.cols === 100 && frame.rows === 30)).toBe(true)
+      await expect(session.replayMetadata()).resolves.toMatchObject({ lastSequence: session.lastSequence })
+
+      await session.setEgressFrozen(false)
+      expect(session.egressFrozen).toBe(false)
+      session.write('echo AFTER_THAW\n')
+      await waitUntil(() => output.includes('AFTER_THAW'))
+    } finally {
+      await session?.shutdownForRuntime({ gracePeriodMs: 200, hardKillWaitMs: 1_000 })
+      restoreEnv('SHELL', previousShell)
+    }
+  })
+
+  it('exits within 3 seconds when disposed while egress-frozen', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'matou-pty-egress-dispose-'))
+    roots.push(root)
+    const previousShell = process.env.SHELL
+    process.env.SHELL = '/bin/sh'
+    let session: PtySession | undefined
+    try {
+      session = await PtySession.create({
+        sessionId: 'egress-freeze-dispose', executionContextId: 'local-default',
+        cols: 80, rows: 24, cwd: root, dataRoot: root, profile: 'shell',
+        send: () => {}
+      })
+      await session.setEgressFrozen(true)
+      expect(session.egressFrozen).toBe(true)
+
+      const startedAt = Date.now()
+      session.dispose({ notifyExit: false, reason: 'structure-removal' })
+      await Promise.race([
+        session.whenClosed(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('frozen dispose timed out')), 3_000))
+      ])
+      expect(Date.now() - startedAt).toBeLessThan(3_000)
+    } finally {
+      if (session) await session.shutdownForRuntime({ gracePeriodMs: 100, hardKillWaitMs: 500 })
+      restoreEnv('SHELL', previousShell)
+    }
+  })
+
+  it('finishes shutdownForRuntime cleanly when egress-frozen', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'matou-pty-egress-shutdown-'))
+    roots.push(root)
+    const previousShell = process.env.SHELL
+    process.env.SHELL = '/bin/sh'
+    let session: PtySession | undefined
+    try {
+      session = await PtySession.create({
+        sessionId: 'egress-freeze-shutdown', executionContextId: 'local-default',
+        cols: 80, rows: 24, cwd: root, dataRoot: root, profile: 'shell',
+        send: () => {}
+      })
+      await session.setEgressFrozen(true)
+
+      const startedAt = Date.now()
+      await session.shutdownForRuntime({ gracePeriodMs: 500, hardKillWaitMs: 1_000 })
+      expect(Date.now() - startedAt).toBeLessThan(3_000)
+      await expect(session.whenClosed()).resolves.toBeUndefined()
+    } finally {
+      restoreEnv('SHELL', previousShell)
+    }
+  })
+
+  it.skipIf(process.platform === 'win32')('keeps process stopped when durability backpressure resumes to low watermark while egress-frozen', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'matou-pty-egress-backpressure-'))
+    roots.push(root)
+    const previousShell = process.env.SHELL
+    process.env.SHELL = '/bin/sh'
+    let releaseBlockedWrite: () => void = () => {}
+    const blockedWrite = new Promise<void>((resolve) => { releaseBlockedWrite = resolve })
+    let blockFirstLargeWrite = true
+    let writeEntered: () => void = () => {}
+    const firstLargeWriteEntered = new Promise<void>((resolve) => { writeEntered = resolve })
+    let session: PtySession | undefined
+    try {
+      session = await PtySession.create({
+        sessionId: 'egress-freeze-backpressure', executionContextId: 'local-default',
+        cols: 80, rows: 24, cwd: root, dataRoot: root, profile: 'shell',
+        send: () => {},
+        journalOptions: {
+          writeFrame: async (handle, encoded) => {
+            if (blockFirstLargeWrite && encoded.byteLength >= 512 * 1024) {
+              blockFirstLargeWrite = false
+              writeEntered()
+              await blockedWrite
+            }
+            await handle.write(encoded)
+          }
+        }
+      })
+
+      await session.setEgressFrozen(true)
+      const statWhileFrozen = await readProcessStat(session.pid)
+      console.info('[egress-test] stat while frozen:', statWhileFrozen)
+      expect(statWhileFrozen).toContain('T')
+
+      // Push healthy durability retention above the 1 MiB high watermark so
+      // durability backpressure pauses too, then drain back below low watermark.
+      session.display('a'.repeat(700 * 1024))
+      await firstLargeWriteEntered
+      session.display('b'.repeat(700 * 1024))
+      expect(session.retainedDurabilityBytes).toBeGreaterThanOrEqual(1024 * 1024)
+
+      releaseBlockedWrite()
+      await session.readFrames()
+      expect(session.retainedDurabilityBytes).toBe(0)
+
+      const statAfterBackpressureResume = await readProcessStat(session.pid)
+      console.info('[egress-test] stat after backpressure resume while still frozen:', statAfterBackpressureResume)
+      expect(statAfterBackpressureResume).toContain('T')
+
+      await session.setEgressFrozen(false)
+      await waitUntil(() => !session!.egressFrozen)
+      const statAfterThaw = await readProcessStat(session.pid)
+      expect(statAfterThaw).not.toContain('T')
+    } finally {
+      releaseBlockedWrite()
+      await session?.shutdownForRuntime({ gracePeriodMs: 200, hardKillWaitMs: 1_000 })
+      restoreEnv('SHELL', previousShell)
     }
   })
 })

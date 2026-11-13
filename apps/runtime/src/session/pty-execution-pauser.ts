@@ -1,3 +1,7 @@
+import type { DurabilityExecutionPauser } from './session-durability-gate'
+
+export type PauseReason = 'durability' | 'egress'
+
 export interface PausablePtyExecution {
   readonly pid: number
   pause(): void
@@ -58,4 +62,98 @@ export class PtyExecutionPauser {
 
 function isMissingProcess(error: unknown): boolean {
   return (error as NodeJS.ErrnoException | undefined)?.code === 'ESRCH'
+}
+
+/**
+ * Coordinates multiple independent pause reasons over a single underlying
+ * execution pauser. The inner pauser is paused on the transition from zero to
+ * one active reason and resumed only when the last active reason clears.
+ */
+export class SharedExecutionPauser {
+  readonly #inner: DurabilityExecutionPauser
+  readonly #reasons = new Set<PauseReason>()
+  readonly #leases = new Map<PauseReason, DurabilityExecutionPauser>()
+  #inFlight: Promise<void> | undefined
+
+  constructor(inner: DurabilityExecutionPauser) {
+    this.#inner = inner
+  }
+
+  lease(reason: PauseReason): DurabilityExecutionPauser {
+    let existing = this.#leases.get(reason)
+    if (!existing) {
+      existing = {
+        pause: () => this.#pause(reason),
+        resume: () => this.#resume(reason)
+      }
+      this.#leases.set(reason, existing)
+    }
+    return existing
+  }
+
+  isPausedFor(reason: PauseReason): boolean {
+    return this.#reasons.has(reason)
+  }
+
+  #pause(reason: PauseReason): Promise<void> {
+    return this.#enqueue(() => {
+      if (this.#reasons.has(reason)) return
+      const shouldPause = this.#reasons.size === 0
+      this.#reasons.add(reason)
+      if (!shouldPause) return
+      return this.#inner.pause()
+    })
+  }
+
+  #resume(reason: PauseReason): Promise<void> {
+    return this.#enqueue(() => {
+      if (!this.#reasons.has(reason)) return
+      if (this.#reasons.size > 1) {
+        this.#reasons.delete(reason)
+        return
+      }
+      const result = this.#inner.resume()
+      if (isPromiseLike(result)) {
+        return Promise.resolve(result).then(() => {
+          this.#reasons.delete(reason)
+        })
+      }
+      this.#reasons.delete(reason)
+      return undefined
+    })
+  }
+
+  #enqueue(run: () => void | Promise<void>): Promise<void> {
+    if (this.#inFlight === undefined) {
+      let result: void | Promise<void>
+      try {
+        result = run()
+      } catch (error) {
+        return Promise.reject(error)
+      }
+      if (!isPromiseLike(result)) {
+        return Promise.resolve()
+      }
+      const promise = Promise.resolve(result)
+      const tracked = promise.then(() => undefined, () => undefined).finally(() => {
+        if (this.#inFlight === tracked) this.#inFlight = undefined
+      })
+      this.#inFlight = tracked
+      return promise
+    }
+    const next = this.#inFlight.then(() => run())
+    const tracked = next.then(() => undefined, () => undefined).finally(() => {
+      if (this.#inFlight === tracked) this.#inFlight = undefined
+    })
+    this.#inFlight = tracked
+    return next
+  }
+}
+
+function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
+  return (
+    (typeof value === 'object' || typeof value === 'function') &&
+    value !== null &&
+    typeof (value as { then?: unknown }).then === 'function'
+  )
 }
