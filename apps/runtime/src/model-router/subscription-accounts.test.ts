@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { EventEmitter } from 'node:events'
 import { createServer, type Server } from 'node:http'
 import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import type { SubscriptionProvider } from '@matou/contracts'
 import { SubscriptionAccounts } from './subscription-accounts'
@@ -359,7 +359,9 @@ describe.runIf(process.env.MATOU_TEST_MODEL_ROUTER === '1')('subscription adopti
       expect((await f.store.snapshot()).activeProviderIds['claude-code']).toBe(saved.id)
       await delay(150)
       expect(f.manager.status.pid).toBeUndefined()
-      await writeFile(join(project, 'output/model-router-stage4/router-status.json'), JSON.stringify({ snapshots: await Promise.all(snapshots), final: await f.accounts.snapshot(), state: f.manager.status }, null, 2))
+      const evidencePath = join(project, 'output/model-router-stage4/router-status.json')
+      await mkdir(dirname(evidencePath), { recursive: true })
+      await writeFile(evidencePath, JSON.stringify({ snapshots: await Promise.all(snapshots), final: await f.accounts.snapshot(), state: f.manager.status }, null, 2))
     } finally { unsubscribe(); lease.release() }
   }, 20000)
   it('does not adopt a credential when cancellation races the callback commit', async () => {
