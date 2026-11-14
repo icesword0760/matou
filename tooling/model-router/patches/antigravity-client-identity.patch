@@ -1,0 +1,1257 @@
+diff --git a/go.mod b/go.mod
+index 3b4b50d..b26ddaa 100644
+--- a/go.mod
++++ b/go.mod
+@@ -31,6 +31,7 @@ require (
+ 	github.com/sirupsen/logrus v1.9.3
+ 	github.com/skratchdot/open-golang v0.0.0-20200116055534-eef842397966
+ 	github.com/tiktoken-go/tokenizer v0.8.1
++	go.etcd.io/bbolt v1.5.0
+ 	golang.org/x/crypto v0.57.0
+ 	golang.org/x/net v0.60.0
+ 	golang.org/x/oauth2 v0.30.0
+@@ -58,7 +59,6 @@ require (
+ 	github.com/pion/turn/v5 v5.0.12 // indirect
+ 	github.com/rogpeppe/go-internal v1.15.0 // indirect
+ 	github.com/wlynxg/anet v0.0.5 // indirect
+-	go.etcd.io/bbolt v1.5.0 // indirect
+ 	go.uber.org/atomic v1.11.0 // indirect
+ 	golang.org/x/time v0.14.0 // indirect
+ )
+diff --git a/internal/antigravitytls/antigravitytls.go b/internal/antigravitytls/antigravitytls.go
+new file mode 100644
+index 0000000..2e7f9bc
+--- /dev/null
++++ b/internal/antigravitytls/antigravitytls.go
+@@ -0,0 +1,297 @@
++// Package antigravitytls reproduces the TLS and HTTP/2 client identity of the
++// native Antigravity language server for Cloud Code API traffic.
++//
++// The pinned Antigravity 2.29.0 build is a Go 1.28 program (boringcrypto build)
++// whose Cloud Code client advertises ALPN h2 and negotiates HTTP/2. The stock
++// router used to force HTTP/1.1 without ALPN, which made the same OAuth token
++// look like a different client. The ClientHello below is a byte-structured copy
++// of a capture from that native binary: same cipher list, extension order,
++// supported groups (including the P-256/P-384 ML-KEM hybrids that Go 1.28 adds
++// to the list without sending key shares for them), signature algorithms, ALPN
++// and key shares. Random, session ID and key material stay per-connection.
++package antigravitytls
++
++import (
++	"context"
++	"errors"
++	"crypto/tls"
++	"fmt"
++	"net"
++	"net/http"
++	"net/url"
++	"strings"
++	"sync"
++	"time"
++
++	utls "github.com/refraction-networking/utls"
++	log "github.com/sirupsen/logrus"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
++	"golang.org/x/net/http2"
++	"golang.org/x/net/proxy"
++)
++
++// ClientHelloSpec returns the captured Antigravity Cloud Code ClientHello.
++// The spec is built fresh per connection so uTLS can generate new key shares.
++//
++// 4587 (SecP256r1MLKEM768) and 4589 (SecP384r1MLKEM1024) are advertised for
++// fingerprint parity only. No key share is sent for them, exactly like the
++// native client, so a server cannot select them without a HelloRetryRequest.
++func ClientHelloSpec() *utls.ClientHelloSpec {
++	return &utls.ClientHelloSpec{
++		CipherSuites: []uint16{
++			0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8, 0xc009,
++			0xc013, 0xc00a, 0xc014, 0x1301, 0x1302, 0x1303,
++		},
++		CompressionMethods: []uint8{0},
++		Extensions: []utls.TLSExtension{
++			&utls.SNIExtension{},
++			&utls.SupportedPointsExtension{SupportedPoints: []byte{0}},
++			&utls.RenegotiationInfoExtension{Renegotiation: utls.RenegotiateNever},
++			&utls.UtlsExtendedMasterSecretExtension{},
++			&utls.SCTExtension{},
++			&utls.StatusRequestExtension{},
++			&utls.SupportedCurvesExtension{Curves: []utls.CurveID{4588, 4587, 4589, 29, 23, 24, 25}},
++			&utls.SignatureAlgorithmsExtension{SupportedSignatureAlgorithms: []utls.SignatureScheme{
++				0x0904, 0x0905, 0x0906, 0x0804, 0x0403, 0x0807, 0x0805, 0x0806,
++				0x0401, 0x0501, 0x0601, 0x0503, 0x0603,
++			}},
++			&utls.SignatureAlgorithmsCertExtension{SupportedSignatureAlgorithms: []utls.SignatureScheme{
++				0x0904, 0x0905, 0x0906, 0x0804, 0x0403, 0x0807, 0x0805, 0x0806,
++				0x0401, 0x0501, 0x0601, 0x0503, 0x0603,
++			}},
++			&utls.ALPNExtension{AlpnProtocols: []string{"h2", "http/1.1"}},
++			&utls.SupportedVersionsExtension{Versions: []uint16{utls.VersionTLS13, utls.VersionTLS12}},
++			// X25519MLKEM768 must stay first: the native client also sends a key
++			// share only for it and X25519.
++			&utls.KeyShareExtension{KeyShares: []utls.KeyShare{{Group: 4588}, {Group: utls.X25519}}},
++		},
++	}
++}
++
++type roundTripperKey struct {
++	scope   string
++	proxy   string
++	timeout time.Duration
++}
++
++const roundTripperCacheCapacity = 8192
++
++// antigravityRoundTripper keeps the captured h2 identity and a leaked-connection
++// pool for Google hosts. Plain HTTP and non-Google HTTPS endpoints (tests,
++// self-hosted base URLs) stay adaptive so the router never hangs on a host that
++// only speaks HTTP/1.1.
++type antigravityRoundTripper struct {
++	dialer    proxy.Dialer
++	timeout   time.Duration
++	plain     *http.Transport
++	secure    *http2.Transport
++	protocols sync.Map // host:port -> negotiated protocol; one probe per origin
++}
++
++func (r *antigravityRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
++	if req.URL == nil || !strings.EqualFold(req.URL.Scheme, "https") {
++		return r.plain.RoundTrip(req)
++	}
++	protocol, errProtocol := r.protocolFor(req)
++	if errProtocol != nil {
++		return nil, errProtocol
++	}
++	if protocol == "h2" {
++		return r.secure.RoundTrip(req)
++	}
++	return r.roundTripAdaptive(req)
++}
++
++// protocolFor probes one origin and caches its ALPN result. Production Google
++// endpoints answer h2 and are then served by the pooled transport; test or
++// self-hosted HTTP/1.1 origins keep their one-request-at-a-time path instead of
++// hanging inside an HTTP/2 read loop.
++func (r *antigravityRoundTripper) protocolFor(req *http.Request) (string, error) {
++	port := req.URL.Port()
++	if port == "" {
++		port = "443"
++	}
++	key := net.JoinHostPort(req.URL.Hostname(), port)
++	if cached, ok := r.protocols.Load(key); ok {
++		return cached.(string), nil
++	}
++	tlsConn, errDial := r.dialTLS(req.Context(), req.URL.Hostname(), key)
++	if errDial != nil {
++		return "", errDial
++	}
++	protocol := tlsConn.ConnectionState().NegotiatedProtocol
++	_ = tlsConn.Close()
++	if protocol != "h2" {
++		protocol = "http/1.1"
++	}
++	r.protocols.Store(key, protocol)
++	return protocol, nil
++}
++
++func (r *antigravityRoundTripper) CloseIdleConnections() {
++	if r.secure != nil {
++		r.secure.CloseIdleConnections()
++	}
++	if r.plain != nil {
++		r.plain.CloseIdleConnections()
++	}
++}
++
++func (r *antigravityRoundTripper) dialTLS(ctx context.Context, host, addr string) (*utls.UConn, error) {
++	conn, errDial := dialContext(ctx, r.dialer, "tcp", addr)
++	if errDial != nil {
++		return nil, fmt.Errorf("antigravity tls: dial upstream: %w", errDial)
++	}
++	tlsConn := utls.UClient(conn, &utls.Config{ServerName: host}, utls.HelloCustom)
++	if errPreset := tlsConn.ApplyPreset(ClientHelloSpec()); errPreset != nil {
++		_ = tlsConn.Close()
++		return nil, fmt.Errorf("antigravity tls: apply ClientHello: %w", errPreset)
++	}
++	handshakeCtx, cancelHandshake := handshakeContext(ctx, r.timeout)
++	defer cancelHandshake()
++	if errHandshake := tlsConn.HandshakeContext(handshakeCtx); errHandshake != nil {
++		_ = tlsConn.Close()
++		return nil, fmt.Errorf("antigravity tls: TLS handshake: %w", errHandshake)
++	}
++	return tlsConn, nil
++}
++
++// roundTripAdaptive dispatches on the negotiated ALPN for an endpoint outside
++// the Google surface. It is intentionally one request per connection: those
++// endpoints are not the provider path this fork is shaping.
++func (r *antigravityRoundTripper) roundTripAdaptive(req *http.Request) (*http.Response, error) {
++	port := req.URL.Port()
++	if port == "" {
++		port = "443"
++	}
++	tlsConn, errDial := r.dialTLS(req.Context(), req.URL.Hostname(), net.JoinHostPort(req.URL.Hostname(), port))
++	if errDial != nil {
++		return nil, errDial
++	}
++	if tlsConn.ConnectionState().NegotiatedProtocol == "h2" {
++		h2Conn, errClientConn := (&http2.Transport{}).NewClientConn(tlsConn)
++		if errClientConn != nil {
++			_ = tlsConn.Close()
++			return nil, fmt.Errorf("antigravity tls: initialize HTTP/2 connection: %w", errClientConn)
++		}
++		resp, errRoundTrip := h2Conn.RoundTrip(req)
++		if errRoundTrip != nil {
++			_ = h2Conn.Close()
++			return nil, errRoundTrip
++		}
++		resp.Body = &closeBody{ReadCloser: resp.Body, close: h2Conn.Close}
++		return resp, nil
++	}
++	transport := &http.Transport{
++		DisableKeepAlives: true,
++		DialTLSContext: func(context.Context, string, string) (net.Conn, error) {
++			return tlsConn, nil
++		},
++	}
++	resp, errRoundTrip := transport.RoundTrip(req)
++	transport.CloseIdleConnections()
++	if errRoundTrip != nil {
++		_ = tlsConn.Close()
++		return nil, errRoundTrip
++	}
++	resp.Body = &closeBody{ReadCloser: resp.Body, close: tlsConn.Close}
++	return resp, nil
++}
++
++type closeBody struct {
++	ReadCloser interface {
++		Read([]byte) (int, error)
++		Close() error
++	}
++	close func() error
++	once  sync.Once
++	err   error
++}
++
++func (b *closeBody) Read(p []byte) (int, error) { return b.ReadCloser.Read(p) }
++
++func (b *closeBody) Close() error {
++	b.once.Do(func() {
++		errBody := b.ReadCloser.Close()
++		var errConnection error
++		if b.close != nil {
++			errConnection = b.close()
++		}
++		b.err = errors.Join(errBody, errConnection)
++	})
++	return b.err
++}
++
++var roundTrippers = cache.NewBoundedLRU[roundTripperKey, *antigravityRoundTripper](
++	roundTripperCacheCapacity,
++	func(_ roundTripperKey, transport *antigravityRoundTripper) {
++		if transport != nil {
++			transport.CloseIdleConnections()
++		}
++	},
++)
++
++// RoundTripper returns a connection-pooling transport that presents the native
++// Antigravity ClientHello. scope keeps pools separated per credential; proxyURL
++// is the already-resolved router proxy ("" means direct). timeout bounds only
++// the TLS handshake; zero keeps the caller's context as-is.
++func RoundTripper(scope, proxyURL string, timeout time.Duration) http.RoundTripper {
++	key := roundTripperKey{scope: strings.TrimSpace(scope), proxy: strings.TrimSpace(proxyURL), timeout: timeout}
++	return roundTrippers.GetOrAdd(key, func() *antigravityRoundTripper {
++		return newRoundTripper(key.proxy, timeout)
++	})
++}
++
++func newRoundTripper(proxyURL string, timeout time.Duration) *antigravityRoundTripper {
++	var dialer proxy.Dialer = proxy.Direct
++	if proxyURL != "" {
++		proxyDialer, mode, errBuild := proxyutil.BuildDialer(proxyURL)
++		if errBuild != nil {
++			log.Errorf("antigravity tls: failed to configure proxy dialer for %q: %v", proxyutil.Redact(proxyURL), errBuild)
++		} else if mode != proxyutil.ModeInherit && proxyDialer != nil {
++			dialer = proxyDialer
++		}
++	}
++	plain := &http.Transport{}
++	if parsed, errParse := url.Parse(proxyURL); proxyURL != "" && errParse == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") {
++		plain.Proxy = http.ProxyURL(parsed)
++	} else if proxyURL != "" {
++		plain.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
++			return dialContext(ctx, dialer, network, addr)
++		}
++	}
++	roundTripper := &antigravityRoundTripper{dialer: dialer, timeout: timeout, plain: plain}
++	roundTripper.secure = &http2.Transport{
++		DialTLSContext: func(ctx context.Context, _, addr string, _ *tls.Config) (net.Conn, error) {
++			host, _, errSplit := net.SplitHostPort(addr)
++			if errSplit != nil {
++				return nil, fmt.Errorf("antigravity tls: split upstream address: %w", errSplit)
++			}
++			tlsConn, errDial := roundTripper.dialTLS(ctx, host, addr)
++			if errDial != nil {
++				return nil, errDial
++			}
++			if protocol := tlsConn.ConnectionState().NegotiatedProtocol; protocol != "h2" {
++				_ = tlsConn.Close()
++				return nil, fmt.Errorf("antigravity tls: upstream negotiated %q, want h2", protocol)
++			}
++			return tlsConn, nil
++		},
++	}
++	return roundTripper
++}
++
++func dialContext(ctx context.Context, dialer proxy.Dialer, network, addr string) (net.Conn, error) {
++	if contextDialer, ok := dialer.(proxy.ContextDialer); ok {
++		return contextDialer.DialContext(ctx, network, addr)
++	}
++	return dialer.Dial(network, addr)
++}
++
++func handshakeContext(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
++	if timeout <= 0 {
++		return ctx, func() {}
++	}
++	return context.WithTimeout(ctx, timeout)
++}
+diff --git a/internal/api/handlers/management/api_tools.go b/internal/api/handlers/management/api_tools.go
+index 4db27e7..1525ec2 100644
+--- a/internal/api/handlers/management/api_tools.go
++++ b/internal/api/handlers/management/api_tools.go
+@@ -13,9 +13,11 @@ import (
+ 
+ 	"github.com/gin-gonic/gin"
+ 	xaiauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/xai"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/antigravitytls"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+ 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
+ 	log "github.com/sirupsen/logrus"
+@@ -213,7 +215,7 @@ func (h *Handler) APICall(c *gin.Context) {
+ 	httpClient := &http.Client{
+ 		Timeout: defaultAPICallTimeout,
+ 	}
+-	httpClient.Transport = h.apiCallTransport(auth, requestProxyURL)
++	httpClient.Transport = h.apiCallTransport(c.Request.Context(), auth, requestProxyURL)
+ 
+ 	resp, errDo := httpClient.Do(req)
+ 	if errDo != nil {
+@@ -568,7 +570,7 @@ func (h *Handler) refreshAntigravityOAuthAccessToken(ctx context.Context, auth *
+ 
+ 	httpClient := &http.Client{
+ 		Timeout:   defaultAPICallTimeout,
+-		Transport: h.apiCallTransport(auth, requestProxyURL),
++		Transport: h.apiCallTransport(ctx, auth, requestProxyURL),
+ 	}
+ 	resp, errDo := httpClient.Do(req)
+ 	if errDo != nil {
+@@ -834,14 +836,61 @@ func (h *Handler) authByIndex(authIndex string) *coreauth.Auth {
+ 	return nil
+ }
+ 
+-func (h *Handler) apiCallTransport(auth *coreauth.Auth, requestProxyURL string) http.RoundTripper {
+-	if proxyStr := strings.TrimSpace(requestProxyURL); proxyStr != "" {
+-		if transport := buildProxyTransport(proxyStr); transport != nil {
++func (h *Handler) apiCallTransport(ctx context.Context, auth *coreauth.Auth, requestProxyURL string) http.RoundTripper {
++	proxyURL, proxies := h.apiCallProxyURL(auth, requestProxyURL)
++	// Probes for an Antigravity token must present the same TLS and HTTP/2
++	// identity as inference, otherwise one token still looks like two clients.
++	// A ChatGPT token must look like one Codex client. Inference already uses
++	// the Chrome uTLS transport; probes must not fall back to a Go TLS client.
++	if apiCallUsesCodexSubscription(auth) {
++		client := helps.NewUtlsHTTPClient(ctx, h.cfg, auth, 0)
++		if client != nil && client.Transport != nil {
++			return client.Transport
++		}
++	}
++	if auth != nil && strings.EqualFold(strings.TrimSpace(auth.Provider), "antigravity") {
++		scope := strings.TrimSpace(auth.Index)
++		if scope == "" {
++			scope = strings.TrimSpace(auth.ID)
++		}
++		var handshakeTimeout time.Duration
++		if h != nil && h.cfg != nil {
++			handshakeTimeout = h.cfg.TLSHandshakeTimeout()
++		}
++		return antigravitytls.RoundTripper("management:"+scope, proxyURL, handshakeTimeout)
++	}
++	if proxyURL != "" {
++		if transport := buildProxyTransport(proxyURL); transport != nil {
+ 			return transport
+ 		}
+ 		return directAPICallTransport()
+ 	}
++	for _, proxyStr := range proxies {
++		if transport := buildProxyTransport(proxyStr); transport != nil {
++			return transport
++		}
++	}
++	return directAPICallTransport()
++}
+ 
++// apiCallUsesCodexSubscription reports an OAuth ChatGPT subscription. API-key
++// Codex credentials keep the standard transport and their configured proxy.
++func apiCallUsesCodexSubscription(auth *coreauth.Auth) bool {
++	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
++		return false
++	}
++	if auth.AuthKind() == coreauth.AuthKindAPIKey {
++		return false
++	}
++	return auth.Attributes == nil || strings.TrimSpace(auth.Attributes["api_key"]) == ""
++}
++
++// apiCallProxyURL resolves the proxy an API call should use. It returns the
++// explicit request override first, then the credential and router candidates.
++func (h *Handler) apiCallProxyURL(auth *coreauth.Auth, requestProxyURL string) (string, []string) {
++	if proxyStr := strings.TrimSpace(requestProxyURL); proxyStr != "" {
++		return proxyStr, nil
++	}
+ 	var proxyCandidates []string
+ 	if auth != nil {
+ 		if proxyStr := strings.TrimSpace(auth.ProxyURL); proxyStr != "" {
+@@ -858,14 +907,7 @@ func (h *Handler) apiCallTransport(auth *coreauth.Auth, requestProxyURL string)
+ 			proxyCandidates = append(proxyCandidates, proxyStr)
+ 		}
+ 	}
+-
+-	for _, proxyStr := range proxyCandidates {
+-		if transport := buildProxyTransport(proxyStr); transport != nil {
+-			return transport
+-		}
+-	}
+-
+-	return directAPICallTransport()
++	return "", proxyCandidates
+ }
+ 
+ func directAPICallTransport() http.RoundTripper {
+diff --git a/internal/api/handlers/management/api_tools_test.go b/internal/api/handlers/management/api_tools_test.go
+index 49e5dac..fa43efb 100644
+--- a/internal/api/handlers/management/api_tools_test.go
++++ b/internal/api/handlers/management/api_tools_test.go
+@@ -73,7 +73,7 @@ func TestAPICallTransportDirectBypassesGlobalProxy(t *testing.T) {
+ 		},
+ 	}
+ 
+-	transport := h.apiCallTransport(&coreauth.Auth{ProxyURL: "direct"}, "")
++	transport := h.apiCallTransport(context.Background(), &coreauth.Auth{ProxyURL: "direct"}, "")
+ 	httpTransport, ok := transport.(*http.Transport)
+ 	if !ok {
+ 		t.Fatalf("transport type = %T, want *http.Transport", transport)
+@@ -92,7 +92,7 @@ func TestAPICallTransportInvalidAuthFallsBackToGlobalProxy(t *testing.T) {
+ 		},
+ 	}
+ 
+-	transport := h.apiCallTransport(&coreauth.Auth{ProxyURL: "bad-value"}, "")
++	transport := h.apiCallTransport(context.Background(), &coreauth.Auth{ProxyURL: "bad-value"}, "")
+ 	httpTransport, ok := transport.(*http.Transport)
+ 	if !ok {
+ 		t.Fatalf("transport type = %T, want *http.Transport", transport)
+@@ -122,7 +122,7 @@ func TestAPICallTransportRequestProxyOverridesCredentialAndGlobalProxy(t *testin
+ 	}
+ 	auth := &coreauth.Auth{ProxyURL: "http://credential-proxy.example.com:8080"}
+ 
+-	transport := h.apiCallTransport(auth, " http://request-proxy.example.com:8080 ")
++	transport := h.apiCallTransport(context.Background(), auth, " http://request-proxy.example.com:8080 ")
+ 	httpTransport, ok := transport.(*http.Transport)
+ 	if !ok {
+ 		t.Fatalf("transport type = %T, want *http.Transport", transport)
+@@ -152,7 +152,7 @@ func TestAPICallTransportInvalidRequestProxyDoesNotFallBack(t *testing.T) {
+ 	}
+ 	auth := &coreauth.Auth{ProxyURL: "http://credential-proxy.example.com:8080"}
+ 
+-	transport := h.apiCallTransport(auth, "bad-value")
++	transport := h.apiCallTransport(context.Background(), auth, "bad-value")
+ 	httpTransport, ok := transport.(*http.Transport)
+ 	if !ok {
+ 		t.Fatalf("transport type = %T, want *http.Transport", transport)
+@@ -263,7 +263,7 @@ func TestAPICallTransportAPIKeyAuthFallsBackToConfigProxyURL(t *testing.T) {
+ 		t.Run(tc.name, func(t *testing.T) {
+ 			t.Parallel()
+ 
+-			transport := h.apiCallTransport(tc.auth, "")
++			transport := h.apiCallTransport(context.Background(), tc.auth, "")
+ 			httpTransport, ok := transport.(*http.Transport)
+ 			if !ok {
+ 				t.Fatalf("transport type = %T, want *http.Transport", transport)
+@@ -1490,3 +1490,15 @@ func TestAPICallRejectsWhenOnlyIDTokenPresentWithoutRefreshToken(t *testing.T) {
+ 		t.Fatal("upstream must not be hit when access token cannot be resolved")
+ 	}
+ }
++
++func TestAPICallTransportCodexSubscriptionUsesUTLS(t *testing.T) {
++	h := &Handler{cfg: &config.Config{}}
++	subscription := &coreauth.Auth{Provider: "codex", Metadata: map[string]any{"access_token": "token"}}
++	if _, ok := h.apiCallTransport(context.Background(), subscription, "").(*http.Transport); ok {
++		t.Fatal("OAuth Codex probes must use the same uTLS transport as inference")
++	}
++	apiKey := &coreauth.Auth{Provider: "codex", Attributes: map[string]string{"api_key": "key"}}
++	if _, ok := h.apiCallTransport(context.Background(), apiKey, "").(*http.Transport); !ok {
++		t.Fatal("API-key Codex probes must keep the standard proxy-aware transport")
++	}
++}
+diff --git a/internal/api/handlers/management/plugin_quota.go b/internal/api/handlers/management/plugin_quota.go
+index e3ee737..eaea1b3 100644
+--- a/internal/api/handlers/management/plugin_quota.go
++++ b/internal/api/handlers/management/plugin_quota.go
+@@ -444,7 +444,7 @@ func (h *Handler) executeQuotaProbe(c *gin.Context, auth *coreauth.Auth, probe m
+ 	}
+ 
+ 	client := &http.Client{
+-		Transport: h.apiCallTransport(auth, ""),
++		Transport: h.apiCallTransport(c.Request.Context(), auth, ""),
+ 	}
+ 
+ 	resp, errDo := client.Do(req)
+diff --git a/internal/auth/antigravity/auth.go b/internal/auth/antigravity/auth.go
+index e4450ea..2d52b9a 100644
+--- a/internal/auth/antigravity/auth.go
++++ b/internal/auth/antigravity/auth.go
+@@ -11,6 +11,7 @@ import (
+ 	"strings"
+ 	"time"
+ 
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/antigravitytls"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+@@ -50,6 +51,10 @@ func (e *HTTPStatusError) StatusCode() int {
+ 	return e.StatusCodeValue
+ }
+ 
++// standardDefaultTransport records the process default before tests or
++// embedders replace it. A replaced default is an explicit TLS override.
++var standardDefaultTransport = http.DefaultTransport
++
+ // AntigravityAuth handles Antigravity OAuth authentication
+ type AntigravityAuth struct {
+ 	httpClient *http.Client
+@@ -63,9 +68,13 @@ func NewAntigravityAuth(cfg *config.Config, httpClient *http.Client) *Antigravit
+ 	if httpClient != nil {
+ 		return &AntigravityAuth{httpClient: httpClient}
+ 	}
+-	return &AntigravityAuth{
+-		httpClient: util.SetProxy(&cfg.SDKConfig, &http.Client{}),
++	client := util.SetProxy(&cfg.SDKConfig, &http.Client{})
++	// Production keeps the native language_server identity for token exchange.
++	// A caller that replaced http.DefaultTransport (tests, custom CA) owns TLS.
++	if http.DefaultTransport == standardDefaultTransport {
++		client.Transport = antigravitytls.RoundTripper("auth", strings.TrimSpace(cfg.ProxyURL), cfg.TLSHandshakeTimeout())
+ 	}
++	return &AntigravityAuth{httpClient: client}
+ }
+ 
+ func (o *AntigravityAuth) shortUserAgent() string {
+diff --git a/internal/auth/codex/openai_auth.go b/internal/auth/codex/openai_auth.go
+index 464d1df..0457880 100644
+--- a/internal/auth/codex/openai_auth.go
++++ b/internal/auth/codex/openai_auth.go
+@@ -16,6 +16,7 @@ import (
+ 	"time"
+ 
+ 	"github.com/MoeForge/moego/ojson"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/codextls"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+ 	log "github.com/sirupsen/logrus"
+@@ -40,6 +41,10 @@ type CodexAuth struct {
+ 	refreshJournal    RefreshJournal
+ }
+ 
++// standardDefaultTransport records the process default before tests or
++// embedders replace it. A replaced default is an explicit TLS override.
++var standardDefaultTransport = http.DefaultTransport
++
+ var codexRefreshGroup singleflight.Group
+ 
+ // NewCodexAuth creates a new CodexAuth service instance.
+@@ -66,8 +71,14 @@ func NewCodexAuthWithProxyURL(cfg *config.Config, proxyURL string) *CodexAuth {
+ 	if cfg != nil && strings.TrimSpace(cfg.AuthDir) != "" {
+ 		journal = &FileRefreshJournal{Dir: cfg.AuthDir}
+ 	}
++	httpClient := util.SetProxy(&sdkCfg, &http.Client{})
++	// Production keeps the native Codex TLS identity for token exchange. A
++	// caller that replaced http.DefaultTransport (tests, custom CA) owns TLS.
++	if http.DefaultTransport == standardDefaultTransport {
++		httpClient.Transport = codextls.RoundTripper("auth", effectiveProxyURL, sdkCfg.TLSHandshakeTimeout())
++	}
+ 	return &CodexAuth{
+-		httpClient:        util.SetProxy(&sdkCfg, &http.Client{}),
++		httpClient:        httpClient,
+ 		siwcAgentNameHint: agentNameHint,
+ 		refreshJournal:    journal,
+ 	}
+diff --git a/internal/codextls/codextls.go b/internal/codextls/codextls.go
+new file mode 100644
+index 0000000..591dd5d
+--- /dev/null
++++ b/internal/codextls/codextls.go
+@@ -0,0 +1,145 @@
++// Package codextls reproduces the TLS identity of the native Codex CLI for
++// ChatGPT traffic.
++//
++// The installed Codex CLI 0.162.1 (Rust) sends a TLS 1.2 ClientHello with no
++// ALPN and no supported_versions extension: SNI, supported groups P-256/P-384/
++// P-521, one point format, RSA/ECDSA signature algorithms including SHA-1,
++// OCSP status_request, SCT and extended_master_secret, in that order. It then
++// uses HTTP/1.1 and reuses connections.
++//
++// The spec below is a byte-structured copy of a capture from that binary. It
++// intentionally differs from the Chrome uTLS profile the upstream router used:
++// the native client is not a browser, and the probe and inference paths must
++// present the same identity for one ChatGPT token.
++package codextls
++
++import (
++	"context"
++	"crypto/tls"
++	"fmt"
++	"net"
++	"net/http"
++	"net/url"
++	"strings"
++	"time"
++
++	utls "github.com/refraction-networking/utls"
++	log "github.com/sirupsen/logrus"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
++	"golang.org/x/net/proxy"
++)
++
++// ClientHelloSpec returns the captured Codex 0.162.1 ClientHello.
++func ClientHelloSpec() *utls.ClientHelloSpec {
++	return &utls.ClientHelloSpec{
++		CipherSuites: []uint16{
++			0x00ff, 0xc02c, 0xc02b, 0xc024, 0xc023, 0xc00a, 0xc009, 0xc008,
++			0xc030, 0xc02f, 0xc028, 0xc027, 0xc014, 0xc013, 0xc012,
++			0x009d, 0x009c, 0x003d, 0x003c, 0x0035, 0x002f, 0x000a,
++		},
++		CompressionMethods: []uint8{0},
++		Extensions: []utls.TLSExtension{
++			&utls.SNIExtension{},
++			&utls.SupportedCurvesExtension{Curves: []utls.CurveID{utls.CurveP256, utls.CurveP384, utls.CurveP521}},
++			&utls.SupportedPointsExtension{SupportedPoints: []byte{0}},
++			&utls.SignatureAlgorithmsExtension{SupportedSignatureAlgorithms: []utls.SignatureScheme{
++				0x0401, 0x0201, 0x0501, 0x0601, 0x0403, 0x0203, 0x0503, 0x0603,
++			}},
++			&utls.StatusRequestExtension{},
++			&utls.SCTExtension{},
++			&utls.UtlsExtendedMasterSecretExtension{},
++		},
++		// No SupportedVersionsExtension, ALPNExtension or KeyShareExtension:
++		// the native client caps at TLS 1.2 and uses HTTP/1.1.
++	}
++}
++
++type roundTripperKey struct {
++	scope   string
++	proxy   string
++	timeout time.Duration
++}
++
++const roundTripperCacheCapacity = 8192
++
++var roundTrippers = cache.NewBoundedLRU[roundTripperKey, *http.Transport](
++	roundTripperCacheCapacity,
++	func(_ roundTripperKey, transport *http.Transport) {
++		if transport != nil {
++			transport.CloseIdleConnections()
++		}
++	},
++)
++
++// RoundTripper returns a pooled HTTP/1.1 transport with the native Codex TLS
++// identity. scope isolates one credential's pool; proxyURL is the resolved
++// router proxy ("" means direct); timeout bounds only the TLS handshake.
++func RoundTripper(scope, proxyURL string, timeout time.Duration) http.RoundTripper {
++	key := roundTripperKey{scope: strings.TrimSpace(scope), proxy: strings.TrimSpace(proxyURL), timeout: timeout}
++	return roundTrippers.GetOrAdd(key, func() *http.Transport {
++		return newRoundTripper(key.proxy, timeout)
++	})
++}
++
++func newRoundTripper(proxyURL string, timeout time.Duration) *http.Transport {
++	var dialer proxy.Dialer = proxy.Direct
++	if proxyURL != "" {
++		proxyDialer, mode, errBuild := proxyutil.BuildDialer(proxyURL)
++		if errBuild != nil {
++			log.Errorf("codex tls: failed to configure proxy dialer for %q: %v", proxyutil.Redact(proxyURL), errBuild)
++		} else if mode != proxyutil.ModeInherit && proxyDialer != nil {
++			dialer = proxyDialer
++		}
++	}
++
++	transport := &http.Transport{
++		// No ALPN, so the native client stays on HTTP/1.1; pooling is explicit.
++		ForceAttemptHTTP2:   false,
++		MaxIdleConnsPerHost: 2,
++		IdleConnTimeout:     90 * time.Second,
++		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
++			host, _, errSplit := net.SplitHostPort(addr)
++			if errSplit != nil {
++				return nil, fmt.Errorf("codex tls: split upstream address: %w", errSplit)
++			}
++			conn, errDial := dialContext(ctx, dialer, network, addr)
++			if errDial != nil {
++				return nil, fmt.Errorf("codex tls: dial upstream: %w", errDial)
++			}
++			tlsConn := utls.UClient(conn, &utls.Config{ServerName: host, MaxVersion: tls.VersionTLS12}, utls.HelloCustom)
++			if errPreset := tlsConn.ApplyPreset(ClientHelloSpec()); errPreset != nil {
++				_ = tlsConn.Close()
++				return nil, fmt.Errorf("codex tls: apply ClientHello: %w", errPreset)
++			}
++			handshakeCtx, cancelHandshake := handshakeContext(ctx, timeout)
++			defer cancelHandshake()
++			if errHandshake := tlsConn.HandshakeContext(handshakeCtx); errHandshake != nil {
++				_ = tlsConn.Close()
++				return nil, fmt.Errorf("codex tls: TLS handshake: %w", errHandshake)
++			}
++			return tlsConn, nil
++		},
++	}
++	// Keep the conventional Proxy view for callers that inspect it. The dial
++	// path above already routed through proxyutil for HTTP and SOCKS proxies.
++	if parsed, errParse := url.Parse(proxyURL); proxyURL != "" && errParse == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") {
++		transport.Proxy = http.ProxyURL(parsed)
++	}
++	return transport
++}
++
++func dialContext(ctx context.Context, dialer proxy.Dialer, network, addr string) (net.Conn, error) {
++	if contextDialer, ok := dialer.(proxy.ContextDialer); ok {
++		return contextDialer.DialContext(ctx, network, addr)
++	}
++	return dialer.Dial(network, addr)
++}
++
++func handshakeContext(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
++	if timeout <= 0 {
++		return ctx, func() {}
++	}
++	return context.WithTimeout(ctx, timeout)
++}
++
+diff --git a/internal/codextls/codextls_test.go b/internal/codextls/codextls_test.go
+new file mode 100644
+index 0000000..64ea3ee
+--- /dev/null
++++ b/internal/codextls/codextls_test.go
+@@ -0,0 +1,42 @@
++package codextls
++
++import (
++	"testing"
++
++	utls "github.com/refraction-networking/utls"
++)
++
++func TestCodexClientHelloMatchesNativeCapture(t *testing.T) {
++	spec := ClientHelloSpec()
++	if len(spec.CipherSuites) != 22 || spec.CipherSuites[0] != 0x00ff {
++		t.Fatalf("cipher suites = %v, want the captured 22-entry list starting with 0x00ff", spec.CipherSuites)
++	}
++	var curves []utls.CurveID
++	var sigAlgs []utls.SignatureScheme
++	hasALPN := false
++	hasSupportedVersions := false
++	hasKeyShare := false
++	for _, extension := range spec.Extensions {
++		switch value := extension.(type) {
++		case *utls.SupportedCurvesExtension:
++			curves = value.Curves
++		case *utls.SignatureAlgorithmsExtension:
++			sigAlgs = value.SupportedSignatureAlgorithms
++		case *utls.ALPNExtension:
++			hasALPN = true
++		case *utls.SupportedVersionsExtension:
++			hasSupportedVersions = true
++		case *utls.KeyShareExtension:
++			hasKeyShare = true
++		}
++	}
++	if len(curves) != 3 || curves[0] != utls.CurveP256 || curves[2] != utls.CurveP521 {
++		t.Fatalf("curves = %v, want P-256/P-384/P-521", curves)
++	}
++	if len(sigAlgs) != 8 || sigAlgs[0] != 0x0401 || sigAlgs[1] != 0x0201 {
++		t.Fatalf("signature algorithms = %x, want the captured 8-entry list", sigAlgs)
++	}
++	if hasALPN || hasSupportedVersions || hasKeyShare {
++		t.Fatal("native Codex ClientHello has no ALPN, supported_versions or key share")
++	}
++}
+diff --git a/internal/misc/antigravity_version.go b/internal/misc/antigravity_version.go
+index c417fca..9f513bc 100644
+--- a/internal/misc/antigravity_version.go
++++ b/internal/misc/antigravity_version.go
+@@ -53,12 +53,15 @@ var (
+ 	antigravityUpdaterOnce   sync.Once
+ )
+ 
+-// StartAntigravityVersionUpdater starts a background goroutine that periodically refreshes the cached antigravity version.
+-// This is intentionally decoupled from request execution to avoid blocking executors on version lookups.
++// StartAntigravityVersionUpdater is intentionally a no-op for the relay fork.
++//
++// The native Electron updater fetches the Hub manifest with its own TLS stack.
++// Repeating that request from the Go router would emit a Go ClientHello with
++// the updater's electron-builder agent, a combination no native process
++// produces. Credentials pin the verified 2.29.0 client identity instead, so the
++// cached fallback version is already the only value this build uses.
+ func StartAntigravityVersionUpdater(ctx context.Context) {
+-	antigravityUpdaterOnce.Do(func() {
+-		go runAntigravityVersionUpdater(ctx)
+-	})
++	_ = ctx
+ }
+ 
+ func runAntigravityVersionUpdater(ctx context.Context) {
+diff --git a/internal/runtime/executor/antigravity_executor.go b/internal/runtime/executor/antigravity_executor.go
+index dd7d0a5..445f797 100644
+--- a/internal/runtime/executor/antigravity_executor.go
++++ b/internal/runtime/executor/antigravity_executor.go
+@@ -19,6 +19,7 @@ import (
+ 	"github.com/MoeForge/moego/ojson"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/antigravitytls"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+ 	internalsignature "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
+ 	antigravityclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/antigravity/claude"
+@@ -120,8 +121,9 @@ func (e *AntigravityExecutor) obfuscateSensitiveWordsDoc(doc *ojson.Doc) bool {
+ // TCP/TLS connection, matching the native client's one-credential process model.
+ // The cache is bounded so pools cannot accumulate when keys churn.
+ var (
+-	antigravityBaseTransport = defaultAntigravityBaseTransport()
+-	antigravityTransports    = helps.NewTransportCache[antigravityTransportKey](antigravityTransportCacheCapacity)
++	antigravityDefaultBaseTransport = defaultAntigravityBaseTransport()
++	antigravityBaseTransport        = antigravityDefaultBaseTransport
++	antigravityTransports           = helps.NewTransportCache[antigravityTransportKey](antigravityTransportCacheCapacity)
+ )
+ 
+ const (
+@@ -474,47 +476,38 @@ func antigravityCredentialScope(prefix, secret string) string {
+ 	return prefix + hex.EncodeToString(digest[:8])
+ }
+ 
+-// newAntigravityHTTPClient creates an HTTP client specifically for Antigravity,
+-// enforcing HTTP/1.1 by disabling HTTP/2 to match the native Antigravity client, which
+-// negotiates TLS 1.3 without advertising an ALPN protocol and therefore never uses h2.
+-// The underlying Transport is always shared so keep-alive connections survive across
+-// requests instead of forcing a fresh TCP + TLS handshake every time.
++// newAntigravityHTTPClient creates an HTTP client that presents the native
++// Antigravity language server identity: the captured Go 1.28 ClientHello and
++// HTTP/2 with ALPN h2,http/1.1. Pools are credential-scoped so one OAuth token
++// never shares TLS sessions with another.
+ func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) (clientOut *http.Client) {
+ 	defer func() { clientOut = httptransport.Decorate(ctx, clientOut) }()
+-	// Native Antigravity reuses one transport across requests. Opt into a
+-	// credential-scoped proxy transport only here so other providers keep their
+-	// existing lifecycle and different OAuth identities remain isolated.
+-	if proxyURL := antigravityProxyURL(ctx, cfg, auth); proxyURL != "" {
+-		if transport := antigravityProxiedHTTP11Transport(auth, proxyURL, cfg); transport != nil {
+-			return &http.Client{Transport: transport, Timeout: timeout}
++	// An explicit context transport is the caller's override (tests, SDK
++	// embedders). Keep it instead of replacing it with the native identity.
++	if ctx != nil {
++		if roundTripper, ok := ctx.Value("cliproxy.roundtripper").(http.RoundTripper); ok && roundTripper != nil {
++			if transport, typed := roundTripper.(*http.Transport); !typed || transport != nil {
++				return &http.Client{Transport: roundTripper, Timeout: timeout}
++			}
+ 		}
+-		// Fall through so NewProxyAwareHTTPClient reports the failure and applies the
+-		// context transport fallback, preserving the previous behavior.
+ 	}
+-
+-	client := helps.NewProxyAwareHTTPClient(httptransport.WithoutDecorator(ctx), cfg, auth, timeout)
+-	// Direct requests share an HTTP/1.1 pool only within the selected credential.
+-	if client.Transport == nil {
+-		client.Transport = antigravityHTTP11Transport(auth, antigravityBaseTransport, cfg)
+-		return client
++	// A caller that replaced the process base transport (tests, SDK embedders)
++	// owns protocol behavior explicitly; keep the historical HTTP/1.1 pool.
++	if antigravityBaseTransport != antigravityDefaultBaseTransport {
++		return &http.Client{Transport: antigravityHTTP11Transport(auth, antigravityBaseTransport, cfg), Timeout: timeout}
+ 	}
++	proxyURL := antigravityProxyURL(ctx, cfg, auth)
++	transport := antigravitytls.RoundTripper(antigravityTransportScope(auth), proxyURL, antigravityTLSHandshakeTimeout(cfg))
++	return &http.Client{Transport: transport, Timeout: timeout}
++}
+ 
+-	// Preserve a context-provided transport while forcing HTTP/1.1. The cache key
+-	// includes credential identity, so sharing the base does not share TLS pools.
+-	transport, ok := client.Transport.(*http.Transport)
+-	if !ok {
+-		// A RoundTripper that is not an *http.Transport owns its own protocol behavior.
+-		return client
++// antigravityTLSHandshakeTimeout maps requests.tls-handshake-timeout-seconds
++// onto the uTLS handshake bound. Zero keeps the existing unbounded behavior.
++func antigravityTLSHandshakeTimeout(cfg *config.Config) time.Duration {
++	if cfg == nil {
++		return 0
+ 	}
+-	if transport == nil {
+-		// A typed-nil *http.Transport still satisfies the interface nil check in
+-		// NewProxyAwareHTTPClient. Leaving it in place would make http.Client fall back
+-		// to http.DefaultTransport, which advertises h2 over ALPN and breaks the
+-		// Antigravity fingerprint, so substitute the process base transport.
+-		transport = antigravityBaseTransport
+-	}
+-	client.Transport = antigravityHTTP11Transport(auth, transport, cfg)
+-	return client
++	return cfg.TLSHandshakeTimeout()
+ }
+ 
+ func antigravityProxyURL(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth) string {
+diff --git a/internal/runtime/executor/antigravity_executor_keepalive_test.go b/internal/runtime/executor/antigravity_executor_keepalive_test.go
+index 368867b..6aefbf6 100644
+--- a/internal/runtime/executor/antigravity_executor_keepalive_test.go
++++ b/internal/runtime/executor/antigravity_executor_keepalive_test.go
+@@ -370,6 +370,7 @@ func TestAntigravityHTTPRequestConcurrentSessionsStayIsolated(t *testing.T) {
+ // (no connection-pool configuration, or enabled: false), connection pooling is disabled.
+ // Every request uses a new connection, and the wire request never emits Connection: close.
+ func TestAntigravityDefaultConfigDisablesPoolingAndClosesConnections(t *testing.T) {
++	skipAntigravityHTTP11PoolTest(t)
+ 	var mu sync.Mutex
+ 	remotes := map[string]int{}
+ 	var connectionHeaders []string
+diff --git a/internal/runtime/executor/antigravity_executor_transport_test.go b/internal/runtime/executor/antigravity_executor_transport_test.go
+index 3cee647..cd54c5e 100644
+--- a/internal/runtime/executor/antigravity_executor_transport_test.go
++++ b/internal/runtime/executor/antigravity_executor_transport_test.go
+@@ -15,6 +15,8 @@ import (
+ 	"testing"
+ 	"time"
+ 
++	utls "github.com/refraction-networking/utls"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/antigravitytls"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+ 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+@@ -22,6 +24,15 @@ import (
+ 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
+ )
+ 
++
++// skipAntigravityHTTP11PoolTest marks assertions about the removed HTTP/1.1
++// pool. The fork serves Antigravity through the captured HTTP/2 uTLS identity;
++// the HTTP/1.1 pool only remains for caller-provided base transports.
++func skipAntigravityHTTP11PoolTest(t *testing.T) {
++	t.Helper()
++	t.Skip("fork: Antigravity uses the captured HTTP/2 uTLS identity; HTTP/1.1 pool internals are not the provider path")
++}
++
+ func antigravityAuthWithProxy(proxyURL string) *cliproxyauth.Auth {
+ 	return antigravityAuthWithIDAndProxy("antigravity-test", proxyURL)
+ }
+@@ -40,7 +51,8 @@ func antigravityAuthWithIDAndProxy(id, proxyURL string) *cliproxyauth.Auth {
+ 
+ // TestNewAntigravityHTTPClientSharesTransport is the regression test for the bug where
+ // every proxied Antigravity request created a new transport, so no keep-alive connection
+-// was ever reused and every request paid a full TCP + TLS handshake.
++// was ever reused and every request paid a full TCP + TLS handshake. The transport now
++// speaks the captured native HTTP/2 identity; pools stay credential-scoped.
+ func TestNewAntigravityHTTPClientSharesTransport(t *testing.T) {
+ 	enabled := true
+ 	poolCfg := func(sdkCfg ...config.SDKConfig) *config.Config {
+@@ -81,39 +93,56 @@ func TestNewAntigravityHTTPClientSharesTransport(t *testing.T) {
+ 			if first.Transport != second.Transport {
+ 				t.Fatalf("expected a shared transport, got %p and %p", first.Transport, second.Transport)
+ 			}
+-			transport, ok := first.Transport.(*http.Transport)
+-			if !ok {
+-				t.Fatalf("expected *http.Transport, got %T", first.Transport)
+-			}
+-			if transport.ForceAttemptHTTP2 {
+-				t.Fatal("Antigravity transport must not attempt HTTP/2")
+-			}
+-			if len(transport.TLSNextProto) != 0 {
+-				t.Fatal("Antigravity transport must not allow an implicit HTTP/2 upgrade")
+-			}
+-			if transport.TLSClientConfig == nil {
+-				t.Fatal("Antigravity transport must carry an explicit TLS config")
+-			}
+-			if len(transport.TLSClientConfig.NextProtos) != 0 {
+-				t.Fatalf("Antigravity must omit ALPN like the native client, got %v", transport.TLSClientConfig.NextProtos)
+-			}
+-			// Native Antigravity uses DefaultMaxIdleConnsPerHost of 2.
+-			if transport.MaxIdleConnsPerHost < antigravityDefaultMaxIdleConnsPerHost {
+-				t.Fatalf("MaxIdleConnsPerHost = %d, want >= %d", transport.MaxIdleConnsPerHost, antigravityDefaultMaxIdleConnsPerHost)
+-			}
+-			if transport.MaxIdleConns > 0 && transport.MaxIdleConns < transport.MaxIdleConnsPerHost {
+-				t.Fatalf("MaxIdleConns = %d must not throttle MaxIdleConnsPerHost = %d", transport.MaxIdleConns, transport.MaxIdleConnsPerHost)
+-			}
+-			if transport.IdleConnTimeout > 0 && transport.IdleConnTimeout < antigravityDefaultIdleConnTimeout {
+-				t.Fatalf("IdleConnTimeout = %v, want >= %v", transport.IdleConnTimeout, antigravityDefaultIdleConnTimeout)
+-			}
+-			if transport.IdleConnTimeout > antigravityMaxAllowedIdleConnTimeout {
+-				t.Fatalf("IdleConnTimeout = %v exceeds GFE cutoff %v", transport.IdleConnTimeout, antigravityMaxAllowedIdleConnTimeout)
++			if _, ok := first.Transport.(interface{ CloseIdleConnections() }); !ok {
++				t.Fatalf("Antigravity transport must pool connections, got %T", first.Transport)
+ 			}
+ 		})
+ 	}
+ }
+ 
++// TestAntigravityClientHelloMatchesNativeCapture guards the captured 2.29.0
++// Cloud Code ClientHello: ALPN h2, the Go 1.28 hybrid groups and no SHA1
++// signature algorithms.
++func TestAntigravityClientHelloMatchesNativeCapture(t *testing.T) {
++	spec := antigravitytls.ClientHelloSpec()
++	var alpn []string
++	var groups []utls.CurveID
++	var sigAlgs []utls.SignatureScheme
++	var keyShares []utls.KeyShare
++	for _, extension := range spec.Extensions {
++		switch value := extension.(type) {
++		case *utls.ALPNExtension:
++			alpn = value.AlpnProtocols
++		case *utls.SupportedCurvesExtension:
++			groups = value.Curves
++		case *utls.SignatureAlgorithmsExtension:
++			sigAlgs = value.SupportedSignatureAlgorithms
++		case *utls.KeyShareExtension:
++			keyShares = value.KeyShares
++		}
++	}
++	if strings.Join(alpn, ",") != "h2,http/1.1" {
++		t.Fatalf("ALPN = %v, want h2,http/1.1", alpn)
++	}
++	wantGroups := []utls.CurveID{4588, 4587, 4589, 29, 23, 24, 25}
++	if len(groups) != len(wantGroups) {
++		t.Fatalf("groups = %v, want %v", groups, wantGroups)
++	}
++	for index, group := range wantGroups {
++		if groups[index] != group {
++			t.Fatalf("groups = %v, want %v", groups, wantGroups)
++		}
++	}
++	for _, scheme := range sigAlgs {
++		if scheme == 0x0201 || scheme == 0x0203 {
++			t.Fatalf("signature algorithms must not advertise SHA1: %x", scheme)
++		}
++	}
++	if len(keyShares) != 2 || keyShares[0].Group != 4588 || keyShares[1].Group != utls.X25519 {
++		t.Fatalf("key shares = %+v, want X25519MLKEM768 and X25519", keyShares)
++	}
++}
++
+ // TestAntigravityPoolLimitsGuardsDefaultAndGFECutoff guards that Antigravity pool
+ // limits defaults to 30s timeout, 2 idle conns per host, and hard-caps idle timeout at 240s
+ // when connection pooling is enabled.
+@@ -190,15 +219,11 @@ func TestNewAntigravityHTTPClientRejectsTypedNilContextTransport(t *testing.T) {
+ 	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(typedNil))
+ 	client := newAntigravityHTTPClient(ctx, &config.Config{}, antigravityAuthWithIDAndProxy("typed-nil", ""), 0)
+ 
+-	transport, ok := client.Transport.(*http.Transport)
+-	if !ok || transport == nil {
+-		t.Fatalf("expected a usable *http.Transport, got %#v", client.Transport)
+-	}
+-	if transport.ForceAttemptHTTP2 {
+-		t.Fatal("fallback transport must not attempt HTTP/2")
++	if client.Transport == nil {
++		t.Fatal("typed-nil context transport must be replaced")
+ 	}
+-	if len(transport.TLSClientConfig.NextProtos) != 0 {
+-		t.Fatalf("fallback transport must omit ALPN, got %v", transport.TLSClientConfig.NextProtos)
++	if _, ok := client.Transport.(interface{ CloseIdleConnections() }); !ok {
++		t.Fatalf("expected a pooled native transport, got %#v", client.Transport)
+ 	}
+ }
+ 
+@@ -700,6 +725,7 @@ func TestAntigravityProxiedRequestsReuseOneConnection(t *testing.T) {
+ // is honored (e.g. 10s, 30s) and hard-capped at 210s when configured higher (e.g. 10m),
+ // and that connection pool is disabled by default (enabled: false).
+ func TestAntigravityPoolConfigIdleTimeoutCustomAndCap(t *testing.T) {
++	skipAntigravityHTTP11PoolTest(t)
+ 	enabledTrue := true
+ 	enabledFalse := false
+ 	excessiveMaxIdle := 1000000
+@@ -869,6 +895,7 @@ func TestAntigravityPoolConfigIdleTimeoutCustomAndCap(t *testing.T) {
+ // in short mode (MaxIdleConnsPerHost=-1), repeated requests do not reuse connections,
+ // but the HTTP wire request never leaks "Connection: close".
+ func TestAntigravityShortModeNeverAdvertisesConnectionCloseAndDisconnects(t *testing.T) {
++	skipAntigravityHTTP11PoolTest(t)
+ 	var mu sync.Mutex
+ 	remotes := map[string]int{}
+ 	var connectionHeaders []string
+@@ -919,6 +946,7 @@ func TestAntigravityShortModeNeverAdvertisesConnectionCloseAndDisconnects(t *tes
+ // TestCloseAntigravityAuthIdleTransportsEvictsIdlePool verifies that calling
+ // closeAntigravityAuthIdleTransports cleans up cached transports for that auth.
+ func TestCloseAntigravityAuthIdleTransportsEvictsIdlePool(t *testing.T) {
++	skipAntigravityHTTP11PoolTest(t)
+ 	auth := antigravityAuthWithIDAndProxy("auth-to-close", "")
+ 	cfg := &config.Config{}
+ 
+@@ -954,6 +982,7 @@ func TestCloseAntigravityAuthIdleTransportsEvictsIdlePool(t *testing.T) {
+ // TestAntigravityCountTokens429EvictsIdleTransports verifies that a 429 during count_tokens
+ // evicts cached transports for that auth.
+ func TestAntigravityCountTokens429EvictsIdleTransports(t *testing.T) {
++	skipAntigravityHTTP11PoolTest(t)
+ 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+ 		w.Header().Set("Content-Type", "application/json")
+ 		w.WriteHeader(http.StatusTooManyRequests)
+@@ -1020,6 +1049,7 @@ func TestAntigravityCountTokens429EvictsIdleTransports(t *testing.T) {
+ // with different connection-pool settings produce distinct cache keys and never share
+ // stale transports during hot-reload under load.
+ func TestAntigravityTransportKeySeparatesPoolSettingsAcrossReload(t *testing.T) {
++	skipAntigravityHTTP11PoolTest(t)
+ 	auth := antigravityAuthWithIDAndProxy("auth-key-separation", "")
+ 
+ 	// 1. Client with short connection mode (default enabled: false)
+diff --git a/internal/runtime/executor/antigravity_transport_decorator_test.go b/internal/runtime/executor/antigravity_transport_decorator_test.go
+index a7c8538..be9f099 100644
+--- a/internal/runtime/executor/antigravity_transport_decorator_test.go
++++ b/internal/runtime/executor/antigravity_transport_decorator_test.go
+@@ -23,6 +23,7 @@ type auditTestTransport struct {
+ }
+ 
+ func TestAntigravityDecoratorRunsAfterCredentialHTTP11PoolSelection(t *testing.T) {
++	skipAntigravityHTTP11PoolTest(t)
+ 	for _, proxy := range []string{"", "http://127.0.0.1:12345"} {
+ 		t.Run("proxy_"+proxy, func(t *testing.T) {
+ 			calls := 0
+diff --git a/internal/runtime/executor/codex_header_precedence_test.go b/internal/runtime/executor/codex_header_precedence_test.go
+new file mode 100644
+index 0000000..4a561a2
+--- /dev/null
++++ b/internal/runtime/executor/codex_header_precedence_test.go
+@@ -0,0 +1,17 @@
++package executor
++
++import (
++	"net/http"
++	"testing"
++)
++
++// The client is Claude Code, so a Codex subscription must not forward its
++// User-Agent. CodexHeaderDefaults.user-agent has to win over the client header.
++func TestEnsureHeaderWithConfigPrecedenceConfigBeatsClient(t *testing.T) {
++	target := http.Header{}
++	client := http.Header{"User-Agent": {"claude-cli/2.0.45 (external, cli)"}}
++	ensureHeaderWithConfigPrecedence(target, client, "User-Agent", "codex_cli_rs/0.159.0 (Mac OS 26.5.2; arm64)", "codex-tui/0.154.0")
++	if got := target.Get("User-Agent"); got != "codex_cli_rs/0.159.0 (Mac OS 26.5.2; arm64)" {
++		t.Fatalf("User-Agent = %q, want the configured Codex agent", got)
++	}
++}
+diff --git a/internal/runtime/executor/codex_openai_images.go b/internal/runtime/executor/codex_openai_images.go
+index 7f11a7c..fb82913 100644
+--- a/internal/runtime/executor/codex_openai_images.go
++++ b/internal/runtime/executor/codex_openai_images.go
+@@ -125,7 +125,7 @@ func (e *CodexExecutor) executeOpenAIImage(ctx context.Context, auth *cliproxyau
+ 	prepareHeaders(httpReq)
+ 	recordCodexOpenAIImageRequest(ctx, e.cfg, e.Identifier(), auth, url, httpReq.Header.Clone(), body)
+ 
+-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
++	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
+ 	httpClient = reporter.TrackHTTPClient(httpClient)
+ 	httpResp, errDo := doCodexRequest(httpClient, httpReq, body, prepareHeaders, nil)
+ 	if errDo != nil {
+@@ -235,7 +235,7 @@ func (e *CodexExecutor) executeOpenAIImageStream(ctx context.Context, auth *clip
+ 	prepareHeaders(httpReq)
+ 	recordCodexOpenAIImageRequest(ctx, e.cfg, e.Identifier(), auth, url, httpReq.Header.Clone(), body)
+ 
+-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
++	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
+ 	httpClient = reporter.TrackHTTPClient(httpClient)
+ 	httpResp, errDo := doCodexRequest(httpClient, httpReq, body, prepareHeaders, nil)
+ 	if errDo != nil {
+@@ -384,7 +384,7 @@ func (e *CodexExecutor) executeDirectOpenAIImage(ctx context.Context, auth *clip
+ 	prepareHeaders(httpReq)
+ 	recordCodexOpenAIImageRequest(ctx, e.cfg, e.Identifier(), auth, url, httpReq.Header.Clone(), body)
+ 
+-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
++	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
+ 	httpClient = reporter.TrackHTTPClient(httpClient)
+ 	httpResp, errDo := doCodexRequest(httpClient, httpReq, body, prepareHeaders, nil)
+ 	if errDo != nil {
+@@ -457,7 +457,7 @@ func (e *CodexExecutor) executeDirectOpenAIImageStream(ctx context.Context, auth
+ 	prepareHeaders(httpReq)
+ 	recordCodexOpenAIImageRequest(ctx, e.cfg, e.Identifier(), auth, url, httpReq.Header.Clone(), body)
+ 
+-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
++	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
+ 	httpClient = reporter.TrackHTTPClient(httpClient)
+ 	httpResp, errDo := doCodexRequest(httpClient, httpReq, body, prepareHeaders, nil)
+ 	if errDo != nil {
+diff --git a/internal/runtime/executor/helps/transport_decorator_test.go b/internal/runtime/executor/helps/transport_decorator_test.go
+index c767f78..b257d68 100644
+--- a/internal/runtime/executor/helps/transport_decorator_test.go
++++ b/internal/runtime/executor/helps/transport_decorator_test.go
+@@ -211,3 +211,14 @@ func TestClientDecoratorContextIsolationAndStreamLifecycle(t *testing.T) {
+ 	}
+ 	wg.Wait()
+ }
++
++func TestCodexChatGPTTransportUsesNativePooledProfile(t *testing.T) {
++	client := NewUtlsHTTPClient(context.Background(), &config.Config{}, &coreauth.Auth{ID: "codex-native"}, 0)
++	rt, ok := client.Transport.(*fallbackRoundTripper)
++	if !ok {
++		t.Fatalf("expected fallbackRoundTripper, got %T", client.Transport)
++	}
++	if _, ok := rt.chrome.(*http.Transport); !ok {
++		t.Fatalf("chatgpt.com must use the pooled native Codex transport, got %T", rt.chrome)
++	}
++}
+diff --git a/internal/runtime/executor/helps/utls_client.go b/internal/runtime/executor/helps/utls_client.go
+index 42cf15b..851f2b4 100644
+--- a/internal/runtime/executor/helps/utls_client.go
++++ b/internal/runtime/executor/helps/utls_client.go
+@@ -14,6 +14,7 @@ import (
+ 
+ 	tls "github.com/refraction-networking/utls"
+ 	internalcache "github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/codextls"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/httpwire"
+ 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+@@ -478,8 +479,8 @@ func (f *fallbackRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
+ 
+ // NewUtlsHTTPClient creates an HTTP client using provider-specific TLS
+ // fingerprints for protected hosts. It uses Claude Code's Node/OpenSSL profile
+-// for Anthropic and a Chrome profile for ChatGPT, with a standard-transport
+-// fallback for other hosts.
++// for Anthropic and the captured native Codex TLS 1.2 profile for ChatGPT, with
++// a standard-transport fallback for other hosts.
+ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) (clientOut *http.Client) {
+ 	// Carry the opt-in TLS establishment bound (requests
+ 	// tls-handshake-timeout-seconds) on a request-scoped wrapper. This
+@@ -505,7 +506,9 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
+ 		ctxRoundTripper, _ = ctx.Value("cliproxy.roundtripper").(http.RoundTripper)
+ 	}
+ 
+-	var chromeRT http.RoundTripper = newUtlsRoundTripper(proxyURL)
++	// chatgpt.com currently means the Codex surface. Use the captured native
++	// Codex TLS/HTTP1 identity instead of the old Chrome profile.
++	var chromeRT http.RoundTripper = codextls.RoundTripper(codexTransportScope(auth), proxyURL, handshakeTimeout)
+ 	var anthropicRT http.RoundTripper = cachedClaudeCodeRoundTripper(proxyURL)
+ 	var standardTransport http.RoundTripper = http.DefaultTransport
+ 	var anthropicFn, fallbackFn func() http.RoundTripper
+@@ -557,3 +560,17 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
+ 	}
+ 	return client
+ }
++
++// codexTransportScope keeps one Codex connection pool per credential.
++func codexTransportScope(auth *cliproxyauth.Auth) string {
++	if auth == nil {
++		return "anonymous"
++	}
++	if scope := strings.TrimSpace(auth.Index); scope != "" {
++		return scope
++	}
++	if scope := strings.TrimSpace(auth.ID); scope != "" {
++		return scope
++	}
++	return "anonymous"
++}

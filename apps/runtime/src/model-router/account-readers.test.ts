@@ -70,6 +70,28 @@ describe('ChatGPT account readers', () => {
     expect(models[1]).toEqual({ id: 'gpt-b', ownedBy: 'Codex' });
   });
   it.each([[], {}, { data: [] }, { models: null }, { error: { message: 'failure' } }])('returns unknown for empty model lists: %j', raw => expect(parseChatGptModels(raw).ok).toBe(false));
+  it('preserves map keys over nested model/name fields and parses Antigravity maxTokens and thinking levels', () => {
+    const models = value(parseChatGptModels({
+      models: {
+        'gemini-4-argon-high': {
+          displayName: 'Gemini 4 Argon',
+          model: 'projects/ignored/models/other',
+          name: 'ignored-display-alias',
+          maxTokens: 1048576,
+          maxOutputTokens: 65536,
+          thinking: { levels: ['low', 'medium', 'high', 'ignored'] }
+        }
+      }
+    }));
+    expect(models).toEqual([{
+      id: 'gemini-4-argon-high',
+      displayName: 'Gemini 4 Argon',
+      ownedBy: 'Codex',
+      contextWindow: 1048576,
+      supportedEfforts: ['low', 'medium', 'high'],
+      maxOutputTokens: 65536
+    }]);
+  });
 });
 describe('management api-call envelope', () => {
   it.each([readChatGptUsage, readChatGptModels, readAntigravityAccount, readAntigravityQuota])('never treats inner 403 as success: %s', reader => {

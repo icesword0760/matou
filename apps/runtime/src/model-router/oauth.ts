@@ -11,7 +11,7 @@ import { RouterManagementClient, type OAuthStart } from './management-client'
 import { isSubscriptionAuthorizationUrl } from './authorization-url'
 import { sanitizeProviderReason } from './errors'
 
-export type OAuthOutcome = { status: 'ok'; authId: string } | { status: 'error' | 'cancelled' | 'expired'; reason: string }
+export type OAuthOutcome = { status: 'ok'; authId?: string } | { status: 'error' | 'cancelled' | 'expired'; reason: string }
 export interface OAuthFlowOptions {
   provider: SubscriptionProvider
   login: OAuthStart
@@ -100,7 +100,10 @@ export class OAuthLoopbackFlow {
     try {
       while (!this.#outcome) {
         const state = await this.#options.client.oauthStatus(this.#options.login.state, this.#abort.signal)
-        if (state.status === 'ok' && state.auth_id) { this.#finish({ status: 'ok', authId: state.auth_id }); return }
+        if (state.status === 'ok' && (state.auth_id || this.#options.provider === 'antigravity')) {
+          this.#finish({ status: 'ok', ...(state.auth_id ? { authId: state.auth_id } : {}) })
+          return
+        }
         if (state.status === 'error') { this.#finish({ status: 'error', reason: sanitizeProviderReason(state.error) ?? 'Sign-in was not completed' }); return }
         await delay(100, undefined, { signal: this.#abort.signal })
       }

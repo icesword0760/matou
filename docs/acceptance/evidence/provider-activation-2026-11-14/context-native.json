@@ -1,0 +1,26 @@
+{
+  "boundary": "Native CLI read-only control calls with isolated Claude config; no model inference. Codex uses current user config with process-local overrides.",
+  "claude": {
+    "maxTokens": 512000,
+    "rawMaxTokens": 512000,
+    "autocompactSource": "settings",
+    "autoCompactThreshold": 479000,
+    "isAutoCompactEnabled": true,
+    "apiUsage": null
+  },
+  "claudeSettings": {
+    "env": {
+      "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "512000",
+      "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "90",
+      "CLAUDE_CODE_DISABLE_1M_CONTEXT": "1"
+    },
+    "autoCompactWindow": 512000
+  },
+  "codex": {
+    "model": "gpt-6-astra",
+    "model_context_window": 512000,
+    "model_auto_compact_token_limit": 460800,
+    "model_auto_compact_token_limit_scope": "total",
+    "model_reasoning_effort": "medium"
+  }
+}

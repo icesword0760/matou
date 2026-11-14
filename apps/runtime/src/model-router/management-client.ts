@@ -2,6 +2,8 @@ import type { SubscriptionProvider } from '@matou/contracts'
 import type { RouterConnection } from './manager'
 import type { ModelAlias } from './claude-launch'
 import { MAX_MODEL_BODY_BYTES } from './account-readers'
+import { ANTIGRAVITY_CLIENT_USER_AGENT } from './antigravity-client'
+import { CODEX_CLIENT_ORIGINATOR, CODEX_CLIENT_USER_AGENT } from './codex-client'
 
 export interface RouterCredential extends Record<string, unknown> {
   id: string
@@ -64,6 +66,13 @@ export class RouterManagementClient {
   }
   async setDisabled(name: string, disabled: boolean): Promise<void> { await this.#request('/credentials/status', 'PATCH', { name, disabled }) }
   async setPrefix(name: string, prefix: string): Promise<void> { await this.#request('/credentials/fields', 'PATCH', { name, prefix }) }
+  /** Pin the credential-level user agent so inference reuses the exact value
+   * that the fixed Antigravity probes send for the same token. The router reads
+   * `user_agent` from credential metadata before its Hub-manifest default. */
+  async setUserAgent(name: string, userAgent: string): Promise<void> { await this.#request('/credentials/fields', 'PATCH', { name, user_agent: userAgent }) }
+  /** Merge credential-level headers. The router applies them to inference
+   * after its defaults, so Codex sees one Originator/Version for one token. */
+  async setHeaders(name: string, headers: Record<string, string>): Promise<void> { await this.#request('/credentials/fields', 'PATCH', { name, headers }) }
   async deleteCredential(name: string): Promise<void> { await this.#request(`/credentials?${new URLSearchParams({ name })}`, 'DELETE') }
   async aliases(provider: SubscriptionProvider): Promise<ModelAlias[]> {
     try {
@@ -90,7 +99,7 @@ export class RouterManagementClient {
     const googleBase = 'https://daily-cloudcode-pa.googleapis.com/v1internal:'
     const specs = {
       'chatgpt-usage': { method: 'GET', url: 'https://chatgpt.com/backend-api/wham/usage' },
-      'chatgpt-models': { method: 'GET', url: 'https://chatgpt.com/backend-api/codex/models?client_version=0.159.0' },
+      'chatgpt-models': { method: 'GET', url: 'https://chatgpt.com/backend-api/codex/models?client_version=0.162.1' },
       'antigravity-account': { method: 'POST', url: `${googleBase}loadCodeAssist` },
       'antigravity-quota': { method: 'POST', url: `${googleBase}retrieveUserQuotaSummary` },
       'antigravity-models': { method: 'POST', url: `${googleBase}fetchAvailableModels` }
@@ -98,9 +107,14 @@ export class RouterManagementClient {
     if ((probe.startsWith('chatgpt') ? 'codex' : 'antigravity') !== credential.provider) throw new Error('Probe does not match account')
     const accountId = typeof credential.account_id === 'string' ? credential.account_id : typeof (credential.id_token as Record<string, unknown> | undefined)?.chatgpt_account_id === 'string' ? (credential.id_token as Record<string, string>).chatgpt_account_id : undefined
     const header: Record<string, string> = { Authorization: 'Bearer $TOKEN$', 'Content-Type': 'application/json' }
-    if (probe === 'chatgpt-models') { header.originator = 'codex_cli_rs'; header.version = '0.159.0' }
+    // Probes and inference carry one token, so both must look like the same
+    // Codex client. The model-list URL already carries client_version.
+    if (probe.startsWith('chatgpt')) { header['User-Agent'] = CODEX_CLIENT_USER_AGENT; header.originator = CODEX_CLIENT_ORIGINATOR }
     if (credential.provider === 'codex' && accountId) header['ChatGPT-Account-Id'] = accountId
-    if (credential.provider === 'antigravity') header['User-Agent'] = 'Matou (antigravity/cli/1.4.6)'
+    // The same token is also used for inference. Never send a relay-specific
+    // agent here: probes must look exactly like the runtime client that owns
+    // the credential.
+    if (credential.provider === 'antigravity') header['User-Agent'] = ANTIGRAVITY_CLIENT_USER_AGENT
     const data = probe === 'antigravity-account' ? { metadata: { ideType: 'ANTIGRAVITY' } } : { ...(project ? { project } : {}) }
     // api-call wraps the provider's JSON text in another JSON string. Quotes
     // and backslashes may double its bytes; the decoded model body remains 4MiB.

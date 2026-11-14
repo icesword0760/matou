@@ -29,7 +29,7 @@ const googleMapping = { opus: 'gemini-4-argon-high', sonnet: 'gemini-4-argon-hig
  * api-call URLs are rewritten only by this test proxy to a local fake service.
  * All CONNECT attempts are rejected: no provider network/real account is used.
  */
-async function fixture(options: { loginTimeoutMs?: number; callbackPort?: number; holdInitialStatus?: boolean; catalog?: 'large' | 'failed' | 'empty'; emptyDefinitions?: boolean; openBrowser?(): Promise<void> } = {}) {
+async function fixture(options: { loginTimeoutMs?: number; callbackPort?: number; holdInitialStatus?: boolean; catalog?: 'large' | 'failed' | 'empty'; emptyDefinitions?: boolean; detailsTtlMs?: number; openBrowser?(): Promise<void> } = {}) {
   await mkdir(output, { recursive: true })
   const dataRoot = await mkdtemp(join(output, 'accounts-'))
   const store = new ProviderConfigStore(dataRoot)
@@ -37,7 +37,9 @@ async function fixture(options: { loginTimeoutMs?: number; callbackPort?: number
   let failQuota = false, failCommit = false, sameAccount = false, identity = 0, holdCallback = false
   let initialStatusEntered = false, staleStatusErrors = 0
   let catalog = options.catalog, emptyDefinitions = options.emptyDefinitions
-  const successes = new Map<string, string>()
+  const successes = new Map<string, { provider: SubscriptionProvider; name: string }>()
+  const statusForSuccess = (entry: { provider: SubscriptionProvider; name: string }) =>
+    entry.provider === 'antigravity' ? { status: 'ok' } : { status: 'ok', auth_id: entry.name }
   const simulatedPending = new Set<string>()
   const upstream = createServer(async (request, response) => {
     probes.push(request.url!)
@@ -47,7 +49,7 @@ async function fixture(options: { loginTimeoutMs?: number; callbackPort?: number
       response.end(JSON.stringify({ plan_type: 'plus', rate_limit: { primary_window: { used_percent: 25, limit_window_seconds: 18000, reset_at: 1800000000 } } }))
     } else if (request.url!.includes('loadCodeAssist')) response.end(JSON.stringify({ paidTier: { id: 'g1-pro-tier', name: 'Google AI Pro' }, cloudaicompanionProject: 'fixture-project' }))
     else if (request.url!.includes('retrieveUserQuotaSummary')) response.end(JSON.stringify({ groups: [{ displayName: 'Gemini Models', buckets: [{ bucketId: 'gemini-5h', remainingFraction: .75 }] }] }))
-    else if (request.url!.includes('fetchAvailableModels')) response.end(JSON.stringify({ models: { 'gemini-4-argon-high': { displayName: 'Fixture Gemini', contextWindow: 1000000, maxOutputTokens: 64000 } } }))
+    else if (request.url!.includes('fetchAvailableModels')) response.end(JSON.stringify({ models: { 'gemini-4-argon-high': { displayName: 'Fixture Gemini', model: 'projects/ignored/models/other', maxTokens: 1000000, maxOutputTokens: 64000 } } }))
     else if (catalog === 'failed') { response.writeHead(503); response.end('{"error":"fixture model read failed"}') }
     else if (catalog === 'empty') response.end('{"models":[]}')
     else if (catalog === 'large') response.end(JSON.stringify({ models: ['gpt-6.1-sol', 'gpt-6-astra', 'gpt-6.1-terra', 'gpt-6-sol', 'gpt-reserve', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'codex-auto-review'].map(slug => ({ slug, display_name: 'Incorrect account label', context_window: 999999, max_output_tokens: 999999, instructions: 'model instruction '.repeat(4200) })) }))
@@ -91,7 +93,7 @@ async function fixture(options: { loginTimeoutMs?: number; callbackPort?: number
         response.setHeader('Content-Type', 'application/json'); response.end(JSON.stringify({ status: 'wait' })); return
       }
       if (url.pathname.endsWith('/oauth/status') && successes.has(url.searchParams.get('state')!)) {
-        response.setHeader('Content-Type', 'application/json'); response.end(JSON.stringify({ status: 'ok', auth_id: successes.get(url.searchParams.get('state')!) })); return
+        response.setHeader('Content-Type', 'application/json'); response.end(JSON.stringify(statusForSuccess(successes.get(url.searchParams.get('state')!)!))); return
       }
       if (options.holdInitialStatus && url.pathname.endsWith('/oauth/status')) {
         initialStatusEntered = true
@@ -117,7 +119,7 @@ async function fixture(options: { loginTimeoutMs?: number; callbackPort?: number
         const state = url.searchParams.get('state')!
         if (successes.has(state) || simulatedPending.has(state)) {
           response.setHeader('Content-Type', 'application/json')
-          response.end(JSON.stringify(successes.has(state) ? { status: 'ok', auth_id: successes.get(state)! } : { status: 'wait' }))
+          response.end(JSON.stringify(successes.has(state) ? statusForSuccess(successes.get(state)!) : { status: 'wait' }))
           return
         }
       }
@@ -131,7 +133,7 @@ async function fixture(options: { loginTimeoutMs?: number; callbackPort?: number
         const name = `${input.provider}-fixture-${identity}.json`
         await upload(input.provider, name)
         await until(async () => (await new RouterManagementClient(real!).credentials()).some(file => file.name === name))
-        successes.set(input.state, name)
+        successes.set(input.state, { provider: input.provider, name })
         simulatedPending.delete(input.state)
         stages.push('official callback accepted -> simulated successful exchange -> official credential upload')
       }
@@ -152,7 +154,7 @@ async function fixture(options: { loginTimeoutMs?: number; callbackPort?: number
     callbackPorts[input.provider] = flow.port
     return flow
   })
-  const accounts = new SubscriptionAccounts({ dataRoot, manager, store, openAuthorizationUrl: async (provider, url) => { opened.push({ provider, url }); await options.openBrowser?.() }, callbackPorts: { codex: options.callbackPort ?? 0, antigravity: 0 }, ...(options.loginTimeoutMs ? { loginTimeoutMs: options.loginTimeoutMs } : {}) })
+  const accounts = new SubscriptionAccounts({ dataRoot, manager, store, openAuthorizationUrl: async (provider, url) => { opened.push({ provider, url }); await options.openBrowser?.() }, callbackPorts: { codex: options.callbackPort ?? 0, antigravity: 0 }, ...(options.loginTimeoutMs ? { loginTimeoutMs: options.loginTimeoutMs } : {}), ...(options.detailsTtlMs === undefined ? {} : { detailsTtlMs: options.detailsTtlMs }) })
   const port = new EventEmitter(), connection = accounts.bindConnection(port)
   disposals.push(async () => { await accounts.close(); await manager.close(); await Promise.all([closeServer(proxy), closeServer(upstream), closeServer(rejectProxy)]) })
   async function login(provider: SubscriptionProvider = 'codex') {
@@ -205,8 +207,17 @@ describe.runIf(process.env.MATOU_TEST_MODEL_ROUTER === '1')('subscription adopti
     expect(f.probes.filter(path => path.includes('usage'))).toHaveLength(quotaReads)
     expect(f.opened).toHaveLength(browserOpens)
   }, 30000)
+  it('reuses a fresh plan/quota read when settings is reopened', async () => {
+    const f = await fixture(), attempt = await f.login(), saved = await f.save(attempt)
+    await f.connection.settings()
+    const reads = f.probes.length
+    await f.connection.closeSettings()
+    const reopened = await f.connection.settings()
+    expect(reopened.accounts[saved.id]?.quota?.[0]?.usedPercent).toBe(25)
+    expect(f.probes).toHaveLength(reads)
+  }, 30000)
   it('completes start -> callback -> status ok -> aliases -> adoption -> nonsecret card snapshot, reads settings once and deletes its credential', async () => {
-    const f = await fixture({ holdInitialStatus: true }), attempt = await f.login(), saved = await f.save(attempt)
+    const f = await fixture({ holdInitialStatus: true, detailsTtlMs: 0 }), attempt = await f.login(), saved = await f.save(attempt)
     expect(f.staleStatusErrors()).toBeGreaterThan(0)
     expect(saved.kind).toBe('subscription')
     expect(saved.subscription?.account.email).toBe('codex-1@example.invalid')
@@ -413,6 +424,15 @@ describe.runIf(process.env.MATOU_TEST_MODEL_ROUTER === '1')('subscription adopti
     const settings = await f.connection.settings()
     expect(settings.accounts[google.id]?.quota?.[0]?.usedPercent).toBe(25)
     expect(settings.accounts[google.id]?.models.map(model => model.id)).not.toContain('gpt-6.1-sol')
+    expect(settings.accounts[google.id]?.models.find(model => model.id === 'gemini-4-argon-high')).toMatchObject({
+      displayName: 'Fixture Gemini',
+      contextWindow: 1000000,
+      supportedEfforts: ['low', 'medium', 'high'],
+      maxOutputTokens: 64000
+    })
+    f.sameAccount()
+    const reauthorized = await f.save(await f.login('antigravity'), 'antigravity')
+    expect(reauthorized.id).toBe(google.id)
   }, 30000)
   it('expires a pending real router login and reports an occupied callback port without leaving a lease', async () => {
     const f = await fixture({ loginTimeoutMs: 80 })

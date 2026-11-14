@@ -1,0 +1,35 @@
+.agent-model-settings { display: grid; gap: 14px; margin-top: 22px; padding-top: 20px; border-top: 1px solid var(--workspace-line); color: var(--workspace-text); }
+.agent-model-settings__section { display: grid; gap: 10px; }
+.agent-model-settings__header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.agent-model-settings__header > div { display: grid; gap: 4px; }
+.agent-model-settings h2 { margin: 0; color: var(--workspace-text); font-size: 13px; font-weight: 680; }
+.agent-model-settings p { margin: 0; color: var(--workspace-muted); font-size: 11px; line-height: 1.65; }
+.agent-model-settings__saved { display: inline-flex; align-items: center; padding: 3px 9px; border-radius: 999px; background: rgba(34, 150, 90, 0.12); color: #16794b; font-size: 11px; font-weight: 600; }
+.agent-model-settings__card { display: grid; gap: 12px; padding: 14px; border: 1px solid var(--workspace-line); border-radius: 10px; background: var(--workspace-panel-muted); }
+.agent-model-settings__fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
+.agent-model-settings__choices { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.agent-model-settings__choice { display: flex; align-items: flex-start; gap: 8px; min-width: 0; padding: 10px 12px; border: 1px solid var(--workspace-line-strong); border-radius: 8px; background: var(--workspace-panel); cursor: pointer; }
+.agent-model-settings__choice.is-selected { border-color: var(--workspace-accent); background: color-mix(in srgb, var(--workspace-accent) 8%, var(--workspace-panel)); }
+.agent-model-settings__choice:focus-within { outline: 2px solid var(--workspace-accent); outline-offset: 2px; }
+.agent-model-settings__choice input[type="radio"] { width: auto; min-height: 0; flex: none; margin: 2px 0 0; padding: 0; border: 0; background: transparent; accent-color: var(--workspace-accent); }
+.agent-model-settings__choice span { display: grid; gap: 2px; min-width: 0; }
+.agent-model-settings__choice strong { font-size: 12px; font-weight: 650; }
+.agent-model-settings__choice small { color: var(--workspace-muted); font-size: 10px; line-height: 1.45; }
+.agent-model-settings__custom-body { display: grid; gap: 10px; padding-top: 12px; border-top: 1px solid var(--workspace-line); }
+.agent-model-settings__grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px 12px; }
+.agent-model-settings__grid label { display: grid; gap: 5px; min-width: 0; font-size: 11px; font-weight: 650; }
+.agent-model-settings select, .agent-model-settings input:not([type="radio"]) { width: 100%; min-height: 34px; padding: 6px 9px; border: 1px solid var(--workspace-line-strong); border-radius: 7px; color: inherit; background: var(--workspace-panel); font: inherit; font-size: 12px; }
+.agent-model-settings select:focus-visible, .agent-model-settings input:not([type="radio"]):focus-visible, .agent-model-settings button:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: 2px; }
+.agent-model-settings select:disabled, .agent-model-settings input:not([type="radio"]):disabled { opacity: .55; }
+.agent-model-settings__cross-note { color: #9a5b13 !important; }
+.agent-model-settings__validation { color: #b34d47 !important; }
+.agent-model-settings__actions { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
+.agent-model-settings__actions button, .agent-model-settings__load-error button { min-height: 32px; padding: 0 16px; border: 1px solid var(--workspace-accent); border-radius: 7px; background: var(--workspace-accent); color: white; font-size: 11px; cursor: pointer; }
+.agent-model-settings__actions button:disabled { opacity: .5; cursor: default; }
+.agent-model-settings__actions [role="status"] { color: var(--workspace-muted); font-size: 11px; line-height: 1.5; }
+.agent-model-settings [role="alert"] { color: #b34d47; font-size: 11px; line-height: 1.6; }
+.agent-model-settings__load-error button { margin-left: 12px; }
+
+@media (max-width: 640px) {
+  .agent-model-settings__choices, .agent-model-settings__grid { grid-template-columns: 1fr; }
+}

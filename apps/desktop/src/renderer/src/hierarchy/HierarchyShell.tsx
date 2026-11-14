@@ -5,7 +5,7 @@ import {
 
 import { isAgentProfileId, type ForkStage, type LayoutNode, type SessionEnvironment } from '@matou/domain'
 import type {
-  HostNavigationPath, HostNavigationRequestWire, RuntimeMessage, RuntimeMode
+  ClaudeSessionDetail, HostNavigationPath, HostNavigationRequestWire, RuntimeMessage, RuntimeMode
 } from '@matou/contracts'
 
 import {
@@ -364,6 +364,7 @@ function HierarchyProduct({
     title: string
     running: boolean
     provider: 'claude-code' | 'antigravity'
+    history?: boolean
   } | null>(null)
   const [searchRequest, setSearchRequest] = useState({
     query: '', options: { caseSensitive: false, regex: false, wholeWord: false } as TerminalSearchOptions,
@@ -427,6 +428,13 @@ function HierarchyProduct({
     if (!loaderSessionId) return Promise.reject(new Error(m.sessionLoaderClosed))
     return commands.getClaudeSessionDetail(loaderSessionId, providerSessionId, options)
   }, [commands, loaderSessionId, loaderTitleRevision, loaderBindingRevision, m])
+  const loadCurrentLoaderDetail = useCallback(() => {
+    if (!loaderSessionId || !client) return Promise.reject(new Error(m.sessionLoaderClosed))
+    return client.request<ClaudeSessionDetail>('claude-sessions.detail', {
+      sessionId: loaderSessionId, current: true,
+      provider: sessionLoader?.provider, limit: 200
+    })
+  }, [client, loaderSessionId, m.sessionLoaderClosed, sessionLoader?.provider])
   const searchLoaderSession = useCallback((
     providerSessionId: string, query: string, offset?: number, limit?: number,
     provider?: 'claude-code' | 'antigravity'
@@ -1218,6 +1226,15 @@ function HierarchyProduct({
                       graphNode?.workStatus === 'starting',
                     provider: session.kind === 'antigravity' ? 'antigravity' : 'claude-code'
                   })}
+                  onViewHistory={() => setSessionLoader({
+                    sessionId: session.id,
+                    sceneId: scene.id,
+                    title: session.title,
+                    running: graphNode?.workStatus === 'running' ||
+                      graphNode?.workStatus === 'starting',
+                    provider: session.kind === 'antigravity' ? 'antigravity' : 'claude-code',
+                    history: true
+                  })}
                   descendantNodes={[...descendantNodes]}
                   {...(graphNode?.parentSessionId ? { parentSessionId: graphNode.parentSessionId } : {})}
                   {...(commands.removeSessionBranch && canRemoveBranch ? {
@@ -1427,6 +1444,7 @@ function HierarchyProduct({
                 listSessions={listLoaderSessions}
                 loadDetail={loadLoaderDetail}
                 searchSession={searchLoaderSession}
+                {...(sessionLoader.history ? { loadCurrentDetail: loadCurrentLoaderDetail } : {})}
                 onCancel={cancelSessionLoader}
                 onLoad={loadIntoCurrentCard} />}
               {branchDialog && !readOnly && <BranchDialog relationMode={branchDialog.relationMode}

@@ -1,0 +1,96 @@
+{
+  "boundary": "Independent fork of pre-compaction history, same GPT alias and xhigh, native Claude with tools/MCP disabled. Proxy records timings and response metadata only.",
+  "requests": [
+    {
+      "index": 1,
+      "path": "/v1/messages?beta=true",
+      "bytes": 16349139,
+      "messages": 896,
+      "model": "matou-chatgpt/matou-opus",
+      "effort": "xhigh",
+      "startSeconds": 0.325,
+      "forwardedMs": 47,
+      "status": 200,
+      "headersMs": 10975,
+      "firstByteMs": 10976,
+      "responseBytes": 1586565,
+      "events": {
+        "message_start": 1,
+        "content_block_start": 3,
+        "content_block_delta": 12627,
+        "content_block_stop": 3,
+        "message_delta": 1,
+        "message_stop": 1
+      },
+      "textChars": 27053,
+      "thinkingChars": 173,
+      "usage": [
+        {
+          "input_tokens": 414683,
+          "output_tokens": 0
+        },
+        {
+          "input_tokens": 503055,
+          "output_tokens": 13786,
+          "output_tokens_details": {
+            "thinking_tokens": 1034
+          }
+        }
+      ],
+      "errors": [],
+      "lastByteMs": 345103,
+      "completeMs": 345111
+    }
+  ],
+  "events": [
+    {
+      "step": "before",
+      "maxTokens": 512000,
+      "totalTokens": 838670,
+      "autoCompactThreshold": 479000,
+      "model": "matou-chatgpt/matou-opus"
+    },
+    {
+      "step": "compacted",
+      "elapsedSeconds": 345.524,
+      "metadata": {
+        "trigger": "manual",
+        "pre_tokens": 839260,
+        "post_tokens": 12767,
+        "cumulative_dropped_tokens": 3694250,
+        "duration_ms": 345177,
+        "pre_compact_discovered_tools": [
+          "Monitor",
+          "TaskStop"
+        ],
+        "preserved_segment": {
+          "head_uuid": "b02aff5e-43af-4540-beab-d76d7609bf07",
+          "anchor_uuid": "35f15dd2-44ad-425f-b90f-ccddaf30db1b",
+          "tail_uuid": "bd527982-5dc5-4edc-b22a-25abb024c4e3"
+        },
+        "preserved_messages": {
+          "anchor_uuid": "35f15dd2-44ad-425f-b90f-ccddaf30db1b",
+          "uuids": [
+            "b02aff5e-43af-4540-beab-d76d7609bf07",
+            "bd527982-5dc5-4edc-b22a-25abb024c4e3"
+          ],
+          "all_uuids": [
+            "b02aff5e-43af-4540-beab-d76d7609bf07",
+            "bd527982-5dc5-4edc-b22a-25abb024c4e3"
+          ]
+        }
+      }
+    }
+  ],
+  "interpretation": {
+    "requestCount": 1,
+    "upstreamModel": "gpt-6-astra",
+    "routerRequestRetry": 0,
+    "initialUsageIsNotFinal": true,
+    "finalInputTokens": 503055,
+    "finalOutputTokens": 13786,
+    "reportedThinkingTokens": 1034,
+    "summaryChars": 27053,
+    "boundary": "Only the local client-to-router request boundary was instrumented. Cannot independently split upstream queue, prefill, reasoning, and network time. This reproduces the same symptom in an isolated fork; original 12:41 request logs are still unavailable."
+  }
+}

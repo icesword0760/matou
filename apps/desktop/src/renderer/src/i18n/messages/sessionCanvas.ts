@@ -151,6 +151,12 @@ export const sessionCanvasZhCN = {
   // SessionLoaderDialog
   loader: {
     dialogTitle: (agent: string) => `载入 ${agent} 会话`,
+    historyTitle: '会话历史',
+    historyDescription: '包含压缩前的消息，不影响当前会话',
+    closeHistory: '关闭会话历史',
+    noHistory: '当前会话还没有可显示的历史内容',
+    retryHistory: '重试读取会话历史',
+    returnLatest: '返回最新',
     providerTabs: '选择会话来源',
     loadInto: (title: string) => `载入到“${title}”`,
     close: '关闭会话管理',
@@ -375,6 +381,12 @@ export const sessionCanvasEn: CatalogShape<typeof sessionCanvasZhCN> = {
   // SessionLoaderDialog
   loader: {
     dialogTitle: (agent: string) => `Load ${agent} session`,
+    historyTitle: 'Session history',
+    historyDescription: 'Includes messages from before compaction and does not affect the current session',
+    closeHistory: 'Close session history',
+    noHistory: 'This session has no history to show yet',
+    retryHistory: 'Retry loading session history',
+    returnLatest: 'Return to latest',
     providerTabs: 'Choose session source',
     loadInto: (title: string) => `Load into "${title}"`,
     close: 'Close the session loader',

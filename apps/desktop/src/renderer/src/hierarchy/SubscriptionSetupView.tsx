@@ -1,8 +1,9 @@
 import { useEffect, useRef } from 'react'
 
-import type { ProviderConfigView, SubscriptionAccountDetails, SubscriptionProvider } from '@matou/contracts'
+import type { ContextWindowMode, ModelContextChoice, ProviderConfigView, ReasoningEffort, SubscriptionAccountDetails, SubscriptionModel, SubscriptionProvider } from '@matou/contracts'
 
 import { useLocale, useMessages } from '../i18n/LocaleProvider'
+import { ContextWindowPicker } from './context-window-ui'
 import { usableSubscriptionModels } from './subscription-settings'
 import './provider-setup.css'
 
@@ -14,8 +15,8 @@ const ROLES: readonly Role[] = ['opus', 'sonnet', 'haiku']
  * state: the settings pane supplies the current phase, draft and callbacks.
  */
 export function SubscriptionSetupView({
-  provider, phase, existing, details, name, mapping, riskChecked, canReopen, reopening, busy, connected, failure, confirm, canDelete,
-  onClose, onRiskChecked, onContinue, onLogin, onReopen, onCancel, onName, onMapping, onSave, onDelete, onKeepEditing, onConfirm, onRetryModels
+  provider, phase, existing, details, name, mapping, effortMapping, contextWindowMode, riskChecked, canReopen, reopening, busy, connected, failure, confirm, canDelete,
+  onClose, onRiskChecked, onContinue, onLogin, onReopen, onCancel, onName, onMapping, onEffort, onContextWindowChange, onSave, onDelete, onKeepEditing, onConfirm, onRetryModels
 }: {
   provider: SubscriptionProvider
   phase: 'risk' | 'login' | 'waiting' | 'error' | 'models'
@@ -23,6 +24,8 @@ export function SubscriptionSetupView({
   details?: SubscriptionAccountDetails | undefined
   name: string
   mapping: Record<Role, string>
+  effortMapping: Record<Role, ReasoningEffort>
+  contextWindowMode?: ContextWindowMode | undefined
   riskChecked: boolean
   canReopen: boolean
   reopening: boolean
@@ -39,6 +42,8 @@ export function SubscriptionSetupView({
   onCancel(): void
   onName(value: string): void
   onMapping(role: Role, value: string): void
+  onEffort(role: Role, value: ReasoningEffort): void
+  onContextWindowChange?(mode: ContextWindowMode): void
   onSave(use: boolean): void
   onDelete(): void
   onKeepEditing(): void
@@ -64,7 +69,22 @@ export function SubscriptionSetupView({
   // Generated media models and the review helper are not coding targets.
   const modelOptions = usableSubscriptionModels(details?.models ?? [])
   const modelsReady = modelOptions.length > 0
-  const saveDisabled = startDisabled || !modelsReady
+  const contextModels: ModelContextChoice[] = modelOptions.map(model => ({
+    id: model.id,
+    name: model.displayName ?? model.id,
+    ...(model.contextWindow ? { defaultTokens: model.contextWindow } : {}),
+    ...(model.maxContextWindow ? { maximumTokens: model.maxContextWindow } : {}),
+    fixedTokens: 512_000
+  }))
+  const resolvedContextMode: ContextWindowMode = contextWindowMode ?? (provider === 'codex' ? '512k' : 'default')
+  const saveDisabled = startDisabled || !modelsReady || ROLES.some(role => {
+    const model = modelOptions.find(row => row.id === mapping[role])
+    return !effortSupported(provider, model, effortMapping[role])
+  })
+  const effortSelectionUsesFallback = ROLES.some(role => {
+    const model = modelOptions.find(row => row.id === mapping[role])
+    return Boolean(model && model.supportedEfforts === undefined)
+  })
 
   useEffect(() => {
     opener.current = document.activeElement as HTMLElement
@@ -128,17 +148,34 @@ export function SubscriptionSetupView({
             <label className="provider-field">{t('供应商名称', 'Provider name')}
               <input data-autofocus value={name} disabled={busy} onChange={e => onName(e.target.value)} />
             </label>
-            {modelsReady ? ROLES.map(role => {
-              const known = modelOptions.some(model => model.id === mapping[role])
-              return <label className="provider-mapping" key={role}>
-                <span>{role[0]!.toUpperCase() + role.slice(1)}</span>
-                <select aria-label={`${role[0]!.toUpperCase() + role.slice(1)} ${t('模型', 'model')}`} value={known ? mapping[role] : ''}
+            {modelsReady ? <>{ROLES.map(role => {
+              const model = modelOptions.find(row => row.id === mapping[role])
+              const known = Boolean(model)
+              const label = role[0]!.toUpperCase() + role.slice(1)
+              const invalidEffort = !effortSupported(provider, model, effortMapping[role])
+              return <div className="provider-mapping" key={role} role="group" aria-label={label}>
+                <span className="provider-mapping__role">{label}</span>
+                <select aria-label={`${label} ${t('模型', 'model')}`} value={known ? mapping[role] : ''}
                   disabled={busy} onChange={e => onMapping(role, e.target.value)}>
                   {!known && <option value="" disabled>—</option>}
                   {modelOptions.map(model => <option key={model.id} value={model.id}>{model.displayName || model.id}</option>)}
                 </select>
-              </label>
-            }) : <div ref={errorNode} tabIndex={-1} className="provider-inline-error" role={failure ? 'alert' : 'status'}>
+                <select aria-label={`${label} ${t('推理强度', 'reasoning effort')}`} value={effortMapping[role]}
+                  disabled={busy} onChange={e => onEffort(role, e.target.value as ReasoningEffort)}>
+                  {effortChoices(provider, model, effortMapping[role]).map(effort => <option key={effort} value={effort}>{effortName(effort, zh)}</option>)}
+                </select>
+                {invalidEffort && <p className="provider-mapping__error" role="alert">{t('该模型不支持当前推理强度。', 'This model does not support the selected reasoning effort.')}</p>}
+              </div>
+            })}
+            {effortSelectionUsesFallback && <p className="provider-help">{t('推理强度选项为候选，实际可用性以供应商支持为准。', 'Reasoning effort options are candidates; actual availability depends on provider support.')}</p>}
+            {onContextWindowChange && <ContextWindowPicker
+              value={resolvedContextMode}
+              models={contextModels}
+              selectedModelIds={ROLES.map(role => mapping[role]).filter(Boolean)}
+              disabled={busy}
+              onChange={onContextWindowChange}
+            />}
+            </> : <div ref={errorNode} tabIndex={-1} className="provider-inline-error" role={failure ? 'alert' : 'status'}>
               <span>{t('没有读到可用的模型', 'No available models were found')}</span>
               {failure && <p className="provider-help">{failure}</p>}
               <p className="provider-help"><button type="button" className="provider-link" disabled={busy} onClick={onRetryModels}>{busy ? t('重试中…', 'Retrying…') : t('重试', 'Retry')}</button></p>
@@ -178,4 +215,31 @@ export function SubscriptionSetupView({
       </footer>
     </div>
   </div>
+}
+
+function supportedEfforts(provider: SubscriptionProvider, model: SubscriptionModel | undefined): Exclude<ReasoningEffort, 'follow'>[] {
+  if (model?.supportedEfforts !== undefined) return model.supportedEfforts
+  const label = `${provider} ${model?.id ?? ''} ${model?.displayName ?? ''}`
+  return !(provider === 'codex' || /\b(gpt|codex|o[1-9])\b/i.test(label)) && /claude|opus|sonnet|haiku/i.test(label)
+    ? ['low', 'medium', 'high', 'xhigh', 'max']
+    : ['low', 'medium', 'high', 'xhigh']
+}
+
+function effortChoices(provider: SubscriptionProvider, model: SubscriptionModel | undefined, current: ReasoningEffort): ReasoningEffort[] {
+  const choices: ReasoningEffort[] = ['follow', ...supportedEfforts(provider, model)]
+  if (current !== 'follow' && !choices.includes(current)) choices.push(current)
+  return choices
+}
+
+function effortSupported(provider: SubscriptionProvider, model: SubscriptionModel | undefined, effort: ReasoningEffort) {
+  return effort === 'follow' || supportedEfforts(provider, model).includes(effort as Exclude<ReasoningEffort, 'follow'>)
+}
+
+function effortName(effort: ReasoningEffort, zh: boolean) {
+  return effort === 'follow' ? zh ? '跟随会话' : 'Follow session'
+    : effort === 'low' ? zh ? '低' : 'Low'
+      : effort === 'medium' ? zh ? '中' : 'Medium'
+        : effort === 'high' ? zh ? '高' : 'High'
+          : effort === 'xhigh' ? zh ? '极高' : 'XHigh'
+            : zh ? '最大' : 'Max'
 }

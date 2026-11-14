@@ -28,6 +28,9 @@ import { SubscriptionLaunchError, type SubscriptionAccounts } from '../model-rou
 import type { RouterLease } from '../model-router/manager'
 import { independentSessionEnvironment } from './independent-session-environment'
 import { claudeResumeUsesSubscriptionModel } from './claude-resume-model'
+import { startClaudeRequestGateway } from './claude-request-gateway'
+import { claudeModelRouting, modelRoutingEnabled, type ClaudeModelRoutingOptions } from './claude-model-routing'
+import { recoverTerminalScreen, terminalRunBoundary, type TerminalScreenRecoveryOptions } from './terminal-screen-recovery'
 
 export interface PtySessionOptions {
   sessionId: string
@@ -45,6 +48,9 @@ export interface PtySessionOptions {
   codexHooksConfig?: string
   controlAssetRoot?: string
   model?: string
+  contextWindow?: number | null
+  reasoningEffort?: string
+  modelRouting?: ClaudeModelRoutingOptions
   env?: Record<string, string>
   send?: (message: RuntimeMessage) => void
   /** Runs immediately on process exit, independently of journal persistence. */
@@ -59,6 +65,7 @@ export interface PtySessionOptions {
   onDurabilityFault?: (event: SessionDurabilityFaultEvent) => void
   onDurabilityRecovered?: (event: SessionDurabilityRecoveredEvent) => void
   journalOptions?: SegmentJournalOptions
+  screenRecovery?: TerminalScreenRecoveryOptions
   runId?: string
 }
 
@@ -76,6 +83,7 @@ export class PtySession {
   readonly profile: SessionRunProfile
   readonly runId: string | undefined
   readonly replayFromSequence: number
+  readonly hasRecoveredScreen: boolean
 
   #subscriptionLeaseReleased = false
   readonly #subscriptionLease: RouterLease | undefined
@@ -96,6 +104,7 @@ export class PtySession {
   readonly #encoder = new TextEncoder()
   readonly #outputBatcher: PtyOutputBatcher
   readonly #screen: TerminalScreenProjector
+  readonly #screenEpoch: number
   #lastOutputAt = 0
   readonly #outputLedger = new OutputByteLedger()
 
@@ -130,7 +139,14 @@ export class PtySession {
     return this.#journal.protectCheckpointSequences(sequences)
   }
 
-  private constructor(options: PtySessionOptions, journal: SegmentJournal, terminal: pty.IPty, subscriptionLease?: RouterLease) {
+  private constructor(
+    options: PtySessionOptions,
+    journal: SegmentJournal,
+    terminal: pty.IPty,
+    recoveredScreen: Awaited<ReturnType<typeof recoverTerminalScreen>> | undefined,
+    subscriptionLease?: RouterLease,
+    private readonly closeRouting?: () => void
+  ) {
     this.#subscriptionLease = subscriptionLease
     this.sessionId = options.sessionId
     this.pid = terminal.pid
@@ -147,7 +163,9 @@ export class PtySession {
     this.#creditWindow = this.#newCreditWindow()
     this.#onExit = options.onExit
     this.#onOutput = options.onOutput
-    this.#screen = new TerminalScreenProjector(options.cols, options.rows)
+    this.#screen = recoveredScreen?.screen ?? new TerminalScreenProjector(options.cols, options.rows)
+    this.#screenEpoch = recoveredScreen?.screenEpoch ?? 0
+    this.hasRecoveredScreen = recoveredScreen?.hasHistory ?? false
     this.#closed = new Promise<void>((resolve) => { this.#resolveClosed = resolve })
     this.#sharedPauser = new SharedExecutionPauser(new PtyExecutionPauser(terminal))
     this.#egressPauser = this.#sharedPauser.lease('egress')
@@ -173,6 +191,12 @@ export class PtySession {
     })
     this.#outputBatcher = new PtyOutputBatcher((data) => this.#enqueueOutputNow(data))
 
+    // The boundary is a normal durable frame, ordered before the new PTY
+    // sends any bytes. Rebuilding the screen or catching up an attached view
+    // therefore preserves the old viewport the same way.
+    if (recoveredScreen?.resized) this.#enqueueResize(options.cols, options.rows)
+    if (this.hasRecoveredScreen) this.#enqueueOutputNow(terminalRunBoundary(options.rows), false)
+
     terminal.onData((data) => {
       this.#lastOutputAt = Date.now()
       this.#outputBatcher.offer(data)
@@ -189,6 +213,8 @@ export class PtySession {
     const profile = options.profile ?? 'shell'
     let subscriptionLease: RouterLease | undefined
     let terminal: pty.IPty | undefined
+    let closeRouting: (() => void) | undefined
+    let recoveredScreen: Awaited<ReturnType<typeof recoverTerminalScreen>> | undefined
     try {
       let subscriptionLaunch: ClaudeLaunch | undefined
       if (options.subscription) {
@@ -197,7 +223,7 @@ export class PtySession {
         subscriptionLease = prepared.lease
         // This is the final process boundary for ordinary launch, recovery,
         // permission restart, fork and global provider switching alike.
-        const projected = buildClaudeLaunch({ ...prepared.input, inheritedEnvNames: Object.keys({ ...process.env, ...options.env }) })
+        const projected = buildClaudeLaunch({ ...prepared.input, ...((options.contextWindow ?? (options.contextWindow === null ? undefined : 512_000)) ? { contextWindow: options.contextWindow ?? 512_000 } : {}), inheritedEnvNames: Object.keys({ ...process.env, ...options.env }) })
         if (!projected.ok) throw new SubscriptionLaunchError(`Subscription launch configuration: ${projected.error}`, projected.error === 'unsupported-context-window' ? 'unsupported-context-window' : 'router-start-failed')
         subscriptionLaunch = projected.value
         const settings = JSON.parse(await readFile(options.settingsPath, 'utf8')) as Record<string, unknown>
@@ -205,6 +231,19 @@ export class PtySession {
         await writeFile(options.settingsPath, JSON.stringify({ ...settings, ...subscriptionLaunch.settings, env: { ...environment, ...subscriptionLaunch.settings.env } }, null, 2), { mode: 0o600 })
       }
       let model = options.model || subscriptionLaunch?.mainModel
+      let settingsPath = options.settingsPath
+      const contextWindow = options.contextWindow === undefined ? 512_000 : options.contextWindow
+      const contextEnv: Record<string, string> = contextWindow ? {
+        CLAUDE_CODE_MAX_CONTEXT_TOKENS: String(contextWindow), CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: '90',
+        CLAUDE_CODE_DISABLE_1M_CONTEXT: contextWindow < 1_000_000 ? '1' : '0'
+      } : {}
+      if (profile === 'claude-code' && contextWindow) {
+        const settings = settingsPath ? JSON.parse(await readFile(settingsPath, 'utf8')) as Record<string, unknown> : {}
+        const environment = settings.env && typeof settings.env === 'object' && !Array.isArray(settings.env) ? settings.env : {}
+        const merged = JSON.stringify({ ...settings, autoCompactWindow: contextWindow, env: { ...environment, ...contextEnv } }, null, 2)
+        if (settingsPath) await writeFile(settingsPath, merged, { mode: 0o600 })
+        else settingsPath = merged
+      }
       if (profile === 'claude-code' && !subscriptionLaunch && !model && options.providerSessionId &&
           await claudeResumeUsesSubscriptionModel(options.cwd, options.providerSessionId, { ...process.env, ...options.env })) {
         // An explicit "default" suppresses native transcript model restoration
@@ -216,6 +255,8 @@ export class PtySession {
         : undefined
       const command = resolvePtyCommand({
         profile,
+        ...(contextWindow ? { contextWindow } : {}),
+        ...(options.reasoningEffort ? { reasoningEffort: options.reasoningEffort } : {}),
         executable: resolveExecutable(profile),
         ...(options.providerSessionId === undefined ? {} : {
           providerSessionId: options.providerSessionId
@@ -224,8 +265,8 @@ export class PtySession {
         ...(options.permissionMode === undefined ? {} : {
           permissionMode: options.permissionMode
         }),
-        ...(options.settingsPath === undefined ? {} : {
-          settingsPath: options.settingsPath
+        ...(settingsPath === undefined ? {} : {
+          settingsPath
         }),
         ...(options.codexHooksConfig === undefined ? {} : {
           codexHooksConfig: options.codexHooksConfig
@@ -278,6 +319,43 @@ export class PtySession {
         for (const key of subscriptionLaunch.clearEnv) delete finalEnvironment[key]
         Object.assign(finalEnvironment, subscriptionLaunch.env)
       }
+      if (profile === 'claude-code') Object.assign(finalEnvironment, contextEnv)
+      if (profile === 'claude-code' && options.modelRouting && modelRoutingEnabled(options.modelRouting.preferences, options.modelRouting.provider)) {
+        const roleEnvironment: Record<string, string> = {}
+        if (!options.modelRouting.provider?.subscription) {
+          // Keep role identity when two API role selectors point to the same model.
+          for (const role of ['opus', 'sonnet', 'haiku'] as const) {
+            const upstream = options.modelRouting.provider?.modelMapping?.[role]
+            if (!upstream) continue
+            const key = `ANTHROPIC_DEFAULT_${role.toUpperCase()}_MODEL`
+            roleEnvironment[key] = `matou-api/${role}`
+            roleEnvironment[`${key}_NAME`] = upstream
+          }
+        }
+        const routing = claudeModelRouting(options.modelRouting, finalEnvironment)
+        const gateway = await startClaudeRequestGateway({
+          upstreamUrl: finalEnvironment.ANTHROPIC_BASE_URL || 'https://api.anthropic.com',
+          env: finalEnvironment, resolveOverride: routing.resolveOverride
+        }).catch(error => { routing.close(); throw error })
+        closeRouting = () => { routing.close(); void gateway.close() }
+        const gatewayEnv = { ...roleEnvironment, ANTHROPIC_BASE_URL: gateway.baseUrl, CLAUDE_CODE_GATEWAY_HINT_HEADERS: '1',
+          NO_PROXY: [finalEnvironment.no_proxy ?? finalEnvironment.NO_PROXY, '127.0.0.1', 'localhost'].filter(Boolean).join(','),
+          no_proxy: [finalEnvironment.no_proxy ?? finalEnvironment.NO_PROXY, '127.0.0.1', 'localhost'].filter(Boolean).join(',') }
+        Object.assign(finalEnvironment, gatewayEnv)
+        const index = command.args.indexOf('--settings')
+        const previous = index >= 0 ? command.args[index + 1] : undefined
+        const isFile = previous && !previous.trim().startsWith('{')
+        const settings = previous ? JSON.parse(isFile ? await readFile(previous, 'utf8') : previous) : {}
+        const merged = JSON.stringify({ ...settings, env: { ...settings.env, ...gatewayEnv } }, null, 2)
+        if (isFile) await writeFile(previous!, merged, { mode: 0o600 })
+        else if (index >= 0) command.args[index + 1] = merged
+        else command.args.unshift('--settings', merged)
+      }
+      if (profile !== 'shell' && journal.lastSequence > 0) {
+        recoveredScreen = await recoverTerminalScreen(journal, options, options.screenRecovery, error => {
+          console.error(`[terminal.screen-recovery] ${options.sessionId}: ${error instanceof Error ? error.message : String(error)}`)
+        })
+      }
       terminal = pty.spawn(command.file, command.args, {
         name: 'xterm-256color',
         cols: options.cols,
@@ -288,9 +366,11 @@ export class PtySession {
         // accidentally reintroduce the caller's identity on resume or fork.
         env: finalEnvironment
       })
-      return new PtySession(options, journal, terminal, subscriptionLease)
+      return new PtySession(options, journal, terminal, recoveredScreen, subscriptionLease, closeRouting)
     } catch (error) {
+      recoveredScreen?.screen.dispose()
       subscriptionLease?.release()
+      closeRouting?.()
       try { terminal?.kill() } catch { /* Failed construction may already have ended the process. */ }
       await journal.close().catch(() => undefined)
       throw error
@@ -344,6 +424,10 @@ export class PtySession {
     void this.#screen.resize(cols, rows)
     this.#lastCols = cols
     this.#lastRows = rows
+    this.#enqueueResize(cols, rows)
+  }
+
+  #enqueueResize(cols: number, rows: number): void {
     const sequence = this.#sequence + 1
     let operation: Promise<void>
     try {
@@ -387,7 +471,7 @@ export class PtySession {
     return screen.then((snapshot) => ({
       terminalSequence,
       domainEventSequence: this.domainEventSequenceAtOrBefore(terminalSequence),
-      screenEpoch: 0,
+      screenEpoch: this.#screenEpoch,
       cols: snapshot.cols,
       rows: snapshot.rows,
       snapshot: this.#encoder.encode(snapshot.snapshot)
@@ -449,6 +533,13 @@ export class PtySession {
       await this.#closeJournalIgnoringStorageFault()
       this.#resolveClosedOnce()
     }
+  }
+
+  /** Finish startup buffering without resetting ACK credit or a queued replay. */
+  replaceOutputSink(previous: (message: RuntimeMessage) => void, next: (message: RuntimeMessage) => void): boolean {
+    if (this.#send !== previous) return false
+    this.#send = next
+    return true
   }
 
   attach(send: (message: RuntimeMessage) => void): void {
@@ -534,7 +625,7 @@ export class PtySession {
     this.#pty.kill()
   }
 
-  #enqueueOutputNow(data: string): void {
+  #enqueueOutputNow(data: string, deriveOutput = true): void {
     void this.#screen.write(data)
     if (this.#forceFinalized) return
     const bytes = this.#encoder.encode(data)
@@ -547,7 +638,7 @@ export class PtySession {
         bytes,
         persist: () => this.#journal.appendOutput(sequence, bytes),
         afterPersist: () => {
-          this.#onOutput?.(data)
+          if (deriveOutput) this.#onOutput?.(data)
           if (this.#replayCapture) {
             this.#replayCapture.push({
               type: 'terminal.data',
@@ -681,6 +772,7 @@ export class PtySession {
     if (this.#subscriptionLeaseReleased) return
     this.#subscriptionLeaseReleased = true
     this.#subscriptionLease?.release()
+    this.closeRouting?.()
   }
 
   #resolveClosedOnce(): void {

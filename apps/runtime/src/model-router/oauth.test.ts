@@ -10,11 +10,11 @@ afterEach(async () => { await Promise.all(flows.splice(0).map(flow => flow.cance
 const authorization = (provider = 'codex') => provider === 'codex'
   ? 'https://auth.openai.com/oauth/authorize?redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&state=test-state'
   : 'https://accounts.google.com/o/oauth2/v2/auth?redirect_uri=http%3A%2F%2F127.0.0.1%3A51121%2Foauth-callback&state=test-state'
-async function fixture(options: { locale?: 'en' | 'zh-CN'; timeoutMs?: number; provider?: 'codex' | 'antigravity'; manual?: boolean; error?: string } = {}) {
+async function fixture(options: { locale?: 'en' | 'zh-CN'; timeoutMs?: number; provider?: 'codex' | 'antigravity'; manual?: boolean; error?: string; omitAuthId?: boolean } = {}) {
   let status: OAuthStatus = { status: 'wait' }, callbacks = 0, cancels = 0
   const client = {
     oauthStatus: async () => status,
-    callback: async () => { callbacks++; if (!options.manual) status = options.error ? { status: 'error', error: options.error } : { status: 'ok', auth_id: 'fixture.json' } },
+    callback: async () => { callbacks++; if (!options.manual) status = options.error ? { status: 'error', error: options.error } : options.omitAuthId ? { status: 'ok' } : { status: 'ok', auth_id: 'fixture.json' } },
     cancelOAuth: async () => { cancels++ }
   } as unknown as RouterManagementClient
   const flow = await OAuthLoopbackFlow.start({ provider: options.provider ?? 'codex', login: { url: authorization(options.provider), state: 'test-state' }, client, callbackPort: 0, timeoutMs: options.timeoutMs ?? 3000, ...(options.locale ? { locale: options.locale } : {}) })
@@ -33,6 +33,14 @@ describe('short-lived dual loopback OAuth callback', () => {
     expect(callbacks()).toBe(1)
     await flow.close()
     await expect(fetch(url)).rejects.toThrow()
+  })
+  it('completes Antigravity sign-in when router oauth/status returns ok without auth_id', async () => {
+    const { flow, url, callbacks } = await fixture({ provider: 'antigravity', omitAuthId: true })
+    const response = await fetch(url)
+    expect(response.status).toBe(200)
+    expect(await response.text()).toContain('登录完成，可以回到 Matou 了')
+    await expect(flow.completion).resolves.toEqual({ status: 'ok' })
+    expect(callbacks()).toBe(1)
   })
   it('rejects bad state/path/method without consuming the valid attempt, including IPv6', async () => {
     const { url, callbacks } = await fixture()

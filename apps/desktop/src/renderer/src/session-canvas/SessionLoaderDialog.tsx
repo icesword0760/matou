@@ -45,6 +45,7 @@ export function SessionLoaderDialog(props: {
     providerSessionId: string, query: string, offset?: number, limit?: number,
     provider?: LoaderProvider
   ): Promise<ClaudeSessionSearchResult>
+  loadCurrentDetail?(): Promise<ClaudeSessionDetail>
   onLoad(providerSessionId: string, provider?: LoaderProvider): Promise<unknown>
   onCancel(): void
   portalTarget?: Element
@@ -53,8 +54,9 @@ export function SessionLoaderDialog(props: {
   const m = messages.sessionCanvas.loader
   const {
     targetTitle, targetRunning, initialProvider = 'claude-code',
-    listSessions, loadDetail, searchSession, onLoad, onCancel, portalTarget
+    listSessions, loadDetail, searchSession, loadCurrentDetail, onLoad, onCancel, portalTarget
   } = props
+  const historyMode = loadCurrentDetail !== undefined
   const [provider, setProvider] = useState<LoaderProvider>(initialProvider)
   const providerName = getAgentDisplayName(provider)
   const providerShortName = getAgentShortName(provider)
@@ -78,9 +80,16 @@ export function SessionLoaderDialog(props: {
   const [loadingSession, setLoadingSession] = useState(false)
   const [confirmRunning, setConfirmRunning] = useState(false)
   const [confirmDuplicate, setConfirmDuplicate] = useState(false)
+  const [viewingEarlier, setViewingEarlier] = useState(false)
   const [error, setError] = useState('')
+  const [currentLoadFailed, setCurrentLoadFailed] = useState(false)
   const listRequestSequence = useRef(0)
   const detailRequestSequence = useRef(0)
+  const skipNextDetailLoad = useRef('')
+  const currentHistoryBootstrapped = useRef(false)
+  const historySearchFocused = useRef(false)
+  const dialogRef = useRef<HTMLElement>(null)
+  const closeButtonRef = useRef<HTMLButtonElement>(null)
   const sessionSearchRef = useRef<HTMLInputElement>(null)
   const contentSearchRef = useRef<HTMLInputElement>(null)
   const sessionScrollRef = useRef<HTMLDivElement>(null)
@@ -105,18 +114,44 @@ export function SessionLoaderDialog(props: {
   const visibleEventRows = eventVirtualizer.getVirtualItems()
 
   useEffect(() => {
-    sessionSearchRef.current?.focus()
+    if (historyMode) closeButtonRef.current?.focus()
+    else sessionSearchRef.current?.focus()
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !confirmDuplicate) onCancel()
+      if (event.key === 'Escape') {
+        if (confirmDuplicate) return
+        event.preventDefault()
+        event.stopPropagation()
+        onCancel()
+        return
+      }
       if (confirmDuplicate) return
+      if (event.key === 'Tab') {
+        const dialog = dialogRef.current
+        if (!dialog) return
+        const focusable = Array.from(dialog.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), input:not([disabled]), [href], [tabindex]:not([tabindex="-1"])'
+        ))
+        const first = focusable[0]
+        const last = focusable[focusable.length - 1]
+        if (!first || !last) return
+        const active = document.activeElement
+        if (event.shiftKey && (active === first || !dialog.contains(active))) {
+          event.preventDefault()
+          last.focus()
+        } else if (!event.shiftKey && (active === last || !dialog.contains(active))) {
+          event.preventDefault()
+          first.focus()
+        }
+        return
+      }
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'f') {
         event.preventDefault()
         contentSearchRef.current?.focus()
       }
     }
-    window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
-  }, [confirmDuplicate, onCancel])
+    window.addEventListener('keydown', onKeyDown, true)
+    return () => window.removeEventListener('keydown', onKeyDown, true)
+  }, [confirmDuplicate, historyMode, onCancel])
 
   useEffect(() => {
     const timer = window.setTimeout(() => setEffectiveSessionQuery(sessionQuery), 180)
@@ -171,6 +206,7 @@ export function SessionLoaderDialog(props: {
   }, [provider])
 
   useEffect(() => {
+    if (historyMode) return
     const sequence = ++listRequestSequence.current
     setLoadingList(true)
     setError('')
@@ -188,7 +224,51 @@ export function SessionLoaderDialog(props: {
     }).finally(() => {
       if (sequence === listRequestSequence.current) setLoadingList(false)
     })
-  }, [effectiveSessionQuery, fetchListPage])
+  }, [effectiveSessionQuery, fetchListPage, historyMode])
+
+  const loadCurrentHistory = useCallback(async () => {
+    if (!loadCurrentDetail) return
+    const sequence = ++detailRequestSequence.current
+    setLoadingDetail(true)
+    setCurrentLoadFailed(false)
+    setError('')
+    try {
+      const current = await loadCurrentDetail()
+      if (sequence !== detailRequestSequence.current) return
+      skipNextDetailLoad.current = current.providerSessionId
+      setDetail(current)
+      setSelectedId(current.providerSessionId)
+      setSearchPage(null)
+      setActiveMatchAbsolute(0)
+      setActiveEventIndex(null)
+      setViewingEarlier(false)
+      requestAnimationFrame(() => eventVirtualizer.scrollToIndex(
+        Math.max(0, current.events.length - 1), { align: 'end' }
+      ))
+    } catch (reason) {
+      if (sequence !== detailRequestSequence.current) return
+      setSelectedId('')
+      setDetail(null)
+      setSearchPage(null)
+      setViewingEarlier(false)
+      setCurrentLoadFailed(true)
+      setError(errorMessage(reason))
+    } finally {
+      if (sequence === detailRequestSequence.current) setLoadingDetail(false)
+    }
+  }, [eventVirtualizer, loadCurrentDetail])
+
+  useEffect(() => {
+    if (!historyMode || currentHistoryBootstrapped.current) return
+    currentHistoryBootstrapped.current = true
+    void loadCurrentHistory()
+  }, [historyMode, loadCurrentHistory])
+
+  useEffect(() => {
+    if (!historyMode || !detail || historySearchFocused.current) return
+    historySearchFocused.current = true
+    requestAnimationFrame(() => contentSearchRef.current?.focus())
+  }, [detail, historyMode])
 
   const loadMoreSessions = useCallback(async () => {
     if (loadingList || loadingMoreSessions || !hasMoreSessions) return
@@ -219,6 +299,11 @@ export function SessionLoaderDialog(props: {
       setSearchPage(null)
       return
     }
+    if (skipNextDetailLoad.current === selectedId) {
+      skipNextDetailLoad.current = ''
+      setLoadingDetail(false)
+      return
+    }
     const sequence = ++detailRequestSequence.current
     setLoadingDetail(true)
     setActiveMatchAbsolute(0)
@@ -229,6 +314,7 @@ export function SessionLoaderDialog(props: {
       void fetchDetailPage(selectedId, { limit: EVENT_PAGE_SIZE }).then((result) => {
         if (sequence !== detailRequestSequence.current) return
         setDetail(result)
+        setViewingEarlier(false)
         requestAnimationFrame(() => eventVirtualizer.scrollToIndex(
           Math.max(0, result.events.length - 1), { align: 'end' }
         ))
@@ -274,6 +360,7 @@ export function SessionLoaderDialog(props: {
       setDetail((current) => current?.providerSessionId === selectedId
         ? mergeEarlierDetail(earlier, current)
         : current)
+      setViewingEarlier(true)
       requestAnimationFrame(() => {
         const added = earlier.events.filter(({ index }) => index < anchorIndex).length
         eventVirtualizer.scrollToIndex(added, { align: 'start' })
@@ -284,6 +371,29 @@ export function SessionLoaderDialog(props: {
       setLoadingEarlier(false)
     }
   }, [detail, effectiveContentQuery, eventVirtualizer, fetchDetailPage, loadingEarlier, selectedId])
+
+  const returnToLatest = useCallback(async () => {
+    if (!selectedId || loadingDetail) return
+    const sequence = ++detailRequestSequence.current
+    setLoadingDetail(true)
+    setError('')
+    try {
+      const latest = await fetchDetailPage(selectedId, { limit: EVENT_PAGE_SIZE })
+      if (sequence !== detailRequestSequence.current) return
+      setDetail(latest)
+      setSearchPage(null)
+      setActiveMatchAbsolute(0)
+      setActiveEventIndex(null)
+      setViewingEarlier(false)
+      requestAnimationFrame(() => eventVirtualizer.scrollToIndex(
+        Math.max(0, latest.events.length - 1), { align: 'end' }
+      ))
+    } catch (reason) {
+      if (sequence === detailRequestSequence.current) setError(errorMessage(reason))
+    } finally {
+      if (sequence === detailRequestSequence.current) setLoadingDetail(false)
+    }
+  }, [eventVirtualizer, fetchDetailPage, loadingDetail, selectedId])
 
   const navigateToHit = useCallback(async (
     absoluteIndex: number, page: ClaudeSessionSearchResult, hit: ClaudeSessionSearchHit
@@ -354,12 +464,12 @@ export function SessionLoaderDialog(props: {
 
   return createPortal(<div className="session-loader-backdrop" role="presentation"
     onPointerDown={(event) => { if (event.target === event.currentTarget) onCancel() }}>
-    <section className="session-loader-dialog" role="dialog" aria-modal="true"
-      aria-label={m.dialogTitle(providerName)}>
+    <section ref={dialogRef} className="session-loader-dialog" role="dialog" aria-modal="true"
+      aria-label={historyMode ? m.historyTitle : m.dialogTitle(providerName)}>
       <header className="session-loader-header">
-        <div><strong>{m.dialogTitle(providerName)}</strong>
-          <span>{m.loadInto(targetTitle)}</span></div>
-        <div className="session-loader-providers" role="tablist" aria-label={m.providerTabs}>
+        <div><strong>{historyMode ? m.historyTitle : m.dialogTitle(providerName)}</strong>
+          <span>{historyMode ? targetTitle : m.loadInto(targetTitle)}</span></div>
+        {!historyMode && <div className="session-loader-providers" role="tablist" aria-label={m.providerTabs}>
           {LOADER_PROVIDERS.map((id) => (
             <button key={id} type="button" role="tab" aria-selected={provider === id}
               className={provider === id ? 'active' : undefined}
@@ -367,11 +477,12 @@ export function SessionLoaderDialog(props: {
               {getAgentDisplayName(id)}
             </button>
           ))}
-        </div>
-        <button type="button" aria-label={m.close} onClick={onCancel}>×</button>
+        </div>}
+        <button ref={closeButtonRef} type="button" aria-label={historyMode ? m.closeHistory : m.close}
+          onClick={onCancel}>×</button>
       </header>
-      <div className="session-loader-body">
-        <aside className="session-loader-list" aria-label={m.resumableSessions}>
+      <div className={`session-loader-body${historyMode ? ' is-history' : ''}`}>
+        {!historyMode && <aside className="session-loader-list" aria-label={m.resumableSessions}>
           <label className="session-loader-search" data-search-scope="sessions">
             <SearchIcon />
             <input ref={sessionSearchRef} type="search" aria-label={m.filterSessions}
@@ -419,13 +530,17 @@ export function SessionLoaderDialog(props: {
               {effectiveSessionQuery ? m.noMatchingSessions : m.noSessionsFor(providerName)}
             </div>}
           </div>
-        </aside>
+        </aside>}
         <section className="session-loader-preview" aria-label={m.preview}>
           <header>
             <div><strong>{detail?.title ?? m.selectSession}</strong>
               {detail && <span>{detail.model ?? providerName} · {m.permission[detail.permissionMode]}</span>}
             </div>
             <div className="session-loader-content-search-group">
+              {historyMode && !effectiveContentQuery && detail &&
+                (viewingEarlier || detail.page.hasLater) &&
+                <button type="button" className="session-loader-scope" disabled={loadingDetail}
+                  onClick={() => void returnToLatest()}>{m.returnLatest}</button>}
               <label className="session-loader-search" data-search-scope="content">
                 <SearchIcon />
                 <input ref={contentSearchRef} type="search" aria-label={m.searchContent}
@@ -443,6 +558,9 @@ export function SessionLoaderDialog(props: {
           </header>
           <div ref={eventScrollRef} className="session-loader-events" aria-busy={loadingDetail}
             onScroll={(event) => { if (event.currentTarget.scrollTop < 64) void loadEarlier() }}>
+            {historyMode && <div className="session-loader-history-note" role="note">
+              {m.historyDescription}
+            </div>}
             {detail && <div className="session-loader-history-status" role="status">
               {effectiveContentQuery
                 ? m.matches(searchPage?.total ?? 0)
@@ -470,6 +588,8 @@ export function SessionLoaderDialog(props: {
               })}
             </div>
             {loadingDetail && <div className="session-loader-empty">{m.loadingPreview}</div>}
+            {historyMode && detail && previewEvents.length === 0 && !loadingDetail &&
+              <div className="session-loader-empty">{m.noHistory}</div>}
           </div>
         </section>
       </div>
@@ -478,11 +598,15 @@ export function SessionLoaderDialog(props: {
           {error && <span className="session-loader-error" role="alert">{error}</span>}
           {confirmRunning && <span className="session-loader-confirm">{m.runningWarning}</span>}
         </div>
-        <button type="button" onClick={onCancel}>{messages.common.cancel}</button>
-        <button type="button" className="primary" disabled={!selectedId || loadingSession}
+        {historyMode && currentLoadFailed && !loadingDetail && <button type="button"
+          onClick={() => void loadCurrentHistory()}>{m.retryHistory}</button>}
+        <button type="button" onClick={onCancel}>
+          {historyMode ? m.closeHistory : messages.common.cancel}
+        </button>
+        {!historyMode && <button type="button" className="primary" disabled={!selectedId || loadingSession}
           onClick={() => void submitLoad()}>
           {loadingSession ? m.loading : confirmRunning ? m.endAndLoad : m.loadHere}
-        </button>
+        </button>}
       </footer>
       {confirmDuplicate && <ConfirmDialog
         title={m.duplicateTitle}

@@ -867,6 +867,51 @@ describe('TerminalSurface focus continuity', () => {
     expect(state.requestTerminalReplay).toHaveBeenCalledWith('session-1', 8, true)
   })
 
+  it('does not mistake output received before the first spawn for a complete historical screen', () => {
+    render(<TerminalSurface sessionId="early-provider-output" profile="claude-code" active visible foreground />)
+    state.onMessage?.({ type: 'terminal.data', sessionId: 'early-provider-output', sequence: 900,
+      data: new TextEncoder().encode('new run only') })
+    state.onMessage?.({ type: 'terminal.spawned', sessionId: 'early-provider-output', pid: 456,
+      reattached: true, replayFromSequence: 899 })
+    expect(state.requestTerminalReplay).toHaveBeenCalledWith('early-provider-output', 0, false)
+  })
+
+  it('requests a fresh suffix on PTY replacement without applying new output twice', () => {
+    render(<TerminalSurface sessionId="provider-replacement" profile="claude-code" active visible foreground />)
+    const send = (message: Record<string, unknown>) =>
+      state.onMessage?.({ sessionId: 'provider-replacement', ...message })
+    const spawned = (pid: number, replayFromSequence: number) =>
+      send({ type: 'terminal.spawned', pid, reattached: true, replayFromSequence })
+    const replayStart = (fromSequence: number, throughSequence: number) =>
+      send({ type: 'terminal.replay-start', source: 'tail', fromSequence, throughSequence,
+        availableFromSequence: 1, liveSequence: throughSequence, instantLineLimit: 10_000 })
+
+    spawned(123, 1)
+    replayStart(1, 7)
+    send({ type: 'terminal.data', sequence: 7, data: new TextEncoder().encode('before replacement') })
+    send({ type: 'terminal.replay-complete', throughSequence: 7 })
+    state.terminalWrite.mockClear()
+    state.terminalReset.mockClear()
+
+    spawned(456, 9)
+    spawned(456, 9)
+    expect(state.requestTerminalReplay.mock.calls).toEqual([
+      ['provider-replacement', 0, false], ['provider-replacement', 8, true]
+    ])
+
+    const data = { type: 'terminal.data', sequence: 9, data: new TextEncoder().encode('new run boundary') }
+    send(data) // Live delivery races the renderer's replay request.
+    expect(state.acknowledgeTerminal).toHaveBeenCalledWith('provider-replacement', 9)
+    expect(state.terminalWrite).not.toHaveBeenCalled()
+    replayStart(8, 9)
+    send(data)
+    send({ type: 'terminal.replay-complete', throughSequence: 9 })
+    expect(state.terminalWrite.mock.calls.filter(([bytes]) =>
+      ArrayBuffer.isView(bytes) && new TextDecoder().decode(bytes) === 'new run boundary'
+    )).toHaveLength(1)
+    expect(state.terminalReset).not.toHaveBeenCalled()
+  })
+
   it('keeps an offscreen foreground terminal live without parsing every hidden output frame', async () => {
     render(<TerminalSurface sessionId="session-1" active={false} visible={false} foreground />)
     await waitFor(() => expect(state.onMessage).toBeTypeOf('function'))

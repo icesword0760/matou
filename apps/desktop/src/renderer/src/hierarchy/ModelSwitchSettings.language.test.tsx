@@ -15,8 +15,9 @@ describe('Settings language category', () => {
     render(<ModelSwitchSettings client={null} onClose={vi.fn()} />)
     const user = userEvent.setup()
 
-    await user.click(screen.getByRole('button', { name: '语言' }))
+    await user.click(screen.getByRole('button', { name: '语言与时区' }))
     expect(checked(await screen.findByRole('radio', { name: '跟随系统' }))).toBe(true)
+    expect(screen.getByLabelText('时区')).toBeTruthy()
     await user.click(screen.getByRole('radio', { name: 'English' }))
 
     expect(bridge.setLocalePreference).toHaveBeenCalledWith('en')
@@ -29,7 +30,7 @@ describe('Settings language category', () => {
     render(<ModelSwitchSettings client={null} onClose={vi.fn()} />)
     const user = userEvent.setup()
 
-    await user.click(screen.getByRole('button', { name: '语言' }))
+    await user.click(screen.getByRole('button', { name: '语言与时区' }))
     expect(checked(screen.getByRole('radio', { name: '跟随系统' }))).toBe(true)
     await user.click(screen.getByRole('radio', { name: '中文' }))
 
@@ -41,7 +42,7 @@ describe('Settings language category', () => {
     render(<ModelSwitchSettings client={null} onClose={vi.fn()} />)
     const user = userEvent.setup()
 
-    await user.click(screen.getByRole('button', { name: '语言' }))
+    await user.click(screen.getByRole('button', { name: '语言与时区' }))
     await user.click(screen.getByRole('radio', { name: '中文' }))
 
     expect(await screen.findByText('当前由环境变量 MATOU_LOCALE 固定为 English')).toBeTruthy()

@@ -7,11 +7,12 @@ import { useLocale, useMessages } from '../i18n/LocaleProvider'
  * card body at a stable minimum height so the quota line (read once when the
  * settings pane opens) never moves the actions when it arrives.
  */
-export function SubscriptionProviderCard({ provider, details, quotaText, quotaTitle, current, switching, subscriptionSupported = true, onEdit, onSignIn, onActivate, onUseOfficial }: {
+export function SubscriptionProviderCard({ provider, details, quotaText, quotaTitle, windowBadge, current, switching, subscriptionSupported = true, onEdit, onSignIn, onActivate, onUseOfficial }: {
   provider: ProviderConfigView
   details?: SubscriptionAccountDetails | undefined
   quotaText: string
   quotaTitle?: string | undefined
+  windowBadge?: string | undefined
   current: boolean
   switching: boolean
   subscriptionSupported?: boolean
@@ -40,7 +41,7 @@ export function SubscriptionProviderCard({ provider, details, quotaText, quotaTi
   return <article className={`model-provider model-provider--subscription${current ? ' is-current' : ''}${status === 'account-unavailable' ? ' is-account-unavailable' : ''}`}>
     <span className={`model-provider__logo tone-${subscription?.provider === 'codex' ? 'openai' : 'custom'}`}>{initial}</span>
     <div className="model-provider__name">
-      <strong>{provider.name}{current && <i>{m.inUse}</i>}{statusLabel && <i className="model-provider__status">{statusLabel}</i>}</strong>
+      <strong>{provider.name}{current && <i>{m.inUse}</i>}{windowBadge && <i className="model-provider__window-badge">{windowBadge}</i>}{statusLabel && <i className="model-provider__status">{statusLabel}</i>}</strong>
       {accountLine && <span className="model-provider__account">{accountLine}</span>}
       {quotaText && <span className="model-provider__quota" title={quotaTitle}>{quotaText}</span>}
       {status === 'account-unavailable' && account?.reason && <span className="model-provider__reason">{account.reason}</span>}

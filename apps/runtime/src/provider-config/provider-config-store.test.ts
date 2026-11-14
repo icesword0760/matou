@@ -2,7 +2,7 @@ import { mkdtemp, readFile, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import { ProviderConfigStore } from './provider-config-store'
 
@@ -121,5 +121,50 @@ describe('ProviderConfigStore', () => {
     expect((await new ProviderConfigStore(root).launchSelection('claude-code', saved.id)).env).toMatchObject({ ANTHROPIC_DEFAULT_OPUS_MODEL: 'big', ANTHROPIC_DEFAULT_HAIKU_MODEL: 'small' })
     await store.upsert({ ...saved, kind: 'api-key', modelMapping: { opus: '', haiku: '' } })
     expect((await store.launchSelection('claude-code', saved.id)).env).not.toHaveProperty('ANTHROPIC_DEFAULT_OPUS_MODEL')
+  })
+
+  it('exposes discovered models without changing the saved configuration until save', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'matou-provider-config-'))
+    const store = new ProviderConfigStore(root)
+    const input = { cli: 'claude-code' as const, endpoint: 'https://api.example/v1', apiKey: 'TOKEN' }
+    const saved = await store.upsert({ ...input, name: 'Provider', model: 'test' })
+    const original = await readFile(join(root, 'provider-config.json'), 'utf8')
+    const request = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ data: [{ id: 'test', name: 'Test Model', context_window: 1_048_576 }] })))
+    try {
+      const discovered = await store.discoverModels({ cli: input.cli, endpoint: input.endpoint, providerId: saved.id })
+      expect(discovered).toEqual({ models: ['test'], modelMetadata: [{ id: 'test', displayName: 'Test Model', contextWindow: 1_048_576 }] })
+      expect(await readFile(join(root, 'provider-config.json'), 'utf8')).toEqual(original)
+    } finally {
+      request.mockRestore()
+    }
+  })
+
+  it('whitelists model metadata and preserves it on reopening and same-service edits', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'matou-provider-config-'))
+    const store = new ProviderConfigStore(root)
+    const input = { cli: 'claude-code' as const, name: 'Provider', endpoint: 'https://api.example/v1', model: 'test', apiKey: 'TOKEN' }
+    const metadata = { id: 'test', displayName: 'Test Model', contextWindow: 1_048_576, maxOutputTokens: 393_216, supportedEfforts: ['high' as const] }
+    const rawModel = { ...metadata, apiKey: 'MODEL_SECRET', raw: 'RAW_UPSTREAM_DATA', maxContextWindow: 0 }
+    const saved = await store.upsert({ ...input, modelMetadata: [rawModel] })
+    const reopened = new ProviderConfigStore(root)
+    expect((await reopened.snapshot()).providers['claude-code'].find(provider => provider.id === saved.id)?.modelMetadata).toEqual([metadata])
+    const renamed = await reopened.upsert({ ...input, id: saved.id, name: 'Renamed', apiKey: '' })
+    expect(renamed.modelMetadata).toEqual([metadata])
+    expect(JSON.stringify(renamed)).not.toContain('TOKEN')
+    expect(await readFile(join(root, 'provider-config.json'), 'utf8')).not.toMatch(/MODEL_SECRET|RAW_UPSTREAM_DATA/)
+    const cleared = await reopened.upsert({ ...input, id: saved.id, modelMetadata: [] })
+    expect(cleared.modelMetadata).toEqual([])
+  })
+
+  it.each([
+    { endpoint: 'https://other.example/v1' },
+    { apiKey: 'REPLACED_TOKEN' }
+  ])('invalidates omitted model metadata after a service credential or address change', async change => {
+    const store = new ProviderConfigStore(await mkdtemp(join(tmpdir(), 'matou-provider-config-')))
+    const input = { cli: 'claude-code' as const, name: 'Provider', endpoint: 'https://api.example/v1', model: 'test', apiKey: 'TOKEN' }
+    const saved = await store.upsert({ ...input, modelMetadata: [{ id: 'test', contextWindow: 1_048_576 }] })
+    const updated = await store.upsert({ ...input, ...change, id: saved.id })
+    expect(updated.modelMetadata).toBeUndefined()
+    expect((await store.snapshot()).providers['claude-code'].find(provider => provider.id === saved.id)?.modelMetadata).toBeUndefined()
   })
 })

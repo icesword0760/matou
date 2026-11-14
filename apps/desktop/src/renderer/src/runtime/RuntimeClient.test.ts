@@ -31,6 +31,35 @@ describe('RuntimeClient', () => {
       client.dispose()
     } finally { vi.useRealTimers() }
   })
+  it('allows a committed provider switch to finish beyond the ordinary request deadline', async () => {
+    vi.useFakeTimers()
+    const port = new FakePort(), client = new RuntimeClient(port)
+    try {
+      port.deliver({ type: 'protocol.ready', protocolVersion: PROTOCOL_VERSION })
+      const result = client.request('provider-config.activate', { cli: 'claude-code', providerId: 'chatgpt' })
+      await vi.advanceTimersByTimeAsync(0)
+      const request = port.sent.at(-1) as { requestId: string; deadlineAt: number }
+      expect(request.deadlineAt - Date.now()).toBe(120_000)
+      await vi.advanceTimersByTimeAsync(15_000)
+      expect(port.sent.filter((message: any) => message.type === 'rpc.cancel')).toHaveLength(0)
+      port.deliver({ type: 'rpc.response', protocolVersion: PROTOCOL_VERSION, requestId: request.requestId, result: { activeProviderIds: { 'claude-code': 'chatgpt' }, sessionTransitions: [] } })
+      await expect(result).resolves.toMatchObject({ activeProviderIds: { 'claude-code': 'chatgpt' } })
+    } finally { client.dispose(); vi.useRealTimers() }
+  })
+
+  it.each([undefined, 250])('keeps provider activation timeout bounded and honors explicit override %s', async timeoutMs => {
+    vi.useFakeTimers()
+    const port = new FakePort(), client = new RuntimeClient(port)
+    try {
+      port.deliver({ type: 'protocol.ready', protocolVersion: PROTOCOL_VERSION })
+      const result = client.request('provider-config.activate', {}, timeoutMs === undefined ? {} : { timeoutMs })
+      const rejected = expect(result).rejects.toThrow('Matou 后台没有及时响应')
+      await vi.advanceTimersByTimeAsync(timeoutMs ?? 120_000)
+      await rejected
+      expect(port.sent.filter((message: any) => message.type === 'rpc.cancel')).toHaveLength(1)
+    } finally { client.dispose(); vi.useRealTimers() }
+  })
+
   it('preserves bilingual sign-in error copy on the rejected request', async () => {
     const port = new FakePort(), client = new RuntimeClient(port)
     port.deliver({ type: 'protocol.ready', protocolVersion: PROTOCOL_VERSION })

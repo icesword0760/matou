@@ -47,6 +47,7 @@ import { AntigravitySessionCatalog, defaultAntigravityRoot } from '../session/an
 import { SessionGitStateRepository } from '../session/session-git-state-repository'
 import type { WorktreeSetupStep } from '../worktrees/worktree-service'
 import { ProviderConfigStore } from '../provider-config/provider-config-store'
+import { AgentModelSettings } from '../session/agent-model-settings'
 import { ClaudeSettings, isClaudeTimeZone } from '../session/claude-settings'
 
 export type RpcFaultCode =
@@ -167,6 +168,8 @@ export class RuntimeRpcRouter {
   }
 
   async #dispatch(method: RpcMethod, payload: unknown): Promise<unknown> {
+    if (method === 'agent-model-settings.get') return new AgentModelSettings(this.#database, this.#providerConfigs).snapshot()
+    if (method === 'agent-model-settings.set') return new AgentModelSettings(this.#database, this.#providerConfigs).set(payload)
     if (method === 'claude-settings.get') return new ClaudeSettings(this.#database).snapshot()
     if (method === 'claude-settings.set') {
       const { timeZone } = record(payload)
@@ -307,8 +310,16 @@ export class RuntimeRpcRouter {
     if (method === 'claude-sessions.detail') {
       const input = record(payload)
       const sessionId = text(input.sessionId, 'sessionId')
-      const providerSessionId = text(input.providerSessionId, 'providerSessionId')
       const provider = this.#sessionCatalogProvider(input.provider)
+      // Reading a card's history must not depend on whether its provider can
+      // currently resume (or accidentally select a different recent chat).
+      const binding = input.current === true
+        ? this.#sessions.getProviderSettingsBinding(sessionId, provider)
+        : undefined
+      if (input.current === true && !binding) {
+        throw new RpcFault('NOT_FOUND', 'No saved conversation is linked to this Session')
+      }
+      const providerSessionId = binding?.providerSessionId ?? text(input.providerSessionId, 'providerSessionId')
       const detail = await this.#sessionCatalog(provider).detail({
         cwd: this.#sessionCwd(sessionId), providerSessionId,
         query: optionalString(input.query),

@@ -1,3 +1,5 @@
+export type ReasoningEffort = 'follow' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+export type RoleEffortMapping = Partial<Record<'opus' | 'sonnet' | 'haiku', ReasoningEffort>>
 export type ProviderCli = 'claude-code' | 'codex'
 
 /**
@@ -14,6 +16,10 @@ export interface ProviderConfigView {
   endpoint: string
   model: string
   hasApiKey: boolean
+  /** Metadata fetched from this API service, retained when its configuration is saved. */
+  modelMetadata?: ProviderModelMetadata[]
+  reasoningEffort?: ReasoningEffort
+  effortMapping?: RoleEffortMapping
   modelMapping?: Partial<Record<'opus' | 'sonnet' | 'haiku', string>>
   builtIn?: boolean
   kind?: 'api-key' | 'subscription'
@@ -71,16 +77,24 @@ export interface ApiKeyProviderConfigInput {
   endpoint: string
   model: string
   apiKey?: string
+  modelMetadata?: ProviderModelMetadata[]
+  reasoningEffort?: ReasoningEffort
+  effortMapping?: RoleEffortMapping
   modelMapping?: Partial<Record<'opus' | 'sonnet' | 'haiku', string>>
 }
 
 export type SubscriptionProvider = 'codex' | 'antigravity'
-export interface SubscriptionModel {
+export interface ProviderModelMetadata {
   id: string
   displayName?: string
-  ownedBy?: string
+  maxContextWindow?: number
+  supportedEfforts?: Exclude<ReasoningEffort, 'follow'>[]
   contextWindow?: number
   maxOutputTokens?: number
+}
+export interface SubscriptionModel extends ProviderModelMetadata {
+  resolvedModel?: string
+  ownedBy?: string
 }
 export interface SubscriptionAccountSummary {
   email?: string
@@ -106,6 +120,7 @@ export interface SubscriptionProviderConfigInput {
   cli: 'claude-code'
   name: string
   subscription: { provider: SubscriptionProvider; attemptId?: string }
+  effortMapping?: RoleEffortMapping
   modelMapping: Record<'opus' | 'sonnet' | 'haiku', string>
   // Keep legacy property lookups type-safe while rejecting these on the wire.
   endpoint?: never
@@ -138,7 +153,7 @@ export interface ProviderModelsInput {
   apiKey?: string
 }
 export type ProviderModelsResult =
-  | { models: string[] }
+  | { models: string[]; modelMetadata?: ProviderModelMetadata[] }
   | { error: 'auth' | 'unsupported' | 'timeout' | 'network' | 'invalid' | 'key-required' | 'empty' | 'too-large' }
 
 /** Curated direct-connect presets adapted from CC Switch (MIT).

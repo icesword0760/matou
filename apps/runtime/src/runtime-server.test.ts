@@ -911,6 +911,7 @@ sleep 30
         ])
       expect((await readFile(join(root, 'control-codex-session.args'), 'utf8')).trim().split('\n'))
         .toEqual([
+          '-c', 'model_context_window=512000', '-c', 'model_auto_compact_token_limit=460800', '-c', 'model_auto_compact_token_limit_scope="total"',
           '-c', 'developer_instructions="Task 8 fixture\\n"',
           '--model', 'codex-persisted', '--dangerously-bypass-approvals-and-sandbox',
           'resume', 'provider-codex'
@@ -957,6 +958,7 @@ sleep 30
     await writeFile(executable, [
       '#!/bin/sh',
       `printf '%s|%s|%s|%s\n' "$*" "$ANTHROPIC_BASE_URL" "$ANTHROPIC_API_KEY" "$ANTHROPIC_AUTH_TOKEN" >> ${JSON.stringify(log)}`,
+      "printf '\\033[2J\\033[Hsession output: %s' \"$ANTHROPIC_BASE_URL\"",
       'sleep 30',
       ''
     ].join('\n'))
@@ -987,6 +989,10 @@ sleep 30
       )!.id
       server.providerIdentityRecorded('provider-config-live', initialRunId)
       const firstPid = (port.last('terminal.spawned') as { pid: number }).pid
+      const session = [...testSessionRegistries][0]!.get('provider-config-live')!
+      await waitUntil(() => terminalText(port).includes('session output:'))
+      session.display('\r\nhistory before provider switch')
+      await session.replayMetadata()
 
       port.receive({
         type: 'rpc.request', protocolVersion: PROTOCOL_VERSION,
@@ -1019,6 +1025,15 @@ sleep 30
         'https://gateway.example|TOKEN|TOKEN'
       )
       expect((port.last('terminal.spawned') as { pid: number }).pid).not.toBe(firstPid)
+      expect(port.last('terminal.spawned')).toMatchObject({ reattached: true })
+      port.receive({
+        type: 'terminal.replay-request', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'provider-config-live', fromSequence: 0
+      })
+      await waitUntil(() => port.last('terminal.replay-complete') !== undefined)
+      const snapshot = new TextDecoder().decode(port.last('terminal.replay-start')?.checkpoint?.snapshot)
+      expect(snapshot).toContain('history before provider switch')
+      expect(snapshot).toContain('session output: https://gateway.example')
       expect(JSON.parse(database.get<{ metadata_json: string }>(
         'SELECT metadata_json FROM provider_bindings WHERE id = ?',
         'provider-config-live-settings'
@@ -1754,6 +1769,8 @@ sleep 30
       await waitUntilAsync(async () => Boolean((await readFile(log, 'utf8').catch(() => '')).trim()))
 
       expect((await readFile(log, 'utf8')).trim()).toBe(
+        '-c model_context_window=512000 -c model_auto_compact_token_limit=460800 ' +
+        '-c model_auto_compact_token_limit_scope="total" ' +
         '--model codex-session-frozen-model --dangerously-bypass-approvals-and-sandbox ' +
         'fork codex-source-context|https://bound-codex.example/v1|KEY_A'
       )
@@ -1870,6 +1887,110 @@ sleep 30
       await sessions.shutdownAll()
       settingsServer.close()
       backgroundServer.close()
+      restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
+    }
+  })
+
+  it('limits global Claude provider activation to four concurrent restarts and returns transitions in session order', async () => {
+    const executable = join(root, 'provider-config-concurrent.sh')
+    await writeFile(executable, '#!/bin/sh\nexec sleep 30\n')
+    await chmod(executable, 0o755)
+    const providerConfigs = new ProviderConfigStore(root)
+    const providerA = await providerConfigs.upsert({
+      cli: 'claude-code', name: 'Baseline provider',
+      endpoint: 'https://concurrent-a.example/', model: 'claude-model-a', apiKey: 'KEY_A'
+    })
+    const providerB = await providerConfigs.upsert({
+      cli: 'claude-code', name: 'Replacement provider',
+      endpoint: 'https://concurrent-b.example/', model: 'claude-model-b', apiKey: 'KEY_B'
+    })
+    await providerConfigs.activate('claude-code', providerA.id)
+    const sessionIds = Array.from({ length: 5 }, (_, index) => `provider-config-concurrent-${index}`)
+    for (const sessionId of sessionIds) {
+      registerSession(database, sessionId, 'claude-code')
+      database.run(
+        `INSERT INTO provider_bindings (
+           id, session_id, provider, provider_session_id, resume_state, restore_state,
+           metadata_json, created_at, updated_at, validated_at
+         ) VALUES (?, ?, 'claude-code', ?, 'available', 'none', ?, 1, 1, 1)`,
+        `binding-${sessionId}`, sessionId, `identity-${sessionId}`,
+        JSON.stringify({ providerConfigId: providerA.id, model: 'claude-model-a', permissionMode: 'default' })
+      )
+    }
+    const sessions = createTestSessionRegistry()
+    const activationPort = new MockPort()
+    const activationServer = new RuntimeServer(
+      activationPort, root, database, new RuntimeRpcRouter(database, undefined, { providerConfigs }),
+      undefined, sessions, undefined, undefined, { providerConfigs }
+    )
+    activationPort.receive({
+      type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION,
+      clientId: 'provider-config-concurrent-renderer'
+    })
+    const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    try {
+      for (const sessionId of sessionIds) {
+        await activationServer.startOrResumeSession({
+          sessionId, executionContextId: 'replay-context', profile: 'claude-code', cols: 80, rows: 24
+        })
+        activationServer.providerIdentityRecorded(sessionId, sessions.get(sessionId)!.runId!)
+      }
+
+      let releaseFirst!: () => void
+      const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve })
+      let releaseOthers!: () => void
+      const otherGate = new Promise<void>((resolve) => { releaseOthers = resolve })
+      const started: string[] = []
+      const finished: string[] = []
+      let maxConcurrent = 0
+      const runExclusive = sessions.runExclusive.bind(sessions)
+      const restartSpy = vi.spyOn(sessions, 'runExclusive').mockImplementation(async (sessionId, operation) => {
+        started.push(sessionId)
+        maxConcurrent = Math.max(maxConcurrent, started.length - finished.length)
+        try {
+          await (sessionId === sessionIds[0] ? firstGate : otherGate)
+          return await runExclusive(sessionId, operation)
+        } finally {
+          finished.push(sessionId)
+        }
+      })
+      const requestId = 'provider-config-concurrent-activate'
+      activationPort.receive({
+        type: 'rpc.request', protocolVersion: PROTOCOL_VERSION,
+        requestId, method: 'provider-config.activate',
+        capability: 'renderer', deadlineAt: Date.now() + 10_000,
+        payload: { cli: 'claude-code', providerId: providerB.id }
+      })
+      try {
+        await waitUntil(() => started.length >= 4)
+        expect(started).toEqual(sessionIds.slice(0, 4))
+        expect(finished).toEqual([])
+
+        releaseOthers()
+        await waitUntil(() => finished.length === 4)
+        expect(finished).not.toContain(sessionIds[0])
+        expect(finished).toContain(sessionIds[4])
+        expect(activationPort.findRpcResponse(requestId)).toBeUndefined()
+      } finally {
+        releaseFirst()
+        releaseOthers()
+        try {
+          await waitUntil(() => activationPort.findRpcResponse(requestId) !== undefined ||
+            activationPort.findRpcError(requestId) !== undefined)
+        } finally {
+          restartSpy.mockRestore()
+        }
+      }
+
+      expect(maxConcurrent).toBe(4)
+      expect(finished.at(-1)).toBe(sessionIds[0])
+      expect(activationPort.findRpcResponse(requestId)?.result).toMatchObject({
+        sessionTransitions: sessionIds.map((sessionId) => ({ sessionId, status: 'updated' }))
+      })
+    } finally {
+      await sessions.shutdownAll()
+      activationServer.close()
       restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
     }
   })
@@ -2126,7 +2247,7 @@ sleep 30
         return Boolean(text.trim()) && text.trim().split('\n').length === 2
       })
       expect((await readFile(log, 'utf8')).trim().split('\n')[1])
-        .toBe('--model gpt-team|https://codex.example/v1|OPENAI_TOKEN')
+        .toBe('-c model_context_window=512000 -c model_auto_compact_token_limit=460800 -c model_auto_compact_token_limit_scope="total" --model gpt-team|https://codex.example/v1|OPENAI_TOKEN')
     } finally {
       for (const sessionId of ['provider-config-codex-running', 'provider-config-codex-next']) {
         port.receive({ type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION, sessionId })
@@ -5682,6 +5803,9 @@ sleep 30
       expect(livePort.last('terminal.hud')).toMatchObject({
         hud: { modelStrategy: 'claude-sonnet-4-6', mode: 'agent' }
       })
+      const beforeRespawn = sessions.get('provider-live-permission')!
+      beforeRespawn.display('\r\nhistory before permission switch')
+      await beforeRespawn.replayMetadata()
 
       livePort.receive(rpc('permission-bypass-live', 'session.set-permission-mode', {
         sessionId: 'provider-live-permission', provider: 'claude-code',
@@ -5695,7 +5819,9 @@ sleep 30
         '--model', 'claude-sonnet-4-6', '--resume', 'provider-live-42',
         '--dangerously-skip-permissions'
       ])
-      expect(terminalText(livePort)).toContain('\u001b[2J\u001b[3J\u001b[H')
+      expect(terminalText(livePort)).not.toContain('\u001b[2J\u001b[3J\u001b[H')
+      const snapshot = await sessions.get('provider-live-permission')!.captureReplayScreen()
+      expect(new TextDecoder().decode(snapshot.snapshot)).toContain('history before permission switch')
       expect(livePort.last('terminal.hud')).toMatchObject({
         hud: { permissionMode: 'bypassPermissions', mode: 'agent' }
       })
@@ -6498,6 +6624,38 @@ sleep 30
       restoreEnv('PATH', previousPath)
       restoreEnv('SHELL', previousShell)
       restoreEnv('ZDOTDIR', previousZdotdir)
+    }
+  })
+
+  it('promotes a typed Codex command to a managed session with the 512K budget', async () => {
+    const executable = join(root, 'codex-context-provider.sh')
+    const argumentsPath = join(root, 'codex-context-arguments.txt')
+    await writeFile(executable, `#!/bin/sh\nprintf '%s\\n' "$@" > '${argumentsPath}'\nexec sleep 30\n`)
+    await chmod(executable, 0o755)
+    const previous = process.env.MATOU_CODEX_COMMAND
+    process.env.MATOU_CODEX_COMMAND = executable
+    const sessions = createTestSessionRegistry()
+    const port = new MockPort()
+    const managed = new RuntimeServer(port, root, database, undefined, undefined, sessions)
+    try {
+      registerSession(database, 'codex-context-shell', 'shell')
+      port.receive({ type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'codex-context' })
+      port.receive({ type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'codex-context-shell', executionContextId: 'replay-context', profile: 'shell', cols: 80, rows: 24 })
+      await waitUntil(() => sessions.get('codex-context-shell')?.profile === 'shell')
+      port.receive({ type: 'terminal.input', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'codex-context-shell', data: 'codex\r' })
+      await waitUntil(() => sessions.get('codex-context-shell')?.profile === 'codex')
+      await waitUntilAsync(async () => (await readFile(argumentsPath, 'utf8').catch(() => '')).length > 0)
+      expect((await readFile(argumentsPath, 'utf8')).trim().split('\n')).toEqual([
+        '-c', 'model_context_window=512000', '-c', 'model_auto_compact_token_limit=460800',
+        '-c', 'model_auto_compact_token_limit_scope="total"'
+      ])
+      expect(database.get<{ kind: string }>('SELECT kind FROM sessions WHERE id = ?', 'codex-context-shell')?.kind).toBe('codex')
+    } finally {
+      await sessions.shutdownAll()
+      managed.close()
+      restoreEnv('MATOU_CODEX_COMMAND', previous)
     }
   })
 
@@ -8162,7 +8320,8 @@ describe('RuntimeServer egress monitoring', () => {
         sessionId: 'egress-ag-sub', executionContextId: 'replay-context',
         profile: 'claude-code', cols: 80, rows: 24
       })
-      await waitUntil(() => harness.testPort.last('terminal.spawned')?.sessionId === 'egress-ag-sub')
+      await waitUntil(() => harness.testPort.last('terminal.spawned')?.sessionId === 'egress-ag-sub' || harness.testPort.last('protocol.error') !== undefined, 10_000)
+      expect(harness.testPort.last('protocol.error')).toBeUndefined()
       await waitUntilAsync(async () => (await readFile(captureFile, 'utf8').catch(() => '')) === 'Asia/Singapore|http://127.0.0.1:12346')
 
       expect(registerSpy).not.toHaveBeenCalled()

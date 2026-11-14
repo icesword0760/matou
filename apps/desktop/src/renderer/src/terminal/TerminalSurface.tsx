@@ -399,8 +399,12 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
         if (terminalFocusAllowed(container)) terminal.focus()
       })
     }
-    let replayRequested = false
+    let replayRequestedForPid: number | undefined
+    let observedSpawnPid: number | undefined
+    let replayRequestPending = false
     let replaying = false
+    let replayGeneration = 0
+    let queuedOutputThrough = model.lastAppliedSequence
     let preserveExistingModelForReplay = false
     let spawned = false
     let visualCatchupPending = false
@@ -470,6 +474,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     }
     checkpointNowRef.current = storeCheckpoint
     const writeLiveOutput = (bytes: Uint8Array, sequence: number) => {
+      queuedOutputThrough = Math.max(queuedOutputThrough, sequence)
       writer.write(bytes, () => {
         model.lastAppliedSequence = Math.max(model.lastAppliedSequence, sequence)
         client.acknowledgeTerminal(sessionId, sequence)
@@ -526,17 +531,21 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
         markSpawned()
         setPid(message.pid)
         onStatusChange('streaming')
-        const hasReusableScreen = reusedTerminalModel && (
-          profileRef.current === 'shell' || model.hasVisibleContent()
-        )
+        const hasPreviousRun = observedSpawnPid !== undefined
+        observedSpawnPid = message.pid
+        const hasReusableScreen = !replaying && (reusedTerminalModel || (hasPreviousRun && queuedOutputThrough > 0)) &&
+          (profileRef.current === 'shell' || model.hasVisibleContent())
         const replayFromSequence = replayFromSequenceForSpawn(
-          message, hasReusableScreen, profileRef.current, model.lastAppliedSequence
+          message, hasReusableScreen, profileRef.current, queuedOutputThrough
         )
-        if (replayFromSequence !== undefined && !replayRequested) {
+        if (replayFromSequence !== undefined && replayRequestedForPid !== message.pid) {
+          replayRequestedForPid = message.pid
+          replayGeneration++
+          replaying = false
           visualReplayPending = true
           if (visibleRef.current) {
             preserveExistingModelForReplay = hasReusableScreen && replayFromSequence > 0
-            replayRequested = true
+            replayRequestPending = true
             client.requestTerminalReplay(
               sessionId,
               replayFromSequence,
@@ -548,9 +557,10 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
         }
         if (replayProbe) {
           onSmokeMarker(SMOKE_MARKER)
-          if (!replayRequested) {
+          if (replayRequestedForPid !== message.pid) {
+            replayRequestedForPid = message.pid
             visualReplayPending = true
-            replayRequested = true
+            replayRequestPending = true
             client.requestTerminalReplay(sessionId)
           }
         }
@@ -565,11 +575,10 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
         if ((!visibleRef.current && !activeRef.current || visualCatchupPending) && !replaying) {
           visualCatchupPending = true
           client.acknowledgeTerminal(sessionId, message.sequence)
-        } else if (visualCatchupRequested && !replaying) {
+        } else if ((visualCatchupRequested || replayRequestPending) && !replaying) {
           // The replay request has not detached the live stream yet. These
           // bytes are included by the replay watermark, so acknowledge them
           // without briefly painting content that replay-start will reset.
-          visualCatchupPending = true
           client.acknowledgeTerminal(sessionId, message.sequence)
         } else {
           output.offer(bytes, message.sequence, true)
@@ -596,6 +605,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
         // the visual replay state as well; otherwise every later live frame is
         // acknowledged but intentionally withheld from xterm forever.
         replaying = false
+        replayRequestPending = false
         visualReplayPending = false
         visualCatchupPending = false
         visualCatchupRequested = false
@@ -611,6 +621,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
             }
         )
       } else if (message.type === 'protocol.error') {
+        replayRequestPending = false
         visualCatchupRequested = false
         onStatusChange('error')
         onRuntimeError(message.message)
@@ -621,23 +632,28 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
           resizeSettleTimer = undefined
         }
         replaying = true
+        replayRequestPending = false
         visualReplayPending = true
         terminalContentApplied = false
         visualCatchupPending = false
         const preservingExistingModel = preserveExistingModelForReplay && !message.checkpoint
         if (!preservingExistingModel) {
-          terminal.reset()
-          model.lastAppliedSequence = message.checkpoint?.terminalSequence ?? 0
-          model.lastCheckpointSequence = message.checkpoint?.terminalSequence ?? -1
-          model.screenEpoch = message.checkpoint?.screenEpoch ?? 0
+          queuedOutputThrough = message.checkpoint?.terminalSequence ?? 0
+          writer.write('', () => {
+            terminal.reset()
+            model.lastAppliedSequence = message.checkpoint?.terminalSequence ?? 0
+            model.lastCheckpointSequence = message.checkpoint?.terminalSequence ?? -1
+            model.screenEpoch = message.checkpoint?.screenEpoch ?? 0
+            if (message.checkpoint) {
+              // Restore the exact grid that the snapshot's cursor moves and
+              // wrapped rows were encoded against.
+              terminal.resize(message.checkpoint.cols, message.checkpoint.rows)
+              publishTerminalDimensions()
+            }
+          })
         }
         preserveExistingModelForReplay = false
         if (message.checkpoint) {
-          // SerializeAddon snapshots contain cursor movement and wrapped rows
-          // for the grid they were captured in. Restore that exact grid before
-          // applying the VT stream, then fit to today's card after replay.
-          terminal.resize(message.checkpoint.cols, message.checkpoint.rows)
-          publishTerminalDimensions()
           const snapshot = message.checkpoint.snapshot instanceof Uint8Array
             ? message.checkpoint.snapshot
             : new Uint8Array(message.checkpoint.snapshot)
@@ -646,6 +662,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
             })
         }
       } else if (message.type === 'terminal.replay-resize') {
+        queuedOutputThrough = Math.max(queuedOutputThrough, message.sequence)
         // Resize is part of VT history: zsh and full-screen tools emit cursor
         // movements relative to the active grid. Apply it at its original
         // sequence instead of replaying every byte at today's card width.
@@ -655,13 +672,17 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
           model.lastAppliedSequence = Math.max(model.lastAppliedSequence, message.sequence)
         })
       } else if (message.type === 'terminal.replay-reset') {
+        queuedOutputThrough = Math.max(queuedOutputThrough, message.sequence)
         writer.write('', () => {
           terminal.reset()
           model.screenEpoch = message.screenEpoch
           model.lastAppliedSequence = Math.max(model.lastAppliedSequence, message.sequence)
         })
       } else if (message.type === 'terminal.replay-complete') {
+        queuedOutputThrough = Math.max(queuedOutputThrough, message.throughSequence)
+        const generation = replayGeneration
         writer.write('', () => {
+          if (generation !== replayGeneration) return
           replaying = false
           visualReplayPending = false
           visualCatchupRequested = false

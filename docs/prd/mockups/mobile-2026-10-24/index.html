@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light">
+  <title>Matou 移动端 · 随时接上你的工作</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="design-board">
+    <header class="board-header">
+      <div class="wordmark"><img src="logo.png" alt="Matou"><span>Matou <b>移动端</b></span><em>ANDROID</em></div>
+      <div class="prototype-label"><span></span> 页面设计 V1 · 演示数据</div>
+    </header>
+    <div class="board-intro">
+      <div><h1>出门在外，也能接着聊。</h1><p>家里的电脑继续工作。手机上看进度、回消息，随时切换账户。</p></div>
+      <div class="board-controls"><button id="overview" class="selected">页面总览</button><button id="single">单屏体验 <span>↗</span></button></div>
+    </div>
+    <div class="single-toolbar" hidden>
+      <button data-preview="sessions">会话</button><button data-preview="chat">对话</button><button data-preview="accounts">账户</button><button data-preview="device">连接设备</button><button data-preview="offline">电脑离线</button><button data-preview="permission">操作确认</button>
+    </div>
+    <main class="screens">
+      <section class="screen-column"><div class="screen-caption"><span>01</span><div><h2>找到要继续的会话</h2><p>需要你处理的事，放在最前面。</p></div></div><div class="phone" id="phone-0"></div><div class="screen-foot">会话按工作空间归属 · 状态一眼可见</div></section>
+      <section class="screen-column"><div class="screen-caption"><span>02</span><div><h2>接上电脑里的对话</h2><p>保留上下文，直接说下一步。</p></div></div><div class="phone" id="phone-1"></div><div class="screen-foot">对话优先阅读 · 原始终端随时展开</div></section>
+      <section class="screen-column"><div class="screen-caption"><span>03</span><div><h2>额度不够，换个账户</h2><p>看清用量，再决定如何切换。</p></div></div><div class="phone" id="phone-2"></div><div class="screen-foot">同步家中电脑 · 切换与重启分别操作</div></section>
+    </main>
+    <footer class="board-footer"><span>MATOU / MOBILE COMPANION</span><p>可点击会话、发送示例消息、切换账户；「设备」中可预览离线状态。</p><span>2026.10.24</span></footer>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>

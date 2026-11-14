@@ -1,0 +1,28 @@
+{
+  "boundary": "real Electron UI/runtime/PTY; local synthetic HTTP provider; no external model calls",
+  "launch": {
+    "window": 512000,
+    "model": "claude-main-fixture",
+    "role": "matou-api/sonnet"
+  },
+  "requests": [
+    {
+      "path": "/main/v1/messages?beta=true",
+      "model": "claude-main-fixture",
+      "effort": "medium",
+      "key": "SOURCE_FIXTURE"
+    },
+    {
+      "path": "/summary/v1/messages?beta=true",
+      "model": "claude-summary-fixture",
+      "effort": "low",
+      "key": "SUMMARY_FIXTURE"
+    },
+    {
+      "path": "/main/v1/messages?beta=true",
+      "model": "claude-main-fixture",
+      "effort": "medium",
+      "key": "SOURCE_FIXTURE"
+    }
+  ]
+}

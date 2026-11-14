@@ -16,3 +16,5 @@ export * from './locale'
 
 export * from './claude-accounts'
 export * from './egress'
+
+export * from './agent-model-settings'

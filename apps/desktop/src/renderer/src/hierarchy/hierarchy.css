@@ -1108,6 +1108,7 @@ html[data-theme="light"] .git-worktree-menu { box-shadow: 0 10px 26px rgba(23,28
 .model-provider__actions button.primary { border-color: var(--workspace-accent-line); color: var(--workspace-accent); background: var(--workspace-accent-soft); }
 .model-provider__actions button:disabled { border-color: transparent; color: var(--workspace-faint); background: rgba(222,226,232,.58); cursor: default; }
 .model-settings__language { margin-top: 23px; }
+.model-settings__general-divider { margin-top: 24px; padding-top: 6px; border-top: 1px solid var(--workspace-line); }
 .model-settings__language-options { display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--workspace-line); border-radius: 10px; background: var(--workspace-panel-muted); box-shadow: 0 1px 2px rgba(34,45,60,.02); }
 .model-settings__language-options label { display: flex; min-height: 42px; align-items: center; gap: 9px; padding: 0 13px; border-bottom: 1px solid var(--workspace-line); color: #414a57; cursor: pointer; font-size: 10px; font-weight: 650; transition: background 120ms ease; }
 .model-settings__language-options label:last-child { border-bottom: 0; }

@@ -1,0 +1,30 @@
+{
+  "boundary": "Real Claude 2.1.325, local synthetic API responses only, no external model calls",
+  "requests": [
+    {
+      "path": "/v1/messages?beta=true",
+      "sessionModel": "matou-chatgpt/matou-opus",
+      "sessionEffort": "xhigh",
+      "compactionHeader": null,
+      "routedModel": "matou-chatgpt/matou-opus",
+      "routedEffort": "xhigh"
+    },
+    {
+      "path": "/v1/messages?beta=true",
+      "sessionModel": "matou-chatgpt/matou-opus",
+      "sessionEffort": "xhigh",
+      "compactionHeader": "manual",
+      "routedModel": "local-fast-summary-fixture",
+      "routedEffort": "medium"
+    },
+    {
+      "path": "/v1/messages?beta=true",
+      "sessionModel": "matou-chatgpt/matou-opus",
+      "sessionEffort": "xhigh",
+      "compactionHeader": null,
+      "routedModel": "matou-chatgpt/matou-opus",
+      "routedEffort": "xhigh"
+    }
+  ],
+  "compactResultType": "compact_boundary"
+}

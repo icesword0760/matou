@@ -43,7 +43,8 @@
     "accounts:setup": "uv sync --project tooling/claude-accounts --frozen",
     "accounts:build": "node tooling/claude-accounts/build.mjs",
     "test:accounts": "pnpm --filter @matou/desktop exec vitest run src/main/claude-accounts && uv run --frozen --project tooling/claude-accounts python -m unittest discover -s tooling/claude-accounts -p 'test_*.py'",
-    "router:prepare": "node tooling/model-router/prepare.mjs"
+    "router:prepare": "node tooling/model-router/prepare.mjs",
+    "router:build": "node tooling/model-router/build-patched.mjs --package"
   },
   "devDependencies": {
     "@playwright/test": "1.62.1",

@@ -4,12 +4,12 @@ import { join } from 'node:path'
 
 import {
   CLI_DEFAULT_MODEL,
-  type ProviderModelsInput, type ProviderModelsResult, type ProviderCli, type ProviderConfigInput, type ApiKeyProviderConfigInput, type ProviderConfigSnapshot, type ProviderConfigView,
+  type ProviderModelMetadata, type ProviderModelsInput, type ProviderModelsResult, type ProviderCli, type ProviderConfigInput, type ApiKeyProviderConfigInput, type ProviderConfigSnapshot, type ProviderConfigView,
   type SubscriptionProvider, type SubscriptionModel, type SubscriptionAccountSummary
 } from '@matou/contracts'
 
 import { toClientModelId } from '../model-router/claude-launch'
-import { discoverProviderModels } from './provider-models'
+import { discoverProviderModels, normalizeProviderModelMetadata } from './provider-models'
 
 import { EntityMissingError } from '../errors'
 import { runtimeMessages } from '../i18n/messages'
@@ -21,6 +21,9 @@ interface StoredProvider {
   endpoint: string
   model: string
   apiKey?: string
+  modelMetadata?: ProviderModelMetadata[]
+  reasoningEffort?: ProviderConfigView['reasoningEffort']
+  effortMapping?: ProviderConfigView['effortMapping']
   modelMapping?: ProviderConfigInput['modelMapping']
   builtIn?: boolean
   kind?: 'api-key' | 'subscription'
@@ -37,6 +40,7 @@ export interface StoredSubscription {
 export interface StoredSubscriptionProvider {
   id: string
   name: string
+  effortMapping?: ProviderConfigView['effortMapping']
   modelMapping: Record<'opus' | 'sonnet' | 'haiku', string>
   subscription: StoredSubscription
 }
@@ -117,6 +121,8 @@ export class ProviderConfigStore {
       if (existing?.kind === 'subscription') throw new Error('Cannot change a subscription into an API key provider')
       if (existing?.apiKey && normalized.endpoint !== existing.endpoint && !normalized.apiKey) throw new Error('Endpoint changed: enter the API key for the new service')
       const apiKey = normalized.apiKey || existing?.apiKey
+      const sameService = existing?.endpoint === normalized.endpoint && existing.apiKey === apiKey
+      const modelMetadata = normalizeProviderModelMetadata(normalized.modelMetadata) ?? (sameService ? existing.modelMetadata : undefined)
       const provider: StoredProvider = {
         ...existing,
         id: existing?.id ?? randomUUID(),
@@ -124,10 +130,14 @@ export class ProviderConfigStore {
         name: normalized.name,
         endpoint: normalized.endpoint,
         model: normalized.model,
+        ...(normalized.reasoningEffort ? { reasoningEffort: normalized.reasoningEffort } : {}),
+        ...(normalized.effortMapping ? { effortMapping: normalized.effortMapping } : {}),
         ...((normalized.modelMapping ?? existing?.modelMapping) ? { modelMapping: normalized.modelMapping ?? existing!.modelMapping! } : {}),
         ...(existing?.builtIn ? { builtIn: true } : {}),
         ...(apiKey ? { apiKey } : {})
       }
+      if (modelMetadata === undefined) delete provider.modelMetadata
+      else provider.modelMetadata = modelMetadata
       if (input.id && !existing) {
         throw new EntityMissingError(runtimeMessages().providerConfig.notFound)
       }
@@ -142,7 +152,17 @@ export class ProviderConfigStore {
   async subscriptions(): Promise<StoredSubscriptionProvider[]> {
     const state = await this.#read()
     return state.providers['claude-code'].filter(provider => provider.kind === 'subscription' && provider.subscription)
-      .map(provider => ({ id: provider.id, name: provider.name, modelMapping: { opus: provider.modelMapping?.opus ?? '', sonnet: provider.modelMapping?.sonnet ?? '', haiku: provider.modelMapping?.haiku ?? '' }, subscription: structuredClone(provider.subscription!) }))
+      .map(provider => ({ id: provider.id, name: provider.name, ...(provider.effortMapping ? { effortMapping: provider.effortMapping } : {}), modelMapping: { opus: provider.modelMapping?.opus ?? '', sonnet: provider.modelMapping?.sonnet ?? '', haiku: provider.modelMapping?.haiku ?? '' }, subscription: structuredClone(provider.subscription!) }))
+  }
+
+  async cacheSubscriptionModels(id: string, credentialName: string, models: SubscriptionModel[]): Promise<void> {
+    if (!models.length) return
+    await this.#mutate(async state => {
+      const row = state.providers['claude-code'].find(p => p.id === id && p.subscription?.credentialRef.name === credentialName)
+      if (!row?.subscription || JSON.stringify(row.subscription.modelMetadata) === JSON.stringify(models)) return
+      row.subscription.modelMetadata = structuredClone(models)
+      state.revision++
+    })
   }
 
   async antigravityRiskAccepted(): Promise<boolean> { return Boolean((await this.#read()).policies?.antigravityRiskAcceptedAt) }
@@ -157,6 +177,7 @@ export class ProviderConfigStore {
   /** Internal commit only. Renderer supplies an attempt, never a credentialRef. */
   async adoptSubscription(input: Omit<StoredSubscriptionProvider, 'id'> & { id?: string }): Promise<ProviderConfigView> {
     return this.#mutate(async state => {
+      validateEffortSettings(input)
       const provider = input.subscription.provider
       if (provider !== 'codex' && provider !== 'antigravity') throw new Error('Invalid subscription provider')
       if (provider === 'antigravity' && !state.policies?.antigravityRiskAcceptedAt) throw new Error('Antigravity risk confirmation is required')
@@ -181,10 +202,12 @@ export class ProviderConfigStore {
           id: model.id, ...(model.displayName ? { displayName: model.displayName } : {}),
           ...(model.ownedBy ? { ownedBy: model.ownedBy } : {}),
           ...(model.contextWindow ? { contextWindow: model.contextWindow } : {}),
+          ...(model.maxContextWindow ? { maxContextWindow: model.maxContextWindow } : {}),
+          ...(model.supportedEfforts ? { supportedEfforts: model.supportedEfforts } : {}),
           ...(model.maxOutputTokens ? { maxOutputTokens: model.maxOutputTokens } : {})
         }))
       }
-      const value: StoredProvider = { ...existing, id: existing?.id ?? randomUUID(), cli: 'claude-code', kind: 'subscription', name: input.name.trim(), endpoint: '', model: input.modelMapping.sonnet, modelMapping: { ...input.modelMapping }, subscription }
+      const value: StoredProvider = { ...existing, id: existing?.id ?? randomUUID(), cli: 'claude-code', kind: 'subscription', name: input.name.trim(), endpoint: '', model: input.modelMapping.sonnet, modelMapping: { ...input.modelMapping }, ...(input.effortMapping ? { effortMapping: input.effortMapping } : {}), subscription }
       delete value.apiKey
       const index = list.findIndex(item => item.id === value.id)
       if (index === -1) list.push(value)
@@ -303,6 +326,7 @@ export class ProviderConfigStore {
 }
 
 function normalizeInput(input: ApiKeyProviderConfigInput): ApiKeyProviderConfigInput & { apiKey: string } {
+  validateEffortSettings(input)
   if (input.cli !== 'claude-code' && input.cli !== 'codex') {
     throw new Error(runtimeMessages().providerConfig.invalidCli)
   }
@@ -342,6 +366,12 @@ function normalizeState(value: Partial<StoredProviderState>): StoredProviderStat
     if (!Array.isArray(state.providers[cli]) || state.providers[cli].length === 0) {
       state.providers[cli] = seed.providers[cli]
     }
+    for (const provider of state.providers[cli]) {
+      if (provider.modelMetadata === undefined) continue
+      const modelMetadata = normalizeProviderModelMetadata(provider.modelMetadata)
+      if (modelMetadata === undefined) delete provider.modelMetadata
+      else provider.modelMetadata = modelMetadata
+    }
     if (!state.providers[cli].some(({ id }) => id === state.activeProviderIds[cli])) {
       state.activeProviderIds[cli] = state.providers[cli][0]!.id
     }
@@ -364,7 +394,10 @@ function view(provider: StoredProvider): ProviderConfigView {
   return {
     id: provider.id, cli: provider.cli, name: provider.name,
     endpoint: provider.endpoint, model: provider.model || CLI_DEFAULT_MODEL,
+    ...(provider.modelMetadata !== undefined ? { modelMetadata: provider.modelMetadata } : {}),
     ...(provider.modelMapping ? { modelMapping: provider.modelMapping } : {}),
+    ...(provider.effortMapping ? { effortMapping: provider.effortMapping } : {}),
+    ...(provider.reasoningEffort ? { reasoningEffort: provider.reasoningEffort } : {}),
     hasApiKey: Boolean(provider.apiKey), ...(provider.builtIn ? { builtIn: true } : {}),
     ...(provider.kind === 'subscription' && provider.subscription ? {
       kind: 'subscription' as const,
@@ -379,4 +412,10 @@ function view(provider: StoredProvider): ProviderConfigView {
 
 function isMissing(error: unknown): boolean {
   return typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT'
+}
+
+export function validateEffortSettings(input: { effortMapping?: ProviderConfigView['effortMapping']; reasoningEffort?: ProviderConfigView['reasoningEffort'] }): void {
+  const levels = ['follow', 'low', 'medium', 'high', 'xhigh', 'max']
+  if (input.reasoningEffort !== undefined && !levels.includes(input.reasoningEffort)) throw new Error('Invalid reasoning effort')
+  if (input.effortMapping !== undefined && (!input.effortMapping || typeof input.effortMapping !== 'object' || Array.isArray(input.effortMapping) || Object.entries(input.effortMapping).some(([role, value]) => !['opus', 'sonnet', 'haiku'].includes(role) || !levels.includes(value)))) throw new Error('Invalid role reasoning effort')
 }

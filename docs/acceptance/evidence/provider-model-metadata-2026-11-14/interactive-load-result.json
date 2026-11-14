@@ -1,0 +1,8 @@
+{
+  "shellTerminals": 3,
+  "activeOutputWorkers": 3,
+  "outputWorkersShareOnePty": true,
+  "openSettingsAndEditorMs": 238,
+  "typingAndDiscard": true,
+  "note": "Initial cold-shell sample was excluded: commands were queued before shell readiness; this sample used a ready shell and screenshot-confirmed output."
+}

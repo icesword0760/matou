@@ -91,6 +91,7 @@ export function TerminalPane(props: {
   latestLines?: string[]
   onOpenChildren?(sessionId: string): unknown
   onLoadSession?(sessionId: string): unknown
+  onViewHistory?(sessionId: string): unknown
   onFork?(sessionId: string): unknown
   onForkPeer?(sessionId: string): unknown
   onForkSibling?(sessionId: string): unknown
@@ -118,7 +119,7 @@ export function TerminalPane(props: {
     searchRequest, onSearchResults, focusRequest = 0,
     onDiagnosticsStatusChange,
     onStorageFaultChange,
-    onActivate, onDelete, onFork, onForkPeer, onForkSibling, onDetach,
+    onActivate, onDelete, onViewHistory, onFork, onForkPeer, onForkSibling, onDetach,
     onRemoveBranch, onRestoreEnvironment, onLocateEnvironment, onHandoffEnvironment,
     onRename, onRestoreAutoTitle
   } = props
@@ -281,6 +282,8 @@ export function TerminalPane(props: {
   }, [contextMenu])
   const hasNotification = notificationStore.sessionHasVisibleIndicator(session.id)
   const isTeamMember = session.kind === 'agent-team-member'
+  const showHistory = !readOnly && onViewHistory !== undefined &&
+    (session.kind === 'claude-code' || session.kind === 'antigravity')
   // A sibling Fork resumes the common Claude parent, not this card. The
   // caller only supplies the action after validating that parent, so a Shell
   // child still exposes the approved sibling operation.
@@ -354,6 +357,13 @@ export function TerminalPane(props: {
       <div className="terminal-pane-actions">
         {onOpenChildren && <ChildSessionBadge children={childNodes}
           onOpen={() => void onOpenChildren(session.id)} />}
+        {showHistory && <button className="pane-fork pane-history" type="button" draggable={false}
+          aria-label={m.pane.sessionHistoryOf(session.title)} title={m.pane.sessionHistory}
+          onPointerDown={(event) => { event.preventDefault(); event.stopPropagation() }}
+          onClick={(event) => {
+            event.stopPropagation()
+            void onViewHistory?.(session.id)
+          }}><HistoryIcon /></button>}
         {onLoadSession && <button className="pane-fork pane-load-session" type="button" draggable={false}
           aria-label={m.pane.loadAgentSessionInto(session.title, agentDisplayName)} disabled={actionBlocked}
           title={actionBlockedReason ?? m.pane.loadAgentSession(agentDisplayName)}
@@ -656,6 +666,10 @@ export function TerminalPane(props: {
 
 function LoadSessionIcon() {
   return <AppIcon name="folder-input" />
+}
+
+function HistoryIcon() {
+  return <AppIcon name="history" />
 }
 
 function NOOP(): void {}

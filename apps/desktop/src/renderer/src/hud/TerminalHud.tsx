@@ -159,7 +159,9 @@ export function TerminalHud(props: {
         onClick={openPermissionMenu}>{permissionAbbreviation(permissionMode)}</button>
       {modelLabel(hud, m) && <span className="status-field status-model status-priority-8"
         title={m.modelTitle(modelLabel(hud, m))}>{modelLabel(hud, m)}</span>}
-      {hud.contextPercent !== undefined && <ContextRing percent={hud.contextPercent} />}
+      {hud.contextPercent !== undefined ? <ContextRing percent={hud.contextPercent} /> :
+        hud.contextWindowSize !== undefined && hud.contextWindowSize > 0 &&
+        <span className="status-field status-priority-7">{zh ? '等待真实用量' : 'Awaiting usage'}</span>}
       {manifest?.hud.supportsMcpSummary !== false && hud.configCounts && hud.configCounts.mcpServers > 0 && <HudDetail
         label={`${hud.configCounts.mcpServers} MCPs`} title={m.mcpServers}
         items={(hud.configCounts.mcpServerNames ?? []).map((name) => name)} />}

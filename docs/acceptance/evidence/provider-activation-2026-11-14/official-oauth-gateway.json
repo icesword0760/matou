@@ -1,0 +1,60 @@
+{
+  "results": {
+    "direct-local": {
+      "code": 0,
+      "fixtureResponse": true,
+      "loginRequested": false,
+      "sandboxError": false
+    },
+    "via-matou-gateway": {
+      "code": 0,
+      "fixtureResponse": true,
+      "loginRequested": false,
+      "sandboxError": false
+    },
+    "via-matou-gateway-env-oauth": {
+      "code": 0,
+      "fixtureResponse": true,
+      "loginRequested": false,
+      "sandboxError": false
+    }
+  },
+  "requests": [
+    {
+      "case": "direct-local",
+      "method": "POST",
+      "path": "/v1/messages?beta=true",
+      "fixtureOAuthBearer": true,
+      "authorizationPresent": true,
+      "apiKeyPresent": false,
+      "model": "claude-sonnet-5-5",
+      "effort": "medium",
+      "stream": true,
+      "oauthBeta": true
+    },
+    {
+      "case": "via-matou-gateway",
+      "method": "POST",
+      "path": "/v1/messages?beta=true",
+      "fixtureOAuthBearer": true,
+      "authorizationPresent": true,
+      "apiKeyPresent": false,
+      "model": "claude-sonnet-5-5",
+      "effort": "medium",
+      "stream": true,
+      "oauthBeta": true
+    },
+    {
+      "case": "via-matou-gateway-env-oauth",
+      "method": "POST",
+      "path": "/v1/messages?beta=true",
+      "fixtureOAuthBearer": true,
+      "authorizationPresent": true,
+      "apiKeyPresent": false,
+      "model": "claude-sonnet-5-5",
+      "effort": "medium",
+      "stream": true,
+      "oauthBeta": true
+    }
+  ]
+}

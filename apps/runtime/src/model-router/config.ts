@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto'
 import { chmod, mkdir, readFile, realpath, rename, writeFile } from 'node:fs/promises'
 import { isAbsolute, join, relative, sep } from 'node:path'
 import type { ModelAlias } from './claude-launch'
+import { CODEX_CLIENT_USER_AGENT } from './codex-client'
 export type RouterModelAliases = Partial<Record<'codex' | 'antigravity', ModelAlias[]>>
 
 export const ROUTER_VERSION = '8.0.69'
@@ -49,7 +50,22 @@ export function routerConfig(directory: string, port: number, keys: RouterKeys, 
     management: { 'allow-remote': false, 'secret-key': keys.management, 'disable-control-panel': true, 'disable-auto-update-panel': true },
     access: { 'api-keys': [keys.client] },
     ...(proxyUrl ? { requests: { 'proxy-url': proxyUrl } } : {}),
-    oauth: { 'auth-dir': join(directory, 'credentials'), providers: { antigravity: { 'antigravity-credits': false } }, ...(Object.keys(aliases).length ? { 'model-alias': aliases } : {}) },
+    oauth: {
+      'auth-dir': join(directory, 'credentials'),
+      providers: {
+        antigravity: { 'antigravity-credits': false },
+        // The client is Claude Code, so without this Codex would see Claude
+        // Code's user agent for a ChatGPT subscription token.
+        codex: { 'header-defaults': { 'user-agent': CODEX_CLIENT_USER_AGENT } }
+      },
+      ...(Object.keys(aliases).length ? { 'model-alias': aliases } : {})
+    },
+    // v8 defaults to short-lived connections for Antigravity: every request
+    // pays a fresh TCP + TLS handshake. Keep-alive is part of the client
+    // identity for the HTTP/1.1 fallback; the patched router serves Google
+    // through its captured HTTP/2 pool. 30s matches the recommendation and
+    // avoids reusing half-closed sockets.
+    antigravity: { 'connection-pool': { enabled: true, 'idle-conn-timeout': '30s', 'max-idle-conns-per-host': 2 } },
     client: { claude: { 'show-codex-commentary': true } },
     multimedia: { 'disable-image-generation': 'passthrough' },
     observability: { logs: { debug: false, 'logging-to-file': false, 'request-log': false, 'error-logs-max-files': 10 }, usage: { 'usage-statistics-enabled': false }, pprof: { enable: false } },

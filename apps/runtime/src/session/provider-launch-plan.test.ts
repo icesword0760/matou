@@ -37,11 +37,12 @@ describe('PRD 04 provider launch plan', () => {
 
   it('resumes Codex by its independent session identity', () => {
     expect(resolvePtyCommand({
-      profile: 'codex', executable: '/fixture/codex', providerSessionId: 'codex-session-1',
+      contextWindow: 512_000, profile: 'codex', executable: '/fixture/codex', providerSessionId: 'codex-session-1',
       codexDeveloperInstructions: '第一行\n第二行有 "引号" 和 \\ 路径'
     })).toEqual({
       file: '/fixture/codex',
       args: [
+        '-c', 'model_context_window=512000', '-c', 'model_auto_compact_token_limit=460800', '-c', 'model_auto_compact_token_limit_scope="total"',
         '-c', 'developer_instructions="第一行\\n第二行有 \\"引号\\" 和 \\\\ 路径"',
         'resume', 'codex-session-1'
       ],
@@ -54,9 +55,9 @@ describe('PRD 04 provider launch plan', () => {
       profile: 'claude-code', executable: '/fixture/claude', model: 'claude-team'
     }).args).toEqual(['--model', 'claude-team'])
     expect(resolvePtyCommand({
-      profile: 'codex', executable: '/fixture/codex', model: 'gpt-team',
+      contextWindow: 512_000, profile: 'codex', executable: '/fixture/codex', model: 'gpt-team',
       providerSessionId: 'codex-session-1'
-    }).args).toEqual(['--model', 'gpt-team', 'resume', 'codex-session-1'])
+    }).args).toEqual(['-c', 'model_context_window=512000', '-c', 'model_auto_compact_token_limit=460800', '-c', 'model_auto_compact_token_limit_scope="total"', '--model', 'gpt-team', 'resume', 'codex-session-1'])
   })
 
   it('opens an ordinary login Shell without any provider resume arguments', () => {
@@ -97,12 +98,13 @@ describe('PRD 04 provider launch plan', () => {
 
   it('forks Codex from the source identity through its provider-specific subcommand', () => {
     expect(resolvePtyCommand({
-      profile: 'codex', executable: '/fixture/codex',
+      contextWindow: 512_000, profile: 'codex', executable: '/fixture/codex',
       providerSessionId: 'codex-source-1', forkSession: true,
       codexDeveloperInstructions: 'Use mt.'
     })).toEqual({
       file: '/fixture/codex',
       args: [
+        '-c', 'model_context_window=512000', '-c', 'model_auto_compact_token_limit=460800', '-c', 'model_auto_compact_token_limit_scope="total"',
         '-c', 'developer_instructions="Use mt."',
         'fork', 'codex-source-1'
       ],
@@ -113,9 +115,10 @@ describe('PRD 04 provider launch plan', () => {
   it('loads the Matou-owned Codex identity hook for a managed launch', () => {
     const codexHooksConfig = '{ SessionStart = [{ hooks = [{ type = "command", command = "/fixture/provider-hooks/run.statusline.sh", timeout = 5 }] }] }'
     expect(resolvePtyCommand({
-      profile: 'codex', executable: '/fixture/codex',
+      contextWindow: 512_000, profile: 'codex', executable: '/fixture/codex',
       codexHooksConfig
     }).args).toEqual([
+      '-c', 'model_context_window=512000', '-c', 'model_auto_compact_token_limit=460800', '-c', 'model_auto_compact_token_limit_scope="total"',
       '-c', `hooks=${codexHooksConfig}`,
       '--dangerously-bypass-hook-trust'
     ])
@@ -123,11 +126,12 @@ describe('PRD 04 provider launch plan', () => {
 
   it('keeps Codex permission flags global while loading session-only instructions', () => {
     expect(resolvePtyCommand({
-      profile: 'codex', executable: '/fixture/codex',
+      contextWindow: 512_000, profile: 'codex', executable: '/fixture/codex',
       permissionMode: 'bypassPermissions', codexDeveloperInstructions: 'Use mt.'
     })).toEqual({
       file: '/fixture/codex',
       args: [
+        '-c', 'model_context_window=512000', '-c', 'model_auto_compact_token_limit=460800', '-c', 'model_auto_compact_token_limit_scope="total"',
         '-c', 'developer_instructions="Use mt."',
         '--dangerously-bypass-approvals-and-sandbox'
       ],
@@ -135,7 +139,7 @@ describe('PRD 04 provider launch plan', () => {
     })
   })
 
-  it('produces byte-identical args to main for Claude and Codex across all permission modes and launch kinds', () => {
+  it('preserves launch behavior with the GPT budget across all permission modes and launch kinds', () => {
     const modes = [
       undefined,
       'default',
@@ -180,6 +184,9 @@ describe('PRD 04 provider launch plan', () => {
       forkSession: boolean
     ) {
       const args = [
+        '-c', 'model_context_window=512000',
+        '-c', 'model_auto_compact_token_limit=460800',
+        '-c', 'model_auto_compact_token_limit_scope="total"',
         '-c', 'hooks={}',
         '--dangerously-bypass-hook-trust',
         '-c', 'developer_instructions="Use mt."',
@@ -209,7 +216,7 @@ describe('PRD 04 provider launch plan', () => {
         })).toEqual(mainClaudeArgs(permissionMode, providerSessionId, forkSession))
 
         expect(resolvePtyCommand({
-          profile: 'codex',
+          contextWindow: 512_000, profile: 'codex',
           executable: '/fixture/codex',
           codexHooksConfig: '{}',
           codexDeveloperInstructions: 'Use mt.',
@@ -266,4 +273,11 @@ describe('PRD 04 provider launch plan', () => {
       resuming: true
     })
   })
+})
+
+it('keeps the CLI default when no budget is configured and applies a selected maximum and effort independently', () => {
+  expect(resolvePtyCommand({ profile: 'codex', executable: 'codex' }).args).toEqual([])
+  expect(resolvePtyCommand({ profile: 'codex', executable: 'codex', contextWindow: 872000, reasoningEffort: 'high', providerSessionId: 'same', forkSession: true }).args).toEqual([
+    '-c', 'model_context_window=872000', '-c', 'model_auto_compact_token_limit=784800', '-c', 'model_auto_compact_token_limit_scope="total"', '-c', 'model_reasoning_effort="high"', 'fork', 'same'
+  ])
 })

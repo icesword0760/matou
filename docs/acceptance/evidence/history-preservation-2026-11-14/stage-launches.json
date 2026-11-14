@@ -1,0 +1,362 @@
+{
+  "stages": [
+    {
+      "stage": "before first history window",
+      "timestamp": 1794666973181,
+      "launches": [
+        {
+          "pid": 49032,
+          "ppid": 48927,
+          "sessionId": "compacted-history-e2e",
+          "timestamp": 1794666972840,
+          "argv": [
+            "--settings",
+            "<fixture settings>",
+            "--plugin-dir",
+            "/Users/icesword/Documents/AIProjects/matou/apps/runtime/dist/control-assets/providers/claude-plugin",
+            "--resume",
+            "compacted-history-e2e"
+          ]
+        }
+      ]
+    },
+    {
+      "stage": "after first history window",
+      "timestamp": 1794666979906,
+      "launches": [
+        {
+          "pid": 49032,
+          "ppid": 48927,
+          "sessionId": "compacted-history-e2e",
+          "timestamp": 1794666972840,
+          "argv": [
+            "--settings",
+            "<fixture settings>",
+            "--plugin-dir",
+            "/Users/icesword/Documents/AIProjects/matou/apps/runtime/dist/control-assets/providers/claude-plugin",
+            "--resume",
+            "compacted-history-e2e"
+          ]
+        }
+      ]
+    },
+    {
+      "stage": "after permission switch, before second history window",
+      "timestamp": 1794666980117,
+      "launches": [
+        {
+          "pid": 49032,
+          "ppid": 48927,
+          "sessionId": "compacted-history-e2e",
+          "timestamp": 1794666972840,
+          "argv": [
+            "--settings",
+            "<fixture settings>",
+            "--plugin-dir",
+            "/Users/icesword/Documents/AIProjects/matou/apps/runtime/dist/control-assets/providers/claude-plugin",
+            "--resume",
+            "compacted-history-e2e"
+          ]
+        },
+        {
+          "pid": 51537,
+          "ppid": 48927,
+          "sessionId": "compacted-history-e2e",
+          "timestamp": 1794666980053,
+          "argv": [
+            "--settings",
+            "<fixture settings>",
+            "--plugin-dir",
+            "/Users/icesword/Documents/AIProjects/matou/apps/runtime/dist/control-assets/providers/claude-plugin",
+            "--resume",
+            "compacted-history-e2e",
+            "--dangerously-skip-permissions"
+          ]
+        }
+      ]
+    },
+    {
+      "stage": "after second history window",
+      "timestamp": 1794666980385,
+      "launches": [
+        {
+          "pid": 49032,
+          "ppid": 48927,
+          "sessionId": "compacted-history-e2e",
+          "timestamp": 1794666972840,
+          "argv": [
+            "--settings",
+            "<fixture settings>",
+            "--plugin-dir",
+            "/Users/icesword/Documents/AIProjects/matou/apps/runtime/dist/control-assets/providers/claude-plugin",
+            "--resume",
+            "compacted-history-e2e"
+          ]
+        },
+        {
+          "pid": 51537,
+          "ppid": 48927,
+          "sessionId": "compacted-history-e2e",
+          "timestamp": 1794666980053,
+          "argv": [
+            "--settings",
+            "<fixture settings>",
+            "--plugin-dir",
+            "/Users/icesword/Documents/AIProjects/matou/apps/runtime/dist/control-assets/providers/claude-plugin",
+            "--resume",
+            "compacted-history-e2e",
+            "--dangerously-skip-permissions"
+          ]
+        }
+      ]
+    },
+    {
+      "stage": "before application restart",
+      "timestamp": 1794666980385,
+      "launches": [
+        {
+          "pid": 49032,
+          "ppid": 48927,
+          "sessionId": "compacted-history-e2e",
+          "timestamp": 1794666972840,
+          "argv": [
+            "--settings",
+            "<fixture settings>",
+            "--plugin-dir",
+            "/Users/icesword/Documents/AIProjects/matou/apps/runtime/dist/control-assets/providers/claude-plugin",
+            "--resume",
+            "compacted-history-e2e"
+          ]
+        },
+        {
+          "pid": 51537,
+          "ppid": 48927,
+          "sessionId": "compacted-history-e2e",
+          "timestamp": 1794666980053,
+          "argv": [
+            "--settings",
+            "<fixture settings>",
+            "--plugin-dir",
+            "/Users/icesword/Documents/AIProjects/matou/apps/runtime/dist/control-assets/providers/claude-plugin",
+            "--resume",
+            "compacted-history-e2e",
+            "--dangerously-skip-permissions"
+          ]
+        }
+      ]
+    },
+    {
+      "stage": "after application restart",
+      "timestamp": 1794666983475,
+      "launches": [
+        {
+          "pid": 49032,
+          "ppid": 48927,
+          "sessionId": "compacted-history-e2e",
+          "timestamp": 1794666972840,
+          "argv": [
+            "--settings",
+            "<fixture settings>",
+            "--plugin-dir",
+            "/Users/icesword/Documents/AIProjects/matou/apps/runtime/dist/control-assets/providers/claude-plugin",
+            "--resume",
+            "compacted-history-e2e"
+          ]
+        },
+        {
+          "pid": 51537,
+          "ppid": 48927,
+          "sessionId": "compacted-history-e2e",
+          "timestamp": 1794666980053,
+          "argv": [
+            "--settings",
+            "<fixture settings>",
+            "--plugin-dir",
+            "/Users/icesword/Documents/AIProjects/matou/apps/runtime/dist/control-assets/providers/claude-plugin",
+            "--resume",
+            "compacted-history-e2e",
+            "--dangerously-skip-permissions"
+          ]
+        },
+        {
+          "pid": 53143,
+          "ppid": 52936,
+          "sessionId": "compacted-history-e2e",
+          "timestamp": 1794666983246,
+          "argv": [
+            "--settings",
+            "<fixture settings>",
+            "--plugin-dir",
+            "/Users/icesword/Documents/AIProjects/matou/apps/runtime/dist/control-assets/providers/claude-plugin",
+            "--resume",
+            "compacted-history-e2e",
+            "--dangerously-skip-permissions"
+          ]
+        },
+        {
+          "pid": 53443,
+          "ppid": 52936,
+          "sessionId": "compacted-history-e2e",
+          "timestamp": 1794666983407,
+          "argv": [
+            "--settings",
+            "<fixture settings>",
+            "--plugin-dir",
+            "/Users/icesword/Documents/AIProjects/matou/apps/runtime/dist/control-assets/providers/claude-plugin",
+            "--resume",
+            "compacted-history-e2e",
+            "--dangerously-skip-permissions"
+          ]
+        }
+      ]
+    },
+    {
+      "stage": "before third history window",
+      "timestamp": 1794666984464,
+      "launches": [
+        {
+          "pid": 49032,
+          "ppid": 48927,
+          "sessionId": "compacted-history-e2e",
+          "timestamp": 1794666972840,
+          "argv": [
+            "--settings",
+            "<fixture settings>",
+            "--plugin-dir",
+            "/Users/icesword/Documents/AIProjects/matou/apps/runtime/dist/control-assets/providers/claude-plugin",
+            "--resume",
+            "compacted-history-e2e"
+          ]
+        },
+        {
+          "pid": 51537,
+          "ppid": 48927,
+          "sessionId": "compacted-history-e2e",
+          "timestamp": 1794666980053,
+          "argv": [
+            "--settings",
+            "<fixture settings>",
+            "--plugin-dir",
+            "/Users/icesword/Documents/AIProjects/matou/apps/runtime/dist/control-assets/providers/claude-plugin",
+            "--resume",
+            "compacted-history-e2e",
+            "--dangerously-skip-permissions"
+          ]
+        },
+        {
+          "pid": 53143,
+          "ppid": 52936,
+          "sessionId": "compacted-history-e2e",
+          "timestamp": 1794666983246,
+          "argv": [
+            "--settings",
+            "<fixture settings>",
+            "--plugin-dir",
+            "/Users/icesword/Documents/AIProjects/matou/apps/runtime/dist/control-assets/providers/claude-plugin",
+            "--resume",
+            "compacted-history-e2e",
+            "--dangerously-skip-permissions"
+          ]
+        },
+        {
+          "pid": 53443,
+          "ppid": 52936,
+          "sessionId": "compacted-history-e2e",
+          "timestamp": 1794666983407,
+          "argv": [
+            "--settings",
+            "<fixture settings>",
+            "--plugin-dir",
+            "/Users/icesword/Documents/AIProjects/matou/apps/runtime/dist/control-assets/providers/claude-plugin",
+            "--resume",
+            "compacted-history-e2e",
+            "--dangerously-skip-permissions"
+          ]
+        }
+      ]
+    },
+    {
+      "stage": "after third history window",
+      "timestamp": 1794666984793,
+      "launches": [
+        {
+          "pid": 49032,
+          "ppid": 48927,
+          "sessionId": "compacted-history-e2e",
+          "timestamp": 1794666972840,
+          "argv": [
+            "--settings",
+            "<fixture settings>",
+            "--plugin-dir",
+            "/Users/icesword/Documents/AIProjects/matou/apps/runtime/dist/control-assets/providers/claude-plugin",
+            "--resume",
+            "compacted-history-e2e"
+          ]
+        },
+        {
+          "pid": 51537,
+          "ppid": 48927,
+          "sessionId": "compacted-history-e2e",
+          "timestamp": 1794666980053,
+          "argv": [
+            "--settings",
+            "<fixture settings>",
+            "--plugin-dir",
+            "/Users/icesword/Documents/AIProjects/matou/apps/runtime/dist/control-assets/providers/claude-plugin",
+            "--resume",
+            "compacted-history-e2e",
+            "--dangerously-skip-permissions"
+          ]
+        },
+        {
+          "pid": 53143,
+          "ppid": 52936,
+          "sessionId": "compacted-history-e2e",
+          "timestamp": 1794666983246,
+          "argv": [
+            "--settings",
+            "<fixture settings>",
+            "--plugin-dir",
+            "/Users/icesword/Documents/AIProjects/matou/apps/runtime/dist/control-assets/providers/claude-plugin",
+            "--resume",
+            "compacted-history-e2e",
+            "--dangerously-skip-permissions"
+          ]
+        },
+        {
+          "pid": 53443,
+          "ppid": 52936,
+          "sessionId": "compacted-history-e2e",
+          "timestamp": 1794666983407,
+          "argv": [
+            "--settings",
+            "<fixture settings>",
+            "--plugin-dir",
+            "/Users/icesword/Documents/AIProjects/matou/apps/runtime/dist/control-assets/providers/claude-plugin",
+            "--resume",
+            "compacted-history-e2e",
+            "--dangerously-skip-permissions"
+          ]
+        }
+      ]
+    }
+  ],
+  "processStatus": [
+    {
+      "pid": 49032,
+      "alive": false
+    },
+    {
+      "pid": 51537,
+      "alive": false
+    },
+    {
+      "pid": 53143,
+      "alive": false
+    },
+    {
+      "pid": 53443,
+      "alive": true
+    }
+  ]
+}

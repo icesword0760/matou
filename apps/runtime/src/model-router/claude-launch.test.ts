@@ -5,7 +5,7 @@
 import { describe, expect, it } from 'vitest';
 import { buildClaudeLaunch, clientModelForSubagent, inheritedEnvToClear, pointReleaseClientId, resolveRoleModels, toClientModelId, type ClaudeLaunchInput, type ClaudeLaunchResult } from './claude-launch.js';
 const input = (): ClaudeLaunchInput => ({
-  subscription: 'chatgpt', accountPrefix: 'matou-chatgpt', routerUrl: 'http://127.0.0.1:12345', clientKey: 'fixture-client-key', mainRole: 'sonnet', providerName: 'ChatGPT 账号',
+  contextWindow: 512_000, subscription: 'chatgpt', accountPrefix: 'matou-chatgpt', routerUrl: 'http://127.0.0.1:12345', clientKey: 'fixture-client-key', mainRole: 'sonnet', providerName: 'ChatGPT 账号',
   models: { opus: { id: 'gpt-large', displayName: 'GPT Large', contextWindow: 1_000_000, maxOutputTokens: 200000 },
     sonnet: { id: 'gpt-balanced', displayName: 'GPT Balanced', contextWindow: 400000, maxOutputTokens: 64000 },
     haiku: { id: 'gpt-small', contextWindow: 200000, maxOutputTokens: 16000 } },
@@ -16,13 +16,13 @@ describe('Claude subscription launch projection', () => {
     const source = input(), before = structuredClone(source), result = value(buildClaudeLaunch(source));
     expect(result.env).toMatchObject({ ANTHROPIC_BASE_URL: source.routerUrl, ANTHROPIC_AUTH_TOKEN: source.clientKey,
       ANTHROPIC_DEFAULT_OPUS_MODEL: 'matou-chatgpt/matou-opus', ANTHROPIC_DEFAULT_SONNET_MODEL_NAME: 'GPT Balanced',
-      ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION: 'ChatGPT 账号 · gpt-large · 1M',
-      ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION: 'ChatGPT 账号 · gpt-balanced · 400K', CLAUDE_CODE_AUTO_MODE_SERVER: '0' });
-    expect(result.settings).toMatchObject({ env: { ANTHROPIC_API_KEY: '', CLAUDE_CODE_OAUTH_TOKEN: '', CLAUDE_CODE_DISABLE_1M_CONTEXT: '1' }, autoCompactWindow: 200000 });
+      ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION: 'ChatGPT 账号 · gpt-large · 512K',
+      ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION: 'ChatGPT 账号 · gpt-balanced · 512K', CLAUDE_CODE_AUTO_MODE_SERVER: '0' });
+    expect(result.settings).toMatchObject({ env: { ANTHROPIC_API_KEY: '', CLAUDE_CODE_OAUTH_TOKEN: '', CLAUDE_CODE_DISABLE_1M_CONTEXT: '1' }, autoCompactWindow: 512000 });
     expect(result.settings.modelPicker).toEqual({ replaceBuiltInOptions: true, options: [
-      { model: 'opus', label: 'Opus · GPT Large', description: 'ChatGPT 账号 · gpt-large · 1M' },
-      { model: 'sonnet', label: 'Sonnet · GPT Balanced', description: 'ChatGPT 账号 · gpt-balanced · 400K' },
-      { model: 'haiku', label: 'Haiku · gpt-small', description: 'ChatGPT 账号 · gpt-small · 200K' }
+      { model: 'opus', label: 'Opus · GPT Large', description: 'ChatGPT 账号 · gpt-large · 512K' },
+      { model: 'sonnet', label: 'Sonnet · GPT Balanced', description: 'ChatGPT 账号 · gpt-balanced · 512K' },
+      { model: 'haiku', label: 'Haiku · gpt-small', description: 'ChatGPT 账号 · gpt-small · 512K' }
     ] });
     expect(result.env.ANTHROPIC_DEFAULT_FABLE_MODEL).toBe(result.env.ANTHROPIC_DEFAULT_OPUS_MODEL);
     expect(result.settings.modelOverrides).toEqual({ 'claude-fable-5': 'matou-chatgpt/matou-opus-fallback', 'claude-fable-5-2': 'matou-chatgpt/matou-opus-fallback' });
@@ -58,18 +58,21 @@ describe('Claude subscription launch projection', () => {
     const result = value(buildClaudeLaunch({ ...input(), models: { default: { id: 'same-model' } } }));
     expect(result.oauth['model-alias'].codex?.map(a => a.alias)).toEqual(['matou-opus', 'matou-sonnet', 'matou-haiku', 'matou-opus-fallback']);
   });
-  it.each(['opus', 'sonnet', 'haiku'] as const)('takes all three upstream windows even when the main role is %s', mainRole => {
+  it.each(['opus', 'sonnet', 'haiku'] as const)('uses the same 512K GPT budget for the %s role', mainRole => {
     const result = value(buildClaudeLaunch({ ...input(), mainRole }));
-    expect(result.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS).toBe('200000');
-    expect(result.settings.autoCompactWindow).toBe(200000);
-    const haiku = value(buildClaudeLaunch({ ...input(), mainRole: 'haiku' }));
-    expect(haiku.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS).toBe('200000');
-    expect(haiku.settings.autoCompactWindow).toBe(200000);
-    expect(haiku.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS).toBe('16000');
+    expect(result.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS).toBe('512000');
+    // Compression percentage is set by the process policy, not the catalog projection.
+    expect(result.settings.autoCompactWindow).toBe(512000);
+
+    expect(value(buildClaudeLaunch({ ...input(), mainRole: 'haiku' })).env.CLAUDE_CODE_MAX_OUTPUT_TOKENS).toBe('16000');
     expect(value(buildClaudeLaunch({ ...input(), mainRole: 'opus' })).env.CLAUDE_CODE_MAX_OUTPUT_TOKENS).toBe('128000');
   });
+  it('applies the explicit GPT budget even with missing or smaller catalog defaults', () => {
+    const source = input(); delete source.models.haiku!.contextWindow; source.models.sonnet!.contextWindow = 80000;
+    expect(value(buildClaudeLaunch(source)).settings.autoCompactWindow).toBe(512000);
+  });
   it('never raises a small upstream window to the client minimum, and caps larger windows conservatively', () => {
-    const source = input(); source.models.sonnet!.contextWindow = 99999;
+    const source = { ...input(), subscription: 'antigravity' as const, accountPrefix: 'matou-antigravity' as const }; delete source.contextWindow; source.models.sonnet!.contextWindow = 99999;
     expect(buildClaudeLaunch(source)).toEqual({ ok: false, error: 'unsupported-context-window' });
     source.models.sonnet!.contextWindow = 2000000; source.models.opus!.contextWindow = 3000000; source.models.haiku!.contextWindow = 1500000;
     const result = value(buildClaudeLaunch(source));
@@ -79,18 +82,19 @@ describe('Claude subscription launch projection', () => {
     expect(result.settings.env.CLAUDE_CODE_DISABLE_1M_CONTEXT).toBeUndefined();
   });
   it.each(['opus', 'sonnet', 'haiku'] as const)('rejects an under-100K %s tier even when it is not selected', role => {
-    const source = input(); source.models[role]!.contextWindow = 99999;
+    const source = { ...input(), subscription: 'antigravity' as const, accountPrefix: 'matou-antigravity' as const }; delete source.contextWindow; source.models[role]!.contextWindow = 99999;
     expect(buildClaudeLaunch(source)).toEqual({ ok: false, error: 'unsupported-context-window' });
   });
   it('does not guess a safe minimum when one tier has no window metadata', () => {
-    const source = input(); delete source.models.haiku!.contextWindow;
+    const source = { ...input(), subscription: 'antigravity' as const, accountPrefix: 'matou-antigravity' as const }; delete source.contextWindow; delete source.models.haiku!.contextWindow;
     const result = value(buildClaudeLaunch(source));
     expect(result.settings.autoCompactWindow).toBeUndefined();
     expect(result.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS).toBeUndefined();
     expect(result.unknown).toContain('context-window');
   });
   it('does not invent unknown context or output limits', () => {
-    const result = value(buildClaudeLaunch({ ...input(), models: { default: { id: 'unknown' } } }));
+    const source = input(); delete source.contextWindow;
+    const result = value(buildClaudeLaunch({ ...source, subscription: 'antigravity', accountPrefix: 'matou-antigravity', models: { default: { id: 'unknown' } } }));
     expect(result.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS).toBeUndefined();
     expect(result.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS).toBeUndefined();
     expect(result.settings.autoCompactWindow).toBeUndefined();

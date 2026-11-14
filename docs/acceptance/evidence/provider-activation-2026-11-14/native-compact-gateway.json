@@ -1,0 +1,50 @@
+{
+  "boundary": true,
+  "turns": [
+    {
+      "phase": "first",
+      "success": true
+    },
+    {
+      "phase": "compact",
+      "success": true
+    },
+    {
+      "phase": "after",
+      "success": true
+    }
+  ],
+  "requests": [
+    {
+      "upstream": "source",
+      "path": "/v1/messages?beta=true",
+      "model": "claude-sonnet-5-5",
+      "effort": "high",
+      "marker": null,
+      "correctFixtureKey": true,
+      "sourceCredentialAtSummary": false,
+      "stream": true
+    },
+    {
+      "upstream": "summary",
+      "path": "/v1/messages?beta=true",
+      "model": "summary-fixture",
+      "effort": "low",
+      "marker": "manual",
+      "correctFixtureKey": true,
+      "sourceCredentialAtSummary": false,
+      "stream": true
+    },
+    {
+      "upstream": "source",
+      "path": "/v1/messages?beta=true",
+      "model": "claude-sonnet-5-5",
+      "effort": "high",
+      "marker": null,
+      "correctFixtureKey": true,
+      "sourceCredentialAtSummary": false,
+      "stream": true
+    }
+  ],
+  "errors": []
+}

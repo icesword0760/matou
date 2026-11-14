@@ -224,6 +224,8 @@ export const RPC_METHODS = [
   'provider-config.subscription.settings-read',
   'provider-config.subscription.settings-close',
   'provider-config.subscription.risk-confirm',
+  'agent-model-settings.get',
+  'agent-model-settings.set',
   'claude-settings.get',
   'claude-settings.set',
   'egress.status',

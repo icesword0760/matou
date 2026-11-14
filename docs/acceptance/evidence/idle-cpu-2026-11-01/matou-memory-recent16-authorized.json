@@ -1,0 +1,514 @@
+{
+  "groups": {
+    "main": {
+      "count": 1,
+      "footprintMiB": 45.86097717285156,
+      "residentMiB": 149.875
+    },
+    "helpers": {
+      "count": 3,
+      "footprintMiB": 294.5189666748047,
+      "residentMiB": 429.96875
+    },
+    "renderer": {
+      "count": 1,
+      "footprintMiB": 103.50141906738281,
+      "residentMiB": 249.6875
+    },
+    "claude": {
+      "count": 15,
+      "footprintMiB": 2931.5689849853516,
+      "residentMiB": 7175.03125
+    },
+    "otherChildren": {
+      "count": 49,
+      "footprintMiB": 5901.974212646484,
+      "residentMiB": 7849.75
+    }
+  },
+  "processes": [
+    {
+      "pid": 43615,
+      "kind": "main",
+      "name": "\u7801\u5934",
+      "footprintMiB": 45.86097717285156,
+      "residentMiB": 149.875
+    },
+    {
+      "pid": 43617,
+      "kind": "helpers",
+      "name": "\u7801\u5934 Helper",
+      "footprintMiB": 218.51690673828125,
+      "residentMiB": 111.734375
+    },
+    {
+      "pid": 43618,
+      "kind": "helpers",
+      "name": "\u7801\u5934 Helper",
+      "footprintMiB": 6.7038116455078125,
+      "residentMiB": 38.40625
+    },
+    {
+      "pid": 43619,
+      "kind": "helpers",
+      "name": "\u7801\u5934 Helper",
+      "footprintMiB": 69.29824829101562,
+      "residentMiB": 279.828125
+    },
+    {
+      "pid": 43620,
+      "kind": "renderer",
+      "name": "\u7801\u5934 Helper (Renderer)",
+      "footprintMiB": 103.50141906738281,
+      "residentMiB": 249.6875
+    },
+    {
+      "pid": 43674,
+      "kind": "claude",
+      "name": "claude",
+      "footprintMiB": 180.39208984375,
+      "residentMiB": 445.09375
+    },
+    {
+      "pid": 47395,
+      "kind": "otherChildren",
+      "name": "npm exec shadcn@latest mcp",
+      "footprintMiB": 127.81058502197266,
+      "residentMiB": 161.96875
+    },
+    {
+      "pid": 47396,
+      "kind": "otherChildren",
+      "name": "python",
+      "footprintMiB": 56.53193664550781,
+      "residentMiB": 67.65625
+    },
+    {
+      "pid": 50114,
+      "kind": "otherChildren",
+      "name": "node",
+      "footprintMiB": 167.2330551147461,
+      "residentMiB": 230.515625
+    },
+    {
+      "pid": 43691,
+      "kind": "claude",
+      "name": "claude",
+      "footprintMiB": 166.95452117919922,
+      "residentMiB": 421.65625
+    },
+    {
+      "pid": 47391,
+      "kind": "otherChildren",
+      "name": "npm exec shadcn@latest mcp",
+      "footprintMiB": 124.88868713378906,
+      "residentMiB": 159.3125
+    },
+    {
+      "pid": 47393,
+      "kind": "otherChildren",
+      "name": "python",
+      "footprintMiB": 56.46955108642578,
+      "residentMiB": 67.515625
+    },
+    {
+      "pid": 50055,
+      "kind": "otherChildren",
+      "name": "node",
+      "footprintMiB": 167.99840545654297,
+      "residentMiB": 237.03125
+    },
+    {
+      "pid": 43692,
+      "kind": "claude",
+      "name": "claude",
+      "footprintMiB": 206.42327117919922,
+      "residentMiB": 462.078125
+    },
+    {
+      "pid": 47675,
+      "kind": "otherChildren",
+      "name": "npm exec shadcn@latest mcp",
+      "footprintMiB": 130.2635498046875,
+      "residentMiB": 164.53125
+    },
+    {
+      "pid": 47677,
+      "kind": "otherChildren",
+      "name": "python",
+      "footprintMiB": 56.656959533691406,
+      "residentMiB": 67.765625
+    },
+    {
+      "pid": 50086,
+      "kind": "otherChildren",
+      "name": "node",
+      "footprintMiB": 170.28015899658203,
+      "residentMiB": 227.828125
+    },
+    {
+      "pid": 43698,
+      "kind": "claude",
+      "name": "claude",
+      "footprintMiB": 185.59514617919922,
+      "residentMiB": 419.921875
+    },
+    {
+      "pid": 47313,
+      "kind": "otherChildren",
+      "name": "npm exec shadcn@latest mcp",
+      "footprintMiB": 126.15424346923828,
+      "residentMiB": 160.390625
+    },
+    {
+      "pid": 47314,
+      "kind": "otherChildren",
+      "name": "python",
+      "footprintMiB": 56.20397186279297,
+      "residentMiB": 67.21875
+    },
+    {
+      "pid": 49979,
+      "kind": "otherChildren",
+      "name": "node",
+      "footprintMiB": 175.15536499023438,
+      "residentMiB": 238.984375
+    },
+    {
+      "pid": 43715,
+      "kind": "otherChildren",
+      "name": "zsh",
+      "footprintMiB": 4.562889099121094,
+      "residentMiB": 5.765625
+    },
+    {
+      "pid": 46288,
+      "kind": "claude",
+      "name": "claude",
+      "footprintMiB": 180.2514877319336,
+      "residentMiB": 528.359375
+    },
+    {
+      "pid": 48634,
+      "kind": "otherChildren",
+      "name": "npm exec shadcn@latest mcp",
+      "footprintMiB": 118.01293182373047,
+      "residentMiB": 152.71875
+    },
+    {
+      "pid": 48636,
+      "kind": "otherChildren",
+      "name": "python",
+      "footprintMiB": 56.71952819824219,
+      "residentMiB": 67.78125
+    },
+    {
+      "pid": 48637,
+      "kind": "otherChildren",
+      "name": "node",
+      "footprintMiB": 109.66874694824219,
+      "residentMiB": 227.828125
+    },
+    {
+      "pid": 50750,
+      "kind": "otherChildren",
+      "name": "node",
+      "footprintMiB": 175.51480865478516,
+      "residentMiB": 245.453125
+    },
+    {
+      "pid": 46308,
+      "kind": "claude",
+      "name": "claude",
+      "footprintMiB": 172.5482940673828,
+      "residentMiB": 412.75
+    },
+    {
+      "pid": 47384,
+      "kind": "otherChildren",
+      "name": "npm exec shadcn@latest mcp",
+      "footprintMiB": 127.87303924560547,
+      "residentMiB": 162.078125
+    },
+    {
+      "pid": 47385,
+      "kind": "otherChildren",
+      "name": "python",
+      "footprintMiB": 56.641334533691406,
+      "residentMiB": 67.75
+    },
+    {
+      "pid": 49847,
+      "kind": "otherChildren",
+      "name": "node",
+      "footprintMiB": 173.2806396484375,
+      "residentMiB": 244.28125
+    },
+    {
+      "pid": 46368,
+      "kind": "claude",
+      "name": "claude",
+      "footprintMiB": 173.8139419555664,
+      "residentMiB": 430.75
+    },
+    {
+      "pid": 47779,
+      "kind": "otherChildren",
+      "name": "npm exec shadcn@latest mcp",
+      "footprintMiB": 240.44707489013672,
+      "residentMiB": 280.28125
+    },
+    {
+      "pid": 47782,
+      "kind": "otherChildren",
+      "name": "python",
+      "footprintMiB": 55.75068664550781,
+      "residentMiB": 66.875
+    },
+    {
+      "pid": 52163,
+      "kind": "otherChildren",
+      "name": "node",
+      "footprintMiB": 172.0767822265625,
+      "residentMiB": 225.328125
+    },
+    {
+      "pid": 46948,
+      "kind": "claude",
+      "name": "claude",
+      "footprintMiB": 177.2826919555664,
+      "residentMiB": 438.4375
+    },
+    {
+      "pid": 49489,
+      "kind": "otherChildren",
+      "name": "npm exec shadcn@latest mcp",
+      "footprintMiB": 263.0582580566406,
+      "residentMiB": 304.703125
+    },
+    {
+      "pid": 49491,
+      "kind": "otherChildren",
+      "name": "python",
+      "footprintMiB": 55.610107421875,
+      "residentMiB": 66.703125
+    },
+    {
+      "pid": 52294,
+      "kind": "otherChildren",
+      "name": "node",
+      "footprintMiB": 175.06321716308594,
+      "residentMiB": 233.46875
+    },
+    {
+      "pid": 46981,
+      "kind": "claude",
+      "name": "claude",
+      "footprintMiB": 272.23597717285156,
+      "residentMiB": 547.0
+    },
+    {
+      "pid": 49108,
+      "kind": "otherChildren",
+      "name": "npm exec shadcn@latest mcp",
+      "footprintMiB": 125.62306213378906,
+      "residentMiB": 159.796875
+    },
+    {
+      "pid": 49109,
+      "kind": "otherChildren",
+      "name": "python",
+      "footprintMiB": 56.82892608642578,
+      "residentMiB": 67.875
+    },
+    {
+      "pid": 50807,
+      "kind": "otherChildren",
+      "name": "node",
+      "footprintMiB": 169.92073822021484,
+      "residentMiB": 234.515625
+    },
+    {
+      "pid": 47062,
+      "kind": "claude",
+      "name": "claude",
+      "footprintMiB": 189.29827117919922,
+      "residentMiB": 517.046875
+    },
+    {
+      "pid": 48706,
+      "kind": "otherChildren",
+      "name": "npm exec shadcn@latest mcp",
+      "footprintMiB": 118.60663604736328,
+      "residentMiB": 153.4375
+    },
+    {
+      "pid": 48707,
+      "kind": "otherChildren",
+      "name": "python",
+      "footprintMiB": 55.82890319824219,
+      "residentMiB": 66.890625
+    },
+    {
+      "pid": 48708,
+      "kind": "otherChildren",
+      "name": "node",
+      "footprintMiB": 111.52789306640625,
+      "residentMiB": 209.453125
+    },
+    {
+      "pid": 50728,
+      "kind": "otherChildren",
+      "name": "node",
+      "footprintMiB": 152.07547760009766,
+      "residentMiB": 206.171875
+    },
+    {
+      "pid": 47268,
+      "kind": "claude",
+      "name": "claude",
+      "footprintMiB": 226.89215850830078,
+      "residentMiB": 564.734375
+    },
+    {
+      "pid": 49731,
+      "kind": "otherChildren",
+      "name": "npm exec shadcn@latest mcp",
+      "footprintMiB": 118.07552337646484,
+      "residentMiB": 152.71875
+    },
+    {
+      "pid": 49742,
+      "kind": "otherChildren",
+      "name": "python",
+      "footprintMiB": 55.56316375732422,
+      "residentMiB": 66.703125
+    },
+    {
+      "pid": 51209,
+      "kind": "otherChildren",
+      "name": "node",
+      "footprintMiB": 183.874755859375,
+      "residentMiB": 246.03125
+    },
+    {
+      "pid": 47409,
+      "kind": "claude",
+      "name": "claude",
+      "footprintMiB": 193.65778350830078,
+      "residentMiB": 508.875
+    },
+    {
+      "pid": 49830,
+      "kind": "otherChildren",
+      "name": "npm exec shadcn@latest mcp",
+      "footprintMiB": 120.02851104736328,
+      "residentMiB": 154.75
+    },
+    {
+      "pid": 49837,
+      "kind": "otherChildren",
+      "name": "python",
+      "footprintMiB": 56.00068664550781,
+      "residentMiB": 67.125
+    },
+    {
+      "pid": 51339,
+      "kind": "otherChildren",
+      "name": "node",
+      "footprintMiB": 143.41963958740234,
+      "residentMiB": 212.140625
+    },
+    {
+      "pid": 47413,
+      "kind": "claude",
+      "name": "claude",
+      "footprintMiB": 199.98593139648438,
+      "residentMiB": 465.421875
+    },
+    {
+      "pid": 50479,
+      "kind": "otherChildren",
+      "name": "npm exec shadcn@latest mcp",
+      "footprintMiB": 253.94924926757812,
+      "residentMiB": 287.8125
+    },
+    {
+      "pid": 50481,
+      "kind": "otherChildren",
+      "name": "python",
+      "footprintMiB": 57.047607421875,
+      "residentMiB": 68.140625
+    },
+    {
+      "pid": 52319,
+      "kind": "otherChildren",
+      "name": "node",
+      "footprintMiB": 170.7976837158203,
+      "residentMiB": 233.875
+    },
+    {
+      "pid": 47444,
+      "kind": "claude",
+      "name": "claude",
+      "footprintMiB": 183.3139419555664,
+      "residentMiB": 435.9375
+    },
+    {
+      "pid": 50253,
+      "kind": "otherChildren",
+      "name": "npm exec shadcn@latest mcp",
+      "footprintMiB": 119.71610260009766,
+      "residentMiB": 154.390625
+    },
+    {
+      "pid": 50255,
+      "kind": "otherChildren",
+      "name": "python",
+      "footprintMiB": 57.172630310058594,
+      "residentMiB": 68.25
+    },
+    {
+      "pid": 51703,
+      "kind": "otherChildren",
+      "name": "node",
+      "footprintMiB": 138.13825225830078,
+      "residentMiB": 207.296875
+    },
+    {
+      "pid": 47863,
+      "kind": "claude",
+      "name": "claude",
+      "footprintMiB": 222.92347717285156,
+      "residentMiB": 576.96875
+    },
+    {
+      "pid": 50309,
+      "kind": "otherChildren",
+      "name": "npm exec shadcn@latest mcp",
+      "footprintMiB": 119.26297760009766,
+      "residentMiB": 153.921875
+    },
+    {
+      "pid": 50310,
+      "kind": "otherChildren",
+      "name": "python",
+      "footprintMiB": 57.40705108642578,
+      "residentMiB": 68.453125
+    },
+    {
+      "pid": 50311,
+      "kind": "otherChildren",
+      "name": "node",
+      "footprintMiB": 109.43450927734375,
+      "residentMiB": 206.265625
+    },
+    {
+      "pid": 51678,
+      "kind": "otherChildren",
+      "name": "node",
+      "footprintMiB": 151.74771881103516,
+      "residentMiB": 202.0
+    }
+  ]
+}

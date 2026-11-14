@@ -4,6 +4,8 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { GitRepositoryStatus, RpcMethod } from '@matou/contracts'
 
+import { LocaleProvider } from '../i18n/LocaleProvider'
+import { setCurrentLocale } from '../i18n/current'
 import { TerminalHud } from './TerminalHud'
 import type { GitRequestClient } from './GitControlMenu'
 import type { SessionHudView } from '../hierarchy/hierarchy-types'
@@ -12,6 +14,7 @@ import type { SessionEnvironmentActions } from './EnvironmentControlMenu'
 afterEach(() => {
   cleanup()
   vi.useRealTimers()
+  setCurrentLocale('zh-CN')
 })
 
 describe('PRD 02 bottom HUD', () => {
@@ -257,6 +260,26 @@ describe('PRD 02 bottom HUD', () => {
       />)
     expect(container.querySelector('.context-ring-fg')?.getAttribute('stroke')).toBe(color)
     expect(screen.getByText(`${contextPercent}%`)).toBeTruthy()
+  })
+
+  it('shows an honest waiting label when the window size is known but usage is unavailable', () => {
+    const { container } = render(<TerminalHud hud={agent({ contextWindowSize: 1_000_000 })} />)
+
+    const waiting = screen.getByText('等待真实用量')
+    expect(waiting.className).toContain('status-field')
+    expect(waiting.className).toContain('status-priority-7')
+    expect(container.querySelector('.status-context-ring')).toBeNull()
+    expect(screen.queryByText(/^(100|0)%$/)).toBeNull()
+  })
+
+  it('localizes the waiting label and omits it without a window size', () => {
+    render(<LocaleProvider initialLocale="en"><TerminalHud hud={agent({ contextWindowSize: 1_000_000 })} /></LocaleProvider>)
+    expect(screen.getByText('Awaiting usage')).toBeTruthy()
+
+    cleanup()
+    render(<TerminalHud hud={agent()} />)
+    expect(screen.queryByText(/等待真实用量|Awaiting usage/)).toBeNull()
+    expect(screen.queryByText(/^(100|0)%$/)).toBeNull()
   })
 
   it.each([

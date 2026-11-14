@@ -155,6 +155,51 @@ describe('RuntimeRpcRouter', () => {
     })
   })
 
+  it('reads the bound conversation across compaction without loading it or changing provider state', async () => {
+    const workspaceRoot = join(testRoot, 'current-history-workspace')
+    const projectsRoot = join(testRoot, 'claude-projects')
+    await mkdir(workspaceRoot)
+    const directory = join(projectsRoot, encodeClaudeProjectPath(workspaceRoot))
+    await mkdir(directory, { recursive: true })
+    const transcript = [
+      { type: 'user', sessionId: 'bound-history', cwd: workspaceRoot,
+        message: { role: 'user', content: 'Before compaction: original user message' } },
+      { type: 'assistant', sessionId: 'bound-history', cwd: workspaceRoot,
+        message: { role: 'assistant', content: [{ type: 'text', text: 'Original complete response' }] } },
+      { type: 'system', subtype: 'compact_boundary', sessionId: 'bound-history', cwd: workspaceRoot },
+      { type: 'user', sessionId: 'bound-history', cwd: workspaceRoot, isCompactSummary: true,
+        message: { role: 'user', content: 'Compacted summary' } },
+      { type: 'assistant', sessionId: 'bound-history', cwd: workspaceRoot,
+        message: { role: 'assistant', content: 'After restart' } }
+    ].map((row) => JSON.stringify(row)).join('\n')
+    const path = join(directory, 'bound-history.jsonl')
+    await writeFile(path, transcript)
+    router = new RuntimeRpcRouter(database, new NotificationProjection(), { projectsRoot })
+    const initial = await router.handle('hierarchy.bootstrap-window', payload('history-bootstrap', {
+      windowId: 'history-window', defaultRootDirectory: workspaceRoot,
+      defaultName: 'history-workspace', now: 1
+    })) as { session: { id: string } }
+    const sessionId = initial.session.id
+    await expect(router.handle('claude-sessions.detail', { sessionId, current: true }))
+      .rejects.toThrow('No saved conversation')
+    await router.handle('claude-sessions.load', payload('bind-history', {
+      sessionId, providerSessionId: 'bound-history', permissionMode: 'default', now: 2
+    }))
+    // History remains readable even when a provider cannot currently resume it.
+    database.run("UPDATE provider_bindings SET resume_state = 'failed', invalidated_at = 3 WHERE session_id = ?", sessionId)
+    const before = database.all('SELECT * FROM provider_bindings WHERE session_id = ?', sessionId)
+    const result = await router.handle('claude-sessions.detail', {
+      sessionId, current: true, providerSessionId: 'wrong-conversation', limit: 200
+    }) as { providerSessionId: string; events: Array<{ text: string }> }
+    expect(result.providerSessionId).toBe('bound-history')
+    expect(result.events.map(({ text }) => text)).toEqual([
+      'Before compaction: original user message', 'Original complete response',
+      'Compacted summary', 'After restart'
+    ])
+    expect(database.all('SELECT * FROM provider_bindings WHERE session_id = ?', sessionId)).toEqual(before)
+    expect(await readFile(path, 'utf8')).toBe(transcript)
+  })
+
   it('pages complete Claude history and searches events beyond the first preview window', async () => {
     const workspaceRoot = join(testRoot, 'paged-history-workspace')
     const projectsRoot = join(testRoot, 'claude-projects')

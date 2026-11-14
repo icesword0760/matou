@@ -5,12 +5,14 @@
  * License: ../../../../packages/contracts/third-party/subscription-accounts-reference-LICENSE
  * Pure projection only; never writes user settings or launches a process.
  */
+
 export type ModelRole = 'opus' | 'sonnet' | 'haiku';
 export type SubscriptionKind = 'chatgpt' | 'antigravity';
 export interface UpstreamModel {
   id: string;
   displayName?: string;
   contextWindow?: number;
+  maxContextWindow?: number;
   maxOutputTokens?: number;
 }
 export interface RoleModels extends Partial<Record<ModelRole, UpstreamModel>> {
@@ -18,6 +20,7 @@ export interface RoleModels extends Partial<Record<ModelRole, UpstreamModel>> {
   smallFast?: UpstreamModel;
 }
 export interface ClaudeLaunchInput {
+  contextWindow?: number;
   subscription: SubscriptionKind;
   accountPrefix: 'matou-chatgpt' | 'matou-antigravity';
   routerUrl: string;
@@ -122,7 +125,8 @@ export function buildClaudeLaunch(input: ClaudeLaunchInput): ClaudeLaunchResult 
     const key = `ANTHROPIC_DEFAULT_${role.toUpperCase()}_MODEL`;
     env[key] = `${input.accountPrefix}/${alias}`;
     env[`${key}_NAME`] = text(model.displayName) ? model.displayName.trim() : stripMarker(model.id);
-    env[`${key}_DESCRIPTION`] = [input.providerName, stripMarker(model.id), ...(tokens(model.contextWindow) ? [formatContextWindow(model.contextWindow)] : [])].join(' · ');
+    const contextWindow = input.contextWindow ?? model.contextWindow;
+    env[`${key}_DESCRIPTION`] = [input.providerName, stripMarker(model.id), ...(tokens(contextWindow) ? [formatContextWindow(contextWindow)] : [])].join(' · ');
     if (!aliases.some(a => a.alias === stripMarker(alias))) aliases.push({ name: stripMarker(model.id), alias: stripMarker(alias), fork: true });
   }
   // Fable is not offered by this card. Internal Fable selectors must resolve
@@ -144,8 +148,8 @@ export function buildClaudeLaunch(input: ClaudeLaunchInput): ClaudeLaunchResult 
   };
   // The running client cannot shrink its window when /model switches tiers.
   // Protect every selectable tier from the start, regardless of the main role.
-  const windows = roles.map(role => resolved[role]!.contextWindow);
-  // Claude Code 2.1.323 autoCompactWindow schema allows 100000..1000000. Never raise a smaller upstream window.
+  const windows = roles.map(role => input.contextWindow ?? resolved[role]!.contextWindow);
+  // Use the smallest catalog window until the per-session preference is applied.
   if (windows.some(w => tokens(w) && w < 100_000)) return { ok: false, error: 'unsupported-context-window' };
   if (windows.every(tokens)) {
     const window = Math.min(...windows, 1_000_000);

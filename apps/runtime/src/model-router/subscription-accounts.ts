@@ -13,6 +13,8 @@ import { ProviderConfigStore } from '../provider-config/provider-config-store'
 import { ModelRouterManager, type RouterLease } from './manager'
 import { RouterManagementClient, type RouterCredential } from './management-client'
 import { OAuthLoopbackFlow, type OAuthOutcome } from './oauth'
+import { ANTIGRAVITY_CLIENT_USER_AGENT, credentialCarriesAntigravityIdentity } from './antigravity-client'
+import { CODEX_CLIENT_HEADERS, credentialCarriesCodexIdentity } from './codex-client'
 import { buildClaudeLaunch, toClientModelId, FABLE_FALLBACK_ALIAS, type ClaudeLaunchInput, type ModelAlias } from './claude-launch'
 import {
   parseCredentialSummary, parseChatGptPlan, readChatGptUsage, readChatGptModels,
@@ -54,6 +56,7 @@ interface Attempt {
   flow: OAuthLoopbackFlow
   state: string
   authorizationUrl: string
+  baseline: ReadonlyMap<string, string>
   browserOpenRevision: number
   credential?: RouterCredential
   done: Promise<void>
@@ -82,6 +85,9 @@ interface Options {
   openAuthorizationUrl(provider: SubscriptionProvider, url: string): Promise<void>
   loginTimeoutMs?: number
   callbackPorts?: Partial<Record<SubscriptionProvider, number>>
+  /** How long a settings read may reuse plan/quota before probing again.
+   * Login, save and explicit model refresh always read fresh values. */
+  detailsTtlMs?: number
   /** Injectable OS facts for the macOS 14/15 compatibility boundary. */
   platform?: NodeJS.Platform
   systemVersion?(): string
@@ -97,6 +103,9 @@ export class SubscriptionAccounts {
   readonly #attempts = new Map<string, Attempt>()
   readonly #owners = new Map<string, Owner>()
   readonly #details = new Map<string, SubscriptionAccountDetails>()
+  readonly #detailsAt = new Map<string, number>()
+  readonly #detailsIdentity = new Map<string, string>()
+  readonly #detailsTtlMs: number
   readonly #credentialStatus = new Map<string, SubscriptionAccountSummary>()
   #queue: Promise<unknown> = Promise.resolve()
   #startup: Promise<void> | undefined
@@ -106,6 +115,7 @@ export class SubscriptionAccounts {
   readonly #unsubscribeRouter: () => void
   constructor(options: Options) {
     this.#options = options
+    this.#detailsTtlMs = options.detailsTtlMs ?? 5 * 60_000
     // Darwin 24 is macOS 15. Only gate older macOS; other platforms keep their
     // existing behavior. No user-agent or persisted compatibility preference.
     this.#subscriptionSupported = (options.platform ?? process.platform) !== 'darwin' ||
@@ -141,6 +151,7 @@ export class SubscriptionAccounts {
           this.#markNeedsSignIn(row.subscription.credentialRef.name, row.subscription.account)
           throw new SubscriptionLaunchError('Subscription credential is missing or no longer valid', 'needs-sign-in')
         }
+        await this.#ensureClientIdentity(client, file)
         try {
           // The credential list is itself a runtime-auth-manager read. An
           // already active exact entry need not be fetched a second time.
@@ -193,6 +204,42 @@ export class SubscriptionAccounts {
     const { reason: _reason, ...summary } = account
     this.#credentialStatus.set(name, { ...summary, status: 'needs-sign-in' })
     this.#notifyChanged()
+  }
+
+  /** Probes and inference carry the same OAuth token, so they must carry the
+   * same client identity. Reading the credential first keeps repeated launches
+   * from rewriting an identical value and waking the engine watcher. A pin
+   * failure is never allowed to block sign-in, save or launch. */
+  async #ensureClientIdentity(client: RouterManagementClient, file: RouterCredential): Promise<void> {
+    try {
+      if (file.provider === 'antigravity') {
+        if (!await credentialCarriesAntigravityIdentity(this.#options.dataRoot, file)) await client.setUserAgent(file.name, ANTIGRAVITY_CLIENT_USER_AGENT)
+      } else if (file.provider === 'codex') {
+        if (!await credentialCarriesCodexIdentity(this.#options.dataRoot, file)) await client.setHeaders(file.name, CODEX_CLIENT_HEADERS)
+      }
+    } catch { /* Best-effort hardening: the fixed probes still agree with each other. */ }
+  }
+
+  /** Store one full or partial details read with the credential identity it
+   * belongs to. A later file rewrite (new auth_index, token rotation) makes the
+   * entry stale even if the TTL has not elapsed. */
+  #rememberDetails(name: string, identity: string, details: SubscriptionAccountDetails): void {
+    this.#details.set(name, details)
+    this.#detailsAt.set(name, Date.now())
+    this.#detailsIdentity.set(name, identity)
+  }
+  #freshDetails(file: RouterCredential): SubscriptionAccountDetails | undefined {
+    if (this.#detailsTtlMs <= 0) return undefined
+    const details = this.#details.get(file.name)
+    if (!details) return undefined
+    if (this.#detailsIdentity.get(file.name) !== credentialFingerprint(file)) return undefined
+    if (Date.now() - (this.#detailsAt.get(file.name) ?? 0) >= this.#detailsTtlMs) return undefined
+    return details
+  }
+  #forgetDetails(name: string): void {
+    this.#details.delete(name)
+    this.#detailsAt.delete(name)
+    this.#detailsIdentity.delete(name)
   }
 
   initialize(): Promise<void> {
@@ -281,6 +328,11 @@ export class SubscriptionAccounts {
       const client = new RouterManagementClient(lease.connection)
       let state: string | undefined
       try {
+        const baseline = new Map(
+          (await client.credentials())
+            .filter(file => file.provider === input.provider)
+            .map(file => [file.name, credentialFingerprint(file)])
+        )
         const login = await client.startOAuth(input.provider)
         state = login.state
         const flow = await OAuthLoopbackFlow.start({
@@ -289,7 +341,7 @@ export class SubscriptionAccounts {
           ...(this.#options.callbackPorts?.[input.provider] === undefined ? {} : { callbackPort: this.#options.callbackPorts[input.provider] })
         })
         const view: SubscriptionLoginView = { attemptId: randomUUID(), provider: input.provider, status: 'waiting' }
-        const attempt: Attempt = { owner, view, lease, client, flow, state, authorizationUrl: login.url, browserOpenRevision: 0, done: Promise.resolve() }
+        const attempt: Attempt = { owner, view, lease, client, flow, state, authorizationUrl: login.url, baseline, browserOpenRevision: 0, done: Promise.resolve() }
         this.#attempts.set(view.attemptId, attempt)
         attempt.done = flow.completion.then(outcome => this.#completed(attempt, outcome)).catch(() => undefined)
         this.#openBrowser(attempt)
@@ -338,9 +390,10 @@ export class SubscriptionAccounts {
     }
     try {
       const credential = await this.#serial(async () => {
-        const file = (await attempt.client.credentials()).find(value => value.id === outcome.authId || value.name === outcome.authId)
+        const file = await this.#resolveAttemptCredential(attempt, outcome.authId)
         if (!file || file.provider !== attempt.view.provider) throw new Error('Signed-in credential has not been adopted')
         attempt.credential = file
+        await this.#ensureClientIdentity(attempt.client, file)
         if (!await this.#isReferenced(file.name)) {
           await attempt.client.setDisabled(file.name, true)
           await attempt.client.setPrefix(file.name, '')
@@ -362,7 +415,7 @@ export class SubscriptionAccounts {
         if (this.#cancelled(attempt)) { await this.#cleanupDraft(attempt); return }
         attempt.view.details = details
         attempt.view.status = 'ready'
-        this.#details.set(credential.name, details)
+        this.#rememberDetails(credential.name, credentialFingerprint(credential), details)
       })
     } catch {
       await this.#serial(async () => {
@@ -387,8 +440,22 @@ export class SubscriptionAccounts {
     } else {
       await attempt.client.setDisabled(file.name, true).catch(() => undefined)
       await attempt.client.deleteCredential(file.name).catch(() => undefined)
-      this.#details.delete(file.name)
+      this.#forgetDetails(file.name)
     }
+  }
+  async #resolveAttemptCredential(attempt: Attempt, authId?: string, waitMs = 2_000): Promise<RouterCredential | undefined> {
+    const deadline = Date.now() + waitMs
+    do {
+      const files = (await attempt.client.credentials()).filter(value => value.provider === attempt.view.provider)
+      const matched = authId
+        ? files.find(value => value.id === authId || value.name === authId)
+        : files.find(value => !attempt.baseline.has(value.name)) ??
+          files.find(value => credentialFingerprint(value) !== attempt.baseline.get(value.name))
+      if (matched) return matched
+      if (Date.now() + 50 > deadline) break
+      await delay(50)
+    } while (Date.now() < deadline)
+    return undefined
   }
   async #collectCancelledCredential(attempt: Attempt): Promise<void> {
     // The official cancel endpoint returns cancelled:false once the disk commit
@@ -398,8 +465,8 @@ export class SubscriptionAccounts {
     const deadline = Date.now() + 8_000
     do {
       const status = await attempt.client.oauthStatus(attempt.state).catch(() => undefined)
-      if (status?.auth_id) {
-        const file = (await attempt.client.credentials()).find(file => file.id === status.auth_id || file.name === status.auth_id)
+      if (status?.auth_id || (status?.status === 'ok' && attempt.view.provider === 'antigravity')) {
+        const file = await this.#resolveAttemptCredential(attempt, status.auth_id, 500)
         if (file) attempt.credential = file
         return
       }
@@ -437,6 +504,7 @@ export class SubscriptionAccounts {
       try {
         const file = attempt?.credential ?? (await client.credentials()).find(value => value.name === previous?.subscription.credentialRef.name)
         if (!file) throw new Error('Subscription credential is missing')
+        await this.#ensureClientIdentity(client, file)
         const details = attempt?.view.details ?? await this.#readDetails(client, file)
         if (!details || !roles.every(role => typeof input.modelMapping?.[role] === 'string' && details.models.some(model => model.id === input.modelMapping[role]))) throw new Error('Selected model is not available')
         const mapping = previous && attempt ? previous.modelMapping : input.modelMapping
@@ -459,11 +527,12 @@ export class SubscriptionAccounts {
           const result = await this.#options.store.adoptSubscription({
             ...(input.id ? { id: input.id } : {}), name: previous && attempt ? previous.name : input.name,
             modelMapping: selected,
-            subscription: { provider, credentialRef: { name: file.name, authIndex: adopted.authIndex }, account: details.account, modelMetadata: details.models.filter(model => Object.values(selected).includes(model.id)) }
+            ...((previous && attempt ? previous.effortMapping : input.effortMapping) ? { effortMapping: (previous && attempt ? previous.effortMapping : input.effortMapping)! } : {}),
+            subscription: { provider, credentialRef: { name: file.name, authIndex: adopted.authIndex }, account: details.account, modelMetadata: details.models }
           })
           committed = true
           this.#options.manager.rememberModelAliases(provider, aliases)
-          this.#details.set(file.name, details)
+          this.#rememberDetails(file.name, credentialFingerprint(file), details)
           this.#credentialStatus.set(file.name, details.account)
           if (attempt) { attempt.view.status = 'saved'; attempt.lease.release() }
           if (replacing) await client.deleteCredential(oldRef).catch(() => undefined)
@@ -495,7 +564,7 @@ export class SubscriptionAccounts {
         let result: ProviderConfigSnapshot
         try { result = await this.#options.store.delete(cli, providerId) }
         catch (error) { if (credentialExists) await client.setDisabled(saved.subscription.credentialRef.name, false).catch(() => undefined); throw error }
-        this.#details.delete(saved.subscription.credentialRef.name)
+        this.#forgetDetails(saved.subscription.credentialRef.name)
         this.#credentialStatus.delete(saved.subscription.credentialRef.name)
         this.#options.manager.rememberModelAliases(saved.subscription.provider, [])
         await client.setAliases(saved.subscription.provider, []).catch(() => undefined)
@@ -527,8 +596,18 @@ export class SubscriptionAccounts {
         await Promise.all(rows.map(async row => {
           const file = credentials.find(file => file.name === row.subscription.credentialRef.name)
           const statusAtRead = this.#credentialStatus.get(row.subscription.credentialRef.name)
-          const details = file ? await this.#readDetails(client, file) : { account: { ...row.subscription.account, status: 'needs-sign-in' as const }, models: [] }
+          const cachedDetails = file ? this.#freshDetails(file) : undefined
+          // Settings only needs plan/quota. Reuse the in-memory model list, then
+          // the list saved at login, so fetchAvailableModels is not repeated.
+          const knownModels = file && this.#details.get(file.name)?.models.length
+            ? this.#details.get(file.name)!.models
+            : row.subscription.modelMetadata
+          const details = file
+            ? cachedDetails ?? await this.#readDetails(client, file, knownModels.length === 0, knownModels)
+            : { account: { ...row.subscription.account, status: 'needs-sign-in' as const }, models: [] }
+          if (file && !cachedDetails) this.#rememberDetails(file.name, credentialFingerprint(file), details)
           round.accounts.set(row.id, { ref: row.subscription.credentialRef.name, details })
+          if (details.models.length) await this.#options.store.cacheSubscriptionModels(row.id, row.subscription.credentialRef.name, details.models)
           // A slow settings read must not erase a newer activation failure.
           if (this.#credentialStatus.get(row.subscription.credentialRef.name) === statusAtRead) this.#credentialStatus.set(row.subscription.credentialRef.name, details.account)
         }))
@@ -579,7 +658,7 @@ export class SubscriptionAccounts {
         const previous = attempt?.view.details ?? this.#details.get(name)
         const details: SubscriptionAccountDetails = { ...(previous ?? { account: saved!.subscription.account }), models }
         if (attempt) attempt.view.details = details
-        this.#details.set(name, details)
+        this.#rememberDetails(name, credentialFingerprint(file), details)
         return structuredClone(details)
       })
     } finally { lease.release() }
@@ -593,7 +672,7 @@ export class SubscriptionAccounts {
     const models = readChatGptModels(response)
     return availableModels(models.ok ? models.value : undefined, registered ?? [], file.provider)
   }
-  async #readDetails(client: RouterManagementClient, file: RouterCredential): Promise<SubscriptionAccountDetails> {
+  async #readDetails(client: RouterManagementClient, file: RouterCredential, includeModels = true, cachedModels = this.#details.get(file.name)?.models): Promise<SubscriptionAccountDetails> {
     const parsed = parseCredentialSummary(file)
     const summary = parsed.ok ? parsed.value : {}
     const mapped = mapAccountStatus({ ...summary, source: 'credential' })
@@ -605,20 +684,23 @@ export class SubscriptionAccounts {
     }
     const safe = <T>(operation: Promise<T>) => operation.catch(() => undefined)
     if (file.provider === 'codex') {
-      const [usageResponse, models] = await Promise.all([safe(client.apiCall('chatgpt-usage', file)), this.#readModels(client, file)])
+      const [usageResponse, models] = await Promise.all([
+        safe(client.apiCall('chatgpt-usage', file)),
+        includeModels ? this.#readModels(client, file) : Promise.resolve(cachedModels ?? [])
+      ])
       const usage = readChatGptUsage(usageResponse)
       if (usage.ok && usage.value.plan) account.plan = usage.value.plan
       return { account, models, ...(usage.ok && usage.value.windows.length ? { quota: usage.value.windows } : {}) }
     }
     const response = readAntigravityAccount(await safe(client.apiCall('antigravity-account', file)))
-    const project = response.ok ? response.value.project ?? undefined : typeof file.project_id === 'string' ? file.project_id : undefined
+    const project = (response.ok ? response.value.project : undefined) ?? (typeof file.project_id === 'string' ? file.project_id : undefined)
     if (response.ok) {
       if (response.value.plan) account.plan = response.value.plan
       if (response.value.eligibility === 'ineligible') { account.status = 'account-unavailable'; if (response.value.reason) account.reason = response.value.reason }
     }
     const [quotaResponse, models] = await Promise.all([
       project ? safe(client.apiCall('antigravity-quota', file, project)) : Promise.resolve(undefined),
-      this.#readModels(client, file, project)
+      includeModels ? this.#readModels(client, file, project) : Promise.resolve(cachedModels ?? [])
     ])
     const quota = readAntigravityQuota(quotaResponse)
     return { account, models, ...(quota.ok ? { quota: quota.value.map(value => ({ name: value.name, group: value.group, usedPercent: value.usedPercent, ...(value.resetsAt ? { resetsAt: value.resetsAt } : {}) })) } : {}) }
@@ -669,11 +751,18 @@ function availableModels(models: SubscriptionModel[] | undefined, registered: Ar
     // Codex definitions are the routing engine's capability contract. The
     // account endpoint may carry different limits and lengthy instructions.
     const metadata = provider === 'codex' ? definition : model
+    const displayName = metadata.displayName ?? definition.displayName
+    const contextWindow = metadata.contextWindow ?? definition.contextWindow
+    const maxContextWindow = metadata.maxContextWindow ?? model.maxContextWindow ?? definition.maxContextWindow
+    const supportedEfforts = metadata.supportedEfforts ?? model.supportedEfforts ?? definition.supportedEfforts
+    const maxOutputTokens = metadata.maxOutputTokens ?? definition.maxOutputTokens
     return {
-      id: model.id, ...(metadata.displayName ? { displayName: metadata.displayName } : {}),
+      id: model.id, ...(displayName ? { displayName } : {}),
       ...(metadata.ownedBy ? { ownedBy: provider === 'antigravity' && metadata.ownedBy === 'Codex' ? 'Antigravity' : metadata.ownedBy } : {}),
-      ...(metadata.contextWindow ? { contextWindow: metadata.contextWindow } : {}),
-      ...(metadata.maxOutputTokens ? { maxOutputTokens: metadata.maxOutputTokens } : {})
+      ...(contextWindow ? { contextWindow } : {}),
+      ...(maxContextWindow ? { maxContextWindow } : {}),
+      ...(supportedEfforts ? { supportedEfforts } : {}),
+      ...(maxOutputTokens ? { maxOutputTokens } : {})
     }
   })
 }
@@ -706,4 +795,7 @@ async function waitForAliases(client: RouterManagementClient, name: string, pref
 function credentialNeedsSignIn(file: RouterCredential): boolean {
   const parsed = parseCredentialSummary(file)
   return mapAccountStatus({ ...(parsed.ok ? parsed.value : {}), source: 'credential' }).status === 'needs-sign-in'
+}
+function credentialFingerprint(file: RouterCredential): string {
+  return JSON.stringify([file.auth_index, file.updated_at, file.modtime, file.adopted_at, file.access_token_expires_at, file.size])
 }

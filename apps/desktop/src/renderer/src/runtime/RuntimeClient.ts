@@ -196,7 +196,11 @@ export class RuntimeClient {
   ): Promise<T> {
     await this.whenReady()
     const requestId = crypto.randomUUID()
-    const timeoutMs = options.timeoutMs ?? (method === 'provider-config.subscription.login-start' ? 30_000 : this.#requestTimeoutMs)
+    // Activation includes router preparation and existing-session restarts.
+    // Keep ordinary reads fast without cancelling a committed provider switch.
+    const timeoutMs = options.timeoutMs ?? (method === 'provider-config.activate'
+      ? 120_000
+      : method === 'provider-config.subscription.login-start' ? 30_000 : this.#requestTimeoutMs)
     return new Promise<T>((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.#requests.delete(requestId)

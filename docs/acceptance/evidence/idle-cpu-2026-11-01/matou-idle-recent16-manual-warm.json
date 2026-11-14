@@ -1,0 +1,37 @@
+{
+  "seconds": 61.45979500000249,
+  "claudeCount": 16,
+  "cpuPercent": {
+    "main": 0.3091451899570967,
+    "helpers": 2.098933131813949,
+    "renderer": 1.0901435645855317,
+    "claude": 8.005233339941665,
+    "other": 0.1464371952428351
+  },
+  "observedGitPids": 0,
+  "claudeRssMiB": 7739.78125,
+  "claudeThreads": {
+    "main/unnamed": 2.8779806375858046,
+    "JSCWarmUp": 0.0041832225441036635,
+    "mi-scavenger": 1.656707445900135,
+    "JIT Worklist Helper Thread": 0.1822703769187572,
+    "Bun Pool 0": 0.2307199365048228,
+    "Bun Pool 1": 0.18930587061020182,
+    "Bun Pool 2": 0.17245745775754007,
+    "Bun Pool 3": 0.17118508123887452,
+    "HTTP Client": 0.022901150256032305,
+    "Bun Pool 4": 0.2166164075229906,
+    "Bun Pool 5": 0.18876730714769763,
+    "Bun Pool 6": 0.1875941825058078,
+    "Bun Pool 7": 0.13384522353189865,
+    "Bun Pool 8": 0.24002195256263717,
+    "Bun Pool 9": 0.14363210941396148,
+    "Bun Pool 10": 0.18830521644270912,
+    "CFThreadLoop": 0.00011552267624712568,
+    "Bun Pool 11": 0.14758916784541232,
+    "Bun Pool 12": 0.14592141089959115,
+    "Bun Pool 13": 0.11350509711266882,
+    "Heap Helper Thread": 0.008327395169475903
+  },
+  "note": "process CPU excludes exited children; thread CPU excludes vanished/reused threads and is diagnostic only"
+}

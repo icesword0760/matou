@@ -346,9 +346,16 @@ export class SessionHudRegistry {
       if (effort) current.effort = effort
       current.providerModelObserved = true
     }
-    const contextPercent = numeric(nested(payload.context_window, 'used_percentage')) ??
-      numeric(nested(payload.contextWindow, 'usedPercentage')) ?? derivedContextPercent(payload)
-    if (contextPercent !== undefined) current.contextPercent = Math.round(contextPercent)
+    const contextWindow = object(payload.context_window) ?? object(payload.contextWindow)
+    const contextPercent = numeric(contextWindow?.used_percentage) ??
+      numeric(contextWindow?.usedPercentage) ?? derivedContextPercent(payload)
+    if (contextPercent !== undefined) {
+      current.contextPercent = Math.round(contextPercent)
+    } else if (contextWindow && [
+      'used_percentage', 'usedPercentage', 'current_usage', 'currentUsage'
+    ].some((key) => Object.prototype.hasOwnProperty.call(contextWindow, key) && contextWindow[key] === null)) {
+      delete current.contextPercent
+    }
     const contextWindowSize = numeric(nested(payload.context_window, 'context_window_size')) ??
       numeric(nested(payload.contextWindow, 'contextWindowSize'))
     if (contextWindowSize !== undefined && contextWindowSize > 0) current.contextWindowSize = contextWindowSize

@@ -24,17 +24,18 @@ describe('Model switch settings in English', () => {
     expect(screen.queryByText(CLI_DEFAULT_MODEL)).toBeNull()
   })
 
-  it('offers the language category with its three options', async () => {
+  it('offers the language and time zone category with its options', async () => {
     render(<LocaleProvider initialLocale="en">
       <ModelSwitchSettings client={fakeClient()} onClose={vi.fn()} />
     </LocaleProvider>)
 
-    await userEvent.setup().click(await screen.findByRole('button', { name: 'Language' }))
+    await userEvent.setup().click(await screen.findByRole('button', { name: 'Language & time zone' }))
 
-    expect(screen.getByRole('heading', { name: 'Language' })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'Language & time zone' })).toBeTruthy()
     expect(screen.getByRole('radio', { name: 'Follow system' })).toBeTruthy()
     expect(screen.getByRole('radio', { name: '中文' })).toBeTruthy()
     expect(screen.getByRole('radio', { name: 'English' })).toBeTruthy()
+    expect(screen.getByLabelText('Time zone')).toBeTruthy()
     expect(screen.getByText(
       'The interface switches immediately; runtime messages switch after a restart'
     )).toBeTruthy()

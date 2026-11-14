@@ -28,3 +28,7 @@ __pycache__/
 
 # Worktree-local pinned router and task dependency caches
 /.cache/
+
+# Local tool caches and dev server pid files
+.impeccable/
+server.pid

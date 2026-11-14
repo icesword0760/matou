@@ -321,6 +321,28 @@ describe('Terminal pane', () => {
     expect(onLoadSession).toHaveBeenLastCalledWith('session-1')
   })
 
+  it('offers read-only session history only on Claude and Antigravity cards', async () => {
+    const onViewHistory = vi.fn()
+    const props = fixture()
+    const view = render(<TerminalPane {...props} onViewHistory={onViewHistory} />)
+
+    const history = screen.getByRole('button', { name: '查看“Claude 主会话”的会话历史' })
+    expect(history.getAttribute('title')).toBe('会话历史')
+    expect(history.querySelector('svg')?.dataset.icon).toBe('history')
+    await userEvent.setup().click(history)
+    expect(onViewHistory).toHaveBeenCalledWith('session-1')
+
+    view.rerender(<TerminalPane {...props}
+      session={{ ...props.session, kind: 'antigravity', title: 'Agy 主会话' }}
+      onViewHistory={onViewHistory} />)
+    expect(screen.getByRole('button', { name: '查看“Agy 主会话”的会话历史' })).toBeTruthy()
+
+    view.rerender(<TerminalPane {...props}
+      session={{ ...props.session, kind: 'shell', title: 'Shell' }}
+      onViewHistory={onViewHistory} />)
+    expect(screen.queryByRole('button', { name: '查看“Shell”的会话历史' })).toBeNull()
+  })
+
   it('offers a sibling Fork on a Shell child when its common Claude parent is fork-ready', async () => {
     const onForkSibling = vi.fn()
     const props = fixture()

@@ -10,6 +10,7 @@ import type { RuntimeMessage } from '@matou/contracts'
 
 import { PtySession, SessionEgressFrozenError } from './pty-session'
 import { readSessionJournalBounds } from '../journal/journal-range-reader'
+import { SegmentJournal } from '../journal/segment-journal'
 import { CALLER_SESSION_MARKERS } from './independent-session-environment'
 
 const roots: string[] = []
@@ -114,6 +115,72 @@ setInterval(() => {}, 1_000)
 })
 
 describe('PtySession live catch-up', () => {
+  it.each([true, false])('restores a previous Agent viewport before redraw (checkpoint: %s)', async (withCheckpoint) => {
+    const root = await mkdtemp(join(tmpdir(), 'matou-pty-screen-recovery-'))
+    roots.push(root)
+    const executable = join(root, 'redrawing-provider.sh')
+    await writeFile(executable, "#!/bin/sh\nprintf '\\033[2J\\033[Hnew provider output'\nsleep 30\n")
+    await chmod(executable, 0o755)
+    const journal = await SegmentJournal.open(root, 'agent-screen-recovery')
+    const encode = (text: string) => new TextEncoder().encode(text)
+    const splitUTF8 = encode('旧输出')
+    await journal.appendOutput(1, encode('first run output\r\n'))
+    await journal.appendResize(2, 84, 5)
+    await journal.appendOutput(3, splitUTF8.subarray(0, 1))
+    await journal.appendOutput(4, splitUTF8.subarray(1))
+    await journal.appendExit(5, 0)
+    await journal.close()
+
+    const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    const messages: RuntimeMessage[] = []
+    const initialSink = (message: RuntimeMessage) => { messages.push(message) }
+    let session: PtySession | undefined
+    let output = ''
+    try {
+      session = await PtySession.create({
+        sessionId: 'agent-screen-recovery', executionContextId: 'local-default',
+        profile: 'claude-code', cols: 80, rows: 6, cwd: root, dataRoot: root,
+        send: initialSink,
+        onOutput: data => { output += data },
+        screenRecovery: { initialGrid: { cols: 80, rows: 6 }, loadCheckpoint: async watermark => {
+          expect(watermark).toEqual({ terminalSequence: 5, domainEventSequence: 0 })
+          return withCheckpoint ? {
+            terminalSequence: 1, screenEpoch: 4, cols: 80, rows: 6,
+            snapshot: encode('first run output\r\n')
+          } : undefined
+        } }
+      })
+      await waitUntil(() => output.includes('new provider output'))
+      const screen = await session.captureReplayScreen()
+      const snapshot = new TextDecoder().decode(screen.snapshot)
+      expect(snapshot.match(/first run output/g)).toHaveLength(1)
+      expect(snapshot).toContain('旧输出')
+      expect(snapshot).toContain('new provider output')
+      expect(screen).toMatchObject({ cols: 80, rows: 6, screenEpoch: withCheckpoint ? 4 : 0 })
+      expect((await session.snapshotScreen()).text).toBe('new provider output')
+      expect((await session.readFrames()).find(frame => frame.sequence === 6))
+        .toEqual({ kind: 'resize', sequence: 6, cols: 80, rows: 6 })
+      const boundary = messages.find(message => message.type === 'terminal.data')
+      expect(boundary).toMatchObject({ sequence: 7 })
+      expect(output).not.toContain('\x1b[?1049l')
+      const replacementMessages: RuntimeMessage[] = []
+      const replacementSink = (message: RuntimeMessage) => { replacementMessages.push(message) }
+      expect(session.replaceOutputSink(initialSink, replacementSink)).toBe(true)
+      session.detach(replacementSink)
+      const deliveredBeforeDetach = messages.length
+      session.display('detached output stays in history')
+      await session.readFrames()
+      expect(messages).toHaveLength(deliveredBeforeDetach)
+      expect(replacementMessages).toHaveLength(0)
+      expect(new TextDecoder().decode((await session.captureReplayScreen()).snapshot))
+        .toContain('detached output stays in history')
+    } finally {
+      await session?.shutdownForRuntime({ gracePeriodMs: 100 })
+      restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
+    }
+  })
+
   it('buffers output beyond one stable replay boundary instead of making replay chase a moving tail', async () => {
     const root = await mkdtemp(join(tmpdir(), 'matou-pty-replay-barrier-'))
     roots.push(root)

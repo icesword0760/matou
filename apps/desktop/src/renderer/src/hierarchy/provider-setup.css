@@ -14,7 +14,7 @@
 .provider-setup button, .provider-setup input { font: inherit; }
 .provider-setup button, .provider-result button { cursor: pointer; }
 .provider-setup button:disabled, .model-settings button:disabled { cursor: default; opacity: .55; }
-.provider-setup button:focus-visible, .provider-setup summary:focus-visible, .provider-result button:focus-visible { outline: 3px solid #b9d8ff; outline-offset: 2px; }
+.provider-setup button:focus-visible, .provider-result button:focus-visible { outline: 3px solid #b9d8ff; outline-offset: 2px; }
 .provider-setup__header { display: flex; align-items: center; gap: 12px; padding: 24px 26px 20px; flex: none; border-bottom: 1px solid #edf0f4; }
 .provider-setup__header > div { flex: 1; }
 .provider-setup__header h2 { margin: 0; font-size: 21px; line-height: 1.35; letter-spacing: -.35px; }
@@ -58,17 +58,29 @@
 .provider-key-input { position: relative; }
 .provider-key-input input { padding-right: 44px; }
 .provider-key-input button { position: absolute; right: 5px; top: 5px; width: 34px; height: 34px; color: #667991; background: transparent; border: 0; border-radius: 7px; font-size: 20px; }
-.provider-more { border-radius: 10px; background: #f1f4f8; margin-top: 6px; }
-.provider-more summary { padding: 14px 16px; cursor: pointer; font-size: 13px; font-weight: 600; }
-.provider-more summary small { display: block; font-weight: 400; font-size: 11px; color: #8190a4; margin: 5px 0 0 14px; }
-.provider-more > div { padding: 2px 16px 16px; }
-.provider-mapping { display: flex; align-items: center; gap: 10px; margin-top: 9px; font-size: 12px; }
-.provider-mapping input { height: 36px; margin-left: auto; width: 78%; font-size: 12px; }
+.provider-mapping { display: grid; grid-template-columns: 58px minmax(0, 1fr) 132px; align-items: center; gap: 8px 10px; margin-top: 9px; font-size: 12px; }
+.provider-mapping__role { color: #667991; font-weight: 600; text-transform: capitalize; }
+.provider-mapping input { width: 100%; height: 36px; margin: 0; font-size: 12px; }
+.provider-model-settings { margin-top: 4px; }
+.provider-mapping__manual { display: flex; min-width: 0; align-items: center; gap: 8px; }
+.provider-mapping__manual input { flex: 1 1 auto; min-width: 0; height: 38px; padding: 0 10px; }
+.provider-mapping__manual .provider-link { flex: none; white-space: nowrap; font-size: 11px; }
 .provider-model-picker { padding: 10px; background: #f5f8fc; border: 1px solid #dce6f4; border-radius: 10px; }
 .provider-model-picker [role=listbox] { max-height: 180px; overflow: auto; margin-top: 8px; }
-.provider-model-picker [role=option] { display: block; text-align: left; width: 100%; padding: 9px; background: transparent; border: 0; border-radius: 5px; color: #344257; overflow-wrap: anywhere; font-size: 12px; }
+.provider-model-picker [role=option] { display: flex; align-items: center; gap: 8px; text-align: left; width: 100%; padding: 9px; background: transparent; border: 0; border-radius: 5px; color: #344257; overflow-wrap: anywhere; font-size: 12px; }
 .provider-model-picker [role=option]:hover, .provider-model-picker [aria-selected=true] { background: #e4efff; }
+.provider-model-option__name { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 2px; }
+.provider-model-option__name strong { font-size: 12px; overflow-wrap: anywhere; }
+.provider-model-option__name small { color: #78879b; font-size: 10px; font-weight: 400; overflow-wrap: anywhere; }
+.provider-model-picker [role=option] em { flex: none; color: #2679d8; font-size: 10px; font-style: normal; font-variant-numeric: tabular-nums; }
+.provider-model-picker [role=option] b { flex: none; color: #2679d8; font-size: 11px; }
 .provider-model-message { font-size: 11px; line-height: 1.6; color: #667991; margin: 0; font-weight: 400; }
+.provider-model-detail { display: flex; flex-wrap: wrap; align-items: baseline; gap: 3px 8px; padding: 9px 11px; border: 1px solid #dce6f4; border-radius: 9px; background: #f7faff; }
+.provider-model-detail strong { color: #344257; font-size: 12px; overflow-wrap: anywhere; }
+.provider-model-detail span { color: #78879b; font-size: 10px; font-weight: 400; overflow-wrap: anywhere; }
+.provider-model-detail em { color: #2679d8; font-size: 11px; font-style: normal; font-variant-numeric: tabular-nums; }
+.provider-model-source, .provider-model-gap { margin-top: 0; }
+.provider-context-unknown { margin-top: 8px; }
 .provider-inline-error { margin: 12px 0; padding: 12px 14px; color: var(--provider-inline-error-text); background: var(--provider-inline-error-bg); border: 1px solid var(--provider-inline-error-line); border-radius: 8px; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
 .provider-confirm { padding: 14px; margin-top: 14px; background: var(--provider-confirm-bg); border: 1px solid var(--provider-confirm-line); border-radius: 10px; font-size: 12px; }
 .provider-confirm p { line-height: 1.6; }
@@ -99,21 +111,51 @@
 .provider-settings .model-settings__tabs { border: 0; border-radius: 0; background: transparent; padding: 0; margin: 20px 0 4px; border-bottom: 1px solid #e3e9f1; display: flex; }
 .provider-settings .model-settings__tabs button { font-size: 12px; border-radius: 0; height: 39px; border-bottom: 2px solid transparent; }
 .provider-settings .model-settings__tabs button.is-active { color: #3284ed; background: transparent; border-bottom-color: #3284ed; box-shadow: none; }
-.provider-settings .model-settings__providers { gap: 12px; }
+.provider-settings .model-settings__providers { gap: 12px; container-type: inline-size; }
 .provider-settings .model-provider { min-height: 80px; padding: 14px; border-radius: 11px; }
 .provider-settings .model-provider.is-current { background: #edf5ff; border-color: #6aa1ee; }
 .provider-settings .model-provider__name strong { font-size: 13px; }
 .provider-settings .model-provider__name span, .provider-settings .model-provider__model span { font-size: 11px; }
 .provider-settings .model-provider__model strong { font-size: 12px; overflow-wrap: anywhere; }
 .provider-settings .model-provider__actions button { font-size: 12px; min-height: 34px; }
+.provider-settings .model-provider:not(.model-provider--subscription) .model-provider__name strong { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; overflow: visible; text-overflow: clip; white-space: normal; overflow-wrap: anywhere; line-height: 1.35; }
+.provider-settings .model-provider:not(.model-provider--subscription) .model-provider__name span,
+.provider-settings .model-provider:not(.model-provider--subscription) .model-provider__model strong,
+.provider-settings .model-provider:not(.model-provider--subscription) .model-provider__model span { overflow: visible; text-overflow: clip; white-space: normal; overflow-wrap: anywhere; line-height: 1.4; }
+.provider-settings .model-provider:not(.model-provider--subscription) .model-provider__actions { flex: none; }
+.provider-settings .model-provider:not(.model-provider--subscription) .model-provider__actions button { flex: none; white-space: nowrap; }
 .provider-settings .model-settings__toolbar h2 { font-size: 13px; }
 .provider-settings .model-settings__toolbar button { font-size: 12px; min-height: 34px; }
 .provider-settings .model-settings__impact { font-size: 11px; line-height: 1.7; }
 
+@container (max-width: 640px) {
+  .provider-settings .model-provider:not(.model-provider--subscription) { grid-template-columns: 32px minmax(0,1fr) auto; grid-template-rows: auto auto; column-gap: 11px; row-gap: 3px; }
+  .provider-settings .model-provider:not(.model-provider--subscription) .model-provider__logo { grid-column: 1; grid-row: 1 / span 2; align-self: center; }
+  .provider-settings .model-provider:not(.model-provider--subscription) .model-provider__name { grid-column: 2; grid-row: 1; align-self: end; }
+  .provider-settings .model-provider:not(.model-provider--subscription) .model-provider__model { display: flex; grid-column: 2; grid-row: 2; align-self: start; }
+  .provider-settings .model-provider:not(.model-provider--subscription) .model-provider__actions { grid-column: 3; grid-row: 1 / span 2; align-self: center; justify-self: end; }
+}
+
 /* Subscription accounts: same shell and card material, with a stable frame so
    the risk, sign-in, failure and model steps do not resize the dialog. */
-.provider-setup--subscription { height: min(540px, calc(100dvh - 44px)); }
+.provider-setup--subscription { height: min(620px, calc(100dvh - 44px)); }
 .provider-setup--subscription .provider-setup__body { flex: 1; }
+
+/* Unified per-provider context window selector inside provider dialogs. */
+.provider-context-picker { min-width: 0; margin: 18px 0 18px; padding: 0; border: 0; }
+.provider-context-picker legend { margin-bottom: 8px; font-size: 13px; font-weight: 600; color: #344257; }
+.provider-context-picker__options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.provider-context-picker__option { display: flex; align-items: flex-start; gap: 8px; min-width: 0; padding: 10px 11px; border: 1.5px solid #d8dfe8; border-radius: 9px; background: #ffffff; cursor: pointer; transition: border-color .12s, background .12s; }
+.provider-context-picker__option:hover { border-color: #8cb7f1; background: #f7faff; }
+.provider-context-picker__option.is-selected { border-color: #3284ed; background: #edf5ff; }
+.provider-context-picker__option:focus-within { outline: 2px solid #b9d8ff; outline-offset: 2px; }
+.provider-context-picker__option input[type="radio"] { width: auto; min-width: 0; height: auto; flex: none; margin: 2px 0 0; padding: 0; border: 0; background: transparent; accent-color: #3284ed; box-shadow: none; }
+.provider-context-picker__content { display: grid; gap: 2px; min-width: 0; }
+.provider-context-picker__content strong { font-size: 12px; font-weight: 650; color: #344257; }
+.provider-context-picker__tokens { font-size: 12px; font-weight: 650; color: #2679d8; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.provider-context-picker__content small { font-size: 11px; line-height: 1.4; color: #78879b; font-weight: 400; }
+.provider-settings .model-provider__window-badge { margin-left: 5px; padding: 2px 6px; border-radius: 6px; color: #276cc0; background: rgba(52, 127, 214, 0.09); border: 1px solid rgba(52, 127, 214, 0.22); font-size: 10px; font-style: normal; font-weight: 600; white-space: nowrap; }
+@media (max-width: 560px) { .provider-context-picker__options { grid-template-columns: 1fr; } }
 .provider-subscription-options { display: grid; gap: 8px; }
 .provider-subscription-support-note { margin: 8px 0 0; font-size: 11px; line-height: 1.6; color: #78879b; }
 .provider-subscription__risk-body { margin: 0 0 16px; font-size: 13px; line-height: 1.75; }
@@ -122,9 +164,12 @@
 .provider-subscription__waiting { display: flex; align-items: center; gap: 9px; margin: 4px 0 0; font-size: 13px; font-weight: 600; }
 .provider-subscription__waiting::before { content: ''; width: 8px; height: 8px; flex: none; border-radius: 50%; background: #3284ed; animation: provider-subscription-pulse 1.1s ease-in-out infinite; }
 .provider-subscription__replacement { margin: 18px 0 0; line-height: 1.6; }
-.provider-mapping select { width: 78%; height: 38px; margin-left: auto; padding: 0 10px; border: 1px solid #d8dfe8; border-radius: 9px; background: white; color: #344257; font: inherit; font-size: 12px; }
+.provider-mapping select, .provider-effort-field select { width: 100%; height: 38px; margin: 0; padding: 0 10px; border: 1px solid #d8dfe8; border-radius: 9px; background: white; color: #344257; font: inherit; font-size: 12px; }
+.provider-mapping__error { grid-column: 2 / -1; margin: 0; color: var(--provider-inline-error-text); font-size: 10px; line-height: 1.5; font-weight: 400; }
 .provider-mapping select:focus { outline: none; border-color: #5c9ced; box-shadow: 0 0 0 3px #e8f1ff; }
 .provider-mapping select:disabled { background: #f5f7fa; }
+.provider-effort-field { margin-top: -8px; }
+.provider-effort-field select:focus { outline: none; border-color: #5c9ced; box-shadow: 0 0 0 3px #e8f1ff; }
 .provider-settings .model-provider--subscription { min-height: 80px; align-items: start; padding-top: 13px; padding-bottom: 13px; }
 .provider-settings .model-provider--subscription.is-account-unavailable { min-height: 120px; }
 .provider-settings .model-provider--subscription .model-provider__logo { margin-top: 1px; }

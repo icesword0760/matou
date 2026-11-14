@@ -66,6 +66,8 @@ import {
 import { RpcFault, RuntimeRpcRouter } from './rpc/runtime-rpc-router'
 import { egressPlanForLaunch, type EgressMonitor } from './egress/egress-monitor'
 import { PtySession, SessionEgressFrozenError } from './session/pty-session'
+import { restoredProviderModel, roleEffort } from './session/claude-model-routing'
+import { AgentModelSettings } from './session/agent-model-settings'
 import { ClaudeSettings } from './session/claude-settings'
 import { RuntimeSessionRegistry } from './session/runtime-session-registry'
 import { TerminalCwdTracker } from './session/terminal-cwd-tracker'
@@ -184,6 +186,7 @@ const REPLAY_LOW_WATERMARK_BYTES = 512 * 1024
 // live screen snapshot is faster than re-parsing every frame since the card left.
 const CATCH_UP_REPLAY_MAX_BYTES = 256 * 1024
 const MAX_PENDING_PROVIDER_DERIVATION_BYTES = 1024 * 1024
+const MAX_CONCURRENT_PROVIDER_RESTARTS = 4
 const DEFAULT_PROVIDER_RESUME_TIMEOUT_MS = 10_000
 const DEFAULT_FORK_PROVIDER_IDENTITY_TIMEOUT_MS = 60_000
 const DEFAULT_ANTIGRAVITY_FORK_NEW_ID_TIMEOUT_MS = 30_000
@@ -1521,8 +1524,8 @@ export class RuntimeServer {
         : undefined
       activeSession?.detach(this.#sendToPort)
       detachedSession = activeSession
-      // The live Runtime VT model has consumed every byte in order since this
-      // PTY started. Prefer it over a renderer checkpoint or a mid-frame tail.
+      // The live Runtime VT model starts with the recovered checkpoint and
+      // journal suffix, then consumes the current PTY output in order.
       const liveScreen = activeSession && activeSession.profile !== 'shell' && (
         !message.preserveExistingModel ||
         activeSession.outputBytesSince(message.fromSequence) > CATCH_UP_REPLAY_MAX_BYTES
@@ -2133,10 +2136,9 @@ export class RuntimeServer {
           )
         : undefined
       if (providerSelection?.subscription && !this.#subscriptionAccounts) throw new SubscriptionLaunchError('Subscription launch service is unavailable')
-      const boundModel = boundProviderSettings.model
-      const providerModel = !providerSelection?.subscription && boundModel?.startsWith('matou-')
-        ? providerSelection?.model
-        : boundModel ?? providerSelection?.model
+      const modelSettings = new AgentModelSettings(this.#database, this.#providerConfigs)
+      const providerView = providerSelection ? (await this.#providerConfigs.snapshot()).providers[message.profile as ProviderCli]?.find(p => p.id === providerSelection.providerConfigId) : undefined
+      const providerModel = restoredProviderModel(boundProviderSettings.model, providerSelection?.model, providerView, modelSettings.preferences())
       const providerLaunch = providerSelection === undefined
         ? { env: {} as Record<string, string> }
         : {
@@ -2379,6 +2381,19 @@ export class RuntimeServer {
         this.#workStatusTrackers.set(message.sessionId, workStatusTracker)
       }
       if (message.profile !== 'shell') this.#hud.providerStarted(message.sessionId)
+      const contextWindow = ['claude-code', 'codex'].includes(message.profile) ? await modelSettings.launchWindow(providerView, launchModelOverride ?? providerLaunch.model) : undefined
+      const firstRunGrid = message.profile === 'shell' ? undefined : this.#database.get<{ cols: number; rows: number }>(
+        'SELECT cols, rows FROM session_runs WHERE session_id = ? ORDER BY ordinal ASC LIMIT 1',
+        message.sessionId
+      )
+      const pendingSpawnMessages: RuntimeMessage[] = []
+      let spawnPublished = false
+      const publishSpawnFrame = (frame: RuntimeMessage) => {
+        // The renderer must learn the new run's replay boundary before any
+        // of its output. Otherwise a partial new screen can look reusable.
+        if (spawnPublished) this.#sendToPort(frame)
+        else pendingSpawnMessages.push(frame)
+      }
       const session = await PtySession.create({
         sessionId: message.sessionId,
         executionContextId: message.executionContextId,
@@ -2388,6 +2403,22 @@ export class RuntimeServer {
         dataRoot: this.#dataRoot,
         profile: message.profile,
         journalOptions: this.#journalOptions(message.sessionId),
+        ...(message.profile === 'shell' ? {} : {
+          screenRecovery: {
+            ...(firstRunGrid === undefined ? {} : { initialGrid: firstRunGrid }),
+            loadCheckpoint: async (watermark) => {
+              const checkpoint = await new CheckpointManager(this.#dataRoot, this.#database)
+                .loadLatest(message.sessionId, watermark)
+              return checkpointHasGrid(checkpoint) ? checkpoint : undefined
+            }
+          }
+        }),
+        contextWindow: contextWindow ?? null,
+        ...((message.profile === 'claude-code' ? roleEffort(providerView, providerModel ?? 'default') : providerView?.reasoningEffort) ? { reasoningEffort: (message.profile === 'claude-code' ? roleEffort(providerView, providerModel ?? 'default') : providerView?.reasoningEffort)! } : {}),
+        ...(message.profile === 'claude-code' ? { modelRouting: {
+          preferences: modelSettings.preferences(), ...(providerView ? { provider: providerView } : {}), store: this.#providerConfigs,
+          ...(this.#subscriptionAccounts ? { accounts: this.#subscriptionAccounts } : {})
+        } } : {}),
         ...(providerSessionId === undefined ? {} : { providerSessionId }),
         ...(forkLaunch === undefined ? {} : { forkSession: true }),
         ...(permissionMode === undefined ? {} : { permissionMode }),
@@ -2417,7 +2448,7 @@ export class RuntimeServer {
               : {})
           } : {})
         },
-        ...(attachView ? { send: this.#sendToPort } : {}),
+        ...(attachView ? { send: publishSpawnFrame } : {}),
         ...(this.#control === undefined ? {} : {
           onProcessExit: () => this.#control?.tokens.revokeRun(runId)
         }),
@@ -2667,9 +2698,18 @@ export class RuntimeServer {
           type: 'terminal.spawned',
           protocolVersion: PROTOCOL_VERSION,
           sessionId: message.sessionId,
-          pid: session.pid
+          pid: session.pid,
+          ...(session.hasRecoveredScreen ? {
+            reattached: true,
+            replayFromSequence: session.replayFromSequence
+          } : {})
         })
       }
+      spawnPublished = true
+      if (session.replaceOutputSink(publishSpawnFrame, this.#sendToPort)) {
+        for (const frame of pendingSpawnMessages) this.#sendToPort(frame)
+      }
+      pendingSpawnMessages.length = 0
       this.publishSessionHud(message.sessionId)
       void this.refreshSessionHud(message.sessionId)
       if (pendingResumeFailure && forkLaunch) {
@@ -3930,7 +3970,6 @@ export class RuntimeServer {
       this.#permissionOverrides.delete(sessionId)
       throw new RpcFault('INTERNAL_ERROR', 'AI Session permission respawn failed')
     }
-    replacement.display('\u001b[2J\u001b[3J\u001b[H')
   }
 
   static async #restartProviderSessions(
@@ -3944,31 +3983,29 @@ export class RuntimeServer {
       .filter((session) => session.profile === cli)
       .map(({ sessionId }) => sessionId)
     const transitions: ProviderSessionActivationTransition[] = []
-    for (const sessionId of liveSessionIds) {
-      const owners = peers.flatMap((server) => {
-        const descriptor = server.#spawnDescriptors.get(sessionId)
-        return descriptor?.profile === cli ? [{ server, descriptor }] : []
-      }).sort((left, right) => {
-        const revision = (right.descriptor.spawnRevision ?? 0) -
-          (left.descriptor.spawnRevision ?? 0)
-        if (revision !== 0) return revision
-        return Number(right.server.#attachedSessionIds.has(sessionId)) -
-          Number(left.server.#attachedSessionIds.has(sessionId))
-      })
-      const owner = owners[0]
-      if (!owner) {
-        transitions.push({
-          sessionId, status: 'deferred', reason: 'restart-unavailable'
+    let nextIndex = 0
+    const restartSessions = async (): Promise<void> => {
+      while (nextIndex < liveSessionIds.length) {
+        const index = nextIndex++
+        const sessionId = liveSessionIds[index]!
+        const owners = peers.flatMap((server) => {
+          const descriptor = server.#spawnDescriptors.get(sessionId)
+          return descriptor?.profile === cli ? [{ server, descriptor }] : []
+        }).sort((left, right) => {
+          const revision = (right.descriptor.spawnRevision ?? 0) -
+            (left.descriptor.spawnRevision ?? 0)
+          if (revision !== 0) return revision
+          return Number(right.server.#attachedSessionIds.has(sessionId)) -
+            Number(left.server.#attachedSessionIds.has(sessionId))
         })
-        continue
+        const owner = owners[0]
+        transitions[index] = owner
+          ? await owner.server.#activateProviderForSession(sessionId, owner.descriptor, selection, peers)
+          : { sessionId, status: 'deferred', reason: 'restart-unavailable' }
       }
-      transitions.push(await owner.server.#activateProviderForSession(
-        sessionId,
-        owner.descriptor,
-        selection,
-        peers
-      ))
     }
+    const workerCount = Math.min(MAX_CONCURRENT_PROVIDER_RESTARTS, liveSessionIds.length)
+    await Promise.all(Array.from({ length: workerCount }, restartSessions))
     return transitions
   }
 
@@ -4058,7 +4095,6 @@ export class RuntimeServer {
         if (this.#sessions.get(sessionId) !== replacement) {
           throw new Error('provider Session replacement exited during startup')
         }
-        replacement.display('\u001b[2J\u001b[3J\u001b[H')
         this.#hud.updateProviderModel(sessionId, selection.model)
         RuntimeServer.#publishAttachedSessionHud(sessionId)
         return { sessionId, status: 'updated' }
@@ -4585,6 +4621,10 @@ async function resolveInteractiveAgentLaunch(
     return { profile: 'claude-code', permissionMode: 'bypassPermissions' }
   }
   if (normalized === 'cc') return configuredCcLaunch()
+  if (normalized === 'codex') return { profile: 'codex', permissionMode: 'default' }
+  if (normalized === 'codex --dangerously-bypass-approvals-and-sandbox') {
+    return { profile: 'codex', permissionMode: 'bypassPermissions' }
+  }
 
   const tokens = normalized.split(' ').filter(Boolean)
   if (tokens[0] === 'agy') {

@@ -1,0 +1,20 @@
+[
+  {
+    "time": "2026-11-14T05:17:50.842506+00:00",
+    "session_id": "dbc53dc7-527a-46d3-bab4-5f4269ee0504",
+    "model": {
+      "id": "matou-chatgpt/matou-opus",
+      "display_name": "matou-chatgpt/matou-opus"
+    },
+    "context_window": {
+      "total_input_tokens": 0,
+      "total_output_tokens": 0,
+      "context_window_size": 272000,
+      "current_usage": null,
+      "used_percentage": null,
+      "remaining_percentage": null
+    },
+    "http_status": "200",
+    "curl_exit": 0
+  }
+]

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -261,6 +261,154 @@ describe('SessionLoaderDialog', () => {
 
     await userEvent.setup().click(screen.getByRole('button', { name: '载入到当前卡片' }))
     await waitFor(() => expect(onLoad).toHaveBeenCalledWith('agy-1', 'antigravity'))
+  })
+
+  it('opens read-only current history without listing or loading other sessions', async () => {
+    const listSessions = vi.fn(async () => listResult([summary()]))
+    const loadDetail = vi.fn(async () => detail())
+    const loadCurrentDetail = vi.fn(async () => ({
+      ...detail(), providerSessionId: 'bound-current', title: '当前绑定会话'
+    }))
+    const onLoad = vi.fn(async () => undefined)
+    render(<SessionLoaderDialog targetTitle="Shell" targetRunning
+      listSessions={listSessions} loadDetail={loadDetail} searchSession={emptySearch}
+      loadCurrentDetail={loadCurrentDetail} onLoad={onLoad} onCancel={() => undefined} />)
+
+    expect(await screen.findByRole('dialog', { name: '会话历史' })).toBeTruthy()
+    await waitFor(() => expect(loadCurrentDetail).toHaveBeenCalledTimes(1))
+    expect(await screen.findByText('定位 hover width 动画')).toBeTruthy()
+    expect(screen.getByText('Shell')).toBeTruthy()
+    expect(screen.getByText('包含压缩前的消息，不影响当前会话')).toBeTruthy()
+    expect(screen.queryByRole('tablist')).toBeNull()
+    expect(screen.queryByText('可恢复会话')).toBeNull()
+    expect(screen.queryByRole('button', { name: '载入到当前卡片' })).toBeNull()
+    expect(screen.queryByText('载入到“Shell”')).toBeNull()
+    expect(listSessions).not.toHaveBeenCalled()
+    expect(loadDetail).not.toHaveBeenCalled()
+    expect(onLoad).not.toHaveBeenCalled()
+  })
+
+  it('keeps focus inside history while the current detail is still loading', async () => {
+    let resolveCurrent: ((current: ClaudeSessionDetail) => void) | undefined
+    const loadCurrentDetail = vi.fn(() => new Promise<ClaudeSessionDetail>((resolve) => {
+      resolveCurrent = resolve
+    }))
+    render(<SessionLoaderDialog targetTitle="Shell" targetRunning={false}
+      listSessions={async () => listResult([summary()])} loadDetail={async () => detail()}
+      searchSession={emptySearch} loadCurrentDetail={loadCurrentDetail}
+      onLoad={async () => undefined} onCancel={() => undefined} />)
+
+    const dialog = await screen.findByRole('dialog', { name: '会话历史' })
+    const close = within(dialog).getAllByRole('button', { name: '关闭会话历史' })[0]!
+    await waitFor(() => expect(document.activeElement).toBe(close))
+    expect(dialog.contains(document.activeElement)).toBe(true)
+
+    resolveCurrent!({ ...detail(), providerSessionId: 'bound-current' })
+    await waitFor(() => expect(document.activeElement).toBe(
+      screen.getByRole('searchbox', { name: '查找右侧会话内容' })
+    ))
+  })
+
+  it('searches and loads earlier pages against the bound current session', async () => {
+    const events = Array.from({ length: 200 }, (_, index) => ({
+      index: index + 1801, kind: 'assistant' as const, role: 'assistant' as const,
+      text: `输出 ${index + 1801}`, matched: false
+    }))
+    const loadCurrentDetail = vi.fn(async () => ({
+      ...detail(), providerSessionId: 'bound-current', eventCount: 2_000,
+      events, page: page(1801, 2000, 2_000)
+    }))
+    const loadDetail = vi.fn(async (_providerSessionId: string, options: {
+      beforeEventIndex?: number; aroundEventIndex?: number; limit?: number
+    } = {}) => {
+      if (options.beforeEventIndex) {
+        const earlier = Array.from({ length: 200 }, (_, index) => ({
+          index: index + 1601, kind: 'assistant' as const, role: 'assistant' as const,
+          text: `旧输出 ${index + 1601}`, matched: false
+        }))
+        return { ...detail(), providerSessionId: 'bound-current', events: earlier, page: page(1601, 1800, 2_000) }
+      }
+      if (options.aroundEventIndex) {
+        return {
+          ...detail(), providerSessionId: 'bound-current', eventCount: 2_000,
+          events: [{ index: options.aroundEventIndex, kind: 'assistant' as const,
+            role: 'assistant' as const, text: '旧消息命中', matched: true }],
+          page: page(options.aroundEventIndex, options.aroundEventIndex, 2_000)
+        }
+      }
+      return { ...detail(), providerSessionId: 'bound-current', events, page: page(1801, 2000, 2_000) }
+    })
+    const searchSession = vi.fn(async (_providerSessionId: string, query: string) => ({
+      query, hits: [{ eventIndex: 205, kind: 'assistant' as const, excerpt: query }],
+      total: 1, offset: 0, limit: 100, nextOffset: 1, hasMore: false
+    }))
+    render(<SessionLoaderDialog targetTitle="Shell" targetRunning={false}
+      listSessions={async () => listResult([summary()])} loadDetail={loadDetail}
+      searchSession={searchSession} loadCurrentDetail={loadCurrentDetail}
+      onLoad={async () => undefined} onCancel={() => undefined} />)
+
+    expect((await screen.findByRole('status')).textContent).toContain('已加载 200 / 2000 条')
+    fireEvent.scroll(document.querySelector('.session-loader-events')!, { target: { scrollTop: 0 } })
+    await waitFor(() => expect(loadDetail).toHaveBeenCalledWith('bound-current', {
+      beforeEventIndex: 1801, limit: 200
+    }))
+    await userEvent.setup().click(screen.getByRole('button', { name: '返回最新' }))
+    await waitFor(() => expect(loadDetail).toHaveBeenCalledWith('bound-current', { limit: 200 }))
+
+    fireEvent.change(screen.getByRole('searchbox', { name: '查找右侧会话内容' }), {
+      target: { value: '旧消息' }
+    })
+    await waitFor(() => expect(searchSession).toHaveBeenCalledWith('bound-current', '旧消息', 0, 100))
+    await waitFor(() => expect(loadDetail).toHaveBeenCalledWith('bound-current', {
+      aroundEventIndex: 205, limit: 200
+    }))
+    expect(await screen.findByText('旧消息', { selector: 'mark' })).toBeTruthy()
+  })
+
+  it('retries current history errors without falling back to another session', async () => {
+    const listSessions = vi.fn(async () => listResult([summary()]))
+    let attempts = 0
+    const loadCurrentDetail = vi.fn(async () => {
+      if (attempts++ === 0) throw new Error('当前会话历史读取失败')
+      return {
+        ...detail(), providerSessionId: 'bound-current', eventCount: 0,
+        events: [], page: { startEventIndex: 0, endEventIndex: 0, total: 0, hasEarlier: false, hasLater: false }
+      }
+    })
+    render(<SessionLoaderDialog targetTitle="Shell" targetRunning={false}
+      listSessions={listSessions} loadDetail={async () => detail()} searchSession={emptySearch}
+      loadCurrentDetail={loadCurrentDetail} onLoad={async () => undefined} onCancel={() => undefined} />)
+
+    expect((await screen.findByRole('alert')).textContent).toContain('当前会话历史读取失败')
+    expect(screen.getByRole('dialog', { name: '会话历史' })).toBeTruthy()
+    expect(listSessions).not.toHaveBeenCalled()
+    await userEvent.setup().click(screen.getByRole('button', { name: '重试读取会话历史' }))
+    await waitFor(() => expect(loadCurrentDetail).toHaveBeenCalledTimes(2))
+    expect(await screen.findByText('当前会话还没有可显示的历史内容')).toBeTruthy()
+    expect(listSessions).not.toHaveBeenCalled()
+  })
+
+  it('keeps focus inside current history and closes on Escape', async () => {
+    const onCancel = vi.fn()
+    render(<SessionLoaderDialog targetTitle="Shell" targetRunning={false}
+      listSessions={async () => listResult([summary()])} loadDetail={async () => detail()}
+      searchSession={emptySearch} loadCurrentDetail={async () => ({
+        ...detail(), providerSessionId: 'bound-current'
+      })} onLoad={async () => undefined} onCancel={onCancel} />)
+
+    const dialog = await screen.findByRole('dialog', { name: '会话历史' })
+    await waitFor(() => expect(screen.getByRole('searchbox', { name: '查找右侧会话内容' })).toBeTruthy())
+    const closes = within(dialog).getAllByRole('button', { name: '关闭会话历史' })
+    const first = closes[0]!
+    const last = closes[closes.length - 1]!
+    last.focus()
+    expect(fireEvent.keyDown(window, { key: 'Tab' })).toBe(false)
+    expect(document.activeElement).toBe(first)
+
+    const escape = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })
+    window.dispatchEvent(escape)
+    expect(escape.defaultPrevented).toBe(true)
+    expect(onCancel).toHaveBeenCalledTimes(1)
   })
 })
 

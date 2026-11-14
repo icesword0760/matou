@@ -1,0 +1,13 @@
+{
+  "elapsed": 18.629742457997054,
+  "residentProcesses": 261,
+  "observedGitProcesses": 192,
+  "cpuPercentByGroup": {
+    "main": 0.05367760731285569,
+    "helpers": 14.761342011035351,
+    "renderer": 0.48309846581570004,
+    "claude": 21.900463783645083
+  },
+  "totalResidentCPU": 37.19858186780899,
+  "note": "exited short-lived subprocess CPU excluded"
+}

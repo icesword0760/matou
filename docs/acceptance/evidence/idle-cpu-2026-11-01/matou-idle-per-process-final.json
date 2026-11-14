@@ -1,0 +1,367 @@
+[
+  {
+    "pid": 56939,
+    "cpu": 2.045684462414142,
+    "name": "claude"
+  },
+  {
+    "pid": 43619,
+    "cpu": 1.6465265185284468,
+    "name": "/Applications/\u7801\u5934.app/Contents/Frameworks/\u7801\u5934 Helper.app/Contents/MacOS/\u7801\u5934 Helper"
+  },
+  {
+    "pid": 43692,
+    "cpu": 1.5966317755427457,
+    "name": "claude"
+  },
+  {
+    "pid": 43620,
+    "cpu": 0.7983158877713552,
+    "name": "/Applications/\u7801\u5934.app/Contents/Frameworks/\u7801\u5934 Helper (Renderer).app/Contents/MacOS/\u7801\u5934 Helper (Renderer)"
+  },
+  {
+    "pid": 46368,
+    "cpu": 0.6486316588142393,
+    "name": "claude"
+  },
+  {
+    "pid": 47413,
+    "cpu": 0.5987369158285296,
+    "name": "claude"
+  },
+  {
+    "pid": 46948,
+    "cpu": 0.54884217284282,
+    "name": "claude"
+  },
+  {
+    "pid": 47444,
+    "cpu": 0.299368457914267,
+    "name": "claude"
+  },
+  {
+    "pid": 47409,
+    "cpu": 0.2993684579142648,
+    "name": "claude"
+  },
+  {
+    "pid": 43674,
+    "cpu": 0.2993684579142626,
+    "name": "claude"
+  },
+  {
+    "pid": 46288,
+    "cpu": 0.24947371492855513,
+    "name": "claude"
+  },
+  {
+    "pid": 46981,
+    "cpu": 0.24947371492855513,
+    "name": "claude"
+  },
+  {
+    "pid": 43691,
+    "cpu": 0.24947371492855291,
+    "name": "claude"
+  },
+  {
+    "pid": 47268,
+    "cpu": 0.24947371492855291,
+    "name": "claude"
+  },
+  {
+    "pid": 47863,
+    "cpu": 0.24947371492855291,
+    "name": "claude"
+  },
+  {
+    "pid": 43698,
+    "cpu": 0.19957897194284321,
+    "name": "claude"
+  },
+  {
+    "pid": 46308,
+    "cpu": 0.19957897194284321,
+    "name": "claude"
+  },
+  {
+    "pid": 47062,
+    "cpu": 0.1496842289571335,
+    "name": "claude"
+  },
+  {
+    "pid": 50311,
+    "cpu": 0.049894742985710804,
+    "name": "/Users/icesword/.nvm/versions/node/v22.16.0/bin/node"
+  },
+  {
+    "pid": 43615,
+    "cpu": 0.0,
+    "name": "/Applications/\u7801\u5934.app/Contents/MacOS/\u7801\u5934"
+  },
+  {
+    "pid": 43617,
+    "cpu": 0.0,
+    "name": "/Applications/\u7801\u5934.app/Contents/Frameworks/\u7801\u5934 Helper.app/Contents/MacOS/\u7801\u5934 Helper"
+  },
+  {
+    "pid": 43618,
+    "cpu": 0.0,
+    "name": "/Applications/\u7801\u5934.app/Contents/Frameworks/\u7801\u5934 Helper.app/Contents/MacOS/\u7801\u5934 Helper"
+  },
+  {
+    "pid": 47395,
+    "cpu": 0.0,
+    "name": "npm exec shadcn@latest mcp"
+  },
+  {
+    "pid": 47396,
+    "cpu": 0.0,
+    "name": "/Users/icesword/.local/share/uv/tools/ida-pro-mcp/bin/python"
+  },
+  {
+    "pid": 50114,
+    "cpu": 0.0,
+    "name": "node"
+  },
+  {
+    "pid": 47391,
+    "cpu": 0.0,
+    "name": "npm exec shadcn@latest mcp"
+  },
+  {
+    "pid": 47393,
+    "cpu": 0.0,
+    "name": "/Users/icesword/.local/share/uv/tools/ida-pro-mcp/bin/python"
+  },
+  {
+    "pid": 50055,
+    "cpu": 0.0,
+    "name": "node"
+  },
+  {
+    "pid": 47675,
+    "cpu": 0.0,
+    "name": "npm exec shadcn@latest mcp"
+  },
+  {
+    "pid": 47677,
+    "cpu": 0.0,
+    "name": "/Users/icesword/.local/share/uv/tools/ida-pro-mcp/bin/python"
+  },
+  {
+    "pid": 50086,
+    "cpu": 0.0,
+    "name": "node"
+  },
+  {
+    "pid": 47313,
+    "cpu": 0.0,
+    "name": "npm exec shadcn@latest mcp"
+  },
+  {
+    "pid": 47314,
+    "cpu": 0.0,
+    "name": "/Users/icesword/.local/share/uv/tools/ida-pro-mcp/bin/python"
+  },
+  {
+    "pid": 49979,
+    "cpu": 0.0,
+    "name": "node"
+  },
+  {
+    "pid": 43715,
+    "cpu": 0.0,
+    "name": "/bin/zsh"
+  },
+  {
+    "pid": 48634,
+    "cpu": 0.0,
+    "name": "npm exec shadcn@latest mcp"
+  },
+  {
+    "pid": 48636,
+    "cpu": 0.0,
+    "name": "/Users/icesword/.local/share/uv/tools/ida-pro-mcp/bin/python"
+  },
+  {
+    "pid": 48637,
+    "cpu": 0.0,
+    "name": "/Users/icesword/.nvm/versions/node/v22.16.0/bin/node"
+  },
+  {
+    "pid": 50750,
+    "cpu": 0.0,
+    "name": "node"
+  },
+  {
+    "pid": 47384,
+    "cpu": 0.0,
+    "name": "npm exec shadcn@latest mcp"
+  },
+  {
+    "pid": 47385,
+    "cpu": 0.0,
+    "name": "/Users/icesword/.local/share/uv/tools/ida-pro-mcp/bin/python"
+  },
+  {
+    "pid": 49847,
+    "cpu": 0.0,
+    "name": "node"
+  },
+  {
+    "pid": 47779,
+    "cpu": 0.0,
+    "name": "npm exec shadcn@latest mcp"
+  },
+  {
+    "pid": 47782,
+    "cpu": 0.0,
+    "name": "/Users/icesword/.local/share/uv/tools/ida-pro-mcp/bin/python"
+  },
+  {
+    "pid": 52163,
+    "cpu": 0.0,
+    "name": "node"
+  },
+  {
+    "pid": 49489,
+    "cpu": 0.0,
+    "name": "npm exec shadcn@latest mcp"
+  },
+  {
+    "pid": 49491,
+    "cpu": 0.0,
+    "name": "/Users/icesword/.local/share/uv/tools/ida-pro-mcp/bin/python"
+  },
+  {
+    "pid": 52294,
+    "cpu": 0.0,
+    "name": "node"
+  },
+  {
+    "pid": 49108,
+    "cpu": 0.0,
+    "name": "npm exec shadcn@latest mcp"
+  },
+  {
+    "pid": 49109,
+    "cpu": 0.0,
+    "name": "/Users/icesword/.local/share/uv/tools/ida-pro-mcp/bin/python"
+  },
+  {
+    "pid": 50807,
+    "cpu": 0.0,
+    "name": "node"
+  },
+  {
+    "pid": 48706,
+    "cpu": 0.0,
+    "name": "npm exec shadcn@latest mcp"
+  },
+  {
+    "pid": 48707,
+    "cpu": 0.0,
+    "name": "/Users/icesword/.local/share/uv/tools/ida-pro-mcp/bin/python"
+  },
+  {
+    "pid": 48708,
+    "cpu": 0.0,
+    "name": "/Users/icesword/.nvm/versions/node/v22.16.0/bin/node"
+  },
+  {
+    "pid": 50728,
+    "cpu": 0.0,
+    "name": "node"
+  },
+  {
+    "pid": 49731,
+    "cpu": 0.0,
+    "name": "npm exec shadcn@latest mcp"
+  },
+  {
+    "pid": 49742,
+    "cpu": 0.0,
+    "name": "/Users/icesword/.local/share/uv/tools/ida-pro-mcp/bin/python"
+  },
+  {
+    "pid": 51209,
+    "cpu": 0.0,
+    "name": "node"
+  },
+  {
+    "pid": 49830,
+    "cpu": 0.0,
+    "name": "npm exec shadcn@latest mcp"
+  },
+  {
+    "pid": 49837,
+    "cpu": 0.0,
+    "name": "/Users/icesword/.local/share/uv/tools/ida-pro-mcp/bin/python"
+  },
+  {
+    "pid": 51339,
+    "cpu": 0.0,
+    "name": "node"
+  },
+  {
+    "pid": 50479,
+    "cpu": 0.0,
+    "name": "npm exec shadcn@latest mcp"
+  },
+  {
+    "pid": 50481,
+    "cpu": 0.0,
+    "name": "/Users/icesword/.local/share/uv/tools/ida-pro-mcp/bin/python"
+  },
+  {
+    "pid": 52319,
+    "cpu": 0.0,
+    "name": "node"
+  },
+  {
+    "pid": 50253,
+    "cpu": 0.0,
+    "name": "npm exec shadcn@latest mcp"
+  },
+  {
+    "pid": 50255,
+    "cpu": 0.0,
+    "name": "/Users/icesword/.local/share/uv/tools/ida-pro-mcp/bin/python"
+  },
+  {
+    "pid": 51703,
+    "cpu": 0.0,
+    "name": "node"
+  },
+  {
+    "pid": 50309,
+    "cpu": 0.0,
+    "name": "npm exec shadcn@latest mcp"
+  },
+  {
+    "pid": 50310,
+    "cpu": 0.0,
+    "name": "/Users/icesword/.local/share/uv/tools/ida-pro-mcp/bin/python"
+  },
+  {
+    "pid": 51678,
+    "cpu": 0.0,
+    "name": "node"
+  },
+  {
+    "pid": 57117,
+    "cpu": 0.0,
+    "name": "npm exec shadcn@latest mcp"
+  },
+  {
+    "pid": 57118,
+    "cpu": 0.0,
+    "name": "/Users/icesword/.local/share/uv/tools/ida-pro-mcp/bin/python"
+  },
+  {
+    "pid": 57395,
+    "cpu": 0.0,
+    "name": "node"
+  }
+]

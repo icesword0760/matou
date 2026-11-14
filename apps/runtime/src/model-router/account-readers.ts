@@ -87,7 +87,7 @@ export function readChatGptUsage(response: unknown): ReadResult<ChatGptUsage> {
   return body.ok ? parseChatGptUsage(body.value) : body;
 }
 
-export interface AccountModel { id: string; displayName?: string; ownedBy?: string; contextWindow?: number; maxOutputTokens?: number }
+export interface AccountModel { id: string; displayName?: string; ownedBy?: string; contextWindow?: number; maxContextWindow?: number; supportedEfforts?: ('low' | 'medium' | 'high' | 'xhigh' | 'max')[]; maxOutputTokens?: number }
 function field(obj: JsonObject, keys: string[]): string | undefined {
   return keys.map(k => str(obj[k])).find(Boolean);
 }
@@ -99,14 +99,16 @@ export function parseChatGptModels(value: unknown): ReadResult<AccountModel[]> {
   const models = new Map<string, AccountModel>();
   const push = (entry: unknown, fallback?: string) => {
     const obj = object(entry);
-    const id = str(typeof entry === 'string' ? entry : undefined) ?? (obj ? field(obj, ['slug', 'id', 'model', 'name']) : undefined) ?? str(fallback);
+    const id = str(typeof entry === 'string' ? entry : undefined) ?? (obj ? field(obj, fallback ? ['slug', 'id'] : ['slug', 'id', 'model', 'name']) : undefined) ?? str(fallback);
     if (!id || models.has(id)) return;
     const displayName = obj && field(obj, ['display_name', 'displayName', 'name']);
     const ownedBy = (obj && field(obj, ['owned_by', 'ownedBy', 'provider', 'vendor', 'category', 'owner'])) || 'Codex';
-    const context = obj?.context_window ?? obj?.contextWindow ?? obj?.context_length;
+    const context = obj?.context_window ?? obj?.contextWindow ?? obj?.context_length ?? obj?.maxTokens;
+    const maximum = obj?.max_context_window ?? obj?.maxContextWindow;
+    const supportedEfforts = list(obj?.supported_reasoning_levels ?? obj?.supportedEfforts ?? object(obj?.thinking)?.levels).map(v => typeof v === 'string' ? v : object(v)?.effort).filter((v): v is 'low' | 'medium' | 'high' | 'xhigh' | 'max' => typeof v === 'string' && ['low', 'medium', 'high', 'xhigh', 'max'].includes(v));
     const output = obj?.max_output_tokens ?? obj?.maxOutputTokens ?? obj?.max_completion_tokens;
     models.set(id, { id, ownedBy, ...(displayName ? { displayName } : {}),
-      ...(positiveInteger(context) ? { contextWindow: context } : {}), ...(positiveInteger(output) ? { maxOutputTokens: output } : {}) });
+      ...(positiveInteger(context) ? { contextWindow: context } : {}), ...(positiveInteger(maximum) ? { maxContextWindow: maximum } : {}), ...(supportedEfforts.length ? { supportedEfforts } : {}), ...(positiveInteger(output) ? { maxOutputTokens: output } : {}) });
   };
   if (entries) for (const entry of entries) push(entry);
   // CC's models-map shape, plus a direct model-id map from a management caller.

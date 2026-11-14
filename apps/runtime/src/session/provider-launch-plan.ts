@@ -11,6 +11,8 @@ export interface PtyCommandInput {
   codexHooksConfig?: string
   controlAssetRoot?: string
   codexDeveloperInstructions?: string
+  contextWindow?: number
+  reasoningEffort?: string
   model?: string
 }
 
@@ -30,6 +32,7 @@ export function resolvePtyCommand(input: PtyCommandInput): PtyCommand {
       args.push('--plugin-dir', join(controlAssetRoot, 'providers', 'claude-plugin'))
     }
     if (input.model?.trim()) args.push('--model', input.model.trim())
+    if (input.reasoningEffort && input.reasoningEffort !== 'follow') args.push('--effort', input.reasoningEffort)
     if (identity) args.push('--resume', identity)
     if (identity && input.forkSession) args.push('--fork-session')
     if (input.permissionMode === 'bypassPermissions') {
@@ -44,6 +47,8 @@ export function resolvePtyCommand(input: PtyCommandInput): PtyCommand {
   }
   if (input.profile === 'codex') {
     const args: string[] = []
+    if (input.contextWindow) args.push('-c', `model_context_window=${input.contextWindow}`, '-c', `model_auto_compact_token_limit=${Math.floor(input.contextWindow * 0.9)}`, '-c', 'model_auto_compact_token_limit_scope="total"')
+    if (input.reasoningEffort && input.reasoningEffort !== 'follow') args.push('-c', `model_reasoning_effort=${JSON.stringify(input.reasoningEffort)}`)
     if (input.codexHooksConfig?.trim()) {
       args.push(
         '-c',

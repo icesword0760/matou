@@ -244,6 +244,48 @@ describe('PRD 05 hierarchy shell', () => {
     expect(dialog.parentElement?.parentElement?.classList.contains('workspace-stage')).toBe(true)
   })
 
+  it('opens read-only history from a Claude card by reading only the current binding', async () => {
+    const data = fixture()
+    data.sessions[0] = { ...data.sessions[0]!, kind: 'claude-code' }
+    const request = vi.fn(async (method: string, payload?: Record<string, unknown>) => {
+      if (method === 'hierarchy.bootstrap-window' || method === 'hierarchy.validate-workspace-path') return {}
+      if (method === 'projection.snapshot') return projectionSnapshot(data)
+      if (method === 'claude-sessions.detail') {
+        expect(payload).toEqual({
+          sessionId: 'session-a1', current: true, provider: 'claude-code', limit: 200
+        })
+        return {
+          providerSessionId: 'provider-current', title: '终端 A1', cwd: '/tmp/a',
+          updatedAt: 10, permissionMode: 'default', eventCount: 1, matchCount: 0, hits: [],
+          availability: 'loaded-here', loadedSessionId: 'session-a1',
+          events: [{ index: 1, kind: 'user', role: 'user', text: '压缩前的消息', matched: false }],
+          page: { startEventIndex: 1, endEventIndex: 1, total: 1, hasEarlier: false, hasLater: false }
+        }
+      }
+      throw new Error(`unexpected Runtime request: ${method}`)
+    })
+    runtime.current = {
+      request,
+      startProjection: vi.fn(),
+      subscribeProjection: vi.fn(() => () => {})
+    }
+
+    render(<HierarchyShell />)
+    await screen.findByRole('region', { name: 'Workspace A 工作现场' })
+    await userEvent.setup().click(screen.getByRole('button', {
+      name: '查看“终端 A1”的会话历史'
+    }))
+
+    expect(screen.getByRole('dialog', { name: '会话历史' })).toBeTruthy()
+    expect(await screen.findByText('压缩前的消息')).toBeTruthy()
+    expect(screen.getByText('包含压缩前的消息，不影响当前会话')).toBeTruthy()
+    expect(request).toHaveBeenCalledWith('claude-sessions.detail', {
+      sessionId: 'session-a1', current: true, provider: 'claude-code', limit: 200
+    })
+    expect(request).not.toHaveBeenCalledWith('claude-sessions.list', expect.anything())
+    expect(request).not.toHaveBeenCalledWith('claude-sessions.load', expect.anything())
+  })
+
   it('refreshes an open session manager immediately when a loaded card is renamed', async () => {
     const data = fixture()
     data.sessions[1] = {

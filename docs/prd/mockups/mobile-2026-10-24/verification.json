@@ -1,0 +1,86 @@
+{
+  "scope": "local design prototype, synthetic data only",
+  "checks": [
+    "工作空间会话筛选与搜索",
+    "发送示例消息并显示回复",
+    "账户取消、立即切换、重启独立确认",
+    "电脑离线禁用发送，重连保留草稿且不自动发送",
+    "确认操作后留在原会话",
+    "360 / 390 / 412px 视口无页面横向溢出"
+  ],
+  "errors": [],
+  "contrastFindings": [],
+  "notVerified": [
+    "真实 Android 设备触摸与软键盘",
+    "跨网远程连接",
+    "桌面真实会话与账户",
+    "APK 打包"
+  ],
+  "readabilityReview": {
+    "minimumFunctionalTextPx": 11,
+    "findings": [],
+    "layouts": [
+      {
+        "width": 360,
+        "scene": "sessions",
+        "overflow": false
+      },
+      {
+        "width": 360,
+        "scene": "chat",
+        "overflow": false
+      },
+      {
+        "width": 360,
+        "scene": "accounts",
+        "overflow": false
+      },
+      {
+        "width": 360,
+        "scene": "device",
+        "overflow": false
+      },
+      {
+        "width": 390,
+        "scene": "sessions",
+        "overflow": false
+      },
+      {
+        "width": 390,
+        "scene": "chat",
+        "overflow": false
+      },
+      {
+        "width": 390,
+        "scene": "accounts",
+        "overflow": false
+      },
+      {
+        "width": 390,
+        "scene": "device",
+        "overflow": false
+      },
+      {
+        "width": 412,
+        "scene": "sessions",
+        "overflow": false
+      },
+      {
+        "width": 412,
+        "scene": "chat",
+        "overflow": false
+      },
+      {
+        "width": 412,
+        "scene": "accounts",
+        "overflow": false
+      },
+      {
+        "width": 412,
+        "scene": "device",
+        "overflow": false
+      }
+    ],
+    "exception": "Monitor illustration stand; border-accent-on-rounded scoped to this exact prototype stylesheet."
+  }
+}

@@ -117,7 +117,7 @@ export class ClaudeSessionCatalog {
     limit?: number
   }): Promise<ClaudeSessionDetail> {
     requireProviderSessionId(input.providerSessionId)
-    const transcript = (await this.#readWorkspace(input.cwd))
+    const transcript = (await this.#readWorkspace(input.cwd, input.providerSessionId))
       .find(({ providerSessionId }) => providerSessionId === input.providerSessionId)
     if (!transcript) {
       throw new EntityMissingError(runtimeMessages().session.claudeSessionNotInWorkspace)
@@ -168,7 +168,7 @@ export class ClaudeSessionCatalog {
     limit?: number
   }): Promise<ClaudeSessionSearchResult> {
     requireProviderSessionId(input.providerSessionId)
-    const transcript = (await this.#readWorkspace(input.cwd))
+    const transcript = (await this.#readWorkspace(input.cwd, input.providerSessionId))
       .find(({ providerSessionId }) => providerSessionId === input.providerSessionId)
     if (!transcript) {
       throw new EntityMissingError(runtimeMessages().session.claudeSessionNotInWorkspace)
@@ -192,7 +192,7 @@ export class ClaudeSessionCatalog {
 
   async autoTitle(input: { cwd: string; providerSessionId: string }): Promise<string | undefined> {
     requireProviderSessionId(input.providerSessionId)
-    return (await this.#readWorkspace(input.cwd))
+    return (await this.#readWorkspace(input.cwd, input.providerSessionId))
       .find(({ providerSessionId }) => providerSessionId === input.providerSessionId)
       ?.autoTitle
   }
@@ -229,7 +229,7 @@ export class ClaudeSessionCatalog {
     return hits
   }
 
-  async #readWorkspace(cwd: string): Promise<IndexedTranscript[]> {
+  async #readWorkspace(cwd: string, selectedSessionId?: string): Promise<IndexedTranscript[]> {
     const normalizedCwd = await canonicalPath(cwd)
     const directoryNames = [...new Set([
       encodeClaudeProjectPath(cwd), encodeClaudeProjectPath(normalizedCwd)
@@ -239,7 +239,9 @@ export class ClaudeSessionCatalog {
       const directory = resolve(this.#projectsRoot, directoryName)
       if (!directory.startsWith(`${this.#projectsRoot}/`) && directory !== this.#projectsRoot) continue
       try {
-        for (const name of await readdir(directory)) {
+        // Detail/search already know the exact conversation. Do not index every
+        // other long transcript in this workspace just to open one card.
+        for (const name of selectedSessionId ? [`${selectedSessionId}.jsonl`] : await readdir(directory)) {
           if (name.endsWith('.jsonl')) candidates.push({ directory, name })
         }
       } catch (error) {

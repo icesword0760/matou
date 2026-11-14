@@ -2,6 +2,12 @@
   "version": "8.0.69",
   "commit": "f7ae8feeb3710319f524730849fbe32fde1751e4",
   "repository": "router-for-me/CLIProxyAPI",
+  "patch": {
+    "name": "antigravity-client-identity",
+    "file": "patches/antigravity-client-identity.patch",
+    "sha256": "6bc3f5221fe88400a359e250f9899de5470b13f729cfb411f42d78c835436a04",
+    "go": "1.27.4"
+  },
   "assets": {
     "arm64": {
       "name": "CLIProxyAPI_8.0.69_darwin_aarch64.tar.gz",

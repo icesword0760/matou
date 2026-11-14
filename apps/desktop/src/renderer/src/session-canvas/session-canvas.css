@@ -105,6 +105,7 @@
 .session-loader-header > button { width: 28px; height: 28px; border: 0; border-radius: 7px; color: #9fa7b3; background: transparent; font-size: 20px; cursor: pointer; }
 .session-loader-header > button:hover { color: #fff; background: rgba(255,255,255,.07); }
 .session-loader-body { display: grid; min-height: 0; grid-template-columns: minmax(250px,36%) minmax(0,1fr); }
+.session-loader-body.is-history { grid-template-columns: minmax(0,1fr); }
 .session-loader-list { display: grid; min-width: 0; min-height: 0; grid-template-rows: auto auto minmax(0,1fr); padding: 14px 12px 0; border-right: 1px solid #333943; background: #1d2025; }
 .session-loader-search { display: flex; width: min(310px,100%); height: 34px; box-sizing: border-box; align-items: center; gap: 7px; padding: 0 9px; border: 1px solid #414854; border-radius: 9px; background: #15181c; transition: border-color 120ms ease,box-shadow 120ms ease; }
 .session-loader-search:focus-within { border-color: #5b9de9; box-shadow: 0 0 0 3px rgba(91,157,233,.13); }
@@ -140,6 +141,7 @@
 .session-loader-match-nav button { width: 25px; height: 25px; padding: 0; border: 0; border-radius: 6px; color: #a6afbb; background: rgba(255,255,255,.05); cursor: pointer; }
 .session-loader-events { min-height: 0; overflow: auto; padding: 16px clamp(14px,3vw,28px) 28px; scroll-behavior: smooth; scrollbar-width: thin; }
 .session-loader-history-status { position: sticky; z-index: 2; top: -8px; width: max-content; max-width: 100%; margin: 0 auto 10px; padding: 5px 9px; border: 1px solid rgba(91,157,233,.15); border-radius: 999px; color: #8490a0; background: rgba(24,27,32,.92); font-size: 9px; text-align: center; backdrop-filter: blur(8px); }
+.session-loader-history-note { max-width: 760px; box-sizing: border-box; margin: 0 auto 10px; padding: 8px 11px; border: 1px solid rgba(91,157,233,.16); border-radius: 9px; color: #93a0b1; background: rgba(91,157,233,.06); font-size: 10px; line-height: 1.5; text-align: center; }
 .session-loader-event { max-width: 760px; margin: 0 auto 12px; padding: 11px 13px; border: 1px solid #343b46; border-radius: 11px; background: #20242a; scroll-margin: 70px; }
 .session-loader-virtual-events .session-loader-event { width: 100%; box-sizing: border-box; }
 .session-loader-event.is-user { margin-left: auto; background: #252b32; }
@@ -174,6 +176,7 @@
 .light-theme .session-loader-event mark { color: #4d3500; background: #ffe08a; box-shadow: inset 0 -1px 0 #e3b948; }
 .light-theme .session-loader-preview { background: #fff; }
 .light-theme .session-loader-history-status { border-color: rgba(52,123,200,.17); color: #748091; background: rgba(255,255,255,.92); }
+.light-theme .session-loader-history-note { border-color: rgba(52,123,200,.18); color: #687587; background: rgba(52,123,200,.05); }
 .light-theme .session-loader-preview > header { border-color: #dce1e8; }
 .light-theme .session-loader-event { border-color: #d8dee6; background: #f7f9fb; }
 .light-theme .session-loader-event.is-user { background: #eef2f6; }

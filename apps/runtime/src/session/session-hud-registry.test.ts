@@ -65,6 +65,46 @@ describe('PRD 02 authoritative Session HUD state', () => {
     expect(registry.snapshot('agent-1')).toMatchObject({ resumable: true })
   })
 
+  it('clears explicit null context usage without replacing missing fields or valid zero', () => {
+    const registry = new SessionHudRegistry()
+    registry.spawn({ sessionId: 'agent-context', profile: 'claude-code', startedAt: 1 })
+    const contextWindow = { context_window_size: 1_000_000 }
+
+    registry.ingestProvider('agent-context', { context_window: { ...contextWindow, used_percentage: 100 } })
+    registry.ingestProvider('agent-context', { hook_event_name: 'Stop' })
+    expect(registry.snapshot('agent-context')?.contextPercent).toBe(100)
+
+    registry.ingestProvider('agent-context', {
+      context_window: { ...contextWindow, used_percentage: null, current_usage: null }
+    })
+    expect(registry.snapshot('agent-context')).not.toHaveProperty('contextPercent')
+    expect(registry.snapshot('agent-context')?.contextWindowSize).toBe(1_000_000)
+
+    registry.ingestProvider('agent-context', { hook_event_name: 'Stop' })
+    expect(registry.snapshot('agent-context')).not.toHaveProperty('contextPercent')
+
+    registry.ingestProvider('agent-context', { context_window: { ...contextWindow, used_percentage: 0 } })
+    registry.ingestProvider('agent-context', { hook_event_name: 'Stop' })
+    expect(registry.snapshot('agent-context')?.contextPercent).toBe(0)
+
+    registry.ingestProvider('agent-context', { context_window: { ...contextWindow, used_percentage: 37 } })
+    expect(registry.snapshot('agent-context')?.contextPercent).toBe(37)
+
+    registry.ingestProvider('agent-context', {
+      context_window: { contextWindowSize: 1_000_000, currentUsage: null }
+    })
+    expect(registry.snapshot('agent-context')).not.toHaveProperty('contextPercent')
+
+    registry.ingestProvider('agent-context', {
+      context_window: {
+        ...contextWindow,
+        used_percentage: null,
+        current_usage: { input_tokens: 100_000, cache_creation_input_tokens: 50_000, cache_read_input_tokens: 50_000 }
+      }
+    })
+    expect(registry.snapshot('agent-context')?.contextPercent).toBe(20)
+  })
+
   it('keeps the provider auto permission mode instead of displaying the default mode', () => {
     const registry = new SessionHudRegistry()
     registry.spawn({ sessionId: 'agent-1', profile: 'claude-code', cwd: '/tmp/project', startedAt: 1 })
