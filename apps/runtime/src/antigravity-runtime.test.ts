@@ -1,7 +1,6 @@
 import { EventEmitter } from 'node:events'
 import { execFile, spawn } from 'node:child_process'
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
-import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { promisify } from 'node:util'
@@ -251,9 +250,10 @@ describe('Antigravity RuntimeServer integration (mocked agy)', () => {
     expect(database.get<{ kind: string }>('SELECT kind FROM sessions WHERE id = ?', 'agy-shell-1')).toEqual({
       kind: 'antigravity'
     })
-    await waitUntil(() => existsSync(launchLogPath), 6_000)
-    const launches = await readLaunches(launchLogPath)
-    expect(launches.at(-1)?.args).toEqual(expect.arrayContaining(['--mode', 'accept-edits']))
+    await expect.poll(
+      async () => (await readLaunches(launchLogPath).catch(() => [])).at(-1)?.args,
+      { timeout: 6_000 }
+    ).toEqual(expect.arrayContaining(['--mode', 'accept-edits']))
   })
 
   it('reports clear installation hint when agy executable is missing', async () => {

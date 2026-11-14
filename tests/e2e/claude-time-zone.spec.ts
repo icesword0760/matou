@@ -3,7 +3,7 @@ import { join, resolve } from 'node:path'
 import { expect, test } from '@playwright/test'
 import { launchMatou, restartMatouGracefully } from './matou-fixture'
 
-test('saves the Claude time zone from settings, persists across app restart and restores system default', async () => {
+test('saves the Claude time zone from settings, persists across app restart and restores automatic default', async () => {
   test.setTimeout(60_000)
   const env = { MATOU_E2E_DISPLAY: 'primary' }
   let fixture = await launchMatou({ env })
@@ -13,7 +13,7 @@ test('saves the Claude time zone from settings, persists across app restart and 
     await fixture.page.getByRole('button', { name: '设置', exact: true }).click()
     await fixture.page.locator('.model-settings__nav').getByRole('button', { name: 'Claude Code', exact: true }).click()
     const select = fixture.page.getByRole('combobox', { name: '时区', exact: true })
-    await expect(select).toHaveValue('system')
+    await expect(select).toHaveValue('auto')
     await select.selectOption('America/Los_Angeles')
     await fixture.page.getByRole('button', { name: '保存', exact: true }).click()
     await expect(fixture.page.locator('.claude-time-zone-settings').getByRole('status')).toContainText('已保存，下次启动 Claude Code 时自动生效。')
@@ -25,7 +25,7 @@ test('saves the Claude time zone from settings, persists across app restart and 
     await fixture.page.getByRole('button', { name: '设置', exact: true }).click()
     await fixture.page.locator('.model-settings__nav').getByRole('button', { name: 'Claude Code', exact: true }).click()
     await expect(fixture.page.getByRole('combobox', { name: '时区', exact: true })).toHaveValue('America/Los_Angeles')
-    await fixture.page.getByRole('combobox', { name: '时区', exact: true }).selectOption('system')
+    await fixture.page.getByRole('combobox', { name: '时区', exact: true }).selectOption('auto')
     await fixture.page.getByRole('button', { name: '保存', exact: true }).click()
     await expect(fixture.page.locator('.claude-time-zone-settings').getByRole('status')).toContainText('已保存')
   } finally { await fixture.close() }

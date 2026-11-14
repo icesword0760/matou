@@ -20,6 +20,7 @@ export interface MatouDesktopApi {
   revealDirectory(path: string): Promise<void>
   openDirectoryInTerminal(path: string): Promise<void>
   openProviderKeyPage?(cli: 'claude-code' | 'codex', presetId: string): Promise<void>
+  openExternal?(url: string): Promise<boolean>
   writeClipboardText(text: string): Promise<void>
   hideWindow(windowId: string): Promise<void>
   showWindow(windowId: string): Promise<void>
@@ -198,6 +199,7 @@ export const DESKTOP_CHANNELS = {
   revealDirectory: 'matou:reveal-directory',
   openDirectoryInTerminal: 'matou:open-directory-in-terminal',
   openProviderKeyPage: 'matou:provider-key-page',
+  openExternal: 'matou:open-external',
   writeClipboardText: 'matou:write-clipboard-text',
   terminalCopyFocus: 'matou:terminal-copy-focus',
   hideWindow: 'matou:hide-window',

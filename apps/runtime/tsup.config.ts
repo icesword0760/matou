@@ -3,7 +3,8 @@ import { defineConfig } from 'tsup'
 export default defineConfig({
   entry: {
     index: 'src/index.ts',
-    'mt-cli': 'src/cli/mt-cli.ts'
+    'mt-cli': 'src/cli/mt-cli.ts',
+    'model-router-supervisor': 'src/model-router/process-supervisor.ts'
   },
   format: ['cjs'],
   outExtension: () => ({ js: '.cjs' }),

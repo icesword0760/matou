@@ -1,11 +1,22 @@
 import type { ClaudeSettingsSnapshot } from '@matou/contracts'
+import { getAgentManifest } from '@matou/domain'
+import { agentTimeZone, isMainlandTimeZone, nonMainlandUtc8Zone } from '../egress/time-zone-policy'
 import type { RuntimeDatabase } from '../storage/database'
 
 const KEY = 'claude.timeZone'
 
+export interface ClaudeSettingsOptions {
+  systemTimeZone?: () => string
+}
+
+export interface ClaudeEnvironmentOptions {
+  exitCountry?: string
+  official?: boolean
+}
+
 export function isClaudeTimeZone(value: unknown): value is string {
   if (typeof value !== 'string') return false
-  if (value === 'system') return true
+  if (value === 'auto' || value === 'system') return true
   // Named zones preserve daylight-saving rules and work with both Intl and TZ.
   if (!/^[A-Za-z_]+(?:\/[A-Za-z0-9_+\-]+)*$/.test(value) || value.length > 100) return false
   try {
@@ -16,18 +27,28 @@ export function isClaudeTimeZone(value: unknown): value is string {
 
 /** Read at launch, without a per-window cache: detached windows share this preference. */
 export class ClaudeSettings {
-  constructor(private readonly database: RuntimeDatabase) {}
+  readonly #systemTimeZone: () => string
+
+  constructor(private readonly database: RuntimeDatabase, options?: ClaudeSettingsOptions) {
+    this.#systemTimeZone = options?.systemTimeZone ?? (() => Intl.DateTimeFormat().resolvedOptions().timeZone)
+  }
 
   snapshot(): ClaudeSettingsSnapshot {
     const row = this.database.get<{ value_json: string }>(
       'SELECT value_json FROM preferences WHERE key = ?', KEY
     )
-    let timeZone = 'system'
+    let timeZone = 'auto'
     try {
       const value: unknown = row && JSON.parse(row.value_json)
       if (isClaudeTimeZone(value)) timeZone = value
-    } catch { /* Invalid stored settings fall back to the launch environment. */ }
-    return { timeZone, systemTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone }
+    } catch { /* Invalid stored settings fall back to the default automatic policy. */ }
+    const systemTimeZone = this.#systemTimeZone()
+    const autoTimeZone = isMainlandTimeZone(systemTimeZone) ? nonMainlandUtc8Zone() : undefined
+    return {
+      timeZone,
+      systemTimeZone,
+      ...(autoTimeZone === undefined ? {} : { autoTimeZone })
+    }
   }
 
   set(timeZone: string): ClaudeSettingsSnapshot {
@@ -40,9 +61,21 @@ export class ClaudeSettings {
     return this.snapshot()
   }
 
-  environment(profile: string): Record<string, string> {
-    if (profile !== 'claude-code') return {}
-    const { timeZone } = this.snapshot()
-    return timeZone === 'system' ? {} : { TZ: timeZone }
+  environment(profile: string, options?: ClaudeEnvironmentOptions): Record<string, string> {
+    const manifest = getAgentManifest(profile)
+    if (!manifest || !manifest.capabilities.providerConfig) return {}
+    const { timeZone, systemTimeZone } = this.snapshot()
+    const official = options?.official ?? true
+    if (!official) {
+      if (!manifest.capabilities.claudeTimeZone || timeZone === 'auto' || timeZone === 'system') return {}
+      return { TZ: timeZone }
+    }
+    const resolved = agentTimeZone({
+      profile: manifest.id,
+      setting: timeZone,
+      systemTimeZone,
+      ...(options?.exitCountry === undefined ? {} : { exitCountry: options.exitCountry })
+    })
+    return resolved === undefined ? {} : { TZ: resolved }
   }
 }

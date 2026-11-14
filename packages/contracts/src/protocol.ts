@@ -216,8 +216,22 @@ export const RPC_METHODS = [
   'provider-config.upsert',
   'provider-config.delete',
   'provider-config.activate',
+  'provider-config.subscription.login-start',
+  'provider-config.subscription.login-status',
+  'provider-config.subscription.login-reopen',
+  'provider-config.subscription.login-cancel',
+  'provider-config.subscription.models-read',
+  'provider-config.subscription.settings-read',
+  'provider-config.subscription.settings-close',
+  'provider-config.subscription.risk-confirm',
   'claude-settings.get',
   'claude-settings.set',
+  'egress.status',
+  'egress.recheck',
+  'egress.set-rule',
+  'egress.accept-current',
+  'egress.set-protection',
+  'egress.override',
   'workspace.create',
   'workspace.update',
   'workspace.archive',
@@ -356,6 +370,7 @@ export type SessionRecoveryStatusWire = {
 }
 
 export type RuntimeMessage =
+  | { type: 'provider-config.changed'; protocolVersion: typeof PROTOCOL_VERSION }
   | SessionRecoveryStatusWire
   | {
       type: 'host.navigation-request'
@@ -525,6 +540,9 @@ export type RuntimeMessage =
       code: RpcErrorCode
       message: string
       retryable: boolean
+      /** Controlled bilingual subscription sign-in copy; raw diagnostics stay in runtime logs. */
+      messageLocalized?: { zh: string; en: string }
+      providerFailure?: import('./provider-config').ProviderActivationFailure
     }
   | {
       type: 'events.batch'
@@ -533,6 +551,11 @@ export type RuntimeMessage =
       runtimeGeneration: string
       events: import('./domain-events').DomainEventWireEnvelope[]
       throughSequence: number
+    }
+  | {
+      type: 'egress.status'
+      protocolVersion: typeof PROTOCOL_VERSION
+      status: import('./egress').EgressStatusWire
     }
 
 export interface RuntimeConnectRequest {

@@ -1,6 +1,7 @@
 import type { SessionRunProfile } from '@matou/domain'
 import {
   PROTOCOL_VERSION,
+  type EgressStatusWire,
   type HostNavigationRequestWire,
   type HostNavigationResultWire,
   type RpcMethod,
@@ -86,6 +87,7 @@ export class RuntimeClient {
   #foregroundTerminalSessions = new Set<string>()
   readonly #terminalCheckpoints = new Map<string, TerminalCheckpointQueue>()
   readonly #terminalResizeIds = new Map<string, number>()
+  readonly #providerConfigListeners = new Set<() => void>()
   readonly #projectionListeners = new Set<(message: RuntimeMessage) => void>()
   readonly #hostNavigationListeners = new Set<(request: HostNavigationRequestWire) => void>()
   readonly #hostNavigationPorts = new Map<string, RuntimeClientPort>()
@@ -93,6 +95,12 @@ export class RuntimeClient {
   readonly #recoveryListeners = new Set<(status: SessionRecoveryStatus) => void>()
   readonly #recoveryResetListeners = new Set<() => void>()
   readonly #recoveryStatuses = new Map<string, SessionRecoveryStatus>()
+  readonly #egressStatusListeners = new Set<() => void>()
+  #egressStatus: EgressStatusWire | undefined
+  #egressFetchedForPort = false
+  #egressFetchInFlight: Promise<void> | null = null
+  #egressPortEpoch = 0
+  #egressPushSeq = 0
   readonly #readyWaiters = new Set<() => void>()
   #port: RuntimeClientPort
   #ready = false
@@ -137,6 +145,16 @@ export class RuntimeClient {
       this.#requests.delete(requestId)
     }
     this.#bindPort(port)
+    this.#egressPortEpoch += 1
+    this.#egressFetchedForPort = false
+    this.#egressFetchInFlight = null
+    if (this.#egressStatus !== undefined) {
+      this.#egressStatus = undefined
+      this.#notifyEgressListeners()
+    }
+    if (this.#egressStatusListeners.size > 0) {
+      this.#ensureEgressStatus()
+    }
   }
 
   dispose(): void {
@@ -148,8 +166,11 @@ export class RuntimeClient {
     this.#hostNavigationPorts.clear()
     this.#hostNavigationListeners.clear()
     this.#projectionListeners.clear()
+    this.#providerConfigListeners.clear()
     this.#recoveryListeners.clear()
     this.#recoveryResetListeners.clear()
+    this.#egressStatusListeners.clear()
+    this.#egressFetchInFlight = null
     for (const [requestId, pending] of this.#requests) {
       clearTimeout(pending.timeout)
       pending.reject(new Error('Runtime client was disposed before the request completed'))
@@ -175,14 +196,16 @@ export class RuntimeClient {
   ): Promise<T> {
     await this.whenReady()
     const requestId = crypto.randomUUID()
-    const timeoutMs = options.timeoutMs ?? this.#requestTimeoutMs
+    const timeoutMs = options.timeoutMs ?? (method === 'provider-config.subscription.login-start' ? 30_000 : this.#requestTimeoutMs)
     return new Promise<T>((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.#requests.delete(requestId)
         this.#post({
           type: 'rpc.cancel', protocolVersion: PROTOCOL_VERSION, requestId
         })
-        reject(new Error(`Runtime request ${method} timed out`))
+        const messageLocalized = { zh: 'Matou 后台没有及时响应，请重试', en: "Matou didn't respond in time. Try again." }
+        const locale = payload && typeof payload === 'object' && 'locale' in payload ? payload.locale : undefined
+        reject(Object.assign(new Error(locale === 'en' ? messageLocalized.en : messageLocalized.zh), { messageLocalized }))
       }, timeoutMs)
       this.#requests.set(requestId, {
         resolve: (value) => resolve(value as T), reject, timeout
@@ -241,6 +264,11 @@ export class RuntimeClient {
     })
   }
 
+  subscribeProviderConfig(listener: () => void): () => void {
+    this.#providerConfigListeners.add(listener)
+    return () => { this.#providerConfigListeners.delete(listener) }
+  }
+
   subscribeProjection(listener: (message: RuntimeMessage) => void): () => void {
     this.#projectionListeners.add(listener)
     return () => this.#projectionListeners.delete(listener)
@@ -273,6 +301,59 @@ export class RuntimeClient {
       this.#recoveryListeners.delete(listener)
       if (onReset) this.#recoveryResetListeners.delete(onReset)
     }
+  }
+
+  getEgressStatusSnapshot = (): EgressStatusWire | undefined => {
+    return this.#egressStatus
+  }
+
+  subscribeEgressStatus = (listener: () => void): (() => void) => {
+    this.#egressStatusListeners.add(listener)
+    this.#ensureEgressStatus()
+    return () => {
+      this.#egressStatusListeners.delete(listener)
+    }
+  }
+
+  updateEgressStatus(status: EgressStatusWire): void {
+    if (this.#disposed) return
+    this.#egressPushSeq += 1
+    this.#egressStatus = status
+    this.#notifyEgressListeners()
+  }
+
+  #notifyEgressListeners(): void {
+    for (const listener of this.#egressStatusListeners) listener()
+  }
+
+  #ensureEgressStatus(): void {
+    if (this.#disposed || this.#egressFetchedForPort || this.#egressFetchInFlight) return
+    this.#egressFetchedForPort = true
+    const epoch = this.#egressPortEpoch
+    const pushSeqAtStart = this.#egressPushSeq
+    const promise = this.request<EgressStatusWire>('egress.status', undefined)
+      .then((status) => {
+        if (
+          this.#disposed ||
+          epoch !== this.#egressPortEpoch ||
+          pushSeqAtStart !== this.#egressPushSeq
+        ) {
+          return
+        }
+        if (isEgressStatusPayload(status)) {
+          this.#egressStatus = status
+          this.#notifyEgressListeners()
+        }
+      })
+      .catch(() => {
+        // Silent fallback: RPC errors hide egress UI without blocking cards.
+      })
+      .finally(() => {
+        if (this.#egressFetchInFlight === promise) {
+          this.#egressFetchInFlight = null
+        }
+      })
+    this.#egressFetchInFlight = promise
   }
 
   prioritizeSessionRecovery(
@@ -473,6 +554,10 @@ export class RuntimeClient {
   }
 
   #receive(message: RuntimeMessage, port: RuntimeClientPort): void {
+    if (message.type === 'provider-config.changed') {
+      for (const listener of this.#providerConfigListeners) listener()
+      return
+    }
     if (message.type === 'protocol.ready') {
       this.#ready = true
       for (const resolve of this.#readyWaiters) resolve()
@@ -512,7 +597,7 @@ export class RuntimeClient {
       clearTimeout(pending.timeout)
       this.#requests.delete(message.requestId)
       if (message.type === 'rpc.response') pending.resolve(message.result)
-      else pending.reject(Object.assign(new Error(message.message), { code: message.code }))
+      else pending.reject(Object.assign(new Error(message.message), { code: message.code, ...(message.messageLocalized ? { messageLocalized: message.messageLocalized } : {}), ...(message.providerFailure ? { providerFailure: message.providerFailure } : {}) }))
       return
     }
     if (message.type === 'session.recovery-status') {
@@ -559,6 +644,12 @@ export class RuntimeClient {
     }
     if (message.type === 'events.batch' || message.type === 'terminal.hud') {
       for (const listener of this.#projectionListeners) listener(message)
+      return
+    }
+    if (message.type === 'egress.status') {
+      this.#egressPushSeq += 1
+      this.#egressStatus = message.status
+      this.#notifyEgressListeners()
     }
   }
 
@@ -712,6 +803,17 @@ function hostNavigationAttemptKey(value: {
   attemptId: string
 }): string {
   return `${value.requestId}\u0000${value.attemptId}`
+}
+
+function isEgressStatusPayload(value: unknown): value is EgressStatusWire {
+  if (!value || typeof value !== 'object') return false
+  const record = value as Record<string, unknown>
+  return (
+    Array.isArray(record.families) &&
+    Array.isArray(record.checks) &&
+    Boolean(record.sessionFamilies) &&
+    typeof record.sessionFamilies === 'object'
+  )
 }
 
 function effectiveTerminalConfig(

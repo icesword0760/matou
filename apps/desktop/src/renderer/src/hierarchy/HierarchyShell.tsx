@@ -13,7 +13,8 @@ import {
   type SessionGraphProjection
 } from '../projection/RuntimeProjectionStore'
 import { messages } from '../i18n/current'
-import { useMessages } from '../i18n/LocaleProvider'
+import { useLocale, useMessages } from '../i18n/LocaleProvider'
+import { useEgressNotifications } from '../egress/egress-notifications'
 import { useRuntimeClient } from '../runtime/RuntimeProvider'
 import type { HostNavigationResultInput } from '../runtime/RuntimeClient'
 import { createBrowserNotificationStore } from '../notifications/browser-notification-store'
@@ -310,6 +311,7 @@ function HierarchyProduct({
   const m = hierarchyMessages.shell
   const client = useRuntimeClient()
   const notificationStore = useNotificationStore()
+  useEgressNotifications(notificationStore, useLocale() === 'zh-CN')
   useNotificationSnapshot()
   const readOnlyRef = useRef(readOnly)
   readOnlyRef.current = readOnly

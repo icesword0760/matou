@@ -1,16 +1,18 @@
 import { useEffect, useRef, useState } from 'react'
-import { CLI_DEFAULT_MODEL, PROVIDER_PRESETS, type ProviderCli, type ProviderConfigInput, type ProviderConfigView, type ProviderModelsResult, type ProviderPreset } from '@matou/contracts'
+import { CLI_DEFAULT_MODEL, PROVIDER_PRESETS, type ProviderCli, type ProviderConfigInput, type ProviderConfigView, type ProviderModelsResult, type ProviderPreset, type SubscriptionProvider } from '@matou/contracts'
 import { useLocale } from '../i18n/LocaleProvider'
 import type { ProviderConfigClient } from './ModelSwitchSettings'
 import './provider-setup.css'
 
 type Draft = { name: string; endpoint: string; model: string; apiKey: string; modelMapping: NonNullable<ProviderConfigInput['modelMapping']> }
-export function ProviderSetupDialog({ cli, existing, official, activeId, client, onClose, onSave, onUseOfficial, onDelete }: {
+export function ProviderSetupDialog({ cli, existing, official, activeId, client, subscriptionSupported = true, onClose, onSave, onUseOfficial, onDelete, onSelectSubscription }: {
   cli: ProviderCli; existing?: ProviderConfigView | undefined; official?: ProviderConfigView | undefined; activeId?: string | undefined
   client: ProviderConfigClient | null; onClose(): void
+  subscriptionSupported?: boolean
   onSave(input: ProviderConfigInput, use: boolean): Promise<void>
   onUseOfficial(provider: ProviderConfigView): Promise<void>
   onDelete(provider: ProviderConfigView): Promise<void>
+  onSelectSubscription?(provider: SubscriptionProvider): void
 }) {
   const zh = useLocale() === 'zh-CN', t = (cn: string, en: string) => zh ? cn : en
   const app = cli === 'claude-code' ? 'Claude Code' : 'Codex'
@@ -49,6 +51,13 @@ export function ProviderSetupDialog({ cli, existing, official, activeId, client,
   }
   const choose = () => {
     setFailure(''); setConfirm(undefined)
+    if (selected === 'subscription-codex' || selected === 'subscription-antigravity') {
+      // Disabled options cannot be selected; keep this as the final guard for
+      // a selection made before the runtime capability arrives.
+      if (!subscriptionSupported) return
+      onSelectSubscription?.(selected === 'subscription-codex' ? 'codex' : 'antigravity')
+      return
+    }
     if (selected === 'official') { setStep('form'); return }
     const next = presets.find(p => p.id === selected)
     const value: Draft = { name: next?.name ?? '', endpoint: next?.endpoint ?? '', model: next?.model ?? '', apiKey: '', modelMapping: next?.modelMapping ?? {} }
@@ -95,8 +104,16 @@ export function ProviderSetupDialog({ cli, existing, official, activeId, client,
     finally { if (alive.current && generation.current === token) setFetching(false) }
   }
   const officialMode = selected === 'official' && !existing
+  const subscriptionBlocked = !subscriptionSupported && (selected === 'subscription-codex' || selected === 'subscription-antigravity')
   const title = step === 'pick' ? t('添加供应商', 'Add provider') : officialMode ? t('使用官方账户', 'Use official account') : existing ? t('编辑供应商', 'Edit provider') : `${t('配置', 'Configure')} ${preset?.name ?? t('自定义服务', 'custom service')}`
   const matches = (value: string) => value.toLowerCase().includes(query.trim().toLowerCase())
+  // The Codex tab keeps its native ChatGPT sign-in; only Claude Code offers these.
+  const subscriptionChoices = cli === 'claude-code' && onSelectSubscription && filter !== 'api'
+    ? [
+        { id: 'subscription-codex' as const, provider: 'codex' as const, title: t('ChatGPT 账号', 'ChatGPT account'), description: t('使用你的 ChatGPT 订阅额度，不需要 API Key', 'Use your ChatGPT subscription. No API key needed.') },
+        { id: 'subscription-antigravity' as const, provider: 'antigravity' as const, title: t('Antigravity 账号', 'Antigravity account'), description: t('使用 Google AI 订阅中的 Claude 与 Gemini 模型', 'Use Claude and Gemini models from your Google AI subscription.') }
+      ].filter(option => matches(`${option.title} ${option.description} ${option.id}`))
+    : []
   return <div className="provider-setup-layer" onPointerDown={e => { if (e.target === e.currentTarget) requestClose() }}>
     <div ref={root} className="provider-setup" role="dialog" aria-modal="true" aria-label={title} aria-busy={busy} onKeyDown={e => {
       if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); if (confirm) setConfirm(undefined); else if (chooser) setChooser(false); else requestClose() }
@@ -116,6 +133,11 @@ export function ProviderSetupDialog({ cli, existing, official, activeId, client,
       {step === 'pick' ? <>
         <input data-autofocus type="search" className="provider-search" aria-label={t('搜索供应商', 'Search providers')} placeholder={t('搜索供应商', 'Search providers')} value={query} onChange={e => setQuery(e.target.value)} />
         <div className="provider-filters" aria-label={t('供应商分类', 'Provider categories')}>{[['all',t('全部','All')],['official',t('官方登录','Official sign-in')],['api',t('API 服务','API services')]].map(([id, label]) => <button key={id} type="button" aria-pressed={filter === id} onClick={() => setFilter(id!)}>{label}</button>)}</div>
+        {subscriptionChoices.length > 0 && <>
+          <p className="provider-field-label">{t('订阅账号', 'Subscription accounts')}</p>
+          <div className="provider-subscription-options">{subscriptionChoices.map(option => <button key={option.id} type="button" className={`provider-preset ${selected === option.id ? 'is-selected' : ''}`} aria-pressed={selected === option.id} disabled={!subscriptionSupported} aria-describedby={subscriptionSupported ? undefined : 'provider-subscription-support-note'} onClick={() => setSelected(option.id)}><span className="provider-preset__icon">{option.provider === 'codex' ? 'C' : 'A'}</span><span><strong>{option.title}</strong><small>{option.description}</small></span><b>{selected === option.id ? '✓' : '○'}</b></button>)}</div>
+          {!subscriptionSupported && <p id="provider-subscription-support-note" className="provider-subscription-support-note">{t('需要 macOS 15 或更高版本', 'Requires macOS 15 or later')}</p>}
+        </>}
         {filter !== 'api' && matches(`${app} 官方 official`) && <button className={`provider-preset provider-preset--wide ${selected === 'official' ? 'is-selected' : ''}`} type="button" aria-pressed={selected === 'official'} onClick={() => setSelected('official')}><span className="provider-preset__icon">◎</span><span><strong>{cli === 'claude-code' ? 'Claude' : 'ChatGPT'} {t('官方账户', 'account')}</strong><small>{t('使用已有登录，无需 API Key', 'Use existing sign-in, no API key')}</small></span><b>›</b></button>}
         {filter !== 'official' && <>
           <p className="provider-field-label">API {t('服务', 'services')}</p>
@@ -161,7 +183,7 @@ export function ProviderSetupDialog({ cli, existing, official, activeId, client,
         {existing && !existing.builtIn && existing.id !== activeId && <button type="button" className="provider-delete" disabled={busy} onClick={() => setConfirm('delete')}>{t('删除','Delete')}</button>}
         <span />
         <button type="button" className={existing ? 'primary' : undefined} disabled={busy} onClick={step === 'form' && !officialMode ? () => save(false) : requestClose}>{step === 'form' && !officialMode ? busy ? t('保存中…','Saving…') : existing ? t('保存修改','Save changes') : t('仅保存','Save only') : t('取消','Cancel')}</button>
-        {!existing && <button type="button" className="primary" disabled={busy || (step === 'pick' && !selected) || (officialMode && !official)} onClick={() => { if (step === 'pick') choose(); else if (officialMode && official) void run(() => onUseOfficial(official)); else save(true) }}>{busy ? t('处理中…','Working…') : step === 'pick' ? t('下一步','Next') : officialMode ? t('使用官方服务','Use official service') : t('添加并使用','Add and use')}</button>}
+        {!existing && <button type="button" className="primary" disabled={busy || (step === 'pick' && (!selected || subscriptionBlocked)) || (officialMode && !official)} onClick={() => { if (step === 'pick') choose(); else if (officialMode && official) void run(() => onUseOfficial(official)); else save(true) }}>{busy ? t('处理中…','Working…') : step === 'pick' ? t('下一步','Next') : officialMode ? t('使用官方服务','Use official service') : t('添加并使用','Add and use')}</button>}
       </footer>
     </div>
   </div>

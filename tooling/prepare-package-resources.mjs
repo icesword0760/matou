@@ -13,6 +13,7 @@ await mkdir(destination, { recursive: true })
 await cp(join(root, 'apps', 'runtime', 'dist'), destination, { recursive: true })
 await cp(nodePtyRoot, join(destination, 'node-pty'), { recursive: true })
 await cp(join(root, 'packages/contracts/third-party/provider-presets-LICENSE'), join(destination, 'provider-presets-LICENSE'))
+await cp(join(root, 'packages/contracts/third-party/subscription-accounts-reference-LICENSE'), join(destination, 'subscription-accounts-reference-LICENSE'))
 const runtimeEntry = join(destination, 'index.cjs')
 const bundledRuntime = await readFile(runtimeEntry, 'utf8')
 await writeFile(
@@ -23,6 +24,7 @@ await writeFile(
 const requiredRuntimeResources = [
   'index.cjs',
   'mt-cli.cjs',
+  'model-router-supervisor.cjs',
   'control-assets/bin/mt',
   'control-assets/bin/mt.cmd',
   'control-assets/providers/host-control.md',
@@ -36,4 +38,8 @@ if (process.platform !== 'win32') {
 }
 
 // Ship the pinned upstream account engine; end users need neither uv nor Python.
+if (process.platform === 'darwin') {
+  const { prepareModelRouter } = await import('./model-router/prepare.mjs')
+  await prepareModelRouter({ packageResources: true })
+}
 await import('./claude-accounts/build.mjs')

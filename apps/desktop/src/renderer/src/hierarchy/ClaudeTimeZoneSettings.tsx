@@ -8,7 +8,7 @@ export function ClaudeTimeZoneSettings({ client }: { client: ProviderConfigClien
   const zh = useLocale() === 'zh-CN'
   const t = (cn: string, en: string) => zh ? cn : en
   const [stored, setStored] = useState<ClaudeSettingsSnapshot>()
-  const [draft, setDraft] = useState('system')
+  const [draft, setDraft] = useState('auto')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [saved, setSaved] = useState(false)
@@ -32,9 +32,13 @@ export function ClaudeTimeZoneSettings({ client }: { client: ProviderConfigClien
     const common = ['UTC', 'Asia/Shanghai', 'Asia/Tokyo', 'Asia/Singapore', 'America/Los_Angeles', 'America/New_York', 'Europe/London', 'Europe/Paris']
     const intl = Intl as typeof Intl & { supportedValuesOf?: (key: 'timeZone') => string[] }
     const all = intl.supportedValuesOf?.('timeZone') ?? []
-    return [...new Set([...common, ...(stored && stored.timeZone !== 'system' ? [stored.timeZone] : []), ...all])]
+    return [...new Set([...common, ...(stored && stored.timeZone !== 'system' && stored.timeZone !== 'auto' ? [stored.timeZone] : []), ...all])]
   }, [stored])
-  const effective = draft === 'system' ? stored?.systemTimeZone : draft
+  const effective = draft === 'auto'
+    ? (stored?.autoTimeZone ?? stored?.systemTimeZone)
+    : draft === 'system'
+      ? stored?.systemTimeZone
+      : draft
   const preview = effective ? new Intl.DateTimeFormat(zh ? 'zh-CN' : 'en-US', {
     timeZone: effective, month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false
   }).format(new Date()) : ''
@@ -52,16 +56,20 @@ export function ClaudeTimeZoneSettings({ client }: { client: ProviderConfigClien
 
   return <div className="claude-time-zone-settings" aria-busy={!stored && !error || saving}>
     <label htmlFor="claude-time-zone">{t('时区', 'Time zone')}</label>
-    <p id="claude-time-zone-help">{t('用于 Claude Code 的额度重置时间等显示。', 'Used for Claude Code displays such as usage limit reset times.')}</p>
+    <p id="claude-time-zone-help">{t(
+      '自动：本机是大陆时区时，Claude Code 和 Codex 使用同为东八区的新加坡时区（出口在台湾时用台北），时间读数不变。',
+      'Automatic: when this Mac uses a mainland China time zone, Claude Code and Codex use another UTC+8 zone (Singapore, or Taipei when your exit is in Taiwan), so clock times stay the same.'
+    )}</p>
     <select id="claude-time-zone" aria-describedby="claude-time-zone-help claude-time-zone-scope"
       value={draft} disabled={!stored || saving} onChange={event => { setDraft(event.target.value); setSaved(false); setError('') }}>
+      <option value="auto">{t('自动（隐藏大陆时区，推荐）', 'Automatic (hide mainland China time zone, recommended)')}</option>
       <option value="system">{t('跟随系统', 'Follow system')}{stored ? ` (${stored.systemTimeZone})` : ''}</option>
       {zones.map(zone => <option key={zone} value={zone}>{zone}</option>)}
     </select>
     {preview && <p className="claude-time-zone-settings__preview">{t('当前时间', 'Current time')}：{preview} · {effective}</p>}
     <p id="claude-time-zone-scope">{t(
-      '仅影响码头启动的 Claude Code 及其子进程。保存后，新建、恢复和重启的会话自动使用该时区。正在运行的会话需重启后生效；保存不会中断任务。',
-      'Applies only to Claude Code and its child processes launched by Matou. New, resumed and restarted sessions use the saved zone automatically. Running sessions need a restart; saving does not interrupt tasks.'
+      '仅影响码头启动的 Claude Code、Codex 及其子进程。保存后，新建、恢复和重启的会话自动使用该时区。正在运行的会话需重启后生效；保存不会中断任务。',
+      'Applies only to Claude Code, Codex and their child processes launched by Matou. New, resumed and restarted sessions use the saved zone automatically. Running sessions need a restart; saving does not interrupt tasks.'
     )}</p>
     <div className="claude-time-zone-settings__actions">
       <button type="button" disabled={!stored || saving || draft === stored.timeZone && !error} onClick={() => void save()}>

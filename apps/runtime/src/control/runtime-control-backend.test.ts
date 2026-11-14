@@ -13,7 +13,8 @@ import {
   withHostControlPostResponseEffect
 } from './host-control-post-response'
 import { SegmentJournal } from '../journal/segment-journal'
-import type { PtySession } from '../session/pty-session'
+import { SessionEgressFrozenError, type PtySession } from '../session/pty-session'
+import { HostControlTargetNotReadyError } from './host-control-types'
 import { TaskTelemetryRepository } from '../domain/product-foundation-repository'
 import { HierarchyApplicationService } from '../hierarchy/hierarchy-application-service'
 import { NotificationProjection } from '../product/experience-foundation'
@@ -211,5 +212,23 @@ describe('RuntimeControlBackend submitted terminal input', () => {
     await backend.sendText('session-1', 'draft only')
 
     expect(target.writes.map(({ data }) => data)).toEqual(['draft only'])
+  })
+
+  it('surfaces a clear target-not-ready error when writing to an egress-frozen session', async () => {
+    const frozenSession = {
+      get lastOutputAt() { return 0 },
+      write: () => { throw new SessionEgressFrozenError('session-1') }
+    } as unknown as PtySession
+    const backend = backendWith(frozenSession)
+
+    await expect(backend.sendText('session-1', 'hello', false)).rejects.toThrow(
+      HostControlTargetNotReadyError
+    )
+    await expect(backend.sendText('session-1', 'hello', false)).rejects.toThrow(
+      'session is paused because the network exit failed a safety check'
+    )
+    await expect(backend.sendKey('session-1', 'Enter')).rejects.toThrow(
+      'session is paused because the network exit failed a safety check'
+    )
   })
 })

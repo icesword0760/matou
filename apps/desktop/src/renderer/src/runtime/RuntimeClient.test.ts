@@ -2,13 +2,72 @@ import { describe, expect, it, vi } from 'vitest'
 
 import {
   PROTOCOL_VERSION, parseRendererMessage,
-  type HostNavigationRequestWire, type HostNavigationResultWire
+  type HostNavigationRequestWire, type HostNavigationResultWire, type ProviderActivationFailure
 } from '@matou/contracts'
 
 import { RuntimeClient, type RuntimeClientPort } from './RuntimeClient'
 import { runtimeWindowIdentityFromSearch } from './RuntimeProvider'
 
 describe('RuntimeClient', () => {
+  it('gives login-start 30 seconds while retaining the normal request timeout and localized errors', async () => {
+    vi.useFakeTimers()
+    try {
+      const port = new FakePort(), client = new RuntimeClient(port)
+      port.deliver({ type: 'protocol.ready', protocolVersion: PROTOCOL_VERSION })
+      const login = client.request('provider-config.subscription.login-start', { provider: 'codex', locale: 'en' })
+      const normal = client.request('provider-config.snapshot', {})
+      const normalError = expect(normal).rejects.toMatchObject({ message: 'Matou 后台没有及时响应，请重试', messageLocalized: { zh: 'Matou 后台没有及时响应，请重试', en: "Matou didn't respond in time. Try again." } })
+      const loginError = expect(login).rejects.toMatchObject({ message: "Matou didn't respond in time. Try again.", messageLocalized: { zh: 'Matou 后台没有及时响应，请重试', en: "Matou didn't respond in time. Try again." } })
+      await vi.advanceTimersByTimeAsync(0)
+      const requests = port.sent.filter((message: any) => message.type === 'rpc.request') as Array<{ method: string; deadlineAt: number }>
+      expect(requests.find(row => row.method.endsWith('login-start'))!.deadlineAt - Date.now()).toBe(30_000)
+      expect(requests.find(row => row.method.endsWith('snapshot'))!.deadlineAt - Date.now()).toBe(10_000)
+      await vi.advanceTimersByTimeAsync(10_000)
+      await normalError
+      expect(port.sent.filter((message: any) => message.type === 'rpc.cancel')).toHaveLength(1)
+      await vi.advanceTimersByTimeAsync(20_000)
+      await loginError
+      expect(port.sent.filter((message: any) => message.type === 'rpc.cancel')).toHaveLength(2)
+      client.dispose()
+    } finally { vi.useRealTimers() }
+  })
+  it('preserves bilingual sign-in error copy on the rejected request', async () => {
+    const port = new FakePort(), client = new RuntimeClient(port)
+    port.deliver({ type: 'protocol.ready', protocolVersion: PROTOCOL_VERSION })
+    const result = client.request('provider-config.subscription.login-start', { provider: 'codex' })
+    await Promise.resolve()
+    const request = port.sent.at(-1) as { requestId: string }
+    const messageLocalized = { zh: '模型路由未能启动', en: 'Model router failed to start' }
+    port.deliver({ type: 'rpc.error', protocolVersion: PROTOCOL_VERSION, requestId: request.requestId, code: 'INTERNAL_ERROR', message: messageLocalized.zh, messageLocalized, retryable: true })
+    await expect(result).rejects.toMatchObject({ message: messageLocalized.zh, messageLocalized })
+    client.dispose()
+  })
+  it('publishes provider changes and unsubscribes without touching terminal projection', () => {
+    const port = new FakePort(), client = new RuntimeClient(port)
+    const listener = vi.fn(), projection = vi.fn()
+    const unsubscribe = client.subscribeProviderConfig(listener)
+    client.subscribeProjection(projection)
+    port.deliver({ type: 'provider-config.changed', protocolVersion: PROTOCOL_VERSION })
+    expect(listener).toHaveBeenCalledOnce()
+    expect(projection).not.toHaveBeenCalled()
+    unsubscribe()
+    port.deliver({ type: 'provider-config.changed', protocolVersion: PROTOCOL_VERSION })
+    expect(listener).toHaveBeenCalledOnce()
+    client.dispose()
+  })
+
+  it.each(['router-start-failed', 'needs-sign-in'] as const)('retains structured provider failure details for %s on rejected RPC errors', async status => {
+    const port = new FakePort(), client = new RuntimeClient(port)
+    port.deliver({ type: 'protocol.ready', protocolVersion: PROTOCOL_VERSION })
+    const result = client.request('provider-config.activate', { cli: 'claude-code', providerId: 'chatgpt' })
+    await Promise.resolve()
+    const request = port.sent.at(-1) as { requestId: string }
+    const providerFailure: ProviderActivationFailure = { status, reason: '请检查账号状态', reasonLocalized: { zh: '请检查账号状态', en: 'Check the account status' }, message: { zh: '操作未完成：请检查账号状态', en: 'Operation failed: Check the account status' }, recovery: status === 'needs-sign-in' ? 'sign-in' : 'retry' }
+    port.deliver({ type: 'rpc.error', protocolVersion: PROTOCOL_VERSION, requestId: request.requestId, code: 'INTERNAL', message: '模型路由未能启动', providerFailure })
+    await expect(result).rejects.toMatchObject({ message: '模型路由未能启动', providerFailure })
+    client.dispose()
+  })
+
   it('publishes Runtime navigation requests and posts an exact Renderer acknowledgement', () => {
     const port = new FakePort()
     const client = new RuntimeClient(port, {
@@ -811,6 +870,95 @@ describe('RuntimeClient', () => {
     expect(second).toEqual([expect.objectContaining({
       type: 'protocol.error', code: 'WORKSPACE_PATH_INVALID', sessionId: 'session-2'
     })])
+  })
+
+  it('coalesces initial egress.status RPC, caches pushes, and clears cache on replacePort', async () => {
+    const port = new FakePort()
+    const client = new RuntimeClient(port, { clientId: 'renderer-1' })
+    port.deliver({
+      type: 'protocol.ready',
+      protocolVersion: PROTOCOL_VERSION,
+      runtimeId: 'runtime-1',
+      capabilities: ['domain-rpc-v1']
+    })
+
+    expect(client.getEgressStatusSnapshot()).toBeUndefined()
+
+    let notifications1 = 0
+    let notifications2 = 0
+    const unsub1 = client.subscribeEgressStatus(() => { notifications1 += 1 })
+    const unsub2 = client.subscribeEgressStatus(() => { notifications2 += 1 })
+
+    // Let whenReady() microtask flush and check only ONE egress.status RPC was sent.
+    await Promise.resolve()
+    const egressRpcs = port.sent.filter(
+      (msg) => msg.type === 'rpc.request' && msg.method === 'egress.status'
+    )
+    expect(egressRpcs).toHaveLength(1)
+
+    const sampleStatus = {
+      state: 'ok' as const,
+      protectionEnabled: true,
+      ruleMode: 'country' as const,
+      checkedAt: 1_700_000_000_000,
+      families: [],
+      checks: [],
+      sessionFamilies: {}
+    }
+    port.deliver({
+      type: 'rpc.response',
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: egressRpcs[0]!.requestId,
+      ok: true,
+      result: sampleStatus
+    })
+    await Promise.resolve()
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(client.getEgressStatusSnapshot()).toEqual(sampleStatus)
+    expect(notifications1).toBe(1)
+    expect(notifications2).toBe(1)
+
+    // Subsequent subscriber reads cached snapshot synchronously and triggers no new RPC.
+    const unsub3 = client.subscribeEgressStatus(() => {})
+    await Promise.resolve()
+    expect(
+      port.sent.filter((msg) => msg.type === 'rpc.request' && msg.method === 'egress.status')
+    ).toHaveLength(1)
+
+    // Pushed update refreshes cached snapshot.
+    const pushedStatus = { ...sampleStatus, checkedAt: 1_700_000_060_000 }
+    port.deliver({
+      type: 'egress.status',
+      protocolVersion: PROTOCOL_VERSION,
+      status: pushedStatus
+    })
+    expect(client.getEgressStatusSnapshot()).toEqual(pushedStatus)
+
+    // Rebuilding the port with no active listeners clears cache without eagerly fetching;
+    // the next subscriber fetches fresh status on the rebuilt port.
+    unsub1()
+    unsub2()
+    unsub3()
+    const port2 = new FakePort()
+    client.replacePort(port2)
+    expect(client.getEgressStatusSnapshot()).toBeUndefined()
+    expect(port2.sent.filter((msg) => msg.type === 'rpc.request')).toHaveLength(0)
+
+    port2.deliver({
+      type: 'protocol.ready',
+      protocolVersion: PROTOCOL_VERSION,
+      runtimeId: 'runtime-2',
+      capabilities: ['domain-rpc-v1']
+    })
+    const unsubAfter = client.subscribeEgressStatus(() => {})
+    await Promise.resolve()
+    expect(
+      port2.sent.filter((msg) => msg.type === 'rpc.request' && msg.method === 'egress.status')
+    ).toHaveLength(1)
+
+    unsubAfter()
+    client.dispose()
   })
 })
 

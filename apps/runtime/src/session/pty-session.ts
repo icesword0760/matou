@@ -1,5 +1,5 @@
 import os from 'node:os'
-import { readFile } from 'node:fs/promises'
+import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import type { RuntimeMessage, StorageFaultCode } from '@matou/contracts'
@@ -12,17 +12,22 @@ import { TerminalScreenProjector, type TerminalScreenSnapshot } from '../control
 import { SegmentJournal, type SegmentJournalOptions } from '../journal/segment-journal'
 import {
   SessionDurabilityGate,
+  type DurabilityExecutionPauser,
   type SessionDurabilityFaultEvent,
   type SessionDurabilityRecoveredEvent,
   type SessionDurabilityState
 } from './session-durability-gate'
-import { PtyExecutionPauser } from './pty-execution-pauser'
+import { PtyExecutionPauser, SharedExecutionPauser } from './pty-execution-pauser'
 import { PtyOutputBatcher } from './pty-output-batcher'
 import { OutputByteLedger } from './output-byte-ledger'
 import { executableExists, resolveProviderCommandEnvironment } from './provider-command-environment'
 import { resolvePtyCommand } from './provider-launch-plan'
 import { shellIntegrationEnvironment } from './shell-integration'
+import { buildClaudeLaunch, type ClaudeLaunch } from '../model-router/claude-launch'
+import { SubscriptionLaunchError, type SubscriptionAccounts } from '../model-router/subscription-accounts'
+import type { RouterLease } from '../model-router/manager'
 import { independentSessionEnvironment } from './independent-session-environment'
+import { claudeResumeUsesSubscriptionModel } from './claude-resume-model'
 
 export interface PtySessionOptions {
   sessionId: string
@@ -36,6 +41,7 @@ export interface PtySessionOptions {
   forkSession?: boolean
   permissionMode?: string
   settingsPath?: string
+  subscription?: { accounts: SubscriptionAccounts; providerConfigId: string }
   codexHooksConfig?: string
   controlAssetRoot?: string
   model?: string
@@ -56,6 +62,13 @@ export interface PtySessionOptions {
   runId?: string
 }
 
+export class SessionEgressFrozenError extends Error {
+  constructor(sessionId?: string) {
+    super(sessionId ? `session ${sessionId} is frozen due to network egress` : 'session egress is frozen')
+    this.name = 'SessionEgressFrozenError'
+  }
+}
+
 export class PtySession {
   readonly sessionId: string
   readonly pid: number
@@ -64,8 +77,12 @@ export class PtySession {
   readonly runId: string | undefined
   readonly replayFromSequence: number
 
+  #subscriptionLeaseReleased = false
+  readonly #subscriptionLease: RouterLease | undefined
   readonly #pty: pty.IPty
   readonly #journal: SegmentJournal
+  readonly #sharedPauser: SharedExecutionPauser
+  readonly #egressPauser: DurabilityExecutionPauser
   readonly #durabilityGate: SessionDurabilityGate
   #send: ((message: RuntimeMessage) => void) | undefined
   #creditWindow: CreditWindow
@@ -101,6 +118,7 @@ export class PtySession {
   #resolveClosed: () => void = () => {}
 
   get lastSequence(): number { return this.#sequence }
+  get egressFrozen(): boolean { return this.#sharedPauser.isPausedFor('egress') }
   get durabilityState(): SessionDurabilityState { return this.#durabilityGate.state }
   get retainedDurabilityBytes(): number { return this.#durabilityGate.retainedBytes }
   get maximumUnackedBytes(): number { return this.#maximumUnackedBytes }
@@ -112,7 +130,8 @@ export class PtySession {
     return this.#journal.protectCheckpointSequences(sequences)
   }
 
-  private constructor(options: PtySessionOptions, journal: SegmentJournal, terminal: pty.IPty) {
+  private constructor(options: PtySessionOptions, journal: SegmentJournal, terminal: pty.IPty, subscriptionLease?: RouterLease) {
+    this.#subscriptionLease = subscriptionLease
     this.sessionId = options.sessionId
     this.pid = terminal.pid
     this.executionContextId = options.executionContextId
@@ -130,10 +149,12 @@ export class PtySession {
     this.#onOutput = options.onOutput
     this.#screen = new TerminalScreenProjector(options.cols, options.rows)
     this.#closed = new Promise<void>((resolve) => { this.#resolveClosed = resolve })
+    this.#sharedPauser = new SharedExecutionPauser(new PtyExecutionPauser(terminal))
+    this.#egressPauser = this.#sharedPauser.lease('egress')
     this.#durabilityGate = new SessionDurabilityGate({
       sessionId: options.sessionId,
       initialSequence: journal.lastSequence,
-      pauser: new PtyExecutionPauser(terminal),
+      pauser: this.#sharedPauser.lease('durability'),
       onFault: (event) => {
         this.#durabilityFault = event
         this.#sendDurabilityFault(event)
@@ -157,6 +178,7 @@ export class PtySession {
       this.#outputBatcher.offer(data)
     })
     terminal.onExit(({ exitCode, signal }) => {
+      this.#releaseSubscriptionLease()
       options.onProcessExit?.()
       this.#enqueueExit(exitCode, signal)
     })
@@ -165,82 +187,114 @@ export class PtySession {
   static async create(options: PtySessionOptions): Promise<PtySession> {
     const journal = await SegmentJournal.open(options.dataRoot, options.sessionId, options.journalOptions)
     const profile = options.profile ?? 'shell'
-    const codexDeveloperInstructions = profile === 'codex' && options.controlAssetRoot
-      ? await readProviderInstructions(options.controlAssetRoot)
-      : undefined
-    const command = resolvePtyCommand({
-      profile,
-      executable: resolveExecutable(profile),
-      ...(options.providerSessionId === undefined ? {} : {
-        providerSessionId: options.providerSessionId
-      }),
-      ...(options.forkSession === undefined ? {} : { forkSession: options.forkSession }),
-      ...(options.permissionMode === undefined ? {} : {
-        permissionMode: options.permissionMode
-      }),
-      ...(options.settingsPath === undefined ? {} : {
-        settingsPath: options.settingsPath
-      }),
-      ...(options.codexHooksConfig === undefined ? {} : {
-        codexHooksConfig: options.codexHooksConfig
-      }),
-      ...(options.controlAssetRoot === undefined ? {} : {
-        controlAssetRoot: options.controlAssetRoot
-      }),
-      ...(codexDeveloperInstructions === undefined ? {} : { codexDeveloperInstructions }),
-      ...(options.model === undefined ? {} : { model: options.model })
-    })
-    const integrationEnvironment = profile === 'shell'
-      ? await shellIntegrationEnvironment(options.dataRoot, command.file)
-      : {}
-    const inheritedEnvironment = { ...process.env }
-    delete inheritedEnvironment.MATOU_AGENT_STATUS_DIR
-    delete inheritedEnvironment.MATOU_PROVIDER_HOOK_URL
-    delete inheritedEnvironment.MATOU_PROVIDER_HOOK_TOKEN
-    delete inheritedEnvironment.MATOU_ANTIGRAVITY_SYSTEM_MESSAGE_FILE
-    const baseEnvironment: NodeJS.ProcessEnv = {
-      ...inheritedEnvironment,
-      ...integrationEnvironment,
-      ...options.env,
-      TERM: 'xterm-256color'
-    }
-    if (profile === 'claude-code') {
-      delete baseEnvironment.NO_COLOR
-      baseEnvironment.COLORTERM = 'truecolor'
-      baseEnvironment.FORCE_COLOR = '1'
-      // Native Claude's allocator sweeps parked heaps every 100 ms by default.
-      // On macOS this dominated measured idle CPU even outside Matou. Keep
-      // reclaiming free blocks, but avoid ten sweeps/second per open session.
-      // This does not suspend the provider or change JavaScript GC; retain an
-      // explicit user setting (including the allocator's lowercase spelling).
-      if (process.platform === 'darwin' &&
-        baseEnvironment.mimalloc_purge_holes_min_interval === undefined) {
-        baseEnvironment.MIMALLOC_PURGE_HOLES_MIN_INTERVAL ??= '1000'
+    let subscriptionLease: RouterLease | undefined
+    let terminal: pty.IPty | undefined
+    try {
+      let subscriptionLaunch: ClaudeLaunch | undefined
+      if (options.subscription) {
+        if (profile !== 'claude-code' || !options.settingsPath) throw new SubscriptionLaunchError('A subscription requires the per-session Claude settings file')
+        const prepared = await options.subscription.accounts.prepareLaunch(options.subscription.providerConfigId)
+        subscriptionLease = prepared.lease
+        // This is the final process boundary for ordinary launch, recovery,
+        // permission restart, fork and global provider switching alike.
+        const projected = buildClaudeLaunch({ ...prepared.input, inheritedEnvNames: Object.keys({ ...process.env, ...options.env }) })
+        if (!projected.ok) throw new SubscriptionLaunchError(`Subscription launch configuration: ${projected.error}`, projected.error === 'unsupported-context-window' ? 'unsupported-context-window' : 'router-start-failed')
+        subscriptionLaunch = projected.value
+        const settings = JSON.parse(await readFile(options.settingsPath, 'utf8')) as Record<string, unknown>
+        const environment = settings.env && typeof settings.env === 'object' && !Array.isArray(settings.env) ? settings.env : {}
+        await writeFile(options.settingsPath, JSON.stringify({ ...settings, ...subscriptionLaunch.settings, env: { ...environment, ...subscriptionLaunch.settings.env } }, null, 2), { mode: 0o600 })
       }
-    }
-    const providerCommandEnvironment = profile === 'shell'
-      ? {}
-      : await resolveProviderCommandEnvironment(command.file, baseEnvironment)
-    if (profile === 'antigravity' && process.platform !== 'win32') {
-      const resolvedPath = providerCommandEnvironment.PATH ?? baseEnvironment.PATH
-      if (!(await executableExists(command.file, resolvedPath))) {
-        throw Object.assign(new Error(`spawn ${command.file} ENOENT`), { code: 'ENOENT' })
+      let model = options.model || subscriptionLaunch?.mainModel
+      if (profile === 'claude-code' && !subscriptionLaunch && !model && options.providerSessionId &&
+          await claudeResumeUsesSubscriptionModel(options.cwd, options.providerSessionId, { ...process.env, ...options.env })) {
+        // An explicit "default" suppresses native transcript model restoration
+        // while letting this Claude release choose its own official default.
+        model = 'default'
       }
-    }
-    const terminal = pty.spawn(command.file, command.args, {
-      name: 'xterm-256color',
-      cols: options.cols,
-      rows: options.rows,
-      cwd: options.cwd,
-      // Also protect Shell cards: users can start Claude manually inside them.
-      // Sanitize at the final spawn boundary so launch-time overrides cannot
-      // accidentally reintroduce the caller's identity on resume or fork.
-      env: independentSessionEnvironment({
-        ...baseEnvironment,
-        ...providerCommandEnvironment
+      const codexDeveloperInstructions = profile === 'codex' && options.controlAssetRoot
+        ? await readProviderInstructions(options.controlAssetRoot)
+        : undefined
+      const command = resolvePtyCommand({
+        profile,
+        executable: resolveExecutable(profile),
+        ...(options.providerSessionId === undefined ? {} : {
+          providerSessionId: options.providerSessionId
+        }),
+        ...(options.forkSession === undefined ? {} : { forkSession: options.forkSession }),
+        ...(options.permissionMode === undefined ? {} : {
+          permissionMode: options.permissionMode
+        }),
+        ...(options.settingsPath === undefined ? {} : {
+          settingsPath: options.settingsPath
+        }),
+        ...(options.codexHooksConfig === undefined ? {} : {
+          codexHooksConfig: options.codexHooksConfig
+        }),
+        ...(options.controlAssetRoot === undefined ? {} : {
+          controlAssetRoot: options.controlAssetRoot
+        }),
+        ...(codexDeveloperInstructions === undefined ? {} : { codexDeveloperInstructions }),
+        ...(model === undefined ? {} : { model })
       })
-    })
-    return new PtySession(options, journal, terminal)
+      const integrationEnvironment = profile === 'shell'
+        ? await shellIntegrationEnvironment(options.dataRoot, command.file)
+        : {}
+      const inheritedEnvironment = { ...process.env }
+      delete inheritedEnvironment.MATOU_AGENT_STATUS_DIR
+      delete inheritedEnvironment.MATOU_PROVIDER_HOOK_URL
+      delete inheritedEnvironment.MATOU_PROVIDER_HOOK_TOKEN
+      delete inheritedEnvironment.MATOU_ANTIGRAVITY_SYSTEM_MESSAGE_FILE
+      const baseEnvironment: NodeJS.ProcessEnv = {
+        ...inheritedEnvironment,
+        ...integrationEnvironment,
+        ...options.env,
+        TERM: 'xterm-256color'
+      }
+      if (profile === 'claude-code') {
+        delete baseEnvironment.NO_COLOR
+        baseEnvironment.COLORTERM = 'truecolor'
+        baseEnvironment.FORCE_COLOR = '1'
+        // Native Claude's allocator sweeps parked heaps every 100 ms by default.
+        // On macOS this dominated measured idle CPU even outside Matou. Keep
+        // reclaiming free blocks, but avoid ten sweeps/second per open session.
+        // This does not suspend the provider or change JavaScript GC; retain an
+        // explicit user setting (including the allocator's lowercase spelling).
+        if (process.platform === 'darwin' &&
+          baseEnvironment.mimalloc_purge_holes_min_interval === undefined) {
+          baseEnvironment.MIMALLOC_PURGE_HOLES_MIN_INTERVAL ??= '1000'
+        }
+      }
+      const providerCommandEnvironment = profile === 'shell'
+        ? {}
+        : await resolveProviderCommandEnvironment(command.file, baseEnvironment)
+      if (profile === 'antigravity' && process.platform !== 'win32') {
+        const resolvedPath = providerCommandEnvironment.PATH ?? baseEnvironment.PATH
+        if (!(await executableExists(command.file, resolvedPath))) {
+          throw Object.assign(new Error(`spawn ${command.file} ENOENT`), { code: 'ENOENT' })
+        }
+      }
+      const finalEnvironment = independentSessionEnvironment({ ...baseEnvironment, ...providerCommandEnvironment })
+      if (subscriptionLaunch) {
+        for (const key of subscriptionLaunch.clearEnv) delete finalEnvironment[key]
+        Object.assign(finalEnvironment, subscriptionLaunch.env)
+      }
+      terminal = pty.spawn(command.file, command.args, {
+        name: 'xterm-256color',
+        cols: options.cols,
+        rows: options.rows,
+        cwd: options.cwd,
+        // Also protect Shell cards: users can start Claude manually inside them.
+        // Sanitize at the final spawn boundary so launch-time overrides cannot
+        // accidentally reintroduce the caller's identity on resume or fork.
+        env: finalEnvironment
+      })
+      return new PtySession(options, journal, terminal, subscriptionLease)
+    } catch (error) {
+      subscriptionLease?.release()
+      try { terminal?.kill() } catch { /* Failed construction may already have ended the process. */ }
+      await journal.close().catch(() => undefined)
+      throw error
+    }
   }
 
   /** Wall-clock time of the latest process output; lets submitted input wait for its echo. */
@@ -248,9 +302,24 @@ export class PtySession {
     return this.#lastOutputAt
   }
 
+  async setEgressFrozen(frozen: boolean): Promise<void> {
+    if (frozen) {
+      if (this.#disposed) return
+      await this.#egressPauser.pause()
+      if (this.#disposed) {
+        await this.#egressPauser.resume()
+      }
+      return
+    }
+    await this.#egressPauser.resume()
+  }
+
   write(data: string): void {
     if (this.#disposed) {
       throw new Error('session is disposed')
+    }
+    if (this.egressFrozen) {
+      throw new SessionEgressFrozenError(this.sessionId)
     }
     if (this.#durabilityGate.state !== 'healthy') {
       throw new Error('session storage is paused')
@@ -354,6 +423,8 @@ export class PtySession {
   } = {}): Promise<void> {
     this.#notifyExit = false
     this.#exitReason = 'runtime-shutdown'
+    // Thaw before termination so SIGSTOPed process groups can receive SIGHUP/SIGTERM.
+    await this.setEgressFrozen(false)
     if (this.#durabilityGate.state !== 'healthy') {
       await this.endDurability()
       return
@@ -441,6 +512,23 @@ export class PtySession {
     this.#outputBatcher.flush()
     if (this.#durabilityGate.state !== 'healthy') {
       void this.endDurability()
+      return
+    }
+    if (this.egressFrozen) {
+      // Defer kill until the async resume completes so SIGCONT precedes SIGHUP.
+      void this.setEgressFrozen(false)
+        .catch(() => undefined)
+        .finally(() => {
+          if (this.#durabilityGate.state !== 'healthy') {
+            void this.endDurability()
+            return
+          }
+          try {
+            this.#pty.kill()
+          } catch {
+            // The PTY may have exited while unfreezing.
+          }
+        })
       return
     }
     this.#pty.kill()
@@ -553,6 +641,11 @@ export class PtySession {
     this.#disposed = true
     this.#forceFinalized = true
     try {
+      await this.setEgressFrozen(false)
+    } catch {
+      // Ending remains authoritative even if a dead process group rejects resume.
+    }
+    try {
       await this.#durabilityGate.end()
     } catch {
       // Ending remains authoritative even if a dead process group rejects resume.
@@ -584,9 +677,16 @@ export class PtySession {
     ).catch(() => undefined)
   }
 
+  #releaseSubscriptionLease(): void {
+    if (this.#subscriptionLeaseReleased) return
+    this.#subscriptionLeaseReleased = true
+    this.#subscriptionLease?.release()
+  }
+
   #resolveClosedOnce(): void {
     if (this.#closedResolved) return
     this.#closedResolved = true
+    this.#releaseSubscriptionLease()
     this.#resolveClosed()
   }
 

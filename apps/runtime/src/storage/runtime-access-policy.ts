@@ -38,6 +38,7 @@ const READ_ONLY_RPC_METHODS = new Set<RpcMethod>([
   'projection.snapshot',
   'provider-config.snapshot',
   'claude-settings.get',
+  'egress.status',
   'hierarchy.get-scene-session-graph',
   'claude-sessions.list',
   'claude-sessions.detail',
