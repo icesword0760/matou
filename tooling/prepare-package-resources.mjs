@@ -2,6 +2,7 @@ import { access, chmod, cp, mkdir, readFile, readdir, rm, writeFile } from 'node
 import { createRequire } from 'node:module'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { assertRuntimePackageImports } from './check-runtime-package-imports.mjs'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const destination = join(root, 'apps', 'desktop', 'package-resources', 'runtime')
@@ -56,6 +57,7 @@ await writeFile(
   runtimeEntry,
   bundledRuntime.replaceAll('require("node-pty")', 'require("./node-pty/lib/index.js")')
 )
+await assertRuntimePackageImports(destination)
 
 const requiredRuntimeResources = [
   'index.cjs',
