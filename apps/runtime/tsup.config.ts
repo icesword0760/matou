@@ -13,5 +13,5 @@ export default defineConfig({
   sourcemap: true,
   clean: true,
   external: ['node-pty'],
-  noExternal: ['@matou/contracts', '@matou/domain', '@xterm/headless', '@xterm/addon-serialize', 'zod']
+  noExternal: ['@matou/contracts', '@matou/domain', '@xterm/headless', '@xterm/addon-serialize', 'zod', 'https-proxy-agent', 'socks-proxy-agent']
 })
