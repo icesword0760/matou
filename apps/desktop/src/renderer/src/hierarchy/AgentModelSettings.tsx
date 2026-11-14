@@ -12,6 +12,9 @@ import { useLocale } from '../i18n/LocaleProvider'
 import type { ProviderConfigClient } from './ModelSwitchSettings'
 import './agent-model-settings.css'
 
+const MODEL_OPTION_PREFIX = 'agent-compaction-model:'
+const MANUAL_MODEL_OPTION = '__agent_compaction_manual__'
+
 export function AgentModelSettings({
   client,
   providerRevision,
@@ -31,6 +34,7 @@ export function AgentModelSettings({
   const [saveError, setSaveError] = useState('')
   const [saved, setSaved] = useState(false)
   const [retry, setRetry] = useState(0)
+  const [manualModel, setManualModel] = useState(false)
 
   useEffect(() => {
     let active = true
@@ -65,6 +69,8 @@ export function AgentModelSettings({
   const availableCompactionProviders = providers.filter(provider => provider.compactionAvailable)
   const selectedCompactionProvider = allProviders.find(provider => provider.id === draft?.compaction.providerId)
   const selectedCompactionModel = selectedCompactionProvider?.models.find(model => model.id === draft?.compaction.model)
+  const currentModelId = draft?.compaction.model?.trim() ?? ''
+  const currentModelMissing = Boolean(currentModelId && !selectedCompactionProvider?.models.some(model => model.id === currentModelId))
   const supportedEfforts = selectedCompactionModel?.supportedEfforts ?? defaultEfforts(selectedCompactionProvider, selectedCompactionModel, draft?.compaction.model)
   const effortChoices = withCurrentEffort(supportedEfforts, draft?.compaction.effort)
   const effortFallback = draft?.compaction.mode === 'custom' &&
@@ -75,6 +81,10 @@ export function AgentModelSettings({
     !availableCompactionProviders.some(provider => provider.id === draft.compaction.providerId)
     ? selectedCompactionProvider?.name ?? draft.compaction.providerId
     : undefined
+  const manualModelActive = manualModel && Boolean(draft?.compaction.providerId) && !invalidProviderSelection
+  const modelSelectValue = manualModelActive
+    ? MANUAL_MODEL_OPTION
+    : currentModelId ? `${MODEL_OPTION_PREFIX}${currentModelId}` : ''
   const customValidation = draft?.compaction.mode !== 'custom' ? '' : !draft.compaction.providerId
     ? t('请选择压缩供应商。', 'Choose a compaction provider.')
     : !selectedCompactionProvider
@@ -134,6 +144,7 @@ export function AgentModelSettings({
 
   const selectCompactionProvider = (providerId: string) => {
     const provider = availableCompactionProviders.find(row => row.id === providerId)
+    setManualModel(false)
     setDraft(current => {
       if (!current) return current
       const compaction = { ...current.compaction, model: provider?.models[0]?.id ?? '' }
@@ -194,8 +205,20 @@ export function AgentModelSettings({
               </select>
             </label>
             <label htmlFor="agent-compaction-model">{t('压缩模型', 'Compaction model')}
-              <input id="agent-compaction-model" aria-label={t('压缩模型', 'Compaction model')} role="combobox" aria-autocomplete="list" aria-expanded="false" list="agent-compaction-models" value={draft.compaction.model ?? ''} disabled={saving || !draft.compaction.providerId || Boolean(invalidProviderSelection)} onChange={event => updateCompaction({ model: event.target.value })} aria-describedby="agent-compaction-help" autoComplete="off" placeholder={t('选择模型或输入自定义 ID', 'Choose a model or enter a custom ID')} />
-              <datalist id="agent-compaction-models">{selectedCompactionProvider?.models.map(model => <option key={model.id} value={model.id}>{model.name || model.id}</option>)}</datalist>
+              {manualModelActive ? <div className="agent-model-settings__manual-model">
+                <input id="agent-compaction-model" aria-label={t('压缩模型', 'Compaction model')} value={draft.compaction.model ?? ''} disabled={saving || Boolean(invalidProviderSelection)} onChange={event => updateCompaction({ model: event.target.value })} aria-describedby="agent-compaction-help" autoComplete="off" />
+                <button type="button" disabled={saving} onClick={() => setManualModel(false)}>{t('从列表选择', 'Choose from list')}</button>
+              </div> : <select id="agent-compaction-model" aria-label={t('压缩模型', 'Compaction model')} value={modelSelectValue} title={currentModelId || undefined} disabled={saving || !draft.compaction.providerId || Boolean(invalidProviderSelection)} onChange={event => {
+                const next = event.target.value
+                if (next === MANUAL_MODEL_OPTION) { setManualModel(true); return }
+                setManualModel(false)
+                updateCompaction({ model: next === '' ? '' : next.slice(MODEL_OPTION_PREFIX.length) })
+              }} aria-describedby="agent-compaction-help">
+                <option value="" disabled>{t('请选择压缩模型', 'Choose a compaction model')}</option>
+                {selectedCompactionProvider?.models.map(model => <option key={model.id} value={`${MODEL_OPTION_PREFIX}${model.id}`} title={model.id}>{model.name || model.id}</option>)}
+                {currentModelMissing && <option value={`${MODEL_OPTION_PREFIX}${currentModelId}`} title={currentModelId}>{currentModelId}{t('（不在当前列表中）', ' (not in this list)')}</option>}
+                <option value={MANUAL_MODEL_OPTION}>{t('手动填写模型 ID…', 'Enter model ID manually…')}</option>
+              </select>}
             </label>
             <label htmlFor="agent-compaction-effort">{t('推理强度', 'Reasoning effort')}
               <select id="agent-compaction-effort" aria-label={t('推理强度', 'Reasoning effort')} value={draft.compaction.effort} disabled={saving} onChange={event => updateCompaction({ effort: event.target.value as CompactionEffort })} aria-describedby="agent-compaction-help">

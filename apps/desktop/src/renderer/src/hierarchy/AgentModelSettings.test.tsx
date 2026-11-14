@@ -33,10 +33,13 @@ describe('AgentModelSettings', () => {
     expect([...providerSelect.options].map(option => option.value)).not.toContain('codex-alt')
 
     await user.selectOptions(providerSelect, 'claude-alt')
-    const compactionModel = screen.getByRole('combobox', { name: '压缩模型' }) as HTMLInputElement
-    expect(compactionModel.value).toBe('sonnet-alt')
-    await user.clear(compactionModel)
-    await user.type(compactionModel, 'vendor/custom-compact')
+    const compactionModel = screen.getByRole('combobox', { name: '压缩模型' }) as HTMLSelectElement
+    expect(screen.getByRole('option', { name: 'Sonnet Alt' })).toHaveProperty('selected', true)
+    await user.selectOptions(compactionModel, screen.getByRole('option', { name: '手动填写模型 ID…' }))
+    const manualModel = screen.getByRole('textbox', { name: '压缩模型' })
+    expect((manualModel as HTMLInputElement).value).toBe('sonnet-alt')
+    await user.clear(manualModel)
+    await user.type(manualModel, 'vendor/custom-compact')
     await user.selectOptions(screen.getByRole('combobox', { name: '推理强度' }), 'xhigh')
     expect(screen.getByText('推理强度选项为候选，实际可用性以供应商支持为准。')).toBeTruthy()
     expect(screen.getByText(/跨供应商压缩时，当前对话历史会交给所选供应商/)).toBeTruthy()
@@ -47,6 +50,102 @@ describe('AgentModelSettings', () => {
       compaction: { mode: 'custom', providerId: 'claude-alt', model: 'vendor/custom-compact', effort: 'xhigh' }
     })
     expect((await screen.findByRole('status')).textContent).toContain('已保存')
+  })
+
+  it('shows every provider model by display name and saves the selected raw ID', async () => {
+    const data = fixture({
+      preferences: {
+        contextWindows: { anthropic: 'default', 'claude-alt': '512k', 'antigravity': 'default', 'codex-alt': '512k' },
+        compaction: { mode: 'custom', providerId: 'antigravity', model: 'claude-opus-5-5-high', effort: 'high' }
+      }
+    })
+    const request = vi.fn(async (method: string, payload: unknown) => method === 'agent-model-settings.set'
+      ? { ...data, preferences: payload as AgentModelPreferences }
+      : data)
+    render(<AgentModelSettings client={{ request }} />)
+
+    await screen.findByRole('heading', { name: '对话压缩模型' })
+    const model = screen.getByRole('combobox', { name: '压缩模型' }) as HTMLSelectElement
+    expect(screen.getByRole('option', { name: 'Claude Opus 5.5 High' })).toHaveProperty('selected', true)
+    expect(screen.getByRole('option', { name: 'Gemini 3 Pro' })).toBeTruthy()
+    expect(screen.getByRole('option', { name: 'Claude Sonnet 5.5' })).toBeTruthy()
+
+    await userEvent.setup().selectOptions(model, screen.getByRole('option', { name: 'Gemini 3 Pro' }))
+    expect(screen.getByRole('combobox', { name: '推理强度' })).toHaveProperty('value', 'high')
+    await userEvent.setup().click(screen.getByRole('button', { name: '保存' }))
+    expect(request).toHaveBeenCalledWith('agent-model-settings.set', {
+      contextWindows: { anthropic: 'default', 'claude-alt': '512k', 'antigravity': 'default', 'codex-alt': '512k' },
+      compaction: { mode: 'custom', providerId: 'antigravity', model: 'gemini-3-pro', effort: 'high' }
+    })
+  })
+
+  it('keeps the draft unchanged when opening and leaving manual entry', async () => {
+    const data = fixture()
+    const request = vi.fn(async () => data)
+    render(<AgentModelSettings client={{ request }} />)
+
+    await screen.findByRole('heading', { name: '对话压缩模型' })
+    const user = userEvent.setup()
+    const model = screen.getByRole('combobox', { name: '压缩模型' }) as HTMLSelectElement
+    await user.selectOptions(model, screen.getByRole('option', { name: '手动填写模型 ID…' }))
+    expect(screen.getByRole('textbox', { name: '压缩模型' })).toHaveProperty('value', 'sonnet-alt')
+
+    await user.click(screen.getByRole('button', { name: '从列表选择' }))
+    const restoredModel = screen.getByRole('combobox', { name: '压缩模型' }) as HTMLSelectElement
+    const restoredOption = screen.getByRole('option', { name: 'Sonnet Alt' }) as HTMLOptionElement
+    expect(restoredModel.value).toBe(restoredOption.value)
+    expect(restoredOption.selected).toBe(true)
+    expect(request).not.toHaveBeenCalledWith('agent-model-settings.set', expect.anything())
+  })
+
+  it('retains an unknown saved model ID instead of replacing it', async () => {
+    const data = fixture({
+      preferences: {
+        contextWindows: { anthropic: 'default', 'claude-alt': '512k', 'codex-alt': '512k' },
+        compaction: { mode: 'custom', providerId: 'claude-alt', model: 'legacy-compaction-model', effort: 'high' }
+      }
+    })
+    render(<AgentModelSettings client={clientFor(data)} />)
+
+    await screen.findByRole('heading', { name: '对话压缩模型' })
+    const model = screen.getByRole('combobox', { name: '压缩模型' }) as HTMLSelectElement
+    const retained = screen.getByRole('option', { name: 'legacy-compaction-model（不在当前列表中）' }) as HTMLOptionElement
+    expect(model.value).toBe(retained.value)
+    expect(retained.selected).toBe(true)
+    expect(screen.getByRole('option', { name: 'Sonnet Alt' })).toBeTruthy()
+  })
+
+  it('clears manual entry and switches model options when the provider changes', async () => {
+    const data = fixture()
+    render(<AgentModelSettings client={clientFor(data)} />)
+
+    await screen.findByRole('heading', { name: '对话压缩模型' })
+    const user = userEvent.setup()
+    await user.selectOptions(screen.getByRole('combobox', { name: '压缩模型' }), screen.getByRole('option', { name: '手动填写模型 ID…' }))
+    expect(screen.getByRole('textbox', { name: '压缩模型' })).toBeTruthy()
+
+    await user.selectOptions(screen.getByRole('combobox', { name: '压缩供应商' }), 'antigravity')
+    expect(screen.queryByRole('textbox', { name: '压缩模型' })).toBeNull()
+    expect(screen.getByRole('combobox', { name: '压缩模型' })).toBeTruthy()
+    expect(screen.getByRole('option', { name: 'Claude Opus 5.5 High' })).toHaveProperty('selected', true)
+    expect(screen.queryByRole('option', { name: 'Sonnet Alt' })).toBeNull()
+    expect(screen.queryByRole('option', { name: 'Limited' })).toBeNull()
+  })
+
+  it('does not change effort with the model and blocks saving when the kept effort is unsupported', async () => {
+    const data = fixture({
+      preferences: {
+        contextWindows: { anthropic: 'default', 'claude-alt': '512k', 'codex-alt': '512k' },
+        compaction: { mode: 'custom', providerId: 'claude-alt', model: 'sonnet-alt', effort: 'max' }
+      }
+    })
+    render(<AgentModelSettings client={clientFor(data)} />)
+
+    await screen.findByRole('heading', { name: '对话压缩模型' })
+    await userEvent.setup().selectOptions(screen.getByRole('combobox', { name: '压缩模型' }), screen.getByRole('option', { name: 'Limited' }))
+    expect(screen.getByRole('combobox', { name: '推理强度' })).toHaveProperty('value', 'max')
+    expect(screen.getByRole('alert')).toHaveProperty('textContent', expect.stringContaining('当前推理强度不受该模型支持'))
+    expect(screen.getByRole('button', { name: '保存' })).toHaveProperty('disabled', true)
   })
 
   it('auto-saves when switching back from custom to follow session', async () => {
@@ -88,15 +187,13 @@ describe('AgentModelSettings', () => {
     const user = userEvent.setup()
     await user.click(screen.getByRole('radio', { name: /独立配置/ }))
     await user.selectOptions(screen.getByRole('combobox', { name: '压缩供应商' }), 'claude-alt')
-    const model = screen.getByRole('combobox', { name: '压缩模型' }) as HTMLInputElement
-    await user.clear(model)
-    await user.type(model, 'limited')
+    await user.selectOptions(screen.getByRole('combobox', { name: '压缩模型' }), screen.getByRole('option', { name: 'Limited' }))
     await user.selectOptions(screen.getByRole('combobox', { name: '推理强度' }), 'high')
     await user.click(screen.getByRole('button', { name: '保存' }))
 
     expect((await screen.findByRole('status')).textContent).toContain('已保存')
     expect(screen.getByRole('combobox', { name: '压缩供应商' })).toHaveProperty('value', 'claude-alt')
-    expect(screen.getByRole('combobox', { name: '压缩模型' })).toHaveProperty('value', 'limited')
+    expect(screen.getByRole('option', { name: 'Limited' })).toHaveProperty('selected', true)
     expect(screen.getByRole('combobox', { name: '推理强度' })).toHaveProperty('value', 'high')
     expect(screen.getByRole('button', { name: '保存' })).toHaveProperty('disabled', true)
   })
@@ -154,7 +251,8 @@ describe('AgentModelSettings', () => {
     const user = userEvent.setup()
     await user.click(screen.getByRole('radio', { name: /独立配置/ }))
     await user.selectOptions(screen.getByRole('combobox', { name: '压缩供应商' }), 'claude-alt')
-    const model = screen.getByRole('combobox', { name: '压缩模型' }) as HTMLInputElement
+    await user.selectOptions(screen.getByRole('combobox', { name: '压缩模型' }), screen.getByRole('option', { name: '手动填写模型 ID…' }))
+    const model = screen.getByRole('textbox', { name: '压缩模型' })
     await user.clear(model)
     await user.type(model, 'custom-after-failure')
     await user.selectOptions(screen.getByRole('combobox', { name: '推理强度' }), 'high')
@@ -162,7 +260,7 @@ describe('AgentModelSettings', () => {
 
     expect(await screen.findByRole('alert')).toHaveProperty('textContent', '保存未确认，请重试。')
     expect(screen.getByRole('combobox', { name: '压缩供应商' })).toHaveProperty('value', 'claude-alt')
-    expect(screen.getByRole('combobox', { name: '压缩模型' })).toHaveProperty('value', 'custom-after-failure')
+    expect(screen.getByRole('textbox', { name: '压缩模型' })).toHaveProperty('value', 'custom-after-failure')
     expect(screen.getByRole('combobox', { name: '推理强度' })).toHaveProperty('value', 'high')
     expect(screen.getByRole('button', { name: '保存' })).toHaveProperty('disabled', false)
   })
@@ -207,7 +305,8 @@ describe('AgentModelSettings', () => {
     expect(await screen.findByRole('alert')).toHaveProperty('textContent', expect.stringContaining('压缩供应商已不存在'))
     expect(screen.getByRole('combobox', { name: '压缩供应商' })).toHaveProperty('value', 'removed-provider')
     expect(screen.getByRole('option', { name: 'removed-provider（不可用于压缩）' })).toHaveProperty('disabled', true)
-    expect(screen.getByRole('combobox', { name: '压缩模型' })).toHaveProperty('value', 'kept-model')
+    const retainedModel = screen.getByRole('option', { name: 'kept-model（不在当前列表中）' }) as HTMLOptionElement
+    expect(screen.getByRole('combobox', { name: '压缩模型' })).toHaveProperty('value', retainedModel.value)
     expect(screen.getByRole('combobox', { name: '压缩模型' })).toHaveProperty('disabled', true)
     expect(screen.getByRole('button', { name: '保存' })).toHaveProperty('disabled', true)
   })
@@ -224,6 +323,7 @@ describe('AgentModelSettings', () => {
     expect(await screen.findByRole('alert')).toHaveProperty('textContent', 'Choose or enter a compaction model.')
     expect(screen.getByRole('combobox', { name: 'Compaction provider' })).toHaveProperty('value', 'claude-alt')
     expect(screen.getByRole('combobox', { name: 'Compaction model' })).toHaveProperty('value', '')
+    expect(screen.getByRole('option', { name: 'Choose a compaction model' })).toHaveProperty('disabled', true)
     expect(screen.getByRole('button', { name: 'Save' })).toHaveProperty('disabled', true)
   })
 
@@ -271,6 +371,18 @@ function fixture(overrides: Partial<AgentModelSettingsSnapshot> = {}): AgentMode
         supportedEfforts: ['low', 'medium', 'high']
       }, {
         id: 'sparse', name: 'Sparse', fixedTokens: 512_000
+      }]
+    }, {
+      id: 'antigravity', name: 'Antigravity', cli: 'claude-code', compactionAvailable: true,
+      models: [{
+        id: 'claude-opus-5-5-high', name: 'Claude Opus 5.5 High', defaultTokens: 200_000, maximumTokens: 1_000_000, fixedTokens: 200_000,
+        supportedEfforts: ['low', 'high', 'max']
+      }, {
+        id: 'gemini-3-pro', name: 'Gemini 3 Pro', defaultTokens: 1_000_000, maximumTokens: 1_000_000, fixedTokens: 1_000_000,
+        supportedEfforts: ['low', 'medium', 'high']
+      }, {
+        id: 'claude-sonnet-5-5', name: 'Claude Sonnet 5.5', defaultTokens: 200_000, maximumTokens: 1_000_000, fixedTokens: 200_000,
+        supportedEfforts: ['low', 'medium', 'high']
       }]
     }, {
       id: 'codex-alt', name: 'Codex Alt', cli: 'codex', compactionAvailable: false,

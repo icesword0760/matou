@@ -7,10 +7,15 @@ import { launchMatou, restartMatouGracefully } from './matou-fixture'
 test('saves independent compaction and role effort, restores settings, and routes actual managed requests', async () => {
   test.setTimeout(100_000)
   const root = await mkdtemp('/tmp/matou-model-policy-ui-')
-  const evidence = resolve('docs/acceptance/evidence/provider-activation-2026-11-14')
+  const evidence = resolve('docs/acceptance/evidence/provider-settings-followup-2026-11-15')
   await mkdir(evidence, { recursive: true })
   const requests: Array<{ path: string; model: string; effort: string; key: string }> = []
   const server = createServer(async (req, res) => {
+    if (req.method === 'GET') {
+      res.setHeader('content-type', 'application/json')
+      res.end(JSON.stringify({ data: [{ id: 'claude-summary-fixture', name: '摘要模型 A' }, { id: 'claude-summary-alternative', name: '摘要模型 B' }] }))
+      return
+    }
     const buffers = []; for await (const chunk of req) buffers.push(chunk)
     const message = JSON.parse(Buffer.concat(buffers).toString())
     requests.push({ path: req.url!, model: message.model, effort: message.output_config?.effort, key: String(req.headers['x-api-key'] ?? '') })
@@ -35,6 +40,15 @@ fs.writeFileSync(${JSON.stringify(capture)},JSON.stringify({window:settings.auto
   let fixture = await launchMatou({ env })
   try {
     let page = fixture.page
+    await page.addInitScript(() => {
+      const post = MessagePort.prototype.postMessage
+      ;(globalThis as any).activationRequests = 0
+      MessagePort.prototype.postMessage = function (message: any, ...args: any[]) {
+        if (message?.type === 'rpc.request' && message.method === 'provider-config.activate') (globalThis as any).activationRequests++
+        return post.call(this, message, ...args as [any])
+      }
+    })
+    await page.reload()
     await page.getByRole('button', { name: '设置', exact: true }).click()
     const add = async (name: string, path: string, model: string, key: string, mapped: boolean) => {
       await page.getByRole('button', { name: '新增供应商' }).click()
@@ -44,14 +58,19 @@ fs.writeFileSync(${JSON.stringify(capture)},JSON.stringify({window:settings.auto
       await dialog.getByLabel('API 地址', { exact: true }).fill(endpoint + path)
       await dialog.getByLabel('API Key', { exact: true }).fill(key)
       await dialog.getByLabel('默认模型', { exact: true }).fill(model)
-      if (!await dialog.locator('details').getAttribute('open').then(v => v !== null)) await dialog.locator('summary').click()
       await dialog.getByLabel('供应商名称', { exact: true }).fill(name)
       if (mapped) {
         for (const [role, effort] of [['opus', 'high'], ['sonnet', 'medium'], ['haiku', 'low']]) {
-          await dialog.getByLabel(`${role} 模型映射`).fill(model)
-          await dialog.getByLabel(`${role} 推理强度`).selectOption(effort!)
+          const label = role![0]!.toUpperCase() + role!.slice(1)
+          await dialog.getByLabel(`${label} 模型`, { exact: true }).selectOption({ label: '手动填写模型 ID…' })
+          await dialog.getByLabel(`${label} 手动填写模型 ID`).fill(model)
+          await dialog.getByLabel(`${label} 推理强度`).selectOption(effort!)
         }
         await dialog.screenshot({ path: join(evidence, 'model-provider-efforts.png') })
+      }
+      if (!mapped) {
+        await dialog.getByRole('button', { name: '获取模型', exact: true }).click()
+        await expect(dialog.getByRole('option', { name: /摘要模型 B/ })).toBeVisible()
       }
       await dialog.getByRole('button', { name: '仅保存', exact: true }).click()
       await expect(dialog).toHaveCount(0)
@@ -64,14 +83,19 @@ fs.writeFileSync(${JSON.stringify(capture)},JSON.stringify({window:settings.auto
     await mainCard.getByRole('button', { name: '编辑' }).click()
     const editDialog = page.getByRole('dialog', { name: '编辑供应商' })
     await editDialog.getByRole('radio', { name: /^512K/ }).check()
-    await editDialog.getByRole('button', { name: '保存修改' }).click()
+    await editDialog.getByRole('button', { name: '保存并切换', exact: true }).click()
     await expect(editDialog).toHaveCount(0)
     await expect(mainCard.getByText('512K 窗口', { exact: true })).toBeVisible()
+    await expect.poll(() => page.evaluate(() => (globalThis as any).activationRequests)).toBe(2)
 
     const settings = page.getByRole('region', { name: '对话压缩模型设置' })
     await settings.getByRole('radio', { name: /^独立配置/ }).check()
     await settings.getByLabel('压缩供应商').selectOption({ label: '本地摘要模型' })
-    await settings.getByRole('combobox', { name: '压缩模型', exact: true }).fill('claude-summary-fixture')
+    const modelSelect = settings.getByRole('combobox', { name: '压缩模型', exact: true })
+    await expect(modelSelect.locator('option')).toHaveText(['请选择压缩模型', '摘要模型 A', '摘要模型 B', '手动填写模型 ID…'])
+    await modelSelect.selectOption({ label: '摘要模型 B' })
+    await expect(modelSelect.locator('option:checked')).toHaveText('摘要模型 B')
+    await modelSelect.selectOption({ label: '摘要模型 A' })
     await settings.getByLabel('推理强度', { exact: true }).selectOption('low')
     await settings.getByRole('button', { name: '保存', exact: true }).click()
     await expect(settings.getByRole('status')).toContainText('已保存')
@@ -79,7 +103,7 @@ fs.writeFileSync(${JSON.stringify(capture)},JSON.stringify({window:settings.auto
     fixture = await restartMatouGracefully(fixture, { env }); page = fixture.page
     await page.getByRole('button', { name: '设置', exact: true }).click()
     await expect(page.locator('.model-provider', { hasText: '本地工作模型' }).getByText('512K 窗口', { exact: true })).toBeVisible()
-    await expect(page.getByRole('combobox', { name: '压缩模型', exact: true })).toHaveValue('claude-summary-fixture')
+    await expect(page.getByRole('combobox', { name: '压缩模型', exact: true }).locator('option:checked')).toHaveText('摘要模型 A')
     await expect(page.getByLabel('推理强度', { exact: true })).toHaveValue('low')
     await page.locator('.model-settings__heading button').click()
     const terminal = page.locator('.scene-stage:not([hidden]) .terminal-surface').first()
