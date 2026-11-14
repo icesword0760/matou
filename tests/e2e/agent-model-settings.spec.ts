@@ -70,7 +70,7 @@ fs.writeFileSync(${JSON.stringify(capture)},JSON.stringify({window:settings.auto
       }
       if (!mapped) {
         await dialog.getByRole('button', { name: '获取模型', exact: true }).click()
-        await expect(dialog.getByRole('option', { name: /摘要模型 B/ })).toBeVisible()
+        await expect(dialog.getByRole('listbox', { name: '可用模型' }).getByRole('option', { name: /摘要模型 B/ })).toBeVisible()
       }
       await dialog.getByRole('button', { name: '仅保存', exact: true }).click()
       await expect(dialog).toHaveCount(0)
@@ -92,14 +92,13 @@ fs.writeFileSync(${JSON.stringify(capture)},JSON.stringify({window:settings.auto
     await settings.getByRole('radio', { name: /^独立配置/ }).check()
     await settings.getByLabel('压缩供应商').selectOption({ label: '本地摘要模型' })
     const modelSelect = settings.getByRole('combobox', { name: '压缩模型', exact: true })
-    await expect(modelSelect.locator('option')).toHaveText(['请选择压缩模型', '摘要模型 A', '摘要模型 B', '手动填写模型 ID…'])
+    await expect(modelSelect.locator('option')).toHaveText(['请选择压缩模型', '摘要模型 B', '摘要模型 A', '手动填写模型 ID…'])
     await modelSelect.selectOption({ label: '摘要模型 B' })
     await expect(modelSelect.locator('option:checked')).toHaveText('摘要模型 B')
     await modelSelect.selectOption({ label: '摘要模型 A' })
     await settings.getByLabel('推理强度', { exact: true }).selectOption('low')
     await settings.getByRole('button', { name: '保存', exact: true }).click()
     await expect(settings.getByRole('status')).toContainText('已保存')
-    await page.screenshot({ path: join(evidence, 'model-settings-configured.png') })
     fixture = await restartMatouGracefully(fixture, { env }); page = fixture.page
     await page.getByRole('button', { name: '设置', exact: true }).click()
     await expect(page.locator('.model-provider', { hasText: '本地工作模型' }).getByText('512K 窗口', { exact: true })).toBeVisible()
