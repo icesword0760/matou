@@ -442,7 +442,7 @@ export function TerminalPane(props: {
     {runtimeStatus === 'error' && forkState !== 'failed' && effectiveRestoreState !== 'failed' && visible &&
       <div className="session-start-failure-card" role="status">
         <div><strong>{m.pane.sessionStartFailed}</strong>
-          <span className="session-start-failure-reason">{runtimeError || m.pane.terminalProcessFailed}</span>
+          <span className="session-start-failure-reason" title={runtimeError || m.pane.terminalProcessFailed}>{runtimeError || m.pane.terminalProcessFailed}</span>
         </div>
         <div className="session-start-failure-actions">
           <button type="button" disabled={actionBlocked} title={actionBlockedReason} onClick={(event) => {
