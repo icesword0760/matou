@@ -1258,23 +1258,56 @@ index 42cf15b..851f2b4 100644
 diff --git a/internal/translator/antigravity/claude/antigravity_claude_request.go b/internal/translator/antigravity/claude/antigravity_claude_request.go
 --- a/internal/translator/antigravity/claude/antigravity_claude_request.go
 +++ b/internal/translator/antigravity/claude/antigravity_claude_request.go
-@@ -337,14 +337,14 @@
- 				}
- 				partJSON := []byte(`{}`)
- 				if systemPrompt != "" {
+@@ -324,27 +324,24 @@
+
+-	// system instruction
+-	systemParts := make([][]byte, 0, 2)
+-	systemResult := ojson.GetBytesNoCopy(rawJSON, "system")
+-	if systemResult.IsArray() {
+-		systemResults := systemResult.Array()
+-		for i := 0; i < len(systemResults); i++ {
+-			systemPromptResult := systemResults[i]
+-			systemTypePromptResult := systemPromptResult.Get("type")
+-			if systemTypePromptResult.Type == ojson.String && systemTypePromptResult.String() == "text" {
+-				systemPrompt := systemPromptResult.Get("text").String()
+-				if util.IsClaudeCodeAttributionSystemText(systemPrompt) {
+-					continue
+-				}
+-				partJSON := []byte(`{}`)
+-				if systemPrompt != "" {
 -					partJSON, _ = ojson.SetBytes(partJSON, "text", systemPrompt)
-+					partJSON, _ = ojson.SetBytes(partJSON, "text", util.NeutralizeClaudeCodeSystemIdentity(systemPrompt))
- 				}
- 				systemParts = append(systemParts, partJSON)
- 			}
- 		}
- 	} else if systemResult.Type == ojson.String && !util.IsClaudeCodeAttributionSystemText(systemResult.String()) {
- 		partJSON := []byte(`{"text":""}`)
+-				}
+-				systemParts = append(systemParts, partJSON)
+-			}
+-		}
+-	} else if systemResult.Type == ojson.String && !util.IsClaudeCodeAttributionSystemText(systemResult.String()) {
+-		partJSON := []byte(`{"text":""}`)
 -		partJSON, _ = ojson.SetBytes(partJSON, "text", systemResult.String())
-+		partJSON, _ = ojson.SetBytes(partJSON, "text", util.NeutralizeClaudeCodeSystemIdentity(systemResult.String()))
- 		systemParts = append(systemParts, partJSON)
- 	}
- 
+-		systemParts = append(systemParts, partJSON)
+-	}
++	// system instruction
++	systemParts := make([][]byte, 0, 2)
++	systemResult := ojson.GetBytesNoCopy(rawJSON, "system")
++	if systemResult.IsArray() {
++		for _, block := range systemResult.Array() {
++			if block.Get("type").String() != "text" {
++				continue
++			}
++			text := sanitizeAntigravitySystemText(block.Get("text").String())
++			if strings.TrimSpace(text) == "" {
++				continue
++			}
++			partJSON, _ := ojson.SetBytes([]byte(`{}`), "text", text)
++			systemParts = append(systemParts, partJSON)
++		}
++	} else if systemResult.Type == ojson.String {
++		text := sanitizeAntigravitySystemText(systemResult.String())
++		if strings.TrimSpace(text) != "" {
++			partJSON, _ := ojson.SetBytes([]byte(`{}`), "text", text)
++			systemParts = append(systemParts, partJSON)
++		}
++	}
+
 diff --git a/internal/translator/codex/claude/codex_claude_request.go b/internal/translator/codex/claude/codex_claude_request.go
 --- a/internal/translator/codex/claude/codex_claude_request.go
 +++ b/internal/translator/codex/claude/codex_claude_request.go
@@ -1291,7 +1324,7 @@ diff --git a/internal/translator/subscription_prompt_test.go b/internal/translat
 new file mode 100644
 --- /dev/null
 +++ b/internal/translator/subscription_prompt_test.go
-@@ -0,0 +1,133 @@
+@@ -0,0 +1,138 @@
 +package translator
 +
 +import (
@@ -1352,6 +1385,11 @@ new file mode 100644
 +			for _, shape := range []string{"array", "string"} {
 +				t.Run(shape, func(t *testing.T) {
 +					want := []string{"You are a coding assistant.", "You are a coding assistant.", "You are a coding agent.", subscriptionGuidance}
++					if route.name == "antigravity" {
++						for i := 0; i < 3; i++ {
++							want[i] = "You are Antigravity, an agentic AI coding assistant."
++						}
++					}
 +					var system any
 +					if shape == "array" {
 +						parts := []any{map[string]any{"type": "text", "text": subscriptionBilling}}
@@ -1488,6 +1526,429 @@ new file mode 100644
 +	} {
 +		if got := NeutralizeClaudeCodeSystemIdentity(text); got != text {
 +			t.Errorf("changed unrelated text: %q -> %q", text, got)
++		}
++	}
++}
+diff --git a/internal/translator/antigravity/claude/system_prompt_sanitizer.go b/internal/translator/antigravity/claude/system_prompt_sanitizer.go
+new file mode 100644
+--- /dev/null
++++ b/internal/translator/antigravity/claude/system_prompt_sanitizer.go
+@@ -0,0 +1,228 @@
++// Some behavior is based on antigravity-claude-proxy (MIT).
++// Copyright (c) 2024 Badri Narayanan S. See THIRD_PARTY_NOTICES.md in Matou.
++// This implementation is independently written; no Manager code or regex is used.
++package claude
++
++import (
++	"strings"
++	"unicode"
++	"unicode/utf8"
++)
++
++const antigravitySanitizedIdentity = "You are Antigravity, an agentic AI coding assistant."
++
++var antigravityIdentitySentences = strings.NewReplacer(
++	"You are Claude Code, Anthropic's official CLI for Claude.", antigravitySanitizedIdentity,
++	"You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK.", antigravitySanitizedIdentity,
++	"You are a Claude agent, built on Anthropic's Claude Agent SDK.", antigravitySanitizedIdentity,
++)
++
++var antigravityCompetitorNames = []string{
++	"OpenAI", "Anthropic", "DeepSeek", "Qwen", "ByteDance", "Tencent",
++	"Xiaomi", "Huawei", "Baidu", "Mistral", "Cohere",
++	"字节跳动", "腾讯", "小米", "华为", "通义千问", "百度", "深度求索",
++}
++
++var antigravityClientNames = []struct{ name, replacement string }{
++	{"Nous Research", "the assistant team"},
++	{"Hermes Agent", "the assistant"},
++	{"Hermes", "the assistant"},
++	{"Claude Code", "the assistant"},
++}
++
++// sanitizeAntigravitySystemText is called only while constructing system parts.
++// It never receives a request object, user content, tools, or schemas.
++func sanitizeAntigravitySystemText(text string) string {
++	text = stripAntigravityBillingLines(text)
++	text = mapAntigravityProse(text, antigravityIdentitySentences.Replace)
++	limit := antigravityBrandWindow(text)
++	// Keep offsets in the complete part, including protected code, so splitting
++	// prose at backticks cannot restart or extend the brand window.
++	mask := antigravityCodeMask(text)
++	var out strings.Builder
++	for i := 0; i < len(text); {
++		if mask[i] {
++			out.WriteByte(text[i])
++			i++
++			continue
++		}
++		// Header identifiers are explicit exemptions even though '-' is a word
++		// boundary. Keep the complete x-anthropic-* token, including mixed case.
++		if antigravityWordStart(text, i) {
++			end := i
++			if antigravityEqualPrefix(text[i:], "anthropic-version") {
++				end += len("anthropic-version")
++			} else if antigravityEqualPrefix(text[i:], "x-anthropic-") {
++				end += len("x-anthropic-")
++				for end < len(text) && (antigravityWordRune(rune(text[end])) || text[end] == '-' || text[end] == '*') {
++					end++
++				}
++			}
++			if end > i {
++				out.WriteString(text[i:end])
++				i = end
++				continue
++			}
++		}
++		matched := false
++		if i < limit {
++			for _, name := range antigravityCompetitorNames {
++				end := i + len(name)
++				if end <= limit && antigravityEqualPrefix(text[i:], name) && antigravityWholeWord(text, i, end) && !antigravityProtected(mask, i, end) {
++					out.WriteString("Google")
++					i, matched = end, true
++					break
++				}
++			}
++		}
++		if !matched {
++			for _, rule := range antigravityClientNames {
++				end := i + len(rule.name)
++				if strings.HasPrefix(text[i:], rule.name) && antigravityWholeWord(text, i, end) && !antigravityProtected(mask, i, end) {
++					out.WriteString(rule.replacement)
++					i, matched = end, true
++					break
++				}
++			}
++		}
++		if !matched {
++			_, size := utf8.DecodeRuneInString(text[i:])
++			out.WriteString(text[i : i+size])
++			i += size
++		}
++	}
++	return out.String()
++}
++
++func stripAntigravityBillingLines(text string) string {
++	mask := antigravityCodeMask(text)
++	var out strings.Builder
++	for start := 0; start < len(text); {
++		end := start
++		for end < len(text) && text[end] != '\n' && text[end] != '\r' {
++			end++
++		}
++		next := end
++		if next < len(text) && text[next] == '\r' {
++			next++
++		}
++		if next < len(text) && text[next] == '\n' {
++			next++
++		}
++		line := strings.TrimLeft(text[start:end], " \t")
++		if !antigravityEqualPrefix(line, "x-anthropic-billing-header:") || antigravityProtected(mask, start, end) {
++			out.WriteString(text[start:next])
++		}
++		start = next
++	}
++	return out.String()
++}
++
++// Backtick spans are copied verbatim, without placeholder strings. An unclosed
++// fence protects the remainder; an unclosed inline span protects to end of line.
++func antigravityCodeMask(text string) []bool {
++	mask := make([]bool, len(text))
++	for i := 0; i < len(text); {
++		if text[i] != '`' {
++			i++
++			continue
++		}
++		width := 1
++		for i+width < len(text) && text[i+width] == '`' {
++			width++
++		}
++		delimiter := text[i : i+width]
++		end := len(text)
++		search := text[i+width:]
++		if width < 3 {
++			if newline := strings.IndexAny(search, "\r\n"); newline >= 0 {
++				search = search[:newline]
++				end = i + width + newline
++			}
++		}
++		if close := strings.Index(search, delimiter); close >= 0 {
++			end = i + width + close + width
++		}
++		for j := i; j < end; j++ {
++			mask[j] = true
++		}
++		i = end
++	}
++	return mask
++}
++
++func mapAntigravityProse(text string, replace func(string) string) string {
++	mask := antigravityCodeMask(text)
++	var out strings.Builder
++	for i := 0; i < len(text); {
++		end := i + 1
++		for end < len(text) && mask[end] == mask[i] {
++			end++
++		}
++		if mask[i] {
++			out.WriteString(text[i:end])
++		} else {
++			out.WriteString(replace(text[i:end]))
++		}
++		i = end
++	}
++	return out.String()
++}
++
++// The window is measured after billing removal and exact identity replacement,
++// before any length-changing brand/client substitutions. Newlines are not sentences.
++func antigravityBrandWindow(text string) int {
++	chars, sentences := 0, 0
++	previousEnd := false
++	for i, r := range text {
++		if chars == 1500 {
++			return i
++		}
++		chars++
++		isEnd := strings.ContainsRune(".!?。！？", r)
++		if isEnd && !previousEnd {
++			sentences++
++			if sentences == 8 {
++				return i + utf8.RuneLen(r)
++			}
++		}
++		previousEnd = isEnd
++	}
++	return len(text)
++}
++
++func antigravityEqualPrefix(text, prefix string) bool {
++	return len(text) >= len(prefix) && strings.EqualFold(text[:len(prefix)], prefix)
++}
++
++func antigravityWordRune(r rune) bool {
++	return unicode.IsLetter(r) || unicode.IsDigit(r) || unicode.IsMark(r) || r == '_'
++}
++
++func antigravityWordStart(text string, start int) bool {
++	if start == 0 {
++		return true
++	}
++	r, _ := utf8.DecodeLastRuneInString(text[:start])
++	return !antigravityWordRune(r)
++}
++
++func antigravityWholeWord(text string, start, end int) bool {
++	if !antigravityWordStart(text, start) {
++		return false
++	}
++	if end == len(text) {
++		return true
++	}
++	r, _ := utf8.DecodeRuneInString(text[end:])
++	return !antigravityWordRune(r)
++}
++
++func antigravityProtected(mask []bool, start, end int) bool {
++	for _, protected := range mask[start:end] {
++		if protected {
++			return true
++		}
++	}
++	return false
++}
+diff --git a/internal/translator/antigravity/claude/system_prompt_sanitizer_test.go b/internal/translator/antigravity/claude/system_prompt_sanitizer_test.go
+new file mode 100644
+--- /dev/null
++++ b/internal/translator/antigravity/claude/system_prompt_sanitizer_test.go
+@@ -0,0 +1,185 @@
++// Some behavior is based on antigravity-claude-proxy (MIT).
++// Copyright (c) 2024 Badri Narayanan S. Tests independently written for Matou.
++package claude
++
++import (
++	"bytes"
++	"encoding/json"
++	"reflect"
++	"strings"
++	"testing"
++
++	"github.com/MoeForge/moego/ojson"
++)
++
++func TestAntigravitySanitizerBillingLines(t *testing.T) {
++	for _, tc := range []struct{ input, want string }{
++		{"x-anthropic-billing-header: sample", ""},
++		{" \tX-ANTHROPIC-BILLING-HEADER: sample\r\nKeep rules.  ", "Keep rules.  "},
++		{"Keep\nx-anthropic-billing-header: a\nMore\nx-anthropic-billing-header: b", "Keep\nMore\n"},
++		{"A\rx-anthropic-billing-header: a\rB", "A\rB"},
++		{"Mention x-anthropic-billing-header: keep", "Mention x-anthropic-billing-header: keep"},
++		{"x-anthropic-custom: cc_version=sample; cch=sample", "x-anthropic-custom: cc_version=sample; cch=sample"},
++		{"x-anthropic-billing-header: `OpenAI`", "x-anthropic-billing-header: `OpenAI`"},
++	} {
++		if got := sanitizeAntigravitySystemText(tc.input); got != tc.want {
++			t.Errorf("%q => %q, want %q", tc.input, got, tc.want)
++		}
++	}
++}
++
++func TestAntigravitySanitizerExactIdentities(t *testing.T) {
++	for _, sentence := range []string{
++		"You are Claude Code, Anthropic's official CLI for Claude.",
++		"You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK.",
++		"You are a Claude agent, built on Anthropic's Claude Agent SDK.",
++	} {
++		// Exact identity replacement is not restricted by the brand scan window.
++		prefix := strings.Repeat("Rule. ", 9)
++		input := prefix + sentence + "\nKeep CTF / security policy."
++		want := prefix + antigravitySanitizedIdentity + "\nKeep CTF / security policy."
++		if got := sanitizeAntigravitySystemText(input); got != want {
++			t.Errorf("identity => %q, want %q", got, want)
++		}
++	}
++	input := "you are claude code, anthropic's official CLI for Claude."
++	if got := sanitizeAntigravitySystemText(input); got != "you are claude code, Google's official CLI for Claude." {
++		t.Fatalf("case-sensitive identity matching changed: %q", got)
++	}
++}
++
++func TestAntigravitySanitizerBrandsAndWholeWords(t *testing.T) {
++	brands := []string{"OpenAI", "Anthropic", "DeepSeek", "Qwen", "ByteDance", "Tencent", "Xiaomi", "Huawei", "Baidu", "Mistral", "Cohere", "字节跳动", "腾讯", "小米", "华为", "通义千问", "百度", "深度求索"}
++	for _, name := range brands {
++		for _, variant := range []string{name, strings.ToLower(name), strings.ToUpper(name)} {
++			if got := sanitizeAntigravitySystemText("(" + variant + ")"); got != "(Google)" {
++				t.Errorf("brand %q => %q", variant, got)
++			}
++		}
++	}
++	input := "OpenAIClient preAnthropic DeepSeek2 Qwen_ apiOpenAI éOpenAI OpenAIé 腾讯云 小米手机 华为技术"
++	if got := sanitizeAntigravitySystemText(input); got != input {
++		t.Fatalf("embedded name changed: %q", got)
++	}
++}
++
++func TestAntigravitySanitizerWindow(t *testing.T) {
++	for _, tc := range []struct{ name, input, want string }{
++		{"eighth sentence", strings.Repeat("Rule. ", 7) + "OpenAI. Anthropic", strings.Repeat("Rule. ", 7) + "Google. Anthropic"},
++		{"Chinese sentences", strings.Repeat("规则。", 7) + "腾讯。百度", strings.Repeat("规则。", 7) + "Google。百度"},
++		{"punctuation", strings.Repeat("Rule!? ", 7) + "Mistral! Cohere", strings.Repeat("Rule!? ", 7) + "Google! Cohere"},
++		{"newlines", strings.Repeat("Rule\n", 9) + "Qwen", strings.Repeat("Rule\n", 9) + "Google"},
++		{"1500 inclusive", strings.Repeat("界", 1493) + " OpenAI", strings.Repeat("界", 1493) + " Google"},
++		{"1500 crossing", strings.Repeat("界", 1494) + " OpenAI", strings.Repeat("界", 1494) + " OpenAI"},
++		{"1500 outside", strings.Repeat("界", 1500) + " OpenAI", strings.Repeat("界", 1500) + " OpenAI"},
++		{"code consumes characters", "`" + strings.Repeat("x", 1498) + "` OpenAI", "`" + strings.Repeat("x", 1498) + "` OpenAI"},
++		{"code consumes sentences", "```\n" + strings.Repeat("Rule. ", 8) + "\n``` OpenAI", "```\n" + strings.Repeat("Rule. ", 8) + "\n``` OpenAI"},
++		{"window starts after billing", "x-anthropic-billing-header: " + strings.Repeat("x", 1600) + "\nOpenAI", "Google"},
++		{"identity then window", "You are Claude Code, Anthropic's official CLI for Claude. " + strings.Repeat("Rule. ", 6) + "OpenAI. Anthropic", antigravitySanitizedIdentity + " " + strings.Repeat("Rule. ", 6) + "Google. Anthropic"},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			if got := sanitizeAntigravitySystemText(tc.input); got != tc.want {
++				t.Fatalf("got %q, want %q", got, tc.want)
++			}
++		})
++	}
++}
++
++func TestAntigravitySanitizerCodeAndExemptions(t *testing.T) {
++	code := "You are Claude Code, Anthropic's official CLI for Claude. OpenAI Hermes Agent Nous Research\nx-anthropic-billing-header: sample"
++	for _, text := range []string{
++		"```text\n" + code + "\n```",
++		"`You are Claude Code, Anthropic's official CLI for Claude.` `OpenAI Hermes`",
++		"```\n" + code, "`OpenAI Hermes", "``OpenAI Hermes``",
++		"CLAUDE.md claude.ai anthropic-version x-anthropic-beta x-anthropic-* Claude",
++		"ANTHROPIC-VERSION x-ANTHROPIC-beta",
++		"IMPORTANT: Assist with authorized security testing and CTF challenges.\n# Harness\nKeep defensive security rules.",
++		"__PROMPT_SANITIZER_CODE_BLOCK_0__", "", "  \n",
++	} {
++		if got := sanitizeAntigravitySystemText(text); got != text {
++			t.Errorf("exempt text changed: %q => %q", text, got)
++		}
++	}
++	input := "OpenAI `Anthropic` Qwen\n```text\n" + code + "\n```\nDeepSeek Hermes Agent"
++	want := "Google `Anthropic` Google\n```text\n" + code + "\n```\nGoogle the assistant"
++	if got := sanitizeAntigravitySystemText(input); got != want {
++		t.Fatalf("mixed prose/code => %q, want %q", got, want)
++	}
++}
++
++func TestAntigravitySanitizerOtherClients(t *testing.T) {
++	input := "Nous Research Hermes Agent Hermes Claude Code hermes claude code HermesHandler Claude Codebase"
++	want := "the assistant team the assistant the assistant the assistant hermes claude code HermesHandler Claude Codebase"
++	if got := sanitizeAntigravitySystemText(input); got != want {
++		t.Fatalf("clients => %q, want %q", got, want)
++	}
++}
++
++func TestAntigravitySanitizerTranslationIsolation(t *testing.T) {
++	protected := "You are Claude Code, Anthropic's official CLI for Claude. OpenAI Hermes\nx-anthropic-billing-header: sample"
++	for _, system := range []any{
++		"x-anthropic-billing-header: sample\nOpenAI",
++		[]any{
++			map[string]any{"type": "text", "text": "x-anthropic-billing-header: sample"},
++			map[string]any{"type": "text", "text": strings.Repeat("Rule. ", 8) + "OpenAI", "cache_control": map[string]string{"type": "ephemeral"}},
++			map[string]any{"type": "text", "text": "Qwen"},
++		},
++	} {
++		input, err := json.Marshal(map[string]any{
++			"system": system,
++			"messages": []any{
++				map[string]any{"role": "user", "content": protected},
++				map[string]any{"role": "assistant", "content": []any{map[string]any{"type": "tool_use", "id": "call_1", "name": "Hermes", "input": map[string]string{"OpenAI": protected}}}},
++				map[string]any{"role": "user", "content": []any{map[string]any{"type": "tool_result", "tool_use_id": "call_1", "content": protected}}},
++			},
++			"tools": []any{map[string]any{"name": "Hermes", "description": protected, "input_schema": map[string]any{"type": "object", "properties": map[string]any{"OpenAI": map[string]any{"type": "string", "description": protected, "enum": []string{"Anthropic", "Hermes"}}}}}},
++		})
++		if err != nil {
++			t.Fatal(err)
++		}
++		original := bytes.Clone(input)
++		output, err := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5", input, false)
++		if err != nil {
++			t.Fatal(err)
++		}
++		if !bytes.Equal(input, original) {
++			t.Fatal("input mutated")
++		}
++		// Compare everything outside systemInstruction with the same translation
++		// given a safe system. This includes tool calls, results and schema values.
++		safe, _ := ojson.SetBytes(input, "system", "Safe rules")
++		baseline, err := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5", safe, false)
++		if err != nil {
++			t.Fatal(err)
++		}
++		withoutSystem, _ := ojson.DeleteBytes(output, "request.systemInstruction")
++		baselineWithoutSystem, _ := ojson.DeleteBytes(baseline, "request.systemInstruction")
++		var actualObject, baselineObject any
++		if err := json.Unmarshal(withoutSystem, &actualObject); err != nil {
++			t.Fatal(err)
++		}
++		if err := json.Unmarshal(baselineWithoutSystem, &baselineObject); err != nil {
++			t.Fatal(err)
++		}
++		if !reflect.DeepEqual(actualObject, baselineObject) {
++			t.Fatalf("non-system request changed:\n%s\n%s", withoutSystem, baselineWithoutSystem)
++		}
++		for _, path := range []string{"request.contents.0.parts.0.text", "request.tools.0.functionDeclarations.0.description"} {
++			if got := ojson.GetBytes(output, path).String(); got != protected {
++				t.Errorf("protected %s = %q", path, got)
++			}
++		}
++		parts := ojson.GetBytes(output, "request.systemInstruction.parts").Array()
++		if _, ok := system.(string); ok {
++			if len(parts) != 1 || parts[0].Get("text").String() != "Google" {
++				t.Fatalf("string system: %s", output)
++			}
++		} else if len(parts) != 2 || parts[0].Get("text").String() != strings.Repeat("Rule. ", 8)+"OpenAI" || parts[1].Get("text").String() != "Google" {
++			t.Fatalf("part window reset/drop failed: %s", output)
++		}
++		repeated, err := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5", input, false)
++		if err != nil || !bytes.Equal(repeated, output) {
++			t.Fatal("same input produced unstable output")
 +		}
 +	}
 +}

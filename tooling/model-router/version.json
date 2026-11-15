@@ -5,7 +5,7 @@
   "patch": {
     "name": "antigravity-client-identity",
     "file": "patches/antigravity-client-identity.patch",
-    "sha256": "86c952bccc51e2b2d51dbb39084f0067fdb29bc4b41f555765ad7563e5a33ff4",
+    "sha256": "6f9c285b0935111b4963e7b06fe3a727a93f4e79fb75ef5c6e027a1eb0864b3e",
     "go": "1.27.4"
   },
   "assets": {
