@@ -83,6 +83,10 @@ pub enum SelectionAction {
         row: usize,
         x: f32,
     },
+    IncrementalClick {
+        row: usize,
+        x: f32,
+    },
     Extend {
         row: usize,
         x: f32,
@@ -225,6 +229,14 @@ impl SelectionState {
         self.set_end(selection_candidate(
             terminal, self.mode, start, row, x, cols, total,
         )?);
+        Ok(())
+    }
+
+    pub fn incremental_click(&mut self, terminal: &mut Terminal, row: usize, x: f32) -> Result<()> {
+        if self.start.is_some() {
+            let (cols, total) = grid_size(terminal)?;
+            self.set_end(selection_cell(row.min(total - 1), x, cols));
+        }
         Ok(())
     }
 
