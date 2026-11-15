@@ -1,16 +1,16 @@
 {
-  "createdAt": "2026-11-15T16:09:02.437838+00:00",
+  "createdAt": "2026-11-15T16:45:23.382314+00:00",
   "buildCommand": "CSC_IDENTITY_AUTO_DISCOVERY=false pnpm package:dir",
-  "packageAttempts": 1,
-  "sourceCommit": "dd8ff9dfac2ed5ac19f9e07630a3bc8cd106938f",
-  "appPath": "apps/desktop/release/mac-arm64/码头.app",
+  "packageAttempts": 2,
+  "sourceCommit": "9f82f8def44015bd35858754c39a1b0423dff5c8",
+  "appPath": "apps/desktop/release/mac-arm64/\u7801\u5934.app",
   "codeSigning": "auto-discovery disabled; unsigned local acceptance app",
-  "bundleManifestSHA256": "2f1f7b4ddcdb0a4a15026d26dd6d86fc29abf717569eb77f66e43f073f20bf24",
+  "bundleManifestSHA256": "1207ec4457ab31ad111fcff53d42963ef4ec8dae6a4daa17e4e42903e08699f6",
   "regularFiles": 604,
   "fingerprints": {
-    "Contents/MacOS/码头": "221d5695ab9eb2263b9107e4a5bb3f5780adc35963530e322673d5535e8eeae5",
+    "Contents/MacOS/\u7801\u5934": "221d5695ab9eb2263b9107e4a5bb3f5780adc35963530e322673d5535e8eeae5",
     "Contents/Resources/app.asar": "18c644b387fe91f36d539afad1e9de6f91df308424d25d139fc1a419dc5a9bfc",
-    "Contents/Resources/runtime/index.cjs": "dc7b4e7bd6232118b573c176d20903f2e043a3d59ba092851dfd6742bedb71b9",
+    "Contents/Resources/runtime/index.cjs": "fc8bbe7dee21eda293512b29ab619dae00e2838bddd427f692368f6b4529b48c",
     "Contents/Resources/runtime/mt-cli.cjs": "4f29ca074b7a4e207a1028ba1bf8d5be1adef777925654b1a34f2342d4da514c",
     "Contents/Resources/runtime/control-assets/providers/dsh/bridge.mjs": "07ea92adf21da1b56c8b68826aeaea69265fb54777acada8b1092b355884a4b1",
     "Contents/Resources/runtime/control-assets/providers/dsh/instructions.mjs": "5ea8f3303f29533775ee3d0c13816937101c6fb91b562f9b3d079ddc13948aaa",
@@ -26,5 +26,6 @@
     ],
     "bytesFreed": 647700,
     "kept": "Configuration backups and accepted mode/live evidence"
-  }
+  },
+  "rebuildReason": "Product source changed after first packaged UI acceptance: DSH early resume failure state/waiter fix and compact HUD occupancy. Initial fingerprint retained."
 }

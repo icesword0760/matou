@@ -8989,7 +8989,7 @@ if (process.argv.includes('--dump-config')) {
       sceneId: `scene-${id}`, priority: 'active-session' as const, enqueueSequence: 1 }
     const launch = () => active!.ensureSessionRunning(job).then(() => 'recovered', error => String(error))
     const observer = async () => {
-      await waitUntil(() => registry.has(id))
+      await waitUntil(() => registry.has(id), 5000)
       let args: string[] = [], patch = '', runId = ''
       await waitUntilAsync(async () => {
         try {
