@@ -109,6 +109,21 @@ pub struct RowMetadata {
     pub wrap_continuation: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryCell {
+    pub text: String,
+    /// Whether this cell contains an explicit character, including a literal space.
+    pub has_content: bool,
+    /// 0 for the continuation cell after a wide glyph, otherwise 1 or 2.
+    pub width: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryRow {
+    pub cells: Vec<HistoryCell>,
+    pub metadata: RowMetadata,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Scrollbar {
     pub offset: u64,

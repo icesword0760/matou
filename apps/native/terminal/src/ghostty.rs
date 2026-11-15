@@ -8,7 +8,10 @@ use std::{
 
 use anyhow::{Context, Result, bail, ensure};
 
-use crate::{Cell, Color, CursorStyle, InputModes, RowMetadata, Screen, Scrollbar, Theme};
+use crate::{
+    Cell, Color, CursorStyle, HistoryCell, HistoryRow, InputModes, RowMetadata, Screen, Scrollbar,
+    Theme,
+};
 
 const SYNC_TIMEOUT: Duration = Duration::from_millis(150);
 
@@ -39,6 +42,7 @@ type WriteCallback = unsafe extern "C" fn(*mut c_void, *const u8, usize);
 type HoldCallback = unsafe extern "C" fn(*mut c_void, bool);
 type RowCallback = unsafe extern "C" fn(*mut c_void, bool, bool);
 type CellCallback = unsafe extern "C" fn(*mut c_void, *const u8, usize, u32, u32, u32, u16, u8);
+type HistoryCellCallback = unsafe extern "C" fn(*mut c_void, *const u32, usize, u8);
 
 unsafe extern "C" {
     fn matou_vt_new(
@@ -83,6 +87,14 @@ unsafe extern "C" {
         emit_cell: CellCallback,
         data: *mut c_void,
     ) -> c_int;
+    fn matou_vt_history_row(
+        terminal: *const c_void,
+        row: usize,
+        wrap: *mut bool,
+        continuation: *mut bool,
+        emit_cell: HistoryCellCallback,
+        data: *mut c_void,
+    ) -> c_int;
 }
 
 #[derive(Default)]
@@ -95,6 +107,12 @@ struct Effects {
 struct ScreenContent {
     cells: Vec<Cell>,
     rows: Vec<RowMetadata>,
+    invalid_text: bool,
+}
+
+#[derive(Default)]
+struct HistoryContent {
+    cells: Vec<HistoryCell>,
     invalid_text: bool,
 }
 
@@ -281,6 +299,35 @@ impl Terminal {
         })
     }
 
+    /// Read an absolute row of the active buffer, including its retained history.
+    /// Row zero is the oldest retained row. The viewport stays where it is.
+    pub fn history_row(&self, row: usize) -> Result<HistoryRow> {
+        let mut wrap = false;
+        let mut wrap_continuation = false;
+        let mut content = HistoryContent::default();
+        check(
+            unsafe {
+                matou_vt_history_row(
+                    self.handle.as_ptr(),
+                    row,
+                    &mut wrap,
+                    &mut wrap_continuation,
+                    on_history_cell,
+                    ptr::from_mut(&mut content).cast(),
+                )
+            },
+            "read history row",
+        )?;
+        ensure!(!content.invalid_text, "Ghostty VT returned invalid UTF-32");
+        Ok(HistoryRow {
+            cells: content.cells,
+            metadata: RowMetadata {
+                wrap,
+                wrap_continuation,
+            },
+        })
+    }
+
     /// Scroll up by a positive number of lines, or down by a negative number.
     pub fn scroll(&mut self, lines: i32) -> Result<()> {
         check(
@@ -377,6 +424,32 @@ unsafe extern "C" fn on_row(data: *mut c_void, wrap: bool, wrap_continuation: bo
     screen.rows.push(RowMetadata {
         wrap,
         wrap_continuation,
+    });
+}
+
+unsafe extern "C" fn on_history_cell(
+    data: *mut c_void,
+    codepoints: *const u32,
+    len: usize,
+    width: u8,
+) {
+    let content = unsafe { &mut *data.cast::<HistoryContent>() };
+    let text = match (width, len) {
+        (0, _) => String::new(),
+        (_, 0) => " ".to_owned(),
+        _ => {
+            let codepoints = unsafe { slice::from_raw_parts(codepoints, len) };
+            let Some(text) = codepoints.iter().copied().map(char::from_u32).collect() else {
+                content.invalid_text = true;
+                return;
+            };
+            text
+        }
+    };
+    content.cells.push(HistoryCell {
+        text,
+        width,
+        has_content: width != 0 && len != 0,
     });
 }
 
