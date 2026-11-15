@@ -1,0 +1,189 @@
+{
+  "recordedAt": "2026-11-15T17:06:27.720173+00:00",
+  "command": "pnpm exec playwright test tests/e2e/dsh-acceptance.spec.ts --workers=1 --retries=1 --output=.cache/dsh-stage5/closeout-results",
+  "packageManifestSHA256": "1207ec4457ab31ad111fcff53d42963ef4ec8dae6a4daa17e4e42903e08699f6",
+  "testCount": 7,
+  "attemptCount": 10,
+  "passedFirstAttempt": 4,
+  "failedAfterRetry": 3,
+  "skipped": 0,
+  "flakyPassed": 0,
+  "elapsedMinutes": 10.0,
+  "journeys": [
+    {
+      "scenario": "lifecycle, labels, HUD, title, notifications, static restart and memory",
+      "attempts": 1,
+      "result": "passed"
+    },
+    {
+      "scenario": "native fork, preview, search, load and remembered parent codeword",
+      "attempts": 1,
+      "result": "passed"
+    },
+    {
+      "scenario": "mt creation and sibling screen read in default sandbox",
+      "attempts": 1,
+      "result": "passed"
+    },
+    {
+      "scenario": "approval, notification and return to idle",
+      "attempts": 2,
+      "result": "failed",
+      "failure": "line 380: needs-input expected, idle remained for 90 seconds",
+      "firstAttemptCompletedRounds": 1,
+      "retryCompletedRounds": 2,
+      "notReached": "Failing round notification/rejection/idle checks, later rounds and final approval proof."
+    },
+    {
+      "scenario": "native model error state and notification",
+      "attempts": 2,
+      "result": "failed",
+      "failure": "line 410: error expected, idle remained for 60 seconds in first round on both attempts",
+      "notReached": "Error DAG/notification/latency assertions, later rounds and final error proof. Cause unconfirmed; this is not proof of a successfully induced native turn error."
+    },
+    {
+      "scenario": "resume failure, retry original ID and start fresh",
+      "attempts": 2,
+      "result": "failed",
+      "failure": "line 439: Retry recovery button disabled: current terminal is still recovering",
+      "notReached": "Successful same-ID retry, remembered codeword after retry and start-fresh path."
+    },
+    {
+      "scenario": "missing executable feedback",
+      "attempts": 1,
+      "result": "passed"
+    }
+  ],
+  "performance": {
+    "core": {
+      "samples": [
+        {
+          "round": 1,
+          "status": "running",
+          "runtimeAt": 1794761667285,
+          "uiAt": 1794761667287,
+          "latencyMs": 2,
+          "nativeAt": 1794761667291,
+          "nativeToUiMs": 0,
+          "nativeToUiSignedMs": -4
+        },
+        {
+          "round": 1,
+          "status": "idle",
+          "runtimeAt": 1794761671883,
+          "uiAt": 1794761671885,
+          "latencyMs": 2,
+          "nativeAt": 1794761671754,
+          "nativeToUiMs": 131,
+          "nativeToUiSignedMs": 131
+        },
+        {
+          "round": 2,
+          "status": "running",
+          "runtimeAt": 1794761673992,
+          "uiAt": 1794761673995,
+          "latencyMs": 3,
+          "nativeAt": 1794761673998,
+          "nativeToUiMs": 0,
+          "nativeToUiSignedMs": -3
+        },
+        {
+          "round": 2,
+          "status": "idle",
+          "runtimeAt": 1794761676295,
+          "uiAt": 1794761676297,
+          "latencyMs": 2,
+          "nativeAt": 1794761676290,
+          "nativeToUiMs": 7,
+          "nativeToUiSignedMs": 7
+        },
+        {
+          "round": 3,
+          "status": "running",
+          "runtimeAt": 1794761678714,
+          "uiAt": 1794761678715,
+          "latencyMs": 1,
+          "nativeAt": 1794761678717,
+          "nativeToUiMs": 0,
+          "nativeToUiSignedMs": -2
+        },
+        {
+          "round": 3,
+          "status": "idle",
+          "runtimeAt": 1794761681392,
+          "uiAt": 1794761681395,
+          "latencyMs": 3,
+          "nativeAt": 1794761681387,
+          "nativeToUiMs": 8,
+          "nativeToUiSignedMs": 8
+        }
+      ],
+      "retries": 0
+    },
+    "partialApproval": [
+      {
+        "evidenceFile": "latency-approval-Yl5ghz-1.json",
+        "samples": [
+          {
+            "round": 1,
+            "status": "needs-input",
+            "runtimeAt": 1794761778987,
+            "uiAt": 1794761778989,
+            "latencyMs": 2,
+            "nativeAt": 1794761778884,
+            "nativeToUiMs": 105
+          }
+        ]
+      },
+      {
+        "evidenceFile": "latency-approval-aVECnd-1.json",
+        "samples": [
+          {
+            "round": 1,
+            "status": "needs-input",
+            "runtimeAt": 1794761886211,
+            "uiAt": 1794761886213,
+            "latencyMs": 2,
+            "nativeAt": 1794761886109,
+            "nativeToUiMs": 104
+          }
+        ]
+      },
+      {
+        "evidenceFile": "latency-approval-aVECnd-2.json",
+        "samples": [
+          {
+            "round": 2,
+            "status": "needs-input",
+            "runtimeAt": 1794761892930,
+            "uiAt": 1794761892932,
+            "latencyMs": 2,
+            "nativeAt": 1794761892827,
+            "nativeToUiMs": 105
+          }
+        ]
+      }
+    ],
+    "nativeRunningMeasurement": "UI preceded native turn/start by 4/3/2 ms. The test clamps these negatives to zero; those zeros are not a measured native-to-UI latency.",
+    "approvalCoverage": "3 real state changes across 2 attempts; approval scenario failed overall.",
+    "error": "No valid samples acquired; 3-trial criterion remains unclosed."
+  },
+  "configuration": {
+    "checked": 9,
+    "changed": []
+  },
+  "screenshots": [
+    "04-dsh-hud.png",
+    "07-child-preview-search.png",
+    "08-memory-restored.png",
+    "10-mt-screen-read.png",
+    "03-approval-2.png",
+    "08-restore-failed.png",
+    "missing-cli.png",
+    "model-error-still-idle.png"
+  ],
+  "privateRawEvidenceRoot": ".cache/dsh-stage5/closeout-evidence",
+  "privatePlaywrightResults": ".cache/dsh-stage5/closeout-results",
+  "rawLog": "closeout-dsh-acceptance.log",
+  "productAcceptance": "Not accepted: matrix remains in implementation stage."
+}
