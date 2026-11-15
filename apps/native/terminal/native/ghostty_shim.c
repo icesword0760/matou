@@ -286,6 +286,12 @@ int matou_vt_history_row(const MatouVt *vt, size_t row, bool *wrap, bool *contin
     return GHOSTTY_SUCCESS;
 }
 
+int matou_vt_history_trimmed_rows(const MatouVt *vt, size_t *out) {
+    // Matou's private TerminalData key in the pinned build.
+    const GhosttyTerminalData history_trimmed = (GhosttyTerminalData)0x4d540001;
+    return ghostty_terminal_get(vt->terminal, history_trimmed, out);
+}
+
 int matou_vt_screen(MatouVt *vt, MatouScreen *screen, MatouRow emit_row,
                      MatouCell emit, void *userdata) {
     GhosttyRenderStateCursor cursor = GHOSTTY_INIT_SIZED(GhosttyRenderStateCursor);
