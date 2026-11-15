@@ -1,5 +1,6 @@
 pub mod backup;
 pub mod durability;
+pub mod geometry;
 pub mod hierarchy;
 pub mod journal;
 pub mod ownership;

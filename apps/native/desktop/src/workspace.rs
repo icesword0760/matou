@@ -1,13 +1,29 @@
-use std::{collections::HashMap, sync::mpsc::Sender, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::mpsc::Sender,
+    time::{Duration, Instant},
+};
 
 use gpui::{prelude::*, *};
+use matou_native_core::geometry::GeometryUpdate;
 use matou_native_core::hierarchy::{HierarchyResult, Scene};
 use serde_json::Value;
 
 use crate::{
+    carousel_motion::{
+        Curve, Transition, centered_scroll, focus_scroll_step, fully_visible_scroll,
+    },
     runtime_bridge::{Command, Event},
     terminal_surface::{SurfaceEvent, TerminalSurface},
 };
+
+#[cfg(debug_assertions)]
+type MotionTrace = std::rc::Rc<std::cell::RefCell<std::fs::File>>;
+
+struct CardMotion {
+    width: Transition,
+    lift: Transition,
+}
 
 pub struct Workspace {
     commands: Sender<Command>,
@@ -15,10 +31,37 @@ pub struct Workspace {
     scenes: Vec<Scene>,
     tab_scroll: ScrollHandle,
     carousel_scroll: ScrollHandle,
+    motion_clock: Instant,
+    #[cfg(debug_assertions)]
+    motion_trace: Option<MotionTrace>,
+    card_motion: HashMap<String, CardMotion>,
+    focus_follow_until: Option<f64>,
+    hovered: Option<String>,
+    hover_follow_until: Option<f64>,
+    hover_baseline: Option<f64>,
+    hover_restore_at: Option<f64>,
+    pointer_position: Option<Point<Pixels>>,
+    edge_direction: i8,
+    edge_blocked: bool,
+    edge_next_at: Option<f64>,
+    edge_target: Option<String>,
+    edge_phase_start: f64,
+    edge_cruising: bool,
+    card_geometry: Vec<(String, f64, f64)>,
+    geometry: HashMap<String, GeometryUpdate>,
+    geometry_dirty: HashSet<String>,
+    restore_geometry: bool,
+    column_capacity: Option<u32>,
+    pending_geometry: Option<GeometryUpdate>,
+    geometry_timer: u64,
+    last_geometry_write: HashMap<String, f64>,
+    geometry_sequence: u64,
+    geometry_writes: HashMap<String, (u64, u8)>,
     graph: Value,
     terminals: HashMap<String, Entity<TerminalSurface>>,
     order: Vec<String>,
     focused: Option<String>,
+    pending_focus: Option<(String, String)>,
     resize_revisions: HashMap<String, u64>,
     fault: Option<String>,
     subscriptions: Vec<Subscription>,
@@ -47,10 +90,37 @@ impl Workspace {
             scenes: Vec::new(),
             tab_scroll: ScrollHandle::new(),
             carousel_scroll: ScrollHandle::new(),
+            motion_clock: Instant::now(),
+            #[cfg(debug_assertions)]
+            motion_trace: open_motion_trace(),
+            card_motion: HashMap::new(),
+            focus_follow_until: None,
+            hovered: None,
+            hover_follow_until: None,
+            hover_baseline: None,
+            hover_restore_at: None,
+            pointer_position: None,
+            edge_direction: 0,
+            edge_blocked: false,
+            edge_next_at: None,
+            edge_target: None,
+            edge_phase_start: 0.,
+            edge_cruising: false,
+            card_geometry: Vec::new(),
+            geometry: HashMap::new(),
+            geometry_dirty: HashSet::new(),
+            restore_geometry: false,
+            column_capacity: None,
+            pending_geometry: None,
+            geometry_timer: 0,
+            last_geometry_write: HashMap::new(),
+            geometry_sequence: 0,
+            geometry_writes: HashMap::new(),
             graph: Value::Null,
             terminals: HashMap::new(),
             order: Vec::new(),
             focused: None,
+            pending_focus: None,
             resize_revisions: HashMap::new(),
             fault: None,
             subscriptions: Vec::new(),
@@ -58,7 +128,23 @@ impl Workspace {
     }
 
     fn send(&mut self, command: Command, cx: &mut Context<Self>) {
+        if matches!(
+            &command,
+            Command::SelectScene { .. }
+                | Command::CreateCanvas { .. }
+                | Command::CreateShellSibling { .. }
+        ) {
+            self.flush_geometry(cx);
+        }
+        if let Command::FocusSession {
+            scene_id,
+            session_id,
+        } = &command
+        {
+            self.pending_focus = Some((scene_id.clone(), session_id.clone()));
+        }
         if self.commands.send(command).is_err() {
+            self.pending_focus = None;
             self.fault = Some("原生运行时已停止".into());
             cx.notify();
         }
@@ -70,14 +156,68 @@ impl Workspace {
                 hierarchy,
                 scenes,
                 graph,
+                geometry,
             }
             | Event::Navigation {
                 hierarchy,
                 scenes,
                 graph,
+                geometry,
             } => {
+                let next_scene = hierarchy.scene.as_ref().map(|scene| &scene.id);
+                let scene_changed = self
+                    .hierarchy
+                    .as_ref()
+                    .and_then(|h| h.scene.as_ref())
+                    .map(|s| &s.id)
+                    != next_scene;
+                let next_focus = hierarchy.session.as_ref().map(|session| session.id.clone());
+                if scene_changed
+                    || self.pending_focus.as_ref().is_some_and(|(scene, session)| {
+                        Some(scene) == next_scene && Some(session) == next_focus.as_ref()
+                    })
+                {
+                    self.pending_focus = None;
+                }
+                if scene_changed {
+                    // A newly mounted source carousel starts at its current styles.
+                    for saved in geometry {
+                        if !self.geometry_dirty.contains(&saved.owner_key) {
+                            self.geometry.insert(saved.owner_key.clone(), saved);
+                        }
+                    }
+                    self.restore_geometry = true;
+                    self.column_capacity = None;
+                    self.stop_edge_browse(false);
+                    self.pointer_position = None;
+                    self.card_motion.clear();
+                    self.hovered = None;
+                    self.hover_follow_until = None;
+                    self.hover_baseline = None;
+                    self.hover_restore_at = None;
+                    self.carousel_scroll.set_offset(point(px(0.), px(0.)));
+                }
+                if !scene_changed && self.focused != next_focus {
+                    self.restore_geometry = false;
+                }
+                if scene_changed || self.focused != next_focus {
+                    let at = self.motion_clock.elapsed().as_secs_f64() * 1000.;
+                    let from_preview = !scene_changed && self.hovered == next_focus;
+                    self.focus_follow_until = if from_preview { None } else { Some(at + 440.) };
+                    self.hovered = None;
+                    self.hover_follow_until = None;
+                    self.hover_baseline = None;
+                    self.hover_restore_at = None;
+                    #[cfg(debug_assertions)]
+                    if let Some(trace) = &self.motion_trace {
+                        record_motion(
+                            trace,
+                            &serde_json::json!({"kind":"focus","at":at,"from":self.focused,"to":next_focus,"sceneChanged":scene_changed}),
+                        );
+                    }
+                }
                 self.scenes = scenes;
-                self.focused = hierarchy.session.as_ref().map(|session| session.id.clone());
+                self.focused = next_focus;
                 self.hierarchy = Some(hierarchy);
                 self.graph = graph;
                 self.refresh_terminals(window, cx);
@@ -89,17 +229,82 @@ impl Workspace {
                 }) {
                     self.tab_scroll.scroll_to_item(index);
                 }
-                if let Some(index) = self
-                    .order
-                    .iter()
-                    .position(|id| Some(id) == self.focused.as_ref())
-                {
-                    self.carousel_scroll.scroll_to_item(index);
-                }
                 if let Some(terminal) = self.focused.as_ref().and_then(|id| self.terminals.get(id))
                 {
                     window.focus(&terminal.read(cx).focus);
                 }
+            }
+            Event::GeometryResult {
+                sequence,
+                update,
+                error,
+            } => {
+                #[cfg(debug_assertions)]
+                if let Some(trace) = &self.motion_trace {
+                    record_motion(
+                        trace,
+                        &serde_json::json!({"kind":"geometry-write","at":self.motion_clock.elapsed().as_secs_f64()*1000.,"sequence":sequence,"owner":update.owner_key,"geometry":update.geometry,"error":error}),
+                    );
+                }
+                let current_attempt = self
+                    .geometry_writes
+                    .get(&update.owner_key)
+                    .filter(|(current, _)| *current == sequence)
+                    .map(|(_, attempt)| *attempt);
+                let desired = self
+                    .geometry
+                    .get(&update.owner_key)
+                    .is_some_and(|desired| desired.geometry == update.geometry)
+                    && !self
+                        .pending_geometry
+                        .as_ref()
+                        .is_some_and(|pending| pending.owner_key == update.owner_key);
+                if desired && current_attempt.is_some() && error.is_none() {
+                    self.geometry_dirty.remove(&update.owner_key);
+                } else if desired && let Some(attempt @ 0..=2) = current_attempt {
+                    let timer = cx.background_executor().timer(Duration::from_millis(120));
+                    cx.spawn(async move |this, cx| {
+                        timer.await;
+                        let _ = this.update(cx, |this, cx| {
+                            if this
+                                .geometry_writes
+                                .get(&update.owner_key)
+                                .is_some_and(|(current, _)| *current == sequence)
+                                && this
+                                    .geometry
+                                    .get(&update.owner_key)
+                                    .is_some_and(|desired| desired.geometry == update.geometry)
+                                && !this
+                                    .pending_geometry
+                                    .as_ref()
+                                    .is_some_and(|pending| pending.owner_key == update.owner_key)
+                            {
+                                let mut retry = update;
+                                if this
+                                    .hierarchy
+                                    .as_ref()
+                                    .and_then(|h| h.scene.as_ref())
+                                    .is_some_and(|s| s.id == retry.scene_id)
+                                {
+                                    retry.layout_revision = this.graph["layoutRevision"]
+                                        .as_f64()
+                                        .unwrap_or(retry.layout_revision);
+                                }
+                                this.write_geometry(retry, attempt + 1, cx);
+                            }
+                        });
+                    })
+                    .detach();
+                }
+            }
+            Event::NavigationFailed {
+                message,
+                attempted_focus,
+            } => {
+                if attempted_focus.is_some() && self.pending_focus == attempted_focus {
+                    self.pending_focus = None;
+                }
+                self.fault = Some(message);
             }
             Event::Graph(graph) => {
                 self.graph = graph;
@@ -139,7 +344,21 @@ impl Workspace {
             .iter()
             .filter_map(|node| node["sessionId"].as_str().map(str::to_owned))
             .collect();
+        let now = self.motion_clock.elapsed().as_secs_f64() * 1000.;
         for id in &self.order {
+            let selected = if self.focused.as_ref() == Some(id) {
+                1.
+            } else {
+                0.
+            };
+            let motion = self
+                .card_motion
+                .entry(id.clone())
+                .or_insert_with(|| CardMotion {
+                    width: Transition::new(selected),
+                    lift: Transition::new(selected),
+                });
+            motion.lift.retarget(selected, now, 180., Curve::Lift);
             if self.terminals.contains_key(id) {
                 continue;
             }
@@ -201,6 +420,311 @@ impl Workspace {
             }
             self.terminals.insert(id.clone(), terminal);
         }
+    }
+
+    pub fn flush_geometry(&mut self, cx: &mut Context<Self>) {
+        self.geometry_timer += 1;
+        if let Some(update) = self.pending_geometry.take() {
+            self.last_geometry_write.insert(
+                update.scene_id.clone(),
+                self.motion_clock.elapsed().as_secs_f64() * 1000.,
+            );
+            self.write_geometry(update, 0, cx);
+        }
+    }
+
+    fn write_geometry(&mut self, update: GeometryUpdate, attempt: u8, cx: &mut Context<Self>) {
+        self.geometry_sequence += 1;
+        let sequence = self.geometry_sequence;
+        self.geometry_writes
+            .insert(update.owner_key.clone(), (sequence, attempt));
+        self.send(Command::PutGeometry { sequence, update }, cx);
+    }
+
+    fn geometry_focus(&self) -> Option<&str> {
+        self.pending_focus
+            .as_ref()
+            .filter(|(scene_id, _)| {
+                self.hierarchy
+                    .as_ref()
+                    .and_then(|hierarchy| hierarchy.scene.as_ref())
+                    .is_some_and(|scene| &scene.id == scene_id)
+            })
+            .map(|(_, session_id)| session_id.as_str())
+            .or(self.focused.as_deref())
+    }
+
+    fn capture_geometry(
+        &mut self,
+        focused: Option<String>,
+        continuous: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let viewport = f64::from(f32::from(window.viewport_size().width)) - 260.;
+        let maximum = self
+            .card_geometry
+            .last()
+            .map(|(_, left, width)| (left + width + 10. - viewport).max(0.))
+            .unwrap_or(0.);
+        let left = focused
+            .as_ref()
+            .and_then(|id| self.card_geometry.iter().find(|(card, _, _)| card == id))
+            .map(|(_, left, _)| *left);
+        self.save_geometry(
+            f64::from(-f32::from(self.carousel_scroll.offset().x)).clamp(0., maximum),
+            left,
+            focused,
+            continuous,
+            cx,
+        );
+    }
+
+    fn save_geometry(
+        &mut self,
+        scroll: f64,
+        focused_left: Option<f64>,
+        focused: Option<String>,
+        continuous: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(scene) = self.hierarchy.as_ref().and_then(|h| h.scene.as_ref()) else {
+            return;
+        };
+        let owner_key = format!("session-group:{}:root", scene.id);
+        let mut geometry = serde_json::json!({"scrollLeft":scroll});
+        if let Some(id) = &focused {
+            geometry["focusedSessionId"] = id.clone().into();
+            if let Some(left) = focused_left {
+                geometry["anchorSessionId"] = id.clone().into();
+                geometry["anchorViewportOffset"] = (left - scroll).into();
+            }
+        }
+        if self
+            .geometry
+            .get(&owner_key)
+            .is_some_and(|saved| saved.geometry == geometry)
+        {
+            return;
+        }
+        let update = GeometryUpdate {
+            scene_id: scene.id.clone(),
+            owner_key: owner_key.clone(),
+            layout_revision: self.graph["layoutRevision"]
+                .as_f64()
+                .unwrap_or(scene.layout_revision as f64),
+            geometry,
+            now: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as i64,
+        };
+        let elapsed = self
+            .last_geometry_write
+            .get(&scene.id)
+            .map(|last| self.motion_clock.elapsed().as_secs_f64() * 1000. - last)
+            .unwrap_or(f64::INFINITY);
+        self.geometry_dirty.insert(owner_key.clone());
+        self.geometry.insert(owner_key, update.clone());
+        self.pending_geometry = Some(update);
+        // Match SessionCanvas: wheel checkpoints are immediate/throttled at
+        // 50ms, while settled/click checkpoints debounce for 180ms.
+        self.geometry_timer += 1;
+        if continuous && elapsed >= 50. {
+            self.flush_geometry(cx);
+            return;
+        }
+        let generation = self.geometry_timer;
+        let delay = if continuous {
+            (50. - elapsed).max(1.)
+        } else {
+            180.
+        };
+        let timer = cx
+            .background_executor()
+            .timer(Duration::from_secs_f64(delay / 1000.));
+        cx.spawn(async move |this, cx| {
+            timer.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.geometry_timer == generation {
+                    this.flush_geometry(cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn scroll_carousel(
+        &mut self,
+        event: &ScrollWheelEvent,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let delta = event.delta.pixel_delta(px(16.));
+        let horizontal = event.modifiers.shift || delta.x.abs() >= delta.y.abs();
+        let narrow = f32::from(window.viewport_size().width) - 260. < 720.;
+        let over_terminal = self
+            .order
+            .iter()
+            .filter(|id| !narrow || self.focused.as_ref() == Some(id))
+            .any(|id| {
+                self.terminals
+                    .get(id)
+                    .is_some_and(|t| t.read(cx).contains_position(event.position))
+            });
+        if !horizontal && over_terminal {
+            return;
+        }
+        let amount = if horizontal && delta.x != px(0.) {
+            delta.x
+        } else {
+            delta.y
+        };
+        if amount == px(0.) {
+            return;
+        }
+        self.stop_edge_browse(true);
+        self.restore_geometry = false;
+        self.focus_follow_until = None;
+        self.hover_follow_until = None;
+        self.hover_baseline = None;
+        self.hover_restore_at = None;
+        let max_scroll = self
+            .card_geometry
+            .last()
+            .map(|(_, left, width)| {
+                left + width + 10. - (f64::from(f32::from(window.viewport_size().width)) - 260.)
+            })
+            .unwrap_or(0.)
+            .max(0.);
+        let next =
+            (f64::from(f32::from(self.carousel_scroll.offset().x + amount))).clamp(-max_scroll, 0.);
+        self.carousel_scroll
+            .set_offset(point(px(next as f32), px(0.)));
+        self.capture_geometry(self.geometry_focus().map(str::to_owned), true, window, cx);
+        // A horizontal gesture retargets visual expansion under the pointer,
+        // while its own wheel deltas continue to own the viewport.
+        if let Some(position) = self.pointer_position {
+            let x = f64::from(f32::from(position.x)) - 260. - next;
+            if let Some((id, _, _)) = self
+                .card_geometry
+                .iter()
+                .find(|(_, left, width)| x >= *left && x <= *left + *width)
+            {
+                self.hovered = Some(id.clone());
+            }
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    fn stop_edge_browse(&mut self, block: bool) {
+        self.edge_direction = 0;
+        self.edge_blocked = block;
+        self.edge_next_at = None;
+        self.edge_target = None;
+        self.edge_cruising = false;
+    }
+
+    fn nearest_hidden_card(&self, direction: i8, viewport_width: f64) -> Option<String> {
+        let scroll = f64::from(-f32::from(self.carousel_scroll.offset().x));
+        if direction < 0 {
+            self.card_geometry
+                .iter()
+                .rev()
+                .find(|(_, left, _)| *left < scroll + 10. - 0.5)
+        } else {
+            self.card_geometry
+                .iter()
+                .find(|(_, left, width)| *left + *width > scroll + viewport_width - 10. + 0.5)
+        }
+        .map(|(id, _, _)| id.clone())
+    }
+
+    fn edge_intent(&mut self, position: Point<Pixels>, window: &Window, cx: &mut Context<Self>) {
+        let delta = self
+            .pointer_position
+            .map(|old| f32::from(position.x - old.x))
+            .unwrap_or(0.);
+        self.pointer_position = Some(position);
+        let x = f32::from(position.x);
+        let y = f32::from(position.y);
+        let width = f32::from(window.viewport_size().width);
+        let inside_y = y >= 48. && y <= f32::from(window.viewport_size().height) - 38.;
+        let direction = if inside_y && x >= 260. && x <= 344. {
+            -1
+        } else if inside_y && x >= width - 84. && x <= width {
+            1
+        } else {
+            0
+        };
+        if direction == 0 {
+            let away = (self.edge_direction == 1 && delta < -2.)
+                || (self.edge_direction == -1 && delta > 2.);
+            self.stop_edge_browse(away);
+            cx.notify();
+            return;
+        }
+        if self.edge_direction != 0 && self.edge_direction != direction {
+            self.stop_edge_browse(false);
+        }
+        if (direction == 1 && delta < -2.) || (direction == -1 && delta > 2.) {
+            self.stop_edge_browse(true);
+            cx.notify();
+            return;
+        }
+        if self.edge_blocked || self.edge_next_at.is_some() {
+            return;
+        }
+        let Some(target) = self.nearest_hidden_card(direction, (width - 260.) as f64) else {
+            self.stop_edge_browse(false);
+            cx.notify();
+            return;
+        };
+        let now = self.motion_clock.elapsed().as_secs_f64() * 1000.;
+        self.edge_direction = direction;
+        self.edge_target = Some(target);
+        self.edge_phase_start = now;
+        self.edge_next_at = Some(now + 180.);
+        cx.notify();
+    }
+
+    fn hover_card(&mut self, id: Option<String>, cx: &mut Context<Self>) {
+        let now = self.motion_clock.elapsed().as_secs_f64() * 1000.;
+        self.hovered = id;
+        #[cfg(debug_assertions)]
+        if let Some(trace) = &self.motion_trace {
+            record_motion(
+                trace,
+                &serde_json::json!({"kind":"hover","at":now,"session":self.hovered,"baseline":self.hover_baseline}),
+            );
+        }
+        match &self.hovered {
+            None => {
+                self.hover_follow_until = None;
+                if let Some(baseline) = self.hover_baseline {
+                    self.carousel_scroll
+                        .set_offset(point(px(-baseline as f32), px(0.)));
+                    self.hover_restore_at = Some(now + 220.);
+                }
+            }
+            Some(id) => {
+                self.hover_restore_at = None;
+                if self.focused.as_ref() == Some(id) {
+                    self.hover_baseline = None;
+                } else {
+                    self.focus_follow_until = None;
+                    self.hover_baseline
+                        .get_or_insert(f64::from(-f32::from(self.carousel_scroll.offset().x)));
+                }
+                self.hover_follow_until = if self.edge_blocked {
+                    None
+                } else {
+                    Some(now + 440.)
+                };
+            }
+        }
+        cx.notify();
     }
 
     fn sidebar(&self) -> Div {
@@ -570,9 +1094,167 @@ impl Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let content_width = f32::from(window.viewport_size().width) - 260. - 20.;
-        let columns = (((content_width + 20. + 12.) / 292.).floor()).clamp(1., 4.);
-        let inactive_width = (content_width - (columns - 1.) * 12.) / columns;
+        let viewport_width = f64::from(f32::from(window.viewport_size().width)) - 260.;
+        let content_width = viewport_width - 20.;
+        let columns = (((viewport_width + 12.) / 292.).floor()).clamp(1., 4.);
+        let narrow = viewport_width < 720.;
+        let inactive_width = if narrow {
+            (content_width * 0.28).clamp(112., 176.)
+        } else {
+            (content_width - (columns - 1.) * 12.) / columns
+        };
+        let active_width = if narrow {
+            (content_width * 0.68).clamp(260., 560.)
+        } else {
+            (content_width * 0.48).min(620.)
+        };
+        let now = self.motion_clock.elapsed().as_secs_f64() * 1000.;
+        let capacity = columns as u32;
+        if self.column_capacity != Some(capacity) {
+            self.column_capacity = Some(capacity);
+            self.restore_geometry = true;
+        }
+        let mut widths = HashMap::new();
+        let mut positions = HashMap::new();
+        let mut left = 10.;
+        self.card_geometry.clear();
+        let mut active_geometry = None;
+        let mut preview_geometry = None;
+        let mut moving = false;
+        let width_duration = if reduced_motion() { 1. } else { 380. };
+        for id in &self.order {
+            let expanded =
+                self.focused.as_ref() == Some(id) || (!narrow && self.hovered.as_ref() == Some(id));
+            let motion = self.card_motion.get_mut(id).expect("mounted card motion");
+            motion.width.retarget(
+                if expanded { 1. } else { 0. },
+                now,
+                width_duration,
+                Curve::Width,
+            );
+            let width = inactive_width + (active_width - inactive_width) * motion.width.value(now);
+            widths.insert(id.clone(), width);
+            positions.insert(id.clone(), left);
+            self.card_geometry.push((id.clone(), left, width));
+            if self.focused.as_ref() == Some(id) {
+                active_geometry = Some((left, width));
+            }
+            if self.hovered.as_ref() == Some(id) {
+                preview_geometry = Some((left, width));
+            }
+            left += width + 12.;
+            moving |= motion.width.is_running(now) || motion.lift.is_running(now);
+        }
+        let total =
+            20. + widths.values().sum::<f64>() + self.order.len().saturating_sub(1) as f64 * 12.;
+        let max_scroll = (total - viewport_width).max(0.);
+        if let Some(deadline) = self.edge_next_at {
+            if now >= deadline {
+                let target = self
+                    .edge_target
+                    .take()
+                    .filter(|id| self.order.contains(id))
+                    .or_else(|| self.nearest_hidden_card(self.edge_direction, viewport_width));
+                if let Some(id) = target {
+                    // Dwelling at an edge is navigation intent: unlike ordinary
+                    // preview, this new position remains after pointer exit.
+                    self.hover_baseline = None;
+                    self.hover_restore_at = None;
+                    self.focus_follow_until = None;
+                    self.hovered = Some(id);
+                    self.hover_follow_until = Some(now + 440.);
+                    if !self.edge_cruising {
+                        self.edge_phase_start = now;
+                    }
+                    self.edge_cruising = true;
+                    self.edge_next_at = Some(now + 900.);
+                    cx.notify();
+                } else {
+                    self.stop_edge_browse(false);
+                }
+            }
+            moving = true;
+        }
+        if self.restore_geometry {
+            self.restore_geometry = moving;
+            if let Some(saved) = self
+                .hierarchy
+                .as_ref()
+                .and_then(|h| h.scene.as_ref())
+                .and_then(|s| self.geometry.get(&format!("session-group:{}:root", s.id)))
+            {
+                let value = &saved.geometry;
+                let anchor = value["anchorSessionId"]
+                    .as_str()
+                    .and_then(|id| positions.get(id));
+                let offset = value["anchorViewportOffset"].as_f64();
+                let scroll = match (anchor, offset) {
+                    (Some(left), Some(offset)) => left - offset,
+                    _ => value["scrollLeft"].as_f64().unwrap_or(0.),
+                };
+                self.carousel_scroll
+                    .set_offset(point(px(-scroll.clamp(0., max_scroll) as f32), px(0.)));
+                if scroll > 0. || anchor.is_some() {
+                    self.focus_follow_until = None;
+                }
+            }
+        }
+        if let (Some(until), Some((left, width))) = (self.hover_follow_until, preview_geometry) {
+            let current =
+                f64::from(-f32::from(self.carousel_scroll.offset().x)).clamp(0., max_scroll);
+            let target = fully_visible_scroll(left, width, current, viewport_width, max_scroll);
+            let next = focus_scroll_step(current, target);
+            self.carousel_scroll
+                .set_offset(point(px(-next as f32), px(0.)));
+            if now < until || (target - next).abs() > 0.5 {
+                moving = true;
+            } else {
+                self.hover_follow_until = None;
+            }
+        }
+        if let Some(at) = self.hover_restore_at {
+            if now >= at || !moving {
+                if let Some(baseline) = self.hover_baseline.take() {
+                    self.carousel_scroll
+                        .set_offset(point(px(-baseline as f32), px(0.)));
+                }
+                self.hover_restore_at = None;
+            } else {
+                moving = true;
+            }
+        }
+        if let (Some(until), Some((left, width))) = (self.focus_follow_until, active_geometry) {
+            let target = centered_scroll(left, width, viewport_width, max_scroll);
+            let current =
+                f64::from(-f32::from(self.carousel_scroll.offset().x)).clamp(0., max_scroll);
+            let next = focus_scroll_step(current, target);
+            self.carousel_scroll
+                .set_offset(point(px(-next as f32), px(0.)));
+            if now < until || (target - next).abs() > 0.5 {
+                moving = true;
+            } else {
+                self.focus_follow_until = None;
+            }
+        }
+        if self.hover_baseline.is_none()
+            && self.hover_follow_until.is_none()
+            && self.focus_follow_until.is_none()
+            && !self.restore_geometry
+            && self.pending_focus.is_none()
+        {
+            let scroll =
+                f64::from(-f32::from(self.carousel_scroll.offset().x)).clamp(0., max_scroll);
+            self.save_geometry(
+                scroll,
+                active_geometry.map(|(left, _)| left),
+                self.focused.clone(),
+                false,
+                cx,
+            );
+        }
+        if moving {
+            window.request_animation_frame();
+        }
         let mut carousel = div()
             .id("session-carousel")
             .flex_1()
@@ -585,7 +1267,24 @@ impl Render for Workspace {
             .overflow_x_scroll()
             .track_scroll(&self.carousel_scroll)
             .overflow_y_hidden()
-            .bg(rgb(0xe9edf2));
+            .bg(rgb(0xe9edf2))
+            .capture_any_mouse_down(cx.listener(|this, _, _, cx| {
+                this.stop_edge_browse(true);
+                cx.notify();
+            }))
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+                this.edge_intent(event.position, window, cx);
+            }))
+            .on_hover(cx.listener(|this, hovered, window, cx| {
+                if !hovered {
+                    this.pointer_position = None;
+                    this.stop_edge_browse(false);
+                    this.hover_card(None, cx);
+                } else {
+                    this.edge_blocked = false;
+                    this.edge_intent(window.mouse_position(), window, cx);
+                }
+            }));
         for id in &self.order {
             let Some(terminal) = self.terminals.get(id) else {
                 continue;
@@ -597,48 +1296,58 @@ impl Render for Workspace {
                 .unwrap_or("Shell");
             let focus = terminal.read(cx).focus.clone();
             let session_id = id.clone();
+            let hover_id = id.clone();
             let scene_id = self
                 .hierarchy
                 .as_ref()
                 .and_then(|h| h.scene.as_ref())
                 .map(|s| s.id.clone());
             let selected = self.focused.as_ref() == Some(id);
-            let width = if selected {
-                (content_width * 0.48).min(620.)
-            } else {
-                inactive_width
-            };
+            let width = widths[id] as f32;
+            let lift = -4. * self.card_motion[id].lift.value(now) as f32;
             let card = div()
                 .id(SharedString::from(format!("card-{id}")))
                 .w(px(width))
                 .h_full()
                 .flex_none()
                 .relative()
-                .top(px(if selected { -4. } else { 0. }))
+                .top(px(lift))
                 .rounded(px(12.))
                 .overflow_hidden()
                 .bg(rgb(0xfcfcfd))
                 .flex()
                 .flex_col()
-                .shadow(vec![
-                    BoxShadow {
-                        color: rgba(0x32445c1c).into(),
-                        offset: point(px(0.), px(7.)),
-                        blur_radius: px(15.),
-                        spread_radius: px(0.),
-                    },
-                    BoxShadow {
-                        color: rgba(0x32445c30).into(),
-                        offset: point(px(0.), px(24.)),
-                        blur_radius: px(52.),
-                        spread_radius: px(0.),
-                    },
-                ])
+                .shadow(if selected {
+                    vec![
+                        shadow(0x32445c, 0.11, 7., 15.),
+                        shadow(0x32445c, 0.19, 24., 52.),
+                        shadow(0x3f82d4, 0.12, 15., 42.),
+                    ]
+                } else if self.hovered.as_ref() == Some(id) {
+                    vec![
+                        shadow(0x2a3748, 0.1, 4., 12.),
+                        shadow(0x2a3748, 0.12, 17., 36.),
+                    ]
+                } else {
+                    vec![
+                        shadow(0x2a3748, 0.075, 2., 7.),
+                        shadow(0x2a3748, 0.07, 13., 30.),
+                    ]
+                })
+                .on_hover(cx.listener(move |this, hovered, _, cx| {
+                    if *hovered {
+                        this.hover_card(Some(hover_id.clone()), cx);
+                    }
+                }))
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _, window, cx| {
                         window.focus(&focus);
-                        if this.focused.as_ref() != Some(&session_id) {
+                        this.hover_baseline = None;
+                        this.hover_restore_at = None;
+                        this.hover_follow_until = None;
+                        this.capture_geometry(Some(session_id.clone()), false, window, cx);
+                        if this.geometry_focus() != Some(session_id.as_str()) {
                             if let Some(scene_id) = &scene_id {
                                 this.send(
                                     Command::FocusSession {
@@ -650,8 +1359,82 @@ impl Render for Workspace {
                             }
                         }
                     }),
+                );
+            let card = if narrow && !selected {
+                let node = self.graph["nodes"]
+                    .as_array()
+                    .and_then(|nodes| nodes.iter().find(|node| node["sessionId"] == *id));
+                let status = node
+                    .and_then(|node| node["workStatus"].as_str())
+                    .unwrap_or("idle");
+                let summary = node
+                    .and_then(|node| node["latestLines"].as_array())
+                    .map(|lines| {
+                        lines
+                            .iter()
+                            .skip(lines.len().saturating_sub(3))
+                            .filter_map(Value::as_str)
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    })
+                    .filter(|text| !text.is_empty())
+                    .unwrap_or_else(|| {
+                        node.and_then(|node| node["cwd"].as_str())
+                            .unwrap_or("")
+                            .to_owned()
+                    });
+                card.child(
+                    div()
+                        .size_full()
+                        .px(px(12.))
+                        .py(px(14.))
+                        .bg(rgb(0xf2f4f7))
+                        .rounded(px(12.))
+                        .text_color(rgb(0x6b7482))
+                        .flex()
+                        .flex_col()
+                        .gap(px(9.))
+                        .child(
+                            div()
+                                .text_size(px(12.))
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(rgb(0x364050))
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .child(title.to_owned()),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(9.))
+                                .px(px(6.))
+                                .py(px(2.))
+                                .rounded(px(8.))
+                                .bg(rgba(0xffffff0f))
+                                .map(|mut badge| {
+                                    badge.style().align_self = Some(AlignSelf::FlexStart);
+                                    badge
+                                })
+                                .child(match status {
+                                    "starting" | "running" => "运行中",
+                                    "needs-input" => "等待输入",
+                                    "error" => "异常",
+                                    "interrupted" => "中断",
+                                    "exited" => "已停止",
+                                    _ => "空闲",
+                                }),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(9.))
+                                .font_family("Menlo")
+                                .line_height(relative(1.5))
+                                .overflow_hidden()
+                                .child(summary.to_owned()),
+                        ),
                 )
-                .child(
+            } else {
+                card.child(
                     div()
                         .h(px(42.))
                         .flex_none()
@@ -677,7 +1460,24 @@ impl Render for Workspace {
                         .pr(px(28.))
                         .py(px(12.))
                         .child(terminal.clone()),
-                );
+                )
+            };
+            #[cfg(debug_assertions)]
+            let card = if let Some(trace) = self
+                .motion_trace
+                .clone()
+                .filter(|_| self.motion_clock.elapsed() < Duration::from_secs(90))
+            {
+                let clock = self.motion_clock;
+                let session = id.clone();
+                card.child(canvas(|_,_,_|(), move |bounds,_,_,_| {
+                    record_motion(&trace,&serde_json::json!({"kind":"paint","renderAt":now,"paintAt":clock.elapsed().as_secs_f64()*1000.,
+                        "session":session,"focused":selected,"x":f32::from(bounds.origin.x),"y":f32::from(bounds.origin.y),
+                        "width":f32::from(bounds.size.width),"height":f32::from(bounds.size.height),"moving":moving}));
+                }).absolute().top_0().left_0().size_full())
+            } else {
+                card
+            };
             carousel = carousel.child(card);
         }
         if let Some(fault) = &self.fault {
@@ -690,6 +1490,78 @@ impl Render for Workspace {
                     .child(fault.clone()),
             );
         }
+        let view = cx.entity().downgrade();
+        let direction = self.edge_direction;
+        let cruising = self.edge_cruising;
+        let elapsed = now - self.edge_phase_start;
+        let indicator = canvas(
+            |_, _, _| (),
+            move |bounds, _, window, _| {
+                let view = view.clone();
+                window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
+                    #[cfg(debug_assertions)]
+                    if phase == DispatchPhase::Capture {
+                        let _ = view.update(cx, |this, _| {
+                            if let Some(trace) = &this.motion_trace { record_motion(trace, &serde_json::json!({"kind":"wheel","position":format!("{:?}",event.position),"delta":format!("{:?}",event.delta),"bounds":format!("{:?}",bounds)})); }
+                        });
+                    }
+                    if phase != DispatchPhase::Capture
+                        || !bounds.contains(&event.position)
+                        || event.modifiers.control
+                        || event.modifiers.platform
+                    {
+                        return;
+                    }
+                    let _ = view.update(cx, |this, cx| this.scroll_carousel(event, window, cx));
+                });
+                if direction == 0 {
+                    return;
+                }
+                let x = if direction < 0 {
+                    bounds.left() + px(6.)
+                } else {
+                    bounds.right() - px(9.)
+                };
+                let track = Bounds::new(
+                    point(x, bounds.top() + px(18.)),
+                    size(px(3.), bounds.size.height - px(36.)),
+                );
+                window.paint_quad(fill(track, rgba(0x6faaf024)).corner_radii(px(2.)));
+                let (opacity, scale) = if cruising {
+                    let p = (elapsed % 900.) / 900.;
+                    (
+                        if p < 0.55 {
+                            0.22 + 0.63 * Curve::Edge.ease(p / 0.55)
+                        } else {
+                            0.85 - 0.53 * Curve::Edge.ease((p - 0.55) / 0.45)
+                        },
+                        1.,
+                    )
+                } else {
+                    let p = (elapsed / 180.).clamp(0., 1.);
+                    (0.2 + 0.62 * p, 0.08 + 0.92 * p)
+                };
+                let mut color: Hsla = rgb(0x6faaf0).into();
+                color.a = opacity as f32;
+                let height = track.size.height * scale as f32;
+                window.paint_quad(
+                    fill(
+                        Bounds::new(point(x, track.bottom() - height), size(px(3.), height)),
+                        color,
+                    )
+                    .corner_radii(px(2.)),
+                );
+            },
+        )
+        .absolute()
+        .size_full();
+        let carousel = div()
+            .flex_1()
+            .min_h_0()
+            .relative()
+            .flex()
+            .child(carousel)
+            .child(indicator);
         div()
             .size_full()
             .flex()
@@ -716,4 +1588,64 @@ fn icon(name: &str, size: f32, color: u32) -> Svg {
         .size(px(size))
         .flex_none()
         .text_color(rgb(color))
+}
+
+fn shadow(color: u32, alpha: f32, y: f32, blur: f32) -> BoxShadow {
+    let mut color: Hsla = rgb(color).into();
+    color.a = alpha;
+    BoxShadow {
+        color,
+        offset: point(px(0.), px(y)),
+        blur_radius: px(blur),
+        spread_radius: px(0.),
+    }
+}
+
+fn reduced_motion() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        crate::macos::reduced_motion()
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            SPI_GETCLIENTAREAANIMATION, SystemParametersInfoW,
+        };
+        let mut enabled: i32 = 1;
+        // Query only: never changes the user's accessibility preference.
+        unsafe {
+            SystemParametersInfoW(
+                SPI_GETCLIENTAREAANIMATION,
+                0,
+                (&mut enabled as *mut i32).cast(),
+                0,
+            );
+        }
+        enabled == 0
+    }
+}
+
+// Debug-only, opt-in acceptance probe. Records actual GPUI paint bounds; it is
+// not physical input-to-photon latency and is absent from release builds.
+#[cfg(debug_assertions)]
+fn open_motion_trace() -> Option<MotionTrace> {
+    let path = std::env::var_os("MATOU_NATIVE_MOTION_TRACE")?;
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(file) => Some(std::rc::Rc::new(std::cell::RefCell::new(file))),
+        Err(error) => {
+            eprintln!("Open motion acceptance trace: {error}");
+            None
+        }
+    }
+}
+#[cfg(debug_assertions)]
+fn record_motion(trace: &MotionTrace, record: &Value) {
+    use std::io::Write;
+    if let Err(error) = writeln!(trace.borrow_mut(), "{record}") {
+        eprintln!("Write motion acceptance trace: {error}");
+    }
 }

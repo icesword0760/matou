@@ -346,7 +346,7 @@ fn marker_digest(marker: &Value) -> Result<String> {
 }
 
 /// Match compact JSON.stringify for hashes of source-generated records.
-fn stringify(value: &Value) -> Result<String> {
+pub(crate) fn stringify(value: &Value) -> Result<String> {
     let mut output = String::new();
     append_json(value, &mut output)?;
     Ok(output)

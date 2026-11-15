@@ -17,17 +17,6 @@ fn main() -> Result<()> {
     let events = runtime.borrow().events.clone();
     let quit_runtime = runtime.clone();
     Application::new().with_assets(NativeAssets).run(move |cx| {
-        // AppKit can terminate the process without returning from Application::run.
-        // Drain the real session owner before that happens; its PTY shutdown has
-        // the existing bounded grace/kill deadlines. GPUI's async quit grace is
-        // only 100ms, so it cannot own this durability boundary.
-        cx.on_app_quit(move |_| {
-            if let Err(error) = quit_runtime.borrow_mut().shutdown() {
-                eprintln!("Close native runtime: {error:#}");
-            }
-            async {}
-        })
-        .detach();
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
         cx.set_menus(vec![Menu {
@@ -56,7 +45,17 @@ fn main() -> Result<()> {
                 cx.new(|cx| Workspace::new(commands, events, window, cx))
             },
         ) {
-            Ok(_) => cx.activate(true),
+            Ok(window) => {
+                cx.on_app_quit(move |cx| {
+                    let _ = window.update(cx, |view, _, cx| view.flush_geometry(cx));
+                    if let Err(error) = quit_runtime.borrow_mut().shutdown() {
+                        eprintln!("Close native runtime: {error:#}");
+                    }
+                    async {}
+                })
+                .detach();
+                cx.activate(true);
+            }
             Err(error) => {
                 eprintln!("Open native window: {error:#}");
                 cx.quit();

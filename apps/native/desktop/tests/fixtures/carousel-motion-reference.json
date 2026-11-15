@@ -1,0 +1,528 @@
+{
+  "reduced": {
+    "width": "0.001s",
+    "lift": "0.18s, 0.18s, 0.18s"
+  },
+  "source": "apps/desktop/src/renderer/src/session-canvas/session-canvas.css",
+  "electron": "43.4.1",
+  "chrome": "150.0.7871.224",
+  "inactive": {
+    "width": 318.6640625,
+    "lift": 0,
+    "shadow": "rgba(42, 55, 72, 0.075) 0px 2px 7px 0px, rgba(42, 55, 72, 0.07) 0px 13px 30px 0px"
+  },
+  "active": {
+    "width": 470.3984375,
+    "lift": -4,
+    "shadow": "rgba(255, 255, 255, 0.96) 0px 1px 0px 0px inset, rgba(50, 68, 92, 0.11) 0px 7px 15px 0px, rgba(50, 68, 92, 0.19) 0px 24px 52px 0px, rgba(63, 130, 212, 0.12) 0px 15px 42px 0px"
+  },
+  "cases": [
+    {
+      "name": "focus-complete",
+      "initial": 0,
+      "segments": [
+        {
+          "target": 1,
+          "samples": [
+            {
+              "ms": 0,
+              "width": 318.6640625,
+              "lift": 0,
+              "shadow": "rgba(255, 255, 255, 0.96) 0px 1px 0px 0px inset, rgba(50, 68, 92, 0.11) 0px 7px 15px 0px, rgba(50, 68, 92, 0.19) 0px 24px 52px 0px, rgba(63, 130, 212, 0.12) 0px 15px 42px 0px"
+            },
+            {
+              "ms": 16,
+              "width": 344.5,
+              "lift": -1.44941,
+              "shadow": "rgba(255, 255, 255, 0.96) 0px 1px 0px 0px inset, rgba(50, 68, 92, 0.11) 0px 7px 15px 0px, rgba(50, 68, 92, 0.19) 0px 24px 52px 0px, rgba(63, 130, 212, 0.12) 0px 15px 42px 0px"
+            },
+            {
+              "ms": 45,
+              "width": 388.703125,
+              "lift": -3.10107,
+              "shadow": "rgba(255, 255, 255, 0.96) 0px 1px 0px 0px inset, rgba(50, 68, 92, 0.11) 0px 7px 15px 0px, rgba(50, 68, 92, 0.19) 0px 24px 52px 0px, rgba(63, 130, 212, 0.12) 0px 15px 42px 0px"
+            },
+            {
+              "ms": 90,
+              "width": 432.1015625,
+              "lift": -3.79752,
+              "shadow": "rgba(255, 255, 255, 0.96) 0px 1px 0px 0px inset, rgba(50, 68, 92, 0.11) 0px 7px 15px 0px, rgba(50, 68, 92, 0.19) 0px 24px 52px 0px, rgba(63, 130, 212, 0.12) 0px 15px 42px 0px"
+            },
+            {
+              "ms": 180,
+              "width": 460.828125,
+              "lift": -4,
+              "shadow": "rgba(255, 255, 255, 0.96) 0px 1px 0px 0px inset, rgba(50, 68, 92, 0.11) 0px 7px 15px 0px, rgba(50, 68, 92, 0.19) 0px 24px 52px 0px, rgba(63, 130, 212, 0.12) 0px 15px 42px 0px"
+            },
+            {
+              "ms": 190,
+              "width": 462.2109375,
+              "lift": -4,
+              "shadow": "rgba(255, 255, 255, 0.96) 0px 1px 0px 0px inset, rgba(50, 68, 92, 0.11) 0px 7px 15px 0px, rgba(50, 68, 92, 0.19) 0px 24px 52px 0px, rgba(63, 130, 212, 0.12) 0px 15px 42px 0px"
+            },
+            {
+              "ms": 285,
+              "width": 469.046875,
+              "lift": -4,
+              "shadow": "rgba(255, 255, 255, 0.96) 0px 1px 0px 0px inset, rgba(50, 68, 92, 0.11) 0px 7px 15px 0px, rgba(50, 68, 92, 0.19) 0px 24px 52px 0px, rgba(63, 130, 212, 0.12) 0px 15px 42px 0px"
+            },
+            {
+              "ms": 380,
+              "width": 470.3984375,
+              "lift": -4,
+              "shadow": "rgba(255, 255, 255, 0.96) 0px 1px 0px 0px inset, rgba(50, 68, 92, 0.11) 0px 7px 15px 0px, rgba(50, 68, 92, 0.19) 0px 24px 52px 0px, rgba(63, 130, 212, 0.12) 0px 15px 42px 0px"
+            }
+          ],
+          "timing": [
+            {
+              "property": "flex-basis",
+              "timing": {
+                "delay": 0,
+                "direction": "normal",
+                "duration": 380,
+                "easing": "cubic-bezier(0.2, 0.8, 0.2, 1)",
+                "endDelay": 0,
+                "fill": "backwards",
+                "iterationStart": 0,
+                "iterations": 1
+              },
+              "keyframes": [
+                {
+                  "offset": 0,
+                  "easing": "linear",
+                  "composite": "auto",
+                  "flexBasis": "calc(33.3333% - 8px)",
+                  "computedOffset": 0
+                },
+                {
+                  "offset": 1,
+                  "easing": "linear",
+                  "composite": "auto",
+                  "flexBasis": "min(48%, 620px)",
+                  "computedOffset": 1
+                }
+              ]
+            },
+            {
+              "property": "transform",
+              "timing": {
+                "delay": 0,
+                "direction": "normal",
+                "duration": 180,
+                "easing": "cubic-bezier(0.2, 0.82, 0.2, 1)",
+                "endDelay": 0,
+                "fill": "backwards",
+                "iterationStart": 0,
+                "iterations": 1
+              },
+              "keyframes": [
+                {
+                  "offset": 0,
+                  "easing": "linear",
+                  "composite": "auto",
+                  "transform": "none",
+                  "computedOffset": 0
+                },
+                {
+                  "offset": 1,
+                  "easing": "linear",
+                  "composite": "auto",
+                  "transform": "translateY(-8px)",
+                  "computedOffset": 1
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "blur-complete",
+      "initial": 1,
+      "segments": [
+        {
+          "target": 0,
+          "samples": [
+            {
+              "ms": 0,
+              "width": 470.3984375,
+              "lift": -4,
+              "shadow": "rgba(42, 55, 72, 0.075) 0px 2px 7px 0px, rgba(42, 55, 72, 0.07) 0px 13px 30px 0px"
+            },
+            {
+              "ms": 16,
+              "width": 444.5625,
+              "lift": -2.55059,
+              "shadow": "rgba(42, 55, 72, 0.075) 0px 2px 7px 0px, rgba(42, 55, 72, 0.07) 0px 13px 30px 0px"
+            },
+            {
+              "ms": 45,
+              "width": 400.3515625,
+              "lift": -0.898934,
+              "shadow": "rgba(42, 55, 72, 0.075) 0px 2px 7px 0px, rgba(42, 55, 72, 0.07) 0px 13px 30px 0px"
+            },
+            {
+              "ms": 90,
+              "width": 356.953125,
+              "lift": -0.202482,
+              "shadow": "rgba(42, 55, 72, 0.075) 0px 2px 7px 0px, rgba(42, 55, 72, 0.07) 0px 13px 30px 0px"
+            },
+            {
+              "ms": 180,
+              "width": 328.2265625,
+              "lift": 0,
+              "shadow": "rgba(42, 55, 72, 0.075) 0px 2px 7px 0px, rgba(42, 55, 72, 0.07) 0px 13px 30px 0px"
+            },
+            {
+              "ms": 190,
+              "width": 326.84375,
+              "lift": 0,
+              "shadow": "rgba(42, 55, 72, 0.075) 0px 2px 7px 0px, rgba(42, 55, 72, 0.07) 0px 13px 30px 0px"
+            },
+            {
+              "ms": 285,
+              "width": 320.015625,
+              "lift": 0,
+              "shadow": "rgba(42, 55, 72, 0.075) 0px 2px 7px 0px, rgba(42, 55, 72, 0.07) 0px 13px 30px 0px"
+            },
+            {
+              "ms": 380,
+              "width": 318.6640625,
+              "lift": 0,
+              "shadow": "rgba(42, 55, 72, 0.075) 0px 2px 7px 0px, rgba(42, 55, 72, 0.07) 0px 13px 30px 0px"
+            }
+          ],
+          "timing": [
+            {
+              "property": "flex-basis",
+              "timing": {
+                "delay": 0,
+                "direction": "normal",
+                "duration": 380,
+                "easing": "cubic-bezier(0.2, 0.8, 0.2, 1)",
+                "endDelay": 0,
+                "fill": "backwards",
+                "iterationStart": 0,
+                "iterations": 1
+              },
+              "keyframes": [
+                {
+                  "offset": 0,
+                  "easing": "linear",
+                  "composite": "auto",
+                  "flexBasis": "min(48%, 620px)",
+                  "computedOffset": 0
+                },
+                {
+                  "offset": 1,
+                  "easing": "linear",
+                  "composite": "auto",
+                  "flexBasis": "calc(33.3333% - 8px)",
+                  "computedOffset": 1
+                }
+              ]
+            },
+            {
+              "property": "transform",
+              "timing": {
+                "delay": 0,
+                "direction": "normal",
+                "duration": 180,
+                "easing": "cubic-bezier(0.2, 0.82, 0.2, 1)",
+                "endDelay": 0,
+                "fill": "backwards",
+                "iterationStart": 0,
+                "iterations": 1
+              },
+              "keyframes": [
+                {
+                  "offset": 0,
+                  "easing": "linear",
+                  "composite": "auto",
+                  "transform": "translateY(-8px)",
+                  "computedOffset": 0
+                },
+                {
+                  "offset": 1,
+                  "easing": "linear",
+                  "composite": "auto",
+                  "transform": "none",
+                  "computedOffset": 1
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "interrupted-and-reversed",
+      "initial": 0,
+      "segments": [
+        {
+          "target": 1,
+          "samples": [
+            {
+              "ms": 0,
+              "width": 318.6640625,
+              "lift": 0,
+              "shadow": "rgba(255, 255, 255, 0.96) 0px 1px 0px 0px inset, rgba(50, 68, 92, 0.11) 0px 7px 15px 0px, rgba(50, 68, 92, 0.19) 0px 24px 52px 0px, rgba(63, 130, 212, 0.12) 0px 15px 42px 0px"
+            },
+            {
+              "ms": 40,
+              "width": 381.7421875,
+              "lift": -2.92805,
+              "shadow": "rgba(255, 255, 255, 0.96) 0px 1px 0px 0px inset, rgba(50, 68, 92, 0.11) 0px 7px 15px 0px, rgba(50, 68, 92, 0.19) 0px 24px 52px 0px, rgba(63, 130, 212, 0.12) 0px 15px 42px 0px"
+            },
+            {
+              "ms": 80,
+              "width": 425.2421875,
+              "lift": -3.71761,
+              "shadow": "rgba(255, 255, 255, 0.96) 0px 1px 0px 0px inset, rgba(50, 68, 92, 0.11) 0px 7px 15px 0px, rgba(50, 68, 92, 0.19) 0px 24px 52px 0px, rgba(63, 130, 212, 0.12) 0px 15px 42px 0px"
+            }
+          ],
+          "timing": [
+            {
+              "property": "flex-basis",
+              "timing": {
+                "delay": 0,
+                "direction": "normal",
+                "duration": 380,
+                "easing": "cubic-bezier(0.2, 0.8, 0.2, 1)",
+                "endDelay": 0,
+                "fill": "backwards",
+                "iterationStart": 0,
+                "iterations": 1
+              },
+              "keyframes": [
+                {
+                  "offset": 0,
+                  "easing": "linear",
+                  "composite": "auto",
+                  "flexBasis": "calc(33.3333% - 8px)",
+                  "computedOffset": 0
+                },
+                {
+                  "offset": 1,
+                  "easing": "linear",
+                  "composite": "auto",
+                  "flexBasis": "min(48%, 620px)",
+                  "computedOffset": 1
+                }
+              ]
+            },
+            {
+              "property": "transform",
+              "timing": {
+                "delay": 0,
+                "direction": "normal",
+                "duration": 180,
+                "easing": "cubic-bezier(0.2, 0.82, 0.2, 1)",
+                "endDelay": 0,
+                "fill": "backwards",
+                "iterationStart": 0,
+                "iterations": 1
+              },
+              "keyframes": [
+                {
+                  "offset": 0,
+                  "easing": "linear",
+                  "composite": "auto",
+                  "transform": "none",
+                  "computedOffset": 0
+                },
+                {
+                  "offset": 1,
+                  "easing": "linear",
+                  "composite": "auto",
+                  "transform": "translateY(-8px)",
+                  "computedOffset": 1
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "target": 0,
+          "samples": [
+            {
+              "ms": 0,
+              "width": 425.2421875,
+              "lift": -3.71761,
+              "shadow": "rgba(42, 55, 72, 0.075) 0px 2px 7px 0px, rgba(42, 55, 72, 0.07) 0px 13px 30px 0px"
+            },
+            {
+              "ms": 20,
+              "width": 393.09375,
+              "lift": -1.95673,
+              "shadow": "rgba(42, 55, 72, 0.075) 0px 2px 7px 0px, rgba(42, 55, 72, 0.07) 0px 13px 30px 0px"
+            },
+            {
+              "ms": 50,
+              "width": 355.453125,
+              "lift": -0.618986,
+              "shadow": "rgba(42, 55, 72, 0.075) 0px 2px 7px 0px, rgba(42, 55, 72, 0.07) 0px 13px 30px 0px"
+            }
+          ],
+          "timing": [
+            {
+              "property": "flex-basis",
+              "timing": {
+                "delay": 0,
+                "direction": "normal",
+                "duration": 266.9146436924975,
+                "easing": "cubic-bezier(0.2, 0.8, 0.2, 1)",
+                "endDelay": 0,
+                "fill": "backwards",
+                "iterationStart": 0,
+                "iterations": 1
+              },
+              "keyframes": [
+                {
+                  "offset": 0,
+                  "easing": "linear",
+                  "composite": "auto",
+                  "flexBasis": "calc(9.91977% - 2.38074px + (0.702407 * min(48%, 620px)))",
+                  "computedOffset": 0
+                },
+                {
+                  "offset": 1,
+                  "easing": "linear",
+                  "composite": "auto",
+                  "flexBasis": "calc(33.3333% - 8px)",
+                  "computedOffset": 1
+                }
+              ]
+            },
+            {
+              "property": "transform",
+              "timing": {
+                "delay": 0,
+                "direction": "normal",
+                "duration": 167.29249225023102,
+                "easing": "cubic-bezier(0.2, 0.82, 0.2, 1)",
+                "endDelay": 0,
+                "fill": "backwards",
+                "iterationStart": 0,
+                "iterations": 1
+              },
+              "keyframes": [
+                {
+                  "offset": 0,
+                  "easing": "linear",
+                  "composite": "auto",
+                  "transform": "translateY(-7.43522px)",
+                  "computedOffset": 0
+                },
+                {
+                  "offset": 1,
+                  "easing": "linear",
+                  "composite": "auto",
+                  "transform": "none",
+                  "computedOffset": 1
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "target": 1,
+          "samples": [
+            {
+              "ms": 0,
+              "width": 355.453125,
+              "lift": -0.618986,
+              "shadow": "rgba(255, 255, 255, 0.96) 0px 1px 0px 0px inset, rgba(50, 68, 92, 0.11) 0px 7px 15px 0px, rgba(50, 68, 92, 0.19) 0px 24px 52px 0px, rgba(63, 130, 212, 0.12) 0px 15px 42px 0px"
+            },
+            {
+              "ms": 30,
+              "width": 402.8046875,
+              "lift": -2.93416,
+              "shadow": "rgba(255, 255, 255, 0.96) 0px 1px 0px 0px inset, rgba(50, 68, 92, 0.11) 0px 7px 15px 0px, rgba(50, 68, 92, 0.19) 0px 24px 52px 0px, rgba(63, 130, 212, 0.12) 0px 15px 42px 0px"
+            },
+            {
+              "ms": 90,
+              "width": 452,
+              "lift": -3.90442,
+              "shadow": "rgba(255, 255, 255, 0.96) 0px 1px 0px 0px inset, rgba(50, 68, 92, 0.11) 0px 7px 15px 0px, rgba(50, 68, 92, 0.19) 0px 24px 52px 0px, rgba(63, 130, 212, 0.12) 0px 15px 42px 0px"
+            },
+            {
+              "ms": 180,
+              "width": 467.6171875,
+              "lift": -4,
+              "shadow": "rgba(255, 255, 255, 0.96) 0px 1px 0px 0px inset, rgba(50, 68, 92, 0.11) 0px 7px 15px 0px, rgba(50, 68, 92, 0.19) 0px 24px 52px 0px, rgba(63, 130, 212, 0.12) 0px 15px 42px 0px"
+            },
+            {
+              "ms": 380,
+              "width": 470.3984375,
+              "lift": -4,
+              "shadow": "rgba(255, 255, 255, 0.96) 0px 1px 0px 0px inset, rgba(50, 68, 92, 0.11) 0px 7px 15px 0px, rgba(50, 68, 92, 0.19) 0px 24px 52px 0px, rgba(63, 130, 212, 0.12) 0px 15px 42px 0px"
+            }
+          ],
+          "timing": [
+            {
+              "property": "flex-basis",
+              "timing": {
+                "delay": 0,
+                "direction": "normal",
+                "duration": 287.8696735933387,
+                "easing": "cubic-bezier(0.2, 0.8, 0.2, 1)",
+                "endDelay": 0,
+                "fill": "backwards",
+                "iterationStart": 0,
+                "iterations": 1
+              },
+              "keyframes": [
+                {
+                  "offset": 0,
+                  "easing": "linear",
+                  "composite": "auto",
+                  "flexBasis": "calc(21.8277% - 5.23866px + (0.345168 * (9.91977% - 2.38074px + (0.702407 * min(48%, 620px)))))",
+                  "computedOffset": 0
+                },
+                {
+                  "offset": 1,
+                  "easing": "linear",
+                  "composite": "auto",
+                  "flexBasis": "min(48%, 620px)",
+                  "computedOffset": 1
+                }
+              ]
+            },
+            {
+              "property": "transform",
+              "timing": {
+                "delay": 0,
+                "direction": "normal",
+                "duration": 152.14563548821002,
+                "easing": "cubic-bezier(0.2, 0.82, 0.2, 1)",
+                "endDelay": 0,
+                "fill": "backwards",
+                "iterationStart": 0,
+                "iterations": 1
+              },
+              "keyframes": [
+                {
+                  "offset": 0,
+                  "easing": "linear",
+                  "composite": "auto",
+                  "transform": "translateY(-1.23797px)",
+                  "computedOffset": 0
+                },
+                {
+                  "offset": 1,
+                  "easing": "linear",
+                  "composite": "auto",
+                  "transform": "translateY(-8px)",
+                  "computedOffset": 1
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "viewportWidth": 1000,
+  "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.7871.224 Electron/43.4.1 Safari/537.36"
+}

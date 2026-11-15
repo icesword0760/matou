@@ -1,4 +1,5 @@
 pub mod assets;
+pub mod carousel_motion;
 #[cfg(target_os = "macos")]
 pub mod macos;
 pub mod runtime_bridge;
