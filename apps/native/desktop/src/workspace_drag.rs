@@ -1,3 +1,4 @@
+use crate::ui_text::ui_text;
 use gpui::{prelude::*, *};
 
 #[derive(Clone)]
@@ -104,7 +105,7 @@ pub fn group(snapshot: &WorkspaceDragSnapshot, width: Pixels, scale: f32) -> Div
                 .text_size(s(13.))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(rgb(if snapshot.active { 0x2f3547 } else { 0x656d76 }))
-                .child(snapshot.name.clone()),
+                .child(ui_text(snapshot.name.clone())),
         )
         .child(
             div()
@@ -124,7 +125,7 @@ pub fn group(snapshot: &WorkspaceDragSnapshot, width: Pixels, scale: f32) -> Div
                             .text_size(s(9.))
                             .line_height(s(12.5))
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child("默认"),
+                            .child(ui_text("默认")),
                     )
                 })
                 .when(snapshot.is_pinned, |status| {
@@ -141,7 +142,7 @@ pub fn group(snapshot: &WorkspaceDragSnapshot, width: Pixels, scale: f32) -> Div
                             .text_color(rgb(0xd99d3c))
                             .text_size(s(9.))
                             .line_height(s(12.5))
-                            .child("路径失效"),
+                            .child(ui_text("路径失效")),
                     )
                 }),
         );
@@ -198,7 +199,7 @@ pub fn group(snapshot: &WorkspaceDragSnapshot, width: Pixels, scale: f32) -> Div
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child("恢复目录"),
+                    .child(ui_text("恢复目录")),
             )
         })
         .child(more_el);
@@ -255,7 +256,7 @@ fn task_row(task: &WorkspaceDragTask, scale: f32) -> Div {
                 .text_ellipsis()
                 .whitespace_nowrap()
                 .font_weight(FontWeight::MEDIUM)
-                .child(task.title.clone()),
+                .child(ui_text(task.title.clone())),
         )
         .when(task.is_pinned, |row| {
             row.child(icon("pin", 13. * scale, 0x81848d))

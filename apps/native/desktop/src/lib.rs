@@ -13,3 +13,5 @@ pub mod rename_input;
 pub mod sidebar_scrollbar;
 
 pub mod workspace_drag;
+
+pub mod ui_text;

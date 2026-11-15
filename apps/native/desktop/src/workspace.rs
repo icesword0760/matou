@@ -21,6 +21,7 @@ use crate::{
     sidebar_scrollbar::{self, SidebarScrollbarState},
     tab_dialog_style as tabs_ui,
     terminal_surface::{SurfaceEvent, TerminalSurface},
+    ui_text::ui_text,
     workspace_drag::{self, WorkspaceDragSnapshot, WorkspaceDragTask},
 };
 
@@ -1438,7 +1439,7 @@ impl Workspace {
                         .text_size(px(13. * scale))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(rgb(if active { 0x2f3547 } else { 0x656d76 }))
-                        .child(workspace.name.clone()),
+                        .child(ui_text(workspace.name.clone())),
                 )
                 .child(
                     div()
@@ -1458,7 +1459,7 @@ impl Workspace {
                                     .text_size(px(9. * scale))
                                     .line_height(px(12.5 * scale))
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .child("默认"),
+                                    .child(ui_text("默认")),
                             )
                         })
                         .when(workspace.is_pinned, |status| {
@@ -1475,7 +1476,7 @@ impl Workspace {
                                     .text_color(rgb(0xd99d3c))
                                     .text_size(px(9. * scale))
                                     .line_height(px(12.5 * scale))
-                                    .child("路径失效"),
+                                    .child(ui_text("路径失效")),
                             )
                         }),
                 ),
@@ -1605,7 +1606,7 @@ impl Workspace {
                             .justify_center()
                             .cursor_pointer()
                             .hover(|s| s.bg(rgba(0xd99d3c26)))
-                            .child("恢复目录"),
+                            .child(ui_text("恢复目录")),
                         &controls[2],
                         move |this, _, cx| {
                             this.relink_workspace_directory(relink_id.clone(), cx);
@@ -2017,7 +2018,7 @@ impl Workspace {
                     .text_ellipsis()
                     .whitespace_nowrap()
                     .font_weight(FontWeight::MEDIUM)
-                    .child(task.title.clone())
+                    .child(ui_text(task.title.clone()))
                     .child(
                         canvas(
                             |_, _, _| (),
@@ -2874,9 +2875,9 @@ impl Workspace {
                 }
                 TabDialog::RemoveWorkspace { name, .. } => (
                     "移出工作空间",
-                    tabs_ui::dialog_body().child(format!(
+                    tabs_ui::dialog_body().child(ui_text(format!(
                         "移出 \"{name}\" 会关闭该空间下的事项和终端会话，本地文件保持原样。 是否继续？"
-                    )),
+                    ))),
                     "移出",
                     true,
                     false,
@@ -3034,7 +3035,7 @@ impl Workspace {
                     .whitespace_nowrap()
                     .cursor_pointer()
                     .hover(|s| s.bg(rgb(0xeceef3)))
-                    .child(label)
+                    .child(ui_text(label))
             };
             let relink_id = id.clone();
             let pin_id = id.clone();
@@ -3085,7 +3086,7 @@ impl Workspace {
                             .cursor_pointer()
                             .hover(|s| s.bg(rgb(0xeceef3)))
                             .child(icon("pin", 13., 0x2f3547))
-                            .child(if pinned { "取消置顶" } else { "置顶" }),
+                            .child(ui_text(if pinned { "取消置顶" } else { "置顶" })),
                         &controls[next_focus],
                         move |this, _, cx| {
                             this.workspace_menu = None;
@@ -3141,7 +3142,7 @@ impl Workspace {
                             .cursor_pointer()
                             .hover(|s| s.bg(rgb(0xfff1f0)).text_color(rgb(0xa8322e)))
                             .child(icon("trash-2", 14., 0xc5443e))
-                            .child("移出码头"),
+                            .child(ui_text("移出码头")),
                         &controls[next_focus + 3],
                         move |this, window, cx| {
                             this.open_workspace_remove(remove_id.clone(), name.clone(), window, cx);
@@ -3180,7 +3181,7 @@ impl Workspace {
                             0x2f3547
                         },
                     ))
-                    .child(label)
+                    .child(ui_text(label))
             };
             return Some(
                 tabs_ui::context_menu("task-context-menu")

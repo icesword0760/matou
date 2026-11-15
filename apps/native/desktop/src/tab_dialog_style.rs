@@ -1,3 +1,4 @@
+use crate::ui_text::ui_text;
 use gpui::{prelude::*, *};
 
 fn color_alpha(hex: u32, alpha: f32) -> Rgba {
@@ -189,7 +190,7 @@ pub fn dialog_title(text: impl Into<SharedString>) -> Div {
         .text_color(color_alpha(0x000000, 0.85))
         .text_size(px(16.))
         .font_weight(FontWeight::SEMIBOLD)
-        .child(text.into())
+        .child(ui_text(text))
 }
 
 /// `.dialog-close` (no light-theme override in frozen CSS; retains low-opacity white).
@@ -270,7 +271,7 @@ pub fn dialog_error(text: impl Into<SharedString>) -> Div {
         .mt(px(8.))
         .text_color(rgb(0xff7b72))
         .text_size(px(12.))
-        .child(text.into())
+        .child(ui_text(text))
 }
 
 /// `.rename-dialog footer, [role="alertdialog"] footer`.
@@ -303,7 +304,7 @@ pub fn dialog_button(
         .px(px(16.))
         .rounded(px(8.))
         .text_size(px(14.))
-        .child(label.into());
+        .child(ui_text(label));
     let styled = if primary {
         let button = base.text_color(rgb(0xffffff)).bg(rgb(0x347fd6));
         if disabled {
@@ -363,7 +364,7 @@ pub fn menu_item(id: impl Into<ElementId>, label: impl Into<SharedString>) -> St
         .bg(rgba(0x00000000))
         .cursor_pointer()
         .hover(|style| style.bg(rgb(0xeceef3)))
-        .child(label.into())
+        .child(ui_text(label))
 }
 
 /// `.light-theme .tab-overflow-panel`.
