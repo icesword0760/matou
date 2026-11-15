@@ -271,3 +271,8 @@ Evidence base: `artifacts/native-parity/native/evidence/`. Final source/bundle b
 | A07.06 | Character, word and line selection retain their distinct drag boundaries | Character drag real-window regression passes; 46 actual-source probes cover word/line ranges and copied text | S08, terminal-selection-tests.log; held multi-click drag trajectories and automatic screen-edge scroll remain unverified/unimplemented respectively |
 
 Mac build and Windows compile pass. The IME shortcut attempt did not open candidates in either product; it is not composition acceptance. No threshold, mask, source expectation or reference product behavior was changed. A07 as a whole remains open.
+
+
+| Scenario | Frozen baseline / operation | Native evidence | Remaining gap |
+| --- | --- | --- | --- |
+| A08.04 / N02ae — saved history during storage fault | pty-session.ts parses protocol before write and publishes renderer data only after successful persistence. With saved multi-screen output, force a real journal-index write error, scroll and copy old text. | Old T01/T02 stuck; final T03/T04 scroll to earlier history during the error; T05 copies SAVED_HISTORY_001 into an independent Shell. Real PTY contract covers all accessible viewports, hidden uncommitted state and exactly-once retry. T07 verifies normal output after restored files and restart. Source/build/launch: committed-state-build.json. | Reference live fault UI not newly captured; native storage retry UI missing (contract only). No screen-external selection/edge scrolling, full timing, pixel or Windows runtime acceptance. Extra parser/history cost recorded separately, not an end-to-end pass. |

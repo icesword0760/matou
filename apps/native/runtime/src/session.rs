@@ -217,9 +217,11 @@ pub struct Session {
     session_id: String,
     journal: SegmentJournal,
     gate: Gate,
-    terminal: Terminal,
+    protocol_terminal: Terminal,
+    display_terminal: Terminal,
     visible_screen: Screen,
     geometry: (u16, u16, u32, u32),
+    display_grid: (u16, u16),
     process: Option<PtyProcess>,
     pid: u32,
     reader: Option<mpsc::Receiver<ReaderEvent>>,
@@ -249,12 +251,14 @@ impl Session {
         let gate = Gate::new(sequence, DEFAULT_MAX_RETAINED_BYTES)?;
         let batcher = OutputBatcher::new(BATCH_DELAY, MAX_CODE_UNITS)?;
         let credit = CreditWindow::new(CREDIT_HIGH_WATERMARK_BYTES, CREDIT_LOW_WATERMARK_BYTES)?;
-        let mut terminal = Terminal::new(options.terminal)?;
-        // Restored completed history belongs to this screen only. In particular,
-        // any terminal replies from replay must never reach the new Shell.
-        terminal.feed(&options.restored_history);
-        terminal.drain_responses();
-        let visible_screen = terminal.screen()?;
+        let mut protocol_terminal = Terminal::new(options.terminal)?;
+        let mut display_terminal = Terminal::new(options.terminal)?;
+        for terminal in [&mut protocol_terminal, &mut display_terminal] {
+            // The restored history seeds each parser without sending its replies to the new Shell.
+            terminal.feed(&options.restored_history);
+            terminal.drain_responses();
+        }
+        let visible_screen = display_terminal.screen()?;
         let geometry = (
             options.terminal.cols,
             options.terminal.rows,
@@ -276,9 +280,11 @@ impl Session {
             session_id: options.session_id,
             journal,
             gate,
-            terminal,
+            protocol_terminal,
+            display_terminal,
             visible_screen,
             geometry,
+            display_grid: (geometry.0, geometry.1),
             process: Some(process),
             pid,
             reader: Some(reader),
@@ -375,7 +381,7 @@ impl Session {
                     .context("Shell process not available")?
                     .resize(cols, rows)?;
             }
-            self.terminal
+            self.protocol_terminal
                 .resize(cols, rows, cell_width_px, cell_height_px)
         })();
         if let Err(error) = result {
@@ -383,8 +389,18 @@ impl Session {
                 .push(diagnostic(format!("resize Shell terminal: {error:#}")));
             return Err(error);
         }
-        self.geometry = geometry;
         self.send_terminal_replies();
+        if !grid_changed {
+            let (display_cols, display_rows) = self.display_grid;
+            self.display_terminal
+                .resize(display_cols, display_rows, cell_width_px, cell_height_px)
+                .inspect_err(|error| {
+                    self.events
+                        .push(diagnostic(format!("resize saved Shell view: {error:#}")));
+                })?;
+            self.display_terminal.drain_responses();
+        }
+        self.geometry = geometry;
         if grid_changed {
             self.admit(
                 Frame::Resize {
@@ -499,28 +515,33 @@ impl Session {
 
     pub fn screen(&mut self) -> Result<Screen> {
         self.expire_sync();
-        // The live parser can already have rendered a frame whose journal write
-        // failed. Keep exposing the last visible screen until storage recovers.
-        if self.gate.state() == State::Healthy && !self.terminal.render_held() {
-            self.visible_screen = self.terminal.screen()?;
+        if !self.display_terminal.render_held() {
+            self.visible_screen = self.display_terminal.screen()?;
         }
         Ok(self.visible_screen.clone())
     }
 
     pub fn view(&mut self) -> Result<(Screen, InputModes)> {
-        Ok((self.screen()?, self.terminal.input_modes()?))
+        Ok((self.screen()?, self.display_terminal.input_modes()?))
     }
 
     pub fn scroll(&mut self, lines: i32) -> Result<()> {
-        self.terminal.scroll(lines)
+        self.display_terminal.scroll(lines)
     }
 
     pub fn set_theme(&mut self, theme: Theme) -> Result<()> {
-        self.terminal.set_theme(theme)
+        self.protocol_terminal.set_theme(theme)?;
+        self.display_terminal.set_theme(theme)
     }
 
     pub fn screen_deadline(&self) -> Option<Instant> {
-        self.terminal.sync_deadline()
+        [
+            self.protocol_terminal.sync_deadline(),
+            self.display_terminal.sync_deadline(),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     pub fn is_closed(&self) -> bool {
@@ -648,7 +669,7 @@ impl Session {
 
     fn enqueue_output(&mut self, data: String) -> Result<()> {
         let bytes = data.into_bytes();
-        self.terminal.feed(&bytes);
+        self.protocol_terminal.feed(&bytes);
         self.send_terminal_replies();
         let len = bytes.len();
         self.admit(
@@ -661,19 +682,25 @@ impl Session {
     }
 
     fn expire_sync(&mut self) {
-        let held = self.terminal.render_held();
-        if let Err(error) = self.terminal.expire_sync() {
+        if let Err(error) = self.protocol_terminal.expire_sync() {
             self.events.push(diagnostic(format!(
-                "end Shell synchronized output: {error:#}"
+                "end Shell protocol synchronized output: {error:#}"
             )));
-        } else if held && !self.terminal.render_held() {
-            self.events.push(SessionEvent::ScreenInvalidated);
         }
         self.send_terminal_replies();
+        let held = self.display_terminal.render_held();
+        if let Err(error) = self.display_terminal.expire_sync() {
+            self.events.push(diagnostic(format!(
+                "end Shell display synchronized output: {error:#}"
+            )));
+        } else if held && !self.display_terminal.render_held() {
+            self.events.push(SessionEvent::ScreenInvalidated);
+        }
+        self.display_terminal.drain_responses();
     }
 
     fn send_terminal_replies(&mut self) {
-        let replies = self.terminal.drain_responses();
+        let replies = self.protocol_terminal.drain_responses();
         if !replies.is_empty()
             && self.child_exit.is_none()
             && let Some(process) = self.process.as_mut()
@@ -762,6 +789,9 @@ impl Session {
             };
             let delivery = &mut self.delivery;
             let collector = &mut self.collector;
+            let display_terminal = &mut self.display_terminal;
+            let display_grid = &mut self.display_grid;
+            let (_, _, cell_width_px, cell_height_px) = self.geometry;
             let events = RefCell::new(&mut self.events);
             let fault_code = Cell::new(StorageFaultCode::WriteFailed);
             let mut persist = |record: &Record| {
@@ -774,6 +804,8 @@ impl Session {
                 match &record.frame {
                     Frame::Output { sequence, data } => {
                         let decoded = std::str::from_utf8(data)?;
+                        display_terminal.feed(data);
+                        display_terminal.drain_responses();
                         events.push(SessionEvent::SavedOutput {
                             sequence: *sequence,
                             data: decoded.to_owned(),
@@ -788,11 +820,18 @@ impl Session {
                         sequence,
                         cols,
                         rows,
-                    } => events.push(SessionEvent::Resized {
-                        sequence: *sequence,
-                        cols: (*cols).try_into()?,
-                        rows: (*rows).try_into()?,
-                    }),
+                    } => {
+                        let cols = (*cols).try_into()?;
+                        let rows = (*rows).try_into()?;
+                        events.push(SessionEvent::Resized {
+                            sequence: *sequence,
+                            cols,
+                            rows,
+                        });
+                        display_terminal.resize(cols, rows, cell_width_px, cell_height_px)?;
+                        display_terminal.drain_responses();
+                        *display_grid = (cols, rows);
+                    }
                     Frame::Exit {
                         sequence,
                         exit_code,

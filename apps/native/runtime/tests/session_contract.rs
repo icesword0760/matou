@@ -465,6 +465,117 @@ fn real_storage_fault_stops_one_session_and_retries_the_same_sequence() -> Resul
 }
 
 #[test]
+fn storage_fault_keeps_saved_scrollback_readable_until_retry() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let mut options = shell_options(root.path(), "saved-scroll", 512)?;
+    options.restored_history = b"FROM_PREVIOUS_RUN\r\n".to_vec();
+    let mut session = Session::launch(options)?;
+    let mut events = Vec::new();
+    require_started(&mut session, &mut events)?;
+    let warmup = r#"for n in {001..080}; do printf 'SAVED_HISTORY_%s\n' "$n"; done"#;
+    input(&mut session, warmup)?;
+    collect(&mut session, &mut events, |events, _| {
+        has_block(events, warmup)
+    })?;
+    let (saved, modes) = session.view()?;
+    assert!(saved.history_lines > 40);
+    assert!(!modes.application_cursor_keys);
+
+    let range = root.path().join("journal/saved-scroll/range-index.json");
+    if range.exists() {
+        fs::remove_file(&range)?;
+    }
+    fs::create_dir(&range)?;
+    let command = r#"printf '\033[?1h%4096s\nPERSISTED_AFTER_%s\n' '' RETRY; read -r answer"#;
+    let marker = "PERSISTED_AFTER_RETRY";
+    input(&mut session, command)?;
+    collect(&mut session, &mut events, |_, session| {
+        session.durability_state() == State::Paused
+    })?;
+    assert!(!output_has(&events, marker));
+
+    // Grid sizes are queued behind the failed output. A pixel-only update must
+    // still resize cells in the current saved view without exposing those grids.
+    session.resize(64, 21, 10, 19)?;
+    session.resize(72, 22, 11, 20)?;
+    session.resize(72, 22, 12, 21)?;
+    let bottom_offset = session.screen()?.scrollbar.offset;
+    assert!(bottom_offset > 40);
+    let mut saw_old_output = false;
+    let mut saw_restored_history = false;
+    for offset in (0..=bottom_offset).rev() {
+        let (view, modes) = session.view()?;
+        assert_eq!(view.scrollbar.offset, offset);
+        assert_eq!((view.cols, view.rows), (saved.cols, saved.rows));
+        assert!(!modes.application_cursor_keys);
+        let text: String = view.cells.iter().map(|cell| cell.text.as_str()).collect();
+        assert!(!text.contains(marker));
+        saw_old_output |= text.contains("SAVED_HISTORY_001");
+        saw_restored_history |= text.contains("FROM_PREVIOUS_RUN");
+        if offset > 0 {
+            session.scroll(1)?;
+        }
+    }
+    assert!(saw_old_output);
+    assert!(saw_restored_history);
+
+    fs::remove_dir(&range)?;
+    session.retry_storage()?;
+    assert_eq!(session.durability_state(), State::Healthy);
+    collect(&mut session, &mut events, |events, _| {
+        output_has(events, marker)
+    })?;
+    let published = output_bytes(&events);
+    let published = std::str::from_utf8(&published)?;
+    assert_eq!(published.matches(marker).count(), 1);
+    assert!(!published.contains("FROM_PREVIOUS_RUN"));
+    let frames = stored_frames(root.path(), "saved-scroll")?;
+    let recorded_sizes: Vec<_> = frames
+        .iter()
+        .filter_map(|frame| match frame {
+            Frame::Resize {
+                sequence,
+                cols,
+                rows,
+            } => Some((*sequence, *cols, *rows)),
+            _ => None,
+        })
+        .collect();
+    let reported_sizes: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            SessionEvent::Resized {
+                sequence,
+                cols,
+                rows,
+            } => Some((*sequence, u32::from(*cols), u32::from(*rows))),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(recorded_sizes, reported_sizes);
+    assert_eq!(
+        recorded_sizes
+            .iter()
+            .map(|(_, cols, rows)| (*cols, *rows))
+            .collect::<Vec<_>>(),
+        [(64, 21), (72, 22)]
+    );
+
+    session.scroll(-1000)?;
+    let (recovered, modes) = session.view()?;
+    assert_eq!((recovered.cols, recovered.rows), (72, 22));
+    assert!(modes.application_cursor_keys);
+    let text: String = recovered
+        .cells
+        .iter()
+        .map(|cell| cell.text.as_str())
+        .collect();
+    assert_eq!(text.matches(marker).count(), 1);
+    session.shutdown()?;
+    Ok(())
+}
+
+#[test]
 fn slow_delivery_replays_saved_real_output_without_redoing_history() -> Result<()> {
     let root = tempfile::tempdir()?;
     let mut session = shell(root.path(), "credit", 512 * 1024)?;
