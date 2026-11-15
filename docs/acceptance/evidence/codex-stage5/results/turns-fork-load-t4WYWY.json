@@ -1,0 +1,34 @@
+[
+  {
+    "sessionId": "5ba37648-26a0-4b30-b7bc-2aca1f599002",
+    "providerSessionId": "01a1df17-6aff-7831-b381-ef5a4ff6f38e",
+    "turnId": "01a1df17-6dbd-7243-9ff3-3b8dc682baed",
+    "prompt": "Remember parent codeword amber-cove-419. Reply only PARENT_OK.",
+    "finalAnswer": "PARENT_OK",
+    "completedAnswer": "PARENT_OK"
+  },
+  {
+    "sessionId": "df59557c-c780-401f-a99c-8e6501f5ad8d",
+    "providerSessionId": "01a1df17-9c7c-7312-81a5-a860f45a0554",
+    "turnId": "01a1df17-a429-7841-b535-8da6af60689a",
+    "prompt": "Which codeword did I ask you to remember? Reply only that codeword.",
+    "finalAnswer": "amber-cove-419",
+    "completedAnswer": "amber-cove-419"
+  },
+  {
+    "sessionId": "df59557c-c780-401f-a99c-8e6501f5ad8d",
+    "providerSessionId": "01a1df17-9c7c-7312-81a5-a860f45a0554",
+    "turnId": "01a1df17-ba2e-7f42-bf80-3fd011a925f2",
+    "prompt": "Also remember child-only-current-572. Reply only CHILD_OK.",
+    "finalAnswer": "CHILD_OK",
+    "completedAnswer": "CHILD_OK"
+  },
+  {
+    "sessionId": "5ba37648-26a0-4b30-b7bc-2aca1f599002",
+    "providerSessionId": "01a1df17-6aff-7831-b381-ef5a4ff6f38e",
+    "turnId": "01a1df17-d509-73f1-b195-5f613944e950",
+    "prompt": "List all codewords I asked you to remember. Reply only those codewords.",
+    "finalAnswer": "amber-cove-419",
+    "completedAnswer": "amber-cove-419"
+  }
+]

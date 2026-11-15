@@ -19,7 +19,7 @@ Running 13 tests using 1 worker
 [8/13] tests/e2e/prd-06-session-fork.spec.ts:20:48 › PRD 06 session fork › confirms the current Claude resume dialog for a new fork and after restarting the same branch
 [9/13] tests/e2e/prd-06-session-fork.spec.ts:20:48 › PRD 06 session fork › confirms the current Claude resume dialog for a retried fork and after restarting the same branch
 [10/13] tests/e2e/prd-06-session-fork.spec.ts:92:3 › PRD 06 session fork › forks a resumable Claude conversation on its right, isolates every branch, and restores once
-  1) tests/e2e/prd-06-session-fork.spec.ts:92:3 › PRD 06 session fork › forks a resumable Claude conversation on its right, isolates every branch, and restores once 
+  1) tests/e2e/prd-06-session-fork.spec.ts:92:3 › PRD 06 session fork › forks a resumable Claude conversation on its right, isolates every branch, and restores once
 
     Error: expect(received).toEqual(expected) // deep equality
 
@@ -67,7 +67,7 @@ Running 13 tests using 1 worker
 (node:6567) ExperimentalWarning: SQLite is an experimental feature and might change at any time
 
 [11/13] tests/e2e/prd-06-session-fork.spec.ts:243:3 › PRD 06 session fork › keeps a failed fork visible and inert instead of opening a Shell or reusing the source
-  2) tests/e2e/prd-06-session-fork.spec.ts:243:3 › PRD 06 session fork › keeps a failed fork visible and inert instead of opening a Shell or reusing the source 
+  2) tests/e2e/prd-06-session-fork.spec.ts:243:3 › PRD 06 session fork › keeps a failed fork visible and inert instead of opening a Shell or reusing the source
 
     Error: expect(locator).toHaveCount(expected) failed
 
@@ -110,6 +110,6 @@ Running 13 tests using 1 worker
 [12/13] tests/e2e/session-load-existing-claude.spec.ts:11:3 › load an existing Claude Code session › loads the selected long conversation through the current resume confirmation and accepts input
 [13/13] tests/e2e/session-load-existing-claude.spec.ts:59:3 › load an existing Claude Code session › separates left-side session filtering from right-side conversation search
   2 failed
-    tests/e2e/prd-06-session-fork.spec.ts:92:3 › PRD 06 session fork › forks a resumable Claude conversation on its right, isolates every branch, and restores once 
-    tests/e2e/prd-06-session-fork.spec.ts:243:3 › PRD 06 session fork › keeps a failed fork visible and inert instead of opening a Shell or reusing the source 
+    tests/e2e/prd-06-session-fork.spec.ts:92:3 › PRD 06 session fork › forks a resumable Claude conversation on its right, isolates every branch, and restores once
+    tests/e2e/prd-06-session-fork.spec.ts:243:3 › PRD 06 session fork › keeps a failed fork visible and inert instead of opening a Shell or reusing the source
   11 passed (1.6m)

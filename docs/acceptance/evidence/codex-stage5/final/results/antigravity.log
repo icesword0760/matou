@@ -12,7 +12,7 @@ Running 5 tests using 1 worker
 [1/5] tests/e2e/antigravity-acceptance.spec.ts:441:3 › Antigravity Packaged App Acceptance (Real agy + Controlled Error Fixtures) › PRD #1 #3 #4 #5 #6 #11 #12: Real agy lifecycle, HUD, notifications, modes, and /model in packaged 码头.app
 [2/5] tests/e2e/antigravity-acceptance.spec.ts:690:3 › Antigravity Packaged App Acceptance (Real agy + Controlled Error Fixtures) › PRD #7 #9a + Latency (3x): Auto Title lock/restore, Restart recovery, and Running/Idle latency
 [3/5] tests/e2e/antigravity-acceptance.spec.ts:862:3 › Antigravity Packaged App Acceptance (Real agy + Controlled Error Fixtures) › PRD #2 #8 #10 + Running-Parent Fork: DAG/Badge/ParentProjection, Fork Current/Worktree/Running, SessionLoader
-  1) tests/e2e/antigravity-acceptance.spec.ts:862:3 › Antigravity Packaged App Acceptance (Real agy + Controlled Error Fixtures) › PRD #2 #8 #10 + Running-Parent Fork: DAG/Badge/ParentProjection, Fork Current/Worktree/Running, SessionLoader 
+  1) tests/e2e/antigravity-acceptance.spec.ts:862:3 › Antigravity Packaged App Acceptance (Real agy + Controlled Error Fixtures) › PRD #2 #8 #10 + Running-Parent Fork: DAG/Badge/ParentProjection, Fork Current/Worktree/Running, SessionLoader
 
     Error: expect(locator).toHaveAttribute(expected) failed
 
@@ -56,5 +56,5 @@ Running 5 tests using 1 worker
 [4/5] tests/e2e/antigravity-acceptance.spec.ts:1051:3 › Antigravity Packaged App Acceptance (Real agy + Controlled Error Fixtures) › PRD #13: mt cross-card control inside real Antigravity card
 [5/5] tests/e2e/antigravity-acceptance.spec.ts:1110:3 › Antigravity Packaged App Acceptance (Real agy + Controlled Error Fixtures) › PRD #9b #14: Controlled fixtures for missing binary, unauthenticated sign-in prompt, and restore failure
   1 failed
-    tests/e2e/antigravity-acceptance.spec.ts:862:3 › Antigravity Packaged App Acceptance (Real agy + Controlled Error Fixtures) › PRD #2 #8 #10 + Running-Parent Fork: DAG/Badge/ParentProjection, Fork Current/Worktree/Running, SessionLoader 
+    tests/e2e/antigravity-acceptance.spec.ts:862:3 › Antigravity Packaged App Acceptance (Real agy + Controlled Error Fixtures) › PRD #2 #8 #10 + Running-Parent Fork: DAG/Badge/ParentProjection, Fork Current/Worktree/Running, SessionLoader
   4 passed (4.8m)

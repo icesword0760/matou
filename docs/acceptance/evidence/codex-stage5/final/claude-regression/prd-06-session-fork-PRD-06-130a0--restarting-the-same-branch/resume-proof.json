@@ -1,0 +1,83 @@
+{
+  "branchId": "ed734585-0c06-4d7b-b65f-246dc7a00015",
+  "invocations": [
+    {
+      "args": [
+        "--settings",
+        "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.c5/m-TM1BKc/data/provider-hooks/bC2OrTbVDuMKQZk0ND9h2sstToML-enWlQgfEe0h6NM.settings.json",
+        "--plugin-dir",
+        "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/apps/runtime/dist/control-assets/providers/claude-plugin"
+      ],
+      "providerId": "provider-source-e2e"
+    },
+    {
+      "args": [
+        "--settings",
+        "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.c5/m-TM1BKc/data/provider-hooks/3eFZIkonCi9Vjvpk3q0qNFG9jItD9PlN86UZ9Nsss6c.settings.json",
+        "--plugin-dir",
+        "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/apps/runtime/dist/control-assets/providers/claude-plugin",
+        "--resume",
+        "provider-source-e2e",
+        "--fork-session"
+      ],
+      "providerId": "provider-fork-e2e-1"
+    },
+    {
+      "args": [
+        "--settings",
+        "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.c5/m-TM1BKc/data/provider-hooks/k_spxEuF-m37lbpftxyZgbAfNmAaDRzKVsT6wQTIM7A.settings.json",
+        "--plugin-dir",
+        "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/apps/runtime/dist/control-assets/providers/claude-plugin",
+        "--resume",
+        "provider-source-e2e",
+        "--fork-session"
+      ],
+      "providerId": "provider-fork-e2e-2"
+    },
+    {
+      "args": [
+        "--settings",
+        "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.c5/m-TM1BKc/data/provider-hooks/C4zM5zWB1wo17dyrZgTCh-DjJWlUPIZa5DvFfGnBmJs.settings.json",
+        "--plugin-dir",
+        "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/apps/runtime/dist/control-assets/providers/claude-plugin",
+        "--resume",
+        "provider-source-e2e"
+      ],
+      "providerId": "provider-source-e2e"
+    },
+    {
+      "args": [
+        "--settings",
+        "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.c5/m-TM1BKc/data/provider-hooks/08MSqWxHGh6q6yx6caW2GHk-5NdVjnCQnSbvfK5Et0k.settings.json",
+        "--plugin-dir",
+        "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/apps/runtime/dist/control-assets/providers/claude-plugin",
+        "--resume",
+        "provider-fork-e2e-2"
+      ],
+      "providerId": "provider-fork-e2e-2"
+    }
+  ],
+  "database": {
+    "sessions": [
+      {
+        "id": "c051eab1-fba9-47c1-a887-8a3af756c849",
+        "cwd": "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.c5/m-TM1BKc/matou_workspace",
+        "kind": "claude-code"
+      },
+      {
+        "id": "ed734585-0c06-4d7b-b65f-246dc7a00015",
+        "cwd": "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.c5/m-TM1BKc/matou_workspace",
+        "kind": "claude-code"
+      }
+    ],
+    "intents": [
+      {
+        "sessionId": "ed734585-0c06-4d7b-b65f-246dc7a00015",
+        "sourceSessionId": "c051eab1-fba9-47c1-a887-8a3af756c849",
+        "permissionMode": "default",
+        "state": "succeeded"
+      }
+    ],
+    "relations": []
+  }
+}
