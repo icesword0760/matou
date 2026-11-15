@@ -84,6 +84,17 @@ pub struct SelectionDrag {
 impl SelectionDrag {
     pub fn begin(terminal: &mut Terminal, mode: SelectionMode, row: usize, x: f32) -> Result<Self> {
         let (cols, total) = grid_size(terminal)?;
+        Self::begin_on_grid(terminal, mode, row, x, cols, total)
+    }
+
+    fn begin_on_grid(
+        terminal: &Terminal,
+        mode: SelectionMode,
+        row: usize,
+        x: f32,
+        cols: usize,
+        total: usize,
+    ) -> Result<Self> {
         let row = row.min(total - 1);
         let point = selection_cell(row, x, cols);
         let mode = if mode == SelectionMode::Word && point.col == cols {
@@ -107,34 +118,15 @@ impl SelectionDrag {
 
     pub fn extend(self, terminal: &mut Terminal, row: usize, x: f32) -> Result<GridSelection> {
         let (cols, total) = grid_size(terminal)?;
-        let row = row.min(total - 1);
         let anchor = self.initial.anchor;
-        Ok(match self.mode {
-            SelectionMode::Character => GridSelection {
+        let candidate = selection_candidate(terminal, self.mode, anchor, row, x, cols, total)?;
+        if self.mode == SelectionMode::Character {
+            return Ok(GridSelection {
                 anchor,
-                end: grid_boundary(terminal, row, x, cols)?,
-            },
-            SelectionMode::Word => {
-                let point = selection_cell(row, x, cols);
-                let candidate = if point.col == cols {
-                    point
-                } else {
-                    let word = word_at(terminal, point, cols, total)?;
-                    if point < anchor {
-                        word.anchor
-                    } else {
-                        word.end
-                    }
-                };
-                self.extend_to(candidate, cols)
-            }
-            // The initial line follows soft wraps. Dragging snaps to the pointer's
-            // physical row, including when it lands on a continuation.
-            SelectionMode::Line => {
-                let col = if row < anchor.row { 0 } else { cols };
-                self.extend_to(GridPoint { row, col }, cols)
-            }
-        })
+                end: candidate,
+            });
+        }
+        Ok(self.extend_to(candidate, cols))
     }
 
     fn extend_to(self, candidate: GridPoint, cols: usize) -> GridSelection {
@@ -162,6 +154,137 @@ impl SelectionDrag {
             end.max(candidate)
         };
         GridSelection { anchor, end }
+    }
+}
+
+/// A selection in the active buffer, including the length established by its initial click.
+pub struct SelectionState {
+    mode: SelectionMode,
+    start: Option<GridPoint>,
+    start_length: usize,
+    end: Option<GridPoint>,
+}
+
+impl Default for SelectionState {
+    fn default() -> Self {
+        Self {
+            mode: SelectionMode::Character,
+            start: None,
+            start_length: 0,
+            end: None,
+        }
+    }
+}
+
+impl SelectionState {
+    pub fn begin(
+        &mut self,
+        terminal: &mut Terminal,
+        mode: SelectionMode,
+        row: usize,
+        x: f32,
+    ) -> Result<()> {
+        let (cols, total) = grid_size(terminal)?;
+        let drag = SelectionDrag::begin_on_grid(terminal, mode, row, x, cols, total)?;
+        let GridSelection { anchor, end } = drag.initial;
+        *self = Self {
+            mode: drag.mode,
+            start: Some(anchor),
+            start_length: (end.row - anchor.row) * cols + end.col - anchor.col,
+            end: None,
+        };
+        Ok(())
+    }
+
+    pub fn extend(&mut self, terminal: &mut Terminal, row: usize, x: f32) -> Result<()> {
+        let Some(start) = self.start else {
+            return Ok(());
+        };
+        let (cols, total) = grid_size(terminal)?;
+        self.set_end(selection_candidate(
+            terminal, self.mode, start, row, x, cols, total,
+        )?);
+        Ok(())
+    }
+
+    /// Complete a drag step at a raw cell boundary, without expanding by word or line.
+    pub fn set_end(&mut self, end: GridPoint) {
+        self.end = Some(end);
+    }
+
+    pub fn range(&self, cols: usize) -> Option<GridSelection> {
+        let start = self.start?;
+        let (anchor, forward_end) = match self.end {
+            Some(end) if end < start => (end, None),
+            end => (start, end),
+        };
+        let initial_end_col = start.col + self.start_length;
+        let end = match forward_end {
+            Some(end) if self.start_length == 0 || end.row != start.row => end,
+            Some(end) if initial_end_col <= cols => GridPoint {
+                row: end.row,
+                col: initial_end_col.max(end.col),
+            },
+            None if initial_end_col <= cols => GridPoint {
+                row: start.row,
+                col: initial_end_col,
+            },
+            None if initial_end_col % cols == 0 => GridPoint {
+                row: start.row + initial_end_col / cols - 1,
+                col: cols,
+            },
+            _ => GridPoint {
+                row: start.row + initial_end_col / cols,
+                col: initial_end_col % cols,
+            },
+        };
+        Some(GridSelection { anchor, end })
+    }
+
+    pub fn trim(&mut self, amount: usize) {
+        if self.end.is_some_and(|end| end.row < amount) {
+            self.clear();
+            return;
+        }
+        if let Some(start) = &mut self.start {
+            start.row = start.row.saturating_sub(amount);
+        }
+        if let Some(end) = &mut self.end {
+            end.row -= amount;
+        }
+    }
+
+    pub fn clear(&mut self) {
+        *self = Self::default();
+    }
+}
+
+fn selection_candidate(
+    terminal: &Terminal,
+    mode: SelectionMode,
+    start: GridPoint,
+    row: usize,
+    x: f32,
+    cols: usize,
+    total: usize,
+) -> Result<GridPoint> {
+    let row = row.min(total - 1);
+    match mode {
+        SelectionMode::Character => grid_boundary(terminal, row, x, cols),
+        SelectionMode::Word => {
+            let point = selection_cell(row, x, cols);
+            if point.col == cols {
+                return Ok(point);
+            }
+            let word = word_at(terminal, point, cols, total)?;
+            Ok(if point < start { word.anchor } else { word.end })
+        }
+        // The initial line follows soft wraps. Dragging snaps to the pointer's
+        // physical row, including when it lands on a continuation.
+        SelectionMode::Line => Ok(GridPoint {
+            row,
+            col: if row < start.row { 0 } else { cols },
+        }),
     }
 }
 

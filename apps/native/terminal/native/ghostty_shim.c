@@ -286,6 +286,10 @@ int matou_vt_history_row(const MatouVt *vt, size_t row, bool *wrap, bool *contin
     return GHOSTTY_SUCCESS;
 }
 
+int matou_vt_selection_epoch(const MatouVt *vt, size_t *out) {
+    return ghostty_terminal_get(vt->terminal, (GhosttyTerminalData)0x4d540002, out);
+}
+
 int matou_vt_history_trimmed_rows(const MatouVt *vt, size_t *out) {
     // Matou's private TerminalData key in the pinned build.
     const GhosttyTerminalData history_trimmed = (GhosttyTerminalData)0x4d540001;

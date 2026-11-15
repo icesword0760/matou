@@ -16,7 +16,7 @@ import tarfile
 
 ROOT = Path(__file__).resolve().parent.parent
 VERSION = '1.0.1'
-HISTORY_TRIM_PATCH_VERSION = 1
+HISTORY_TRIM_PATCH_VERSION = 2
 BASE = f'https://release.files.ghostty.org/libghostty-vt/{VERSION}'
 ARCHIVES = {
     f'libghostty-vt-{VERSION}.tar.gz': '333dfce97641ef9b536bb9e08907ad86abaaada50e8f7417b70d9284adef37aa',
@@ -47,6 +47,12 @@ def patch_source(original, source, path, replacements):
 def patch_history_trim(original, source):
     pages = 'src/terminal/PageList.zig'
     terminal = 'src/terminal/c/terminal.zig'
+    lifecycle = 'src/terminal/Terminal.zig'
+    patch_source(original, source, lifecycle, [
+        ('screens: ScreenSet,\n', 'screens: ScreenSet,\n\n/// Changes that invalidate external selection state.\nmatou_selection_epoch: usize = 0,\n'),
+        ('    self.screens.switchTo(key);\n', '    self.screens.switchTo(key);\n    self.matou_selection_epoch +%= 1;\n'),
+        ('pub fn fullReset(self: *Terminal) void {\n', 'pub fn fullReset(self: *Terminal) void {\n    self.matou_selection_epoch +%= 1;\n'),
+    ])
     patch_source(original, source, pages, [
         (
             'total_rows: usize,\n\n/// The list of tracked pins.',
@@ -75,22 +81,24 @@ def patch_history_trim(original, source):
     patch_source(original, source, terminal, [
         (
             '    memory_usage = 42,\n',
-            '    memory_usage = 42,\n    matou_history_trimmed = 0x4d540001,\n',
+            '    memory_usage = 42,\n    matou_history_trimmed = 0x4d540001,\n'
+            '    matou_selection_epoch = 0x4d540002,\n',
         ),
         (
             '            .total_rows,\n            .scrollback_rows,\n',
             '            .total_rows,\n            .scrollback_rows,\n'
-            '            .matou_history_trimmed,\n',
+            '            .matou_history_trimmed,\n            .matou_selection_epoch,\n',
         ),
         (
             '        .total_rows => out.* = t.screens.active.pages.total_rows,\n',
             '        .total_rows => out.* = t.screens.active.pages.total_rows,\n'
-            '        .matou_history_trimmed => out.* = t.screens.active.pages.matou_history_trimmed,\n',
+            '        .matou_history_trimmed => out.* = t.screens.active.pages.matou_history_trimmed,\n'
+            '        .matou_selection_epoch => out.* = t.matou_selection_epoch,\n',
         ),
     ])
     return {
         'version': HISTORY_TRIM_PATCH_VERSION,
-        'files': {path: digest(source / path) for path in (pages, terminal)},
+        'files': {path: digest(source / path) for path in (pages, terminal, lifecycle)},
     }
 
 
