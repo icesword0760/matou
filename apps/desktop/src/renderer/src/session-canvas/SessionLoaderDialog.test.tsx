@@ -263,6 +263,96 @@ describe('SessionLoaderDialog', () => {
     await waitFor(() => expect(onLoad).toHaveBeenCalledWith('agy-1', 'antigravity'))
   })
 
+  it('adds a Codex tab and carries the codex provider through list, preview, search and load', async () => {
+    const onLoad = vi.fn(async () => undefined)
+    const listSessions = vi.fn(async (
+      _query: string, _scope?: 'metadata' | 'all', _offset?: number, _limit?: number,
+      provider?: 'claude-code' | 'antigravity' | 'codex'
+    ): Promise<ClaudeSessionListResult> => (
+      provider === 'codex'
+        ? {
+            provider: 'codex',
+            total: 1, offset: 0, limit: 50, nextOffset: 1, hasMore: false,
+            sessions: [{
+              provider: 'codex',
+              providerSessionId: 'codex-1', title: 'Codex 会话', cwd: '/workspace',
+              updatedAt: Date.now(), model: 'gpt-5.1-codex', permissionMode: 'default', eventCount: 0,
+              matchCount: 0, hits: [], availability: 'available'
+            }]
+          }
+        : listResult([summary()])
+    ))
+    const loadDetail = vi.fn(async (providerSessionId: string, options?: {
+      aroundEventIndex?: number
+      provider?: 'claude-code' | 'antigravity' | 'codex'
+    }) => (
+      options?.provider === 'codex'
+        ? {
+            provider: 'codex' as const,
+            providerSessionId,
+            title: 'Codex 会话',
+            cwd: '/workspace',
+            updatedAt: 20,
+            model: 'gpt-5.1-codex',
+            permissionMode: 'default' as const,
+            eventCount: 2,
+            matchCount: 1,
+            hits: [{ eventIndex: 2, kind: 'assistant' as const, excerpt: 'codex 命中' }],
+            availability: 'available' as const,
+            events: [
+              { index: 1, kind: 'user' as const, role: 'user' as const, text: '你好 codex', matched: false },
+              { index: 2, kind: 'assistant' as const, role: 'assistant' as const, text: 'codex 命中', matched: true }
+            ],
+            page: page(1, 2, 2)
+          }
+        : detail()
+    ))
+    const searchSession = vi.fn(async (
+      _providerSessionId: string, query: string, offset = 0, limit = 100,
+      provider?: 'claude-code' | 'antigravity' | 'codex'
+    ) => ({
+      query,
+      hits: provider === 'codex'
+        ? [{ eventIndex: 2, kind: 'assistant' as const, excerpt: 'codex 命中' }]
+        : [],
+      total: provider === 'codex' ? 1 : 0, offset, limit,
+      nextOffset: provider === 'codex' ? 1 : 0, hasMore: false
+    }))
+    render(<SessionLoaderDialog targetTitle="Shell" targetRunning={false}
+      listSessions={listSessions} loadDetail={loadDetail} searchSession={searchSession}
+      onLoad={onLoad} onCancel={() => undefined} />)
+
+    expect(await screen.findByRole('dialog', { name: '载入 Claude Code 会话' })).toBeTruthy()
+    const claudeRow = await screen.findByRole('button', { name: /预览会话：通知中心聚合/ })
+    expect(claudeRow.textContent).toContain('开放所有权限 · 2 条内容')
+    expect(screen.getAllByRole('tab').map((tab) => tab.textContent))
+      .toEqual(['Claude Code', 'Antigravity', 'Codex'])
+    await userEvent.setup().click(screen.getByRole('tab', { name: 'Codex' }))
+
+    expect(await screen.findByRole('dialog', { name: '载入 Codex 会话' })).toBeTruthy()
+    await waitFor(() => expect(listSessions).toHaveBeenLastCalledWith('', 'metadata', 0, 50, 'codex'))
+    const codexRow = await screen.findByRole('button', { name: /预览会话：Codex 会话/ })
+    expect(codexRow.textContent).toContain('Codex 会话')
+    expect(codexRow.textContent).toContain('刚刚 · gpt-5.1-codex')
+    expect(codexRow.textContent).not.toContain('默认权限')
+    expect(codexRow.textContent).not.toContain('条内容')
+    expect(await screen.findByText('gpt-5.1-codex · 默认权限')).toBeTruthy()
+    expect(await screen.findByText('你好 codex')).toBeTruthy()
+    expect(screen.queryByText('定位 hover width 动画')).toBeNull()
+    expect(screen.getAllByText('Codex').length).toBeGreaterThan(1)
+
+    fireEvent.change(screen.getByRole('searchbox', { name: '查找右侧会话内容' }), {
+      target: { value: 'codex 命中' }
+    })
+    await waitFor(() => expect(searchSession).toHaveBeenCalledWith(
+      'codex-1', 'codex 命中', 0, 100, 'codex'
+    ))
+    expect(await screen.findByText('codex 命中', { selector: 'mark' })).toBeTruthy()
+
+    await userEvent.setup().click(screen.getByRole('button', { name: '载入到当前卡片' }))
+    await waitFor(() => expect(onLoad).toHaveBeenCalledWith('codex-1', 'codex'))
+  })
+
   it('opens read-only current history without listing or loading other sessions', async () => {
     const listSessions = vi.fn(async () => listResult([summary()]))
     const loadDetail = vi.fn(async () => detail())

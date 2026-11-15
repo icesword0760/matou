@@ -363,7 +363,7 @@ function HierarchyProduct({
     sceneId: string
     title: string
     running: boolean
-    provider: 'claude-code' | 'antigravity'
+    provider: 'claude-code' | 'antigravity' | 'codex'
     history?: boolean
   } | null>(null)
   const [searchRequest, setSearchRequest] = useState({
@@ -409,7 +409,7 @@ function HierarchyProduct({
     .join('\u0001'), [projection.sessions])
   const listLoaderSessions = useCallback((
     query: string, searchScope?: 'metadata' | 'all', offset?: number, limit?: number,
-    provider?: 'claude-code' | 'antigravity'
+    provider?: 'claude-code' | 'antigravity' | 'codex'
   ) => {
     if (!loaderSessionId) return Promise.resolve({
       sessions: [], total: 0, offset: 0, limit: limit ?? 50, nextOffset: 0, hasMore: false
@@ -422,7 +422,7 @@ function HierarchyProduct({
       beforeEventIndex?: number
       aroundEventIndex?: number
       limit?: number
-      provider?: 'claude-code' | 'antigravity'
+      provider?: 'claude-code' | 'antigravity' | 'codex'
     } = {}
   ) => {
     if (!loaderSessionId) return Promise.reject(new Error(m.sessionLoaderClosed))
@@ -437,7 +437,7 @@ function HierarchyProduct({
   }, [client, loaderSessionId, m.sessionLoaderClosed, sessionLoader?.provider])
   const searchLoaderSession = useCallback((
     providerSessionId: string, query: string, offset?: number, limit?: number,
-    provider?: 'claude-code' | 'antigravity'
+    provider?: 'claude-code' | 'antigravity' | 'codex'
   ) => {
     if (!loaderSessionId) return Promise.reject(new Error(m.sessionLoaderClosed))
     return commands.searchClaudeSession(loaderSessionId, providerSessionId, query, offset, limit, provider)
@@ -448,7 +448,7 @@ function HierarchyProduct({
   }, [])
   const loadIntoCurrentCard = useCallback(async (
     providerSessionId: string,
-    provider?: 'claude-code' | 'antigravity'
+    provider?: 'claude-code' | 'antigravity' | 'codex'
   ) => {
     if (!loaderSessionId || !loaderSceneId) return
     await commands.loadClaudeSession(loaderSessionId, providerSessionId, provider)
@@ -1224,7 +1224,7 @@ function HierarchyProduct({
                     title: session.title,
                     running: graphNode?.workStatus === 'running' ||
                       graphNode?.workStatus === 'starting',
-                    provider: session.kind === 'antigravity' ? 'antigravity' : 'claude-code'
+                    provider: session.kind === 'codex' ? 'codex' : session.kind === 'antigravity' ? 'antigravity' : 'claude-code'
                   })}
                   onViewHistory={() => setSessionLoader({
                     sessionId: session.id,
@@ -1232,7 +1232,7 @@ function HierarchyProduct({
                     title: session.title,
                     running: graphNode?.workStatus === 'running' ||
                       graphNode?.workStatus === 'starting',
-                    provider: session.kind === 'antigravity' ? 'antigravity' : 'claude-code',
+                    provider: session.kind === 'codex' ? 'codex' : session.kind === 'antigravity' ? 'antigravity' : 'claude-code',
                     history: true
                   })}
                   descendantNodes={[...descendantNodes]}

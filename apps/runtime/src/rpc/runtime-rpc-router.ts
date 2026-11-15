@@ -42,6 +42,7 @@ import { DomainTransactionManager } from '../storage/domain-transaction'
 import { RuntimeAccessPolicy } from '../storage/runtime-access-policy'
 import { NotificationProjection } from '../product/experience-foundation'
 import { GitWorkspaceService } from '../git/git-workspace-service'
+import { CodexSessionCatalog, defaultCodexRoot } from '../session/codex-session-catalog'
 import { ClaudeSessionCatalog } from '../session/claude-session-catalog'
 import { AntigravitySessionCatalog, defaultAntigravityRoot } from '../session/antigravity-session-catalog'
 import { SessionGitStateRepository } from '../session/session-git-state-repository'
@@ -90,6 +91,7 @@ export class RuntimeRpcRouter {
   readonly #forkWorkflows: ForkWorkflowService
   readonly #git: GitWorkspaceService
   readonly #gitStates: SessionGitStateRepository
+  readonly #codexSessions: CodexSessionCatalog
   readonly #claudeSessions: ClaudeSessionCatalog
   readonly #antigravitySessions: AntigravitySessionCatalog
   readonly #accessPolicy: RuntimeAccessPolicy
@@ -99,6 +101,7 @@ export class RuntimeRpcRouter {
     database: RuntimeDatabase,
     notifications = new NotificationProjection(),
     options: {
+      codexRoot?: string
       projectsRoot?: string
       antigravityRoot?: string
       accessPolicy?: RuntimeAccessPolicy
@@ -135,6 +138,7 @@ export class RuntimeRpcRouter {
     )
     this.#git = new GitWorkspaceService({ database, dataRoot: dirname(database.path) })
     this.#gitStates = new SessionGitStateRepository(database)
+    this.#codexSessions = new CodexSessionCatalog(options.codexRoot ?? defaultCodexRoot())
     this.#claudeSessions = new ClaudeSessionCatalog(
       options.projectsRoot ?? process.env.MATOU_CLAUDE_PROJECTS_ROOT ??
         resolve(homedir(), '.claude', 'projects')
@@ -305,7 +309,7 @@ export class RuntimeRpcRouter {
             ...(usage.loadedSessionTitle ? { title: usage.loadedSessionTitle } : {})
           }
         })
-      return { ...result, ...(provider === 'antigravity' ? { provider } : {}), sessions }
+      return { ...result, ...(provider !== 'claude-code' ? { provider } : {}), sessions }
     }
     if (method === 'claude-sessions.detail') {
       const input = record(payload)
@@ -365,6 +369,9 @@ export class RuntimeRpcRouter {
         const result = this.#providerModes.loadClaudeSession(command, {
           sessionId,
           bindingId: randomUUID(),
+          ...(provider === 'codex' ? { hasCompletedTurn: await this.#codexSessions.hasCompletedTurn({
+            cwd: this.#sessionCwd(sessionId), providerSessionId
+          }) } : {}),
           provider,
           providerSessionId,
           title: detail.title,
@@ -375,7 +382,7 @@ export class RuntimeRpcRouter {
         return {
           ...result,
           load: {
-            ...(provider === 'antigravity' ? { provider } : {}),
+            ...(provider !== 'claude-code' ? { provider } : {}),
             sessionId, providerSessionId, permissionMode: detail.permissionMode
           }
         }
@@ -1018,20 +1025,20 @@ export class RuntimeRpcRouter {
     }
   }
 
-  #sessionCatalogProvider(value: unknown): 'claude-code' | 'antigravity' {
+  #sessionCatalogProvider(value: unknown): 'claude-code' | 'antigravity' | 'codex' {
     return value === undefined
       ? 'claude-code'
-      : enumeration(value, ['claude-code', 'antigravity'] as const, 'provider')
+      : enumeration(value, ['claude-code', 'antigravity', 'codex'] as const, 'provider')
   }
 
-  #sessionCatalog(provider: 'claude-code' | 'antigravity') {
-    return provider === 'antigravity' ? this.#antigravitySessions : this.#claudeSessions
+  #sessionCatalog(provider: 'claude-code' | 'antigravity' | 'codex') {
+    return provider === 'codex' ? this.#codexSessions : provider === 'antigravity' ? this.#antigravitySessions : this.#claudeSessions
   }
 
   #providerConversationUsage(
     providerSessionId: string,
     targetSessionId: string,
-    provider: 'claude-code' | 'antigravity' = 'claude-code'
+    provider: 'claude-code' | 'antigravity' | 'codex' = 'claude-code'
   ): {
     availability: 'available' | 'loaded-here' | 'loaded-elsewhere'
     loadedSessionId?: string

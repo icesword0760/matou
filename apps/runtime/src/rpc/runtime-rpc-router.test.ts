@@ -981,3 +981,37 @@ it('uses only AGENTS.md for Codex instruction reads and saves', async () => {
   })
   expect(await readFile(join(cwd, 'CLAUDE.md'), 'utf8')).toBe('# Other provider\n')
 })
+
+it('routes Codex listing, preview, search, load and duplicate availability while deriving Fork from normal history', async () => {
+  const cwd = join(testRoot, 'codex-load'); const codexRoot = join(testRoot, 'codex-home')
+  await mkdir(cwd); await mkdir(join(codexRoot, 'sessions'), { recursive: true })
+  const id = '01a1ddd6-4064-70e1-a006-000000000001'
+  const noReplyId = '01a1ddd6-4064-70e1-a006-000000000002'
+  const meta = (value: string) => ({ type: 'session_meta', payload: { id: value, cwd } })
+  const events = [meta(id),
+    { type: 'turn_context', payload: { turn_id: 'turn', model: 'gpt-6-astra' } },
+    { type: 'event_msg', payload: { type: 'item_completed', turn_id: 'turn', item: { id: 'u', type: 'UserMessage', content: [{ text: 'secret hello' }] } } },
+    { type: 'event_msg', payload: { type: 'item_completed', turn_id: 'turn', item: { id: 'a', type: 'AgentMessage', phase: 'final_answer', content: [{ text: 'secret reply' }] } } },
+    { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'turn' } }]
+  await writeFile(join(codexRoot, 'sessions', `rollout-${id}.jsonl`), events.map(v => JSON.stringify(v)).join('\n') + '\n')
+  await writeFile(join(codexRoot, 'sessions', `rollout-${noReplyId}.jsonl`), JSON.stringify(meta(noReplyId)) + '\n')
+  await writeFile(join(codexRoot, 'session_index.jsonl'), JSON.stringify({ id, thread_name: 'Codex indexed title', updated_at: '2026-11-15T08:00:00Z' }) + '\n')
+  const codexRouter = new RuntimeRpcRouter(database, undefined, { codexRoot })
+  const initial = await codexRouter.handle('hierarchy.bootstrap-window', payload('codex-load-bootstrap', {
+    windowId: 'window-codex-load', defaultRootDirectory: cwd, defaultName: 'Codex load', now: 1
+  })) as { session: { id: string } }
+  const input = { sessionId: initial.session.id, provider: 'codex' }
+  expect(await codexRouter.handle('claude-sessions.list', { ...input, query: 'indexed', searchScope: 'metadata' })).toMatchObject({
+    provider: 'codex', total: 1, sessions: [{ provider: 'codex', providerSessionId: id, title: 'Codex indexed title' }]
+  })
+  expect(await codexRouter.handle('claude-sessions.search', { ...input, providerSessionId: id, query: 'secret', limit: 1 })).toMatchObject({ total: 2, hasMore: true })
+  expect(await codexRouter.handle('claude-sessions.detail', { ...input, providerSessionId: id, query: '', limit: 1 })).toMatchObject({ events: [{ index: 2, text: 'secret reply' }] })
+  expect(await codexRouter.handle('claude-sessions.load', payload('load-codex-valid', { ...input, providerSessionId: id, now: 3 }))).toMatchObject({
+    binding: { provider: 'codex', providerSessionId: id, restoreState: 'restoring', metadata: { canFork: true } },
+    load: { provider: 'codex', providerSessionId: id }
+  })
+  expect(await codexRouter.handle('claude-sessions.list', { ...input, query: 'indexed' })).toMatchObject({ sessions: [{ availability: 'loaded-here' }] })
+  expect(await codexRouter.handle('claude-sessions.load', payload('load-codex-empty', { ...input, providerSessionId: noReplyId, now: 4 }))).toMatchObject({
+    binding: { metadata: { canFork: false } }, load: { provider: 'codex', providerSessionId: noReplyId }
+  })
+})

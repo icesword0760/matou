@@ -226,7 +226,7 @@ export interface HierarchyCommands {
   startFreshProvider(sessionId: string): unknown
   listClaudeSessions(
     sessionId: string, query: string, searchScope?: 'metadata' | 'all', offset?: number, limit?: number,
-    provider?: 'claude-code' | 'antigravity'
+    provider?: 'claude-code' | 'antigravity' | 'codex'
   ): Promise<ClaudeSessionListResult>
   getClaudeSessionDetail(
     sessionId: string, providerSessionId: string,
@@ -234,15 +234,15 @@ export interface HierarchyCommands {
       beforeEventIndex?: number
       aroundEventIndex?: number
       limit?: number
-      provider?: 'claude-code' | 'antigravity'
+      provider?: 'claude-code' | 'antigravity' | 'codex'
     }
   ): Promise<ClaudeSessionDetail>
   searchClaudeSession(
     sessionId: string, providerSessionId: string, query: string, offset?: number, limit?: number,
-    provider?: 'claude-code' | 'antigravity'
+    provider?: 'claude-code' | 'antigravity' | 'codex'
   ): Promise<ClaudeSessionSearchResult>
   loadClaudeSession(
-    sessionId: string, providerSessionId: string, provider?: 'claude-code' | 'antigravity'
+    sessionId: string, providerSessionId: string, provider?: 'claude-code' | 'antigravity' | 'codex'
   ): Promise<ClaudeSessionLoadResult>
   restartStoppedSession?(sessionId: string): unknown
   removeSessionBranch?(sceneId: string, sessionId: string, scope: RemoveNodeScope): unknown
