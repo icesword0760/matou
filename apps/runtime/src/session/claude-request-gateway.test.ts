@@ -1,5 +1,5 @@
 import http, { type RequestListener, type Server } from 'node:http'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { startClaudeRequestGateway, type GatewayOverride } from './claude-request-gateway'
 
 const dispose: Array<() => Promise<void>> = []
@@ -38,9 +38,82 @@ async function captureRequests() {
 
 afterEach(async () => {
   for (const close of dispose.splice(0)) await close()
+  vi.restoreAllMocks()
 })
 
 describe('Claude request gateway', () => {
+  async function captureOfficialRequests() {
+    const capture = await captureRequests()
+    const local = new URL(capture.url)
+    const original = http.request
+    vi.spyOn(http, 'request').mockImplementation(((url: URL, ...args: unknown[]) => {
+      if (url instanceof URL && url.hostname === 'api.deepseek.com') {
+        url = new URL(url)
+        url.hostname = local.hostname
+        url.port = local.port
+      }
+      return Reflect.apply(original, http, [url, ...args])
+    }) as typeof http.request)
+    return { ...capture, official: 'http://api.deepseek.com/anthropic' }
+  }
+
+  const inlineDefinition = { name: 'lookup', input_schema: { type: 'object' } }
+  const inlineRequest = () => ({
+    model: 'original', tools: [{ name: 'search', input_schema: { type: 'object' } }],
+    messages: [{ role: 'system', content: [{ type: 'tool_addition', tool: { type: 'tool_definition', definition: inlineDefinition } }] }]
+  })
+
+  it('converts official message and token-count requests without an override and updates body headers', async () => {
+    const upstream = await captureOfficialRequests()
+    const gateway = await start(upstream.official)
+    const body = JSON.stringify(inlineRequest())
+    for (const path of ['/v1/messages', '/v1/messages/count_tokens']) {
+      const response = await fetch(gateway.baseUrl + path, { method: 'POST', body, headers: {
+        'content-type': 'application/json', 'content-length': String(Buffer.byteLength(body)),
+        'content-md5': 'old-md5', 'content-digest': 'old-content-digest', digest: 'old-digest'
+      } })
+      expect(response.status).toBe(200)
+      expect(await response.text()).toBe('accepted')
+    }
+    expect(upstream.requests.map(request => request.url)).toEqual(['/anthropic/v1/messages', '/anthropic/v1/messages/count_tokens'])
+    for (const request of upstream.requests) {
+      const parsed = JSON.parse(request.body)
+      expect(parsed.tools).toEqual([...inlineRequest().tools, { ...inlineDefinition, defer_loading: true }])
+      expect(parsed.messages[0].content[0].tool).toEqual({ type: 'tool_reference', name: 'lookup' })
+      expect(request.headers['content-length']).toBe(String(Buffer.byteLength(request.body)))
+      expect(request.headers['content-md5']).toBeUndefined()
+      expect(request.headers['content-digest']).toBeUndefined()
+      expect(request.headers.digest).toBeUndefined()
+    }
+  })
+
+  it('uses the final destination, preserving other providers and converting overrides into DeepSeek', async () => {
+    const official = await captureOfficialRequests()
+    const other = await captureRequests()
+    const fromOther = await start(other.url, ({ compaction }) => compaction ? { baseUrl: official.official, model: 'deepseek-flash' } : undefined)
+    const fromOfficial = await start(official.official, ({ compaction }) => compaction ? { baseUrl: other.url, model: 'other' } : undefined)
+    const body = JSON.stringify(inlineRequest())
+    for (const [gateway, headers] of [[fromOther, {}], [fromOther, { 'x-claude-code-compaction': 'manual' }], [fromOfficial, { 'x-claude-code-compaction': 'manual' }]] as const) {
+      expect(await (await fetch(gateway.baseUrl + '/v1/messages', { method: 'POST', body, headers })).text()).toBe('accepted')
+    }
+    expect(other.requests).toHaveLength(2)
+    expect(other.requests[0]!.body).toBe(body)
+    expect(JSON.parse(other.requests[1]!.body).messages).toEqual(inlineRequest().messages)
+    expect(official.requests).toHaveLength(1)
+    expect(JSON.parse(official.requests[0]!.body).messages[0].content[0].tool.type).toBe('tool_reference')
+  })
+
+  it('reports incompatible inline tools as a client error before sending upstream', async () => {
+    const upstream = await captureOfficialRequests()
+    const gateway = await start(upstream.official)
+    for (const tools of [[], [{ ...inlineDefinition, input_schema: { type: 'string' } }]]) {
+      const response = await fetch(gateway.baseUrl + '/v1/messages', { method: 'POST', body: JSON.stringify({ ...inlineRequest(), tools }) })
+      expect(response.status).toBe(400)
+      expect(await response.json()).toMatchObject({ type: 'error', error: { type: 'invalid_request_error', message: expect.stringContaining('DeepSeek') } })
+    }
+    expect(upstream.requests).toHaveLength(0)
+  })
+
   it('routes manual and automatic compaction separately and keeps subsequent chat on the primary model', async () => {
     const primary = await captureRequests()
     const secondary = await captureRequests()
