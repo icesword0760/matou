@@ -18,6 +18,7 @@ const MAX_POLL_WAIT: Duration = Duration::from_millis(250);
 #[derive(Debug)]
 pub struct WorkerEvent {
     pub session_id: String,
+    pub run_id: String,
     pub event: SessionEvent,
 }
 
@@ -56,11 +57,16 @@ pub enum WorkerCommand {
 pub struct SessionWorker {
     commands: Sender<WorkerCommand>,
     wake: SessionWaker,
+    process_id: u32,
     thread: Option<JoinHandle<Result<()>>>,
 }
 
 impl SessionWorker {
-    pub fn spawn(options: SessionOptions, events: Sender<WorkerEvent>) -> Result<Self> {
+    pub fn spawn(
+        options: SessionOptions,
+        events: Sender<WorkerEvent>,
+        run_id: String,
+    ) -> Result<Self> {
         let (commands, incoming) = mpsc::channel();
         let (started, startup) = mpsc::sync_channel(1);
         let thread = thread::Builder::new()
@@ -69,10 +75,13 @@ impl SessionWorker {
                 let session_id = options.session_id.clone();
                 match Session::launch(options) {
                     Ok(mut session) => {
-                        if started.send(Ok(session.waker())).is_err() {
-                            return finish(&mut session, &session_id, &events);
+                        if started
+                            .send(Ok((session.waker(), session.process_id())))
+                            .is_err()
+                        {
+                            return finish(&mut session, &session_id, &run_id, &events);
                         }
-                        run(&mut session, &session_id, &incoming, &events)
+                        run(&mut session, &session_id, &run_id, &incoming, &events)
                     }
                     Err(error) => {
                         let _ = started.send(Err(error));
@@ -82,9 +91,10 @@ impl SessionWorker {
             })
             .context("start Shell session worker")?;
         match startup.recv() {
-            Ok(Ok(wake)) => Ok(Self {
+            Ok(Ok((wake, process_id))) => Ok(Self {
                 commands,
                 wake,
+                process_id,
                 thread: Some(thread),
             }),
             Ok(Err(error)) => {
@@ -96,6 +106,10 @@ impl SessionWorker {
                 Err(error).context("Shell session worker did not report startup")
             }
         }
+    }
+
+    pub fn process_id(&self) -> u32 {
+        self.process_id
     }
 
     pub fn write(&self, bytes: &[u8]) -> Result<()> {
@@ -189,6 +203,7 @@ fn join(thread: JoinHandle<Result<()>>) -> Result<()> {
 fn run(
     session: &mut Session,
     id: &str,
+    run_id: &str,
     incoming: &Receiver<WorkerCommand>,
     events: &Sender<WorkerEvent>,
 ) -> Result<()> {
@@ -198,7 +213,7 @@ fn run(
             let command = match next.take().map_or_else(|| incoming.try_recv(), Ok) {
                 Ok(command) => command,
                 Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => return finish(session, id, events),
+                Err(TryRecvError::Disconnected) => return finish(session, id, run_id, events),
             };
             match command {
                 WorkerCommand::Write { bytes, reply } => {
@@ -226,13 +241,18 @@ fn run(
                     let _ = reply.send(session.screen());
                 }
                 WorkerCommand::Shutdown { reply } => {
-                    let result = finish(session, id, events);
+                    let result = finish(session, id, run_id, events);
                     if let Some(reply) = reply {
                         let _ = reply.send(result);
                         return Ok(());
                     }
                     if let Err(error) = &result {
-                        diagnostic(events, id, format!("shut down Shell session: {error:#}"));
+                        diagnostic(
+                            events,
+                            id,
+                            run_id,
+                            format!("shut down Shell session: {error:#}"),
+                        );
                     }
                     return result;
                 }
@@ -246,15 +266,20 @@ fn run(
         };
         match session.poll(wait) {
             Ok(batch) => {
-                if let Err(error) = publish(events, id, batch) {
-                    let _ = finish(session, id, events);
+                if let Err(error) = publish(events, id, run_id, batch) {
+                    let _ = finish(session, id, run_id, events);
                     return Err(error);
                 }
             }
             Err(error) => {
-                diagnostic(events, id, format!("poll Shell session: {error:#}"));
-                if let Err(cleanup) = finish(session, id, events) {
-                    diagnostic(events, id, format!("shut down Shell session: {cleanup:#}"));
+                diagnostic(events, id, run_id, format!("poll Shell session: {error:#}"));
+                if let Err(cleanup) = finish(session, id, run_id, events) {
+                    diagnostic(
+                        events,
+                        id,
+                        run_id,
+                        format!("shut down Shell session: {cleanup:#}"),
+                    );
                 }
                 return Err(error);
             }
@@ -264,25 +289,36 @@ fn run(
             // after the PTY has exited. Wait for commands without busy-polling.
             match incoming.recv() {
                 Ok(command) => next = Some(command),
-                Err(_) => return finish(session, id, events),
+                Err(_) => return finish(session, id, run_id, events),
             }
         }
     }
 }
 
-fn finish(session: &mut Session, id: &str, events: &Sender<WorkerEvent>) -> Result<()> {
+fn finish(
+    session: &mut Session,
+    id: &str,
+    run_id: &str,
+    events: &Sender<WorkerEvent>,
+) -> Result<()> {
     let stopped = session.shutdown();
     let final_events = session
         .poll(Duration::ZERO)
-        .and_then(|batch| publish(events, id, batch));
+        .and_then(|batch| publish(events, id, run_id, batch));
     stopped.and(final_events)
 }
 
-fn publish(events: &Sender<WorkerEvent>, id: &str, batch: Vec<SessionEvent>) -> Result<()> {
+fn publish(
+    events: &Sender<WorkerEvent>,
+    id: &str,
+    run_id: &str,
+    batch: Vec<SessionEvent>,
+) -> Result<()> {
     for event in batch {
         events
             .send(WorkerEvent {
                 session_id: id.to_owned(),
+                run_id: run_id.to_owned(),
                 event,
             })
             .context("Shell event receiver stopped")?;
@@ -290,6 +326,11 @@ fn publish(events: &Sender<WorkerEvent>, id: &str, batch: Vec<SessionEvent>) -> 
     Ok(())
 }
 
-fn diagnostic(events: &Sender<WorkerEvent>, id: &str, message: String) {
-    let _ = publish(events, id, vec![SessionEvent::Diagnostic { message }]);
+fn diagnostic(events: &Sender<WorkerEvent>, id: &str, run_id: &str, message: String) {
+    let _ = publish(
+        events,
+        id,
+        run_id,
+        vec![SessionEvent::Diagnostic { message }],
+    );
 }

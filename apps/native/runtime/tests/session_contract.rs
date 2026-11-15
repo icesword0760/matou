@@ -14,6 +14,7 @@ use matou_native_core::{
     durability::State,
     journal::{Frame, JournalOptions, for_each_frame},
     pty::{ProcessExit, ShellLaunch},
+    shell_history::CollectedShellBlock,
 };
 use matou_native_runtime::{
     SessionEvent, SessionOptions, StorageFaultCode,
@@ -48,6 +49,7 @@ fn shell(root: &Path, id: &str, segment_bytes: u64) -> Result<Session> {
         },
         terminal: TerminalOptions::new(80, 24, 9, 18),
         restored_history: Vec::new(),
+        collect_history: true,
         journal: JournalOptions {
             max_segment_bytes: segment_bytes,
             compress_sealed: false,
@@ -129,10 +131,65 @@ fn has_cursor_reply(events: &[SessionEvent]) -> bool {
 }
 
 fn has_block(events: &[SessionEvent], command: &str) -> bool {
-    events.iter().any(|event| {
-        matches!(event,
-        SessionEvent::CompletedBlock(block) if block.command == command)
-    })
+    completed_blocks(events).any(|block| block.command == command)
+}
+
+fn completed_blocks(events: &[SessionEvent]) -> impl Iterator<Item = &CollectedShellBlock> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            SessionEvent::SavedOutput {
+                completed_blocks, ..
+            } => Some(completed_blocks),
+            _ => None,
+        })
+        .flatten()
+}
+
+fn assert_persisted_events(events: &[SessionEvent], frames: &[Frame]) {
+    let output_events: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            SessionEvent::SavedOutput { sequence, data, .. } => Some((*sequence, data.as_bytes())),
+            _ => None,
+        })
+        .collect();
+    let exit_events: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            SessionEvent::SavedExit {
+                sequence, status, ..
+            } => Some((*sequence, *status)),
+            _ => None,
+        })
+        .collect();
+    let output_frames: Vec<_> = frames
+        .iter()
+        .filter_map(|frame| match frame {
+            Frame::Output { sequence, data } => Some((*sequence, data.as_slice())),
+            _ => None,
+        })
+        .collect();
+    let exit_frames: Vec<_> = frames
+        .iter()
+        .filter_map(|frame| match frame {
+            Frame::Exit {
+                sequence,
+                exit_code,
+                signal,
+            } => Some((
+                *sequence,
+                ProcessExit {
+                    exit_code: *exit_code,
+                    signal: *signal,
+                },
+            )),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(output_events, output_frames);
+    assert_eq!(exit_events, exit_frames);
+    assert_eq!(exit_events.len(), 1);
 }
 
 fn input(session: &mut Session, command: &str) -> Result<()> {
@@ -165,13 +222,44 @@ fn live_shell_persists_output_for_history_screen_resize_and_exit() -> Result<()>
     let mut events = Vec::new();
     require_started(&mut session, &mut events)?;
     let command = r#"printf 'VISIBLE_%s\n' '中文🙂'"#;
+    let before_submit = events.len();
     input(&mut session, command)?;
     collect(&mut session, &mut events, |events, _| {
         has_block(events, command) && output_has(events, "VISIBLE_中文🙂\r\n")
     })?;
-    let block = events.iter().position(|event| matches!(event, SessionEvent::CompletedBlock(block)
-        if block.command == command && block.exit_code == 0 && block.output.contains("VISIBLE_中文🙂"))).unwrap();
-    assert!(matches!(&events[block + 1], SessionEvent::Output { .. }));
+    assert!(matches!(
+        events.get(before_submit),
+        Some(SessionEvent::InputSubmitted)
+    ));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, SessionEvent::InputSubmitted))
+            .count(),
+        1
+    );
+    let (block, sequence) = events
+        .iter()
+        .enumerate()
+        .find_map(|(index, event)| match event {
+            SessionEvent::SavedOutput {
+                sequence,
+                completed_blocks,
+                ..
+            } if completed_blocks.iter().any(|block| {
+                block.command == command
+                    && block.exit_code == 0
+                    && block.output.contains("VISIBLE_中文🙂")
+            }) =>
+            {
+                Some((index, *sequence))
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert!(
+        matches!(&events[block + 1], SessionEvent::Output { sequence: display, .. } if *display == sequence)
+    );
     let screen = session.screen()?;
     assert!(screen.cells.chunks(screen.cols).any(|row| {
         row.iter()
@@ -229,6 +317,10 @@ fn live_shell_persists_output_for_history_screen_resize_and_exit() -> Result<()>
         matches!(events.last(), Some(SessionEvent::Exited { sequence, status: ProcessExit { exit_code: 7, signal: Some(0) } })
         if *sequence == frames.last().unwrap().sequence())
     );
+    assert!(
+        matches!(events.get(events.len() - 2), Some(SessionEvent::SavedExit { sequence, status: ProcessExit { exit_code: 7, signal: Some(0) }, disposed: false })
+        if *sequence == frames.last().unwrap().sequence())
+    );
     let published: Vec<_> = events
         .iter()
         .filter_map(|event| match event {
@@ -244,6 +336,7 @@ fn live_shell_persists_output_for_history_screen_resize_and_exit() -> Result<()>
         })
         .collect();
     assert_eq!(published, saved);
+    assert_persisted_events(&events, &frames);
     Ok(())
 }
 
@@ -292,7 +385,8 @@ fn real_storage_fault_stops_one_session_and_retries_the_same_sequence() -> Resul
         "undurable output reached the visible screen"
     );
     assert!(!blocked_events.iter().any(
-        |event| matches!(event, SessionEvent::Output { sequence: sent, .. } if *sent == sequence)
+        |event| matches!(event, SessionEvent::Output { sequence: sent, .. } |
+            SessionEvent::SavedOutput { sequence: sent, .. } if *sent == sequence)
     ));
 
     let independent = r#"printf 'OTHER_%s\n' running"#;
@@ -325,6 +419,22 @@ fn real_storage_fault_stops_one_session_and_retries_the_same_sequence() -> Resul
         1
     );
     blocked.shutdown()?;
+    blocked_events.extend(blocked.poll(Duration::ZERO)?);
+    assert_eq!(
+        blocked_events
+            .iter()
+            .filter(|event| matches!(event, SessionEvent::InputSubmitted))
+            .count(),
+        2,
+        "only the warmup and fault-triggering writes reached the shell"
+    );
+    let blocked_frames = stored_frames(root.path(), "blocked")?;
+    assert_persisted_events(&blocked_events, &blocked_frames);
+    assert!(
+        blocked_events
+            .iter()
+            .any(|event| matches!(event, SessionEvent::SavedExit { disposed: true, .. }))
+    );
     other.shutdown()?;
     Ok(())
 }
@@ -355,6 +465,15 @@ fn slow_delivery_replays_saved_real_output_without_redoing_history() -> Result<(
             .iter()
             .any(|event| matches!(event, SessionEvent::Exited { .. }))
     );
+    let saved = stored_frames(root.path(), "credit")?;
+    assert_persisted_events(&events, &saved);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        SessionEvent::SavedExit {
+            disposed: false,
+            ..
+        }
+    )));
     let mut acknowledged = 0;
     let mut resume_count = 0;
     while !events
@@ -381,7 +500,13 @@ fn slow_delivery_replays_saved_real_output_without_redoing_history() -> Result<(
     }
     assert!(resume_count >= 2);
     assert!(output_has(&events, "BULK_end\r\n"));
-    assert_eq!(events.iter().filter(|event| matches!(event, SessionEvent::CompletedBlock(block) if block.command == command)).count(), 1);
+    assert_eq!(
+        completed_blocks(&events)
+            .filter(|block| block.command == command)
+            .count(),
+        1
+    );
+    assert_persisted_events(&events, &saved);
     let published: Vec<_> = events
         .iter()
         .filter_map(|event| match event {
@@ -389,7 +514,6 @@ fn slow_delivery_replays_saved_real_output_without_redoing_history() -> Result<(
             _ => None,
         })
         .collect();
-    let saved = stored_frames(root.path(), "credit")?;
     let saved_output: Vec<_> = saved
         .iter()
         .filter_map(|frame| match frame {

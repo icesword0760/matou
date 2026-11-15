@@ -230,7 +230,7 @@ pub struct Session {
     reader_finished: bool,
     decoder: Utf8Decoder,
     batcher: OutputBatcher,
-    collector: Collector,
+    collector: Option<Collector>,
     delivery: Delivery,
     events: Vec<SessionEvent>,
     exit_enqueued: bool,
@@ -289,7 +289,7 @@ impl Session {
             reader_finished: false,
             decoder: Utf8Decoder::new(),
             batcher,
-            collector: Collector::new(),
+            collector: options.collect_history.then(Collector::new),
             delivery: Delivery {
                 credit,
                 replay_from: None,
@@ -327,11 +327,14 @@ impl Session {
             "session storage is paused"
         );
         ensure!(!self.pauses.egress, "session output is frozen");
-        let result = self
+        let process = self
             .process
             .as_mut()
-            .context("Shell process not available")?
-            .write(bytes);
+            .context("Shell process not available")?;
+        if bytes.iter().any(|byte| matches!(byte, b'\r' | b'\n')) {
+            self.events.push(SessionEvent::InputSubmitted);
+        }
+        let result = process.write(bytes);
         if let Err(error) = &result {
             self.events
                 .push(diagnostic(format!("write to Shell PTY: {error:#}")));
@@ -752,12 +755,14 @@ impl Session {
                 match &record.frame {
                     Frame::Output { sequence, data } => {
                         let decoded = std::str::from_utf8(data)?;
-                        events.extend(
-                            collector
-                                .ingest(decoded, record.timestamp)
-                                .into_iter()
-                                .map(SessionEvent::CompletedBlock),
-                        );
+                        events.push(SessionEvent::SavedOutput {
+                            sequence: *sequence,
+                            data: decoded.to_owned(),
+                            completed_blocks: collector
+                                .as_mut()
+                                .map(|collector| collector.ingest(decoded, record.timestamp))
+                                .unwrap_or_default(),
+                        });
                         delivery.publish_output(&mut events, *sequence, data)?;
                     }
                     Frame::Resize {
@@ -816,7 +821,13 @@ impl Session {
         };
         self.events.extend(diagnostics);
         if let Some((sequence, status)) = exit {
+            let disposed = self.disposed;
             self.close_resources();
+            self.events.push(SessionEvent::SavedExit {
+                sequence,
+                status,
+                disposed,
+            });
             self.delivery
                 .publish_exit(&mut self.events, sequence, status);
         }

@@ -13,6 +13,7 @@ pub struct SessionOptions {
     /// Completed Shell blocks, formatted by the database owner before live launch.
     /// This is display history only; it must not be collected or journaled again.
     pub restored_history: Vec<u8>,
+    pub collect_history: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,6 +29,11 @@ pub enum SessionEvent {
         pid: u32,
         sequence: u64,
     },
+    InputSubmitted,
+    CwdCaptured {
+        run_id: String,
+        cwd: String,
+    },
     Output {
         sequence: u64,
         data: Vec<u8>,
@@ -37,7 +43,12 @@ pub enum SessionEvent {
         cols: u16,
         rows: u16,
     },
-    CompletedBlock(CollectedShellBlock),
+    /// Emitted once for live output after it reaches the journal.
+    SavedOutput {
+        sequence: u64,
+        data: String,
+        completed_blocks: Vec<CollectedShellBlock>,
+    },
     StorageFault {
         sequence: u64,
         retained_bytes: usize,
@@ -46,6 +57,13 @@ pub enum SessionEvent {
     },
     StorageRecovered {
         sequence: u64,
+    },
+    /// Emitted after the final stored frame even if display delivery is paused.
+    SavedExit {
+        sequence: u64,
+        status: ProcessExit,
+        /// A disposal was requested before normal exit cleanup.
+        disposed: bool,
     },
     Exited {
         sequence: u64,
