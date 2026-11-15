@@ -157,4 +157,7 @@ pub struct Screen {
 pub struct InputModes {
     pub application_cursor_keys: bool,
     pub bracketed_paste: bool,
+    pub mouse_protocol: crate::MouseProtocol,
+    pub mouse_encoding: crate::MouseEncoding,
+    pub input_epoch: usize,
 }

@@ -70,6 +70,8 @@ unsafe extern "C" {
         terminal: *mut c_void,
         cursor_keys: *mut bool,
         bracketed_paste: *mut bool,
+        mouse_modes: *mut usize,
+        input_epoch: *mut usize,
     ) -> c_int;
     fn matou_vt_resize(
         terminal: *mut c_void,
@@ -244,15 +246,38 @@ impl Terminal {
 
     pub fn input_modes(&self) -> Result<InputModes> {
         let (mut cursor_keys, mut bracketed_paste) = (false, false);
+        let mut mouse_modes = 0usize;
+        let mut input_epoch = 0usize;
         check(
             unsafe {
-                matou_vt_input_modes(self.handle.as_ptr(), &mut cursor_keys, &mut bracketed_paste)
+                matou_vt_input_modes(
+                    self.handle.as_ptr(),
+                    &mut cursor_keys,
+                    &mut bracketed_paste,
+                    &mut mouse_modes,
+                    &mut input_epoch,
+                )
             },
             "read input modes",
         )?;
         Ok(InputModes {
             application_cursor_keys: cursor_keys,
             bracketed_paste,
+            input_epoch,
+            mouse_protocol: match mouse_modes & 0xff {
+                0 => crate::MouseProtocol::None,
+                1 => crate::MouseProtocol::X10,
+                2 => crate::MouseProtocol::Vt200,
+                3 => crate::MouseProtocol::Drag,
+                4 => crate::MouseProtocol::Any,
+                other => bail!("Unknown terminal mouse protocol {other}"),
+            },
+            mouse_encoding: match mouse_modes >> 8 {
+                0 => crate::MouseEncoding::Default,
+                2 => crate::MouseEncoding::Sgr,
+                4 => crate::MouseEncoding::SgrPixels,
+                other => bail!("Unknown terminal mouse encoding {other}"),
+            },
         })
     }
 

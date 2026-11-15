@@ -8,8 +8,8 @@ use gpui::{
     UTF16Selection, Window, canvas, div, fill, font, point, px, rgb, size,
 };
 use matou_native_terminal::{
-    Cell, Color, CursorStyle, GridSelection, InputModes, Screen, SelectionAction, SelectionMode,
-    Theme,
+    Cell, Color, CursorStyle, GridSelection, InputModes, MouseEncoding, MouseEvent, MouseProtocol,
+    MouseReporter, MouseWheel, Screen, SelectionAction, SelectionMode, Theme,
 };
 
 use crate::terminal_input::{
@@ -97,6 +97,9 @@ pub struct TerminalSurface {
     composition: Composition,
     caret: Option<Bounds<Pixels>>,
     wheel_lines: f32,
+    mouse_reporter: MouseReporter,
+    mouse_wheel: MouseWheel,
+    mouse_buttons: u8,
     blink: Option<Task<()>>,
     blink_visible: bool,
     input_disabled: bool,
@@ -137,6 +140,9 @@ impl TerminalSurface {
             modes: InputModes {
                 application_cursor_keys: false,
                 bracketed_paste: false,
+                input_epoch: 0,
+                mouse_protocol: matou_native_terminal::MouseProtocol::None,
+                mouse_encoding: matou_native_terminal::MouseEncoding::Default,
             },
             theme: Theme::default(),
             grid: None,
@@ -148,6 +154,9 @@ impl TerminalSurface {
             composition: Composition::default(),
             caret: None,
             wheel_lines: 0.,
+            mouse_reporter: MouseReporter::default(),
+            mouse_wheel: MouseWheel::default(),
+            mouse_buttons: 0,
             blink: None,
             blink_visible: true,
             input_disabled: false,
@@ -173,8 +182,21 @@ impl TerminalSurface {
         selection: Option<GridSelection>,
         cx: &mut Context<Self>,
     ) {
+        let modes_changed = self.modes != modes;
+        if self.modes.input_epoch != modes.input_epoch {
+            self.mouse_reporter = MouseReporter::default();
+            self.mouse_wheel = MouseWheel::default();
+            self.mouse_buttons = 0;
+        }
+        if self.modes.mouse_protocol != modes.mouse_protocol {
+            if modes.mouse_protocol == MouseProtocol::None {
+                self.mouse_buttons = 0;
+            } else {
+                self.stop_drag();
+            }
+        }
         self.modes = modes;
-        if self.screen.as_ref() == Some(&screen) && self.selection == selection {
+        if !modes_changed && self.screen.as_ref() == Some(&screen) && self.selection == selection {
             return;
         }
         if let Some(old) = &self.screen {
@@ -343,7 +365,129 @@ impl TerminalSurface {
             .is_some_and(|grid| grid.bounds.contains(&position))
     }
 
+    fn force_selection(modifiers: gpui::Modifiers) -> bool {
+        // The frozen Mac configuration leaves Option force-selection disabled.
+        !cfg!(target_os = "macos") && modifiers.shift
+    }
+
+    fn mouse_button(button: MouseButton) -> Option<u8> {
+        match button {
+            MouseButton::Left => Some(0),
+            MouseButton::Middle => Some(1),
+            MouseButton::Right => Some(2),
+            _ => None,
+        }
+    }
+
+    fn report_mouse(
+        &mut self,
+        position: Point<Pixels>,
+        modifiers: gpui::Modifiers,
+        button: u8,
+        action: u8,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(grid) = self.grid else {
+            return;
+        };
+        let x = f32::from(position.x - grid.bounds.origin.x).clamp(
+            0.,
+            (f32::from(self.metrics.width) * grid.cols as f32 - 1.).max(0.),
+        );
+        let y = f32::from(position.y - grid.bounds.origin.y).clamp(
+            0.,
+            (f32::from(self.metrics.height) * grid.rows as f32 - 1.).max(0.),
+        );
+        let event = MouseEvent {
+            col: (x / f32::from(self.metrics.width)).floor() as i32,
+            row: (y / f32::from(self.metrics.height)).floor() as i32,
+            x: x.floor() as i32,
+            y: y.floor() as i32,
+            button,
+            action,
+            ctrl: modifiers.control,
+            alt: modifiers.alt,
+            shift: modifiers.shift,
+        };
+        let bytes = self.mouse_reporter.report(
+            self.modes.mouse_protocol,
+            self.modes.mouse_encoding,
+            event,
+            grid.cols,
+            grid.rows,
+        );
+        // The frozen product subscribes to onData only, not binary mouse reports.
+        if self.modes.mouse_encoding != MouseEncoding::Default
+            && let Some(bytes) = bytes
+        {
+            if !self.input_disabled
+                && self
+                    .screen
+                    .as_ref()
+                    .is_some_and(|s| s.scrollbar.offset + (s.rows as u64) < s.scrollbar.total)
+            {
+                cx.emit(SurfaceEvent::Scroll(i32::MIN));
+            }
+            self.send(bytes, cx);
+        }
+    }
+
+    fn mouse_down(&mut self, event: &gpui::MouseDownEvent, cx: &mut Context<Self>) -> bool {
+        if self.modes.mouse_protocol == MouseProtocol::None
+            || Self::force_selection(event.modifiers)
+        {
+            return false;
+        }
+        if let Some(button) = Self::mouse_button(event.button) {
+            self.mouse_buttons |= 1 << button;
+            self.report_mouse(event.position, event.modifiers, button, 1, cx);
+        }
+        self.stop_drag();
+        cx.stop_propagation();
+        true
+    }
+
     fn on_scroll(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
+        let reports_wheel = matches!(
+            self.modes.mouse_protocol,
+            MouseProtocol::Vt200 | MouseProtocol::Drag | MouseProtocol::Any
+        );
+        let alternate = self.screen.as_ref().is_some_and(|screen| screen.alternate);
+        if reports_wheel || alternate {
+            let delta = match event.delta {
+                gpui::ScrollDelta::Pixels(delta) => -f32::from(delta.y),
+                gpui::ScrollDelta::Lines(delta) => -delta.y,
+            };
+            let lines = self.mouse_wheel.consume(
+                delta,
+                event.delta.precise(),
+                f32::from(self.metrics.height),
+                event.modifiers.shift,
+                event.modifiers.alt,
+                event.modifiers.control,
+            );
+            if lines != 0. {
+                if reports_wheel {
+                    self.report_mouse(
+                        event.position,
+                        event.modifiers,
+                        4,
+                        if delta < 0. { 0 } else { 1 },
+                        cx,
+                    );
+                } else {
+                    let prefix = if self.modes.application_cursor_keys {
+                        b'O'
+                    } else {
+                        b'['
+                    };
+                    self.send(vec![27, prefix, if delta < 0. { b'A' } else { b'B' }], cx);
+                }
+            }
+            cx.stop_propagation();
+            return;
+        }
+
         if event.modifiers.control || event.modifiers.platform {
             return;
         }
@@ -593,7 +737,11 @@ impl Render for TerminalSurface {
         div()
             .size_full()
             .overflow_hidden()
-            .cursor(PointerStyle::IBeam)
+            .cursor(if self.modes.mouse_protocol == MouseProtocol::None {
+                PointerStyle::IBeam
+            } else {
+                PointerStyle::Arrow
+            })
             .track_focus(&self.focus)
             .on_key_down(cx.listener(|this, event, _, cx| this.handle_key(event, cx)))
             .on_mouse_down(
@@ -601,7 +749,11 @@ impl Render for TerminalSurface {
                 cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
                     this.focus.focus(window);
                     this.reset_blink();
-                    if event.modifiers.shift {
+                    if this.mouse_down(event, cx) {
+                        cx.notify();
+                        return;
+                    }
+                    if event.modifiers.shift && this.modes.mouse_protocol == MouseProtocol::None {
                         if let Some((_, row, x)) = this.selection_location(event.position) {
                             this.selecting = true;
                             this.drag_scroll_amount = 0;
@@ -647,6 +799,20 @@ impl Render for TerminalSurface {
                     cx.notify();
                 }),
             )
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
+                    this.focus.focus(window);
+                    this.mouse_down(event, cx);
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
+                    this.focus.focus(window);
+                    this.mouse_down(event, cx);
+                }),
+            )
             .on_scroll_wheel(cx.listener(|this, event, _, cx| this.on_scroll(event, cx)))
             .child(
                 canvas(
@@ -659,7 +825,22 @@ impl Render for TerminalSurface {
                         window.on_mouse_event(move |event: &gpui::MouseMoveEvent, phase, _, cx| {
                             if phase == DispatchPhase::Capture {
                                 let _ = moving.update(cx, |this, cx| {
-                                    if event.dragging() {
+                                    let button = event.pressed_button.and_then(Self::mouse_button);
+                                    let reporting_drag = button.is_some_and(|button| {
+                                        this.mouse_buttons & (1 << button) != 0
+                                    });
+                                    let reporting_hover = event.pressed_button.is_none()
+                                        && this.modes.mouse_protocol == MouseProtocol::Any
+                                        && this.contains_position(event.position);
+                                    if reporting_drag || reporting_hover {
+                                        this.report_mouse(
+                                            event.position,
+                                            event.modifiers,
+                                            button.unwrap_or(3),
+                                            32,
+                                            cx,
+                                        );
+                                    } else if event.dragging() {
                                         this.update_selection(event.position, cx);
                                     } else {
                                         this.stop_drag();
@@ -669,9 +850,24 @@ impl Render for TerminalSurface {
                         });
                         let released = surface.downgrade();
                         window.on_mouse_event(move |event: &gpui::MouseUpEvent, phase, _, cx| {
-                            if phase == DispatchPhase::Capture && event.button == MouseButton::Left
-                            {
-                                let _ = released.update(cx, |this, _| this.finish_selection());
+                            if phase == DispatchPhase::Capture {
+                                let _ = released.update(cx, |this, cx| {
+                                    if let Some(button) = Self::mouse_button(event.button) {
+                                        if this.mouse_buttons & (1 << button) != 0 {
+                                            this.report_mouse(
+                                                event.position,
+                                                event.modifiers,
+                                                button,
+                                                0,
+                                                cx,
+                                            );
+                                            this.mouse_buttons &= !(1 << button);
+                                        }
+                                    }
+                                    if event.button == MouseButton::Left {
+                                        this.finish_selection();
+                                    }
+                                });
                             }
                         });
                     },

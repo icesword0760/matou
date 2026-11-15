@@ -147,11 +147,13 @@ void matou_vt_feed(MatouVt *vt, const uint8_t *data, size_t len) {
     ghostty_terminal_vt_write(vt->terminal, data, len);
 }
 
-int matou_vt_input_modes(MatouVt *vt, bool *cursor_keys, bool *bracketed_paste) {
+int matou_vt_input_modes(MatouVt *vt, bool *cursor_keys, bool *bracketed_paste, size_t *mouse_modes, size_t *input_epoch) {
     GhosttyTerminalModeConfig cursor = { .mode = GHOSTTY_MODE_CURSOR_KEYS };
     GhosttyTerminalModeConfig paste = { .mode = GHOSTTY_MODE_BRACKETED_PASTE };
     TRY(ghostty_terminal_get(vt->terminal, GHOSTTY_TERMINAL_DATA_MODE, &cursor));
     TRY(ghostty_terminal_get(vt->terminal, GHOSTTY_TERMINAL_DATA_MODE, &paste));
+    TRY(ghostty_terminal_get(vt->terminal, (GhosttyTerminalData)0x4d540003, mouse_modes));
+    TRY(ghostty_terminal_get(vt->terminal, (GhosttyTerminalData)0x4d540004, input_epoch));
     *cursor_keys = cursor.value;
     *bracketed_paste = paste.value;
     return GHOSTTY_SUCCESS;
