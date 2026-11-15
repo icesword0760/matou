@@ -118,7 +118,7 @@ pub fn tab_overflow_btn(id: impl Into<ElementId>) -> Stateful<Div> {
 }
 
 /// `.hierarchy-shell[data-theme="light"] .tab-add-btn`.
-pub fn tab_add(id: impl Into<ElementId>) -> Stateful<Div> {
+pub fn tab_add(id: impl Into<ElementId>, enabled: bool) -> Stateful<Div> {
     div()
         .id(id)
         .flex()
@@ -130,11 +130,12 @@ pub fn tab_add(id: impl Into<ElementId>) -> Stateful<Div> {
         .rounded(px(6.))
         .text_color(rgb(0x606572))
         .bg(rgb(0xeff0f4))
-        .cursor_pointer()
-        .hover(|style| {
-            style
-                .text_color(rgb(0x2f3547))
-                .bg(color_alpha(0x000000, 0.08))
+        .when(enabled, |button| {
+            button.cursor_pointer().hover(|style| {
+                style
+                    .text_color(rgb(0x2f3547))
+                    .bg(color_alpha(0x000000, 0.08))
+            })
         })
         .child(
             svg()

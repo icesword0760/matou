@@ -88,6 +88,7 @@ pub struct TerminalSurface {
     wheel_lines: f32,
     blink: Option<Task<()>>,
     blink_visible: bool,
+    input_disabled: bool,
 }
 
 impl EventEmitter<SurfaceEvent> for TerminalSurface {}
@@ -135,7 +136,20 @@ impl TerminalSurface {
             wheel_lines: 0.,
             blink: None,
             blink_visible: true,
+            input_disabled: false,
         }
+    }
+
+    pub fn set_input_disabled(&mut self, disabled: bool, cx: &mut Context<Self>) {
+        if self.input_disabled == disabled {
+            return;
+        }
+        self.input_disabled = disabled;
+        if disabled {
+            self.composition.clear();
+            self.reset_blink();
+        }
+        cx.notify();
     }
 
     pub fn set_screen(&mut self, screen: Screen, modes: InputModes, cx: &mut Context<Self>) {
@@ -172,12 +186,13 @@ impl TerminalSurface {
     }
 
     fn send(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
-        if !bytes.is_empty() {
-            self.clear_selection();
-            self.reset_blink();
-            cx.emit(SurfaceEvent::Input(bytes));
-            cx.notify();
+        if self.input_disabled || bytes.is_empty() {
+            return;
         }
+        self.clear_selection();
+        self.reset_blink();
+        cx.emit(SurfaceEvent::Input(bytes));
+        cx.notify();
     }
 
     fn reset_blink(&mut self) {
@@ -224,6 +239,9 @@ impl TerminalSurface {
                 cx.stop_propagation();
                 return;
             }
+        }
+        if self.input_disabled {
+            return;
         }
         let paste_mod = if mac {
             mods.platform && !mods.control
@@ -359,7 +377,9 @@ impl TerminalSurface {
                 },
             );
         self.caret = Some(caret);
-        window.handle_input(&self.focus, ElementInputHandler::new(caret, entity), cx);
+        if !self.input_disabled {
+            window.handle_input(&self.focus, ElementInputHandler::new(caret, entity), cx);
+        }
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
             if let Some(screen) = screen {
                 let show_cursor = screen.cursor_visible
@@ -609,8 +629,7 @@ impl EntityInputHandler for TerminalSurface {
     }
 
     fn marked_text_range(&self, _: &mut Window, _: &mut Context<Self>) -> Option<Range<usize>> {
-        self.composition
-            .is_active()
+        (!self.input_disabled && self.composition.is_active())
             .then(|| 0..self.composition.text.encode_utf16().count())
     }
 
@@ -627,7 +646,7 @@ impl EntityInputHandler for TerminalSurface {
         cx: &mut Context<Self>,
     ) {
         self.composition.clear();
-        if text.is_empty() {
+        if self.input_disabled || text.is_empty() {
             cx.notify();
         } else {
             self.send(text.as_bytes().to_vec(), cx);
@@ -642,6 +661,11 @@ impl EntityInputHandler for TerminalSurface {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.input_disabled {
+            self.composition.clear();
+            cx.notify();
+            return;
+        }
         self.composition.replace(range, text, selected);
         cx.notify();
     }
