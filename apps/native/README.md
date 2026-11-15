@@ -35,14 +35,20 @@ desktop application. Product scope and acceptance remain in
   incremental decoding/batching, persisted event delivery, credited log replay,
   terminal replies and shutdown. `WorkerCommand` carries typed reply channels
   so the central owner need not block on another session's disk or PTY.
-- `runtime::owner`: serializes completed-command SQLite writes before forwarding
-  their terminal output, reads restoration preference/results supplied at launch,
-  and seeds the new terminal before its live prompt. It consumes a pre-opened
-  database and lease; it does not replace database startup/recovery policy.
+- `core::session_graph`: existing graph projection and work-status transactions,
+  including domain events and replay receipts.
+- `runtime::derived`: source-compatible Shell OSC state/cwd tracking and the
+  existing four-line graph summary filters.
+- `runtime::owner`: consumes the writable startup connection/lease, interrupts
+  previous-generation runs, records real PTY runs, and serializes completed
+  history, cwd, work status and graph summaries. `OwnerEvent::Domain` exposes
+  committed event ranges; saved output/exit callbacks are independent of display
+  credit and are never rerun during display replay. Worker run identities reject
+  late events after relaunch. This owner runs off the UI thread.
 
 The application must connect startup results and recovery choices to the runtime
 owner and views. No current entry point opens production data. Clean-exit backup,
-Shell lifecycle event wiring, process/IPC integration, GPUI views, native packaging
+application process/IPC integration, GPUI views, native packaging
 and full platform acceptance are still pending.
 
 ## Check the implemented contracts

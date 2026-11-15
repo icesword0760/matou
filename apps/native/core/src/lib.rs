@@ -9,3 +9,5 @@ pub mod sessions;
 pub mod shell_history;
 pub mod startup;
 pub mod storage;
+
+pub mod session_graph;

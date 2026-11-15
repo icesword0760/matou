@@ -49,6 +49,7 @@ fn options(root: &Path, id: &str) -> Result<SessionOptions> {
             ..JournalOptions::default()
         },
         restored_history: Vec::new(),
+        collect_history: true,
     })
 }
 
@@ -64,7 +65,9 @@ impl Seen {
         let deadline = Instant::now() + Duration::from_secs(8);
         while !done(self) {
             let remaining = deadline.saturating_duration_since(Instant::now());
-            let WorkerEvent { session_id, event } = inbox
+            let WorkerEvent {
+                session_id, event, ..
+            } = inbox
                 .recv_timeout(remaining)
                 .context("wait for real Shell worker events")?;
             match event {
@@ -104,13 +107,17 @@ fn real_workers_keep_shell_output_independent_and_return_owned_screens() -> Resu
     let root_a = root.path().join("a");
     let root_b = root.path().join("b");
     let (events, incoming) = mpsc::channel();
-    let mut a = SessionWorker::spawn(options(&root_a, "a")?, events.clone())?;
-    let mut b = SessionWorker::spawn(options(&root_b, "b")?, events)?;
+    let mut a = SessionWorker::spawn(options(&root_a, "a")?, events.clone(), "run-a".into())?;
+    let mut b = SessionWorker::spawn(options(&root_b, "b")?, events, "run-b".into())?;
+    let (pid_a, pid_b) = (a.process_id(), b.process_id());
+    assert!(pid_a > 0 && pid_b > 0);
+    assert_ne!(pid_a, pid_b);
     let mut seen = Seen::default();
     seen.wait(&incoming, |seen| {
         seen.frame_with("a", b"WORKER_READY> ").is_some()
             && seen.frame_with("b", b"WORKER_READY> ").is_some()
     })?;
+    assert_eq!((seen.pids["a"], seen.pids["b"]), (pid_a, pid_b));
 
     a.set_egress_frozen(true)?;
     // The central owner can forward requests directly and continue serving

@@ -1,0 +1,454 @@
+{
+  "versions": {
+    "node": "24.18.1",
+    "acorn": "8.16.0",
+    "ada": "3.4.4",
+    "amaro": "1.1.9",
+    "ares": "1.34.6",
+    "brotli": "1.2.0",
+    "cldr": "48.0",
+    "icu": "78.2",
+    "llhttp": "9.4.3",
+    "merve": "1.2.2",
+    "modules": "148",
+    "napi": "10",
+    "nbytes": "0.1.4",
+    "ncrypto": "0.0.1",
+    "nghttp2": "1.69.0",
+    "nghttp3": "",
+    "ngtcp2": "",
+    "openssl": "0.0.0",
+    "simdjson": "4.6.4",
+    "simdutf": "7.7.0",
+    "sqlite": "3.53.1",
+    "tz": "2025c",
+    "undici": "7.29.0",
+    "unicode": "17.0",
+    "uv": "1.52.1",
+    "uvwasi": "0.0.23",
+    "v8": "15.0.245.28-electron.0",
+    "zlib": "1.3.2.1-motley",
+    "zstd": "1.6.0",
+    "electron": "43.4.1",
+    "chrome": "150.0.7871.224"
+  },
+  "work": [
+    {
+      "name": "shell-0",
+      "chunks": [
+        "\u001b]133;C\u0007",
+        "output\r\n\u001b]133;D;0\u0007",
+        "\u001b]133;C\u0007\u001b]133;D;2\u0007",
+        "\u001b]133;D;130\u0007"
+      ],
+      "expected": [
+        [
+          "running"
+        ],
+        [
+          "idle"
+        ],
+        [
+          "running",
+          "error"
+        ],
+        [
+          "interrupted"
+        ]
+      ]
+    },
+    {
+      "name": "shell-1",
+      "chunks": [
+        "text\u001b]133;D;",
+        "0\u001b\\prompt",
+        "more prompt"
+      ],
+      "expected": [
+        [],
+        [
+          "idle"
+        ],
+        []
+      ]
+    },
+    {
+      "name": "shell-2",
+      "chunks": [
+        "\u001b]133;C\u0007",
+        "printf 'enter value: '; read -r value\r\n",
+        "enter ",
+        "value: "
+      ],
+      "expected": [
+        [
+          "running"
+        ],
+        [],
+        [],
+        [
+          "needs-input"
+        ]
+      ]
+    },
+    {
+      "name": "shell-3",
+      "chunks": [
+        "\u001b]133;C\u0007",
+        "python3 -c 'input()'\r\n"
+      ],
+      "expected": [
+        [
+          "running"
+        ],
+        []
+      ]
+    },
+    {
+      "name": "shell-4",
+      "chunks": [
+        "Password: ",
+        "continue? [y/N] ",
+        "Password: accepted\r\n"
+      ],
+      "expected": [
+        [
+          "needs-input"
+        ],
+        [
+          "needs-input"
+        ],
+        []
+      ]
+    },
+    {
+      "name": "shell-5",
+      "chunks": [
+        "\u001b]133;D;0\u0007\u001b]133;A\u0007\u001b]133;C\u0007STA008_WAIT> "
+      ],
+      "expected": [
+        [
+          "idle",
+          "running",
+          "needs-input"
+        ]
+      ]
+    },
+    {
+      "name": "shell-6",
+      "chunks": [
+        "Select an option: "
+      ],
+      "expected": [
+        [
+          "needs-input"
+        ]
+      ]
+    },
+    {
+      "name": "shell-7",
+      "chunks": [
+        "password for user bob: "
+      ],
+      "expected": [
+        [
+          "needs-input"
+        ]
+      ]
+    },
+    {
+      "name": "shell-8",
+      "chunks": [
+        "inputs: "
+      ],
+      "expected": [
+        []
+      ]
+    },
+    {
+      "name": "shell-9",
+      "chunks": [
+        "Selector: "
+      ],
+      "expected": [
+        []
+      ]
+    },
+    {
+      "name": "shell-10",
+      "chunks": [
+        "Which item should I select?"
+      ],
+      "expected": [
+        []
+      ]
+    },
+    {
+      "name": "shell-11",
+      "chunks": [
+        "Reading the file so I can select the right section: "
+      ],
+      "expected": [
+        []
+      ]
+    },
+    {
+      "name": "shell-12",
+      "chunks": [
+        "steps:\r\n  input: build"
+      ],
+      "expected": [
+        []
+      ]
+    },
+    {
+      "name": "shell-13",
+      "chunks": [
+        "STA008_WAIT> "
+      ],
+      "expected": [
+        [
+          "needs-input"
+        ]
+      ]
+    },
+    {
+      "name": "shell-14",
+      "chunks": [
+        "请输入姓名："
+      ],
+      "expected": [
+        [
+          "needs-input"
+        ]
+      ]
+    },
+    {
+      "name": "shell-15",
+      "chunks": [
+        "[y/n]"
+      ],
+      "expected": [
+        [
+          "needs-input"
+        ]
+      ]
+    },
+    {
+      "name": "shell-16",
+      "chunks": [
+        "\u001b[31mPassword:\u001b[0m "
+      ],
+      "expected": [
+        [
+          "needs-input"
+        ]
+      ]
+    },
+    {
+      "name": "shell-17",
+      "chunks": [
+        "﻿Password:"
+      ],
+      "expected": [
+        [
+          "needs-input"
+        ]
+      ]
+    },
+    {
+      "name": "shell-18",
+      "chunks": [
+        "Password:"
+      ],
+      "expected": [
+        []
+      ]
+    },
+    {
+      "name": "shell-19",
+      "chunks": [
+        "Type 😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀?"
+      ],
+      "expected": [
+        [
+          "needs-input"
+        ]
+      ]
+    },
+    {
+      "name": "shell-20",
+      "chunks": [
+        "Type 😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀?"
+      ],
+      "expected": [
+        []
+      ]
+    },
+    {
+      "name": "shell-21",
+      "chunks": [
+        "\u001b]133;D;-1\u001b\\",
+        "\u001b]133;D\u0007",
+        "\u001b]133;D;١٣٠\u0007",
+        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "Password: "
+      ],
+      "expected": [
+        [
+          "error"
+        ],
+        [
+          "idle"
+        ],
+        [],
+        [],
+        []
+      ]
+    }
+  ],
+  "cwd": [
+    {
+      "name": "cwd-0",
+      "chunks": [
+        "\u001b]7;file://host/tmp/first\u001b\\",
+        "\u001b]7;file://host/tmp/space%20name\u0007"
+      ],
+      "expected": [
+        "/tmp/first",
+        "/tmp/space name"
+      ]
+    },
+    {
+      "name": "cwd-1",
+      "chunks": [
+        "prefix\u001b]7;file://host/tmp/spl",
+        "it\u001b\\prompt"
+      ],
+      "expected": [
+        null,
+        "/tmp/split"
+      ]
+    },
+    {
+      "name": "cwd-2",
+      "chunks": [
+        "\u001b]7;https://host/tmp\u0007",
+        "\u001b]7;broken\u0007"
+      ],
+      "expected": [
+        null,
+        null
+      ]
+    },
+    {
+      "name": "cwd-3",
+      "chunks": [
+        "\u001b]7;file:///tmp/中文\u0007",
+        "\u001b]7;file:///tmp/%E4%B8%AD%E6%96%87\u0007"
+      ],
+      "expected": [
+        "/tmp/中文",
+        "/tmp/中文"
+      ]
+    },
+    {
+      "name": "cwd-4",
+      "chunks": [
+        "\u001b]7;file:///tmp/%ZZ\u0007",
+        "\u001b]7;file:///tmp/%FF\u0007",
+        "\u001b]7;file:///tmp/a/../b?x=1#hash\u0007"
+      ],
+      "expected": [
+        null,
+        null,
+        "/tmp/b"
+      ]
+    },
+    {
+      "name": "cwd-5",
+      "chunks": [
+        "\u001b]7;file:///tmp/first\u0007\u001b]7;file:///tmp/last\u001b\\",
+        "trailing"
+      ],
+      "expected": [
+        "/tmp/last",
+        null
+      ]
+    },
+    {
+      "name": "cwd-6",
+      "chunks": [
+        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\u001b]7;file:///tmp/tail\u0007"
+      ],
+      "expected": [
+        "/tmp/tail"
+      ]
+    }
+  ],
+  "summary": [
+    {
+      "name": "summary-0",
+      "raw": "one\r\ntwo\r\nthree\r\nfour\r\nfive\r\n",
+      "expected": [
+        "two",
+        "three",
+        "four",
+        "five"
+      ]
+    },
+    {
+      "name": "summary-1",
+      "raw": "\u001b[31m中文🙂\u001b[0m\r\n\u001b]7;file:///tmp\u0007next\r\n",
+      "expected": [
+        "中文🙂",
+        "next"
+      ]
+    },
+    {
+      "name": "summary-2",
+      "raw": "user@host ~ %\r\n%\r\n$\r\n#\r\n>\r\n",
+      "expected": []
+    },
+    {
+      "name": "summary-3",
+      "raw": "(venv) ➜ repo git:(main) ✗\r\n❯\r\n───\r\n⏸ manual mode on\r\nkept output",
+      "expected": [
+        "kept output"
+      ]
+    },
+    {
+      "name": "summary-4",
+      "raw": "\u001b(Balpha\rbravo\n﻿\n\n",
+      "expected": [
+        "alpha",
+        "bravo",
+        ""
+      ]
+    },
+    {
+      "name": "summary-5",
+      "raw": "Password: \r\nvalue accepted\r\n",
+      "expected": [
+        "Password:",
+        "value accepted"
+      ]
+    },
+    {
+      "name": "summary-6",
+      "raw": "partial\u001b]0;title\u001b\\tail\u001b[2K\r\nlatest",
+      "expected": [
+        "partialtail",
+        "latest"
+      ]
+    }
+  ],
+  "tail": [
+    {
+      "name": "utf16-boundary",
+      "raw": "ab😀z",
+      "limit": 2,
+      "expected": "�z"
+    }
+  ]
+}
