@@ -327,6 +327,12 @@ export class RuntimeClient {
   }
 
   #notifyEgressListeners(): void {
+    if (this.#egressStatus && typeof window !== 'undefined') {
+      const country = this.#egressStatus.families
+        .map(family => family.exit?.country?.trim())
+        .find(value => Boolean(value))
+      window.matouDesktop?.reportEgressCountry?.(country)
+    }
     for (const listener of this.#egressStatusListeners) listener()
   }
 

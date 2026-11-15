@@ -15,6 +15,31 @@ export interface SafeBrowserStatus { installed: boolean; version: string | null 
 const installedExecutable = '/Applications/安全浏览器.app/Contents/MacOS/Chromium'
 const executablePath = () => process.env.MATOU_SAFE_BROWSER_PATH || installedExecutable
 
+let latestCountry: string | undefined
+
+export function reportSafeBrowserCountry(country: unknown): void {
+  if (typeof country === 'string' && /^[a-z]{2}$/i.test(country.trim())) {
+    latestCountry = country.trim().toUpperCase()
+  }
+}
+
+export function safeBrowserTimeZone(): string {
+  return browserTimeZone(latestCountry)
+}
+
+export function safeBrowserAccountEnv(controller: SafeBrowserController, baseEnv = process.env): NodeJS.ProcessEnv {
+  const env = { ...baseEnv }
+  delete env.MATOU_SAFE_BROWSER_BIN
+  delete env.MATOU_SAFE_BROWSER_TZ
+  delete env.MATOU_SAFE_BROWSER_SEED
+  if (safeBrowserStatus().installed) {
+    env.MATOU_SAFE_BROWSER_BIN = executablePath()
+    env.MATOU_SAFE_BROWSER_TZ = safeBrowserTimeZone()
+    env.MATOU_SAFE_BROWSER_SEED = String(controller.getFingerprintSeed())
+  }
+  return env
+}
+
 export function safeBrowserStatus(): SafeBrowserStatus {
   const executable = executablePath()
   try {
@@ -122,6 +147,11 @@ export class SafeBrowserController {
     app.on('will-quit', this.onQuit)
   }
 
+  getFingerprintSeed(): number {
+    privateDirectory(this.userData, false)
+    return fingerprintSeed(this.userData)
+  }
+
   private onQuit = (event: Electron.Event): void => {
     if (this.quitComplete) return
     this.quitting = true
@@ -161,7 +191,7 @@ export class SafeBrowserController {
     privateDirectory(this.userData, false)
     const root = join(this.userData, 'safe-browser')
     privateDirectory(root)
-    const seed = fingerprintSeed(this.userData)
+    const seed = this.getFingerprintSeed()
     let profile = join(root, 'profile')
     if (ephemeral) {
       const tmp = join(root, 'tmp')

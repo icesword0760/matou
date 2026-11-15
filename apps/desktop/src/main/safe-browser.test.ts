@@ -5,7 +5,7 @@ import { PassThrough, Writable } from 'node:stream'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { app } from 'electron'
 import { spawn, execFileSync } from 'node:child_process'
-import { SafeBrowserController, browserTimeZone, safeBrowserStatus } from './safe-browser'
+import { SafeBrowserController, browserTimeZone, safeBrowserStatus, reportSafeBrowserCountry, safeBrowserTimeZone, safeBrowserAccountEnv } from './safe-browser'
 import { BrowserPipe } from './safe-browser-pipe'
 
 vi.mock('electron', async () => {
@@ -137,6 +137,41 @@ describe('safeBrowserStatus', () => {
   it('keeps an executable usable when its plist is missing or invalid', () => {
     vi.mocked(execFileSync).mockImplementation(() => { throw new Error('bad plist') })
     expect(safeBrowserStatus()).toEqual({ installed: true, version: null })
+  })
+})
+
+describe('sign-in browser context', () => {
+  it('uses Singapore until a country arrives, retains the last valid country and maps unknown countries', async () => {
+    vi.resetModules()
+    const context = await import('./safe-browser')
+    expect(context.safeBrowserTimeZone()).toBe('Asia/Singapore')
+    context.reportSafeBrowserCountry(' jp ')
+    expect(context.safeBrowserTimeZone()).toBe('Asia/Tokyo')
+    for (const value of [undefined, null, '', {}, 'Asia/Tokyo', 'JPN']) context.reportSafeBrowserCountry(value)
+    expect(context.safeBrowserTimeZone()).toBe('Asia/Tokyo')
+    context.reportSafeBrowserCountry('XX')
+    expect(context.safeBrowserTimeZone()).toBe('Asia/Singapore')
+  })
+  it('shares the persisted seed with account login and reads current country on each env call', async () => {
+    const value = controller()
+    const seed = value.getFingerprintSeed()
+    reportSafeBrowserCountry('US')
+    expect(safeBrowserAccountEnv(value, { PATH: '/fixture/bin' })).toEqual({
+      PATH: '/fixture/bin', MATOU_SAFE_BROWSER_BIN: executable,
+      MATOU_SAFE_BROWSER_TZ: 'America/Los_Angeles', MATOU_SAFE_BROWSER_SEED: String(seed)
+    })
+    reportSafeBrowserCountry('JP')
+    expect(safeBrowserAccountEnv(value).MATOU_SAFE_BROWSER_TZ).toBe('Asia/Tokyo')
+    await value.openPersistent('about:blank', safeBrowserTimeZone())
+    expect(argsFor()).toContain(`--fingerprint=${seed}`)
+    expect(value.getFingerprintSeed()).toBe(seed)
+  })
+  it('omits all safe-browser env when missing, including inherited values, without creating a seed', () => {
+    rmSync(executable)
+    expect(safeBrowserAccountEnv(controller(), {
+      PATH: '/fixture/bin', MATOU_SAFE_BROWSER_BIN: '/stale/kernel', MATOU_SAFE_BROWSER_TZ: 'Asia/Tokyo', MATOU_SAFE_BROWSER_SEED: '42'
+    })).toEqual({ PATH: '/fixture/bin' })
+    expect(existsSync(join(root, 'safe-browser.json'))).toBe(false)
   })
 })
 

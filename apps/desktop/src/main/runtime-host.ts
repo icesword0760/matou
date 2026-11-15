@@ -1,4 +1,5 @@
 import { isSubscriptionAuthorizationUrl } from '../../../runtime/src/model-router/authorization-url'
+import type { SafeBrowserController } from './safe-browser'
 import type { ClaudeAccountRuntimeAction, ClaudeAccountSession, ClaudeAccountRuntimeResult } from '@matou/contracts'
 import { randomUUID } from 'node:crypto'
 
@@ -98,6 +99,8 @@ interface PendingScaleMetrics {
 export interface RuntimeHostOptions {
   modelRouterBinary?: string
   openExternal?(url: string): Promise<void>
+  safeBrowser?: Pick<SafeBrowserController, 'openPersistent'>
+  safeBrowserTimeZone?: () => string
   /** Getter so a locale change applies without reconstructing the host. */
   messages?: () => MainMessages
   /** Getter for the current locale, forwarded to the forked Runtime as `MATOU_LOCALE`. */
@@ -106,6 +109,8 @@ export interface RuntimeHostOptions {
 
 export class RuntimeHost {
   readonly #openExternal: ((url: string) => Promise<void>) | undefined
+  readonly #safeBrowser: RuntimeHostOptions['safeBrowser']
+  readonly #safeBrowserTimeZone: () => string
   readonly #modelRouterBinary: string
   #routerCleanup: Promise<void> | undefined
   readonly #runtimeEntry: string
@@ -142,6 +147,8 @@ export class RuntimeHost {
     options: RuntimeHostOptions = {}
   ) {
     this.#openExternal = options.openExternal
+    this.#safeBrowser = options.safeBrowser
+    this.#safeBrowserTimeZone = options.safeBrowserTimeZone ?? (() => 'Asia/Singapore')
     this.#runtimeEntry = runtimeEntry
     this.#modelRouterBinary = options.modelRouterBinary ?? resolve(dirname(runtimeEntry), '../../../.cache/model-router/8.0.69', `darwin-${process.arch}`, 'model-router')
     this.#controlAssetRoot = controlAssetRoot
@@ -269,6 +276,12 @@ export class RuntimeHost {
           ? Promise.resolve().then(async () => {
               if ((request.provider !== 'codex' && request.provider !== 'antigravity') || typeof request.url !== 'string' ||
                   !isSubscriptionAuthorizationUrl(request.provider, request.url) || !this.#openExternal) throw new Error('Sign-in authorization URL is not allowed')
+              try {
+                if (this.#safeBrowser) {
+                  await this.#safeBrowser.openPersistent(request.url, this.#safeBrowserTimeZone())
+                  return
+                }
+              } catch { /* Any browser startup failure uses the existing system-browser path. */ }
               await this.#openExternal(request.url)
             })
           : request.action === 'start' ? routerOwner.start() : routerOwner.stop()

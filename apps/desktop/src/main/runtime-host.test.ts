@@ -36,6 +36,47 @@ beforeEach(() => {
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks() })
 
 describe('RuntimeHost', () => {
+  it.each(['codex', 'antigravity'] as const)('opens %s subscription sign-in in the safe browser without opening the system browser', async provider => {
+    const openExternal = vi.fn(async () => {})
+    const safeBrowser = { openPersistent: vi.fn(async () => {}) }
+    const timezone = vi.fn(() => 'Asia/Tokyo')
+    const host = new RuntimeHost('/runtime/index.cjs', undefined, { openExternal, safeBrowser, safeBrowserTimeZone: timezone })
+    const starting = host.start()
+    const child = electron.children[0] as MockUtilityProcess
+    child.emit('spawn')
+    await starting
+    const url = provider === 'codex'
+      ? 'https://auth.openai.com/oauth/authorize?redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback'
+      : 'https://accounts.google.com/o/oauth2/v2/auth?redirect_uri=http%3A%2F%2Flocalhost%3A51121%2Foauth-callback'
+    child.emit('message', { type: 'runtime.model-router-request', requestId: 'safe-auth', action: 'open-authorization', provider, url })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(safeBrowser.openPersistent).toHaveBeenCalledExactlyOnceWith(url, 'Asia/Tokyo')
+    expect(openExternal).not.toHaveBeenCalled()
+    expect(child.postMessage).toHaveBeenCalledWith({ type: 'runtime.model-router-result', requestId: 'safe-auth', ok: true })
+    child.emit('message', { type: 'runtime.model-router-request', requestId: 'bad-auth', action: 'open-authorization', provider, url: 'https://example.invalid/login' })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(safeBrowser.openPersistent).toHaveBeenCalledOnce()
+    expect(openExternal).not.toHaveBeenCalled()
+    const stopping = host.stop(); child.emit('exit', 0); await stopping
+  })
+
+  it.each(['safe-browser-missing', 'launch-failed'])('silently falls back once to the system browser on %s', async code => {
+    const openExternal = vi.fn(async () => {})
+    const safeBrowser = { openPersistent: vi.fn().mockRejectedValue(Object.assign(new Error('private URL must never be logged'), { code })) }
+    const log = vi.spyOn(console, 'log'), warn = vi.spyOn(console, 'warn'), error = vi.spyOn(console, 'error')
+    const host = new RuntimeHost('/runtime/index.cjs', undefined, { openExternal, safeBrowser })
+    const starting = host.start()
+    const child = electron.children[0] as MockUtilityProcess
+    child.emit('spawn'); await starting
+    const url = 'https://auth.openai.com/oauth/authorize?redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback'
+    child.emit('message', { type: 'runtime.model-router-request', requestId: 'fallback-auth', action: 'open-authorization', provider: 'codex', url })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(safeBrowser.openPersistent).toHaveBeenCalledExactlyOnceWith(url, 'Asia/Singapore')
+    expect(openExternal).toHaveBeenCalledExactlyOnceWith(url)
+    expect(child.postMessage).toHaveBeenCalledWith({ type: 'runtime.model-router-result', requestId: 'fallback-auth', ok: true })
+    expect(log).not.toHaveBeenCalled(); expect(warn).not.toHaveBeenCalled(); expect(error).not.toHaveBeenCalled()
+    const stopping = host.stop(); child.emit('exit', 0); await stopping
+  })
   it('waits for the old router to exit before launching a replacement runtime', async () => {
     let finishCleanup!: () => void
     const cleanup = new Promise<void>(done => { finishCleanup = done })
