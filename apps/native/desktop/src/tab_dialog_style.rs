@@ -190,7 +190,8 @@ pub fn dialog_title(text: impl Into<SharedString>) -> Div {
         .text_color(color_alpha(0x000000, 0.85))
         .text_size(px(16.))
         .font_weight(FontWeight::SEMIBOLD)
-        .child(ui_text(text))
+        .whitespace_nowrap()
+        .child(ui_text(text).normal_line_height())
 }
 
 /// `.dialog-close` (no light-theme override in frozen CSS; retains low-opacity white).
@@ -304,7 +305,8 @@ pub fn dialog_button(
         .px(px(16.))
         .rounded(px(8.))
         .text_size(px(14.))
-        .child(ui_text(label));
+        .whitespace_nowrap()
+        .child(ui_text(label).normal_line_height());
     let styled = if primary {
         let button = base.text_color(rgb(0xffffff)).bg(rgb(0x347fd6));
         if disabled {
