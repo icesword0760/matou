@@ -2877,13 +2877,13 @@ impl Workspace {
                     "移出工作空间",
                     tabs_ui::dialog_body().child(ui_text(format!(
                         "移出 \"{name}\" 会关闭该空间下的事项和终端会话，本地文件保持原样。 是否继续？"
-                    ))),
+                    )).pre_line()),
                     "移出",
                     true,
                     false,
                 ),
                 TabDialog::DeleteTask { title, .. } => (
-                    "提示", tabs_ui::dialog_body().child(format!("删除 \"{title}\" 会丢失该事项下所有终端会话，但不会删除本地目录。 是否继续？")), "确定", true, false,
+                    "提示", tabs_ui::dialog_body().child(ui_text(format!("删除 \"{title}\" 会丢失该事项下所有终端会话，但不会删除本地目录。 是否继续？")).pre_line()), "确定", true, false,
                 ),
                 TabDialog::Rename { scene_id, input } => {
                     let value = trim_name(&input.read(cx).text);
@@ -2948,7 +2948,7 @@ impl Workspace {
                     };
                     (
                         if *is_last { "提示" } else { "关闭画布" },
-                        tabs_ui::dialog_body().child(text),
+                        tabs_ui::dialog_body().child(ui_text(text).pre_line()),
                         if *is_last {
                             "我知道了"
                         } else {
