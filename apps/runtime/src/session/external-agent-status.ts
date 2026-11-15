@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import type { HudAgentActivity } from '@matou/contracts'
 
 export const STALE_AGENT_DETAIL = '状态已停止更新'
+export const INTERRUPTED_AGENT_DETAIL = '监工进程已退出，任务中断'
 export function sortAgents(agents: HudAgentActivity[]): HudAgentActivity[] {
   const rank = { error: 0, warning: 1, waiting: 2, running: 3 }
   return agents.sort((a, b) => rank[a.state] - rank[b.state] ||
@@ -12,6 +13,7 @@ interface ExternalStatus {
   activity: HudAgentActivity
   state: HudAgentActivity['state'] | 'completed' | 'stopped'
   updatedAt: number
+  pid?: number
 }
 const line = (value: string, limit: number) => value.split(/\r?\n/)[0]!.trim().slice(0, limit)
 function time(value: unknown): number | undefined {
@@ -30,19 +32,30 @@ function parse(filename: string, value: unknown): ExternalStatus | undefined {
     activity: { id: `external:${filename.slice(0, -5)}`, label: line(data.label, 60), source: 'external',
       state: data.state as HudAgentActivity['state'], startedAt,
       ...(typeof data.detail === 'string' ? { detail: line(data.detail, 120) } : {}) },
-    state: data.state as ExternalStatus['state'], updatedAt
+    state: data.state as ExternalStatus['state'], updatedAt,
+    ...(typeof data.pid === 'number' && Number.isInteger(data.pid) && data.pid > 0 ? { pid: data.pid } : {})
   }
+}
+
+function isProcessAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true }
+  catch (error) { return (error as NodeJS.ErrnoException).code === 'EPERM' }
 }
 
 /** A directory reader retains the last valid value only while its file still exists. */
 export class ExternalAgentStatusReader {
   readonly #valid = new Map<string, ExternalStatus>()
-  constructor(readonly directory: string, readonly now: () => number = Date.now) {}
+  readonly #interrupted = new Map<string, { pid: number; detectedAt: number }>()
+  constructor(readonly directory: string, readonly now: () => number = Date.now,
+    readonly alive: (pid: number) => boolean = isProcessAlive) {}
   read(): HudAgentActivity[] {
     let files: string[]
     try { files = readdirSync(this.directory).filter(name => /^[A-Za-z0-9._-]{1,80}\.json$/.test(name)) }
     catch { return this.#snapshot() }
-    for (const name of this.#valid.keys()) if (!files.includes(name)) this.#valid.delete(name)
+    for (const name of this.#valid.keys()) if (!files.includes(name)) {
+      this.#valid.delete(name)
+      this.#interrupted.delete(name)
+    }
     for (const name of files.sort()) {
       try {
         const valid = parse(name, JSON.parse(readFileSync(join(this.directory, name), 'utf8')))
@@ -52,7 +65,15 @@ export class ExternalAgentStatusReader {
     return this.#snapshot()
   }
   #snapshot(): HudAgentActivity[] {
-    return sortAgents([...this.#valid.values()].flatMap(({ activity, state, updatedAt }) => {
+    return sortAgents([...this.#valid.entries()].flatMap(([name, { activity, state, updatedAt, pid }]) => {
+      if (this.#interrupted.get(name)?.pid !== pid) this.#interrupted.delete(name)
+      if (pid !== undefined && (state === 'running' || state === 'waiting' || state === 'warning') && !this.alive(pid)) {
+        const interrupted = this.#interrupted.get(name) ?? { pid, detectedAt: this.now() }
+        this.#interrupted.set(name, interrupted)
+        if (this.now() - interrupted.detectedAt >= 300_000) return []
+        return [{ ...activity, state: 'error' as const, detail: INTERRUPTED_AGENT_DETAIL }]
+      }
+      this.#interrupted.delete(name)
       const age = this.now() - updatedAt
       if (state === 'completed' || state === 'stopped' || (state === 'error' && age >= 300_000)) return []
       return [{ ...activity, ...(state !== 'error' && age > 60_000 ? { state: 'error' as const, detail: STALE_AGENT_DETAIL } : {}) }]
