@@ -277,6 +277,11 @@ impl TerminalSurface {
         }
     }
 
+    pub fn contains_position(&self, position: Point<Pixels>) -> bool {
+        self.grid
+            .is_some_and(|grid| grid.bounds.contains(&position))
+    }
+
     fn on_scroll(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
         if event.modifiers.control || event.modifiers.platform {
             return;

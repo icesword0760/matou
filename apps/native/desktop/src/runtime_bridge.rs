@@ -84,6 +84,10 @@ pub enum Command {
         scene_id: String,
         session_id: String,
     },
+    PutGeometry {
+        sequence: u64,
+        update: matou_native_core::geometry::GeometryUpdate,
+    },
     Refresh,
     Shutdown,
 }
@@ -93,11 +97,22 @@ pub enum Event {
         hierarchy: HierarchyResult,
         scenes: Vec<Scene>,
         graph: Value,
+        geometry: Vec<matou_native_core::geometry::GeometryUpdate>,
     },
     Navigation {
         hierarchy: HierarchyResult,
         scenes: Vec<Scene>,
         graph: Value,
+        geometry: Vec<matou_native_core::geometry::GeometryUpdate>,
+    },
+    NavigationFailed {
+        message: String,
+        attempted_focus: Option<(String, String)>,
+    },
+    GeometryResult {
+        sequence: u64,
+        update: matou_native_core::geometry::GeometryUpdate,
+        error: Option<String>,
     },
     Graph(Value),
     Frame {
@@ -237,6 +252,7 @@ fn run(
         hierarchy,
         scenes,
         graph: owner.graph(&scene_id, Some(window_id))?,
+        geometry: owner.geometry(&scene_id)?,
     })?;
     let mut dirty: HashSet<String> = sessions.iter().cloned().collect();
     let mut sequence = HashMap::<String, u64>::new();
@@ -263,6 +279,13 @@ fn run(
             ) {
                 // Each command mutates the authoritative domain before the view changes.
                 // A failed launch leaves its real created structure available for recovery.
+                let attempted_focus = match &command {
+                    Command::FocusSession {
+                        scene_id,
+                        session_id,
+                    } => Some((scene_id.clone(), session_id.clone())),
+                    _ => None,
+                };
                 match navigate(&mut owner, window_id, command) {
                     Ok(hierarchy) => {
                         scene_id = hierarchy
@@ -282,6 +305,7 @@ fn run(
                             hierarchy,
                             scenes,
                             graph: owner.graph(&scene_id, Some(window_id))?,
+                            geometry: owner.geometry(&scene_id)?,
                         })?;
                         if let Err(error) =
                             ensure_scene_shells(&mut owner, &options, &scene_id, &mut sessions)
@@ -291,7 +315,10 @@ fn run(
                         // Existing workers and terminal surfaces remain alive across tab changes.
                         dirty.extend(sessions.iter().cloned());
                     }
-                    Err(error) => send.send_blocking(Event::Diagnostic(format!("{error:#}")))?,
+                    Err(error) => send.send_blocking(Event::NavigationFailed {
+                        message: format!("{error:#}"),
+                        attempted_focus,
+                    })?,
                 }
                 continue;
             }
@@ -342,6 +369,18 @@ fn run(
                 }
                 Command::RetryStorage { session_id } => {
                     (session_id, WorkerCommand::RetryStorage { reply }, true)
+                }
+                Command::PutGeometry { sequence, update } => {
+                    let error = owner
+                        .put_geometry(&update)
+                        .err()
+                        .map(|error| format!("{error:#}"));
+                    send.send_blocking(Event::GeometryResult {
+                        sequence,
+                        update,
+                        error,
+                    })?;
+                    continue;
                 }
                 Command::Refresh => {
                     dirty.extend(sessions.iter().cloned());

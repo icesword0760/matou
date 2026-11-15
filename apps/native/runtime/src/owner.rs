@@ -135,6 +135,19 @@ impl ShellOwner {
         hierarchy::list_scenes(&self.connection, task_id)
     }
 
+    pub fn geometry(
+        &self,
+        scene_id: &str,
+    ) -> Result<Vec<matou_native_core::geometry::GeometryUpdate>> {
+        matou_native_core::geometry::list(&self.connection, scene_id)
+    }
+    pub fn put_geometry(
+        &self,
+        update: &matou_native_core::geometry::GeometryUpdate,
+    ) -> Result<matou_native_core::geometry::GeometryUpdate> {
+        matou_native_core::geometry::put(&self.connection, update)
+    }
+
     pub fn select_scene(
         &mut self,
         window_id: &str,

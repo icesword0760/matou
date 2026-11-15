@@ -273,6 +273,7 @@ impl<'a> Probe<'a> {
                 hierarchy,
                 scenes,
                 graph,
+                ..
             } => Ok(Some(Navigation::read(hierarchy, scenes, graph)?)),
             _ => Ok(None),
         })
@@ -285,6 +286,7 @@ impl<'a> Probe<'a> {
                 hierarchy,
                 scenes,
                 graph,
+                ..
             } => Ok(Some(Navigation::read(hierarchy, scenes, graph)?)),
             _ => Ok(None),
         })

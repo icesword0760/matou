@@ -41,3 +41,13 @@ pub fn apply_sidebar_material(window: &Window) -> Result<()> {
     }
     Ok(())
 }
+
+/// Read the same accessibility preference that Chromium exposes to CSS.
+pub fn reduced_motion() -> bool {
+    unsafe {
+        let workspace: id = msg_send![class!(NSWorkspace), sharedWorkspace];
+        let reduced: cocoa::base::BOOL =
+            msg_send![workspace, accessibilityDisplayShouldReduceMotion];
+        reduced == cocoa::base::YES
+    }
+}

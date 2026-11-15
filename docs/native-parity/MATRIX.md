@@ -140,3 +140,15 @@ This does not close a whole capability group. Images under `artifacts/native-par
 | A08 multi-Shell reopen | Source persistent navigation plus D01 completed-command restoration | B07-native-reopen-canvas.png shows active canvas, first-card focus, both histories and a fresh executed marker; actual app quit/relaunch | Full crash, Agent, large-history and window geometry cases open |
 
 The screenshots are functional evidence, not a passed same-state pixel comparison. All referenced images and canvas-build.json are under artifacts/native-parity/native/evidence; B01 is a reference-app image captured there for this paired sequence.
+
+
+## Carousel motion and geometry — N02w/x
+
+| Scenario | Frozen reference | Native result / evidence | Remaining difference |
+| --- | --- | --- | --- |
+| A03 card selection motion | Actual CSS browser samples: width380ms/lift180ms, two interrupted reversals | `carousel_motion_contract`; actual paint traces, C01/C02 screenshots and real post-switch input | Full matched-state frame/pixel comparison not complete |
+| A03 ordinary hover | D15/D16 isolate preview/return without edge intent | D01–D07 show expansion, unchanged keyboard input target and restoration | Horizontal gestures and all interruption combinations not accepted |
+| A03 edge browse | D08–D10/source: dwell180ms, browse900ms, keep position on leave | D17/D18 native dwell/leave demonstrated | Indicator timing/pixel comparison still open |
+| A03 narrow card | Frozen source compact summary styles and widths | Native compact summary renders/activates; ordinary terminal input works after selection | Full narrow state/resize pixel matrix open |
+| A03/A16 canvas anchor | Frozen geometry repository fixture and source saved root-group geometry | `geometry_contract`, SQLite `geometry-before-reopen.json`, D07 and D11/D12 tab/quit/reopen | Nested groups/DAG/window geometry not yet connected |
+| A16 geometry write failure | Source latest-write retry120ms, up to3 retries | Real SQLite trigger failure then same-value success129.1ms, D22/`geometry-transient-failure.json` | Latest build exact-value retry127.4ms passed; delayed-focus/tab switch verified with a real DB lock; sub120ms failure/reentry ordering source-reviewed only |
