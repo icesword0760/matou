@@ -4,7 +4,7 @@ mod transaction;
 use anyhow::Result;
 use rusqlite::Connection;
 
-pub use migrations::{MigrationReport, migrate};
+pub use migrations::{MigrationReport, migrate, migrate_with_backup, supported_schema_version};
 pub use transaction::{
     CommandMetadata, CommandReplayConflictError, DomainCommit, DomainEventInput, execute,
 };

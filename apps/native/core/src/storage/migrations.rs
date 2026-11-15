@@ -42,6 +42,25 @@ impl Migration {
 
 /// Apply the frozen source migrations. The caller owns backups and recovery.
 pub fn migrate(connection: &mut Connection, applied_at: i64) -> Result<MigrationReport> {
+    migrate_with_backup(connection, applied_at, |_| Ok(()))
+}
+
+pub fn supported_schema_version() -> Result<i64> {
+    let migrations: Vec<Migration> = serde_json::from_str(CATALOG)?;
+    Ok(migrations
+        .iter()
+        .map(|migration| migration.version)
+        .max()
+        .unwrap_or(0))
+}
+
+/// Invoke the existing pre-migration backup boundary after validating history,
+/// and before creating/updating the history table or applying any pending SQL.
+pub fn migrate_with_backup(
+    connection: &mut Connection,
+    applied_at: i64,
+    backup: impl FnOnce(&Connection) -> Result<()>,
+) -> Result<MigrationReport> {
     let mut migrations: Vec<Migration> = serde_json::from_str(CATALOG)?;
     migrations.sort_unstable_by_key(|migration| migration.version);
     validate_catalog(&migrations)?;
@@ -88,6 +107,12 @@ pub fn migrate(connection: &mut Connection, applied_at: i64) -> Result<Migration
         }
     }
 
+    if migrations
+        .iter()
+        .any(|migration| migration.version > current_version)
+    {
+        backup(connection)?;
+    }
     connection.execute_batch(
         "CREATE TABLE IF NOT EXISTS schema_migrations (
         version INTEGER PRIMARY KEY,

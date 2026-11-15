@@ -20,6 +20,13 @@ desktop application. Product scope and acceptance remain in
   the restoration preference and localized divider text.
 - `core::ownership`: atomic data-directory owner publication, live-process
   exclusion, stale takeover and generation-safe release before opening SQLite.
+- `core::backup` and `core::recovery_marker`: SQLite online backups, validated
+  retention/restore, stable recovery generations and durable resolution records.
+- `core::startup`: owner-first inspection, pre-migration backups, read-only
+  fallback and corruption/WAL recovery state. It opens only the caller-supplied
+  data root; the app entry point and recovery actions remain to be connected.
+- `core::sessions`: ordinary-Shell creation, run lifecycle, title/cwd updates
+  and archive transactions, preserving existing events and replay receipts.
 - `core::journal` and `core::durability`: ordered segmented output, indexes,
   compression, recovery and bounded storage-fault pause/retry.
 - `core::pty`: real platform PTY launch, environment, resize, process control
@@ -33,10 +40,10 @@ desktop application. Product scope and acceptance remain in
   and seeds the new terminal before its live prompt. It consumes a pre-opened
   database and lease; it does not replace database startup/recovery policy.
 
-The connection caller owns data-directory locking, pre-migration backups and the
-recovery interface. No current entry point opens production data. Runtime startup,
-domain lifecycle, process/IPC integration, GPUI views, native packaging and full
-platform acceptance are still pending.
+The application must connect startup results and recovery choices to the runtime
+owner and views. No current entry point opens production data. Clean-exit backup,
+Shell lifecycle event wiring, process/IPC integration, GPUI views, native packaging
+and full platform acceptance are still pending.
 
 ## Check the implemented contracts
 

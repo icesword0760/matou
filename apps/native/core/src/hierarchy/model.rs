@@ -145,7 +145,7 @@ pub struct Session {
 }
 
 impl Session {
-    pub(super) fn from_row(row: &Row<'_>) -> Result<Self> {
+    pub(crate) fn from_row(row: &Row<'_>) -> Result<Self> {
         Ok(Self {
             id: row.get("id")?,
             task_id: row.get("task_id")?,

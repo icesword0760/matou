@@ -8,7 +8,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{Result, anyhow, ensure};
+use anyhow::{Context, Result, anyhow, ensure};
 use rusqlite::{Connection, ErrorCode, OpenFlags, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 
@@ -117,6 +117,61 @@ pub fn read_database_owner(owner_path: &Path) -> Option<OwnerRecord> {
         Inspection::Valid(_, record) => Some(record),
         _ => None,
     }
+}
+
+/// Read-only startup checks the live owner before inspecting user data.
+pub fn assert_no_live_owner(database_path: &Path) -> Result<()> {
+    let owner_path = append_suffix(database_path, ".owner");
+    if !owner_path.exists() {
+        return Ok(());
+    }
+    match inspect(&owner_path) {
+        Inspection::Malformed(error) => {
+            Err(OwnerRecoveryError::new("owner-record-malformed", &owner_path, error).into())
+        }
+        Inspection::Absent => Err(anyhow!(CONFLICT)),
+        Inspection::Valid(_, record) if is_live(record.pid) => Err(anyhow!(CONFLICT)),
+        Inspection::Valid(..) => Ok(()),
+    }
+}
+
+/// The existing recovery-action fence is separate from the live runtime lease.
+/// Operation errors retain their original cause (unlike stale-owner takeover).
+pub(crate) fn with_recovery_action_fence<T>(
+    database_path: &Path,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let path = append_suffix(database_path, ".recovery-action.sqlite");
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.is_file() => repair_mode(&path, &metadata),
+        Ok(_) => {
+            return Err(OwnerRecoveryError::new(
+                "takeover-sidecar-unusable",
+                &path,
+                anyhow!("takeover sidecar is not a regular file"),
+            )
+            .into());
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(OwnerRecoveryError::new("takeover-sidecar-unusable", &path, error).into());
+        }
+    }
+    let sqlite_path = parent(&path).canonicalize()?.join(
+        path.file_name()
+            .context("missing recovery fence filename")?,
+    );
+    let mut connection = Connection::open_with_flags(
+        sqlite_path,
+        OpenFlags::default() | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )?;
+    repair_mode(&path, &fs::symlink_metadata(&path)?);
+    connection.busy_timeout(Duration::from_millis(5000))?;
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Exclusive)?;
+    let result = operation()?;
+    transaction.commit()?;
+    connection.close().map_err(|(_, error)| error)?;
+    Ok(result)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -359,12 +414,12 @@ fn repair_mode(_path: &Path, _metadata: &Metadata) {
 }
 
 #[cfg(unix)]
-fn sync_directory(path: &Path) -> io::Result<()> {
+pub(crate) fn sync_directory(path: &Path) -> io::Result<()> {
     fs::File::open(path)?.sync_all()
 }
 
 #[cfg(windows)]
-fn sync_directory(path: &Path) -> io::Result<()> {
+pub(crate) fn sync_directory(path: &Path) -> io::Result<()> {
     use std::os::windows::fs::OpenOptionsExt;
     use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
     // CreateFileW needs BACKUP_SEMANTICS for directories and GENERIC_WRITE
