@@ -1,0 +1,584 @@
+{
+  "provenance": {
+    "source": "frozen source services executed using captured reference Electron runtime",
+    "node": "24.18.1",
+    "sqlite": "3.53.1",
+    "generator": "tooling/native-parity/export-storage-contract.ts"
+  },
+  "schema": [
+    {
+      "type": "index",
+      "name": "active_pinned_scene_title_idx",
+      "tbl_name": "scenes",
+      "sql": "CREATE UNIQUE INDEX active_pinned_scene_title_idx\n      ON scenes(task_id, name)\n      WHERE archived_at IS NULL AND title_pinned = 1"
+    },
+    {
+      "type": "index",
+      "name": "active_task_name_idx",
+      "tbl_name": "tasks",
+      "sql": "CREATE UNIQUE INDEX active_task_name_idx\n      ON tasks(workspace_id, title)\n      WHERE archived_at IS NULL"
+    },
+    {
+      "type": "index",
+      "name": "active_task_window_migration_idx",
+      "tbl_name": "task_window_migrations",
+      "sql": "CREATE UNIQUE INDEX active_task_window_migration_idx\n      ON task_window_migrations(task_id) WHERE state = 'preparing'"
+    },
+    {
+      "type": "index",
+      "name": "domain_events_aggregate_idx",
+      "tbl_name": "domain_events",
+      "sql": "CREATE INDEX domain_events_aggregate_idx ON domain_events(aggregate_type, aggregate_id, seq)"
+    },
+    {
+      "type": "index",
+      "name": "domain_events_session_idx",
+      "tbl_name": "domain_events",
+      "sql": "CREATE INDEX domain_events_session_idx ON domain_events(session_id, seq)"
+    },
+    {
+      "type": "index",
+      "name": "fork_batch_items_session_idx",
+      "tbl_name": "fork_batch_items",
+      "sql": "CREATE INDEX fork_batch_items_session_idx\n      ON fork_batch_items(session_id)"
+    },
+    {
+      "type": "index",
+      "name": "fork_batch_public_request_idx",
+      "tbl_name": "fork_batch_ledger",
+      "sql": "CREATE INDEX fork_batch_public_request_idx\n      ON fork_batch_ledger(public_request_fingerprint)"
+    },
+    {
+      "type": "index",
+      "name": "fork_batch_retry_attempts_batch_idx",
+      "tbl_name": "fork_batch_retry_attempts",
+      "sql": "CREATE INDEX fork_batch_retry_attempts_batch_idx\n      ON fork_batch_retry_attempts(batch_key, created_at, attempt_id)"
+    },
+    {
+      "type": "index",
+      "name": "one_active_default_workspace_idx",
+      "tbl_name": "workspaces",
+      "sql": "CREATE UNIQUE INDEX one_active_default_workspace_idx\n      ON workspaces(is_default) WHERE is_default = 1 AND archived_at IS NULL"
+    },
+    {
+      "type": "index",
+      "name": "one_structural_parent_idx",
+      "tbl_name": "session_relations_current",
+      "sql": "CREATE UNIQUE INDEX one_structural_parent_idx\n      ON session_relations_current(from_session_id)\n      WHERE relation_kind IN ('forked-from', 'derived-from')"
+    },
+    {
+      "type": "index",
+      "name": "session_canvas_memberships_scene_idx",
+      "tbl_name": "session_canvas_memberships",
+      "sql": "CREATE INDEX session_canvas_memberships_scene_idx\n      ON session_canvas_memberships(\n        scene_id,\n        last_user_interaction_seq DESC,\n        sibling_created_seq ASC\n      )"
+    },
+    {
+      "type": "index",
+      "name": "session_environment_local_context_idx",
+      "tbl_name": "session_environment_bindings",
+      "sql": "CREATE INDEX session_environment_local_context_idx\n      ON session_environment_bindings(local_execution_context_id)"
+    },
+    {
+      "type": "index",
+      "name": "session_fork_intents_lease_idx",
+      "tbl_name": "session_fork_intents",
+      "sql": "CREATE INDEX session_fork_intents_lease_idx\n      ON session_fork_intents(stage, lease_expires_at, created_at)"
+    },
+    {
+      "type": "index",
+      "name": "session_fork_intents_operation_idx",
+      "tbl_name": "session_fork_intents",
+      "sql": "CREATE UNIQUE INDEX session_fork_intents_operation_idx\n      ON session_fork_intents(operation_id)"
+    },
+    {
+      "type": "index",
+      "name": "session_fork_intents_source_idx",
+      "tbl_name": "session_fork_intents",
+      "sql": "CREATE INDEX session_fork_intents_source_idx\n      ON session_fork_intents(source_session_id, created_at)"
+    },
+    {
+      "type": "index",
+      "name": "session_fork_intents_submission_idx",
+      "tbl_name": "session_fork_intents",
+      "sql": "CREATE UNIQUE INDEX session_fork_intents_submission_idx\n      ON session_fork_intents(submission_key)"
+    },
+    {
+      "type": "index",
+      "name": "session_mounts_window_idx",
+      "tbl_name": "session_mounts",
+      "sql": "CREATE INDEX session_mounts_window_idx ON session_mounts(scene_window_id)"
+    },
+    {
+      "type": "index",
+      "name": "session_relation_events_relation_idx",
+      "tbl_name": "session_relation_events",
+      "sql": "CREATE INDEX session_relation_events_relation_idx ON session_relation_events(relation_id, sequence)"
+    },
+    {
+      "type": "index",
+      "name": "session_relations_structural_lookup_idx",
+      "tbl_name": "session_relations_current",
+      "sql": "CREATE INDEX session_relations_structural_lookup_idx\n      ON session_relations_current(from_session_id, relation_kind)"
+    },
+    {
+      "type": "index",
+      "name": "sessions_task_idx",
+      "tbl_name": "sessions",
+      "sql": "CREATE INDEX sessions_task_idx ON sessions(task_id, archived_at, last_activity_at)"
+    },
+    {
+      "type": "index",
+      "name": "shell_history_blocks_session_completed_idx",
+      "tbl_name": "shell_history_blocks",
+      "sql": "CREATE INDEX shell_history_blocks_session_completed_idx\n      ON shell_history_blocks(session_id, completed_at DESC, id DESC)"
+    },
+    {
+      "type": "index",
+      "name": "task_logs_task_idx",
+      "tbl_name": "task_logs",
+      "sql": "CREATE INDEX task_logs_task_idx ON task_logs(task_id, id)"
+    },
+    {
+      "type": "index",
+      "name": "tasks_workspace_idx",
+      "tbl_name": "tasks",
+      "sql": "CREATE INDEX tasks_workspace_idx ON tasks(workspace_id, archived_at, updated_at)"
+    },
+    {
+      "type": "index",
+      "name": "terminal_commands_session_sequence_idx",
+      "tbl_name": "terminal_commands",
+      "sql": "CREATE INDEX terminal_commands_session_sequence_idx\n      ON terminal_commands(session_id, started_sequence)"
+    },
+    {
+      "type": "table",
+      "name": "_runtime_meta",
+      "tbl_name": "_runtime_meta",
+      "sql": "CREATE TABLE _runtime_meta (\n          key TEXT PRIMARY KEY,\n          value TEXT NOT NULL\n        ) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "annotations",
+      "tbl_name": "annotations",
+      "sql": "CREATE TABLE annotations (\n  id TEXT PRIMARY KEY,\n  task_id TEXT NOT NULL REFERENCES tasks(id),\n  session_id TEXT NOT NULL REFERENCES sessions(id),\n  kind TEXT NOT NULL,\n  text_snapshot TEXT NOT NULL,\n  anchor_json TEXT NOT NULL,\n  status TEXT NOT NULL CHECK (status IN ('active', 'completed', 'degraded', 'archived')),\n  created_at INTEGER NOT NULL,\n  updated_at INTEGER NOT NULL\n) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "app_windows",
+      "tbl_name": "app_windows",
+      "sql": "CREATE TABLE app_windows (\n        id TEXT PRIMARY KEY,\n        kind TEXT NOT NULL CHECK (kind IN ('main', 'detached-terminal')),\n        state TEXT NOT NULL CHECK (state IN ('visible', 'hidden', 'closed')),\n        created_at INTEGER NOT NULL,\n        updated_at INTEGER NOT NULL\n      ) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "artifacts",
+      "tbl_name": "artifacts",
+      "sql": "CREATE TABLE artifacts (\n  id TEXT PRIMARY KEY,\n  task_id TEXT NOT NULL REFERENCES tasks(id),\n  producer_session_id TEXT REFERENCES sessions(id),\n  path_identity TEXT NOT NULL,\n  media_type TEXT,\n  state TEXT NOT NULL CHECK (state IN ('observed', 'produced', 'modified', 'missing', 'archived')),\n  metadata_json TEXT NOT NULL DEFAULT '{}',\n  created_at INTEGER NOT NULL,\n  updated_at INTEGER NOT NULL,\n  UNIQUE(task_id, path_identity)\n) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "bootstrap_state",
+      "tbl_name": "bootstrap_state",
+      "sql": "CREATE TABLE bootstrap_state (\n        key TEXT PRIMARY KEY,\n        value_json TEXT NOT NULL,\n        updated_at INTEGER NOT NULL\n      ) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "command_deduplication",
+      "tbl_name": "command_deduplication",
+      "sql": "CREATE TABLE command_deduplication (\n  command_id TEXT PRIMARY KEY,\n  command_type TEXT NOT NULL,\n  request_hash TEXT NOT NULL,\n  response_json TEXT NOT NULL,\n  first_event_seq INTEGER,\n  last_event_seq INTEGER,\n  committed_at INTEGER NOT NULL\n) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "consumer_cursors",
+      "tbl_name": "consumer_cursors",
+      "sql": "CREATE TABLE consumer_cursors (\n  consumer_id TEXT PRIMARY KEY,\n  last_event_seq INTEGER NOT NULL DEFAULT 0,\n  updated_at INTEGER NOT NULL\n) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "domain_events",
+      "tbl_name": "domain_events",
+      "sql": "CREATE TABLE domain_events (\n  seq INTEGER PRIMARY KEY AUTOINCREMENT,\n  event_id TEXT NOT NULL UNIQUE,\n  event_type TEXT NOT NULL,\n  aggregate_type TEXT NOT NULL,\n  aggregate_id TEXT NOT NULL,\n  workspace_id TEXT REFERENCES workspaces(id),\n  task_id TEXT REFERENCES tasks(id),\n  session_id TEXT REFERENCES sessions(id),\n  payload_json TEXT NOT NULL,\n  schema_version INTEGER NOT NULL,\n  required_terminal_sequence INTEGER,\n  command_id TEXT NOT NULL,\n  causation_id TEXT,\n  correlation_id TEXT,\n  occurred_at INTEGER NOT NULL\n) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "execution_context_git_states",
+      "tbl_name": "execution_context_git_states",
+      "sql": "CREATE TABLE execution_context_git_states (\n        execution_context_id TEXT PRIMARY KEY\n          REFERENCES execution_contexts(id) ON DELETE CASCADE,\n        repository_root TEXT,\n        state TEXT NOT NULL CHECK (state IN ('ready', 'unavailable')),\n        branch TEXT,\n        detached_head TEXT,\n        dirty INTEGER NOT NULL CHECK (dirty IN (0, 1)),\n        error_message TEXT,\n        updated_at INTEGER NOT NULL,\n        CHECK (\n          state = 'unavailable' OR (\n            repository_root IS NOT NULL AND\n            ((branch IS NOT NULL) <> (detached_head IS NOT NULL))\n          )\n        ),\n        CHECK (\n          state = 'ready' OR (\n            branch IS NULL AND detached_head IS NULL AND dirty = 0\n          )\n        )\n      ) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "execution_contexts",
+      "tbl_name": "execution_contexts",
+      "sql": "CREATE TABLE execution_contexts (\n  id TEXT PRIMARY KEY,\n  workspace_id TEXT NOT NULL REFERENCES workspaces(id),\n  kind TEXT NOT NULL CHECK (kind IN ('plain-directory', 'git-worktree')),\n  cwd TEXT NOT NULL,\n  created_at INTEGER NOT NULL,\n  archived_at INTEGER\n) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "feature_campaign_views",
+      "tbl_name": "feature_campaign_views",
+      "sql": "CREATE TABLE feature_campaign_views (\n  campaign_id TEXT NOT NULL,\n  campaign_version INTEGER NOT NULL,\n  viewed_at INTEGER NOT NULL,\n  PRIMARY KEY(campaign_id, campaign_version)\n) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "fork_batch_items",
+      "tbl_name": "fork_batch_items",
+      "sql": "CREATE TABLE fork_batch_items (\n        batch_key TEXT NOT NULL REFERENCES fork_batch_ledger(batch_key) ON DELETE CASCADE,\n        item_key TEXT NOT NULL,\n        ordinal INTEGER NOT NULL CHECK (ordinal >= 0),\n        item_fingerprint TEXT NOT NULL,\n        submission_key TEXT NOT NULL UNIQUE,\n        title TEXT NOT NULL,\n        environment_json TEXT NOT NULL,\n        start_requested INTEGER NOT NULL CHECK (start_requested IN (0, 1)),\n        prompt_fingerprint TEXT,\n        session_id TEXT,\n        state TEXT NOT NULL CHECK (\n          state IN ('unsubmitted', 'created', 'ready', 'started', 'failed')\n        ),\n        start_state TEXT NOT NULL CHECK (\n          start_state IN (\n            'not-requested', 'pending', 'waiting', 'delivering',\n            'completed', 'failed', 'uncertain'\n          )\n        ),\n        error_message TEXT,\n        created_at INTEGER NOT NULL,\n        updated_at INTEGER NOT NULL, failure_generation INTEGER NOT NULL DEFAULT 0\n        CHECK (failure_generation >= 0), failure_receipt TEXT,\n        PRIMARY KEY (batch_key, item_key),\n        UNIQUE (batch_key, ordinal)\n      ) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "fork_batch_ledger",
+      "tbl_name": "fork_batch_ledger",
+      "sql": "CREATE TABLE fork_batch_ledger (\n        batch_key TEXT PRIMARY KEY,\n        request_fingerprint TEXT NOT NULL,\n        caller_session_id TEXT NOT NULL,\n        source_session_id TEXT NOT NULL,\n        source_scene_id TEXT NOT NULL,\n        item_count INTEGER NOT NULL CHECK (item_count >= 0 AND item_count <= 50),\n        created_at INTEGER NOT NULL,\n        updated_at INTEGER NOT NULL\n      , public_request_fingerprint TEXT, resolved_request_json TEXT) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "fork_batch_retry_attempts",
+      "tbl_name": "fork_batch_retry_attempts",
+      "sql": "CREATE TABLE fork_batch_retry_attempts (\n        attempt_id TEXT PRIMARY KEY,\n        batch_key TEXT NOT NULL REFERENCES fork_batch_ledger(batch_key) ON DELETE CASCADE,\n        batch_request_fingerprint TEXT NOT NULL,\n        request_fingerprint TEXT NOT NULL,\n        retry_keys_json TEXT NOT NULL,\n        failure_generations_json TEXT NOT NULL,\n        state TEXT NOT NULL CHECK (state IN ('pending', 'completed')),\n        created_at INTEGER NOT NULL,\n        updated_at INTEGER NOT NULL, replay_pending INTEGER NOT NULL DEFAULT 0\n        CHECK (replay_pending IN (0, 1)),\n        UNIQUE (batch_key, request_fingerprint)\n      ) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "fork_batch_retry_items",
+      "tbl_name": "fork_batch_retry_items",
+      "sql": "CREATE TABLE fork_batch_retry_items (\n        attempt_id TEXT NOT NULL\n          REFERENCES fork_batch_retry_attempts(attempt_id) ON DELETE CASCADE,\n        batch_key TEXT NOT NULL,\n        item_key TEXT NOT NULL,\n        ordinal INTEGER NOT NULL CHECK (ordinal >= 0),\n        failure_generation INTEGER NOT NULL CHECK (failure_generation > 0),\n        state TEXT NOT NULL CHECK (state IN ('pending', 'executing', 'completed', 'failed')),\n        session_id TEXT,\n        result_state TEXT CHECK (\n          result_state IS NULL OR result_state IN ('created', 'ready', 'started', 'failed')\n        ),\n        result_failure_generation INTEGER CHECK (\n          result_failure_generation IS NULL OR result_failure_generation > 0\n        ),\n        error_message TEXT,\n        created_at INTEGER NOT NULL,\n        updated_at INTEGER NOT NULL,\n        PRIMARY KEY (attempt_id, item_key),\n        UNIQUE (attempt_id, ordinal),\n        FOREIGN KEY (batch_key, item_key)\n          REFERENCES fork_batch_items(batch_key, item_key) ON DELETE CASCADE\n      ) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "journal_checkpoints",
+      "tbl_name": "journal_checkpoints",
+      "sql": "CREATE TABLE journal_checkpoints (\n  id TEXT PRIMARY KEY,\n  session_id TEXT NOT NULL REFERENCES sessions(id),\n  generation INTEGER NOT NULL,\n  terminal_sequence INTEGER NOT NULL,\n  domain_event_sequence INTEGER NOT NULL,\n  screen_epoch INTEGER NOT NULL,\n  file_path TEXT NOT NULL,\n  checksum TEXT NOT NULL,\n  created_at INTEGER NOT NULL,\n  valid INTEGER NOT NULL DEFAULT 1 CHECK (valid IN (0, 1)),\n  UNIQUE(session_id, generation)\n) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "legacy_entity_mappings",
+      "tbl_name": "legacy_entity_mappings",
+      "sql": "CREATE TABLE legacy_entity_mappings (\n  import_run_id TEXT NOT NULL REFERENCES legacy_import_runs(id),\n  legacy_type TEXT NOT NULL,\n  legacy_id TEXT NOT NULL,\n  entity_type TEXT NOT NULL,\n  entity_id TEXT NOT NULL,\n  PRIMARY KEY(import_run_id, legacy_type, legacy_id)\n) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "legacy_import_runs",
+      "tbl_name": "legacy_import_runs",
+      "sql": "CREATE TABLE legacy_import_runs (\n  id TEXT PRIMARY KEY,\n  source_fingerprint TEXT NOT NULL UNIQUE,\n  status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed')),\n  report_json TEXT NOT NULL DEFAULT '{}',\n  started_at INTEGER NOT NULL,\n  completed_at INTEGER\n) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "legacy_projection_diffs",
+      "tbl_name": "legacy_projection_diffs",
+      "sql": "CREATE TABLE legacy_projection_diffs (\n        id INTEGER PRIMARY KEY AUTOINCREMENT,\n        source_id TEXT NOT NULL,\n        equal INTEGER NOT NULL CHECK (equal IN (0, 1)),\n        diff_json TEXT NOT NULL,\n        legacy_fingerprint TEXT NOT NULL,\n        sqlite_fingerprint TEXT NOT NULL,\n        created_at INTEGER NOT NULL\n      ) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "legacy_source_cursors",
+      "tbl_name": "legacy_source_cursors",
+      "sql": "CREATE TABLE legacy_source_cursors (\n        source_id TEXT PRIMARY KEY,\n        source_fingerprint TEXT NOT NULL,\n        metadata_offset INTEGER NOT NULL DEFAULT 0,\n        checkpoint_fingerprint TEXT,\n        updated_at INTEGER NOT NULL\n      ) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "migration_authority",
+      "tbl_name": "migration_authority",
+      "sql": "CREATE TABLE migration_authority (\n        key TEXT PRIMARY KEY,\n        value_json TEXT NOT NULL,\n        updated_at INTEGER NOT NULL\n      ) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "migration_telemetry",
+      "tbl_name": "migration_telemetry",
+      "sql": "CREATE TABLE migration_telemetry (\n        metric TEXT PRIMARY KEY,\n        value REAL NOT NULL,\n        updated_at INTEGER NOT NULL\n      ) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "preferences",
+      "tbl_name": "preferences",
+      "sql": "CREATE TABLE preferences (\n  key TEXT PRIMARY KEY,\n  value_json TEXT NOT NULL,\n  updated_at INTEGER NOT NULL\n) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "preset_capability_state",
+      "tbl_name": "preset_capability_state",
+      "sql": "CREATE TABLE preset_capability_state (\n  capability_id TEXT PRIMARY KEY,\n  provider TEXT NOT NULL,\n  plugin_id TEXT NOT NULL,\n  installed_version TEXT,\n  desired_version TEXT NOT NULL,\n  status TEXT NOT NULL CHECK (status IN ('pending', 'installed', 'suppressed', 'failed', 'drifted')),\n  source_fingerprint TEXT,\n  last_attempt INTEGER,\n  last_error TEXT,\n  updated_at INTEGER NOT NULL\n) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "preset_capability_suppressions",
+      "tbl_name": "preset_capability_suppressions",
+      "sql": "CREATE TABLE preset_capability_suppressions (\n  capability_id TEXT PRIMARY KEY,\n  reason TEXT NOT NULL,\n  suppressed_at INTEGER NOT NULL\n) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "preset_reconcile_commands",
+      "tbl_name": "preset_reconcile_commands",
+      "sql": "CREATE TABLE preset_reconcile_commands (\n        command_id TEXT PRIMARY KEY,\n        manifest_fingerprint TEXT NOT NULL,\n        result_json TEXT NOT NULL,\n        completed_at INTEGER NOT NULL\n      ) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "provider_bindings",
+      "tbl_name": "provider_bindings",
+      "sql": "CREATE TABLE \"provider_bindings\" (\n        id TEXT PRIMARY KEY,\n        session_id TEXT NOT NULL REFERENCES sessions(id),\n        provider TEXT NOT NULL CHECK (length(trim(provider)) > 0),\n        provider_session_id TEXT NOT NULL,\n        resume_state TEXT NOT NULL CHECK (\n          resume_state IN ('unknown', 'available', 'resuming', 'resumed', 'failed', 'expired')\n        ),\n        metadata_json TEXT NOT NULL DEFAULT '{}',\n        created_at INTEGER NOT NULL,\n        updated_at INTEGER NOT NULL,\n        validated_at INTEGER,\n        invalidated_at INTEGER,\n        restore_state TEXT NOT NULL DEFAULT 'none' CHECK (\n          restore_state IN ('none', 'restoring', 'failed')\n        ),\n        restore_error TEXT,\n        user_exited_at INTEGER,\n        UNIQUE(session_id, provider, provider_session_id)\n      ) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "runtime_sequences",
+      "tbl_name": "runtime_sequences",
+      "sql": "CREATE TABLE runtime_sequences (\n        name TEXT PRIMARY KEY,\n        value INTEGER NOT NULL\n      ) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "scene_geometry",
+      "tbl_name": "scene_geometry",
+      "sql": "CREATE TABLE scene_geometry (\n  scene_id TEXT NOT NULL REFERENCES scenes(id),\n  owner_key TEXT NOT NULL,\n  layout_revision INTEGER NOT NULL,\n  geometry_json TEXT NOT NULL,\n  updated_at INTEGER NOT NULL,\n  PRIMARY KEY(scene_id, owner_key)\n) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "scene_nodes",
+      "tbl_name": "scene_nodes",
+      "sql": "CREATE TABLE scene_nodes (\n  id TEXT PRIMARY KEY,\n  scene_id TEXT NOT NULL REFERENCES scenes(id),\n  parent_node_id TEXT REFERENCES scene_nodes(id),\n  kind TEXT NOT NULL CHECK (kind IN ('root', 'split', 'mount', 'group')),\n  direction TEXT CHECK (direction IS NULL OR direction IN ('horizontal', 'vertical')),\n  ordinal INTEGER NOT NULL,\n  created_at INTEGER NOT NULL\n) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "scene_windows",
+      "tbl_name": "scene_windows",
+      "sql": "CREATE TABLE scene_windows (\n  id TEXT PRIMARY KEY,\n  scene_id TEXT NOT NULL REFERENCES scenes(id),\n  native_window_key TEXT NOT NULL,\n  state TEXT NOT NULL CHECK (state IN ('attached', 'detached', 'closed')),\n  created_at INTEGER NOT NULL,\n  updated_at INTEGER NOT NULL,\n  UNIQUE(scene_id, native_window_key)\n) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "scenes",
+      "tbl_name": "scenes",
+      "sql": "CREATE TABLE scenes (\n  id TEXT PRIMARY KEY,\n  task_id TEXT NOT NULL REFERENCES tasks(id),\n  name TEXT NOT NULL,\n  mode TEXT NOT NULL CHECK (mode IN ('tile', 'card', 'dag')),\n  root_node_id TEXT,\n  created_at INTEGER NOT NULL,\n  updated_at INTEGER NOT NULL,\n  archived_at INTEGER\n, title_pinned INTEGER NOT NULL DEFAULT 0\n        CHECK (title_pinned IN (0, 1)), sort_key TEXT NOT NULL DEFAULT '', layout_revision INTEGER NOT NULL DEFAULT 1) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "schema_migrations",
+      "tbl_name": "schema_migrations",
+      "sql": "CREATE TABLE schema_migrations (\n        version INTEGER PRIMARY KEY,\n        name TEXT NOT NULL,\n        checksum TEXT NOT NULL,\n        applied_at INTEGER NOT NULL\n      ) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "session_canvas_memberships",
+      "tbl_name": "session_canvas_memberships",
+      "sql": "CREATE TABLE session_canvas_memberships (\n        session_id TEXT PRIMARY KEY REFERENCES sessions(id),\n        scene_id TEXT NOT NULL REFERENCES scenes(id),\n        sibling_created_seq INTEGER NOT NULL,\n        last_user_interaction_seq INTEGER NOT NULL DEFAULT 0,\n        created_at INTEGER NOT NULL,\n        updated_at INTEGER NOT NULL\n      , pending_user_interaction_seq INTEGER NOT NULL DEFAULT 0) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "session_environment_bindings",
+      "tbl_name": "session_environment_bindings",
+      "sql": "CREATE TABLE session_environment_bindings (\n        session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,\n        local_execution_context_id TEXT NOT NULL REFERENCES execution_contexts(id),\n        managed_worktree_id TEXT UNIQUE REFERENCES worktrees(id),\n        active_target TEXT NOT NULL CHECK (active_target IN ('local', 'worktree')),\n        state TEXT NOT NULL CHECK (\n          state IN ('ready', 'missing', 'recovering', 'handoff', 'failed')\n        ),\n        error_message TEXT,\n        updated_at INTEGER NOT NULL,\n        CHECK (active_target <> 'worktree' OR managed_worktree_id IS NOT NULL),\n        CHECK (active_target <> 'local' OR state <> 'missing')\n      ) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "session_environment_transitions",
+      "tbl_name": "session_environment_transitions",
+      "sql": "CREATE TABLE session_environment_transitions (\n        session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,\n        operation_id TEXT NOT NULL UNIQUE,\n        kind TEXT NOT NULL CHECK (kind IN ('restore', 'locate', 'handoff')),\n        previous_active_target TEXT NOT NULL CHECK (\n          previous_active_target IN ('local', 'worktree')\n        ),\n        previous_state TEXT NOT NULL CHECK (\n          previous_state IN ('ready', 'missing', 'failed')\n        ),\n        target TEXT NOT NULL CHECK (target IN ('local', 'worktree')),\n        candidate_path TEXT,\n        phase TEXT NOT NULL CHECK (\n          phase IN ('accepted', 'external-ready', 'failed')\n        ),\n        error_message TEXT,\n        created_at INTEGER NOT NULL,\n        updated_at INTEGER NOT NULL,\n        CHECK (kind = 'locate' OR candidate_path IS NULL)\n      ) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "session_fork_intents",
+      "tbl_name": "session_fork_intents",
+      "sql": "CREATE TABLE \"session_fork_intents\" (\n        session_id TEXT PRIMARY KEY REFERENCES sessions(id),\n        source_session_id TEXT NOT NULL REFERENCES sessions(id),\n        source_provider TEXT NOT NULL CHECK (length(trim(source_provider)) > 0),\n        source_provider_session_id TEXT NOT NULL,\n        state TEXT NOT NULL CHECK (state IN ('pending', 'starting', 'succeeded', 'failed')),\n        error_message TEXT,\n        created_at INTEGER NOT NULL,\n        started_at INTEGER,\n        completed_at INTEGER,\n        display_name TEXT NOT NULL DEFAULT '',\n        worktree_mode TEXT NOT NULL DEFAULT 'current' CHECK (worktree_mode IN ('current', 'new')),\n        worktree_id TEXT,\n        target_execution_context_id TEXT,\n        worktree_path TEXT,\n        branch_name TEXT,\n        attempt_count INTEGER NOT NULL DEFAULT 0,\n        updated_at INTEGER NOT NULL DEFAULT 0,\n        operation_id TEXT NOT NULL DEFAULT '',\n        submission_key TEXT NOT NULL DEFAULT '',\n        stage TEXT NOT NULL DEFAULT 'queued' CHECK (\n          stage IN (\n            'queued', 'creating-worktree', 'applying-setup', 'binding-session',\n            'restoring-provider', 'starting-window', 'succeeded', 'failed'\n          )\n        ),\n        completed_steps INTEGER NOT NULL DEFAULT 0 CHECK (completed_steps >= 0),\n        total_steps INTEGER NOT NULL DEFAULT 5 CHECK (\n          total_steps > 0 AND completed_steps <= total_steps\n        ),\n        attempt INTEGER NOT NULL DEFAULT 0 CHECK (attempt >= 0),\n        lease_owner TEXT,\n        lease_token TEXT,\n        lease_expires_at INTEGER,\n        lease_fence INTEGER NOT NULL DEFAULT 0 CHECK (lease_fence >= 0),\n        last_heartbeat_at INTEGER,\n        permission_mode TEXT NOT NULL DEFAULT 'default' CHECK (\n          permission_mode IN (\n            'default', 'auto', 'acceptEdits', 'plan', 'bypassPermissions'\n          )\n        ),\n        CHECK (source_session_id <> session_id)\n      ) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "session_graph_summaries",
+      "tbl_name": "session_graph_summaries",
+      "sql": "CREATE TABLE session_graph_summaries (\n        session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,\n        latest_lines_json TEXT NOT NULL DEFAULT '[]',\n        updated_at INTEGER NOT NULL\n      )"
+    },
+    {
+      "type": "table",
+      "name": "session_mounts",
+      "tbl_name": "session_mounts",
+      "sql": "CREATE TABLE session_mounts (\n  id TEXT PRIMARY KEY,\n  scene_id TEXT NOT NULL REFERENCES scenes(id),\n  scene_node_id TEXT REFERENCES scene_nodes(id),\n  session_id TEXT NOT NULL REFERENCES sessions(id),\n  created_at INTEGER NOT NULL, scene_window_id TEXT REFERENCES scene_windows(id),\n  UNIQUE(scene_id, session_id, id)\n) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "session_relation_events",
+      "tbl_name": "session_relation_events",
+      "sql": "CREATE TABLE session_relation_events (\n  sequence INTEGER PRIMARY KEY AUTOINCREMENT,\n  event_id TEXT NOT NULL UNIQUE,\n  relation_id TEXT NOT NULL,\n  operation TEXT NOT NULL CHECK (operation IN ('created', 'revoked', 'restored', 'metadata-updated')),\n  task_id TEXT NOT NULL REFERENCES tasks(id),\n  from_session_id TEXT NOT NULL REFERENCES sessions(id),\n  to_session_id TEXT NOT NULL REFERENCES sessions(id),\n  relation_kind TEXT NOT NULL CHECK (relation_kind IN ('forked-from', 'derived-from', 'depends-on', 'supports', 'blocks', 'references', 'team-member-of')),\n  metadata_json TEXT NOT NULL DEFAULT '{}',\n  command_id TEXT NOT NULL,\n  occurred_at INTEGER NOT NULL,\n  CHECK (from_session_id <> to_session_id)\n) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "session_relations_current",
+      "tbl_name": "session_relations_current",
+      "sql": "CREATE TABLE session_relations_current (\n  relation_id TEXT PRIMARY KEY,\n  task_id TEXT NOT NULL REFERENCES tasks(id),\n  from_session_id TEXT NOT NULL REFERENCES sessions(id),\n  to_session_id TEXT NOT NULL REFERENCES sessions(id),\n  relation_kind TEXT NOT NULL CHECK (relation_kind IN ('forked-from', 'derived-from', 'depends-on', 'supports', 'blocks', 'references', 'team-member-of')),\n  metadata_json TEXT NOT NULL DEFAULT '{}',\n  created_at INTEGER NOT NULL,\n  updated_at INTEGER NOT NULL,\n  source_event_sequence INTEGER NOT NULL REFERENCES session_relation_events(sequence),\n  CHECK (from_session_id <> to_session_id)\n) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "session_runs",
+      "tbl_name": "session_runs",
+      "sql": "CREATE TABLE session_runs (\n  id TEXT PRIMARY KEY,\n  session_id TEXT NOT NULL REFERENCES sessions(id),\n  ordinal INTEGER NOT NULL,\n  runtime_generation TEXT NOT NULL,\n  pid INTEGER,\n  status TEXT NOT NULL CHECK (status IN ('starting', 'running', 'exited', 'failed', 'interrupted')),\n  started_at INTEGER NOT NULL,\n  ended_at INTEGER,\n  exit_code INTEGER,\n  signal INTEGER, profile TEXT NOT NULL DEFAULT 'shell', cols INTEGER NOT NULL DEFAULT 80, rows INTEGER NOT NULL DEFAULT 24,\n  UNIQUE(session_id, ordinal)\n) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "sessions",
+      "tbl_name": "sessions",
+      "sql": "CREATE TABLE \"sessions\" (\n        id TEXT PRIMARY KEY,\n        task_id TEXT NOT NULL REFERENCES tasks(id),\n        execution_context_id TEXT NOT NULL REFERENCES execution_contexts(id),\n        kind TEXT NOT NULL CHECK (length(trim(kind)) > 0),\n        status TEXT NOT NULL CHECK (\n          status IN ('created', 'starting', 'running', 'waiting', 'interrupted', 'exited', 'archived')\n        ),\n        created_at INTEGER NOT NULL,\n        updated_at INTEGER NOT NULL,\n        last_activity_at INTEGER NOT NULL,\n        archived_at INTEGER,\n        title TEXT NOT NULL DEFAULT '',\n        version INTEGER NOT NULL DEFAULT 1,\n        cwd TEXT NOT NULL DEFAULT '',\n        work_status TEXT NOT NULL DEFAULT 'idle' CHECK (\n          work_status IN (\n            'starting', 'idle', 'running', 'needs-input', 'error',\n            'interrupted', 'exited'\n          )\n        ),\n        title_source TEXT NOT NULL DEFAULT 'default' CHECK (\n          title_source IN ('default', 'auto', 'manual')\n        ),\n        provider_title TEXT\n      ) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "shadow_repair_queue",
+      "tbl_name": "shadow_repair_queue",
+      "sql": "CREATE TABLE shadow_repair_queue (\n  command_id TEXT PRIMARY KEY,\n  mutation_type TEXT NOT NULL,\n  payload_json TEXT NOT NULL,\n  attempt_count INTEGER NOT NULL DEFAULT 0,\n  next_attempt_at INTEGER NOT NULL,\n  last_error TEXT,\n  created_at INTEGER NOT NULL,\n  completed_at INTEGER\n) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "shell_history_blocks",
+      "tbl_name": "shell_history_blocks",
+      "sql": "CREATE TABLE shell_history_blocks (\n        id TEXT PRIMARY KEY,\n        session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,\n        command_text TEXT NOT NULL,\n        cwd TEXT NOT NULL,\n        output TEXT NOT NULL,\n        exit_code INTEGER NOT NULL,\n        started_at INTEGER NOT NULL,\n        completed_at INTEGER NOT NULL\n      ) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "task_logs",
+      "tbl_name": "task_logs",
+      "sql": "CREATE TABLE task_logs (\n  id INTEGER PRIMARY KEY AUTOINCREMENT,\n  task_id TEXT NOT NULL REFERENCES tasks(id),\n  level TEXT NOT NULL CHECK (level IN ('debug', 'info', 'warn', 'error')),\n  source TEXT NOT NULL,\n  message TEXT NOT NULL,\n  runtime_generation TEXT NOT NULL,\n  created_at INTEGER NOT NULL\n) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "task_progress",
+      "tbl_name": "task_progress",
+      "sql": "CREATE TABLE task_progress (\n  task_id TEXT PRIMARY KEY REFERENCES tasks(id),\n  progress REAL NOT NULL CHECK (progress >= 0 AND progress <= 100),\n  label TEXT,\n  runtime_generation TEXT NOT NULL,\n  updated_at INTEGER NOT NULL\n) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "task_status_entries",
+      "tbl_name": "task_status_entries",
+      "sql": "CREATE TABLE task_status_entries (\n  task_id TEXT NOT NULL REFERENCES tasks(id),\n  key TEXT NOT NULL,\n  value TEXT NOT NULL,\n  runtime_generation TEXT NOT NULL,\n  updated_at INTEGER NOT NULL,\n  PRIMARY KEY(task_id, key)\n) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "task_window_migrations",
+      "tbl_name": "task_window_migrations",
+      "sql": "CREATE TABLE task_window_migrations (\n        id TEXT PRIMARY KEY,\n        task_id TEXT NOT NULL REFERENCES tasks(id),\n        source_window_id TEXT NOT NULL REFERENCES app_windows(id),\n        target_window_id TEXT NOT NULL REFERENCES app_windows(id),\n        state TEXT NOT NULL CHECK (state IN ('preparing', 'committed', 'failed')),\n        failure_reason TEXT,\n        created_at INTEGER NOT NULL,\n        updated_at INTEGER NOT NULL\n      ) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "tasks",
+      "tbl_name": "tasks",
+      "sql": "CREATE TABLE tasks (\n  id TEXT PRIMARY KEY,\n  workspace_id TEXT NOT NULL REFERENCES workspaces(id),\n  parent_task_id TEXT REFERENCES tasks(id),\n  execution_context_id TEXT NOT NULL REFERENCES execution_contexts(id),\n  title TEXT NOT NULL,\n  status TEXT NOT NULL CHECK (status IN ('planned', 'active', 'blocked', 'completed', 'archived')),\n  created_at INTEGER NOT NULL,\n  updated_at INTEGER NOT NULL,\n  archived_at INTEGER, sort_key TEXT NOT NULL DEFAULT '', version INTEGER NOT NULL DEFAULT 1, is_pinned INTEGER NOT NULL DEFAULT 0\n        CHECK (is_pinned IN (0, 1)), pin_sort_key TEXT NOT NULL DEFAULT '', last_opened_at INTEGER NOT NULL DEFAULT 0,\n  CHECK (parent_task_id IS NULL OR parent_task_id <> id)\n) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "terminal_commands",
+      "tbl_name": "terminal_commands",
+      "sql": "CREATE TABLE terminal_commands (\n        command_id TEXT PRIMARY KEY,\n        session_id TEXT NOT NULL REFERENCES sessions(id),\n        started_sequence INTEGER NOT NULL,\n        executed_sequence INTEGER,\n        ended_sequence INTEGER,\n        command_text TEXT,\n        cwd TEXT,\n        exit_code INTEGER,\n        created_at INTEGER NOT NULL,\n        updated_at INTEGER NOT NULL\n      ) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "validation_runs",
+      "tbl_name": "validation_runs",
+      "sql": "CREATE TABLE validation_runs (\n  id TEXT PRIMARY KEY,\n  task_id TEXT NOT NULL REFERENCES tasks(id),\n  session_id TEXT REFERENCES sessions(id),\n  check_id TEXT NOT NULL,\n  status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'passed', 'failed', 'cancelled', 'error')),\n  summary_json TEXT NOT NULL DEFAULT '{}',\n  started_at INTEGER,\n  ended_at INTEGER,\n  created_at INTEGER NOT NULL\n) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "window_navigation",
+      "tbl_name": "window_navigation",
+      "sql": "CREATE TABLE window_navigation (\n        window_id TEXT PRIMARY KEY REFERENCES app_windows(id),\n        active_workspace_id TEXT REFERENCES workspaces(id),\n        updated_at INTEGER NOT NULL\n      ) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "window_scene_focus",
+      "tbl_name": "window_scene_focus",
+      "sql": "CREATE TABLE window_scene_focus (\n        window_id TEXT NOT NULL REFERENCES app_windows(id),\n        scene_id TEXT NOT NULL REFERENCES scenes(id),\n        active_session_id TEXT REFERENCES sessions(id),\n        updated_at INTEGER NOT NULL,\n        PRIMARY KEY(window_id, scene_id)\n      ) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "window_task_focus",
+      "tbl_name": "window_task_focus",
+      "sql": "CREATE TABLE window_task_focus (\n        window_id TEXT NOT NULL REFERENCES app_windows(id),\n        task_id TEXT NOT NULL REFERENCES tasks(id),\n        active_scene_id TEXT REFERENCES scenes(id),\n        updated_at INTEGER NOT NULL,\n        PRIMARY KEY(window_id, task_id)\n      ) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "window_task_placements",
+      "tbl_name": "window_task_placements",
+      "sql": "CREATE TABLE window_task_placements (\n        window_id TEXT NOT NULL REFERENCES app_windows(id),\n        task_id TEXT NOT NULL UNIQUE REFERENCES tasks(id),\n        ordinal INTEGER NOT NULL,\n        updated_at INTEGER NOT NULL,\n        PRIMARY KEY(window_id, task_id)\n      ) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "window_workspace_focus",
+      "tbl_name": "window_workspace_focus",
+      "sql": "CREATE TABLE window_workspace_focus (\n        window_id TEXT NOT NULL REFERENCES app_windows(id),\n        workspace_id TEXT NOT NULL REFERENCES workspaces(id),\n        active_task_id TEXT REFERENCES tasks(id),\n        updated_at INTEGER NOT NULL,\n        PRIMARY KEY(window_id, workspace_id)\n      ) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "workspace_path_state",
+      "tbl_name": "workspace_path_state",
+      "sql": "CREATE TABLE workspace_path_state (\n        workspace_id TEXT PRIMARY KEY REFERENCES workspaces(id),\n        status TEXT NOT NULL CHECK (status IN ('valid', 'invalid')),\n        reason TEXT NOT NULL CHECK (reason IN ('', 'missing', 'not-directory', 'no-access', 'unknown')),\n        checked_at INTEGER NOT NULL,\n        validation_generation INTEGER NOT NULL\n      ) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "workspaces",
+      "tbl_name": "workspaces",
+      "sql": "CREATE TABLE workspaces (\n  id TEXT PRIMARY KEY,\n  name TEXT NOT NULL,\n  root_directory TEXT NOT NULL,\n  task_order_json TEXT NOT NULL DEFAULT '[]',\n  created_at INTEGER NOT NULL,\n  updated_at INTEGER NOT NULL,\n  archived_at INTEGER\n, path_identity TEXT, version INTEGER NOT NULL DEFAULT 1, is_default INTEGER NOT NULL DEFAULT 0\n        CHECK (is_default IN (0, 1)), is_pinned INTEGER NOT NULL DEFAULT 0\n        CHECK (is_pinned IN (0, 1)), pin_sort_key TEXT NOT NULL DEFAULT '', last_opened_at INTEGER NOT NULL DEFAULT 0) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "worktrees",
+      "tbl_name": "worktrees",
+      "sql": "CREATE TABLE worktrees (\n  id TEXT PRIMARY KEY,\n  execution_context_id TEXT NOT NULL UNIQUE REFERENCES execution_contexts(id),\n  repository_root TEXT NOT NULL,\n  worktree_path TEXT NOT NULL UNIQUE,\n  branch_name TEXT NOT NULL,\n  base_ref TEXT,\n  state TEXT NOT NULL CHECK (state IN ('creating', 'ready', 'dirty', 'retained', 'removing', 'removed', 'failed')),\n  created_at INTEGER NOT NULL,\n  updated_at INTEGER NOT NULL,\n  cleanup_policy TEXT NOT NULL DEFAULT 'retain-dirty'\n, base_revision TEXT, setup_policy_json TEXT NOT NULL DEFAULT '[]', setup_result_json TEXT NOT NULL DEFAULT '[]', retained_at INTEGER) STRICT"
+    },
+    {
+      "type": "trigger",
+      "name": "session_environment_binding_after_session_insert",
+      "tbl_name": "sessions",
+      "sql": "CREATE TRIGGER session_environment_binding_after_session_insert\n      AFTER INSERT ON sessions\n      BEGIN\n        INSERT INTO session_environment_bindings (\n          session_id, local_execution_context_id, managed_worktree_id,\n          active_target, state, error_message, updated_at\n        ) VALUES (\n          NEW.id, NEW.execution_context_id, NULL,\n          'local', 'ready', NULL, NEW.updated_at\n        );\n      END"
+    },
+    {
+      "type": "trigger",
+      "name": "session_mount_canvas_membership_after_insert",
+      "tbl_name": "session_mounts",
+      "sql": "CREATE TRIGGER session_mount_canvas_membership_after_insert\n      AFTER INSERT ON session_mounts\n      WHEN NOT EXISTS (\n        SELECT 1 FROM session_canvas_memberships\n        WHERE session_id = NEW.session_id\n      )\n      BEGIN\n        UPDATE runtime_sequences\n        SET value = value + 1\n        WHERE name = 'session-sibling-created';\n        INSERT INTO session_canvas_memberships (\n          session_id,\n          scene_id,\n          sibling_created_seq,\n          last_user_interaction_seq,\n          created_at,\n          updated_at\n        )\n        SELECT\n          NEW.session_id,\n          NEW.scene_id,\n          value,\n          0,\n          NEW.created_at,\n          NEW.created_at\n        FROM runtime_sequences\n        WHERE name = 'session-sibling-created';\n      END"
+    },
+    {
+      "type": "trigger",
+      "name": "sessions_default_cwd_after_insert",
+      "tbl_name": "sessions",
+      "sql": "CREATE TRIGGER sessions_default_cwd_after_insert\n      AFTER INSERT ON sessions\n      WHEN NEW.cwd = ''\n      BEGIN\n        UPDATE sessions\n        SET cwd = COALESCE((\n          SELECT execution_contexts.cwd\n          FROM execution_contexts\n          WHERE execution_contexts.id = NEW.execution_context_id\n        ), '')\n        WHERE id = NEW.id;\n      END"
+    }
+  ],
+  "transaction": {
+    "result": {
+      "result": {
+        "outcome": "committed",
+        "count": 1
+      },
+      "firstEventSequence": 1,
+      "lastEventSequence": 1,
+      "replayed": false
+    },
+    "replayed": {
+      "result": {
+        "outcome": "committed",
+        "count": 1
+      },
+      "firstEventSequence": 1,
+      "lastEventSequence": 1,
+      "replayed": true
+    },
+    "conflict": "command id transaction-contract was already used for a different request",
+    "rollback": "forced mutation failure",
+    "events": [
+      {
+        "seq": 1,
+        "event_id": "contract-event-1",
+        "event_type": "workspace.parity-contract",
+        "aggregate_type": "workspace",
+        "aggregate_id": "workspace-contract",
+        "workspace_id": null,
+        "task_id": null,
+        "session_id": null,
+        "payload_json": "{\"value\":\"中文🙂\",\"retained\":true}",
+        "schema_version": 1,
+        "required_terminal_sequence": null,
+        "command_id": "transaction-contract",
+        "causation_id": "cause-1",
+        "correlation_id": "correlation-1",
+        "occurred_at": 1100
+      }
+    ],
+    "dedup": {
+      "command_id": "transaction-contract",
+      "command_type": "parity.contract",
+      "request_hash": "same-request",
+      "response_json": "{\"outcome\":\"committed\",\"count\":1}",
+      "first_event_seq": 1,
+      "last_event_seq": 1
+    },
+    "rollbackRowPresent": false,
+    "rollbackEventPresent": false,
+    "rollbackCommandPresent": false
+  }
+}

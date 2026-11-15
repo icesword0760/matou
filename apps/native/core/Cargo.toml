@@ -1,0 +1,16 @@
+[package]
+name = "matou-native-core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow = "1"
+rusqlite = { version = "=0.42.0", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "3"
