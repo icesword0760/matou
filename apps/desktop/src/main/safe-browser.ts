@@ -14,7 +14,7 @@ import { BrowserPipe } from './safe-browser-pipe'
 
 export interface SafeBrowserStatus { installed: boolean; version: string | null }
 
-const installedExecutable = '/Applications/安全浏览器.app/Contents/MacOS/Chromium'
+const installedExecutable = '/Applications/Mantle.app/Contents/MacOS/Chromium'
 const executablePath = () => process.env.MATOU_SAFE_BROWSER_PATH || installedExecutable
 
 let latestCountry: string | undefined
@@ -210,13 +210,13 @@ export class SafeBrowserController {
       this.quitComplete = true
       app.removeListener('will-quit', this.onQuit)
       app.quit()
-    }).catch(error => { console.error('Safe browser cleanup failed', error) })
+    }).catch(error => { console.error('Mantle cleanup failed', error) })
   }
 
   openPersistent(url: string, timezone: string): Promise<void> {
-    if (this.quitting || this.stopping) return Promise.reject(new Error('Safe browser is closing'))
+    if (this.quitting || this.stopping) return Promise.reject(new Error('Mantle is closing'))
     const opening = this.persistentQueue.then(async () => {
-      if (this.quitting || this.stopping) throw new Error('Safe browser is closing')
+      if (this.quitting || this.stopping) throw new Error('Mantle is closing')
       if (this.persistent && !this.persistent.exited) {
         await this.persistent.pipe.open(url)
       } else {
@@ -233,9 +233,9 @@ export class SafeBrowserController {
   }
 
   private async launch(url: string, timezone: string, ephemeral: boolean): Promise<BrowserSession> {
-    if (this.quitting || this.stopping) throw new Error('Safe browser is closing')
+    if (this.quitting || this.stopping) throw new Error('Mantle is closing')
     if (!safeBrowserStatus().installed) {
-      throw Object.assign(new Error('Safe browser is not installed'), { code: 'safe-browser-missing' })
+      throw Object.assign(new Error('Mantle is not installed'), { code: 'safe-browser-missing' })
     }
     privateDirectory(this.userData, false)
     const root = join(this.userData, 'safe-browser')
@@ -299,7 +299,7 @@ export class SafeBrowserController {
         child.once('error', no)
       })
       await pipe.ready()
-      if (session.exited) throw new Error('Safe browser exited during startup')
+      if (session.exited) throw new Error('Mantle exited during startup')
       return session
     } catch (error) {
       await this.closeSession(session)

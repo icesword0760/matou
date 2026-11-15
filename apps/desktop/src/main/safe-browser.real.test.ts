@@ -45,7 +45,7 @@ it.runIf(process.env.MATOU_SAFE_BROWSER_REAL_TEST === '1')('real kernel: verifie
       res.end('ok')
     } else {
       res.setHeader('Content-Type', 'text/html; charset=utf-8')
-      res.end(`<title>Matou safe browser acceptance</title><script>fetch('/report?kind=${kind}&zone='+encodeURIComponent(Intl.DateTimeFormat().resolvedOptions().timeZone))</script>`)
+      res.end(`<title>Matou Mantle acceptance</title><script>fetch('/report?kind=${kind}&zone='+encodeURIComponent(Intl.DateTimeFormat().resolvedOptions().timeZone))</script>`)
     }
   })
   await new Promise<void>(yes => server.listen(0, '127.0.0.1', yes))

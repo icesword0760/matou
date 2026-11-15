@@ -16,10 +16,10 @@ const status: EgressStatusWire = {
   state: 'ok', protectionEnabled: true, ruleMode: 'country', families: [],
   checks: [{ id: 'time-zone', result: 'pass' }], sessionFamilies: {}
 }
-async function show() {
+async function show(locale: 'zh-CN' | 'en' = 'zh-CN') {
   let view!: ReturnType<typeof render>
   await act(async () => {
-    view = render(<LocaleProvider initialLocale="zh-CN"><EgressPanel status={status} onClose={vi.fn()}
+    view = render(<LocaleProvider initialLocale={locale}><EgressPanel status={status} onClose={vi.fn()}
       onRecheck={vi.fn()} onSetRule={vi.fn()} onAcceptCurrent={vi.fn()} onSetProtection={vi.fn()} /></LocaleProvider>)
   })
   return view
@@ -35,20 +35,25 @@ beforeEach(() => {
 })
 afterEach(() => { cleanup(); vi.useRealTimers(); Reflect.deleteProperty(window, 'matouDesktop') })
 describe('EgressPanel safe browser and client notices', () => {
-  it('shows the installed version, both actions and a URL-free open before reference checks', async () => {
-    const { container } = await show()
-    expect(screen.getByText('已安装 · 148.0.7778.215')).toBeTruthy()
-    expect(screen.getByText(hint)).toBeTruthy()
-    expect(screen.getByRole('button', { name: '检查更新' })).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { name: '打开' }))
+  it.each(['zh-CN', 'en'] as const)('shows Mantle with the installed version, both actions and a URL-free open before reference checks in %s', async locale => {
+    const { container } = await show(locale)
+    const zh = locale === 'zh-CN'
+    expect(screen.getByRole('region', { name: 'Mantle' })).toBeTruthy()
+    expect(screen.getByText('Mantle')).toBeTruthy()
+    expect(screen.getByText(`${zh ? '已安装' : 'Installed'} · 148.0.7778.215`)).toBeTruthy()
+    expect(screen.getByText(zh ? hint : 'Used when signing in to Claude / ChatGPT / Antigravity')).toBeTruthy()
+    expect(screen.getByRole('button', { name: zh ? '检查更新' : 'Check for updates' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: zh ? '打开' : 'Open' }))
     expect(bridge.safeBrowserOpen).toHaveBeenCalledExactlyOnceWith()
-    expect(screen.queryByRole('button', { name: '获取安装包' })).toBeNull()
+    expect(screen.queryByRole('button', { name: zh ? '获取安装包' : 'Get installer' })).toBeNull()
     const blocks = [...container.querySelector('.egress-panel__scroll')!.children]
     expect(blocks.indexOf(container.querySelector('.egress-safe-browser')!)).toBeLessThan(blocks.indexOf(container.querySelector('.egress-reference')!))
   })
   it('shows an uninstalled card with only the fixed installer action', async () => {
     bridge.safeBrowserStatus.mockResolvedValue({ installed: false, version: null })
     await show()
+    expect(screen.getByRole('region', { name: 'Mantle' })).toBeTruthy()
+    expect(screen.getByText('Mantle')).toBeTruthy()
     expect(screen.getByText('未安装')).toBeTruthy()
     expect(screen.getByText(hint)).toBeTruthy()
     expect(screen.queryByRole('button', { name: '打开' })).toBeNull()

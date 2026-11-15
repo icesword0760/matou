@@ -1,4 +1,6 @@
-# 安全浏览器启动器验收记录
+# Mantle 启动器验收记录（历史验证）
+
+> 当前品牌已更名为 **Mantle**，安装路径为 `/Applications/Mantle.app/Contents/MacOS/Chromium`，下载页为 https://github.com/icesword0760/mantle-browser/releases/latest 。本关最新验证见 [Mantle 改名验收](mantle-rebrand.md)。以下原始命令、输出和截图文字保留为历史证据。
 
 本关只交付 desktop main 模块和测试；未接入登录流程或 UI，未修改 runtime-host.ts、Python 工具、版本号、依赖声明或其他项目。
 

@@ -20,7 +20,7 @@ describe('safe browser release check', () => {
   ])('compares numeric release %s with installed version', async (tag_name, latest) => {
     vi.mocked(net.fetch).mockResolvedValue(new Response(JSON.stringify({ tag_name })))
     expect(await safeBrowserCheckUpdate()).toEqual({ latest, failed: false })
-    expect(net.fetch).toHaveBeenCalledExactlyOnceWith('https://api.github.com/repos/icesword0760/safe-browser/releases/latest', expect.objectContaining({ signal: expect.any(AbortSignal) }))
+    expect(net.fetch).toHaveBeenCalledExactlyOnceWith('https://api.github.com/repos/icesword0760/mantle-browser/releases/latest', expect.objectContaining({ signal: expect.any(AbortSignal) }))
   })
   it.each(['http', 'network', 'json', 'tag', 'unknown-installed'])('reports a silent failure for %s', async kind => {
     if (kind === 'http') vi.mocked(net.fetch).mockResolvedValue(new Response('', { status: 404 }))

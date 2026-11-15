@@ -19,18 +19,19 @@ describe('isAllowedExternalUrl', () => {
   })
 })
 
-it('allows only the exact safe-browser repository release path on GitHub', () => {
-  expect(isAllowedExternalUrl('https://github.com/icesword0760/safe-browser/releases/latest')).toBe(true)
-  expect(isAllowedExternalUrl('https://github.com/icesword0760/safe-browser/releases/tag/v148.1')).toBe(true)
+it('allows only the exact Mantle repository release path on GitHub', () => {
+  expect(isAllowedExternalUrl('https://github.com/icesword0760/mantle-browser/releases/latest')).toBe(true)
+  expect(isAllowedExternalUrl('https://github.com/icesword0760/mantle-browser/releases/tag/v148.1')).toBe(true)
   for (const url of [
-    'http://github.com/icesword0760/safe-browser/releases/latest',
-    'https://sub.github.com/icesword0760/safe-browser/releases/latest',
-    'https://github.com.evil.invalid/icesword0760/safe-browser/releases/latest',
-    'https://github.com/other/safe-browser/releases/latest',
-    'https://github.com/icesword0760/safe-browser',
-    'https://github.com/icesword0760/safe-browser/releases-evil/latest',
-    'https://github.com/icesword0760/safe-browser/releases/../../other',
-    'https://github.com:444/icesword0760/safe-browser/releases/latest',
-    'https://user@github.com/icesword0760/safe-browser/releases/latest'
+    'https://github.com/icesword0760/safe-browser/releases/latest',
+    'http://github.com/icesword0760/mantle-browser/releases/latest',
+    'https://sub.github.com/icesword0760/mantle-browser/releases/latest',
+    'https://github.com.evil.invalid/icesword0760/mantle-browser/releases/latest',
+    'https://github.com/other/mantle-browser/releases/latest',
+    'https://github.com/icesword0760/mantle-browser',
+    'https://github.com/icesword0760/mantle-browser/releases-evil/latest',
+    'https://github.com/icesword0760/mantle-browser/releases/../../other',
+    'https://github.com:444/icesword0760/mantle-browser/releases/latest',
+    'https://user@github.com/icesword0760/mantle-browser/releases/latest'
   ]) expect(isAllowedExternalUrl(url)).toBe(false)
 })

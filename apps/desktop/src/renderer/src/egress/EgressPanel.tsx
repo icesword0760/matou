@@ -197,9 +197,9 @@ function SafeBrowserCard({ zh }: { zh: boolean }) {
       : 'Not installed'
 
   return (
-    <section className="egress-safe-browser" aria-label={zh ? '安全浏览器' : 'Safe browser'}>
+    <section className="egress-safe-browser" aria-label="Mantle">
       <div className="egress-safe-browser__main">
-        <div className="egress-safe-browser__title">{zh ? '安全浏览器' : 'Safe browser'}</div>
+        <div className="egress-safe-browser__title">Mantle</div>
         <div className="egress-safe-browser__state">{stateText}</div>
         <div className="egress-safe-browser__hint" role={feedback ? 'status' : undefined}>
           {feedback

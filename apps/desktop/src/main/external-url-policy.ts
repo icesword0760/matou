@@ -1,4 +1,4 @@
-export const SAFE_BROWSER_REPOSITORY = 'icesword0760/safe-browser'
+export const SAFE_BROWSER_REPOSITORY = 'icesword0760/mantle-browser'
 export const SAFE_BROWSER_RELEASES_URL = `https://github.com/${SAFE_BROWSER_REPOSITORY}/releases/latest`
 
 export const ALLOWED_EXTERNAL_HOSTS: ReadonlySet<string> = new Set([

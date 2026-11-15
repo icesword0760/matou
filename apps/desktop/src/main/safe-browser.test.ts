@@ -122,8 +122,8 @@ describe('safeBrowserStatus', () => {
     vi.mocked(statSync).mockReturnValueOnce(stat)
     vi.mocked(accessSync).mockImplementationOnce(() => {})
     expect(safeBrowserStatus()).toEqual({ installed: true, version: '144.0.1' })
-    expect(statSync).toHaveBeenLastCalledWith('/Applications/安全浏览器.app/Contents/MacOS/Chromium')
-    expect(vi.mocked(execFileSync).mock.calls[0]![1]).toContain('/Applications/安全浏览器.app/Contents/Info.plist')
+    expect(statSync).toHaveBeenLastCalledWith('/Applications/Mantle.app/Contents/MacOS/Chromium')
+    expect(vi.mocked(execFileSync).mock.calls[0]![1]).toContain('/Applications/Mantle.app/Contents/Info.plist')
     expect(spawn).not.toHaveBeenCalled()
   })
   it('reports missing, non-executable and directory paths as not installed', () => {

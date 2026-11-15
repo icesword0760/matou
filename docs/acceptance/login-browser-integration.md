@@ -1,5 +1,7 @@
 # 登录改道验收记录
 
+> 当前品牌已更名为 **Mantle**，安装路径为 `/Applications/Mantle.app/Contents/MacOS/Chromium`，下载页为 https://github.com/icesword0760/mantle-browser/releases/latest 。本关最新验证见 [Mantle 改名验收](mantle-rebrand.md)。以下原始命令、输出和截图文字保留为历史证据。
+
 本关完成订阅登录和 Claude 账户添加/重新登录的浏览器改道。没有改 UI、版本号、依赖声明或 `apps/runtime`，没有发布或推送。目标分支为 `feat/login-browser-integration`。
 
 ## 用户可见结果

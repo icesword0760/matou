@@ -39,7 +39,7 @@ const server = createServer((request, response) => {
   } else {
     response.setHeader('Content-Type', 'text/html; charset=utf-8')
     response.end(`<!doctype html><meta charset="utf-8"><title>Matou 登录改道验证</title>
-      <h1>安全浏览器已打开</h1><p>本页是本地测试替身，不连接授权服务。</p>
+      <h1>Mantle 已打开</h1><p>本页是本地测试替身，不连接授权服务。</p>
       <p id="zone"></p><script>
       const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
       document.getElementById('zone').textContent = '浏览器时区：' + zone;
