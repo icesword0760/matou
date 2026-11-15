@@ -32,3 +32,6 @@ __pycache__/
 # Local tool caches and dev server pid files
 .impeccable/
 server.pid
+
+# Local native migration reference bundles, data and evidence
+/artifacts/native-parity/
