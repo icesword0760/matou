@@ -284,6 +284,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "matou-native-runtime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "matou-native-core",
+ "matou-native-terminal",
+ "rusqlite",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "matou-native-terminal"
 version = "0.1.0"
 dependencies = [

@@ -277,6 +277,25 @@ pub fn for_each_frame(
     through_sequence: Option<u64>,
     mut visitor: impl FnMut(Record) -> Result<()>,
 ) -> Result<()> {
+    visit_frames(
+        data_root,
+        session_id,
+        from_sequence,
+        through_sequence,
+        |record| {
+            visitor(record)?;
+            Ok(true)
+        },
+    )
+}
+
+pub fn visit_frames(
+    data_root: &Path,
+    session_id: &str,
+    from_sequence: u64,
+    through_sequence: Option<u64>,
+    mut visitor: impl FnMut(Record) -> Result<bool>,
+) -> Result<()> {
     ensure!(
         from_sequence <= MAX_SAFE_INTEGER,
         "fromSequence must be a non-negative integer"
@@ -311,7 +330,7 @@ pub fn for_each_frame(
                 return Ok(false);
             }
             if sequence >= from_sequence {
-                visitor(record)?;
+                return visitor(record);
             }
             Ok(true)
         })? {
@@ -319,4 +338,37 @@ pub fn for_each_frame(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::journal::{Frame, JournalOptions, SegmentJournal};
+
+    #[test]
+    fn visitor_false_stops_after_first_frame() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let options = JournalOptions {
+            compress_sealed: false,
+            ..JournalOptions::default()
+        };
+        let mut journal = SegmentJournal::open(root.path(), "visitor", options)?;
+        for sequence in 1..=3 {
+            journal.append(&Record {
+                timestamp: sequence as i64,
+                frame: Frame::Output {
+                    sequence,
+                    data: vec![b'a'],
+                },
+            })?;
+        }
+        journal.close()?;
+        let mut observed = Vec::new();
+        visit_frames(root.path(), "visitor", 1, None, |record| {
+            observed.push(record.frame.sequence());
+            Ok(false)
+        })?;
+        assert_eq!(observed, [1]);
+        Ok(())
+    }
 }
