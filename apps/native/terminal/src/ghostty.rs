@@ -414,6 +414,7 @@ unsafe extern "C" fn on_cell(
     let underline_style = ((flags >> 8) & 7) as u8;
     screen.cells.push(Cell {
         text,
+        has_content: width != 0 && len != 0,
         fg: color_from_shim(fg),
         bg: color_from_shim(bg),
         width,

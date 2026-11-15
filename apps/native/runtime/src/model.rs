@@ -43,6 +43,7 @@ pub enum SessionEvent {
         cols: u16,
         rows: u16,
     },
+    ScreenInvalidated,
     /// Emitted once for live output after it reaches the journal.
     SavedOutput {
         sequence: u64,

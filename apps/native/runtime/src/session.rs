@@ -16,7 +16,7 @@ use matou_native_core::{
     pty::{ProcessExit, PtyProcess},
     shell_history::Collector,
 };
-use matou_native_terminal::{Screen, Terminal};
+use matou_native_terminal::{InputModes, Screen, Terminal, Theme};
 
 use crate::{
     SessionEvent, SessionOptions, StorageFaultCode,
@@ -507,6 +507,22 @@ impl Session {
         Ok(self.visible_screen.clone())
     }
 
+    pub fn view(&mut self) -> Result<(Screen, InputModes)> {
+        Ok((self.screen()?, self.terminal.input_modes()?))
+    }
+
+    pub fn scroll(&mut self, lines: i32) -> Result<()> {
+        self.terminal.scroll(lines)
+    }
+
+    pub fn set_theme(&mut self, theme: Theme) -> Result<()> {
+        self.terminal.set_theme(theme)
+    }
+
+    pub fn screen_deadline(&self) -> Option<Instant> {
+        self.terminal.sync_deadline()
+    }
+
     pub fn is_closed(&self) -> bool {
         self.closed
     }
@@ -539,10 +555,10 @@ impl Session {
     }
 
     fn advance(&mut self, max_wait: Duration, wake_on_events: bool) -> Result<()> {
+        self.expire_sync();
         if self.closed {
             return Ok(());
         }
-        self.expire_sync();
         self.flush_due()?;
         self.observe_exit()?;
         self.enqueue_exit_if_ready()?;
@@ -551,7 +567,7 @@ impl Session {
         }
 
         let now = Instant::now();
-        let wait = [self.batcher.deadline(), self.terminal.sync_deadline()]
+        let wait = [self.batcher.deadline(), self.screen_deadline()]
             .into_iter()
             .flatten()
             .map(|deadline| deadline.saturating_duration_since(now))
@@ -645,10 +661,13 @@ impl Session {
     }
 
     fn expire_sync(&mut self) {
+        let held = self.terminal.render_held();
         if let Err(error) = self.terminal.expire_sync() {
             self.events.push(diagnostic(format!(
                 "end Shell synchronized output: {error:#}"
             )));
+        } else if held && !self.terminal.render_held() {
+            self.events.push(SessionEvent::ScreenInvalidated);
         }
         self.send_terminal_replies();
     }

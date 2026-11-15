@@ -1,12 +1,12 @@
 //! Thread-affine owner for one live Shell session.
 use std::{
-    sync::mpsc::{self, Receiver, Sender, TryRecvError},
+    sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError},
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, anyhow};
-use matou_native_terminal::Screen;
+use matou_native_terminal::{InputModes, Screen, Theme};
 
 use crate::{
     SessionEvent, SessionOptions,
@@ -48,6 +48,17 @@ pub enum WorkerCommand {
     },
     Screen {
         reply: Sender<Result<Screen>>,
+    },
+    View {
+        reply: Sender<Result<(Screen, InputModes)>>,
+    },
+    Scroll {
+        lines: i32,
+        reply: Sender<Result<()>>,
+    },
+    SetTheme {
+        theme: Theme,
+        reply: Sender<Result<()>>,
     },
     Shutdown {
         reply: Option<Sender<Result<()>>>,
@@ -240,6 +251,15 @@ fn run(
                 WorkerCommand::Screen { reply } => {
                     let _ = reply.send(session.screen());
                 }
+                WorkerCommand::View { reply } => {
+                    let _ = reply.send(session.view());
+                }
+                WorkerCommand::Scroll { lines, reply } => {
+                    let _ = reply.send(session.scroll(lines));
+                }
+                WorkerCommand::SetTheme { theme, reply } => {
+                    let _ = reply.send(session.set_theme(theme));
+                }
                 WorkerCommand::Shutdown { reply } => {
                     let result = finish(session, id, run_id, events);
                     if let Some(reply) = reply {
@@ -285,11 +305,20 @@ fn run(
             }
         }
         if session.is_closed() {
-            // The last screen and unsent credited output remain queryable
-            // after the PTY has exited. Wait for commands without busy-polling.
-            match incoming.recv() {
+            // Keep serving the final screen and pending replay after exit.
+            // Wake once at the synchronized-output deadline if it is still held.
+            let command = match session.screen_deadline() {
+                Some(deadline) => {
+                    incoming.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                }
+                None => incoming.recv().map_err(|_| RecvTimeoutError::Disconnected),
+            };
+            match command {
                 Ok(command) => next = Some(command),
-                Err(_) => return finish(session, id, run_id, events),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => {
+                    return finish(session, id, run_id, events);
+                }
             }
         }
     }
