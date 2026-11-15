@@ -114,7 +114,7 @@ impl TerminalSurface {
         // Adding it makes rows shorter than the glyphs and overlaps text.
         let height = text.ascent(id, FONT_SIZE) - text.descent(id, FONT_SIZE);
         Self {
-            focus: cx.focus_handle(),
+            focus: cx.focus_handle().tab_stop(true),
             font: face,
             metrics: Metrics {
                 width: width.max(px(1.)),

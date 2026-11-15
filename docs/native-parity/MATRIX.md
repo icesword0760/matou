@@ -162,6 +162,18 @@ The screenshots are functional evidence, not a passed same-state pixel compariso
 | A03 rename UI | E01/E02, live HTML input undo/word editing | E04–E07/E17–E19: Chinese names, duplicate/FEFF trim, 20-unit input, selected-word undo and redo | Genuine IME, complete focus traversal and pixel comparison open |
 | A02.05/A02.08 close UI | E03 and earlier original close/last-tab captures | E08–E10; background tab removed, retained Shell takes input; sole tab preserved | Slow-exit concurrency/run persistence pass in bridge; E20/scene-tabs-final-exit.json confirm real UI result; multi-task UI open |
 | A03 overflow tabs | E13/E14 hidden list and selection | E11/E12/E15/E16 visible menu, selection, width and long-title ellipsis | Full keyboard/unread/disabled/pixel states open |
-| A03 modal interaction | Original input Tab → cancel → confirm → underlying new-workspace | Native scroll/right-click occluded; disabled confirm skipped | Native currently traps Tab within dialog; original does not. Full focus parity NOT passed |
+| A03 modal interaction | Original input Tab → cancel → confirm → underlying new-workspace | Native scroll/right-click occluded; disabled confirm skipped | N02z corrects rename trap and preserves separate confirmation cycle; full app focus parity remains open |
 
 | A03/A08 slow closed Shell | Original private runtime disposal retains normal run-exit recording and does not serialize other session input | Real HUP-ignoring zsh bridge: retained input completes before closed PID exits; run exited + code/signal persisted unchanged across reopen. E20 + scene-tabs-final-exit.json show same user route in native app | UI pixel/timing equivalence of structural removal versus event/RPC projection still open; no Agent/multiwindow claim |
+
+
+N02z continuation (A03/A08/A16, evidence `native/evidence/tab-focus-build.json`):
+
+| Requirement | Frozen reference | Native observation | Remaining |
+| --- | --- | --- | --- |
+| Rename Tab/Escape | Input → cancel → confirm → background; Escape on cancel keeps modal | F03/F05 plus real traversal; background terminal executes with modal open | Missing full-app controls and genuine IME |
+| Confirmation focus | Close → cancel → confirm cycle, Escape cancels | Real forward/reverse traversal and Escape retain canvas | Full pixel comparison |
+| Canvas keyboard | Modifier+T/D/[ / ], modifier+Shift+arrows/brackets, numeric tabs | F03/F06; reorder persisted across native relaunch | Full platform key/repeat and read-only states |
+| Button focus after navigation | Existing button retains focus; output only restores unclaimed active terminal | F08/F09 current/different tab, F10 delayed-output recovery | Full app/window/AX behavior |
+| Context and overflow focus | Context does not autofocus; Escape dismisses it. Overflow keeps trigger focus and ignores Escape | F11 reference AX; F12/F13 final native | No complete menu pixel claim |
+| Focus indicator | F07 frozen Mac cancel outline | F14 separately painted outline, transparent interior retained | Exact geometry/color and other platforms remain unverified |
