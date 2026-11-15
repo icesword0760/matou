@@ -16,9 +16,7 @@ use matou_native_core::{
     pty::{ProcessExit, PtyProcess},
     shell_history::Collector,
 };
-use matou_native_terminal::{
-    GridPoint, GridSelection, InputModes, Screen, SelectionAction, Terminal, Theme,
-};
+use matou_native_terminal::{GridSelection, InputModes, Screen, SelectionAction, Terminal, Theme};
 
 use crate::{
     SessionEvent, SessionOptions, StorageFaultCode,
@@ -546,26 +544,8 @@ impl Session {
     }
 
     pub fn scroll_selection(&mut self, lines: i32) -> Result<()> {
-        let terminal = &mut self.display_terminal;
-        if lines == 0 || terminal.selection_range()?.is_none() {
-            return Ok(());
-        }
-        terminal.scroll(lines)?;
-        let screen = terminal.screen()?;
-        let offset = usize::try_from(screen.scrollbar.offset)?;
-        let end = if lines > 0 {
-            GridPoint {
-                row: offset,
-                col: 0,
-            }
-        } else {
-            let last_row = usize::try_from(screen.scrollbar.total)? - 1;
-            GridPoint {
-                row: (offset + screen.rows).min(last_row),
-                col: screen.cols,
-            }
-        };
-        terminal.selection_action(SelectionAction::SetEnd(end))
+        self.display_terminal
+            .selection_action(SelectionAction::Scroll { lines })
     }
 
     pub fn set_theme(&mut self, theme: Theme) -> Result<()> {

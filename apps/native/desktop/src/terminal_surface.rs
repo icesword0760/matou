@@ -624,14 +624,11 @@ impl Render for TerminalSurface {
                     if let Some((grid, row, x)) = this.selection_location(event.position)
                         && grid.bounds.contains(&event.position)
                     {
-                        let mode = if event.modifiers.alt {
-                            SelectionMode::Character
-                        } else {
-                            match event.click_count {
-                                2 if x <= grid.cols as f32 - 0.5 => SelectionMode::Word,
-                                3 => SelectionMode::Line,
-                                _ => SelectionMode::Character,
-                            }
+                        let mode = match event.click_count {
+                            1 if event.modifiers.alt => SelectionMode::Column,
+                            2 if x <= grid.cols as f32 - 0.5 => SelectionMode::Word,
+                            3 => SelectionMode::Line,
+                            _ => SelectionMode::Character,
                         };
                         this.selection_drag = Some(mode);
                         this.selecting = true;

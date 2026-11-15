@@ -29,7 +29,7 @@ use matou_native_core::{
 use matou_native_runtime::{
     SessionEvent, SessionOptions,
     owner::{OwnerEvent, ShellOwner},
-    worker::WorkerCommand,
+    worker::{SelectionCopy, WorkerCommand},
     workspace_paths::WorkspacePathChecks,
 };
 use matou_native_terminal::{
@@ -435,7 +435,7 @@ fn run(
     let mut views = HashMap::<String, PendingView>::new();
     let mut awaiting_ui = HashMap::<String, u64>::new();
     let mut operations = Vec::<WorkerOperation>::new();
-    let mut copies = Vec::<(u64, String, bool, Receiver<Result<String>>)>::new();
+    let mut copies = Vec::<(u64, String, bool, Receiver<Result<SelectionCopy>>)>::new();
     loop {
         let mut shutdown = false;
         let mut graph_dirty = false;
@@ -1127,10 +1127,10 @@ fn run(
                 }
             }
         }
-        copies.retain(|(request_id, session_id, interrupt_if_empty, receive)| {
-            match receive.try_recv() {
-                Ok(Ok(text)) => {
-                    if text.is_empty() && *interrupt_if_empty {
+        copies.retain(
+            |(request_id, session_id, _, receive)| match receive.try_recv() {
+                Ok(Ok(SelectionCopy { text, interrupted })) => {
+                    if interrupted {
                         match owner.record_interaction(session_id, "control", true) {
                             Ok(_) => {
                                 graph_dirty = true;
@@ -1157,8 +1157,8 @@ fn run(
                     let _ = send.send_blocking(Event::Diagnostic("Shell copy disconnected".into()));
                     false
                 }
-            }
-        });
+            },
+        );
         operations.retain(|(session_id, result, refresh)| match result.try_recv() {
             Ok(Ok(())) => {
                 if *refresh {
