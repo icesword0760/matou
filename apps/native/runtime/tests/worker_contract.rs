@@ -168,13 +168,25 @@ fn real_workers_keep_shell_output_independent_and_return_owned_screens() -> Resu
         reply,
     })?;
     let (reply, copied) = mpsc::channel();
-    b.send(WorkerCommand::CopySelection { reply })?;
+    b.send(WorkerCommand::CopySelection {
+        reply,
+        interrupt_if_empty: false,
+    })?;
     // Copy is queued before waiting for selection to finish.
     assert_eq!(
         copied.recv_timeout(Duration::from_secs(2))??,
         "WORKER_B_ONLY"
     );
     selected.recv_timeout(Duration::from_secs(2))??;
+    let (reply, view) = mpsc::channel();
+    b.send(WorkerCommand::SelectedView { reply })?;
+    let (selected_screen, _, range) = view.recv_timeout(Duration::from_secs(2))??;
+    let range = range.context("selection travels with its frame")?;
+    assert_eq!(
+        range.anchor.row,
+        usize::try_from(selected_screen.scrollbar.offset)? + output_row
+    );
+    assert_eq!(range.end.col - range.anchor.col, "WORKER_B_ONLY".len());
 
     a.set_egress_frozen(false)?;
     a.write(b"printf 'WORKER_%s\\n' 'A_BACK'\r")?;

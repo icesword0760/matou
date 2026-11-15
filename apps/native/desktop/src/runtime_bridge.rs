@@ -32,7 +32,9 @@ use matou_native_runtime::{
     worker::WorkerCommand,
     workspace_paths::WorkspacePathChecks,
 };
-use matou_native_terminal::{InputModes, Screen, TerminalOptions, Theme};
+use matou_native_terminal::{
+    GridSelection, InputModes, Screen, SelectionAction, TerminalOptions, Theme,
+};
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -47,6 +49,15 @@ pub struct LaunchOptions {
 }
 
 pub enum Command {
+    Select {
+        session_id: String,
+        action: SelectionAction,
+    },
+    CopySelection {
+        session_id: String,
+        request_id: u64,
+        interrupt_if_empty: bool,
+    },
     Input {
         session_id: String,
         bytes: Vec<u8>,
@@ -217,9 +228,14 @@ pub enum Event {
         error: Option<String>,
     },
     Graph(Value),
+    Copied {
+        request_id: u64,
+        text: String,
+    },
     Frame {
         session_id: String,
         screen: Screen,
+        selection: Option<GridSelection>,
         modes: InputModes,
         sequence: u64,
     },
@@ -279,7 +295,7 @@ impl Drop for RuntimeBridge {
 }
 
 struct PendingView {
-    receive: Receiver<Result<(Screen, InputModes)>>,
+    receive: Receiver<Result<(Screen, InputModes, Option<GridSelection>)>>,
     sequence: u64,
 }
 
@@ -415,6 +431,7 @@ fn run(
     let mut views = HashMap::<String, PendingView>::new();
     let mut awaiting_ui = HashMap::<String, u64>::new();
     let mut operations = Vec::<WorkerOperation>::new();
+    let mut copies = Vec::<(u64, String, bool, Receiver<Result<String>>)>::new();
     loop {
         let mut shutdown = false;
         let mut graph_dirty = false;
@@ -618,6 +635,11 @@ fn run(
             }
         }
         for _ in 0..128 {
+            // Resolve Ctrl+C before a subsequent focus/shutdown can overtake its
+            // control interaction. Ordinary copy does not hold this queue.
+            if copies.iter().any(|(_, _, interrupt, _)| *interrupt) {
+                break;
+            }
             let command = match incoming.try_recv() {
                 Ok(command) => command,
                 Err(mpsc::TryRecvError::Empty) => break,
@@ -869,6 +891,30 @@ fn run(
                         true,
                     )
                 }
+                Command::CopySelection {
+                    session_id,
+                    request_id,
+                    interrupt_if_empty,
+                } => {
+                    if sessions.contains(&session_id) {
+                        let (reply, receive) = mpsc::channel();
+                        owner.send(
+                            &session_id,
+                            WorkerCommand::CopySelection {
+                                reply,
+                                interrupt_if_empty,
+                            },
+                        )?;
+                        copies.push((request_id, session_id, interrupt_if_empty, receive));
+                    }
+                    continue;
+                }
+                Command::Select { session_id, action } => {
+                    if !sessions.contains(&session_id) {
+                        continue;
+                    }
+                    (session_id, WorkerCommand::Select { action, reply }, true)
+                }
                 Command::Scroll { session_id, lines } => {
                     if !sessions.contains(&session_id) {
                         continue;
@@ -1067,6 +1113,38 @@ fn run(
                 }
             }
         }
+        copies.retain(|(request_id, session_id, interrupt_if_empty, receive)| {
+            match receive.try_recv() {
+                Ok(Ok(text)) => {
+                    if text.is_empty() && *interrupt_if_empty {
+                        match owner.record_interaction(session_id, "control", true) {
+                            Ok(_) => {
+                                graph_dirty = true;
+                                tasks_dirty = true;
+                            }
+                            Err(error) => {
+                                let _ = send.send_blocking(Event::Diagnostic(format!("{error:#}")));
+                            }
+                        }
+                    }
+                    dirty.insert(session_id.clone());
+                    let _ = send.send_blocking(Event::Copied {
+                        request_id: *request_id,
+                        text,
+                    });
+                    false
+                }
+                Ok(Err(error)) => {
+                    let _ = send.send_blocking(Event::Diagnostic(format!("{error:#}")));
+                    false
+                }
+                Err(mpsc::TryRecvError::Empty) => true,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    let _ = send.send_blocking(Event::Diagnostic("Shell copy disconnected".into()));
+                    false
+                }
+            }
+        });
         operations.retain(|(session_id, result, refresh)| match result.try_recv() {
             Ok(Ok(())) => {
                 if *refresh {
@@ -1095,11 +1173,12 @@ fn run(
             send_sidebar(&owner, window_id, send)?;
         }
         views.retain(|session_id, pending| match pending.receive.try_recv() {
-            Ok(Ok((screen, modes))) => {
+            Ok(Ok((screen, modes, selection))) => {
                 awaiting_ui.insert(session_id.clone(), pending.sequence);
                 let _ = send.send_blocking(Event::Frame {
                     session_id: session_id.clone(),
                     screen,
+                    selection,
                     modes,
                     sequence: pending.sequence,
                 });
@@ -1120,7 +1199,7 @@ fn run(
                 continue;
             }
             let (reply, receive) = mpsc::channel();
-            owner.send(&session_id, WorkerCommand::View { reply })?;
+            owner.send(&session_id, WorkerCommand::SelectedView { reply })?;
             views.insert(
                 session_id.clone(),
                 PendingView {
@@ -1179,7 +1258,7 @@ fn send_input(
     } else {
         false
     };
-    operations.push((session_id, result, false));
+    operations.push((session_id, result, true));
     Ok(changed)
 }
 

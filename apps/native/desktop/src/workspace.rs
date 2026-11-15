@@ -197,6 +197,7 @@ pub struct Workspace {
     order: Vec<String>,
     focused: Option<String>,
     pending_focus: Option<(String, String)>,
+    copy_request_id: u64,
     resize_revisions: HashMap<String, u64>,
     fault: Option<String>,
     subscriptions: Vec<Subscription>,
@@ -306,6 +307,7 @@ impl Workspace {
             order: Vec::new(),
             focused: None,
             pending_focus: None,
+            copy_request_id: 0,
             resize_revisions: HashMap::new(),
             fault: None,
             subscriptions: vec![keyboard],
@@ -732,14 +734,22 @@ impl Workspace {
                 self.refresh_terminals(cx);
                 self.sync_terminal_input(window, cx);
             }
+            Event::Copied { request_id, text } => {
+                if request_id == self.copy_request_id && !text.is_empty() {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                }
+            }
             Event::Frame {
                 session_id,
                 screen,
+                selection,
                 modes,
                 sequence,
             } => {
                 if let Some(terminal) = self.terminals.get(&session_id) {
-                    terminal.update(cx, |terminal, cx| terminal.set_screen(screen, modes, cx));
+                    terminal.update(cx, |terminal, cx| {
+                        terminal.set_screen(screen, modes, selection, cx)
+                    });
                     // The reference live-output callback restores only an unclaimed
                     // active terminal; dialogs and focused controls retain ownership.
                     if self.focused.as_ref() == Some(&session_id)
@@ -829,6 +839,24 @@ impl Workspace {
             self.subscriptions.push(cx.subscribe(
                 &terminal,
                 move |this, _, event: &SurfaceEvent, cx| match event {
+                    SurfaceEvent::Select(action) => this.send(
+                        Command::Select {
+                            session_id: session_id.clone(),
+                            action: *action,
+                        },
+                        cx,
+                    ),
+                    SurfaceEvent::Copy { interrupt_if_empty } => {
+                        this.copy_request_id += 1;
+                        this.send(
+                            Command::CopySelection {
+                                session_id: session_id.clone(),
+                                request_id: this.copy_request_id,
+                                interrupt_if_empty: *interrupt_if_empty,
+                            },
+                            cx,
+                        );
+                    }
                     SurfaceEvent::Input(bytes) => this.send(
                         Command::Input {
                             session_id: session_id.clone(),
