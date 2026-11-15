@@ -42,6 +42,7 @@ import { DomainTransactionManager } from '../storage/domain-transaction'
 import { RuntimeAccessPolicy } from '../storage/runtime-access-policy'
 import { NotificationProjection } from '../product/experience-foundation'
 import { GitWorkspaceService } from '../git/git-workspace-service'
+import { DshSessionCatalog, defaultDshSessionRoot } from '../session/dsh-session-catalog'
 import { CodexSessionCatalog, defaultCodexRoot } from '../session/codex-session-catalog'
 import { ClaudeSessionCatalog } from '../session/claude-session-catalog'
 import { AntigravitySessionCatalog, defaultAntigravityRoot } from '../session/antigravity-session-catalog'
@@ -91,6 +92,7 @@ export class RuntimeRpcRouter {
   readonly #forkWorkflows: ForkWorkflowService
   readonly #git: GitWorkspaceService
   readonly #gitStates: SessionGitStateRepository
+  readonly #dshSessions: DshSessionCatalog
   readonly #codexSessions: CodexSessionCatalog
   readonly #claudeSessions: ClaudeSessionCatalog
   readonly #antigravitySessions: AntigravitySessionCatalog
@@ -101,6 +103,7 @@ export class RuntimeRpcRouter {
     database: RuntimeDatabase,
     notifications = new NotificationProjection(),
     options: {
+      dshSessionsRoot?: string
       codexRoot?: string
       projectsRoot?: string
       antigravityRoot?: string
@@ -138,6 +141,7 @@ export class RuntimeRpcRouter {
     )
     this.#git = new GitWorkspaceService({ database, dataRoot: dirname(database.path) })
     this.#gitStates = new SessionGitStateRepository(database)
+    this.#dshSessions = new DshSessionCatalog(options.dshSessionsRoot ?? defaultDshSessionRoot())
     this.#codexSessions = new CodexSessionCatalog(options.codexRoot ?? defaultCodexRoot())
     this.#claudeSessions = new ClaudeSessionCatalog(
       options.projectsRoot ?? process.env.MATOU_CLAUDE_PROJECTS_ROOT ??
@@ -1025,20 +1029,20 @@ export class RuntimeRpcRouter {
     }
   }
 
-  #sessionCatalogProvider(value: unknown): 'claude-code' | 'antigravity' | 'codex' {
+  #sessionCatalogProvider(value: unknown): 'claude-code' | 'antigravity' | 'codex' | 'dsh' {
     return value === undefined
       ? 'claude-code'
-      : enumeration(value, ['claude-code', 'antigravity', 'codex'] as const, 'provider')
+      : enumeration(value, ['claude-code', 'antigravity', 'codex', 'dsh'] as const, 'provider')
   }
 
-  #sessionCatalog(provider: 'claude-code' | 'antigravity' | 'codex') {
-    return provider === 'codex' ? this.#codexSessions : provider === 'antigravity' ? this.#antigravitySessions : this.#claudeSessions
+  #sessionCatalog(provider: 'claude-code' | 'antigravity' | 'codex' | 'dsh') {
+    return provider === 'dsh' ? this.#dshSessions : provider === 'codex' ? this.#codexSessions : provider === 'antigravity' ? this.#antigravitySessions : this.#claudeSessions
   }
 
   #providerConversationUsage(
     providerSessionId: string,
     targetSessionId: string,
-    provider: 'claude-code' | 'antigravity' | 'codex' = 'claude-code'
+    provider: 'claude-code' | 'antigravity' | 'codex' | 'dsh' = 'claude-code'
   ): {
     availability: 'available' | 'loaded-here' | 'loaded-elsewhere'
     loadedSessionId?: string

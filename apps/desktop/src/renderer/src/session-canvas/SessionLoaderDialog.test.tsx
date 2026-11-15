@@ -326,7 +326,7 @@ describe('SessionLoaderDialog', () => {
     const claudeRow = await screen.findByRole('button', { name: /预览会话：通知中心聚合/ })
     expect(claudeRow.textContent).toContain('开放所有权限 · 2 条内容')
     expect(screen.getAllByRole('tab').map((tab) => tab.textContent))
-      .toEqual(['Claude Code', 'Antigravity', 'Codex'])
+      .toEqual(['Claude Code', 'Antigravity', 'Codex', 'DSH'])
     await userEvent.setup().click(screen.getByRole('tab', { name: 'Codex' }))
 
     expect(await screen.findByRole('dialog', { name: '载入 Codex 会话' })).toBeTruthy()

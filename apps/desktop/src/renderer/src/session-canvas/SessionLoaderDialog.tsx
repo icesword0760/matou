@@ -18,9 +18,9 @@ import { useMessages } from '../i18n/LocaleProvider'
 import type { Messages } from '../i18n/messages'
 
 type LoaderMessages = Messages['sessionCanvas']['loader']
-type LoaderProvider = 'claude-code' | 'antigravity' | 'codex'
+type LoaderProvider = 'claude-code' | 'antigravity' | 'codex' | 'dsh'
 
-const LOADER_PROVIDERS: readonly LoaderProvider[] = ['claude-code', 'antigravity', 'codex']
+const LOADER_PROVIDERS: readonly LoaderProvider[] = ['claude-code', 'antigravity', 'codex', 'dsh']
 const SESSION_PAGE_SIZE = 50
 const EVENT_PAGE_SIZE = 200
 const SEARCH_PAGE_SIZE = 100
@@ -514,8 +514,9 @@ export function SessionLoaderDialog(props: {
                       onClick={() => setSelectedId(session.providerSessionId)}>
                       <strong>{session.title}</strong>
                       <span>{relativeTime(session.updatedAt, m)} · {session.model ?? providerName}</span>
-                      {provider !== 'codex' &&
-                        <small>{m.permission[session.permissionMode]} · {m.entries(session.eventCount)}</small>}
+                      {provider !== 'codex' && (provider === 'dsh'
+                        ? <small>{m.entries(session.eventCount)}</small>
+                        : <small>{m.permission[session.permissionMode]} · {m.entries(session.eventCount)}</small>)}
                       {session.availability === 'loaded-here' && <small>{m.loadedHere}</small>}
                       {session.availability === 'loaded-elsewhere' &&
                         <small>{m.loadedElsewhere(session.loadedSessionTitle
@@ -535,7 +536,9 @@ export function SessionLoaderDialog(props: {
         <section className="session-loader-preview" aria-label={m.preview}>
           <header>
             <div><strong>{detail?.title ?? m.selectSession}</strong>
-              {detail && <span>{detail.model ?? providerName} · {m.permission[detail.permissionMode]}</span>}
+              {detail && <span>{detail.model ?? providerName}{provider === 'dsh'
+                ? null
+                : ` · ${m.permission[detail.permissionMode]}`}</span>}
             </div>
             <div className="session-loader-content-search-group">
               {historyMode && !effectiveContentQuery && detail &&

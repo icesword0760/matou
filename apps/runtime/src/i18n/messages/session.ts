@@ -20,6 +20,13 @@ export const sessionZhCN = {
   codexHistoryDepthLimit: '祖先历史超过 5 层，仅显示已读取的历史。',
   codexSessionPermissionDenied: '没有权限读取 Codex 会话目录或文件，请检查访问权限后重试',
 
+  dshSessionNotInWorkspace: 'DSH 会话不存在或不属于当前工作目录',
+  dshSessionIdInvalid: 'DSH 会话标识格式错误',
+  dshSessionCorrupt: 'DSH 会话文件已损坏或包含不支持的记录，无法预览',
+  dshSessionReadLimit: 'DSH 会话超过预览读取上限，原文件未被修改',
+  dshSessionUnsupportedEvent: 'DSH 会话包含暂不支持的必要事件，已停止预览',
+  dshPreviewShortened: '预览内容已截短',
+
   // provider-hook-server.ts
   hookStatusMessage: '正在确认会话',
   teammateFinished: '队友已完成当前任务',
@@ -46,6 +53,13 @@ export const sessionEn: CatalogShape<typeof sessionZhCN> = {
   codexHistoryCycle: 'Ancestor history contains a cycle. Showing the readable history without following the cycle.',
   codexHistoryDepthLimit: 'Ancestor history exceeds 5 levels. Showing the history read within that limit.',
   codexSessionPermissionDenied: 'Cannot read the Codex session directory or file. Check access permissions and retry',
+
+  dshSessionNotInWorkspace: 'That DSH session does not exist or does not belong to this working directory',
+  dshSessionIdInvalid: 'The DSH session id has an invalid format',
+  dshSessionCorrupt: 'The DSH session file is damaged or contains unsupported records and cannot be previewed',
+  dshSessionReadLimit: 'The DSH session exceeds the preview read limit; the original file was not changed',
+  dshSessionUnsupportedEvent: 'The DSH session contains an unsupported required event; preview was stopped',
+  dshPreviewShortened: 'Preview shortened',
 
   hookStatusMessage: 'Confirming the session',
   teammateFinished: 'A teammate finished the current task',
