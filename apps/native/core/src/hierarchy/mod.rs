@@ -1,6 +1,7 @@
 pub mod canvas;
 mod model;
 mod navigation;
+pub mod tabs;
 
 use anyhow::{Result, ensure};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};

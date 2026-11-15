@@ -17,6 +17,7 @@ use matou_native_core::{
     hierarchy::{
         self, BootstrapWindowInput, HierarchyIds, HierarchyResult, Scene,
         canvas::{CanvasIds, CanvasMessages, CreateCanvasInput, CreateShellSiblingInput},
+        tabs::{CloseSceneInput, RenameSceneInput, ReorderSceneInput},
     },
     journal::JournalOptions,
     pty::ShellLaunch,
@@ -80,6 +81,21 @@ pub enum Command {
     SelectScene {
         scene_id: String,
     },
+    RenameScene {
+        scene_id: String,
+        name: String,
+    },
+    ReorderScene {
+        scene_id: String,
+        before_scene_id: Option<String>,
+    },
+    CloseScene {
+        scene_id: String,
+        confirmed: bool,
+    },
+    PreviewSceneClose {
+        scene_id: String,
+    },
     FocusSession {
         scene_id: String,
         session_id: String,
@@ -108,6 +124,13 @@ pub enum Event {
     NavigationFailed {
         message: String,
         attempted_focus: Option<(String, String)>,
+    },
+    /// Session IDs retired by a scene close, before its navigation projection.
+    ScenesDisposed(Vec<String>),
+    SceneClosePreview {
+        scene_id: String,
+        graph: Value,
+        is_last: bool,
     },
     GeometryResult {
         sequence: u64,
@@ -238,21 +261,22 @@ fn run(
         "默认",
         now(),
     )?;
-    let mut scene_id = hierarchy
-        .scene
-        .as_ref()
-        .context("active native scene")?
-        .id
-        .clone();
+    let mut scene_id = hierarchy.scene.as_ref().map(|scene| scene.id.clone());
     let mut owner = ShellOwner::new(connection, ownership, id)?;
     let mut sessions = HashSet::new();
-    ensure_scene_shells(&mut owner, &options, &scene_id, &mut sessions)?;
+    if let Some(scene_id) = scene_id.as_deref() {
+        ensure_scene_shells(&mut owner, &options, scene_id, &mut sessions)?;
+    }
     let scenes = owner.scenes(&hierarchy.task.as_ref().context("active task")?.id)?;
     send.send_blocking(Event::Ready {
         hierarchy,
         scenes,
-        graph: owner.graph(&scene_id, Some(window_id))?,
-        geometry: owner.geometry(&scene_id)?,
+        graph: active_graph(&owner, scene_id.as_deref(), window_id)?,
+        geometry: scene_id
+            .as_deref()
+            .map(|id| owner.geometry(id))
+            .transpose()?
+            .unwrap_or_default(),
     })?;
     let mut dirty: HashSet<String> = sessions.iter().cloned().collect();
     let mut sequence = HashMap::<String, u64>::new();
@@ -275,6 +299,9 @@ fn run(
                 Command::CreateCanvas { .. }
                     | Command::CreateShellSibling { .. }
                     | Command::SelectScene { .. }
+                    | Command::RenameScene { .. }
+                    | Command::ReorderScene { .. }
+                    | Command::CloseScene { .. }
                     | Command::FocusSession { .. }
             ) {
                 // Each command mutates the authoritative domain before the view changes.
@@ -287,13 +314,19 @@ fn run(
                     _ => None,
                 };
                 match navigate(&mut owner, window_id, command) {
-                    Ok(hierarchy) => {
-                        scene_id = hierarchy
-                            .scene
-                            .as_ref()
-                            .context("active scene after navigation")?
-                            .id
-                            .clone();
+                    Ok((hierarchy, disposed)) => {
+                        if !disposed.is_empty() {
+                            for id in &disposed {
+                                sessions.remove(id);
+                                dirty.remove(id);
+                                sequence.remove(id);
+                                views.remove(id);
+                                awaiting_ui.remove(id);
+                            }
+                            operations.retain(|(id, _, _)| sessions.contains(id));
+                            send.send_blocking(Event::ScenesDisposed(disposed))?;
+                        }
+                        scene_id = hierarchy.scene.as_ref().map(|scene| scene.id.clone());
                         let scenes = owner.scenes(
                             &hierarchy
                                 .task
@@ -304,11 +337,16 @@ fn run(
                         send.send_blocking(Event::Navigation {
                             hierarchy,
                             scenes,
-                            graph: owner.graph(&scene_id, Some(window_id))?,
-                            geometry: owner.geometry(&scene_id)?,
+                            graph: active_graph(&owner, scene_id.as_deref(), window_id)?,
+                            geometry: scene_id
+                                .as_deref()
+                                .map(|id| owner.geometry(id))
+                                .transpose()?
+                                .unwrap_or_default(),
                         })?;
-                        if let Err(error) =
-                            ensure_scene_shells(&mut owner, &options, &scene_id, &mut sessions)
+                        if let Some(scene_id) = scene_id.as_deref()
+                            && let Err(error) =
+                                ensure_scene_shells(&mut owner, &options, scene_id, &mut sessions)
                         {
                             send.send_blocking(Event::Diagnostic(format!("{error:#}")))?;
                         }
@@ -358,7 +396,7 @@ fn run(
                     // A first layout/theme frame can precede any PTY output.
                     // Zero means no output credit has been sent yet; it still
                     // releases the UI frame slot, but has nothing to acknowledge.
-                    if sequence == 0 {
+                    if sequence == 0 || !sessions.contains(&session_id) {
                         continue;
                     }
                     (
@@ -382,15 +420,37 @@ fn run(
                     })?;
                     continue;
                 }
+                Command::PreviewSceneClose { scene_id } => {
+                    let event = match owner.scene_close_preview(window_id, &scene_id) {
+                        Ok((graph, is_last)) => Event::SceneClosePreview {
+                            scene_id,
+                            graph,
+                            is_last,
+                        },
+                        Err(error) => Event::NavigationFailed {
+                            message: format!("{error:#}"),
+                            attempted_focus: None,
+                        },
+                    };
+                    send.send_blocking(event)?;
+                    continue;
+                }
                 Command::Refresh => {
                     dirty.extend(sessions.iter().cloned());
                     awaiting_ui.clear();
-                    send.send_blocking(Event::Graph(owner.graph(&scene_id, Some(window_id))?))?;
+                    send.send_blocking(Event::Graph(active_graph(
+                        &owner,
+                        scene_id.as_deref(),
+                        window_id,
+                    )?))?;
                     continue;
                 }
                 Command::CreateCanvas { .. }
                 | Command::CreateShellSibling { .. }
                 | Command::SelectScene { .. }
+                | Command::RenameScene { .. }
+                | Command::ReorderScene { .. }
+                | Command::CloseScene { .. }
                 | Command::FocusSession { .. } => unreachable!("navigation handled above"),
                 Command::Shutdown => {
                     shutdown = true;
@@ -416,6 +476,9 @@ fn run(
                 }
                 OwnerEvent::Terminal(event) => {
                     let session_id = event.session_id;
+                    if !sessions.contains(&session_id) {
+                        continue;
+                    }
                     match event.event {
                         SessionEvent::Output { sequence: next, .. } => {
                             sequence.insert(session_id.clone(), next);
@@ -450,7 +513,11 @@ fn run(
             }
         }
         if graph_dirty {
-            send.send_blocking(Event::Graph(owner.graph(&scene_id, Some(window_id))?))?;
+            send.send_blocking(Event::Graph(active_graph(
+                &owner,
+                scene_id.as_deref(),
+                window_id,
+            )?))?;
         }
         operations.retain(|(session_id, result, refresh)| match result.try_recv() {
             Ok(Ok(())) => {
@@ -558,7 +625,18 @@ fn ensure_scene_shells(
     Ok(())
 }
 
-fn navigate(owner: &mut ShellOwner, window_id: &str, command: Command) -> Result<HierarchyResult> {
+fn active_graph(owner: &ShellOwner, scene_id: Option<&str>, window_id: &str) -> Result<Value> {
+    match scene_id {
+        Some(scene_id) => owner.graph(scene_id, Some(window_id)),
+        None => Ok(serde_json::json!({"nodes": []})),
+    }
+}
+
+fn navigate(
+    owner: &mut ShellOwner,
+    window_id: &str,
+    command: Command,
+) -> Result<(HierarchyResult, Vec<String>)> {
     let time = now();
     let ids = CanvasIds {
         scene_id: id(),
@@ -627,6 +705,53 @@ fn navigate(owner: &mut ShellOwner, window_id: &str, command: Command) -> Result
         Command::SelectScene { scene_id } => {
             owner.select_scene(window_id, &scene_id, time)?;
         }
+        Command::RenameScene { scene_id, name } => {
+            let input = RenameSceneInput {
+                scene_id,
+                name,
+                now: time,
+            };
+            owner.rename_scene(
+                &metadata("hierarchy.rename-scene", &serde_json::to_value(&input)?),
+                &input,
+                messages.duplicate_scene_name,
+                time,
+            )?;
+        }
+        Command::ReorderScene {
+            scene_id,
+            before_scene_id,
+        } => {
+            let input = ReorderSceneInput {
+                window_id: window_id.into(),
+                scene_id,
+                before_scene_id,
+                now: time,
+            };
+            owner.reorder_scene(
+                &metadata("hierarchy.reorder-scene", &serde_json::to_value(&input)?),
+                &input,
+                time,
+            )?;
+        }
+        Command::CloseScene {
+            scene_id,
+            confirmed,
+        } => {
+            let confirmed_intent = confirmed.then(|| format!("close-scene:{scene_id}"));
+            let input = CloseSceneInput {
+                window_id: window_id.into(),
+                scene_id,
+                confirmed_intent,
+                now: time,
+            };
+            let disposed = owner.close_scene(
+                &metadata("hierarchy.close-scene", &serde_json::to_value(&input)?),
+                &input,
+                time,
+            )?;
+            return Ok((owner.hierarchy(window_id)?, disposed));
+        }
         Command::FocusSession {
             scene_id,
             session_id,
@@ -641,7 +766,7 @@ fn navigate(owner: &mut ShellOwner, window_id: &str, command: Command) -> Result
         }
         _ => unreachable!("only navigation commands reach navigate"),
     }
-    owner.hierarchy(window_id)
+    Ok((owner.hierarchy(window_id)?, Vec::new()))
 }
 
 fn id() -> String {

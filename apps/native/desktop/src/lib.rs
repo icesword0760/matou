@@ -6,3 +6,7 @@ pub mod runtime_bridge;
 pub mod terminal_input;
 pub mod terminal_surface;
 pub mod workspace;
+
+pub mod tab_dialog_style;
+
+pub mod rename_input;

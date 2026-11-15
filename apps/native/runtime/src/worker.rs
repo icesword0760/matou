@@ -180,6 +180,14 @@ impl SessionWorker {
         result
     }
 
+    pub(crate) fn is_finished(&self) -> bool {
+        self.thread.as_ref().is_none_or(JoinHandle::is_finished)
+    }
+
+    pub(crate) fn join_after_shutdown(&mut self) -> Result<()> {
+        self.thread.take().map_or(Ok(()), join)
+    }
+
     fn request<T>(&self, build: impl FnOnce(Sender<Result<T>>) -> WorkerCommand) -> Result<T> {
         let (reply, result) = mpsc::channel();
         self.send(build(reply))?;

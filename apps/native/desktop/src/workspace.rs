@@ -13,7 +13,9 @@ use crate::{
     carousel_motion::{
         Curve, Transition, centered_scroll, focus_scroll_step, fully_visible_scroll,
     },
+    rename_input::{RenameInput, RenameInputEvent, trim_name},
     runtime_bridge::{Command, Event},
+    tab_dialog_style as tabs_ui,
     terminal_surface::{SurfaceEvent, TerminalSurface},
 };
 
@@ -25,11 +27,32 @@ struct CardMotion {
     lift: Transition,
 }
 
+enum TabDialog {
+    Rename {
+        scene_id: String,
+        input: Entity<RenameInput>,
+    },
+    Close {
+        scene_id: String,
+        graph: Value,
+        is_last: bool,
+    },
+}
+
 pub struct Workspace {
     commands: Sender<Command>,
     hierarchy: Option<HierarchyResult>,
     scenes: Vec<Scene>,
     tab_scroll: ScrollHandle,
+    tab_hover: Option<String>,
+    tab_overflow: bool,
+    hidden_tabs: Option<Vec<String>>,
+    tab_menu: Option<(String, Point<Pixels>)>,
+    dialog: Option<TabDialog>,
+    dialog_controls: Vec<FocusHandle>,
+    dialog_subscription: Option<Subscription>,
+    dialog_return_focus: Option<FocusHandle>,
+    pending_close: Option<String>,
     carousel_scroll: ScrollHandle,
     motion_clock: Instant,
     #[cfg(debug_assertions)]
@@ -89,6 +112,15 @@ impl Workspace {
             hierarchy: None,
             scenes: Vec::new(),
             tab_scroll: ScrollHandle::new(),
+            tab_hover: None,
+            tab_overflow: false,
+            hidden_tabs: None,
+            tab_menu: None,
+            dialog: None,
+            dialog_controls: Vec::new(),
+            dialog_subscription: None,
+            dialog_return_focus: None,
+            pending_close: None,
             carousel_scroll: ScrollHandle::new(),
             motion_clock: Instant::now(),
             #[cfg(debug_assertions)]
@@ -133,6 +165,8 @@ impl Workspace {
             Command::SelectScene { .. }
                 | Command::CreateCanvas { .. }
                 | Command::CreateShellSibling { .. }
+                | Command::CloseScene { .. }
+                | Command::ReorderScene { .. }
         ) {
             self.flush_geometry(cx);
         }
@@ -221,17 +255,47 @@ impl Workspace {
                 self.hierarchy = Some(hierarchy);
                 self.graph = graph;
                 self.refresh_terminals(window, cx);
-                if let Some(index) = self.scenes.iter().position(|scene| {
-                    self.hierarchy
-                        .as_ref()
-                        .and_then(|h| h.scene.as_ref())
-                        .is_some_and(|active| active.id == scene.id)
-                }) {
+                if scene_changed
+                    && let Some(index) = self.scenes.iter().position(|scene| {
+                        self.hierarchy
+                            .as_ref()
+                            .and_then(|h| h.scene.as_ref())
+                            .is_some_and(|active| active.id == scene.id)
+                    })
+                {
                     self.tab_scroll.scroll_to_item(index);
                 }
-                if let Some(terminal) = self.focused.as_ref().and_then(|id| self.terminals.get(id))
+                if self.dialog.is_none()
+                    && let Some(terminal) =
+                        self.focused.as_ref().and_then(|id| self.terminals.get(id))
                 {
                     window.focus(&terminal.read(cx).focus);
+                }
+            }
+            Event::ScenesDisposed(ids) => {
+                for id in ids {
+                    self.terminals.remove(&id);
+                    self.card_motion.remove(&id);
+                    self.resize_revisions.remove(&id);
+                }
+            }
+            Event::SceneClosePreview {
+                scene_id,
+                graph,
+                is_last,
+            } => {
+                if self.pending_close.as_ref() == Some(&scene_id) {
+                    self.pending_close = None;
+                    self.dialog_return_focus = window.focused(cx);
+                    self.dialog_controls = (0..if is_last { 2 } else { 3 })
+                        .map(|_| cx.focus_handle())
+                        .collect();
+                    window.focus(&self.dialog_controls[0]);
+                    self.dialog = Some(TabDialog::Close {
+                        scene_id,
+                        graph,
+                        is_last,
+                    });
                 }
             }
             Event::GeometryResult {
@@ -862,6 +926,156 @@ impl Workspace {
             )
     }
 
+    fn scene_title(&self, scene: &Scene) -> String {
+        if !scene.title_pinned
+            && scene.name.starts_with("Shell · ")
+            && self
+                .hierarchy
+                .as_ref()
+                .and_then(|h| h.scene.as_ref())
+                .is_some_and(|s| s.id == scene.id)
+        {
+            if let Some(cwd) = self.graph["nodes"]
+                .as_array()
+                .and_then(|nodes| {
+                    nodes
+                        .iter()
+                        .find(|n| n["sessionId"].as_str() == self.focused.as_deref())
+                })
+                .and_then(|n| n["cwd"].as_str())
+            {
+                return format!("Shell · {cwd}");
+            }
+        }
+        scene.name.clone()
+    }
+    fn close_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.dialog = None;
+        self.dialog_subscription = None;
+        self.dialog_controls.clear();
+        if let Some(focus) = self.dialog_return_focus.take() {
+            window.focus(&focus);
+        }
+        cx.notify();
+    }
+    fn open_rename(&mut self, scene_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(scene) = self.scenes.iter().find(|s| s.id == scene_id) else {
+            return;
+        };
+        let text = self.scene_title(scene);
+        let input = cx.new(|cx| RenameInput::new(text, cx));
+        self.dialog_return_focus = window.focused(cx);
+        self.dialog_controls = vec![
+            cx.focus_handle(),
+            input.read(cx).focus.clone(),
+            cx.focus_handle(),
+            cx.focus_handle(),
+        ];
+        self.dialog_subscription =
+            Some(
+                cx.subscribe_in(&input, window, |this, _, event, window, cx| match event {
+                    RenameInputEvent::Changed => cx.notify(),
+                    RenameInputEvent::Cancel => this.close_dialog(window, cx),
+                    RenameInputEvent::Confirm => this.confirm_dialog(window, cx),
+                }),
+            );
+        window.focus(&input.read(cx).focus);
+        self.dialog = Some(TabDialog::Rename { scene_id, input });
+        self.tab_menu = None;
+        self.hidden_tabs = None;
+        cx.notify();
+    }
+    fn rename_error(&self, scene_id: &str, value: &str) -> Option<String> {
+        self.scenes
+            .iter()
+            .any(|s| s.id != scene_id && s.title_pinned && self.scene_title(s) == value)
+            .then(|| format!("当前事项下已存在名为\"{value}\"的标签页"))
+    }
+    fn confirm_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let command = match &self.dialog {
+            Some(TabDialog::Rename { scene_id, input }) => {
+                let input = input.read(cx);
+                let name = trim_name(&input.text);
+                if input.composing()
+                    || name.is_empty()
+                    || self.rename_error(scene_id, name).is_some()
+                {
+                    return;
+                }
+                Some(Command::RenameScene {
+                    scene_id: scene_id.clone(),
+                    name: name.to_owned(),
+                })
+            }
+            Some(TabDialog::Close {
+                scene_id, is_last, ..
+            }) => {
+                if *is_last {
+                    None
+                } else {
+                    Some(Command::CloseScene {
+                        scene_id: scene_id.clone(),
+                        confirmed: true,
+                    })
+                }
+            }
+            None => return,
+        };
+        self.close_dialog(window, cx);
+        if let Some(command) = command {
+            self.send(command, cx);
+        }
+    }
+    fn tab_key(&mut self, e: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dialog.is_some() {
+            let composing = matches!(&self.dialog,Some(TabDialog::Rename{input,..}) if input.read(cx).composing());
+            if e.keystroke.key == "escape" && !composing {
+                self.close_dialog(window, cx);
+                cx.stop_propagation();
+                return;
+            }
+            if e.keystroke.key == "tab" && !composing {
+                let disabled = matches!(&self.dialog,Some(TabDialog::Rename{scene_id,input}) if !trim_name(&input.read(cx).text).is_empty() && self.rename_error(scene_id,trim_name(&input.read(cx).text)).is_some());
+                let n = self.dialog_controls.len() - usize::from(disabled);
+                let i = self
+                    .dialog_controls
+                    .iter()
+                    .position(|f| f.is_focused(window))
+                    .unwrap_or(0);
+                let next = if e.keystroke.modifiers.shift {
+                    (i + n - 1) % n
+                } else {
+                    (i + 1) % n
+                };
+                window.focus(&self.dialog_controls[next]);
+                cx.stop_propagation();
+                return;
+            }
+            if matches!(e.keystroke.key.as_str(), "enter" | "space") && !composing {
+                let i = self
+                    .dialog_controls
+                    .iter()
+                    .position(|f| f.is_focused(window))
+                    .unwrap_or(0);
+                if matches!(&self.dialog, Some(TabDialog::Rename { .. })) && i == 1 {
+                    return;
+                }
+                if i + 1 == self.dialog_controls.len() {
+                    self.confirm_dialog(window, cx);
+                } else {
+                    self.close_dialog(window, cx);
+                }
+                cx.stop_propagation();
+            }
+            return;
+        }
+        if e.keystroke.key == "escape" && (self.tab_menu.is_some() || self.hidden_tabs.is_some()) {
+            self.tab_menu = None;
+            self.hidden_tabs = None;
+            cx.stop_propagation();
+            cx.notify();
+        }
+    }
     fn topbar(&self, cx: &mut Context<Self>) -> Div {
         let active_id = self
             .hierarchy
@@ -879,63 +1093,72 @@ impl Workspace {
             .track_scroll(&self.tab_scroll);
         for scene in &self.scenes {
             let active = active_id == Some(&scene.id);
-            let scene_id = scene.id.clone();
-            let mut title = scene.name.clone();
-            if active && !scene.title_pinned && title.starts_with("Shell · ") {
-                if let Some(cwd) = self.graph["nodes"]
-                    .as_array()
-                    .and_then(|nodes| {
-                        nodes
-                            .iter()
-                            .find(|node| node["sessionId"].as_str() == self.focused.as_deref())
-                    })
-                    .and_then(|node| node["cwd"].as_str())
-                {
-                    title = format!("Shell · {cwd}");
-                }
-            }
+            let select_id = scene.id.clone();
+            let rename_id = scene.id.clone();
+            let close_id = scene.id.clone();
+            let menu_id = scene.id.clone();
+            let hover_id = scene.id.clone();
+            let title = self.scene_title(scene);
             tabs = tabs.child(
-                div()
-                    .id(SharedString::from(format!("tab-{}", scene.id)))
-                    .h(px(28.))
-                    .min_w(px(100.))
-                    .max_w(px(200.))
-                    .flex_none()
-                    .pl(px(12.))
-                    .pr(px(10.))
-                    .rounded(px(6.))
-                    .bg(if active {
-                        rgba(0xeceef3ff)
-                    } else {
-                        rgba(0x00000000)
-                    })
-                    .text_color(if active { rgb(0x2f3547) } else { rgb(0x999999) })
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .text_size(px(12.))
-                    .cursor_pointer()
+                tabs_ui::tab(SharedString::from(format!("tab-{}", scene.id)), active)
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.send(
-                            Command::SelectScene {
-                                scene_id: scene_id.clone(),
-                            },
-                            cx,
-                        )
+                    .on_hover(cx.listener(move |this, hover: &bool, _, cx| {
+                        this.tab_hover = hover.then(|| hover_id.clone());
+                        cx.notify();
                     }))
-                    .child(
-                        div()
-                            .flex_1()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .child(title),
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, e: &MouseDownEvent, window, cx| {
+                            let size = window.viewport_size();
+                            this.tab_menu = Some((
+                                menu_id.clone(),
+                                point(
+                                    e.position.x.clamp(px(8.), size.width - px(136.)),
+                                    e.position.y.clamp(px(8.), size.height - px(44.)),
+                                ),
+                            ));
+                            this.hidden_tabs = None;
+                            cx.stop_propagation();
+                            cx.notify();
+                        }),
                     )
                     .child(
-                        div()
-                            .opacity(if active { 1. } else { 0. })
-                            .child(icon("x", 13., 0x606572)),
+                        tabs_ui::tab_title(title)
+                            .id(SharedString::from(format!("tab-title-{}", scene.id)))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, e: &MouseDownEvent, window, cx| {
+                                    if e.click_count == 2 {
+                                        this.open_rename(rename_id.clone(), window, cx);
+                                    }
+                                    cx.stop_propagation();
+                                }),
+                            )
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.send(
+                                    Command::SelectScene {
+                                        scene_id: select_id.clone(),
+                                    },
+                                    cx,
+                                );
+                            })),
+                    )
+                    .child(
+                        tabs_ui::tab_close(
+                            SharedString::from(format!("tab-close-{}", scene.id)),
+                            active || self.tab_hover.as_ref() == Some(&scene.id),
+                        )
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.pending_close = Some(close_id.clone());
+                            this.send(
+                                Command::PreviewSceneClose {
+                                    scene_id: close_id.clone(),
+                                },
+                                cx,
+                            );
+                            cx.stop_propagation();
+                        })),
                     ),
             );
         }
@@ -944,31 +1167,60 @@ impl Workspace {
             .as_ref()
             .and_then(|h| h.task.as_ref())
             .map(|t| t.id.clone());
-        tabs = tabs.child(
-            div()
-                .id("create-canvas")
-                .ml(px(4.))
-                .size(px(24.))
-                .flex_none()
-                .rounded(px(6.))
-                .bg(rgb(0xf1f1f4))
-                .flex()
-                .items_center()
-                .justify_center()
-                .cursor_pointer()
+        let add = |id: &'static str| {
+            tabs_ui::tab_add(id)
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    if let Some(task_id) = &task {
-                        this.send(
-                            Command::CreateCanvas {
-                                task_id: task_id.clone(),
-                            },
-                            cx,
-                        );
+                .on_click(cx.listener({
+                    let task = task.clone();
+                    move |this, _, _, cx| {
+                        if let Some(task_id) = &task {
+                            this.send(
+                                Command::CreateCanvas {
+                                    task_id: task_id.clone(),
+                                },
+                                cx,
+                            );
+                        }
                     }
                 }))
-                .child(icon("plus", 15., 0x606572)),
-        );
+        };
+        if !self.tab_overflow {
+            tabs = tabs.child(add("create-canvas"));
+        }
+        let overflow_actions = div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(4.))
+            .ml(px(8.))
+            .child(
+                tabs_ui::tab_overflow_btn("tab-overflow")
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if this.hidden_tabs.is_some() {
+                            this.hidden_tabs = None;
+                        } else {
+                            let viewport = this.tab_scroll.bounds();
+                            let offset = this.tab_scroll.offset();
+                            this.hidden_tabs = Some(
+                                this.scenes
+                                    .iter()
+                                    .enumerate()
+                                    .filter(|(i, _)| {
+                                        this.tab_scroll.bounds_for_item(*i).is_none_or(|b| {
+                                            b.left() + offset.x < viewport.left() - px(1.)
+                                                || b.right() + offset.x > viewport.right() + px(1.)
+                                        })
+                                    })
+                                    .map(|(_, s)| s.id.clone())
+                                    .collect(),
+                            );
+                        }
+                        this.tab_menu = None;
+                        cx.notify();
+                    })),
+            )
+            .child(add("create-canvas-overflow"));
         let scene = active_id.cloned();
         let session = self.focused.clone();
         div()
@@ -980,6 +1232,7 @@ impl Workspace {
             .bg(rgb(0xffffff))
             .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
             .child(tabs)
+            .when(self.tab_overflow, |bar| bar.child(overflow_actions))
             .child(
                 div()
                     .size(px(28.))
@@ -1024,6 +1277,262 @@ impl Workspace {
                         Transformation::rotate(Radians(std::f32::consts::PI)),
                     )),
             )
+    }
+
+    fn tab_overlay(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if let Some(dialog) = &self.dialog {
+            let (title, body, confirm, show_cancel, disabled) = match dialog {
+                TabDialog::Rename { scene_id, input } => {
+                    let value = trim_name(&input.read(cx).text);
+                    let error = self.rename_error(scene_id, value);
+                    let mut body = tabs_ui::dialog_body().child(input.clone());
+                    if let Some(error) = &error {
+                        body = body.child(tabs_ui::dialog_error(error.clone()));
+                    }
+                    (
+                        "重命名标签页",
+                        body,
+                        "确定",
+                        true,
+                        error.is_some() && !value.is_empty(),
+                    )
+                }
+                TabDialog::Close {
+                    scene_id,
+                    graph,
+                    is_last,
+                } => {
+                    let name = self
+                        .scenes
+                        .iter()
+                        .find(|s| &s.id == scene_id)
+                        .map(|s| self.scene_title(s))
+                        .unwrap_or_else(|| "当前画布".into());
+                    let nodes = graph["nodes"].as_array();
+                    let count = nodes.map_or(0, |ns| {
+                        ns.iter().filter(|n| n["archivedAt"].is_null()).count()
+                    });
+                    let running = nodes.map_or(0, |ns| {
+                        ns.iter()
+                            .filter(|n| {
+                                matches!(n["workStatus"].as_str(), Some("running" | "starting"))
+                            })
+                            .count()
+                    });
+                    let needs = nodes.map_or(0, |ns| {
+                        ns.iter()
+                            .filter(|n| n["workStatus"] == "needs-input")
+                            .count()
+                    });
+                    let mut affected = Vec::new();
+                    if running > 0 {
+                        affected.push(format!("{running} 个运行中会话"));
+                    }
+                    if needs > 0 {
+                        affected.push(format!("{needs} 个待输入会话"));
+                    }
+                    let activity = if affected.is_empty() {
+                        String::new()
+                    } else {
+                        format!("其中 {}将停止。", affected.join("和 "))
+                    };
+                    let text = if *is_last {
+                        "当前已是最后一个事项下的最后一个标签，这里点击关闭不会删除该事项。\n\n如需删除该工作区，请在左侧事项面板的下拉菜单中执行删除。".into()
+                    } else {
+                        format!(
+                            "关闭后，“{name}”下的 {count} 个会话会全部从界面移除。{activity}项目文件和工作树保持原样。"
+                        )
+                    };
+                    (
+                        if *is_last { "提示" } else { "关闭画布" },
+                        tabs_ui::dialog_body().child(text),
+                        if *is_last {
+                            "我知道了"
+                        } else {
+                            "关闭画布"
+                        },
+                        !*is_last,
+                        false,
+                    )
+                }
+            };
+            let n = self.dialog_controls.len();
+            let mut footer = tabs_ui::dialog_footer();
+            if show_cancel {
+                footer = footer.child(
+                    tabs_ui::dialog_button("dialog-cancel", "取消", false, false)
+                        .track_focus(&self.dialog_controls[n - 2])
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, window, _| {
+                                window.focus(&this.dialog_controls[n - 2])
+                            }),
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| this.close_dialog(window, cx))),
+                );
+            }
+            footer = footer.child(
+                tabs_ui::dialog_button("dialog-confirm", confirm, true, disabled)
+                    .track_focus(&self.dialog_controls[n - 1])
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, window, _| {
+                            if !disabled {
+                                window.focus(&this.dialog_controls[n - 1]);
+                            }
+                        }),
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if !disabled {
+                            this.confirm_dialog(window, cx);
+                        }
+                    })),
+            );
+            return Some(
+                tabs_ui::dialog_overlay("tab-dialog-overlay")
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            this.close_dialog(window, cx);
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                    .child(
+                        tabs_ui::dialog_panel(f32::from(window.viewport_size().width))
+                            .id("tab-dialog-panel")
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .child(
+                                tabs_ui::dialog_header()
+                                    .child(tabs_ui::dialog_title(title))
+                                    .child(
+                                        tabs_ui::dialog_close("dialog-close")
+                                            .track_focus(&self.dialog_controls[0])
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                cx.listener(|this, _, window, _| {
+                                                    window.focus(&this.dialog_controls[0])
+                                                }),
+                                            )
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.close_dialog(window, cx)
+                                            })),
+                                    ),
+                            )
+                            .child(body)
+                            .child(footer),
+                    )
+                    .into_any_element(),
+            );
+        }
+        if let Some((id, position)) = &self.tab_menu {
+            let id = id.clone();
+            return Some(
+                tabs_ui::context_menu("tab-context-menu")
+                    .left(position.x)
+                    .top(position.y)
+                    .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                        this.tab_menu = None;
+                        cx.notify();
+                    }))
+                    .child(
+                        tabs_ui::menu_item("tab-rename-menu", "重命名页签").on_click(cx.listener(
+                            move |this, _, window, cx| this.open_rename(id.clone(), window, cx),
+                        )),
+                    )
+                    .into_any_element(),
+            );
+        }
+        if let Some(ids) = &self.hidden_tabs {
+            let bounds = self.tab_scroll.bounds();
+            let size = window.viewport_size();
+            let top = bounds.bottom() + px(4.);
+            // CSS shrink-to-fit width needs an explicit value here so GPUI's
+            // percentage-width rows receive a definite containing block.
+            let font = window.text_style().font();
+            let menu_width = ids
+                .iter()
+                .filter_map(|id| self.scenes.iter().find(|s| &s.id == id))
+                .map(|scene| {
+                    let text: SharedString = self.scene_title(scene).into();
+                    let run = TextRun {
+                        len: text.len(),
+                        font: font.clone(),
+                        color: rgb(0x2f3547).into(),
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    };
+                    let line = window
+                        .text_system()
+                        .shape_line(text.clone(), px(13.), &[run], None);
+                    f32::from(line.x_for_index(text.len()))
+                        + 24.
+                        + if self
+                            .hierarchy
+                            .as_ref()
+                            .and_then(|h| h.scene.as_ref())
+                            .is_some_and(|s| s.id == scene.id)
+                        {
+                            24.
+                        } else {
+                            0.
+                        }
+                })
+                .fold(200f32, f32::max)
+                .min(360.);
+            let mut panel = tabs_ui::overflow_panel("hidden-tab-panel")
+                .w(px(menu_width))
+                .right(size.width - bounds.right())
+                .top(top)
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
+            for id in ids {
+                let Some(scene) = self.scenes.iter().find(|s| &s.id == id) else {
+                    continue;
+                };
+                let active = self
+                    .hierarchy
+                    .as_ref()
+                    .and_then(|h| h.scene.as_ref())
+                    .is_some_and(|s| &s.id == id);
+                let id = id.clone();
+                panel = panel.child(
+                    tabs_ui::overflow_item(SharedString::from(format!("hidden-{id}")), active)
+                        .child(tabs_ui::overflow_title(self.scene_title(scene), active))
+                        .when(active, |item| item.child(tabs_ui::overflow_check()))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.hidden_tabs = None;
+                            if let Some(index) = this.scenes.iter().position(|s| s.id == id) {
+                                this.tab_scroll.scroll_to_item(index);
+                            }
+                            this.send(
+                                Command::SelectScene {
+                                    scene_id: id.clone(),
+                                },
+                                cx,
+                            );
+                        })),
+                );
+            }
+            return Some(
+                div()
+                    .id("hidden-tab-overlay")
+                    .occlude()
+                    .absolute()
+                    .inset_0()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.hidden_tabs = None;
+                            cx.stop_propagation();
+                            cx.notify();
+                        }),
+                    )
+                    .child(panel)
+                    .into_any_element(),
+            );
+        }
+        None
     }
 
     fn footer(&self) -> Div {
@@ -1512,7 +2021,7 @@ impl Render for Workspace {
                     {
                         return;
                     }
-                    let _ = view.update(cx, |this, cx| this.scroll_carousel(event, window, cx));
+                    let _ = view.update(cx, |this, cx| { if this.dialog.is_none() && this.hidden_tabs.is_none() { this.scroll_carousel(event, window, cx); } });
                 });
                 if direction == 0 {
                     return;
@@ -1562,7 +2071,12 @@ impl Render for Workspace {
             .flex()
             .child(carousel)
             .child(indicator);
+        let overlay = self.tab_overlay(window, cx);
+        let geometry_view = cx.entity().downgrade();
         div()
+            .id("workspace-root")
+            .relative()
+            .capture_key_down(cx.listener(Self::tab_key))
             .size_full()
             .flex()
             .font_family(".AppleSystemUIFont")
@@ -1579,6 +2093,28 @@ impl Render for Workspace {
                     .child(carousel)
                     .child(self.footer()),
             )
+            .child(
+                canvas(
+                    |_, _, _| (),
+                    move |_, _, window, cx| {
+                        let _ = geometry_view.update(cx, |this, cx| {
+                            let overflow = this.tab_scroll.max_offset().width > px(4.);
+                            if overflow != this.tab_overflow {
+                                this.tab_overflow = overflow;
+                                if !overflow {
+                                    this.hidden_tabs = None;
+                                }
+                                cx.notify();
+                            }
+                            // Native scroll bounds are ready only after this frame's layout.
+                            let _ = window;
+                        });
+                    },
+                )
+                .absolute()
+                .size(px(0.)),
+            )
+            .children(overlay)
     }
 }
 
