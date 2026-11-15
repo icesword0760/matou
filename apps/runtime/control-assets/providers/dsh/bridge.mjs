@@ -75,9 +75,23 @@ export function apply(ctx, config) {
       }
     } finally { sending = false }
   }
+  const foregroundId = () => {
+    try {
+      const path = join(homedir(), '.dsh-tui', 'inject', 'servers.json')
+      if (statSync(path).size > 256 * 1024) return undefined
+      const rows = JSON.parse(readFileSync(path, 'utf8'))
+      if (!Array.isArray(rows)) return undefined
+      const ownRows = rows.filter(row => row?.pid === process.pid && agents.has(row.sessionId))
+      return ownRows.length === 1 ? ownRows[0].sessionId : undefined
+    } catch { return undefined }
+  }
   const emit = (type, data = {}, options = {}) => {
     const agent = agents.get(current)
-    if (!agent || disposed) return
+    if (!agent || disposed || foregroundId() !== current) return
+    if (type === 'ready' || type === 'agent/status') {
+      const older = queue.findIndex(row => row.generation === generation && row.event_type === type)
+      if (older >= 0) queue.splice(older, 1)
+    }
     if (queue.length >= 128) queue.shift()
     queue.push({ dsh_observation: 1, run_id: config.runId, sequence: ++sequence,
       generation, session_id: current, foreground: true, event_type: type,
@@ -96,7 +110,7 @@ export function apply(ctx, config) {
     if (isTopLevelAgent(agent)) agents.set(idOf(agent), agent)
     // This serial listener must not await the HTTP endpoint or native UI.
   }))
-  own(ctx.on('agent/disposed', ({ agent }) => { agents.delete(idOf(agent)) }))
+  own(ctx.on('agent/disposed', ({ agent }) => { agents.delete(idOf(agent)); states.delete(idOf(agent)) }))
   own(ctx.on('agent/status', ({ agent, status }) => {
     if (idOf(agent) === current && isTopLevelAgent(agent)) emit('agent/status', {}, { agent_status: text(status) })
   }))
@@ -131,14 +145,9 @@ export function apply(ctx, config) {
     if (polling || disposed) return
     polling = true
     try {
-      const path = join(homedir(), '.dsh-tui', 'inject', 'servers.json')
-      if (statSync(path).size > 256 * 1024) return
-      const rows = JSON.parse(readFileSync(path, 'utf8'))
-      if (!Array.isArray(rows)) return
-      const ownRows = rows.filter(row => row.pid === process.pid && agents.has(row.sessionId))
-      // A process may park many agents, but only the active TUI endpoint owns input.
-      if (ownRows.length !== 1) return
-      const target = ownRows[0].sessionId
+      // A parked agent must stop owning the terminal as soon as its input endpoint closes.
+      const target = foregroundId()
+      if (!target) { current = undefined; return }
       if (target !== current) { current = target; generation++; snapshot(); lastSnapshot = Date.now() }
       else if (Date.now() - lastSnapshot >= 500) { snapshot(); lastSnapshot = Date.now() }
     } catch { /* No current endpoint means not ready; never guess by cwd or newest file. */ }

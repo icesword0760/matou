@@ -272,9 +272,9 @@ export class SessionHudRegistry {
     if (current?.mode === 'agent' && normalized) current.sessionName = normalized.slice(0, 120)
   }
 
-  markResumable(sessionId: string): void {
+  markResumable(sessionId: string, resumable = true): void {
     const current = this.#states.get(sessionId)
-    if (current?.mode === 'agent') current.resumable = true
+    if (current?.mode === 'agent') current.resumable = resumable
   }
 
   antigravityCycleMode(sessionId: string): string | null | undefined {

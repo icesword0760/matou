@@ -21,6 +21,7 @@ import { PtyExecutionPauser, SharedExecutionPauser } from './pty-execution-pause
 import { PtyOutputBatcher } from './pty-output-batcher'
 import { OutputByteLedger } from './output-byte-ledger'
 import { executableExists, resolveProviderCommandEnvironment } from './provider-command-environment'
+import { prepareDshObservationPatch } from '../agents/dsh-runtime-adapter'
 import { resolvePtyCommand } from './provider-launch-plan'
 import { readCodexDefaultPermissions } from './codex-default-permissions'
 import { shellIntegrationEnvironment } from './shell-integration'
@@ -314,13 +315,22 @@ export class PtySession {
       const providerCommandEnvironment = profile === 'shell'
         ? {}
         : await resolveProviderCommandEnvironment(command.file, baseEnvironment)
-      if ((profile === 'antigravity' || profile === 'codex') && process.platform !== 'win32') {
+      if ((profile === 'antigravity' || profile === 'codex' || profile === 'dsh') && process.platform !== 'win32') {
         const resolvedPath = providerCommandEnvironment.PATH ?? baseEnvironment.PATH
         if (!(await executableExists(command.file, resolvedPath))) {
           throw Object.assign(new Error(`spawn ${command.file} ENOENT`), { code: 'ENOENT' })
         }
       }
       const finalEnvironment = independentSessionEnvironment({ ...baseEnvironment, ...providerCommandEnvironment })
+      if (profile === 'dsh') {
+        if (!options.settingsPath || !options.controlAssetRoot || !options.env?.MATOU_PROVIDER_HOOK_URL || !options.runId) {
+          throw new Error('DSH requires its per-run observation patch')
+        }
+        await prepareDshObservationPatch({ executable: command.file, cwd: options.cwd,
+          env: finalEnvironment, path: options.settingsPath,
+          bridgePath: join(options.controlAssetRoot, 'providers', 'dsh', 'bridge.mjs'),
+          hookUrl: options.env.MATOU_PROVIDER_HOOK_URL, runId: options.runId })
+      }
       if (subscriptionLaunch) {
         for (const key of subscriptionLaunch.clearEnv) delete finalEnvironment[key]
         Object.assign(finalEnvironment, subscriptionLaunch.env)

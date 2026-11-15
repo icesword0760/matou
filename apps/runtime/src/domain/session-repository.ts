@@ -902,6 +902,13 @@ export class SessionRepository {
     sessionId: string,
     provider: ProviderBinding['provider']
   ): ProviderBinding | undefined {
+    // DSH can switch its foreground to a new, not-yet-persisted conversation.
+    // An older saved conversation must never stand in for that current identity.
+    if (provider === 'dsh') {
+      const latest = this.getProviderSettingsBinding(sessionId, provider)
+      return latest && (latest.resumeState === 'available' || latest.resumeState === 'resumed') &&
+        latest.validatedAt !== undefined && latest.invalidatedAt === undefined ? latest : undefined
+    }
     const row = this.#database.get<BindingRow>(
       `SELECT * FROM provider_bindings
        WHERE session_id = ? AND provider = ?

@@ -16,11 +16,12 @@ import {
 
 describe('agent-manifest', () => {
   it('registers all launchable agent profiles with consistent lookup helpers', () => {
-    expect(LAUNCHABLE_AGENT_PROFILES).toEqual(['claude-code', 'codex', 'antigravity'])
+    expect(LAUNCHABLE_AGENT_PROFILES).toEqual(['claude-code', 'codex', 'antigravity', 'dsh'])
     expect(listAgentManifests().map((manifest) => manifest.id)).toEqual([
       'claude-code',
       'codex',
-      'antigravity'
+      'antigravity',
+      'dsh'
     ])
 
     for (const id of LAUNCHABLE_AGENT_PROFILES) {

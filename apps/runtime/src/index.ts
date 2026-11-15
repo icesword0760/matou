@@ -7,7 +7,8 @@ import { monitorEventLoopDelay } from 'node:perf_hooks'
 import {
   getAgentDisplayName,
   getAgentManifest,
-  isAgentProfileId
+  isAgentProfileId,
+  type AgentProfileId
 } from '@matou/domain'
 import {
   PROTOCOL_VERSION,
@@ -498,10 +499,10 @@ async function initializeRuntime(): Promise<RuntimeState> {
       if (changed) for (const server of servers) server.flushSemanticEvents()
     },
     onIdentityRecorded: ({
-      sessionId, runId, provider, providerSessionId, eventName, forkAuthority
+      sessionId, runId, provider, providerSessionId, eventName, forkAuthority, resumable
     }) => {
       providerReady.record(sessionId, runId, sessions.get(sessionId)?.runId ?? '')
-      sessionHuds.markResumable(sessionId)
+      sessionHuds.markResumable(sessionId, resumable !== false)
       const now = Date.now()
       if (getAgentManifest(provider)?.capabilities.autoRestore === true) {
         try {
@@ -651,7 +652,7 @@ async function initializeRuntime(): Promise<RuntimeState> {
           'SELECT kind FROM sessions WHERE id = ?',
           notification.sessionId
         )
-        const sessionProvider: 'claude-code' | 'codex' | 'antigravity' = sessionRow &&
+        const sessionProvider: AgentProfileId = sessionRow &&
           isAgentProfileId(sessionRow.kind)
           ? sessionRow.kind
           : 'claude-code'

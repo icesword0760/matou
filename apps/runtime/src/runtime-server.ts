@@ -2169,7 +2169,7 @@ export class RuntimeServer {
       }
       const resumeMonitor = providerSessionId === undefined
         ? undefined
-        : new ProviderResumeMonitor(providerSessionId, { requireIdentity: message.profile === 'codex' })
+        : new ProviderResumeMonitor(providerSessionId, { requireIdentity: message.profile === 'codex' || message.profile === 'dsh' })
       // A mounted idle Session can be restored lazily by the Renderer after the
       // startup recovery queue has already settled. Scope this to any real
       // provider resume so the long-session choice behaves the same regardless
@@ -2272,7 +2272,9 @@ export class RuntimeServer {
         const antigravitySystemMessage = antigravityAssetPath && this.#controlAssetRoot
           ? await readFile(join(this.#controlAssetRoot, antigravityAssetPath), 'utf8').catch(() => undefined)
           : undefined
-        hookRegistration = message.profile === 'claude-code'
+        hookRegistration = message.profile === 'dsh'
+          ? await this.#providerHooks.registerSession('dsh', providerHookInput)
+          : message.profile === 'claude-code'
           ? await this.#providerHooks.registerClaudeSession({
               ...providerHookInput,
               // A fresh Claude process that replaces an invalid resume is already live
@@ -2446,7 +2448,7 @@ export class RuntimeServer {
             ...(egressCountry === undefined ? {} : { exitCountry: egressCountry }),
             official: egressPlan.hideTimeZone
           }),
-          ...(message.profile === 'antigravity' && hookRegistration ? {
+          ...((message.profile === 'antigravity' || message.profile === 'dsh') && hookRegistration ? {
             MATOU_PROVIDER_HOOK_URL: hookRegistration.hookUrl,
             MATOU_PROVIDER_HOOK_TOKEN: hookRegistration.hookToken,
             ...(hookRegistration.systemMessagePath
@@ -2490,7 +2492,7 @@ export class RuntimeServer {
             // A short startup message alone can precede a failed process exit
             // and must not report a successful account restart.
             this.#settleProviderRecovery(message.sessionId, undefined,
-              message.profile === 'codex' || !resumeMonitor.isSettled)
+              message.profile === 'codex' || message.profile === 'dsh' || !resumeMonitor.isSettled)
           }
         },
         onExit: (exited, exitCode, signal, exitReason) => {
@@ -4675,6 +4677,9 @@ async function resolveInteractiveAgentLaunch(
     return { profile: 'claude-code', permissionMode: 'bypassPermissions' }
   }
   if (normalized === 'cc') return configuredCcLaunch()
+  if (normalized === 'dsh' || normalized === 'dsh dsh-tui' || normalized === 'dsh --profile dsh-tui') {
+    return { profile: 'dsh', permissionMode: 'default' }
+  }
   if (normalized === 'codex') return { profile: 'codex', permissionMode: 'default' }
   if (normalized === 'codex --dangerously-bypass-approvals-and-sandbox') {
     return { profile: 'codex', permissionMode: 'bypassPermissions' }

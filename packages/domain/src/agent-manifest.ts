@@ -1,4 +1,4 @@
-export const LAUNCHABLE_AGENT_PROFILES = ['claude-code', 'codex', 'antigravity'] as const
+export const LAUNCHABLE_AGENT_PROFILES = ['claude-code', 'codex', 'antigravity', 'dsh'] as const
 export type AgentProfileId = (typeof LAUNCHABLE_AGENT_PROFILES)[number]
 
 export const SESSION_RUN_PROFILES = ['shell', ...LAUNCHABLE_AGENT_PROFILES] as const
@@ -29,8 +29,8 @@ export interface AgentManifest {
   displayName: string
   shortName: string
   executable: {
-    envVar: 'MATOU_CLAUDE_COMMAND' | 'MATOU_CODEX_COMMAND' | 'MATOU_ANTIGRAVITY_COMMAND'
-    defaultCommand: 'claude' | 'codex' | 'agy'
+    envVar: 'MATOU_CLAUDE_COMMAND' | 'MATOU_CODEX_COMMAND' | 'MATOU_ANTIGRAVITY_COMMAND' | 'MATOU_DSH_COMMAND'
+    defaultCommand: 'claude' | 'codex' | 'agy' | 'dsh'
     interactiveAliases: readonly string[]
   }
   launch: {
@@ -200,6 +200,21 @@ export const AGENT_MANIFESTS: Record<AgentProfileId, AgentManifest> = {
       autoRestore: true,
       forkRequiresCompletedTurn: true
     }
+  },
+  dsh: {
+    id: 'dsh', displayName: 'DSH', shortName: 'DSH',
+    executable: { envVar: 'MATOU_DSH_COMMAND', defaultCommand: 'dsh', interactiveAliases: ['dsh'] },
+    launch: { resumeFlag: '--resume', forkStrategy: 'none', permissionFlags: { default: [] } },
+    events: { lifecycleSource: 'http-hook', statusLineSource: 'none',
+      identitySource: 'hook-or-statusline', transcriptPathSource: 'none', forkIdentityRule: 'immediate-new-id' },
+    mtInjection: { mode: 'none' },
+    instructionFiles: { candidates: [] },
+    hud: { stripClaudeModelPrefix: false, showAccountControl: false, hideEmptyQuotaPlaceholder: true,
+      supportsTodos: false, supportsAgentsCount: false, supportsMcpSummary: false,
+      supportsHooksCount: false, supportsQuotaWindows: false },
+    capabilities: { fork: false, sessionLoader: false, autoTitle: false, permissionModes: [],
+      permissionSwitchMode: 'none', providerConfig: false, accountSwitching: false,
+      agentTeam: false, claudeTimeZone: false, autoRestore: false, forkRequiresCompletedTurn: true }
   },
   antigravity: {
     id: 'antigravity',

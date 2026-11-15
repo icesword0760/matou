@@ -331,3 +331,12 @@ describe('Codex Default explicitly replaces inherited permissions', () => {
      expect(resolvePtyCommand({ profile, executable: profile }).args.join(' ')).not.toContain('check_for_update_on_startup')
    }
  })
+
+describe('DSH managed launch', () => {
+  it('starts the DSH TUI profile with a per-run patch and an explicit resume ID', () => {
+    expect(resolvePtyCommand({ profile: 'dsh', executable: '/bin/dsh', settingsPath: '/run/observer.patch.yml', providerSessionId: 'session-explicit' })).toEqual({
+      file: '/bin/dsh', args: ['dsh-tui', '--patch', '/run/observer.patch.yml', '--resume', 'session-explicit'], resuming: true
+    })
+    expect(resolvePtyCommand({ profile: 'dsh', executable: 'dsh' })).toEqual({ file: 'dsh', args: ['dsh-tui'], resuming: false })
+  })
+})

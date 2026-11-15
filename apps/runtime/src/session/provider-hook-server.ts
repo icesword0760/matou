@@ -23,6 +23,8 @@ import { latestCodexAutoTitle } from './codex-session-title'
 import { latestClaudeAutoTitle } from './claude-session-catalog'
 import { toProviderNotificationEvent, type ProviderNotificationEvent } from './provider-notification-event'
 
+import { DshProviderEvents, parseDshObservation } from './dsh-provider-events'
+
 const MAX_HOOK_BYTES = 1024 * 1024
 
 interface HookRegistrationRecord {
@@ -47,6 +49,8 @@ interface HookRegistrationRecord {
   systemMessagePath?: string
   mtExecutablePath?: string
   lastAgentState?: string
+  dshEvents?: DshProviderEvents
+  dshPersisted?: boolean
   errorLatched?: boolean
   codexErrorWatch?: {
     path: string
@@ -122,6 +126,7 @@ export interface ProviderHookServerOptions {
     providerSessionId: string
     eventName: string
     forkAuthority?: ProviderIdentityForkAuthority
+    resumable?: boolean
   }) => void
   onTitleObserved?: (event: {
     runId: string
@@ -326,7 +331,7 @@ export class ProviderHookServer {
     const directory = join(this.#dataRoot, 'provider-hooks')
     await mkdir(directory, { recursive: true, mode: 0o700 })
     await chmod(directory, 0o700)
-    const settingsPath = join(directory, `${token}.${provider === 'codex' ? 'hooks' : 'settings'}.json`)
+    const settingsPath = join(directory, provider === 'dsh' ? `${token}.patch.yml` : `${token}.${provider === 'codex' ? 'hooks' : 'settings'}.json`)
     const statusScriptPath = join(directory, `${token}.statusline.sh`)
     const systemMessagePath = provider === 'antigravity' && input.systemMessageMarkdown?.trim()
       ? join(directory, `${token}.system-message.json`)
@@ -338,8 +343,10 @@ export class ProviderHookServer {
     const scriptContent = provider === 'antigravity'
       ? antigravityStatusLineScript(`${hookUrl}?kind=statusline`, userAntigravityStatusCommand)
       : statusLineScript(hookUrl)
-    await writeFile(statusScriptPath, scriptContent, { encoding: 'utf8', mode: 0o700 })
-    await chmod(statusScriptPath, 0o700)
+    if (provider !== 'dsh') {
+      await writeFile(statusScriptPath, scriptContent, { encoding: 'utf8', mode: 0o700 })
+      await chmod(statusScriptPath, 0o700)
+    }
     if (systemMessagePath && input.systemMessageMarkdown?.trim()) {
       const systemMessagePayload = JSON.stringify({
         injectSteps: [{ systemMessage: { systemMessage: input.systemMessageMarkdown.trim() } }]
@@ -352,7 +359,7 @@ export class ProviderHookServer {
       : provider === 'antigravity'
         ? antigravityHookSettings(statusScriptPath)
         : codexHookSettings(statusScriptPath)
-    await writeFile(temporaryPath, JSON.stringify(settings, null, 2), {
+    await writeFile(temporaryPath, provider === 'dsh' ? '' : JSON.stringify(settings, null, 2), {
       encoding: 'utf8', mode: 0o600
     })
     await rename(temporaryPath, settingsPath)
@@ -377,6 +384,7 @@ export class ProviderHookServer {
       ...(input.forkSourceProviderSessionId?.trim()
         ? { forkSourceProviderSessionId: input.forkSourceProviderSessionId.trim() }
         : {}),
+      ...(provider === 'dsh' ? { dshEvents: new DshProviderEvents() } : {}),
       acceptIdentity: true,
       acceptSideEffects: true,
       settingsPath,
@@ -491,6 +499,11 @@ export class ProviderHookServer {
       }
       if (!this.#acceptsSideEffects(registration)) {
         this.#stopTitleWatch(registration)
+        replyNoIntervention()
+        return
+      }
+      if (registration.provider === 'dsh') {
+        this.#handleDsh(registration, payload)
         replyNoIntervention()
         return
       }
@@ -965,6 +978,45 @@ export class ProviderHookServer {
     registration.observedTitle = title
     this.#stopTitleWatch(registration)
     return true
+  }
+
+  #handleDsh(registration: HookRegistrationRecord, payload: Record<string, unknown>): void {
+    const event = parseDshObservation(payload, registration.runId)
+    const events = registration.dshEvents
+    if (!event || !events || !events.accepts(event) || !registration.acceptIdentity) return
+    if (event.ready) {
+      const expected = registration.expectedProviderSessionId
+      if (expected && (event.sessionId !== expected || !event.persisted)) {
+        if (event.sessionId !== expected) {
+          registration.identityRejected = true
+          this.#onIdentityMismatch({ runId: registration.runId, sessionId: registration.sessionId,
+            provider: 'dsh', expectedProviderSessionId: expected, actualProviderSessionId: event.sessionId,
+            eventName: 'ready' })
+        }
+        return
+      }
+      if (registration.confirmedProviderSessionId !== event.sessionId || registration.dshPersisted !== event.persisted) {
+        const previous = this.#sessions.getProviderSettingsBinding(registration.sessionId, 'dsh')
+        const now = Math.max(Date.now(), (previous?.updatedAt ?? 0) + 1)
+        this.#sessions.recordResumableProviderIdentity({
+          commandId: `dsh-identity-${registration.runId}-${randomUUID()}`,
+          commandType: 'provider-hook.identity', requestHash: `${registration.runId}:${event.sessionId}:${event.sequence}`
+        }, { id: `provider-binding-${randomUUID()}`, sessionId: registration.sessionId,
+          provider: 'dsh', providerSessionId: event.sessionId,
+          provisional: !event.persisted, metadata: { ...(event.cwd ? { cwd: event.cwd } : {}), lastHookEvent: 'ready' }, now })
+        registration.confirmedProviderSessionId = event.sessionId
+        registration.dshPersisted = event.persisted
+        delete registration.expectedProviderSessionId
+        this.#onIdentityRecorded({ runId: registration.runId, sessionId: registration.sessionId,
+          provider: 'dsh', providerSessionId: event.sessionId, eventName: 'ready', resumable: event.persisted })
+      }
+    }
+    const result = events.ingest(event)
+    // Notification consumers also derive a status; authoritative structured state wins last.
+    if (result.notification) this.#onNotification({ runId: registration.runId,
+      sessionId: registration.sessionId, provider: 'dsh', event: result.notification })
+    this.#onWorkStatus({ runId: registration.runId, sessionId: registration.sessionId,
+      provider: 'dsh', workStatus: result.workStatus })
   }
 
   #acceptsSideEffects(registration: HookRegistrationRecord): boolean {

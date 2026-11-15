@@ -80,6 +80,12 @@ export function resolvePtyCommand(input: PtyCommandInput): PtyCommand {
     if (identity) args.push(input.forkSession ? 'fork' : 'resume', identity)
     return { file: input.executable, args, resuming: Boolean(identity) }
   }
+  if (input.profile === 'dsh') {
+    const args = ['dsh-tui']
+    if (input.settingsPath?.trim()) args.push('--patch', input.settingsPath.trim())
+    if (identity) args.push('--resume', identity)
+    return { file: input.executable, args, resuming: Boolean(identity) }
+  }
   if (input.profile === 'antigravity') {
     const manifest = getAgentManifest('antigravity')!
     const args: string[] = []
