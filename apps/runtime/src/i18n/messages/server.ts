@@ -32,6 +32,7 @@ export const serverZhCN = {
     `未检测到 ${displayName}（命令：${command}）。请先安装并确保 \`${command}\` 在 PATH 中，再重试。`,
   providerIdentityMismatch: 'AI 会话返回的上下文与待恢复会话不一致，请重试恢复',
   forkIdentityTimeout: 'Fork 会话身份确认超时，请重试',
+  dshResumeIdentityTimeout: 'DSH 会话身份确认超时，请重试或新开会话',
   environmentRecovering: '该会话的运行目录正在恢复或需要重新定位，请先处理运行环境后继续',
   worktreeUnavailable: '该会话的 Worktree 当前不可用，请恢复、重新定位或切换到 Local 后继续'
 }
@@ -65,6 +66,7 @@ export const serverEn: CatalogShape<typeof serverZhCN> = {
   providerIdentityMismatch:
     'The context returned by the AI session does not match the session being restored; try restoring again',
   forkIdentityTimeout: 'Fork session identity confirmation timed out; try again',
+  dshResumeIdentityTimeout: 'DSH session identity confirmation timed out; retry or start a new session',
   environmentRecovering:
     'The working directory of this session is being restored or needs relocating; sort out the environment before continuing',
   worktreeUnavailable:

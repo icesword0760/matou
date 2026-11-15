@@ -89,7 +89,7 @@ describe('agent-manifest', () => {
   })
 
   it('includes Codex in the auto-restore provider list', () => {
-    expect(listAutoRestoreAgentIds()).toEqual(['claude-code', 'codex', 'antigravity'])
+    expect(listAutoRestoreAgentIds()).toEqual(['claude-code', 'codex', 'antigravity', 'dsh'])
   })
 
   it('declares antigravity manifest according to finalized product decisions', () => {

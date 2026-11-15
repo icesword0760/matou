@@ -576,7 +576,7 @@ export class RuntimeServer {
       this.#sessionRepository.getResumeBinding(job.sessionId, job.profile as AgentProfileId)
       // Queue readiness only mounts an interactive terminal. The binding stays
       // restoring and provider-derived state remains gated until its real hook.
-      ? this.#waitForProviderRecovery(job.sessionId)
+      ? this.#waitForProviderRecovery(job.sessionId, job.profile !== 'dsh')
       : undefined
     try {
       await this.#spawnSerialized({
@@ -3027,7 +3027,7 @@ export class RuntimeServer {
     this.#clearProviderResumeTimer(message.sessionId)
     this.#providerResumeTimers.set(message.sessionId, setTimeout(() => {
       this.#providerResumeTimers.delete(message.sessionId)
-      const reason = monitor.timeout()
+      const reason = monitor.timeout() ?? (message.profile === 'dsh' ? runtimeMessages().server.dshResumeIdentityTimeout : undefined)
       if (this.#sessions.get(message.sessionId) !== session) return
       if (!reason) {
         // The deadline only bounds the startup queue. Keep a silent PTY alive

@@ -8581,7 +8581,7 @@ function seedReplayAuthority(database: RuntimeDatabase, root: string): void {
 function registerSession(
   database: RuntimeDatabase,
   sessionId: string,
-  kind: 'shell' | 'claude-code' | 'codex' = 'shell'
+  kind: 'shell' | 'claude-code' | 'codex' | 'dsh' = 'shell'
 ): void {
   database.run(
     `INSERT INTO sessions (
@@ -8595,7 +8595,7 @@ function registerSession(
 function registerCanvasSession(
   database: RuntimeDatabase,
   sessionId: string,
-  kind: 'shell' | 'claude-code' | 'codex' = 'shell'
+  kind: 'shell' | 'claude-code' | 'codex' | 'dsh' = 'shell'
 ): void {
   registerSession(database, sessionId, kind)
   database.run(
@@ -8946,3 +8946,114 @@ it.each(['parent', 'missing', 'unique', 'ambiguous', 'mismatch', 'parent-after-d
     slowDiscovery?.mockRestore(); await registry.shutdownAll(); active.close(); await hookServer.stop(); restoreEnv('MATOU_CODEX_COMMAND', previous)
   }
 })
+
+it.each(['confirmed', 'mismatch', 'timeout-retry', 'timeout-fresh'] as const)(
+  'requires the real DSH ready identity for restart recovery: %s', async outcome => {
+    const id = 'dsh-stage3-recovery'
+    registerCanvasSession(database, id, 'dsh')
+    database.run(
+      `INSERT INTO provider_bindings (
+         id, session_id, provider, provider_session_id, resume_state, restore_state, metadata_json,
+         created_at, updated_at, validated_at
+       ) VALUES ('dsh-stage3-binding', ?, 'dsh', 'native-original', 'available', 'restoring', '{}', 1, 1, 1)`, id
+    )
+    const executable = join(root, 'dsh-stage3-stub.cjs'), argsFile = join(root, 'dsh-stage3-argv.json')
+    await writeFile(executable, `#!/usr/bin/env node
+const fs = require('node:fs');
+if (process.argv.includes('--dump-config')) {
+  console.log('- id: dsh-tui\\n  inject:\\n    - agents\\n  config:\\n    model: native-model');
+} else {
+  fs.writeFileSync(${JSON.stringify(argsFile)}, JSON.stringify(process.argv.slice(2)));
+  console.log('x'.repeat(2400));
+  setInterval(() => {}, 1000);
+}
+`)
+    await chmod(executable, 0o755)
+    const previous = process.env.MATOU_DSH_COMMAND
+    process.env.MATOU_DSH_COMMAND = executable
+    const registry = createTestSessionRegistry(), repository = new SessionRepository(database, new DomainTransactionManager(database))
+    let active: RuntimeServer | undefined
+    const hooks = new ProviderHookServer(root, repository, {
+      currentRunId: sessionId => registry.get(sessionId)?.runId,
+      onIdentityRecorded: event => active?.providerIdentityRecorded(event.sessionId, event.runId),
+      onIdentityMismatch: event => active?.providerIdentityMismatch(event)
+    })
+    await hooks.start()
+    active = new RuntimeServer(new MockPort(), root, database, undefined, undefined, registry, hooks, undefined,
+      { providerResumeTimeoutMs: 350, controlAssetRoot: join(root, 'control-assets') })
+    const binding = () => database.get<{ restore_state: string; restore_error: string | null; provider_session_id: string }>(
+      `SELECT restore_state, restore_error, provider_session_id FROM provider_bindings WHERE id = 'dsh-stage3-binding'`
+    )!
+    const job = { sessionId: id, executionContextId: 'replay-context', profile: 'dsh' as const,
+      sceneId: `scene-${id}`, priority: 'active-session' as const, enqueueSequence: 1 }
+    const launch = () => active!.ensureSessionRunning(job).then(() => 'recovered', error => String(error))
+    const observer = async () => {
+      await waitUntil(() => registry.has(id))
+      let args: string[] = [], patch = '', runId = ''
+      await waitUntilAsync(async () => {
+        try {
+          args = JSON.parse(await readFile(argsFile, 'utf8')) as string[]
+          patch = await readFile(args[args.indexOf('--patch') + 1]!, 'utf8')
+          runId = JSON.parse(/^\s+runId: (.+)$/m.exec(patch)![1]!) as string
+          return runId === registry.get(id)?.runId
+        } catch { return false }
+      })
+      const url = JSON.parse(/^\s+hookUrl: (.+)$/m.exec(patch)![1]!) as string
+      let sequence = 0
+      return { args, runId, ready: (nativeId: string, persisted = true) => fetch(url, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+          dsh_observation: 1, run_id: runId, sequence: ++sequence, generation: 1,
+          session_id: nativeId, foreground: true, event_type: 'ready', event_data: {}, ready: true,
+          persisted, cwd: root, agent_status: 'idle'
+        })
+      }) }
+    }
+    try {
+      let settled = false
+      const recovering = launch().then(result => { settled = true; return result })
+      const first = await observer()
+      expect(first.args.slice(-2)).toEqual(['--resume', 'native-original'])
+      await new Promise(resolve => setTimeout(resolve, 60))
+      expect(settled).toBe(false)
+      expect(binding().restore_state).toBe('restoring')
+      expect(registry.providerIdentityConfirmed(first.runId)).toBe(false)
+      if (outcome === 'confirmed') {
+        await first.ready('native-original', false)
+        expect(settled).toBe(false)
+        await first.ready('native-original')
+        expect(await recovering).toBe('recovered')
+        expect(binding().restore_state).toBe('none')
+        expect(registry.providerIdentityConfirmed(first.runId)).toBe(true)
+      } else {
+        if (outcome === 'mismatch') await first.ready('native-other')
+        expect(await recovering).not.toBe('recovered')
+        expect(binding()).toMatchObject({ restore_state: 'failed', provider_session_id: 'native-original' })
+        expect(binding().restore_error).toBeTruthy()
+        expect(registry.has(id)).toBe(false)
+        if (outcome !== 'mismatch') {
+          await first.ready('native-original')
+          expect(binding().restore_state).toBe('failed')
+          const method = outcome === 'timeout-retry' ? 'hierarchy.retry-provider-restore' : 'hierarchy.start-fresh-provider'
+          const router = new RuntimeRpcRouter(database)
+          await router.handle(method, { command: { commandId: method, commandType: method, requestHash: method }, input: { sessionId: id, now: Date.now() } })
+          const next = launch()
+          const second = await observer()
+          expect(second.runId).not.toBe(first.runId)
+          await first.ready('native-original')
+          expect(registry.providerIdentityConfirmed(second.runId)).toBe(false)
+          if (outcome === 'timeout-retry') {
+            expect(second.args.slice(-2)).toEqual(['--resume', 'native-original'])
+            await second.ready('native-original')
+          } else {
+            expect(second.args).not.toContain('--resume')
+            await second.ready('native-new', false)
+          }
+          expect(await next).toBe('recovered')
+          expect(repository.getProviderSettingsBinding(id, 'dsh')?.providerSessionId).toBe(outcome === 'timeout-retry' ? 'native-original' : 'native-new')
+        }
+      }
+    } finally {
+      active.close(); await registry.shutdownAll(); await hooks.stop(); restoreEnv('MATOU_DSH_COMMAND', previous)
+    }
+  }
+)

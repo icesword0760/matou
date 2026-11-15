@@ -212,9 +212,9 @@ export const AGENT_MANIFESTS: Record<AgentProfileId, AgentManifest> = {
     hud: { stripClaudeModelPrefix: false, showAccountControl: false, hideEmptyQuotaPlaceholder: true,
       supportsTodos: false, supportsAgentsCount: false, supportsMcpSummary: false,
       supportsHooksCount: false, supportsQuotaWindows: false },
-    capabilities: { fork: false, sessionLoader: false, autoTitle: false, permissionModes: [],
+    capabilities: { fork: false, sessionLoader: true, autoTitle: true, permissionModes: [],
       permissionSwitchMode: 'none', providerConfig: false, accountSwitching: false,
-      agentTeam: false, claudeTimeZone: false, autoRestore: false, forkRequiresCompletedTurn: true }
+      agentTeam: false, claudeTimeZone: false, autoRestore: true, forkRequiresCompletedTurn: true }
   },
   antigravity: {
     id: 'antigravity',
