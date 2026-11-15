@@ -16,7 +16,7 @@ export function parseDshHud(value: unknown): Partial<SessionHudSnapshot> | undef
   if (cwd) result.cwd = cwd
   const percent = finite(source.contextPercent), window = finite(source.contextWindowSize)
   if (percent !== undefined && window !== undefined && window > 0) {
-    result.contextPercent = Math.min(100, percent); result.contextWindowSize = window
+    result.contextPercent = Math.min(100, Math.round(percent)); result.contextWindowSize = window
   }
   if (Array.isArray(source.runningTools)) result.runningTools = source.runningTools.slice(0, 128).flatMap(row => {
     const name = text(record(row)?.name); return name ? [{ name }] : []

@@ -8947,7 +8947,7 @@ it.each(['parent', 'missing', 'unique', 'ambiguous', 'mismatch', 'parent-after-d
   }
 })
 
-it.each(['confirmed', 'mismatch', 'timeout-retry', 'timeout-fresh'] as const)(
+it.each(['confirmed', 'mismatch', 'timeout-retry', 'timeout-fresh', 'exit-retry'] as const)(
   'requires the real DSH ready identity for restart recovery: %s', async outcome => {
     const id = 'dsh-stage3-recovery'
     registerCanvasSession(database, id, 'dsh')
@@ -8965,7 +8965,8 @@ if (process.argv.includes('--dump-config')) {
 } else {
   fs.writeFileSync(${JSON.stringify(argsFile)}, JSON.stringify(process.argv.slice(2)));
   console.log('x'.repeat(2400));
-  setInterval(() => {}, 1000);
+  if (${outcome === 'exit-retry'} && !fs.existsSync(${JSON.stringify(argsFile + '.retry')})) setTimeout(() => process.exit(1), 400);
+  else setInterval(() => {}, 1000);
 }
 `)
     await chmod(executable, 0o755)
@@ -8980,7 +8981,7 @@ if (process.argv.includes('--dump-config')) {
     })
     await hooks.start()
     active = new RuntimeServer(new MockPort(), root, database, undefined, undefined, registry, hooks, undefined,
-      { providerResumeTimeoutMs: 350, controlAssetRoot: join(root, 'control-assets') })
+      { providerResumeTimeoutMs: outcome === 'exit-retry' ? 2000 : 700, controlAssetRoot: join(root, 'control-assets') })
     const binding = () => database.get<{ restore_state: string; restore_error: string | null; provider_session_id: string }>(
       `SELECT restore_state, restore_error, provider_session_id FROM provider_bindings WHERE id = 'dsh-stage3-binding'`
     )!
@@ -9031,9 +9032,13 @@ if (process.argv.includes('--dump-config')) {
         expect(binding().restore_error).toBeTruthy()
         expect(registry.has(id)).toBe(false)
         if (outcome !== 'mismatch') {
+          if (outcome === 'exit-retry') {
+            expect(database.get<{ work_status: string }>('SELECT work_status FROM sessions WHERE id = ?', id)?.work_status).toBe('error')
+            await writeFile(argsFile + '.retry', '')
+          }
           await first.ready('native-original')
           expect(binding().restore_state).toBe('failed')
-          const method = outcome === 'timeout-retry' ? 'hierarchy.retry-provider-restore' : 'hierarchy.start-fresh-provider'
+          const method = outcome !== 'timeout-fresh' ? 'hierarchy.retry-provider-restore' : 'hierarchy.start-fresh-provider'
           const router = new RuntimeRpcRouter(database)
           await router.handle(method, { command: { commandId: method, commandType: method, requestHash: method }, input: { sessionId: id, now: Date.now() } })
           const next = launch()
@@ -9041,7 +9046,7 @@ if (process.argv.includes('--dump-config')) {
           expect(second.runId).not.toBe(first.runId)
           await first.ready('native-original')
           expect(registry.providerIdentityConfirmed(second.runId)).toBe(false)
-          if (outcome === 'timeout-retry') {
+          if (outcome !== 'timeout-fresh') {
             expect(second.args.slice(-2)).toEqual(['--resume', 'native-original'])
             await second.ready('native-original')
           } else {
@@ -9049,11 +9054,11 @@ if (process.argv.includes('--dump-config')) {
             await second.ready('native-new', false)
           }
           expect(await next).toBe('recovered')
-          expect(repository.getProviderSettingsBinding(id, 'dsh')?.providerSessionId).toBe(outcome === 'timeout-retry' ? 'native-original' : 'native-new')
+          expect(repository.getProviderSettingsBinding(id, 'dsh')?.providerSessionId).toBe(outcome !== 'timeout-fresh' ? 'native-original' : 'native-new')
         }
       }
     } finally {
       active.close(); await registry.shutdownAll(); await hooks.stop(); restoreEnv('MATOU_DSH_COMMAND', previous)
     }
-  }
+  }, 15_000
 )

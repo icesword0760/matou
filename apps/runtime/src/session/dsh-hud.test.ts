@@ -40,6 +40,7 @@ describe('DSH authoritative HUD facts', () => {
       model: 'native', effort: 'high', contextPercent: 0, contextWindowSize: 1000,
       providerPermissionLabel: 'Native mode', toolCounts: [{ name: 'read', count: 2 }] })
     expect(parseDshHud({ effort: 'high', contextPercent: NaN, contextWindowSize: 0, model: [], providerPermissionLabel: {} })).toEqual({})
+    expect(parseDshHud({ contextPercent: 12.3456789, contextWindowSize: 1000 })).toEqual({ contextPercent: 12, contextWindowSize: 1000 })
     expect(parseDshHud(null)).toBeUndefined()
   })
 

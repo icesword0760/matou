@@ -2598,7 +2598,7 @@ export class RuntimeServer {
                 { exitCode, ...(signal === undefined ? {} : { signal }), now: Date.now() }
               )
               this.#setWorkStatus(message.sessionId,
-                shellStartupFailure || (resumeExitFallback && exited.profile === 'codex') ? 'error' : 'exited')
+                shellStartupFailure || (resumeExitFallback && (exited.profile === 'codex' || exited.profile === 'dsh')) ? 'error' : 'exited')
             } catch (error) {
               console.error(`[session.run-exit] ${errorMessage(error)}`)
             }
@@ -2617,6 +2617,7 @@ export class RuntimeServer {
             return false
           }
           if (resumeExitFallback) {
+            this.#settleProviderRecovery(message.sessionId, new Error(`provider resume exited with code ${exitCode}`))
             return false
           }
           if (naturalAgentFallback) {
