@@ -1,0 +1,104 @@
+{
+  "steps": [
+    {
+      "input": "",
+      "protocol": "NONE",
+      "encoding": "DEFAULT"
+    },
+    {
+      "input": "\u001b[?9h",
+      "protocol": "X10",
+      "encoding": "DEFAULT"
+    },
+    {
+      "input": "\u001b[?1000h",
+      "protocol": "VT200",
+      "encoding": "DEFAULT"
+    },
+    {
+      "input": "\u001b[?1002h",
+      "protocol": "DRAG",
+      "encoding": "DEFAULT"
+    },
+    {
+      "input": "\u001b[?1003h",
+      "protocol": "ANY",
+      "encoding": "DEFAULT"
+    },
+    {
+      "input": "\u001b[?9l",
+      "protocol": "NONE",
+      "encoding": "DEFAULT"
+    },
+    {
+      "input": "\u001b[?1002h",
+      "protocol": "DRAG",
+      "encoding": "DEFAULT"
+    },
+    {
+      "input": "\u001b[?1000l",
+      "protocol": "NONE",
+      "encoding": "DEFAULT"
+    },
+    {
+      "input": "\u001b[?1006h",
+      "protocol": "NONE",
+      "encoding": "SGR"
+    },
+    {
+      "input": "\u001b[?1005h",
+      "protocol": "NONE",
+      "encoding": "SGR"
+    },
+    {
+      "input": "\u001b[?1005l",
+      "protocol": "NONE",
+      "encoding": "SGR"
+    },
+    {
+      "input": "\u001b[?1015h",
+      "protocol": "NONE",
+      "encoding": "SGR"
+    },
+    {
+      "input": "\u001b[?1015l",
+      "protocol": "NONE",
+      "encoding": "SGR"
+    },
+    {
+      "input": "\u001b[?1016h",
+      "protocol": "NONE",
+      "encoding": "SGR_PIXELS"
+    },
+    {
+      "input": "\u001b[?1006l",
+      "protocol": "NONE",
+      "encoding": "DEFAULT"
+    },
+    {
+      "input": "\u001b[?1006h",
+      "protocol": "NONE",
+      "encoding": "SGR"
+    },
+    {
+      "input": "\u001b[?1016l",
+      "protocol": "NONE",
+      "encoding": "DEFAULT"
+    },
+    {
+      "input": "\u001b[?1003;1016h",
+      "protocol": "ANY",
+      "encoding": "SGR_PIXELS"
+    },
+    {
+      "input": "\u001b[!p",
+      "protocol": "ANY",
+      "encoding": "SGR_PIXELS"
+    },
+    {
+      "input": "\u001bc",
+      "protocol": "NONE",
+      "encoding": "DEFAULT"
+    }
+  ]
+}
