@@ -1,0 +1,1994 @@
+{
+  "source": "Frozen JournalHistoryReader",
+  "cases": [
+    {
+      "variant": "raw",
+      "sessionId": "history-raw",
+      "segments": [
+        {
+          "name": "segment-000001.mtj",
+          "base64": "TVRKUk5MMgoAAACQrSN0xwAAAEh7ImtpbmQiOiJvdXRwdXQiLCJzZXF1ZW5jZSI6MSwidGltZXN0YW1wIjoxNzk0NzYzMzk5MTI4LCJkYXRhTGVuZ3RoIjo2OH3vu79maXJzdA0KY2F0NDIgY2F0NDIKdW50ZXN0IHRlc3QKW3Rlc3RdCuS4reaWh+a1i+ivlQrkuK3mlocg5rWL6K+VCg=="
+        },
+        {
+          "name": "segment-000002.mtj",
+          "base64": "TVRKUk5MMgoAAAB04GFwVQAAAEh7ImtpbmQiOiJvdXRwdXQiLCJzZXF1ZW5jZSI6MiwidGltZXN0YW1wIjoxNzk0NzYzMzk5MTI4LCJkYXRhTGVuZ3RoIjo0MH0bWzMxbXJlZBtbMG0NChtdMDt0aXRsZQd2aXNpYmxlCnBhcnRpYWwt"
+        },
+        {
+          "name": "segment-000003.mtj",
+          "base64": "TVRKUk5MMgoAAABNBp/oAgAAAEd7ImtpbmQiOiJvdXRwdXQiLCJzZXF1ZW5jZSI6MywidGltZXN0YW1wIjoxNzk0NzYzMzk5MTYwLCJkYXRhTGVuZ3RoIjoyffCf"
+        },
+        {
+          "name": "segment-000004.mtj",
+          "base64": "TVRKUk5MMgoAAABOsc0GwgAAAEd7ImtpbmQiOiJvdXRwdXQiLCJzZXF1ZW5jZSI6NCwidGltZXN0YW1wIjoxNzk0NzYzMzk5MTkwLCJkYXRhTGVuZ3RoIjozfZmCCg=="
+        },
+        {
+          "name": "segment-000005.mtj",
+          "base64": "TVRKUk5MMgoAAABwg3cD1wAAAEh7ImtpbmQiOiJvdXRwdXQiLCJzZXF1ZW5jZSI6NSwidGltZXN0YW1wIjoxNzk0NzYzMzk5MjIwLCJkYXRhTGVuZ3RoIjozNn1saW5lLWEKbGluZS1iCmxpbmUtYwpsYXN0LW5vLW5ld2xpbmU="
+        }
+      ],
+      "probes": [
+        {
+          "op": "page",
+          "input": {},
+          "expected": {
+            "lines": [
+              {
+                "sequence": 1,
+                "cursor": {
+                  "sequence": 1,
+                  "lineIndex": 0
+                },
+                "text": "first"
+              },
+              {
+                "sequence": 1,
+                "cursor": {
+                  "sequence": 1,
+                  "lineIndex": 1
+                },
+                "text": "cat42 cat42"
+              },
+              {
+                "sequence": 1,
+                "cursor": {
+                  "sequence": 1,
+                  "lineIndex": 2
+                },
+                "text": "untest test"
+              },
+              {
+                "sequence": 1,
+                "cursor": {
+                  "sequence": 1,
+                  "lineIndex": 3
+                },
+                "text": "[test]"
+              },
+              {
+                "sequence": 1,
+                "cursor": {
+                  "sequence": 1,
+                  "lineIndex": 4
+                },
+                "text": "中文测试"
+              },
+              {
+                "sequence": 1,
+                "cursor": {
+                  "sequence": 1,
+                  "lineIndex": 5
+                },
+                "text": "中文 测试"
+              },
+              {
+                "sequence": 2,
+                "cursor": {
+                  "sequence": 2,
+                  "lineIndex": 0
+                },
+                "text": "red"
+              },
+              {
+                "sequence": 2,
+                "cursor": {
+                  "sequence": 2,
+                  "lineIndex": 1
+                },
+                "text": "visible"
+              },
+              {
+                "sequence": 4,
+                "cursor": {
+                  "sequence": 4,
+                  "lineIndex": 0
+                },
+                "text": "partial-🙂"
+              },
+              {
+                "sequence": 5,
+                "cursor": {
+                  "sequence": 5,
+                  "lineIndex": 0
+                },
+                "text": "line-a"
+              },
+              {
+                "sequence": 5,
+                "cursor": {
+                  "sequence": 5,
+                  "lineIndex": 1
+                },
+                "text": "line-b"
+              },
+              {
+                "sequence": 5,
+                "cursor": {
+                  "sequence": 5,
+                  "lineIndex": 2
+                },
+                "text": "line-c"
+              },
+              {
+                "sequence": 5,
+                "cursor": {
+                  "sequence": 5,
+                  "lineIndex": 3
+                },
+                "text": "last-no-newline"
+              }
+            ],
+            "gaps": [],
+            "hasMore": false
+          }
+        },
+        {
+          "op": "page",
+          "input": {
+            "lineLimit": 3
+          },
+          "expected": {
+            "lines": [
+              {
+                "sequence": 5,
+                "cursor": {
+                  "sequence": 5,
+                  "lineIndex": 1
+                },
+                "text": "line-b"
+              },
+              {
+                "sequence": 5,
+                "cursor": {
+                  "sequence": 5,
+                  "lineIndex": 2
+                },
+                "text": "line-c"
+              },
+              {
+                "sequence": 5,
+                "cursor": {
+                  "sequence": 5,
+                  "lineIndex": 3
+                },
+                "text": "last-no-newline"
+              }
+            ],
+            "gaps": [],
+            "hasMore": true
+          }
+        },
+        {
+          "op": "page",
+          "input": {
+            "lineLimit": 0
+          },
+          "expected": {
+            "lines": [
+              {
+                "sequence": 5,
+                "cursor": {
+                  "sequence": 5,
+                  "lineIndex": 3
+                },
+                "text": "last-no-newline"
+              }
+            ],
+            "gaps": [],
+            "hasMore": true
+          }
+        },
+        {
+          "op": "page",
+          "input": {
+            "before": {
+              "sequence": 5,
+              "lineIndex": 1
+            },
+            "lineLimit": 2
+          },
+          "expected": {
+            "lines": [
+              {
+                "sequence": 4,
+                "cursor": {
+                  "sequence": 4,
+                  "lineIndex": 0
+                },
+                "text": "partial-🙂"
+              },
+              {
+                "sequence": 5,
+                "cursor": {
+                  "sequence": 5,
+                  "lineIndex": 0
+                },
+                "text": "line-a"
+              }
+            ],
+            "gaps": [],
+            "hasMore": true
+          }
+        },
+        {
+          "op": "page",
+          "input": {
+            "around": {
+              "sequence": 5,
+              "lineIndex": 1
+            },
+            "beforeLines": 1,
+            "afterLines": 1
+          },
+          "expected": {
+            "lines": [
+              {
+                "sequence": 5,
+                "cursor": {
+                  "sequence": 5,
+                  "lineIndex": 0
+                },
+                "text": "line-a"
+              },
+              {
+                "sequence": 5,
+                "cursor": {
+                  "sequence": 5,
+                  "lineIndex": 1
+                },
+                "text": "line-b"
+              },
+              {
+                "sequence": 5,
+                "cursor": {
+                  "sequence": 5,
+                  "lineIndex": 2
+                },
+                "text": "line-c"
+              }
+            ],
+            "gaps": [],
+            "hasMore": true,
+            "anchorIndex": 1,
+            "hasMoreBefore": true,
+            "hasMoreAfter": true
+          }
+        },
+        {
+          "op": "page",
+          "input": {
+            "around": {
+              "sequence": 99,
+              "lineIndex": 0
+            }
+          },
+          "expected": {
+            "lines": [],
+            "gaps": [],
+            "hasMore": false
+          }
+        },
+        {
+          "op": "search",
+          "input": {
+            "query": ""
+          },
+          "expected": {
+            "matches": [],
+            "gaps": [],
+            "hasMore": false
+          }
+        },
+        {
+          "op": "search",
+          "input": {
+            "query": "line",
+            "limit": 2
+          },
+          "expected": {
+            "matches": [
+              {
+                "sequence": 5,
+                "cursor": {
+                  "sequence": 5,
+                  "lineIndex": 3
+                },
+                "text": "last-no-newline"
+              },
+              {
+                "sequence": 5,
+                "cursor": {
+                  "sequence": 5,
+                  "lineIndex": 2
+                },
+                "text": "line-c"
+              }
+            ],
+            "gaps": [],
+            "hasMore": true
+          }
+        },
+        {
+          "op": "search",
+          "input": {
+            "query": "LINE",
+            "before": {
+              "sequence": 5,
+              "lineIndex": 2
+            }
+          },
+          "expected": {
+            "matches": [
+              {
+                "sequence": 5,
+                "cursor": {
+                  "sequence": 5,
+                  "lineIndex": 1
+                },
+                "text": "line-b"
+              },
+              {
+                "sequence": 5,
+                "cursor": {
+                  "sequence": 5,
+                  "lineIndex": 0
+                },
+                "text": "line-a"
+              }
+            ],
+            "gaps": [],
+            "hasMore": false
+          }
+        },
+        {
+          "op": "search",
+          "input": {
+            "query": "test",
+            "options": {
+              "caseSensitive": false,
+              "regex": false,
+              "wholeWord": true
+            }
+          },
+          "expected": {
+            "matches": [
+              {
+                "sequence": 1,
+                "cursor": {
+                  "sequence": 1,
+                  "lineIndex": 3
+                },
+                "text": "[test]"
+              },
+              {
+                "sequence": 1,
+                "cursor": {
+                  "sequence": 1,
+                  "lineIndex": 2
+                },
+                "text": "untest test"
+              }
+            ],
+            "gaps": [],
+            "hasMore": false
+          }
+        },
+        {
+          "op": "search",
+          "input": {
+            "query": "测试",
+            "options": {
+              "caseSensitive": false,
+              "regex": false,
+              "wholeWord": true
+            }
+          },
+          "expected": {
+            "matches": [
+              {
+                "sequence": 1,
+                "cursor": {
+                  "sequence": 1,
+                  "lineIndex": 5
+                },
+                "text": "中文 测试"
+              }
+            ],
+            "gaps": [],
+            "hasMore": false
+          }
+        },
+        {
+          "op": "search",
+          "input": {
+            "query": "cat",
+            "options": {
+              "caseSensitive": false,
+              "regex": true,
+              "wholeWord": true
+            }
+          },
+          "expected": {
+            "matches": [
+              {
+                "sequence": 1,
+                "cursor": {
+                  "sequence": 1,
+                  "lineIndex": 1
+                },
+                "text": "cat42 cat42"
+              }
+            ],
+            "gaps": [],
+            "hasMore": false
+          }
+        },
+        {
+          "op": "search",
+          "input": {
+            "query": "(?<=cat)\\d+",
+            "options": {
+              "caseSensitive": false,
+              "regex": true,
+              "wholeWord": true
+            }
+          },
+          "expected": {
+            "matches": [
+              {
+                "sequence": 1,
+                "cursor": {
+                  "sequence": 1,
+                  "lineIndex": 1
+                },
+                "text": "cat42 cat42"
+              }
+            ],
+            "gaps": [],
+            "hasMore": false
+          }
+        },
+        {
+          "op": "search",
+          "input": {
+            "query": "^",
+            "options": {
+              "caseSensitive": false,
+              "regex": true,
+              "wholeWord": true
+            }
+          },
+          "expected": {
+            "matches": [
+              {
+                "sequence": 5,
+                "cursor": {
+                  "sequence": 5,
+                  "lineIndex": 3
+                },
+                "text": "last-no-newline"
+              },
+              {
+                "sequence": 5,
+                "cursor": {
+                  "sequence": 5,
+                  "lineIndex": 2
+                },
+                "text": "line-c"
+              },
+              {
+                "sequence": 5,
+                "cursor": {
+                  "sequence": 5,
+                  "lineIndex": 1
+                },
+                "text": "line-b"
+              },
+              {
+                "sequence": 5,
+                "cursor": {
+                  "sequence": 5,
+                  "lineIndex": 0
+                },
+                "text": "line-a"
+              },
+              {
+                "sequence": 4,
+                "cursor": {
+                  "sequence": 4,
+                  "lineIndex": 0
+                },
+                "text": "partial-🙂"
+              },
+              {
+                "sequence": 2,
+                "cursor": {
+                  "sequence": 2,
+                  "lineIndex": 1
+                },
+                "text": "visible"
+              },
+              {
+                "sequence": 2,
+                "cursor": {
+                  "sequence": 2,
+                  "lineIndex": 0
+                },
+                "text": "red"
+              },
+              {
+                "sequence": 1,
+                "cursor": {
+                  "sequence": 1,
+                  "lineIndex": 5
+                },
+                "text": "中文 测试"
+              },
+              {
+                "sequence": 1,
+                "cursor": {
+                  "sequence": 1,
+                  "lineIndex": 4
+                },
+                "text": "中文测试"
+              },
+              {
+                "sequence": 1,
+                "cursor": {
+                  "sequence": 1,
+                  "lineIndex": 3
+                },
+                "text": "[test]"
+              },
+              {
+                "sequence": 1,
+                "cursor": {
+                  "sequence": 1,
+                  "lineIndex": 2
+                },
+                "text": "untest test"
+              },
+              {
+                "sequence": 1,
+                "cursor": {
+                  "sequence": 1,
+                  "lineIndex": 1
+                },
+                "text": "cat42 cat42"
+              },
+              {
+                "sequence": 1,
+                "cursor": {
+                  "sequence": 1,
+                  "lineIndex": 0
+                },
+                "text": "first"
+              }
+            ],
+            "gaps": [],
+            "hasMore": false
+          }
+        },
+        {
+          "op": "search",
+          "input": {
+            "query": "[",
+            "options": {
+              "caseSensitive": false,
+              "regex": true,
+              "wholeWord": true
+            }
+          },
+          "expected": {
+            "error": "invalid terminal history search pattern: Invalid regular expression: /[/i: Unterminated character class"
+          }
+        },
+        {
+          "op": "search",
+          "input": {
+            "query": "🙂"
+          },
+          "expected": {
+            "matches": [
+              {
+                "sequence": 4,
+                "cursor": {
+                  "sequence": 4,
+                  "lineIndex": 0
+                },
+                "text": "partial-🙂"
+              }
+            ],
+            "gaps": [],
+            "hasMore": false
+          }
+        },
+        {
+          "op": "search",
+          "input": {
+            "query": "red",
+            "options": {
+              "caseSensitive": true,
+              "regex": false,
+              "wholeWord": false
+            }
+          },
+          "expected": {
+            "matches": [
+              {
+                "sequence": 2,
+                "cursor": {
+                  "sequence": 2,
+                  "lineIndex": 0
+                },
+                "text": "red"
+              }
+            ],
+            "gaps": [],
+            "hasMore": false
+          }
+        }
+      ]
+    },
+    {
+      "variant": "compressed",
+      "sessionId": "history-compressed",
+      "segments": [
+        {
+          "name": "segment-000001.mtj.gz",
+          "base64": "H4sIAAAAAAAAE/MN8Qry8zHiYmBgmBD6tYCRgYHBo1opOzMvRclKKb+0pKC0RElHqTi1sDQ1LzlVycpQR6kkMze1uCQxt0DJytDc0sTczNjY0tLY0FhHKSWxJNEnNS+9JEPJysyi9v3u/WmZRcUlvFzJiSUmRgpgkqs0ryS1uEQBRHBFg8hYric71j6b1v5sa/eL9VOhHAUoDwA0X7SJoAAAAA=="
+        },
+        {
+          "name": "segment-000002.mtj.gz",
+          "base64": "H4sIAAAAAAAAEwXBMQrCMBQA0ICDUPAE2f4cIWmKpfECItVB3IpDNJ8aTGpsf1zEwSM7ufre7rg97NuyYIzR9zP7McY2L7j5wYGBe6aUCQRM+Mg4XBBMKYB8xIlsTGBU3VT1Suum0UoLcJZsi0NPVzCVfPNOqzii452Mi4Kf5Jo8BZw//eTPAYtkR/I2LP9zOGD8hAAAAA=="
+        },
+        {
+          "name": "segment-000003.mtj.gz",
+          "base64": "H4sIAAAAAAAAE/MN8Qry8zHiYmBg8BWTF/JkYGBwr1bKzsxLUbJSyi8tKSgtUdJRKk4tLE3NS05VsjLWUSrJzE0tLknMLVCyMjS3NDE3Mza2tDQ2MdVRSkksSfRJzUsvyVCyMqr9MB8ATWjnzV0AAAA="
+        },
+        {
+          "name": "segment-000004.mtj.gz",
+          "base64": "H4sIAAAAAAAAE/MN8Qry8zHiYmBg8LvYKerAwMDgXq2UnZmXomSllF9aUlBaoqSjVJxaWJqal5yqZGWio1SSmZtaXJKYW6BkZWhuaWJuZmxsaWlsbqGjlJJYkuiTmpdekqFkZVw7s4kLAInN5YdeAAAA"
+        },
+        {
+          "name": "segment-000005.mtj.gz",
+          "base64": "H4sIAAAAAAAAE/MN8Qry8zHiYmBgKOgrC2RnYGDwqFbKzsxLUbJSyi8tKSgtUdJRKk4tLE3NS05VsjLVUSrJzE0tLknMLVCyMjS3NDE3Mza2tDQxMNdRSkksSfRJzUsvyVCyMjarzcnMS9VN5AJTSRAqmSsnsbhENy9fNy+1HCQCAC8fcHeAAAAA"
+        }
+      ],
+      "probes": [
+        {
+          "op": "page",
+          "input": {},
+          "expected": {
+            "lines": [
+              {
+                "sequence": 1,
+                "cursor": {
+                  "sequence": 1,
+                  "lineIndex": 0
+                },
+                "text": "first"
+              },
+              {
+                "sequence": 1,
+                "cursor": {
+                  "sequence": 1,
+                  "lineIndex": 1
+                },
+                "text": "cat42 cat42"
+              },
+              {
+                "sequence": 1,
+                "cursor": {
+                  "sequence": 1,
+                  "lineIndex": 2
+                },
+                "text": "untest test"
+              },
+              {
+                "sequence": 1,
+                "cursor": {
+                  "sequence": 1,
+                  "lineIndex": 3
+                },
+                "text": "[test]"
+              },
+              {
+                "sequence": 1,
+                "cursor": {
+                  "sequence": 1,
+                  "lineIndex": 4
+                },
+                "text": "中文测试"
+              },
+              {
+                "sequence": 1,
+                "cursor": {
+                  "sequence": 1,
+                  "lineIndex": 5
+                },
+                "text": "中文 测试"
+              },
+              {
+                "sequence": 2,
+                "cursor": {
+                  "sequence": 2,
+                  "lineIndex": 0
+                },
+                "text": "red"
+              },
+              {
+                "sequence": 2,
+                "cursor": {
+                  "sequence": 2,
+                  "lineIndex": 1
+                },
+                "text": "visible"
+              },
+              {
+                "sequence": 4,
+                "cursor": {
+                  "sequence": 4,
+                  "lineIndex": 0
+                },
+                "text": "partial-🙂"
+              },
+              {
+                "sequence": 5,
+                "cursor": {
+                  "sequence": 5,
+                  "lineIndex": 0
+                },
+                "text": "line-a"
+              },
+              {
+                "sequence": 5,
+                "cursor": {
+                  "sequence": 5,
+                  "lineIndex": 1
+                },
+                "text": "line-b"
+              },
+              {
+                "sequence": 5,
+                "cursor": {
+                  "sequence": 5,
+                  "lineIndex": 2
+                },
+                "text": "line-c"
+              },
+              {
+                "sequence": 5,
+                "cursor": {
+                  "sequence": 5,
+                  "lineIndex": 3
+                },
+                "text": "last-no-newline"
+              }
+            ],
+            "gaps": [],
+            "hasMore": false
+          }
+        },
+        {
+          "op": "page",
+          "input": {
+            "lineLimit": 3
+          },
+          "expected": {
+            "lines": [
+              {
+                "sequence": 5,
+                "cursor": {
+                  "sequence": 5,
+                  "lineIndex": 1
+                },
+                "text": "line-b"
+              },
+              {
+                "sequence": 5,
+                "cursor": {
+                  "sequence": 5,
+                  "lineIndex": 2
+                },
+                "text": "line-c"
+              },
+              {
+                "sequence": 5,
+                "cursor": {
+                  "sequence": 5,
+                  "lineIndex": 3
+                },
+                "text": "last-no-newline"
+              }
+            ],
+            "gaps": [],
+            "hasMore": true
+          }
+        },
+        {
+          "op": "page",
+          "input": {
+            "lineLimit": 0
+          },
+          "expected": {
+            "lines": [
+              {
+                "sequence": 5,
+                "cursor": {
+                  "sequence": 5,
+                  "lineIndex": 3
+                },
+                "text": "last-no-newline"
+              }
+            ],
+            "gaps": [],
+            "hasMore": true
+          }
+        },
+        {
+          "op": "page",
+          "input": {
+            "before": {
+              "sequence": 5,
+              "lineIndex": 1
+            },
+            "lineLimit": 2
+          },
+          "expected": {
+            "lines": [
+              {
+                "sequence": 4,
+                "cursor": {
+                  "sequence": 4,
+                  "lineIndex": 0
+                },
+                "text": "partial-🙂"
+              },
+              {
+                "sequence": 5,
+                "cursor": {
+                  "sequence": 5,
+                  "lineIndex": 0
+                },
+                "text": "line-a"
+              }
+            ],
+            "gaps": [],
+            "hasMore": true
+          }
+        },
+        {
+          "op": "page",
+          "input": {
+            "around": {
+              "sequence": 5,
+              "lineIndex": 1
+            },
+            "beforeLines": 1,
+            "afterLines": 1
+          },
+          "expected": {
+            "lines": [
+              {
+                "sequence": 5,
+                "cursor": {
+                  "sequence": 5,
+                  "lineIndex": 0
+                },
+                "text": "line-a"
+              },
+              {
+                "sequence": 5,
+                "cursor": {
+                  "sequence": 5,
+                  "lineIndex": 1
+                },
+                "text": "line-b"
+              },
+              {
+                "sequence": 5,
+                "cursor": {
+                  "sequence": 5,
+                  "lineIndex": 2
+                },
+                "text": "line-c"
+              }
+            ],
+            "gaps": [],
+            "hasMore": true,
+            "anchorIndex": 1,
+            "hasMoreBefore": true,
+            "hasMoreAfter": true
+          }
+        },
+        {
+          "op": "page",
+          "input": {
+            "around": {
+              "sequence": 99,
+              "lineIndex": 0
+            }
+          },
+          "expected": {
+            "lines": [],
+            "gaps": [],
+            "hasMore": false
+          }
+        },
+        {
+          "op": "search",
+          "input": {
+            "query": ""
+          },
+          "expected": {
+            "matches": [],
+            "gaps": [],
+            "hasMore": false
+          }
+        },
+        {
+          "op": "search",
+          "input": {
+            "query": "line",
+            "limit": 2
+          },
+          "expected": {
+            "matches": [
+              {
+                "sequence": 5,
+                "cursor": {
+                  "sequence": 5,
+                  "lineIndex": 3
+                },
+                "text": "last-no-newline"
+              },
+              {
+                "sequence": 5,
+                "cursor": {
+                  "sequence": 5,
+                  "lineIndex": 2
+                },
+                "text": "line-c"
+              }
+            ],
+            "gaps": [],
+            "hasMore": true
+          }
+        },
+        {
+          "op": "search",
+          "input": {
+            "query": "LINE",
+            "before": {
+              "sequence": 5,
+              "lineIndex": 2
+            }
+          },
+          "expected": {
+            "matches": [
+              {
+                "sequence": 5,
+                "cursor": {
+                  "sequence": 5,
+                  "lineIndex": 1
+                },
+                "text": "line-b"
+              },
+              {
+                "sequence": 5,
+                "cursor": {
+                  "sequence": 5,
+                  "lineIndex": 0
+                },
+                "text": "line-a"
+              }
+            ],
+            "gaps": [],
+            "hasMore": false
+          }
+        },
+        {
+          "op": "search",
+          "input": {
+            "query": "test",
+            "options": {
+              "caseSensitive": false,
+              "regex": false,
+              "wholeWord": true
+            }
+          },
+          "expected": {
+            "matches": [
+              {
+                "sequence": 1,
+                "cursor": {
+                  "sequence": 1,
+                  "lineIndex": 3
+                },
+                "text": "[test]"
+              },
+              {
+                "sequence": 1,
+                "cursor": {
+                  "sequence": 1,
+                  "lineIndex": 2
+                },
+                "text": "untest test"
+              }
+            ],
+            "gaps": [],
+            "hasMore": false
+          }
+        },
+        {
+          "op": "search",
+          "input": {
+            "query": "测试",
+            "options": {
+              "caseSensitive": false,
+              "regex": false,
+              "wholeWord": true
+            }
+          },
+          "expected": {
+            "matches": [
+              {
+                "sequence": 1,
+                "cursor": {
+                  "sequence": 1,
+                  "lineIndex": 5
+                },
+                "text": "中文 测试"
+              }
+            ],
+            "gaps": [],
+            "hasMore": false
+          }
+        },
+        {
+          "op": "search",
+          "input": {
+            "query": "cat",
+            "options": {
+              "caseSensitive": false,
+              "regex": true,
+              "wholeWord": true
+            }
+          },
+          "expected": {
+            "matches": [
+              {
+                "sequence": 1,
+                "cursor": {
+                  "sequence": 1,
+                  "lineIndex": 1
+                },
+                "text": "cat42 cat42"
+              }
+            ],
+            "gaps": [],
+            "hasMore": false
+          }
+        },
+        {
+          "op": "search",
+          "input": {
+            "query": "(?<=cat)\\d+",
+            "options": {
+              "caseSensitive": false,
+              "regex": true,
+              "wholeWord": true
+            }
+          },
+          "expected": {
+            "matches": [
+              {
+                "sequence": 1,
+                "cursor": {
+                  "sequence": 1,
+                  "lineIndex": 1
+                },
+                "text": "cat42 cat42"
+              }
+            ],
+            "gaps": [],
+            "hasMore": false
+          }
+        },
+        {
+          "op": "search",
+          "input": {
+            "query": "^",
+            "options": {
+              "caseSensitive": false,
+              "regex": true,
+              "wholeWord": true
+            }
+          },
+          "expected": {
+            "matches": [
+              {
+                "sequence": 5,
+                "cursor": {
+                  "sequence": 5,
+                  "lineIndex": 3
+                },
+                "text": "last-no-newline"
+              },
+              {
+                "sequence": 5,
+                "cursor": {
+                  "sequence": 5,
+                  "lineIndex": 2
+                },
+                "text": "line-c"
+              },
+              {
+                "sequence": 5,
+                "cursor": {
+                  "sequence": 5,
+                  "lineIndex": 1
+                },
+                "text": "line-b"
+              },
+              {
+                "sequence": 5,
+                "cursor": {
+                  "sequence": 5,
+                  "lineIndex": 0
+                },
+                "text": "line-a"
+              },
+              {
+                "sequence": 4,
+                "cursor": {
+                  "sequence": 4,
+                  "lineIndex": 0
+                },
+                "text": "partial-🙂"
+              },
+              {
+                "sequence": 2,
+                "cursor": {
+                  "sequence": 2,
+                  "lineIndex": 1
+                },
+                "text": "visible"
+              },
+              {
+                "sequence": 2,
+                "cursor": {
+                  "sequence": 2,
+                  "lineIndex": 0
+                },
+                "text": "red"
+              },
+              {
+                "sequence": 1,
+                "cursor": {
+                  "sequence": 1,
+                  "lineIndex": 5
+                },
+                "text": "中文 测试"
+              },
+              {
+                "sequence": 1,
+                "cursor": {
+                  "sequence": 1,
+                  "lineIndex": 4
+                },
+                "text": "中文测试"
+              },
+              {
+                "sequence": 1,
+                "cursor": {
+                  "sequence": 1,
+                  "lineIndex": 3
+                },
+                "text": "[test]"
+              },
+              {
+                "sequence": 1,
+                "cursor": {
+                  "sequence": 1,
+                  "lineIndex": 2
+                },
+                "text": "untest test"
+              },
+              {
+                "sequence": 1,
+                "cursor": {
+                  "sequence": 1,
+                  "lineIndex": 1
+                },
+                "text": "cat42 cat42"
+              },
+              {
+                "sequence": 1,
+                "cursor": {
+                  "sequence": 1,
+                  "lineIndex": 0
+                },
+                "text": "first"
+              }
+            ],
+            "gaps": [],
+            "hasMore": false
+          }
+        },
+        {
+          "op": "search",
+          "input": {
+            "query": "[",
+            "options": {
+              "caseSensitive": false,
+              "regex": true,
+              "wholeWord": true
+            }
+          },
+          "expected": {
+            "error": "invalid terminal history search pattern: Invalid regular expression: /[/i: Unterminated character class"
+          }
+        },
+        {
+          "op": "search",
+          "input": {
+            "query": "🙂"
+          },
+          "expected": {
+            "matches": [
+              {
+                "sequence": 4,
+                "cursor": {
+                  "sequence": 4,
+                  "lineIndex": 0
+                },
+                "text": "partial-🙂"
+              }
+            ],
+            "gaps": [],
+            "hasMore": false
+          }
+        },
+        {
+          "op": "search",
+          "input": {
+            "query": "red",
+            "options": {
+              "caseSensitive": true,
+              "regex": false,
+              "wholeWord": false
+            }
+          },
+          "expected": {
+            "matches": [
+              {
+                "sequence": 2,
+                "cursor": {
+                  "sequence": 2,
+                  "lineIndex": 0
+                },
+                "text": "red"
+              }
+            ],
+            "gaps": [],
+            "hasMore": false
+          }
+        }
+      ]
+    },
+    {
+      "variant": "gap",
+      "sessionId": "history-gap",
+      "segments": [
+        {
+          "name": "segment-000001.mtj",
+          "base64": "TVRKUk5MMgoAAACQPf+Y9wAAAEh7ImtpbmQiOiJvdXRwdXQiLCJzZXF1ZW5jZSI6MSwidGltZXN0YW1wIjoxNzk0NzYzMzk5NTAxLCJkYXRhTGVuZ3RoIjo2OH3vu79maXJzdA0KY2F0NDIgY2F0NDIKdW50ZXN0IHRlc3QKW3Rlc3RdCuS4reaWh+a1i+ivlQrkuK3mlocg5rWL6K+VCg=="
+        },
+        {
+          "name": "segment-000003.mtj",
+          "base64": "TVRKUk5MMgoAAABN1oQxRAAAAEd7ImtpbmQiOiJvdXRwdXQiLCJzZXF1ZW5jZSI6MywidGltZXN0YW1wIjoxNzk0NzYzMzk5NTM0LCJkYXRhTGVuZ3RoIjoyffCf"
+        },
+        {
+          "name": "segment-000004.mtj",
+          "base64": "TVRKUk5MMgoAAABOivPK8wAAAEd7ImtpbmQiOiJvdXRwdXQiLCJzZXF1ZW5jZSI6NCwidGltZXN0YW1wIjoxNzk0NzYzMzk5NTY1LCJkYXRhTGVuZ3RoIjozfZmCCg=="
+        },
+        {
+          "name": "segment-000005.mtj",
+          "base64": "TVRKUk5MMgoAAABweynGtwAAAEh7ImtpbmQiOiJvdXRwdXQiLCJzZXF1ZW5jZSI6NSwidGltZXN0YW1wIjoxNzk0NzYzMzk5NTk2LCJkYXRhTGVuZ3RoIjozNn1saW5lLWEKbGluZS1iCmxpbmUtYwpsYXN0LW5vLW5ld2xpbmU="
+        }
+      ],
+      "probes": [
+        {
+          "op": "page",
+          "input": {},
+          "expected": {
+            "lines": [
+              {
+                "sequence": 1,
+                "cursor": {
+                  "sequence": 1,
+                  "lineIndex": 0
+                },
+                "text": "first"
+              },
+              {
+                "sequence": 1,
+                "cursor": {
+                  "sequence": 1,
+                  "lineIndex": 1
+                },
+                "text": "cat42 cat42"
+              },
+              {
+                "sequence": 1,
+                "cursor": {
+                  "sequence": 1,
+                  "lineIndex": 2
+                },
+                "text": "untest test"
+              },
+              {
+                "sequence": 1,
+                "cursor": {
+                  "sequence": 1,
+                  "lineIndex": 3
+                },
+                "text": "[test]"
+              },
+              {
+                "sequence": 1,
+                "cursor": {
+                  "sequence": 1,
+                  "lineIndex": 4
+                },
+                "text": "中文测试"
+              },
+              {
+                "sequence": 1,
+                "cursor": {
+                  "sequence": 1,
+                  "lineIndex": 5
+                },
+                "text": "中文 测试"
+              },
+              {
+                "sequence": 4,
+                "cursor": {
+                  "sequence": 4,
+                  "lineIndex": 0
+                },
+                "text": "🙂"
+              },
+              {
+                "sequence": 5,
+                "cursor": {
+                  "sequence": 5,
+                  "lineIndex": 0
+                },
+                "text": "line-a"
+              },
+              {
+                "sequence": 5,
+                "cursor": {
+                  "sequence": 5,
+                  "lineIndex": 1
+                },
+                "text": "line-b"
+              },
+              {
+                "sequence": 5,
+                "cursor": {
+                  "sequence": 5,
+                  "lineIndex": 2
+                },
+                "text": "line-c"
+              },
+              {
+                "sequence": 5,
+                "cursor": {
+                  "sequence": 5,
+                  "lineIndex": 3
+                },
+                "text": "last-no-newline"
+              }
+            ],
+            "gaps": [
+              {
+                "segmentIndex": 2,
+                "code": "MISSING_SEGMENT",
+                "message": "Journal segment is missing"
+              }
+            ],
+            "hasMore": false
+          }
+        },
+        {
+          "op": "page",
+          "input": {
+            "lineLimit": 3
+          },
+          "expected": {
+            "lines": [
+              {
+                "sequence": 5,
+                "cursor": {
+                  "sequence": 5,
+                  "lineIndex": 1
+                },
+                "text": "line-b"
+              },
+              {
+                "sequence": 5,
+                "cursor": {
+                  "sequence": 5,
+                  "lineIndex": 2
+                },
+                "text": "line-c"
+              },
+              {
+                "sequence": 5,
+                "cursor": {
+                  "sequence": 5,
+                  "lineIndex": 3
+                },
+                "text": "last-no-newline"
+              }
+            ],
+            "gaps": [
+              {
+                "segmentIndex": 2,
+                "code": "MISSING_SEGMENT",
+                "message": "Journal segment is missing"
+              }
+            ],
+            "hasMore": true
+          }
+        },
+        {
+          "op": "page",
+          "input": {
+            "lineLimit": 0
+          },
+          "expected": {
+            "lines": [
+              {
+                "sequence": 5,
+                "cursor": {
+                  "sequence": 5,
+                  "lineIndex": 3
+                },
+                "text": "last-no-newline"
+              }
+            ],
+            "gaps": [
+              {
+                "segmentIndex": 2,
+                "code": "MISSING_SEGMENT",
+                "message": "Journal segment is missing"
+              }
+            ],
+            "hasMore": true
+          }
+        },
+        {
+          "op": "page",
+          "input": {
+            "before": {
+              "sequence": 5,
+              "lineIndex": 1
+            },
+            "lineLimit": 2
+          },
+          "expected": {
+            "lines": [
+              {
+                "sequence": 4,
+                "cursor": {
+                  "sequence": 4,
+                  "lineIndex": 0
+                },
+                "text": "🙂"
+              },
+              {
+                "sequence": 5,
+                "cursor": {
+                  "sequence": 5,
+                  "lineIndex": 0
+                },
+                "text": "line-a"
+              }
+            ],
+            "gaps": [
+              {
+                "segmentIndex": 2,
+                "code": "MISSING_SEGMENT",
+                "message": "Journal segment is missing"
+              }
+            ],
+            "hasMore": true
+          }
+        },
+        {
+          "op": "page",
+          "input": {
+            "around": {
+              "sequence": 5,
+              "lineIndex": 1
+            },
+            "beforeLines": 1,
+            "afterLines": 1
+          },
+          "expected": {
+            "lines": [
+              {
+                "sequence": 5,
+                "cursor": {
+                  "sequence": 5,
+                  "lineIndex": 0
+                },
+                "text": "line-a"
+              },
+              {
+                "sequence": 5,
+                "cursor": {
+                  "sequence": 5,
+                  "lineIndex": 1
+                },
+                "text": "line-b"
+              },
+              {
+                "sequence": 5,
+                "cursor": {
+                  "sequence": 5,
+                  "lineIndex": 2
+                },
+                "text": "line-c"
+              }
+            ],
+            "gaps": [
+              {
+                "segmentIndex": 2,
+                "code": "MISSING_SEGMENT",
+                "message": "Journal segment is missing"
+              }
+            ],
+            "hasMore": true,
+            "anchorIndex": 1,
+            "hasMoreBefore": true,
+            "hasMoreAfter": true
+          }
+        },
+        {
+          "op": "page",
+          "input": {
+            "around": {
+              "sequence": 99,
+              "lineIndex": 0
+            }
+          },
+          "expected": {
+            "lines": [],
+            "gaps": [
+              {
+                "segmentIndex": 2,
+                "code": "MISSING_SEGMENT",
+                "message": "Journal segment is missing"
+              }
+            ],
+            "hasMore": false
+          }
+        },
+        {
+          "op": "search",
+          "input": {
+            "query": ""
+          },
+          "expected": {
+            "matches": [],
+            "gaps": [],
+            "hasMore": false
+          }
+        },
+        {
+          "op": "search",
+          "input": {
+            "query": "line",
+            "limit": 2
+          },
+          "expected": {
+            "matches": [
+              {
+                "sequence": 5,
+                "cursor": {
+                  "sequence": 5,
+                  "lineIndex": 3
+                },
+                "text": "last-no-newline"
+              },
+              {
+                "sequence": 5,
+                "cursor": {
+                  "sequence": 5,
+                  "lineIndex": 2
+                },
+                "text": "line-c"
+              }
+            ],
+            "gaps": [
+              {
+                "segmentIndex": 2,
+                "code": "MISSING_SEGMENT",
+                "message": "Journal segment is missing"
+              }
+            ],
+            "hasMore": true
+          }
+        },
+        {
+          "op": "search",
+          "input": {
+            "query": "LINE",
+            "before": {
+              "sequence": 5,
+              "lineIndex": 2
+            }
+          },
+          "expected": {
+            "matches": [
+              {
+                "sequence": 5,
+                "cursor": {
+                  "sequence": 5,
+                  "lineIndex": 1
+                },
+                "text": "line-b"
+              },
+              {
+                "sequence": 5,
+                "cursor": {
+                  "sequence": 5,
+                  "lineIndex": 0
+                },
+                "text": "line-a"
+              }
+            ],
+            "gaps": [
+              {
+                "segmentIndex": 2,
+                "code": "MISSING_SEGMENT",
+                "message": "Journal segment is missing"
+              }
+            ],
+            "hasMore": false
+          }
+        },
+        {
+          "op": "search",
+          "input": {
+            "query": "test",
+            "options": {
+              "caseSensitive": false,
+              "regex": false,
+              "wholeWord": true
+            }
+          },
+          "expected": {
+            "matches": [
+              {
+                "sequence": 1,
+                "cursor": {
+                  "sequence": 1,
+                  "lineIndex": 3
+                },
+                "text": "[test]"
+              },
+              {
+                "sequence": 1,
+                "cursor": {
+                  "sequence": 1,
+                  "lineIndex": 2
+                },
+                "text": "untest test"
+              }
+            ],
+            "gaps": [
+              {
+                "segmentIndex": 2,
+                "code": "MISSING_SEGMENT",
+                "message": "Journal segment is missing"
+              }
+            ],
+            "hasMore": false
+          }
+        },
+        {
+          "op": "search",
+          "input": {
+            "query": "测试",
+            "options": {
+              "caseSensitive": false,
+              "regex": false,
+              "wholeWord": true
+            }
+          },
+          "expected": {
+            "matches": [
+              {
+                "sequence": 1,
+                "cursor": {
+                  "sequence": 1,
+                  "lineIndex": 5
+                },
+                "text": "中文 测试"
+              }
+            ],
+            "gaps": [
+              {
+                "segmentIndex": 2,
+                "code": "MISSING_SEGMENT",
+                "message": "Journal segment is missing"
+              }
+            ],
+            "hasMore": false
+          }
+        },
+        {
+          "op": "search",
+          "input": {
+            "query": "cat",
+            "options": {
+              "caseSensitive": false,
+              "regex": true,
+              "wholeWord": true
+            }
+          },
+          "expected": {
+            "matches": [
+              {
+                "sequence": 1,
+                "cursor": {
+                  "sequence": 1,
+                  "lineIndex": 1
+                },
+                "text": "cat42 cat42"
+              }
+            ],
+            "gaps": [
+              {
+                "segmentIndex": 2,
+                "code": "MISSING_SEGMENT",
+                "message": "Journal segment is missing"
+              }
+            ],
+            "hasMore": false
+          }
+        },
+        {
+          "op": "search",
+          "input": {
+            "query": "(?<=cat)\\d+",
+            "options": {
+              "caseSensitive": false,
+              "regex": true,
+              "wholeWord": true
+            }
+          },
+          "expected": {
+            "matches": [
+              {
+                "sequence": 1,
+                "cursor": {
+                  "sequence": 1,
+                  "lineIndex": 1
+                },
+                "text": "cat42 cat42"
+              }
+            ],
+            "gaps": [
+              {
+                "segmentIndex": 2,
+                "code": "MISSING_SEGMENT",
+                "message": "Journal segment is missing"
+              }
+            ],
+            "hasMore": false
+          }
+        },
+        {
+          "op": "search",
+          "input": {
+            "query": "^",
+            "options": {
+              "caseSensitive": false,
+              "regex": true,
+              "wholeWord": true
+            }
+          },
+          "expected": {
+            "matches": [
+              {
+                "sequence": 5,
+                "cursor": {
+                  "sequence": 5,
+                  "lineIndex": 3
+                },
+                "text": "last-no-newline"
+              },
+              {
+                "sequence": 5,
+                "cursor": {
+                  "sequence": 5,
+                  "lineIndex": 2
+                },
+                "text": "line-c"
+              },
+              {
+                "sequence": 5,
+                "cursor": {
+                  "sequence": 5,
+                  "lineIndex": 1
+                },
+                "text": "line-b"
+              },
+              {
+                "sequence": 5,
+                "cursor": {
+                  "sequence": 5,
+                  "lineIndex": 0
+                },
+                "text": "line-a"
+              },
+              {
+                "sequence": 4,
+                "cursor": {
+                  "sequence": 4,
+                  "lineIndex": 0
+                },
+                "text": "🙂"
+              },
+              {
+                "sequence": 1,
+                "cursor": {
+                  "sequence": 1,
+                  "lineIndex": 5
+                },
+                "text": "中文 测试"
+              },
+              {
+                "sequence": 1,
+                "cursor": {
+                  "sequence": 1,
+                  "lineIndex": 4
+                },
+                "text": "中文测试"
+              },
+              {
+                "sequence": 1,
+                "cursor": {
+                  "sequence": 1,
+                  "lineIndex": 3
+                },
+                "text": "[test]"
+              },
+              {
+                "sequence": 1,
+                "cursor": {
+                  "sequence": 1,
+                  "lineIndex": 2
+                },
+                "text": "untest test"
+              },
+              {
+                "sequence": 1,
+                "cursor": {
+                  "sequence": 1,
+                  "lineIndex": 1
+                },
+                "text": "cat42 cat42"
+              },
+              {
+                "sequence": 1,
+                "cursor": {
+                  "sequence": 1,
+                  "lineIndex": 0
+                },
+                "text": "first"
+              }
+            ],
+            "gaps": [
+              {
+                "segmentIndex": 2,
+                "code": "MISSING_SEGMENT",
+                "message": "Journal segment is missing"
+              }
+            ],
+            "hasMore": false
+          }
+        },
+        {
+          "op": "search",
+          "input": {
+            "query": "[",
+            "options": {
+              "caseSensitive": false,
+              "regex": true,
+              "wholeWord": true
+            }
+          },
+          "expected": {
+            "error": "invalid terminal history search pattern: Invalid regular expression: /[/i: Unterminated character class"
+          }
+        },
+        {
+          "op": "search",
+          "input": {
+            "query": "🙂"
+          },
+          "expected": {
+            "matches": [
+              {
+                "sequence": 4,
+                "cursor": {
+                  "sequence": 4,
+                  "lineIndex": 0
+                },
+                "text": "🙂"
+              }
+            ],
+            "gaps": [
+              {
+                "segmentIndex": 2,
+                "code": "MISSING_SEGMENT",
+                "message": "Journal segment is missing"
+              }
+            ],
+            "hasMore": false
+          }
+        },
+        {
+          "op": "search",
+          "input": {
+            "query": "red",
+            "options": {
+              "caseSensitive": true,
+              "regex": false,
+              "wholeWord": false
+            }
+          },
+          "expected": {
+            "matches": [],
+            "gaps": [
+              {
+                "segmentIndex": 2,
+                "code": "MISSING_SEGMENT",
+                "message": "Journal segment is missing"
+              }
+            ],
+            "hasMore": false
+          }
+        }
+      ]
+    }
+  ]
+}
