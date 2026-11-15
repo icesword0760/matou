@@ -49,6 +49,10 @@ pub struct LaunchOptions {
 }
 
 pub enum Command {
+    ScrollSelection {
+        session_id: String,
+        lines: i32,
+    },
     Select {
         session_id: String,
         action: SelectionAction,
@@ -908,6 +912,16 @@ fn run(
                         copies.push((request_id, session_id, interrupt_if_empty, receive));
                     }
                     continue;
+                }
+                Command::ScrollSelection { session_id, lines } => {
+                    if !sessions.contains(&session_id) {
+                        continue;
+                    }
+                    (
+                        session_id,
+                        WorkerCommand::ScrollSelection { lines, reply },
+                        true,
+                    )
                 }
                 Command::Select { session_id, action } => {
                     if !sessions.contains(&session_id) {

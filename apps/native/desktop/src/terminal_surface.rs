@@ -1,11 +1,11 @@
 use std::{ops::Range, time::Duration};
 
 use gpui::{
-    App, Bounds, ContentMask, Context, CursorStyle as PointerStyle, ElementInputHandler, Entity,
-    EntityInputHandler, EventEmitter, FocusHandle, Font, FontStyle, FontWeight, InteractiveElement,
-    IntoElement, KeyDownEvent, MouseButton, ParentElement, Pixels, Point, Render, ScrollWheelEvent,
-    ShapedLine, SharedString, Styled, Task, TextRun, UTF16Selection, Window, canvas, div, fill,
-    font, point, px, rgb, size,
+    App, Bounds, ContentMask, Context, CursorStyle as PointerStyle, DispatchPhase,
+    ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Font, FontStyle,
+    FontWeight, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, ParentElement, Pixels,
+    Point, Render, ScrollWheelEvent, ShapedLine, SharedString, Styled, Task, TextRun,
+    UTF16Selection, Window, canvas, div, fill, font, point, px, rgb, size,
 };
 use matou_native_terminal::{
     Cell, Color, CursorStyle, GridSelection, InputModes, Screen, SelectionAction, SelectionMode,
@@ -13,7 +13,8 @@ use matou_native_terminal::{
 };
 
 use crate::terminal_input::{
-    Composition, byte_from_utf16, encode_paste, terminal_key, utf16_from_byte,
+    Composition, byte_from_utf16, encode_paste, selection_scroll_amount, terminal_key,
+    utf16_from_byte,
 };
 
 const FONT_SIZE: Pixels = px(11.);
@@ -34,6 +35,7 @@ pub enum SurfaceEvent {
     },
     /// Positive lines move into scrollback.
     Scroll(i32),
+    ScrollSelection(i32),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -90,6 +92,8 @@ pub struct TerminalSurface {
     selection: Option<GridSelection>,
     selection_drag: Option<SelectionMode>,
     selecting: bool,
+    drag_scroll_amount: i32,
+    drag_scroll_timer: Option<Task<()>>,
     composition: Composition,
     caret: Option<Bounds<Pixels>>,
     wheel_lines: f32,
@@ -139,6 +143,8 @@ impl TerminalSurface {
             selection: None,
             selection_drag: None,
             selecting: false,
+            drag_scroll_amount: 0,
+            drag_scroll_timer: None,
             composition: Composition::default(),
             caret: None,
             wheel_lines: 0.,
@@ -198,7 +204,7 @@ impl TerminalSurface {
             return;
         }
         self.selection_drag = None;
-        self.selecting = false;
+        self.stop_drag();
         self.reset_blink();
         cx.emit(SurfaceEvent::Input(bytes));
         cx.notify();
@@ -283,17 +289,53 @@ impl TerminalSurface {
 
     fn update_selection(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
         if self.selecting
-            && let Some((_, row, x)) = self.selection_location(position)
+            && let Some((grid, row, x)) = self.selection_location(position)
         {
-            cx.emit(SurfaceEvent::Select(SelectionAction::Extend { row, x }));
+            self.drag_scroll_amount = selection_scroll_amount(
+                f32::from(position.y - grid.bounds.top()),
+                f32::from(grid.bounds.size.height),
+            );
+            let action = if self.drag_scroll_amount == 0 {
+                SelectionAction::Extend { row, x }
+            } else {
+                SelectionAction::ExtendOutside {
+                    row,
+                    x,
+                    below: self.drag_scroll_amount < 0,
+                }
+            };
+            cx.emit(SurfaceEvent::Select(action));
         }
     }
 
-    fn finish_selection(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
-        if self.selection_drag == Some(SelectionMode::Character) {
-            self.update_selection(position, cx);
-        }
+    fn finish_selection(&mut self) {
+        // The last move/timer owns the endpoint; mouseup only ends the gesture.
+        self.stop_drag();
+    }
+
+    fn stop_drag(&mut self) {
         self.selecting = false;
+        self.drag_scroll_amount = 0;
+        self.drag_scroll_timer = None;
+    }
+
+    fn schedule_drag_scroll(&mut self, cx: &mut Context<Self>) {
+        if !self.selecting || self.drag_scroll_timer.is_some() {
+            return;
+        }
+        let timer = cx.background_executor().timer(Duration::from_millis(50));
+        self.drag_scroll_timer = Some(cx.spawn(async move |this, cx| {
+            timer.await;
+            let _ = this.update(cx, |this, cx| {
+                this.drag_scroll_timer = None;
+                if this.selecting {
+                    if this.drag_scroll_amount != 0 {
+                        cx.emit(SurfaceEvent::ScrollSelection(this.drag_scroll_amount));
+                    }
+                    this.schedule_drag_scroll(cx);
+                }
+            });
+        }));
     }
 
     pub fn contains_position(&self, position: Point<Pixels>) -> bool {
@@ -540,6 +582,9 @@ impl TerminalSurface {
 
 impl Render for TerminalSurface {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !window.is_window_active() {
+            self.stop_drag();
+        }
         self.schedule_blink(
             self.focus.is_focused(window) && window.is_window_active(),
             cx,
@@ -558,6 +603,8 @@ impl Render for TerminalSurface {
                     this.reset_blink();
                     if event.click_count > 3 {
                         this.selecting = this.selection_drag.is_some();
+                        this.drag_scroll_amount = 0;
+                        this.schedule_drag_scroll(cx);
                         cx.notify();
                         return;
                     }
@@ -575,6 +622,8 @@ impl Render for TerminalSurface {
                         };
                         this.selection_drag = Some(mode);
                         this.selecting = true;
+                        this.drag_scroll_amount = 0;
+                        this.schedule_drag_scroll(cx);
                         cx.emit(SurfaceEvent::Select(SelectionAction::Begin {
                             mode,
                             row,
@@ -582,27 +631,10 @@ impl Render for TerminalSurface {
                         }));
                     } else {
                         this.selection_drag = None;
-                        this.selecting = false;
+                        this.stop_drag();
                         cx.emit(SurfaceEvent::Select(SelectionAction::Clear));
                     }
                     cx.notify();
-                }),
-            )
-            .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _, cx| {
-                if event.dragging() {
-                    this.update_selection(event.position, cx);
-                }
-            }))
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, event: &gpui::MouseUpEvent, _, cx| {
-                    this.finish_selection(event.position, cx);
-                }),
-            )
-            .on_mouse_up_out(
-                MouseButton::Left,
-                cx.listener(|this, event: &gpui::MouseUpEvent, _, cx| {
-                    this.finish_selection(event.position, cx);
                 }),
             )
             .on_scroll_wheel(cx.listener(|this, event, _, cx| this.on_scroll(event, cx)))
@@ -612,6 +644,25 @@ impl Render for TerminalSurface {
                     move |bounds, (), window, cx| {
                         surface.update(cx, |this, cx| {
                             this.paint(surface.clone(), bounds, window, cx)
+                        });
+                        let moving = surface.downgrade();
+                        window.on_mouse_event(move |event: &gpui::MouseMoveEvent, phase, _, cx| {
+                            if phase == DispatchPhase::Capture {
+                                let _ = moving.update(cx, |this, cx| {
+                                    if event.dragging() {
+                                        this.update_selection(event.position, cx);
+                                    } else {
+                                        this.stop_drag();
+                                    }
+                                });
+                            }
+                        });
+                        let released = surface.downgrade();
+                        window.on_mouse_event(move |event: &gpui::MouseUpEvent, phase, _, cx| {
+                            if phase == DispatchPhase::Capture && event.button == MouseButton::Left
+                            {
+                                let _ = released.update(cx, |this, _| this.finish_selection());
+                            }
                         });
                     },
                 )

@@ -2,6 +2,17 @@ use std::ops::Range;
 
 use matou_native_terminal::InputModes;
 
+/// Native positive values scroll upward; reference pointer velocity is downward-positive.
+pub(crate) fn selection_scroll_amount(y: f32, height: f32) -> i32 {
+    if y >= 0. && y <= height {
+        return 0;
+    }
+    let distance = if y > height { y - height } else { y };
+    let ratio = distance.clamp(-50., 50.) / 50.;
+    // Math.round uses ties toward positive infinity, including negative values.
+    -(ratio.signum() as i32 + (ratio * 14. + 0.5).floor() as i32)
+}
+
 pub(crate) fn encode_paste(text: &str, modes: InputModes) -> Vec<u8> {
     let text = text.replace("\r\n", "\r").replace('\n', "\r");
     if !modes.bracketed_paste {
@@ -125,6 +136,32 @@ impl Composition {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn edge_velocity_matches_reference_mouse_offsets() {
+        // Frozen SelectionService method execution; native direction is reversed.
+        for (y, expected) in [
+            (-100., 15),
+            (-50., 15),
+            (-25., 8),
+            (-12.5, 4),
+            (-1., 1),
+            (0., 0),
+            (40., 0),
+            (80., 0),
+            (81., -1),
+            (92.5, -5),
+            (105., -8),
+            (130., -15),
+            (180., -15),
+        ] {
+            assert_eq!(
+                super::selection_scroll_amount(y, 80.),
+                expected,
+                "offset {y}"
+            );
+        }
+    }
 
     #[test]
     fn ime_uses_utf16_offsets_without_splitting_surrogates() {

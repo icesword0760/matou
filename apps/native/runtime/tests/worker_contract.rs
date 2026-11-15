@@ -18,7 +18,7 @@ use matou_native_runtime::{
     SessionEvent, SessionOptions,
     worker::{SessionWorker, WorkerCommand, WorkerEvent},
 };
-use matou_native_terminal::{SelectionAction, SelectionMode, TerminalOptions};
+use matou_native_terminal::{GridPoint, SelectionAction, SelectionMode, TerminalOptions};
 
 fn options(root: &Path, id: &str) -> Result<SessionOptions> {
     let home = root.join("home");
@@ -207,6 +207,83 @@ fn real_workers_keep_shell_output_independent_and_return_owned_screens() -> Resu
     wait_until_exited(seen.pids["b"])?;
     assert!(screen_has(&a_screen, "WORKER_A_BACK"));
     assert!(screen_has(&b_screen, "WORKER_B_ONLY"));
+    Ok(())
+}
+
+#[test]
+fn drag_scroll_extends_selection_in_the_new_worker_viewport() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let mut fixture = options(root.path(), "drag-scroll")?;
+    fixture.restored_history = (0..100)
+        .map(|row| format!("line{row:03}\r\n"))
+        .collect::<String>()
+        .into_bytes();
+    let (events, incoming) = mpsc::channel();
+    let mut worker = SessionWorker::spawn(fixture, events, "run-drag".into())?;
+    Seen::default().wait(&incoming, |seen| {
+        seen.frame_with("drag-scroll", b"WORKER_READY> ").is_some()
+    })?;
+    let timeout = Duration::from_secs(2);
+    let initial = worker.screen()?;
+    assert!(initial.scrollbar.offset > 40);
+    assert!(screen_has(&initial, "line099"));
+
+    let scroll = |lines| -> Result<_> {
+        let (reply, scrolled) = mpsc::channel();
+        worker.send(WorkerCommand::ScrollSelection { lines, reply })?;
+        let (reply, view) = mpsc::channel();
+        worker.send(WorkerCommand::SelectedView { reply })?;
+        let (screen, _, selection) = view.recv_timeout(timeout)??;
+        scrolled.recv_timeout(timeout)??;
+        Ok((screen, selection))
+    };
+    let copy = || -> Result<String> {
+        let (reply, copied) = mpsc::channel();
+        worker.send(WorkerCommand::CopySelection {
+            reply,
+            interrupt_if_empty: false,
+        })?;
+        copied.recv_timeout(timeout)?
+    };
+
+    let (unchanged, selection) = scroll(2)?;
+    assert_eq!(unchanged.scrollbar.offset, initial.scrollbar.offset);
+    assert_eq!(selection, None);
+
+    let (reply, selected) = mpsc::channel();
+    worker.send(WorkerCommand::Select {
+        action: SelectionAction::Begin {
+            mode: SelectionMode::Word,
+            row: 99,
+            x: 1.,
+        },
+        reply,
+    })?;
+    selected.recv_timeout(timeout)??;
+    let (top, selection) = scroll(1000)?;
+    assert_eq!(top.scrollbar.offset, 0);
+    let selection = selection.context("selection after scrolling up")?;
+    assert_eq!(selection.anchor, GridPoint { row: 0, col: 0 });
+    assert_eq!(selection.end, GridPoint { row: 99, col: 7 });
+    let upward_text = copy()?;
+    assert!(upward_text.starts_with("line000\n"));
+    assert!(upward_text.ends_with("line099"));
+
+    let (bottom, selection) = scroll(-1000)?;
+    assert_eq!(bottom.scrollbar.offset, initial.scrollbar.offset);
+    let selection = selection.context("selection after scrolling down")?;
+    assert_eq!(selection.anchor, GridPoint { row: 99, col: 0 });
+    assert_eq!(
+        selection.end,
+        GridPoint {
+            row: usize::try_from(bottom.scrollbar.total)? - 1,
+            col: bottom.cols,
+        }
+    );
+    let downward_text = copy()?;
+    assert!(downward_text.starts_with("line099\n"));
+    assert!(downward_text.contains("WORKER_READY>"));
+    worker.shutdown()?;
     Ok(())
 }
 
