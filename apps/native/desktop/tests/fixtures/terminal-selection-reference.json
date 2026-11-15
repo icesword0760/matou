@@ -5,6 +5,7 @@
       "name": "paths-and-cjk",
       "cols": 64,
       "rows": 3,
+      "text": "SELECT_ALPHA beta-gamma/path 中文词尾",
       "grid": [
         {
           "continuation": false,
@@ -1177,6 +1178,7 @@
       "name": "separators-and-spaces",
       "cols": 32,
       "rows": 3,
+      "text": "aa(bb) cc,dd   end",
       "grid": [
         {
           "continuation": false,
@@ -1897,6 +1899,7 @@
       "name": "soft-wrap",
       "cols": 10,
       "rows": 5,
+      "text": "ab LONGPATH/abcdefghij END\r\nHARD next",
       "grid": [
         {
           "continuation": false,
@@ -2435,6 +2438,7 @@
       "name": "wide-combining",
       "cols": 16,
       "rows": 4,
+      "text": "A 中文é🙂 tail\r\nX👩‍💻Y",
       "grid": [
         {
           "continuation": false,
@@ -2928,6 +2932,7 @@
       "name": "word-drag-start-row",
       "cols": 5,
       "rows": 4,
+      "text": "ABCD(EFGHI\r\nK",
       "grid": [
         {
           "continuation": false,
