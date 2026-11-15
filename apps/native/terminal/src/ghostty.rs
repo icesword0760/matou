@@ -393,6 +393,7 @@ impl Terminal {
     pub fn selection_action(&mut self, action: SelectionAction) -> Result<()> {
         self.reconcile_selection()?;
         match action {
+            SelectionAction::Select { row, col, length } => self.selection.select(row, col, length),
             SelectionAction::Begin { mode, row, x } => {
                 self.update_selection(|selection, terminal| selection.begin(terminal, mode, row, x))
             }

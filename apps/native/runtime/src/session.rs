@@ -24,6 +24,7 @@ use crate::{
         BATCH_DELAY, CREDIT_HIGH_WATERMARK_BYTES, CREDIT_LOW_WATERMARK_BYTES, CreditWindow,
         MAX_CODE_UNITS, OutputBatcher, Utf8Decoder,
     },
+    search::{SearchRequest, SearchResult, SessionSearch},
 };
 
 const READ_BYTES: usize = 8 * 1024;
@@ -219,6 +220,7 @@ pub struct Session {
     gate: Gate,
     protocol_terminal: Terminal,
     display_terminal: Terminal,
+    search: SessionSearch,
     visible_screen: Screen,
     geometry: (u16, u16, u32, u32),
     display_grid: (u16, u16),
@@ -283,6 +285,7 @@ impl Session {
             gate,
             protocol_terminal,
             display_terminal,
+            search: SessionSearch::default(),
             visible_screen,
             geometry,
             display_grid: (geometry.0, geometry.1),
@@ -528,6 +531,14 @@ impl Session {
         Ok((self.screen()?, self.display_terminal.input_modes()?))
     }
 
+    pub fn search(&mut self, request: SearchRequest) -> Result<SearchResult> {
+        self.search.search(&mut self.display_terminal, request)
+    }
+
+    pub fn clear_search(&mut self) {
+        self.search.clear();
+    }
+
     pub fn selection_action(&mut self, action: SelectionAction) -> Result<()> {
         self.display_terminal.selection_action(action)
     }
@@ -564,6 +575,13 @@ impl Session {
         .min()
     }
 
+    pub(crate) fn poll_deadline(&self) -> Option<Instant> {
+        [self.screen_deadline(), self.search.deadline()]
+            .into_iter()
+            .flatten()
+            .min()
+    }
+
     pub fn is_closed(&self) -> bool {
         self.closed
     }
@@ -597,6 +615,7 @@ impl Session {
 
     fn advance(&mut self, max_wait: Duration, wake_on_events: bool) -> Result<()> {
         self.expire_sync();
+        self.refresh_search();
         if self.closed {
             return Ok(());
         }
@@ -608,7 +627,7 @@ impl Session {
         }
 
         let now = Instant::now();
-        let wait = [self.batcher.deadline(), self.screen_deadline()]
+        let wait = [self.batcher.deadline(), self.poll_deadline()]
             .into_iter()
             .flatten()
             .map(|deadline| deadline.saturating_duration_since(now))
@@ -657,7 +676,20 @@ impl Session {
         self.expire_sync();
         self.flush_due()?;
         self.observe_exit()?;
-        self.enqueue_exit_if_ready()
+        self.enqueue_exit_if_ready()?;
+        self.refresh_search();
+        Ok(())
+    }
+
+    fn refresh_search(&mut self) {
+        if let Some(result) = self.search.refresh_due(&mut self.display_terminal) {
+            match result {
+                Ok(result) => self.events.push(SessionEvent::SearchUpdated { result }),
+                Err(error) => self
+                    .events
+                    .push(diagnostic(format!("refresh Shell search: {error:#}"))),
+            }
+        }
     }
 
     fn flush_due(&mut self) -> Result<()> {
@@ -811,6 +843,7 @@ impl Session {
             let delivery = &mut self.delivery;
             let collector = &mut self.collector;
             let display_terminal = &mut self.display_terminal;
+            let search = &mut self.search;
             let display_grid = &mut self.display_grid;
             let (_, _, cell_width_px, cell_height_px) = self.geometry;
             let events = RefCell::new(&mut self.events);
@@ -826,6 +859,7 @@ impl Session {
                     Frame::Output { sequence, data } => {
                         let decoded = std::str::from_utf8(data)?;
                         display_terminal.feed(data);
+                        search.buffer_changed();
                         display_terminal.drain_responses();
                         let clipboard = display_terminal.drain_clipboard();
                         events.push(SessionEvent::SavedOutput {
@@ -858,6 +892,7 @@ impl Session {
                         display_terminal.resize(cols, rows, cell_width_px, cell_height_px)?;
                         display_terminal.drain_responses();
                         *display_grid = (cols, rows);
+                        search.buffer_changed();
                     }
                     Frame::Exit {
                         sequence,

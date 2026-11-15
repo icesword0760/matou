@@ -24,6 +24,7 @@ pub struct RenameInput {
     pub focus: FocusHandle,
     pub text: String,
     pub placeholder: String,
+    pub search_style: bool,
     selection: Range<usize>,
     reversed: bool,
     marked: Option<Range<usize>>,
@@ -44,6 +45,7 @@ impl RenameInput {
             focus: cx.focus_handle().tab_stop(true),
             text,
             placeholder: "输入标签页名称".into(),
+            search_style: false,
             selection: end..end,
             reversed: false,
             marked: None,
@@ -120,7 +122,12 @@ impl RenameInput {
     }
 
     fn replace(&mut self, range: Range<usize>, text: &str, typing: bool, cx: &mut Context<Self>) {
-        let remaining = 20usize.saturating_sub(
+        let remaining = (if self.search_style {
+            usize::MAX
+        } else {
+            20usize
+        })
+        .saturating_sub(
             self.text[..range.start].encode_utf16().count()
                 + self.text[range.end..].encode_utf16().count(),
         );
@@ -322,9 +329,17 @@ impl RenameInput {
             len: display.len(),
             font: window.text_style().font(),
             color: rgba(if self.text.is_empty() {
-                0x00000066
+                if self.search_style {
+                    0x747474ff
+                } else {
+                    0x00000066
+                }
             } else {
-                0x000000d9
+                if self.search_style {
+                    0x2f3547ff
+                } else {
+                    0x000000d9
+                }
             })
             .into(),
             background_color: None,
@@ -353,9 +368,12 @@ impl RenameInput {
         } else {
             vec![run]
         };
-        let line = window
-            .text_system()
-            .shape_line(display, px(14.), &runs, None);
+        let line = window.text_system().shape_line(
+            display,
+            px(if self.search_style { 12. } else { 14. }),
+            &runs,
+            None,
+        );
         let cursor = line.x_for_index(self.cursor());
         self.scroll = self
             .scroll
@@ -516,13 +534,17 @@ impl Render for RenameInput {
         div()
             .id("rename-native-input")
             .track_focus(&self.focus)
-            .h(px(32.))
+            .h(px(if self.search_style { 28. } else { 32. }))
             .w_full()
             .relative()
             .rounded(px(8.))
-            .bg(rgba(0x0000000a))
-            .pl(px(14.))
-            .pr(px(50.))
+            .bg(rgba(if self.search_style {
+                0x00000000
+            } else {
+                0x0000000a
+            }))
+            .pl(px(if self.search_style { 0. } else { 14. }))
+            .pr(px(if self.search_style { 0. } else { 50. }))
             .cursor(CursorStyle::IBeam)
             .on_key_down(cx.listener(Self::key))
             .on_mouse_down(
@@ -574,17 +596,19 @@ impl Render for RenameInput {
                 )
                 .w_full()
                 .h(px(20.))
-                .mt(px(6.)),
+                .mt(px(if self.search_style { 4. } else { 6. })),
             )
-            .child(
-                div()
-                    .absolute()
-                    .right(px(14.))
-                    .top(px(6.))
-                    .text_size(px(13.))
-                    .line_height(px(20.))
-                    .text_color(rgba(0xffffff57))
-                    .child(format!("{}/20", self.text.encode_utf16().count())),
-            )
+            .when(!self.search_style, |el| {
+                el.child(
+                    div()
+                        .absolute()
+                        .right(px(14.))
+                        .top(px(6.))
+                        .text_size(px(13.))
+                        .line_height(px(20.))
+                        .text_color(rgba(0xffffff57))
+                        .child(format!("{}/20", self.text.encode_utf16().count())),
+                )
+            })
     }
 }

@@ -29,6 +29,7 @@ use matou_native_core::{
 use matou_native_runtime::{
     SessionEvent, SessionOptions,
     owner::{OwnerEvent, ShellOwner},
+    search::{SearchRequest, SearchResult},
     worker::{SelectionCopy, WorkerCommand},
     workspace_paths::WorkspacePathChecks,
 };
@@ -49,6 +50,13 @@ pub struct LaunchOptions {
 }
 
 pub enum Command {
+    Search {
+        session_id: String,
+        request: SearchRequest,
+    },
+    ClearSearch {
+        session_id: String,
+    },
     ScrollSelection {
         session_id: String,
         lines: i32,
@@ -186,6 +194,11 @@ pub enum RecoveryState {
 }
 
 pub enum Event {
+    SearchResults {
+        session_id: String,
+        sequence: u64,
+        result: Result<SearchResult, String>,
+    },
     Recovery {
         session_id: String,
         state: RecoveryState,
@@ -439,6 +452,7 @@ fn run(
     let mut views = HashMap::<String, PendingView>::new();
     let mut awaiting_ui = HashMap::<String, u64>::new();
     let mut operations = Vec::<WorkerOperation>::new();
+    let mut searches = Vec::<(String, u64, Receiver<Result<SearchResult>>)>::new();
     let mut copies = Vec::<(u64, String, bool, Receiver<Result<SelectionCopy>>)>::new();
     loop {
         let mut shutdown = false;
@@ -899,6 +913,24 @@ fn run(
                         true,
                     )
                 }
+                Command::Search {
+                    session_id,
+                    request,
+                } => {
+                    if sessions.contains(&session_id) {
+                        let sequence = request.sequence;
+                        let (reply, receive) = mpsc::channel();
+                        owner.send(&session_id, WorkerCommand::Search { request, reply })?;
+                        searches.push((session_id, sequence, receive));
+                    }
+                    continue;
+                }
+                Command::ClearSearch { session_id } => {
+                    if !sessions.contains(&session_id) {
+                        continue;
+                    }
+                    (session_id, WorkerCommand::ClearSearch { reply }, true)
+                }
                 Command::CopySelection {
                     session_id,
                     request_id,
@@ -1110,6 +1142,14 @@ fn run(
                         | SessionEvent::Exited { .. } => {
                             dirty.insert(session_id);
                         }
+                        SessionEvent::SearchUpdated { result } => {
+                            dirty.insert(session_id.clone());
+                            send.send_blocking(Event::SearchResults {
+                                session_id,
+                                sequence: result.sequence,
+                                result: Ok(result),
+                            })?;
+                        }
                         SessionEvent::ClipboardWrite { text } => {
                             send.send_blocking(Event::ClipboardWrite { session_id, text })?;
                         }
@@ -1134,6 +1174,20 @@ fn run(
                 }
             }
         }
+        searches.retain(|(session_id, sequence, receive)| {
+            let result = match receive.try_recv() {
+                Ok(result) => result.map_err(|error| format!("{error:#}")),
+                Err(mpsc::TryRecvError::Empty) => return true,
+                Err(mpsc::TryRecvError::Disconnected) => Err("Shell search disconnected".into()),
+            };
+            dirty.insert(session_id.clone());
+            let _ = send.send_blocking(Event::SearchResults {
+                session_id: session_id.clone(),
+                sequence: *sequence,
+                result,
+            });
+            false
+        });
         copies.retain(
             |(request_id, session_id, _, receive)| match receive.try_recv() {
                 Ok(Ok(SelectionCopy { text, interrupted })) => {

@@ -10,6 +10,7 @@ use matou_native_terminal::{GridSelection, InputModes, Screen, SelectionAction, 
 
 use crate::{
     SessionEvent, SessionOptions,
+    search::{SearchRequest, SearchResult},
     session::{Session, SessionWaker},
 };
 
@@ -59,6 +60,13 @@ pub enum WorkerCommand {
     },
     SelectedView {
         reply: Sender<Result<(Screen, InputModes, Option<GridSelection>)>>,
+    },
+    Search {
+        request: SearchRequest,
+        reply: Sender<Result<SearchResult>>,
+    },
+    ClearSearch {
+        reply: Sender<Result<()>>,
     },
     Select {
         action: SelectionAction,
@@ -185,6 +193,14 @@ impl SessionWorker {
         self.request(|reply| WorkerCommand::Screen { reply })
     }
 
+    pub fn search(&self, request: SearchRequest) -> Result<SearchResult> {
+        self.request(move |reply| WorkerCommand::Search { request, reply })
+    }
+
+    pub fn clear_search(&self) -> Result<()> {
+        self.request(|reply| WorkerCommand::ClearSearch { reply })
+    }
+
     pub fn shutdown(&mut self) -> Result<()> {
         let Some(thread) = self.thread.take() else {
             return Ok(());
@@ -291,6 +307,13 @@ fn run(
                     });
                     let _ = reply.send(result);
                 }
+                WorkerCommand::Search { request, reply } => {
+                    let _ = reply.send(session.search(request));
+                }
+                WorkerCommand::ClearSearch { reply } => {
+                    session.clear_search();
+                    let _ = reply.send(Ok(()));
+                }
                 WorkerCommand::Select { action, reply } => {
                     let _ = reply.send(session.selection_action(action));
                 }
@@ -369,8 +392,8 @@ fn run(
         }
         if session.is_closed() {
             // Keep serving the final screen and pending replay after exit.
-            // Wake once at the synchronized-output deadline if it is still held.
-            let command = match session.screen_deadline() {
+            // Wake for a held frame or pending search refresh after the last output.
+            let command = match session.poll_deadline() {
                 Some(deadline) => {
                     incoming.recv_timeout(deadline.saturating_duration_since(Instant::now()))
                 }

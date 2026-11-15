@@ -68,6 +68,9 @@ const cases = [
     probes: [
       { op: 'find', term: '.', row: 0, col: 0, options: { regex: true } },
       { op: 'find', term: '\u0327', row: 0, col: 0 },
+      { op: 'next', term: '\u0327' },
+      { op: 'next', term: '\u0327' },
+      { op: 'previous', term: '\u0327' },
       { op: 'all', term: '.', options: { regex: true } },
     ],
   },

@@ -121,7 +121,20 @@ const CONTROLS: &[&str] = &[
     "account",
 ];
 
+struct TerminalSearchState {
+    input: Entity<RenameInput>,
+    controls: [FocusHandle; 6],
+    query: String,
+    open: bool,
+    options: matou_native_terminal::SearchOptions,
+    sequence: u64,
+    session_id: Option<String>,
+    result: Option<matou_native_runtime::search::SearchResult>,
+    error: Option<String>,
+}
+
 pub struct Workspace {
+    search: Option<TerminalSearchState>,
     commands: Sender<Command>,
     hierarchy: Option<HierarchyResult>,
     scenes: Vec<Scene>,
@@ -204,6 +217,252 @@ pub struct Workspace {
 }
 
 impl Workspace {
+    fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.focused.is_none() {
+            return;
+        }
+        if self.search.is_none() {
+            let input = cx.new(|cx| {
+                let mut input = RenameInput::new(String::new(), cx);
+                input.placeholder = "搜索".into();
+                input.search_style = true;
+                input
+            });
+            self.subscriptions.push(cx.subscribe_in(
+                &input,
+                window,
+                |this, _, event, window, cx| match event {
+                    RenameInputEvent::Changed => {
+                        if let Some(search) = this.search.as_mut() {
+                            search.query = search.input.read(cx).text.clone();
+                        }
+                        this.run_search(false, cx);
+                    }
+                    RenameInputEvent::Cancel => this.close_search(window, cx),
+                    RenameInputEvent::Confirm => this.run_search(false, cx),
+                },
+            ));
+            self.search = Some(TerminalSearchState {
+                input,
+                controls: std::array::from_fn(|_| cx.focus_handle().tab_stop(true)),
+                query: String::new(),
+                open: false,
+                options: Default::default(),
+                sequence: 0,
+                session_id: None,
+                result: None,
+                error: None,
+            });
+        }
+        let search = self.search.as_mut().unwrap();
+        search.open = true;
+        window.focus(&search.input.read(cx).focus);
+        self.run_search(false, cx);
+    }
+
+    fn run_search(&mut self, previous: bool, cx: &mut Context<Self>) {
+        let Some(search) = self.search.as_mut().filter(|search| search.open) else {
+            return;
+        };
+        let Some(session_id) = self.focused.clone() else {
+            return;
+        };
+        if search.session_id.as_ref() != Some(&session_id) {
+            if let Some(old) = search.session_id.take() {
+                let _ = self.commands.send(Command::ClearSearch {
+                    session_id: old.clone(),
+                });
+                if let Some(terminal) = self.terminals.get(&old) {
+                    terminal.update(cx, |terminal, cx| terminal.set_search(None, cx));
+                }
+            }
+            search.result = None;
+        }
+        search.session_id = Some(session_id.clone());
+        search.sequence += 1;
+        search.error = None;
+        let request = matou_native_runtime::search::SearchRequest {
+            sequence: search.sequence,
+            query: search.query.clone(),
+            options: search.options,
+            previous,
+        };
+        self.send(
+            Command::Search {
+                session_id,
+                request,
+            },
+            cx,
+        );
+        cx.notify();
+    }
+
+    fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(search) = self.search.as_mut() {
+            search.open = false;
+            search.query.clear();
+            search.sequence += 1;
+            search.result = None;
+            search.error = None;
+            if let Some(session_id) = &search.session_id {
+                let _ = self.commands.send(Command::ClearSearch {
+                    session_id: session_id.clone(),
+                });
+                if let Some(terminal) = self.terminals.get(session_id) {
+                    terminal.update(cx, |terminal, cx| terminal.set_search(None, cx));
+                }
+            }
+        }
+        if let Some(terminal) = self.focused.as_ref().and_then(|id| self.terminals.get(id)) {
+            window.focus(&terminal.read(cx).focus);
+        }
+        cx.notify();
+    }
+
+    fn search_key(
+        &mut self,
+        stroke: &Keystroke,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.dialog.is_some() {
+            return false;
+        }
+        let m = stroke.modifiers;
+        let command = if cfg!(target_os = "macos") {
+            m.platform
+        } else {
+            m.control
+        };
+        if command && stroke.key == "f" && !m.alt {
+            self.open_search(window, cx);
+            return true;
+        }
+        let Some(search) = self
+            .search
+            .as_mut()
+            .filter(|s| s.open && s.input.read(cx).focus.is_focused(window))
+        else {
+            return false;
+        };
+        if stroke.key == "escape" {
+            self.close_search(window, cx);
+            return true;
+        }
+        if stroke.key == "enter" {
+            self.run_search(m.shift, cx);
+            return true;
+        }
+        let modifier = if cfg!(target_os = "macos") {
+            m.platform
+        } else {
+            m.alt
+        };
+        if modifier && matches!(stroke.key.as_str(), "c" | "r") {
+            search.query = search.input.read(cx).text.clone();
+            if stroke.key == "c" {
+                search.options.case_sensitive = !search.options.case_sensitive;
+            } else {
+                search.options.regex = !search.options.regex;
+            }
+            self.run_search(false, cx);
+            return true;
+        }
+        false
+    }
+
+    fn search_bar(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let search = self.search.as_ref().filter(|search| search.open)?;
+        let count = if let Some(error) = &search.error {
+            error.clone()
+        } else if search.input.read(cx).text.is_empty() {
+            String::new()
+        } else {
+            search.result.as_ref().map_or("0/0".into(), |r| {
+                format!("{}/{}", r.result_index + 1, r.matches.len())
+            })
+        };
+        let mut bar = div()
+            .flex_none()
+            .w_full()
+            .h(px(40.))
+            .px(px(12.))
+            .flex()
+            .items_center()
+            .border_b_1()
+            .border_color(rgb(0xe8e8e8))
+            .bg(rgb(0xffffff))
+            .text_color(rgb(0x2f3547))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .font_family("SF Mono")
+                    .text_size(px(12.))
+                    .child(search.input.clone()),
+            )
+            .child(
+                div()
+                    .min_w(px(42.))
+                    .px(px(8.))
+                    .text_size(px(11.))
+                    .font_family("SF Mono")
+                    .text_color(rgb(if search.error.is_some() {
+                        0xb14542
+                    } else {
+                        0x606572
+                    }))
+                    .child(count),
+            );
+        for (index, label, active) in [
+            (0, "Aa", search.options.case_sensitive),
+            (1, ".*", search.options.regex),
+            (2, "ab", search.options.whole_word),
+            (3, "↑", false),
+            (4, "↓", false),
+            (5, "×", false),
+        ] {
+            bar = bar.child(
+                div()
+                    .id(SharedString::from(format!("terminal-search-{index}")))
+                    .track_focus(&search.controls[index])
+                    .w(px(24.))
+                    .h(px(24.))
+                    .ml(px(4.))
+                    .rounded(px(4.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(11.))
+                    .text_color(rgb(if active { 0xff8c00 } else { 0x606572 }))
+                    .cursor_pointer()
+                    .hover(|style| {
+                        style
+                            .bg(rgba(0x00000014))
+                            .text_color(rgb(0x2f3547))
+                            .rounded(px(6.))
+                    })
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if index == 5 {
+                            this.close_search(window, cx);
+                            return;
+                        }
+                        if let Some(search) = this.search.as_mut() {
+                            match index {
+                                0 => search.options.case_sensitive = !search.options.case_sensitive,
+                                1 => search.options.regex = !search.options.regex,
+                                2 => search.options.whole_word = !search.options.whole_word,
+                                _ => {}
+                            }
+                        }
+                        this.run_search(index == 3, cx);
+                    }))
+                    .child(label),
+            );
+        }
+        Some(bar)
+    }
+
     pub fn new(
         commands: Sender<Command>,
         events: async_channel::Receiver<Event>,
@@ -229,6 +488,7 @@ impl Workspace {
             }
         });
         Self {
+            search: None,
             commands,
             hierarchy: None,
             scenes: Vec::new(),
@@ -586,7 +846,11 @@ impl Workspace {
                     self.reveal_task = hierarchy.task.as_ref().map(|task| task.id.clone());
                 }
                 self.scenes = scenes;
+                let search_focus_changed = self.focused != next_focus;
                 self.focused = next_focus;
+                if search_focus_changed {
+                    self.run_search(false, cx);
+                }
                 self.hierarchy = Some(hierarchy);
                 self.graph = graph;
                 self.refresh_terminals(cx);
@@ -739,6 +1003,42 @@ impl Workspace {
                 // OS window is obscured or a dialog owns keyboard focus.
                 if self.focused.as_ref() == Some(&session_id) && self.order.contains(&session_id) {
                     cx.write_to_clipboard(ClipboardItem::new_string(text));
+                }
+            }
+            Event::SearchResults {
+                session_id,
+                sequence,
+                result,
+            } => {
+                if let Some(search) = self.search.as_mut().filter(|search| {
+                    search.open
+                        && search.sequence == sequence
+                        && search.session_id.as_ref() == Some(&session_id)
+                }) {
+                    match result {
+                        Ok(result) => {
+                            if let Some(terminal) = self.terminals.get(&session_id) {
+                                terminal.update(cx, |terminal, cx| {
+                                    terminal.set_search(Some(result.clone()), cx)
+                                });
+                            }
+                            search.result = Some(result);
+                            search.error = None;
+                        }
+                        Err(error) => {
+                            search.result = None;
+                            search.error = Some(
+                                if error.contains("invalid terminal search regular expression") {
+                                    "正则表达式无效".into()
+                                } else {
+                                    error
+                                },
+                            );
+                            if let Some(terminal) = self.terminals.get(&session_id) {
+                                terminal.update(cx, |terminal, cx| terminal.set_search(None, cx));
+                            }
+                        }
+                    }
                 }
             }
             Event::Copied { request_id, text } => {
@@ -2506,6 +2806,17 @@ impl Workspace {
     }
 
     fn tab_key(&mut self, stroke: &Keystroke, window: &mut Window, cx: &mut Context<Self>) {
+        if self.search_key(stroke, window, cx) {
+            cx.stop_propagation();
+            return;
+        }
+        if self.search.as_ref().is_some_and(|search| {
+            search.open
+                && (search.input.read(cx).focus.is_focused(window)
+                    || search.controls.iter().any(|focus| focus.is_focused(window)))
+        }) {
+            return;
+        }
         if stroke.key == "escape" && self.workspace_drag_source.is_some() && cx.has_active_drag() {
             cx.stop_active_drag(window);
             self.workspace_drag_source = None;
@@ -4129,6 +4440,7 @@ impl Render for Workspace {
                     .flex_col()
                     .child(self.topbar(window, cx))
                     .child(carousel)
+                    .children(self.search_bar(cx))
                     .child(self.footer()),
             )
             .child(
