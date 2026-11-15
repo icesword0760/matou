@@ -12,6 +12,14 @@ desktop application. Product scope and acceptance remain in
 - `core::hierarchy`: default workspace/task/canvas/Shell creation and persisted
   window navigation readback. The runtime caller will supply resolved paths,
   generated identities, locale messages and timestamps.
+- `terminal`: thread-affine libghostty-vt parser, owned screen cells, frozen
+  light/dark themes, cursor/soft-wrap metadata, scrollback, PTY replies and
+  synchronized-output hold. The caller owns the PTY and displayed-frame timing.
+- `core::shell_history`: completed-command stream collector, existing SQLite
+  block retention and restoration text. The runtime supplies IDs, timestamps,
+  the restoration preference and localized divider text.
+- `core::ownership`: atomic data-directory owner publication, live-process
+  exclusion, stale takeover and generation-safe release before opening SQLite.
 
 The connection caller owns data-directory locking, pre-migration backups and the
 recovery interface. No current entry point opens production data. Runtime/PTY,
@@ -23,8 +31,30 @@ From the repository root with Rust/Cargo installed:
 
 ```sh
 cargo test --manifest-path apps/native/Cargo.toml -p matou-native-core
-cargo fmt --manifest-path apps/native/Cargo.toml --check
+cargo fmt --manifest-path apps/native/Cargo.toml --all --check
 ```
+
+The terminal library is built from the pinned libghostty-vt 1.0.1 release with
+Zig 0.17.x. Its generated width table uses the frozen renderer's Unicode 6
+policy: the upstream default counts some characters differently (for example,
+🙂), changing wrapping and cursor positions. Original PTY bytes are preserved.
+Upstream Unicode/grapheme properties other than width remain unchanged.
+
+```sh
+python3 apps/native/terminal/scripts/build-libs.py --zig /absolute/path/to/zig
+cargo test --locked --manifest-path apps/native/Cargo.toml -p matou-native-terminal
+```
+
+`build-libs.py` verifies the pinned source/dependency archives, patches only the
+width lookup generator in an ignored copy, and records its inputs in the
+installed library's `matou-build.json`. Windows cross-builds use
+`--target x86_64-pc-windows-msvc`; Mac Intel uses `--target x86_64-apple-darwin`.
+macOS links a uniquely named static archive; Windows uses the matching DLL.
+Do not replace this library with unmodified upstream release binaries.
+`tooling/native-parity/export-terminal-width.mjs` reproduces the checked-in
+width ranges from the frozen JS dependency; it is a development exporter and
+is not part of the native product runtime. MIT attribution is retained beside
+the generated table and installed library.
 
 Tests use temporary databases and fixtures emitted by the frozen TypeScript
 services on the captured Electron runtime. Fixture exporters live in
