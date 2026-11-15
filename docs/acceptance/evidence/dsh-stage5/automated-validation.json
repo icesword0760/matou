@@ -1,0 +1,40 @@
+{
+  "sourceCommit": "dd8ff9dfac2ed5ac19f9e07630a3bc8cd106938f",
+  "runtime": {
+    "command": "pnpm --filter @matou/runtime exec vitest run --exclude src/runtime-server.test.ts",
+    "passed": 1652,
+    "failed": 1,
+    "skipped": 36,
+    "server": {
+      "command": "pnpm --filter @matou/runtime exec vitest run src/runtime-server.test.ts --maxWorkers=1 --testTimeout=15000",
+      "passed": 165
+    },
+    "journalFailure": {
+      "file": "apps/runtime/src/journal/journal-range-reader.test.ts",
+      "test": "recovers only the checkpoint suffix of a 256 MiB Journal within a 16 MiB RSS budget",
+      "budgetBytes": 16777216,
+      "firstObservedBytes": 19038208,
+      "isolatedObservedBytes": 32014336,
+      "isolatedCommand": "pnpm --filter @matou/runtime exec vitest run src/journal/journal-range-reader.test.ts --maxWorkers=1 --testTimeout=120000",
+      "isolatedPassed": 8,
+      "isolatedFailed": 1,
+      "sourceDiffFromBase": "No diff for range-reader, its test, segment-journal, package.json or pnpm-lock.yaml against a06812f.",
+      "classification": "Unclosed RSS regression gate. No clean baseline reproduction; unchanged source is not proof this is a known failure."
+    }
+  },
+  "desktop": {
+    "command": "pnpm --filter @matou/desktop test",
+    "functionalFiles": 113,
+    "functionalPassed": 1031,
+    "performanceFiles": 2,
+    "performancePassed": 3,
+    "failed": 0
+  },
+  "workspaceTypecheck": "passed",
+  "acceptanceSpecTypecheck": "passed",
+  "identifierCheck": "passed",
+  "fullRuntimePassed": false,
+  "uiRegression": "pending",
+  "dshPackagedAcceptance": "pending",
+  "logs": "Private run logs stage5-runtime-all-except-server.log, stage5-runtime-server.log, stage5-runtime-journal-isolated.log, stage5-desktop-all.log; workspace local .cache/dsh-stage5/typecheck.log and spec-typecheck.log."
+}
