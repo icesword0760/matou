@@ -816,13 +816,82 @@
           }
         },
         {
+          "op": "next",
+          "term": "̧",
+          "previous": null,
+          "cachedTerm": null,
+          "expected": {
+            "term": [
+              807
+            ],
+            "row": 0,
+            "col": -1,
+            "size": 1
+          }
+        },
+        {
+          "op": "next",
+          "term": "̧",
+          "previous": {
+            "start": {
+              "x": -1,
+              "y": 0
+            },
+            "end": {
+              "x": 0,
+              "y": 0
+            }
+          },
+          "cachedTerm": "̧",
+          "expected": {
+            "term": [
+              807
+            ],
+            "row": 0,
+            "col": -1,
+            "size": 1
+          }
+        },
+        {
+          "op": "previous",
+          "term": "̧",
+          "previous": {
+            "start": {
+              "x": -1,
+              "y": 0
+            },
+            "end": {
+              "x": 0,
+              "y": 0
+            }
+          },
+          "cachedTerm": "̧",
+          "expected": {
+            "term": [
+              807
+            ],
+            "row": 0,
+            "col": -1,
+            "size": 1
+          }
+        },
+        {
           "op": "all",
           "term": ".",
           "options": {
             "regex": true
           },
-          "previous": null,
-          "cachedTerm": null,
+          "previous": {
+            "start": {
+              "x": -1,
+              "y": 0
+            },
+            "end": {
+              "x": 0,
+              "y": 0
+            }
+          },
+          "cachedTerm": "̧",
           "expected": [
             {
               "term": [

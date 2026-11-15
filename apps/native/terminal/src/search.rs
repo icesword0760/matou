@@ -207,13 +207,13 @@ impl<'a> SearchEngine<'a> {
         };
         let start = if let Some(selection) = previous {
             let point = if cached_term == Some(term) {
-                selection.anchor.max(selection.end)
+                selection.end
             } else {
-                selection.anchor.min(selection.end)
+                selection.anchor
             };
             Position {
                 row: point.row.try_into()?,
-                col: point.col.try_into()?,
+                col: point.col,
             }
         } else {
             Position { row: 0, col: 0 }
@@ -227,7 +227,7 @@ impl<'a> SearchEngine<'a> {
             }
         }
         if let Some(selection) = previous {
-            let row = selection.anchor.min(selection.end).row.try_into()?;
+            let row = selection.anchor.row.try_into()?;
             return self.find_in_line(&query, &mut Position { row, col: 0 }, false);
         }
         Ok(None)
@@ -249,19 +249,19 @@ impl<'a> SearchEngine<'a> {
             col: self.cols,
         };
         if let Some(selection) = previous {
-            let point = selection.anchor.min(selection.end);
+            let point = selection.anchor;
             position = Position {
                 row: point.row.try_into()?,
-                col: point.col.try_into()?,
+                col: point.col,
             };
             if cached_term != Some(term) {
                 if let Some(found) = self.find_in_line(&query, &mut position, false)? {
                     return Ok(Some(found));
                 }
-                let point = selection.anchor.max(selection.end);
+                let point = selection.end;
                 position = Position {
                     row: point.row.try_into()?,
-                    col: point.col.try_into()?,
+                    col: point.col,
                 };
             }
         }

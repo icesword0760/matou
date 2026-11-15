@@ -7,7 +7,7 @@ use serde_json::Value;
 fn point(value: &Value) -> Result<GridPoint> {
     Ok(GridPoint {
         row: usize::try_from(value["y"].as_u64().context("row of selected point")?)?,
-        col: usize::try_from(value["x"].as_u64().context("column of selected point")?)?,
+        col: isize::try_from(value["x"].as_i64().context("column of selected point")?)?,
     })
 }
 

@@ -5,6 +5,8 @@ use matou_native_core::{
 };
 use matou_native_terminal::TerminalOptions;
 
+use crate::search::SearchResult;
+
 pub struct SessionOptions {
     pub session_id: String,
     pub launch: ShellLaunch,
@@ -44,6 +46,9 @@ pub enum SessionEvent {
         rows: u16,
     },
     ScreenInvalidated,
+    SearchUpdated {
+        result: SearchResult,
+    },
     ClipboardWrite {
         text: String,
     },

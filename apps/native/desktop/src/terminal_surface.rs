@@ -81,6 +81,7 @@ struct VisibleGrid {
 }
 
 pub struct TerminalSurface {
+    search: Option<matou_native_runtime::search::SearchResult>,
     pub focus: FocusHandle,
     font: Font,
     metrics: Metrics,
@@ -108,6 +109,15 @@ pub struct TerminalSurface {
 impl EventEmitter<SurfaceEvent> for TerminalSurface {}
 
 impl TerminalSurface {
+    pub fn set_search(
+        &mut self,
+        result: Option<matou_native_runtime::search::SearchResult>,
+        cx: &mut Context<Self>,
+    ) {
+        self.search = result;
+        cx.notify();
+    }
+
     pub fn new(cx: &mut Context<Self>) -> Self {
         let text = cx.text_system();
         let families = text.all_font_names();
@@ -129,6 +139,7 @@ impl TerminalSurface {
         // Adding it makes rows shorter than the glyphs and overlaps text.
         let height = text.ascent(id, FONT_SIZE) - text.descent(id, FONT_SIZE);
         Self {
+            search: None,
             focus: cx.focus_handle().tab_stop(true),
             font: face,
             metrics: Metrics {
@@ -228,6 +239,14 @@ impl TerminalSurface {
         self.selection_drag = None;
         self.stop_drag();
         self.reset_blink();
+        // Frozen CoreService scrollOnUserInput also applies to typing and paste.
+        if self
+            .screen
+            .as_ref()
+            .is_some_and(|s| s.scrollbar.offset + (s.rows as u64) < s.scrollbar.total)
+        {
+            cx.emit(SurfaceEvent::Scroll(i32::MIN));
+        }
         cx.emit(SurfaceEvent::Input(bytes));
         cx.notify();
     }
@@ -420,14 +439,6 @@ impl TerminalSurface {
         if self.modes.mouse_encoding != MouseEncoding::Default
             && let Some(bytes) = bytes
         {
-            if !self.input_disabled
-                && self
-                    .screen
-                    .as_ref()
-                    .is_some_and(|s| s.scrollbar.offset + (s.rows as u64) < s.scrollbar.total)
-            {
-                cx.emit(SurfaceEvent::Scroll(i32::MIN));
-            }
             self.send(bytes, cx);
         }
     }
@@ -685,6 +696,34 @@ impl TerminalSurface {
                 if !range.is_empty() {
                     let bounds = self.metrics.cell(origin, range.start, row, range.len());
                     window.paint_quad(fill(bounds, rgb(self.theme.selection_background)));
+                }
+            }
+            if let Some(search) = &self.search {
+                for matched in search.matches.iter().chain(search.active.iter()) {
+                    if matched.row > first_row + row || matched.col < 0 || matched.size <= 0 {
+                        continue;
+                    }
+                    let relative_row = first_row + row - matched.row;
+                    let line_start = relative_row * screen.cols;
+                    let match_start = matched.col as usize;
+                    let match_end = match_start + matched.size as usize;
+                    let start = match_start.saturating_sub(line_start).min(cols);
+                    let end = match_end.saturating_sub(line_start).min(cols);
+                    let length = end.saturating_sub(start);
+                    if length == 0 {
+                        continue;
+                    }
+                    let active = search.active.as_ref() == Some(matched);
+                    let bounds = self.metrics.cell(origin, start, row, length);
+                    window.paint_quad(fill(bounds, rgb(if active { 0xff9632 } else { 0xffe792 })));
+                    window.paint_quad(
+                        gpui::outline(
+                            bounds,
+                            rgb(if active { 0xc86400 } else { 0xd6a800 }),
+                            gpui::BorderStyle::Solid,
+                        )
+                        .border_widths(px(1.)),
+                    );
                 }
             }
             for (col, cell) in cells.iter().take(cols).enumerate() {

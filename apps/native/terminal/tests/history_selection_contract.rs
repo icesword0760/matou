@@ -10,7 +10,7 @@ fn selection_matches_reference_probes_on_terminal_output() -> Result<()> {
         "../../desktop/tests/fixtures/terminal-selection-reference.json"
     ))?;
     let point = |value: &Value| GridPoint {
-        col: value[0].as_u64().unwrap() as usize,
+        col: value[0].as_i64().unwrap() as isize,
         row: value[1].as_u64().unwrap() as usize,
     };
     let mut differences = Vec::new();

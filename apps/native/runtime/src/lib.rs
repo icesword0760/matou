@@ -3,6 +3,7 @@ pub mod flow;
 pub mod history;
 mod model;
 pub mod owner;
+pub mod search;
 pub mod session;
 pub mod worker;
 

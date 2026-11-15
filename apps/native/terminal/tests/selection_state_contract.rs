@@ -7,7 +7,7 @@ use serde_json::Value;
 fn point(value: &Value) -> GridPoint {
     GridPoint {
         row: value[1].as_u64().unwrap() as usize,
-        col: value[0].as_u64().unwrap() as usize,
+        col: value[0].as_i64().unwrap() as isize,
     }
 }
 
