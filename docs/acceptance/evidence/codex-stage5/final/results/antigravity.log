@@ -1,0 +1,60 @@
+(node:11407) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+Running 5 tests using 1 worker
+
+(node:11459) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+
+(node:11459) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+
+[1/5] tests/e2e/antigravity-acceptance.spec.ts:441:3 › Antigravity Packaged App Acceptance (Real agy + Controlled Error Fixtures) › PRD #1 #3 #4 #5 #6 #11 #12: Real agy lifecycle, HUD, notifications, modes, and /model in packaged 码头.app
+[2/5] tests/e2e/antigravity-acceptance.spec.ts:690:3 › Antigravity Packaged App Acceptance (Real agy + Controlled Error Fixtures) › PRD #7 #9a + Latency (3x): Auto Title lock/restore, Restart recovery, and Running/Idle latency
+[3/5] tests/e2e/antigravity-acceptance.spec.ts:862:3 › Antigravity Packaged App Acceptance (Real agy + Controlled Error Fixtures) › PRD #2 #8 #10 + Running-Parent Fork: DAG/Badge/ParentProjection, Fork Current/Worktree/Running, SessionLoader
+  1) tests/e2e/antigravity-acceptance.spec.ts:862:3 › Antigravity Packaged App Acceptance (Real agy + Controlled Error Fixtures) › PRD #2 #8 #10 + Running-Parent Fork: DAG/Badge/ParentProjection, Fork Current/Worktree/Running, SessionLoader 
+
+    Error: expect(locator).toHaveAttribute(expected) failed
+
+    Locator: locator('[data-session-card="0f1c4ab5-e03b-4aea-83b4-f600e6e5b4c0"] [data-testid="terminal-pane"]:visible').locator('.pane-fork:not(.pane-load-session):not(.pane-fork-sibling):not(.pane-remove)')
+    Expected: "false"
+    Error: strict mode violation: locator('[data-session-card="0f1c4ab5-e03b-4aea-83b4-f600e6e5b4c0"] [data-testid="terminal-pane"]:visible').locator('.pane-fork:not(.pane-load-session):not(.pane-fork-sibling):not(.pane-remove)') resolved to 2 elements:
+        1) <button title="会话历史" type="button" draggable="false" class="pane-fork pane-history" aria-label="查看“Memory Codeword Storage And Retrieval”的会话历史">…</button> aka getByRole('button', { name: '查看“Memory Codeword Storage' })
+        2) <button type="button" title="创建子分支" class="pane-fork" draggable="false" aria-disabled="false" aria-label="从“Memory Codeword Storage And Retrieval”创建子分支">…</button> aka getByRole('button', { name: '从“Memory Codeword Storage And' })
+
+    Call log:
+      - Expect "toHaveAttribute" with timeout 15000ms
+      - waiting for locator('[data-session-card="0f1c4ab5-e03b-4aea-83b4-f600e6e5b4c0"] [data-testid="terminal-pane"]:visible').locator('.pane-fork:not(.pane-load-session):not(.pane-fork-sibling):not(.pane-remove)')
+
+
+      874 |
+      875 |       const parentPane = paneForSession(harness.page, parentId)
+    > 876 |       await expect(parentPane.locator('.pane-fork:not(.pane-load-session):not(.pane-fork-sibling):not(.pane-remove)')).toHaveAttribute('aria-disabled', 'false', { timeout: 15_000 })
+          |                                                                                                                        ^
+      877 |
+      878 |       // Fork Case A: Current Worktree (create child branch via pane header fork button)
+      879 |       await parentPane.locator('.pane-fork:not(.pane-load-session):not(.pane-fork-sibling):not(.pane-remove)').click()
+        at /Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tests/e2e/antigravity-acceptance.spec.ts:876:120
+
+    Error Context: docs/acceptance/evidence/codex-stage5/final/antigravity-regression/playwright-artifacts/antigravity-acceptance-Ant-ce073-ktree-Running-SessionLoader/error-context.md
+
+    attachment #2: trace (application/zip) ─────────────────────────────────────────────────────────
+    docs/acceptance/evidence/codex-stage5/final/antigravity-regression/playwright-artifacts/antigravity-acceptance-Ant-ce073-ktree-Running-SessionLoader/trace.zip
+    Usage:
+
+        pnpm exec playwright show-trace docs/acceptance/evidence/codex-stage5/final/antigravity-regression/playwright-artifacts/antigravity-acceptance-Ant-ce073-ktree-Running-SessionLoader/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+(node:32187) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+
+(node:32187) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+
+[4/5] tests/e2e/antigravity-acceptance.spec.ts:1051:3 › Antigravity Packaged App Acceptance (Real agy + Controlled Error Fixtures) › PRD #13: mt cross-card control inside real Antigravity card
+[5/5] tests/e2e/antigravity-acceptance.spec.ts:1110:3 › Antigravity Packaged App Acceptance (Real agy + Controlled Error Fixtures) › PRD #9b #14: Controlled fixtures for missing binary, unauthenticated sign-in prompt, and restore failure
+  1 failed
+    tests/e2e/antigravity-acceptance.spec.ts:862:3 › Antigravity Packaged App Acceptance (Real agy + Controlled Error Fixtures) › PRD #2 #8 #10 + Running-Parent Fork: DAG/Badge/ParentProjection, Fork Current/Worktree/Running, SessionLoader 
+  4 passed (4.8m)

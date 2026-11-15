@@ -1,0 +1,115 @@
+(node:87167) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+Running 13 tests using 1 worker
+
+(node:87279) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+
+[1/13] tests/e2e/prd-01-agent-notifications.spec.ts:5:1 › shows the reference product unread trail and navigates back to the originating terminal
+[2/13] tests/e2e/prd-01-agent-notifications.spec.ts:50:1 › keeps focused read events out of every unread indicator and highlights only the unread Session
+[3/13] tests/e2e/prd-01-agent-notifications.spec.ts:87:1 › closes outside or with Escape and remembers the sound preference
+[4/13] tests/e2e/prd-01-agent-notifications.spec.ts:121:1 › bounds two Workspace notification queues, navigates, and clears the retained center
+[5/13] tests/e2e/prd-02-bottom-hud.spec.ts:14:1 › shows the live Shell environment with reference product geometry and refreshes cwd and Git silently
+[6/13] tests/e2e/prd-02-bottom-hud.spec.ts:57:1 › operates the compact Git controller for branches, Worktrees, commits, and push availability
+[7/13] tests/e2e/prd-02-bottom-hud.spec.ts:119:1 › moves from Shell to the full Agent HUD with switchable permissions and a read-only model
+(node:87279) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+
+[8/13] tests/e2e/prd-06-session-fork.spec.ts:20:48 › PRD 06 session fork › confirms the current Claude resume dialog for a new fork and after restarting the same branch
+[9/13] tests/e2e/prd-06-session-fork.spec.ts:20:48 › PRD 06 session fork › confirms the current Claude resume dialog for a retried fork and after restarting the same branch
+[10/13] tests/e2e/prd-06-session-fork.spec.ts:92:3 › PRD 06 session fork › forks a resumable Claude conversation on its right, isolates every branch, and restores once
+  1) tests/e2e/prd-06-session-fork.spec.ts:92:3 › PRD 06 session fork › forks a resumable Claude conversation on its right, isolates every branch, and restores once 
+
+    Error: expect(received).toEqual(expected) // deep equality
+
+    - Expected  - 12
+    + Received  +  1
+
+    - Array [
+    -   Object {
+    -     "fromSessionId": "91f58992-b3f1-40a9-bc1f-45a84646e875",
+    -     "kind": "forked-from",
+    -     "toSessionId": "8667d5de-4fb0-49ad-8b22-b7d91ea90615",
+    -   },
+    -   Object {
+    -     "fromSessionId": "ab9857a6-3a35-4392-a3f7-21c8b4a610f7",
+    -     "kind": "forked-from",
+    -     "toSessionId": "91f58992-b3f1-40a9-bc1f-45a84646e875",
+    -   },
+    - ]
+    + Array []
+
+      185 |         }
+      186 |       ])
+    > 187 |       expect(databaseBeforeRestart.relations).toEqual([
+          |                                               ^
+      188 |         { fromSessionId: firstForkSessionId, toSessionId: sourceSessionId, kind: 'forked-from' },
+      189 |         { fromSessionId: secondForkSessionId, toSessionId: firstForkSessionId, kind: 'forked-from' }
+      190 |       ])
+        at /Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tests/e2e/prd-06-session-fork.spec.ts:187:47
+
+    Error Context: docs/acceptance/evidence/codex-stage5/final/claude-regression/prd-06-session-fork-PRD-06-85a27-ry-branch-and-restores-once/error-context.md
+
+    attachment #2: trace (application/zip) ─────────────────────────────────────────────────────────
+    docs/acceptance/evidence/codex-stage5/final/claude-regression/prd-06-session-fork-PRD-06-85a27-ry-branch-and-restores-once/trace.zip
+    Usage:
+
+        pnpm exec playwright show-trace docs/acceptance/evidence/codex-stage5/final/claude-regression/prd-06-session-fork-PRD-06-85a27-ry-branch-and-restores-once/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+(node:6567) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+
+(node:6567) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+
+[11/13] tests/e2e/prd-06-session-fork.spec.ts:243:3 › PRD 06 session fork › keeps a failed fork visible and inert instead of opening a Shell or reusing the source
+  2) tests/e2e/prd-06-session-fork.spec.ts:243:3 › PRD 06 session fork › keeps a failed fork visible and inert instead of opening a Shell or reusing the source 
+
+    Error: expect(locator).toHaveCount(expected) failed
+
+    Locator:  locator('[data-session-card]').filter({ has: locator('.fork-failure-card') })
+    Expected: 1
+    Received: 0
+    Timeout:  15000ms
+
+    Call log:
+      - Expect "toHaveCount" with timeout 15000ms
+      - waiting for locator('[data-session-card]').filter({ has: locator('.fork-failure-card') })
+        34 × locator resolved to 0 elements
+           - unexpected value "0"
+
+
+      274 |         has: fixture.page.locator('.fork-failure-card')
+      275 |       })
+    > 276 |       await expect(failedCard).toHaveCount(1)
+          |                                ^
+      277 |       await expect(failedCard).toContainText('父会话已失效')
+      278 |       await expect(failedCard).toContainText('请返回父会话继续，或移除此失败节点后新建空会话')
+      279 |       await expect(failedCard).not.toContainText('provider session not found')
+        at /Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tests/e2e/prd-06-session-fork.spec.ts:276:32
+
+    Error Context: docs/acceptance/evidence/codex-stage5/final/claude-regression/prd-06-session-fork-PRD-06-484ad-Shell-or-reusing-the-source/error-context.md
+
+    attachment #2: trace (application/zip) ─────────────────────────────────────────────────────────
+    docs/acceptance/evidence/codex-stage5/final/claude-regression/prd-06-session-fork-PRD-06-484ad-Shell-or-reusing-the-source/trace.zip
+    Usage:
+
+        pnpm exec playwright show-trace docs/acceptance/evidence/codex-stage5/final/claude-regression/prd-06-session-fork-PRD-06-484ad-Shell-or-reusing-the-source/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+(node:9548) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+
+[12/13] tests/e2e/session-load-existing-claude.spec.ts:11:3 › load an existing Claude Code session › loads the selected long conversation through the current resume confirmation and accepts input
+[13/13] tests/e2e/session-load-existing-claude.spec.ts:59:3 › load an existing Claude Code session › separates left-side session filtering from right-side conversation search
+  2 failed
+    tests/e2e/prd-06-session-fork.spec.ts:92:3 › PRD 06 session fork › forks a resumable Claude conversation on its right, isolates every branch, and restores once 
+    tests/e2e/prd-06-session-fork.spec.ts:243:3 › PRD 06 session fork › keeps a failed fork visible and inert instead of opening a Shell or reusing the source 
+  11 passed (1.6m)

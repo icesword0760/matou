@@ -1,0 +1,13 @@
+
+ RUN  v4.1.11 /Users/icesword/Documents/AIProjects/matou-multi-agent-codex/apps/desktop
+
+Not implemented: HTMLCanvasElement's getContext() method: without installing the canvas npm package
+Not implemented: HTMLCanvasElement's getContext() method: without installing the canvas npm package
+Not implemented: HTMLCanvasElement's getContext() method: without installing the canvas npm package
+Not implemented: HTMLCanvasElement's getContext() method: without installing the canvas npm package
+
+ Test Files  111 passed (111)
+      Tests  1025 passed (1025)
+   Start at  20:30:33
+   Duration  62.65s (transform 1.45s, setup 0ms, import 6.99s, tests 32.40s, environment 16.29s)
+

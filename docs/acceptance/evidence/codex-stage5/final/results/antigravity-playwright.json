@@ -1,0 +1,300 @@
+{
+  "config": {
+    "argv": [
+      "/Users/icesword/.nvm/versions/node/v22.16.0/bin/node",
+      "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/node_modules/@playwright/test/cli.js",
+      "test",
+      "tests/e2e/antigravity-acceptance.spec.ts",
+      "--reporter=line,json",
+      "--retries=0",
+      "--trace=retain-on-failure",
+      "--output=docs/acceptance/evidence/codex-stage5/final/antigravity-regression/playwright-artifacts"
+    ],
+    "configFile": "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/playwright.config.ts",
+    "rootDir": "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tests/e2e",
+    "failOnFlakyTests": false,
+    "forbidOnly": false,
+    "fullyParallel": false,
+    "globalSetup": null,
+    "globalTeardown": null,
+    "globalTimeout": 0,
+    "grep": {},
+    "grepInvert": null,
+    "maxFailures": 0,
+    "metadata": {
+      "actualWorkers": 1
+    },
+    "preserveOutput": "always",
+    "projects": [
+      {
+        "outputDir": "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/docs/acceptance/evidence/codex-stage5/final/antigravity-regression/playwright-artifacts",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "",
+        "name": "",
+        "testDir": "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tests/e2e",
+        "testIgnore": [],
+        "testMatch": [
+          "**/*.@(spec|test).?(c|m)[jt]s?(x)"
+        ],
+        "timeout": 30000
+      }
+    ],
+    "quiet": false,
+    "reporter": [
+      [
+        "line"
+      ],
+      [
+        "json"
+      ]
+    ],
+    "reportSlowTests": {
+      "max": 5,
+      "threshold": 300000
+    },
+    "shard": null,
+    "tags": [],
+    "updateSnapshots": "missing",
+    "updateSourceMethod": "patch",
+    "version": "1.62.1",
+    "workers": 1,
+    "webServer": null
+  },
+  "suites": [
+    {
+      "title": "antigravity-acceptance.spec.ts",
+      "file": "antigravity-acceptance.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [],
+      "suites": [
+        {
+          "title": "Antigravity Packaged App Acceptance (Real agy + Controlled Error Fixtures)",
+          "file": "antigravity-acceptance.spec.ts",
+          "line": 438,
+          "column": 6,
+          "specs": [
+            {
+              "title": "PRD #1 #3 #4 #5 #6 #11 #12: Real agy lifecycle, HUD, notifications, modes, and /model in packaged 码头.app",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 360000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 53549,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-11-15T12:31:10.087Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "ba1bbb77b9b9c2ddd992-845ed53cddabf120f0ff",
+              "file": "antigravity-acceptance.spec.ts",
+              "line": 441,
+              "column": 3
+            },
+            {
+              "title": "PRD #7 #9a + Latency (3x): Auto Title lock/restore, Restart recovery, and Running/Idle latency",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 360000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 55503,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-11-15T12:32:03.651Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "ba1bbb77b9b9c2ddd992-ae87cca549bda062e2bd",
+              "file": "antigravity-acceptance.spec.ts",
+              "line": 690,
+              "column": 3
+            },
+            {
+              "title": "PRD #2 #8 #10 + Running-Parent Fork: DAG/Badge/ParentProjection, Fork Current/Worktree/Running, SessionLoader",
+              "ok": false,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 360000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "failed",
+                      "duration": 12608,
+                      "error": {
+                        "message": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mlocator\u001b[39m\u001b[2m).\u001b[22mtoHaveAttribute\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m)\u001b[22m failed\n\nLocator: locator('[data-session-card=\"0f1c4ab5-e03b-4aea-83b4-f600e6e5b4c0\"] [data-testid=\"terminal-pane\"]:visible').locator('.pane-fork:not(.pane-load-session):not(.pane-fork-sibling):not(.pane-remove)')\nExpected: \u001b[32m\"false\"\u001b[39m\nError: strict mode violation: locator('[data-session-card=\"0f1c4ab5-e03b-4aea-83b4-f600e6e5b4c0\"] [data-testid=\"terminal-pane\"]:visible').locator('.pane-fork:not(.pane-load-session):not(.pane-fork-sibling):not(.pane-remove)') resolved to 2 elements:\n    1) <button title=\"会话历史\" type=\"button\" draggable=\"false\" class=\"pane-fork pane-history\" aria-label=\"查看“Memory Codeword Storage And Retrieval”的会话历史\">…</button> aka getByRole('button', { name: '查看“Memory Codeword Storage' })\n    2) <button type=\"button\" title=\"创建子分支\" class=\"pane-fork\" draggable=\"false\" aria-disabled=\"false\" aria-label=\"从“Memory Codeword Storage And Retrieval”创建子分支\">…</button> aka getByRole('button', { name: '从“Memory Codeword Storage And' })\n\nCall log:\n\u001b[2m  - Expect \"toHaveAttribute\" with timeout 15000ms\u001b[22m\n\u001b[2m  - waiting for locator('[data-session-card=\"0f1c4ab5-e03b-4aea-83b4-f600e6e5b4c0\"] [data-testid=\"terminal-pane\"]:visible').locator('.pane-fork:not(.pane-load-session):not(.pane-fork-sibling):not(.pane-remove)')\u001b[22m\n",
+                        "stack": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mlocator\u001b[39m\u001b[2m).\u001b[22mtoHaveAttribute\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m)\u001b[22m failed\n\nLocator: locator('[data-session-card=\"0f1c4ab5-e03b-4aea-83b4-f600e6e5b4c0\"] [data-testid=\"terminal-pane\"]:visible').locator('.pane-fork:not(.pane-load-session):not(.pane-fork-sibling):not(.pane-remove)')\nExpected: \u001b[32m\"false\"\u001b[39m\nError: strict mode violation: locator('[data-session-card=\"0f1c4ab5-e03b-4aea-83b4-f600e6e5b4c0\"] [data-testid=\"terminal-pane\"]:visible').locator('.pane-fork:not(.pane-load-session):not(.pane-fork-sibling):not(.pane-remove)') resolved to 2 elements:\n    1) <button title=\"会话历史\" type=\"button\" draggable=\"false\" class=\"pane-fork pane-history\" aria-label=\"查看“Memory Codeword Storage And Retrieval”的会话历史\">…</button> aka getByRole('button', { name: '查看“Memory Codeword Storage' })\n    2) <button type=\"button\" title=\"创建子分支\" class=\"pane-fork\" draggable=\"false\" aria-disabled=\"false\" aria-label=\"从“Memory Codeword Storage And Retrieval”创建子分支\">…</button> aka getByRole('button', { name: '从“Memory Codeword Storage And' })\n\nCall log:\n\u001b[2m  - Expect \"toHaveAttribute\" with timeout 15000ms\u001b[22m\n\u001b[2m  - waiting for locator('[data-session-card=\"0f1c4ab5-e03b-4aea-83b4-f600e6e5b4c0\"] [data-testid=\"terminal-pane\"]:visible').locator('.pane-fork:not(.pane-load-session):not(.pane-fork-sibling):not(.pane-remove)')\u001b[22m\n\n    at /Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tests/e2e/antigravity-acceptance.spec.ts:876:120",
+                        "location": {
+                          "file": "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tests/e2e/antigravity-acceptance.spec.ts",
+                          "column": 120,
+                          "line": 876
+                        },
+                        "snippet": "  874 |\n  875 |       const parentPane = paneForSession(harness.page, parentId)\n> 876 |       await expect(parentPane.locator('.pane-fork:not(.pane-load-session):not(.pane-fork-sibling):not(.pane-remove)')).toHaveAttribute('aria-disabled', 'false', { timeout: 15_000 })\n      |                                                                                                                        ^\n  877 |\n  878 |       // Fork Case A: Current Worktree (create child branch via pane header fork button)\n  879 |       await parentPane.locator('.pane-fork:not(.pane-load-session):not(.pane-fork-sibling):not(.pane-remove)').click()"
+                      },
+                      "errors": [
+                        {
+                          "location": {
+                            "file": "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tests/e2e/antigravity-acceptance.spec.ts",
+                            "column": 120,
+                            "line": 876
+                          },
+                          "message": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mlocator\u001b[39m\u001b[2m).\u001b[22mtoHaveAttribute\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m)\u001b[22m failed\n\nLocator: locator('[data-session-card=\"0f1c4ab5-e03b-4aea-83b4-f600e6e5b4c0\"] [data-testid=\"terminal-pane\"]:visible').locator('.pane-fork:not(.pane-load-session):not(.pane-fork-sibling):not(.pane-remove)')\nExpected: \u001b[32m\"false\"\u001b[39m\nError: strict mode violation: locator('[data-session-card=\"0f1c4ab5-e03b-4aea-83b4-f600e6e5b4c0\"] [data-testid=\"terminal-pane\"]:visible').locator('.pane-fork:not(.pane-load-session):not(.pane-fork-sibling):not(.pane-remove)') resolved to 2 elements:\n    1) <button title=\"会话历史\" type=\"button\" draggable=\"false\" class=\"pane-fork pane-history\" aria-label=\"查看“Memory Codeword Storage And Retrieval”的会话历史\">…</button> aka getByRole('button', { name: '查看“Memory Codeword Storage' })\n    2) <button type=\"button\" title=\"创建子分支\" class=\"pane-fork\" draggable=\"false\" aria-disabled=\"false\" aria-label=\"从“Memory Codeword Storage And Retrieval”创建子分支\">…</button> aka getByRole('button', { name: '从“Memory Codeword Storage And' })\n\nCall log:\n\u001b[2m  - Expect \"toHaveAttribute\" with timeout 15000ms\u001b[22m\n\u001b[2m  - waiting for locator('[data-session-card=\"0f1c4ab5-e03b-4aea-83b4-f600e6e5b4c0\"] [data-testid=\"terminal-pane\"]:visible').locator('.pane-fork:not(.pane-load-session):not(.pane-fork-sibling):not(.pane-remove)')\u001b[22m\n\n\n  874 |\n  875 |       const parentPane = paneForSession(harness.page, parentId)\n> 876 |       await expect(parentPane.locator('.pane-fork:not(.pane-load-session):not(.pane-fork-sibling):not(.pane-remove)')).toHaveAttribute('aria-disabled', 'false', { timeout: 15_000 })\n      |                                                                                                                        ^\n  877 |\n  878 |       // Fork Case A: Current Worktree (create child branch via pane header fork button)\n  879 |       await parentPane.locator('.pane-fork:not(.pane-load-session):not(.pane-fork-sibling):not(.pane-remove)').click()\n    at /Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tests/e2e/antigravity-acceptance.spec.ts:876:120"
+                        }
+                      ],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-11-15T12:32:59.159Z",
+                      "annotations": [],
+                      "attachments": [
+                        {
+                          "name": "error-context",
+                          "contentType": "text/markdown",
+                          "path": "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/docs/acceptance/evidence/codex-stage5/final/antigravity-regression/playwright-artifacts/antigravity-acceptance-Ant-ce073-ktree-Running-SessionLoader/error-context.md"
+                        },
+                        {
+                          "name": "trace",
+                          "contentType": "application/zip",
+                          "path": "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/docs/acceptance/evidence/codex-stage5/final/antigravity-regression/playwright-artifacts/antigravity-acceptance-Ant-ce073-ktree-Running-SessionLoader/trace.zip"
+                        }
+                      ],
+                      "errorLocation": {
+                        "file": "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tests/e2e/antigravity-acceptance.spec.ts",
+                        "column": 120,
+                        "line": 876
+                      }
+                    }
+                  ],
+                  "status": "unexpected"
+                }
+              ],
+              "id": "ba1bbb77b9b9c2ddd992-a1e7cae44275708e03bf",
+              "file": "antigravity-acceptance.spec.ts",
+              "line": 862,
+              "column": 3
+            },
+            {
+              "title": "PRD #13: mt cross-card control inside real Antigravity card",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 360000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 1,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 152453,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-11-15T12:33:12.069Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "ba1bbb77b9b9c2ddd992-9cbedd1e863499d6ab7a",
+              "file": "antigravity-acceptance.spec.ts",
+              "line": 1051,
+              "column": 3
+            },
+            {
+              "title": "PRD #9b #14: Controlled fixtures for missing binary, unauthenticated sign-in prompt, and restore failure",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 360000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 1,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 14999,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-11-15T12:35:44.539Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "ba1bbb77b9b9c2ddd992-bf6f524e22f0e76be20d",
+              "file": "antigravity-acceptance.spec.ts",
+              "line": 1110,
+              "column": 3
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "errors": [],
+  "stats": {
+    "startTime": "2026-11-15T12:31:09.782Z",
+    "duration": 289769.155,
+    "expected": 4,
+    "skipped": 0,
+    "unexpected": 1,
+    "flaky": 0
+  }
+}

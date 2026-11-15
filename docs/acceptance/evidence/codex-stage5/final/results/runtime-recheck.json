@@ -1,0 +1,21 @@
+{
+  "command": [
+    "pnpm",
+    "--filter",
+    "@matou/runtime",
+    "exec",
+    "vitest",
+    "run",
+    "--testTimeout=15000",
+    "--maxWorkers=1",
+    "src/antigravity-runtime.test.ts",
+    "src/cli/mt-cli.test.ts",
+    "src/control/host-control-client.test.ts",
+    "src/control/host-control-server.test.ts",
+    "src/storage/runtime-database-bootstrap.test.ts",
+    "src/session/claude-resume-notices.test.ts"
+  ],
+  "exitCode": 1,
+  "durationSeconds": 18.17,
+  "environmentCorrection": "TMPDIR uses verified short symlink .c5/t; temporary fixture package scope is CommonJS; no product or test changes"
+}
