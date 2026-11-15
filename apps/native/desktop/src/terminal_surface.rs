@@ -1,17 +1,19 @@
 use std::{ops::Range, time::Duration};
 
 use gpui::{
-    App, Bounds, ClipboardItem, ContentMask, Context, CursorStyle as PointerStyle,
-    ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Font, FontStyle,
-    FontWeight, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, ParentElement, Pixels,
-    Point, Render, ScrollWheelEvent, ShapedLine, SharedString, Styled, Task, TextRun,
-    UTF16Selection, Window, canvas, div, fill, font, point, px, rgb, size,
+    App, Bounds, ContentMask, Context, CursorStyle as PointerStyle, ElementInputHandler, Entity,
+    EntityInputHandler, EventEmitter, FocusHandle, Font, FontStyle, FontWeight, InteractiveElement,
+    IntoElement, KeyDownEvent, MouseButton, ParentElement, Pixels, Point, Render, ScrollWheelEvent,
+    ShapedLine, SharedString, Styled, Task, TextRun, UTF16Selection, Window, canvas, div, fill,
+    font, point, px, rgb, size,
 };
-use matou_native_terminal::{Cell, Color, CursorStyle, InputModes, Screen, Theme};
+use matou_native_terminal::{
+    Cell, Color, CursorStyle, GridSelection, InputModes, Screen, SelectionAction, SelectionMode,
+    Theme,
+};
 
 use crate::terminal_input::{
-    Composition, GridSelection, SelectionDrag, SelectionMode, byte_from_utf16, encode_paste,
-    terminal_key, utf16_from_byte,
+    Composition, byte_from_utf16, encode_paste, terminal_key, utf16_from_byte,
 };
 
 const FONT_SIZE: Pixels = px(11.);
@@ -20,6 +22,10 @@ const FAMILIES: &[&str] = &["SF Mono", "Monaco", "Menlo", "Consolas", "Courier N
 
 pub enum SurfaceEvent {
     Input(Vec<u8>),
+    Select(SelectionAction),
+    Copy {
+        interrupt_if_empty: bool,
+    },
     Resize {
         cols: u16,
         rows: u16,
@@ -82,7 +88,7 @@ pub struct TerminalSurface {
     theme: Theme,
     grid: Option<VisibleGrid>,
     selection: Option<GridSelection>,
-    selection_drag: Option<SelectionDrag>,
+    selection_drag: Option<SelectionMode>,
     selecting: bool,
     composition: Composition,
     caret: Option<Bounds<Pixels>>,
@@ -154,29 +160,29 @@ impl TerminalSurface {
         cx.notify();
     }
 
-    pub fn set_screen(&mut self, screen: Screen, modes: InputModes, cx: &mut Context<Self>) {
+    pub fn set_screen(
+        &mut self,
+        screen: Screen,
+        modes: InputModes,
+        selection: Option<GridSelection>,
+        cx: &mut Context<Self>,
+    ) {
         self.modes = modes;
-        if self.screen.as_ref() == Some(&screen) {
+        if self.screen.as_ref() == Some(&screen) && self.selection == selection {
             return;
         }
         if let Some(old) = &self.screen {
-            let grid_changed = old.cols != screen.cols
-                || old.rows != screen.rows
-                || old.alternate != screen.alternate
-                || old.scrollbar.offset != screen.scrollbar.offset;
             let cursor_changed = old.cursor_col != screen.cursor_col
                 || old.cursor_row != screen.cursor_row
                 || old.cursor_visible != screen.cursor_visible
                 || old.cursor_style != screen.cursor_style
                 || old.cursor_blinking != screen.cursor_blinking;
-            if grid_changed {
-                self.clear_selection();
-            }
             if cursor_changed {
                 self.reset_blink();
             }
         }
         self.screen = Some(screen);
+        self.selection = selection;
         cx.notify();
     }
 
@@ -191,7 +197,8 @@ impl TerminalSurface {
         if self.input_disabled || bytes.is_empty() {
             return;
         }
-        self.clear_selection();
+        self.selection_drag = None;
+        self.selecting = false;
         self.reset_blink();
         cx.emit(SurfaceEvent::Input(bytes));
         cx.notify();
@@ -233,14 +240,11 @@ impl TerminalSurface {
         let mac = cfg!(target_os = "macos");
         let copy_mod = if mac { mods.platform } else { mods.control };
         if key == "c" && copy_mod && !mods.alt && !mods.shift {
-            let copied = self.selection_text();
-            if mac || !copied.is_empty() {
-                if !copied.is_empty() {
-                    cx.write_to_clipboard(ClipboardItem::new_string(copied));
-                }
-                cx.stop_propagation();
-                return;
-            }
+            cx.emit(SurfaceEvent::Copy {
+                interrupt_if_empty: !mac && !self.input_disabled,
+            });
+            cx.stop_propagation();
+            return;
         }
         if self.input_disabled {
             return;
@@ -265,23 +269,7 @@ impl TerminalSurface {
         }
     }
 
-    fn selection_text(&self) -> String {
-        match (self.selection, self.screen.as_ref(), self.grid) {
-            (Some(selection), Some(screen), Some(grid)) => selection.text(screen, grid.cols),
-            _ => String::new(),
-        }
-    }
-
-    fn clear_selection(&mut self) {
-        self.selection = None;
-        self.selection_drag = None;
-        self.selecting = false;
-    }
-
-    fn selection_location(
-        &self,
-        position: Point<Pixels>,
-    ) -> Option<(&Screen, VisibleGrid, usize, f32)> {
+    fn selection_location(&self, position: Point<Pixels>) -> Option<(VisibleGrid, usize, f32)> {
         let screen = self.screen.as_ref()?;
         let mut grid = self.grid?;
         grid.cols = grid.cols.min(screen.cols);
@@ -289,30 +277,20 @@ impl TerminalSurface {
         let row =
             f32::from((position.y - grid.bounds.top()) / self.metrics.height).max(0.) as usize;
         let x = f32::from((position.x - grid.bounds.left()) / self.metrics.width);
-        Some((screen, grid, row.min(grid.rows - 1), x))
+        let row = screen.scrollbar.offset as usize + row.min(grid.rows - 1);
+        Some((grid, row, x))
     }
 
     fn update_selection(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
-        if !self.selecting {
-            return;
-        }
-        let (Some(drag), Some((screen, grid, row, x))) =
-            (self.selection_drag, self.selection_location(position))
-        else {
-            return;
-        };
-        let selection = drag.extend(screen, row, x, grid.cols, grid.rows);
-        if self.selection != Some(selection) {
-            self.selection = Some(selection);
-            cx.notify();
+        if self.selecting
+            && let Some((_, row, x)) = self.selection_location(position)
+        {
+            cx.emit(SurfaceEvent::Select(SelectionAction::Extend { row, x }));
         }
     }
 
     fn finish_selection(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
-        if self
-            .selection_drag
-            .is_some_and(|drag| drag.mode == SelectionMode::Character)
-        {
+        if self.selection_drag == Some(SelectionMode::Character) {
             self.update_selection(position, cx);
         }
         self.selecting = false;
@@ -503,6 +481,7 @@ impl TerminalSurface {
             }
         });
         let cursor_color = screen.cursor_color.unwrap_or(self.theme.cursor);
+        let first_row = screen.scrollbar.offset as usize;
         for (row, cells) in screen
             .cells
             .chunks(screen.cols.max(1))
@@ -516,7 +495,7 @@ impl TerminalSurface {
                 }
             }
             if let Some(selection) = self.selection {
-                let range = selection.range(row, cols.min(cells.len()));
+                let range = selection.range(first_row + row, cols.min(cells.len()));
                 if !range.is_empty() {
                     let bounds = self.metrics.cell(origin, range.start, row, range.len());
                     window.paint_quad(fill(bounds, rgb(self.theme.selection_background)));
@@ -582,23 +561,29 @@ impl Render for TerminalSurface {
                         cx.notify();
                         return;
                     }
-                    this.clear_selection();
-                    if let Some((screen, grid, row, x)) = this.selection_location(event.position)
+                    if let Some((grid, row, x)) = this.selection_location(event.position)
                         && grid.bounds.contains(&event.position)
                     {
                         let mode = if event.modifiers.shift || event.modifiers.alt {
                             SelectionMode::Character
                         } else {
                             match event.click_count {
-                                2 => SelectionMode::Word,
+                                2 if x <= grid.cols as f32 - 0.5 => SelectionMode::Word,
                                 3 => SelectionMode::Line,
                                 _ => SelectionMode::Character,
                             }
                         };
-                        let drag = SelectionDrag::begin(mode, screen, row, x, grid.cols, grid.rows);
-                        this.selection = Some(drag.initial);
-                        this.selection_drag = Some(drag);
+                        this.selection_drag = Some(mode);
                         this.selecting = true;
+                        cx.emit(SurfaceEvent::Select(SelectionAction::Begin {
+                            mode,
+                            row,
+                            x,
+                        }));
+                    } else {
+                        this.selection_drag = None;
+                        this.selecting = false;
+                        cx.emit(SurfaceEvent::Select(SelectionAction::Clear));
                     }
                     cx.notify();
                 }),

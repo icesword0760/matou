@@ -52,6 +52,9 @@ pub enum WorkerCommand {
     View {
         reply: Sender<Result<(Screen, InputModes)>>,
     },
+    SelectedView {
+        reply: Sender<Result<(Screen, InputModes, Option<GridSelection>)>>,
+    },
     Select {
         action: SelectionAction,
         reply: Sender<Result<()>>,
@@ -60,6 +63,7 @@ pub enum WorkerCommand {
         reply: Sender<Result<Option<GridSelection>>>,
     },
     CopySelection {
+        interrupt_if_empty: bool,
         reply: Sender<Result<String>>,
     },
     Scroll {
@@ -272,14 +276,29 @@ fn run(
                 WorkerCommand::View { reply } => {
                     let _ = reply.send(session.view());
                 }
+                WorkerCommand::SelectedView { reply } => {
+                    let result = session.view().and_then(|(screen, modes)| {
+                        Ok((screen, modes, session.selection_range()?))
+                    });
+                    let _ = reply.send(result);
+                }
                 WorkerCommand::Select { action, reply } => {
                     let _ = reply.send(session.selection_action(action));
                 }
                 WorkerCommand::Selection { reply } => {
                     let _ = reply.send(session.selection_range());
                 }
-                WorkerCommand::CopySelection { reply } => {
-                    let _ = reply.send(session.selected_text());
+                WorkerCommand::CopySelection {
+                    reply,
+                    interrupt_if_empty,
+                } => {
+                    let result = session.selected_text().and_then(|text| {
+                        if text.is_empty() && interrupt_if_empty {
+                            session.write(&[3])?;
+                        }
+                        Ok(text)
+                    });
+                    let _ = reply.send(result);
                 }
                 WorkerCommand::Scroll { lines, reply } => {
                     let _ = reply.send(session.scroll(lines));
