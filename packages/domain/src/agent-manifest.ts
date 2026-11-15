@@ -207,7 +207,7 @@ export const AGENT_MANIFESTS: Record<AgentProfileId, AgentManifest> = {
     launch: { resumeFlag: '--resume', forkStrategy: 'none', permissionFlags: { default: [] } },
     events: { lifecycleSource: 'http-hook', statusLineSource: 'none',
       identitySource: 'hook-or-statusline', transcriptPathSource: 'none', forkIdentityRule: 'immediate-new-id' },
-    mtInjection: { mode: 'none' },
+    mtInjection: { mode: 'session-start-system-message', assetRelativePath: 'providers/dsh-system-message.md' },
     instructionFiles: { candidates: [] },
     hud: { stripClaudeModelPrefix: false, showAccountControl: false, hideEmptyQuotaPlaceholder: true,
       supportsTodos: false, supportsAgentsCount: false, supportsMcpSummary: false,

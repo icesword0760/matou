@@ -388,6 +388,25 @@ describe('mt CLI', () => {
     expect(large.err[0]).not.toContain('候选 1')
   })
 
+  it.each(['fallback', 'original-first', 'original-invalid', 'missing', 'revoked'] as const)('authenticates DSH shell-env identity with %s precedence', async scenario => {
+    const root = await mkdtemp(join(tmpdir(), 'mt-dsh-')), endpoint = controlEndpointForPlatform(root)
+    const tokens = new CapabilityTokenService('dsh-test-runtime')
+    const token = tokens.issue({ runId: 'dsh-test-run', sessionId: 'dsh-card' }, ['host.identify'], Date.now() + 10000)
+    const backend = hostControlBackend(async () => { throw new Error('unexpected host action') })
+    const server = new HostControlServer({ socketPath: endpoint, tokenService: tokens, backend })
+    await server.start()
+    try {
+      const fixture = ioFixture()
+      if (scenario === 'revoked') tokens.revokeRun('dsh-test-run')
+      const environment = { MATOU_CONTROL_ENDPOINT: endpoint,
+        ...(scenario === 'original-first' ? { MATOU_CONTROL_TOKEN: token } : scenario === 'original-invalid' ? { MATOU_CONTROL_TOKEN: 'invalid-original' } : {}),
+        ...(scenario === 'missing' ? {} : { DSH_MATOU_CONTROL_TOKEN: scenario === 'original-first' ? 'invalid-fallback' : token }) }
+      const result = await runMt(['identify', '--json'], environment, fixture.io)
+      expect(result).toBe(scenario === 'missing' || scenario === 'revoked' || scenario === 'original-invalid' ? 4 : 0)
+      expect([...fixture.out, ...fixture.err].join('')).not.toContain(token)
+    } finally { await server.stop(); await rm(root, { recursive: true, force: true }) }
+  })
+
   it('transports exactly 1 MiB of stdin JSON through the real client and server envelope', async () => {
     const root = await mkdtemp(join(tmpdir(), 'matou-mt-frame-'))
     const endpoint = controlEndpointForPlatform(root)

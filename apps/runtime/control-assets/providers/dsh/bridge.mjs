@@ -2,6 +2,7 @@ import { readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { createHudState, foldHudEvent, observationHud } from './hud.mjs'
+import { attachMtInstructions, attachMtShellEnvironment, hasManagedMtEnvironment } from './instructions.mjs'
 
 export const name = 'matou-dsh-observer'
 export const inject = ['agents']
@@ -59,9 +60,11 @@ export function apply(ctx, config) {
   const url = new URL(config.hookUrl)
   if (url.protocol !== 'http:' || url.hostname !== '127.0.0.1') throw new Error('Matou observer requires its local run hook')
   const agents = new Map(), requests = new Map(), states = new Map(), hudStates = new Map()
-  let current, generation = 0, sequence = 0, disposed = false, sending = false, polling = false, requestNumber = 0, lastSnapshot = 0
+  let current, generation = 0, sequence = 0, disposed = false, sending = false, polling = false, requestNumber = 0, lastSnapshot = 0, mtEnvironmentReady = false
   const queue = [], controller = new AbortController()
-  const disposers = []
+  const disposers = [], instructedAgents = new WeakSet()
+  const mtInstructions = hasManagedMtEnvironment(process.env, config.runId)
+    ? readFileSync(new URL('../dsh-system-message.md', import.meta.url), 'utf8') : undefined
   const own = fn => { if (typeof fn === 'function') disposers.push(fn) }
   const post = async () => {
     if (sending || disposed) return
@@ -86,6 +89,21 @@ export function apply(ctx, config) {
       return ownRows.length === 1 ? ownRows[0].sessionId : undefined
     } catch { return undefined }
   }
+  if (mtInstructions) ctx.inject(['shellEnv'], shellCtx => {
+    const dispose = attachMtShellEnvironment(shellCtx, process.env, config.runId, agent =>
+      !disposed && isTopLevelAgent(agent) && agents.get(idOf(agent)) === agent && foregroundId() === idOf(agent))
+    mtEnvironmentReady = typeof dispose === 'function'
+    shellCtx.effect(() => () => { mtEnvironmentReady = false; dispose?.() })
+  })
+  const trackAgent = agent => {
+    if (!isTopLevelAgent(agent)) return
+    const id = idOf(agent)
+    agents.set(id, agent); hudStates.set(id, createHudState())
+    if (mtInstructions && !instructedAgents.has(agent)) {
+      const dispose = attachMtInstructions(agent, mtInstructions, () => !disposed && mtEnvironmentReady && foregroundId() === id)
+      if (dispose) { instructedAgents.add(agent); own(dispose) }
+    }
+  }
   const emit = (type, data = {}, options = {}) => {
     const agent = agents.get(current)
     if (!agent || disposed || foregroundId() !== current) return
@@ -108,7 +126,7 @@ export function apply(ctx, config) {
       turn_error: states.get(current)?.error === true })
   }
   own(ctx.on('agent/created', ({ agent }) => {
-    if (isTopLevelAgent(agent)) { agents.set(idOf(agent), agent); hudStates.set(idOf(agent), createHudState()) }
+    trackAgent(agent)
     // This serial listener must not await the HTTP endpoint or native UI.
   }))
   own(ctx.on('agent/disposed', ({ agent }) => { agents.delete(idOf(agent)); states.delete(idOf(agent)); hudStates.delete(idOf(agent)) }))
@@ -142,7 +160,7 @@ export function apply(ctx, config) {
       }
     }))
   }
-  for (const agent of ctx.get('agents')?.list?.() ?? []) if (isTopLevelAgent(agent)) { agents.set(idOf(agent), agent); hudStates.set(idOf(agent), createHudState()) }
+  for (const agent of ctx.get('agents')?.list?.() ?? []) trackAgent(agent)
   const poll = async () => {
     if (polling || disposed) return
     polling = true

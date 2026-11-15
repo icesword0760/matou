@@ -29,6 +29,8 @@ export interface MtIo {
 export interface MtEnvironment {
   MATOU_CONTROL_ENDPOINT?: string
   MATOU_CONTROL_TOKEN?: string
+  /** Official DSH shell-env explicit forwarding after its ambient credential scrub. */
+  DSH_MATOU_CONTROL_TOKEN?: string
 }
 
 export type MtRequest = (method: HostControlScope, params: unknown) => Promise<unknown>
@@ -200,7 +202,7 @@ function normalizeDependencies(
 
 function requestFromEnvironment(environment: MtEnvironment): MtRequest {
   const endpoint = environment.MATOU_CONTROL_ENDPOINT
-  const token = environment.MATOU_CONTROL_TOKEN
+  const token = environment.MATOU_CONTROL_TOKEN || environment.DSH_MATOU_CONTROL_TOKEN
   if (!endpoint || !token) {
     throw new HostControlClientError(
       'CAPABILITY_DENIED',
