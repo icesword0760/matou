@@ -48,7 +48,8 @@ export function resolvePtyCommand(input: PtyCommandInput): PtyCommand {
     return { file: input.executable, args, resuming: Boolean(identity) }
   }
   if (input.profile === 'codex') {
-    const args: string[] = []
+    // Embedded sessions never offer an in-terminal global CLI upgrade.
+    const args: string[] = ['-c', 'check_for_update_on_startup=false']
     if (input.contextWindow) args.push('-c', `model_context_window=${input.contextWindow}`, '-c', `model_auto_compact_token_limit=${Math.floor(input.contextWindow * 0.9)}`, '-c', 'model_auto_compact_token_limit_scope="total"')
     if (input.reasoningEffort && input.reasoningEffort !== 'follow') args.push('-c', `model_reasoning_effort=${JSON.stringify(input.reasoningEffort)}`)
     if (input.codexHooksConfig?.trim()) {

@@ -1,4 +1,4 @@
-import { appendFile, chmod, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
+import { appendFile, chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -12,9 +12,9 @@ const normal = [row('turn_context', { turn_id: 't', model: 'gpt-6-astra' }),
   item('UserMessage', [{ type: 'text', text: 'hello needle' }], { id: 'u' }),
   item('AgentMessage', [{ type: 'Text', text: 'answer needle' }], { id: 'a', phase: 'final_answer' }),
   row('event_msg', { type: 'task_complete', turn_id: 't' })]
-async function transcript(n: number, records: unknown[] = normal, workspace = cwd, filename?: string) {
+async function transcript(n: number, records: unknown[] = normal, workspace = cwd, filename?: string, metadata: Record<string, unknown> = {}) {
   const path = join(directory, filename ?? `rollout-2026-11-15T00-00-00-${id(n)}.jsonl`)
-  await writeFile(path, [row('session_meta', { id: id(n), cwd: workspace }), ...records].map(v => JSON.stringify(v)).join('\n') + '\n')
+  await writeFile(path, [row('session_meta', { id: id(n), cwd: workspace, ...metadata }), ...records].map(v => JSON.stringify(v)).join('\n') + '\n')
   return path
 }
 beforeEach(async () => {
@@ -98,6 +98,68 @@ describe('CodexSessionCatalog', () => {
     await appendFile(path, JSON.stringify(row('response_item', { type: 'message', role: 'assistant', content: [{ text: 'new reply' }] })) + '\n')
     expect((await catalog.search({ cwd, providerSessionId: id(1), query: 'new' })).total).toBe(1)
   })
+  it('merges one cross-Worktree ancestor into preview and full-text listing/search with stable indexes', async () => {
+    const at = (text: string, time: number, messageId: string) => ({ ...item('AgentMessage', [{ text }], { id: messageId }), timestamp: time })
+    await transcript(1, [at('ancestor needle', 10, 'a'), at('shared', 20, 's')], join(root, 'parent-worktree'))
+    await transcript(2, [at('shared', 20, 's'), at('child', 30, 'c')], cwd, undefined, { history_base: { thread_id: id(1) } })
+    const detail = await catalog.detail({ cwd, providerSessionId: id(2), query: '' })
+    expect(detail.events.map(e => [e.index, e.text])).toEqual([[1, 'ancestor needle'], [2, 'shared'], [3, 'child']])
+    expect((await catalog.list({ cwd, query: 'needle' })).sessions.map(e => e.providerSessionId)).toEqual([id(2)])
+    const search = await catalog.search({ cwd, providerSessionId: id(2), query: 'needle' })
+    expect(search.hits).toMatchObject([{ eventIndex: 1, excerpt: 'ancestor needle' }])
+    expect((await catalog.detail({ cwd, providerSessionId: id(2), query: 'needle', aroundEventIndex: 1, limit: 1 })).events)
+      .toMatchObject([{ index: 1, text: 'ancestor needle', matched: true }])
+  })
+
+  it('follows multiple history_base levels and respects the recorded fork boundary', async () => {
+    await transcript(1, [{ ...item('AgentMessage', [{ text: 'grandparent' }], { id: 'g' }), ordinal: 1, timestamp: 10 }])
+    await transcript(2, [
+      { ...item('AgentMessage', [{ text: 'parent at fork' }], { id: 'p' }), ordinal: 2, timestamp: 20 },
+      { ...item('AgentMessage', [{ text: 'parent after fork private' }], { id: 'future' }), ordinal: 3, timestamp: 40 }
+    ], cwd, undefined, { history_base: { thread_id: id(1) } })
+    await transcript(3, [{ ...item('AgentMessage', [{ text: 'child' }], { id: 'c' }), timestamp: 30 }], cwd, undefined,
+      { history_base: { thread_id: id(2), end_ordinal_exclusive: 3 } })
+    expect((await catalog.detail({ cwd, providerSessionId: id(3), query: '' })).events.map(e => e.text))
+      .toEqual(['grandparent', 'parent at fork', 'child'])
+    expect((await catalog.search({ cwd, providerSessionId: id(3), query: 'private' })).total).toBe(0)
+  })
+
+  it('bounds ancestor depth at five and stops cycles without duplicating messages', async () => {
+    for (let n = 1; n <= 8; n++) {
+      await transcript(n, [{ ...item('AgentMessage', [{ text: `message-${n}` }], { id: `m-${n}` }), timestamp: n }], cwd, undefined,
+        n === 1 ? {} : { history_base: { thread_id: id(n - 1) } })
+    }
+    const limited = await catalog.detail({ cwd, providerSessionId: id(8), query: '' })
+    expect(limited.events.filter(e => e.kind === 'assistant').map(e => e.text)).toEqual(['message-3', 'message-4', 'message-5', 'message-6', 'message-7', 'message-8'])
+    expect(limited.events.at(-1)).toMatchObject({ kind: 'system', text: expect.stringContaining('5') })
+    await transcript(1, [item('AgentMessage', [{ text: 'first' }], { id: 'first' })], cwd, undefined, { history_base: { thread_id: id(2) } })
+    await transcript(2, [item('AgentMessage', [{ text: 'second' }], { id: 'second' })], cwd, undefined, { history_base: { thread_id: id(1) } })
+    const cycle = await catalog.detail({ cwd, providerSessionId: id(1), query: '' })
+    expect(cycle.events.filter(e => e.kind === 'assistant').map(e => e.text).sort()).toEqual(['first', 'second'])
+    expect(cycle.events.at(-1)).toMatchObject({ kind: 'system', text: expect.stringContaining('循环') })
+  })
+
+  it('falls back to the current file with a visible note when any ancestor is missing', async () => {
+    await transcript(2, [item('AgentMessage', [{ text: 'partial ancestor' }])], cwd, undefined, { history_base: { thread_id: id(99) } })
+    await transcript(3, [item('AgentMessage', [{ text: 'current' }])], cwd, undefined, { history_base: { thread_id: id(2) } })
+    const detail = await catalog.detail({ cwd, providerSessionId: id(3), query: '' })
+    expect(detail.events.map(e => e.kind)).toEqual(['assistant', 'system'])
+    expect(detail.events[0]?.text).toBe('current')
+    expect(detail.events[1]?.text).toContain('仅显示当前会话')
+    expect((await catalog.search({ cwd, providerSessionId: id(3), query: 'partial' })).hits).toEqual([])
+  })
+
+  it('invalidates merged search when an ancestor changes and applies byte boundaries', async () => {
+    const parent = await transcript(1, [item('AgentMessage', [{ text: 'original' }], { id: 'old' })])
+    const size = (await readFile(parent)).length
+    await transcript(2, [], cwd, undefined, { history_base: { thread_id: id(1) } })
+    await transcript(3, [], cwd, undefined, { history_base: { thread_id: id(1), end_byte_offset: size } })
+    expect((await catalog.search({ cwd, providerSessionId: id(2), query: 'appended' })).total).toBe(0)
+    await appendFile(parent, JSON.stringify(item('AgentMessage', [{ text: 'appended' }], { id: 'new' })) + '\n')
+    expect((await catalog.search({ cwd, providerSessionId: id(2), query: 'appended' })).total).toBe(1)
+    expect((await catalog.search({ cwd, providerSessionId: id(3), query: 'appended' })).total).toBe(0)
+  })
+
   it('returns readable corrupt and permission errors, with an absent archive treated as empty', async () => {
     expect((await new CodexSessionCatalog(join(root, 'absent')).list({ cwd, query: '' })).sessions).toEqual([])
     const path = await transcript(1)

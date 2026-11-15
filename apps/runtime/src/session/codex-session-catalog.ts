@@ -14,9 +14,10 @@ import {
   selectEventWindow, type CatalogQuery, type CatalogSearchScope, type IndexedCatalogEvent
 } from './session-catalog-utils'
 
-interface CodexMetadata { path: string; providerSessionId: string; cwd: string; updatedAt: number; size: number; mtimeMs: number; createdAt?: number; forkedFromId?: string }
-interface CodexEventRef extends IndexedCatalogEvent { id?: string; turn?: string; structured: boolean }
-interface CodexIndex { path: string; size: number; mtimeMs: number; model?: string; events: CodexEventRef[]; hasCompletedTurn: boolean }
+interface HistoryBase { threadId: string; endOrdinal?: number; endOffset?: number }
+interface CodexMetadata { historyBase?: HistoryBase; path: string; providerSessionId: string; cwd: string; updatedAt: number; size: number; mtimeMs: number; createdAt?: number; forkedFromId?: string }
+interface CodexEventRef extends IndexedCatalogEvent { path: string; ordinal?: number; warning?: string; sortAt: number; id?: string; turn?: string; structured: boolean }
+interface CodexIndex { fingerprint: string; path: string; size: number; mtimeMs: number; model?: string; events: CodexEventRef[]; hasCompletedTurn: boolean }
 interface IndexTitle { title: string; updatedAt: number }
 export function defaultCodexRoot(): string { return resolve(process.env.CODEX_HOME || join(homedir(), '.codex')) }
 export function isCodexSessionId(value: string): boolean { return /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(value) }
@@ -26,7 +27,7 @@ export class CodexSessionCatalog {
   readonly #root: string
   readonly #metadata = new Map<string, CodexMetadata>()
   readonly #indexes = new Map<string, CodexIndex>()
-  readonly #searches = new Map<string, { size: number; mtimeMs: number; hits: ClaudeSessionSearchHit[] }>()
+  readonly #searches = new Map<string, { fingerprint: string; hits: ClaudeSessionSearchHit[] }>()
   constructor(root = defaultCodexRoot()) { this.#root = resolve(root) }
 
   async list(input: CatalogQuery & { offset?: number; limit?: number; searchScope?: CatalogSearchScope;
@@ -34,13 +35,14 @@ export class CodexSessionCatalog {
     const entries = await this.#workspace(input.cwd)
     const titles = await this.#titles()
     const query = normalizeQuery(input.query)
+    const archive = query && input.searchScope !== 'metadata' ? await this.#workspace() : undefined
     const sessions: ClaudeSessionSummary[] = []
     // Sequential full-text reads bound memory and I/O fan-out for large archives.
     for (const entry of entries) {
       const named = titles.get(entry.providerSessionId)
       const title = input.titleForSession?.(entry.providerSessionId) ?? named?.title ?? fallbackTitle(entry)
       const metadataMatch = Boolean(query && normalizeQuery(`${title} ${entry.providerSessionId}`).includes(query))
-      const hits = query && input.searchScope !== 'metadata' ? await this.#search(await this.#index(entry), query) : []
+      const hits = query && input.searchScope !== 'metadata' ? await this.#search(await this.#historyIndex(entry, archive), query) : []
       if (query && !metadataMatch && !hits.length) continue
       sessions.push({ ...summary(entry, title, named), matchCount: (metadataMatch ? 1 : 0) + hits.length, hits: hits.slice(0, 4) })
     }
@@ -54,13 +56,13 @@ export class CodexSessionCatalog {
 
   async detail(input: CatalogQuery & { providerSessionId: string; beforeEventIndex?: number; aroundEventIndex?: number; limit?: number }): Promise<ClaudeSessionDetail> {
     const entry = await this.#selected(input.cwd, input.providerSessionId)
-    const index = await this.#index(entry)
+    const index = await this.#historyIndex(entry)
     const named = (await this.#titles()).get(entry.providerSessionId)
     const query = normalizeQuery(input.query)
     const hits = query ? await this.#search(index, query) : []
     const selected = selectEventWindow(index.events, { ...input,
       limit: clampInteger(input.limit ?? DEFAULT_EVENT_PAGE_LIMIT, 1, MAX_EVENT_PAGE_LIMIT) })
-    const events = await this.#readEvents(index, selected, query)
+    const events = await this.#readEvents(selected, query)
     const start = selected[0]?.index ?? 0; const end = selected.at(-1)?.index ?? 0
     return { ...summary(entry, named?.title ?? fallbackTitle(entry), named),
       ...(index.model ? { model: index.model } : {}), eventCount: index.events.length,
@@ -72,7 +74,7 @@ export class CodexSessionCatalog {
   async search(input: CatalogQuery & { providerSessionId: string; offset?: number; limit?: number }): Promise<ClaudeSessionSearchResult> {
     const entry = await this.#selected(input.cwd, input.providerSessionId)
     const query = normalizeQuery(input.query)
-    const hits = query ? await this.#search(await this.#index(entry), query) : []
+    const hits = query ? await this.#search(await this.#historyIndex(entry), query) : []
     const offset = clampInteger(input.offset ?? 0, 0, hits.length)
     const limit = clampInteger(input.limit ?? 100, 1, MAX_SEARCH_PAGE_LIMIT)
     const page = hits.slice(offset, offset + limit)
@@ -99,8 +101,8 @@ export class CodexSessionCatalog {
     return entry
   }
 
-  async #workspace(cwd: string, selectedId?: string): Promise<CodexMetadata[]> {
-    const canonical = await canonicalPath(cwd)
+  async #workspace(cwd?: string, selectedId?: string): Promise<CodexMetadata[]> {
+    const canonical = cwd === undefined ? undefined : await canonicalPath(cwd)
     const entries = new Map<string, CodexMetadata>()
     try {
       for await (const path of rolloutPaths(join(this.#root, 'sessions'))) {
@@ -119,13 +121,14 @@ export class CodexSessionCatalog {
             entry = { path, providerSessionId: payload.id, cwd: await canonicalPath(payload.cwd),
               updatedAt: file.mtimeMs, size: file.size, mtimeMs: file.mtimeMs,
               ...(parseTimestamp(payload.timestamp) === undefined ? {} : { createdAt: parseTimestamp(payload.timestamp)! }),
-              ...(typeof payload.forked_from_id === 'string' ? { forkedFromId: payload.forked_from_id } : {}) }
+              ...(typeof payload.forked_from_id === 'string' ? { forkedFromId: payload.forked_from_id } : {}),
+              ...(historyBase(payload.history_base) ? { historyBase: historyBase(payload.history_base)! } : {}) }
             break
           }
           if (!entry) throw corrupt(path)
           cachePut(this.#metadata, path, entry, 256)
         }
-        if (entry.cwd !== canonical || (selectedId && entry.providerSessionId !== selectedId)) continue
+        if ((canonical !== undefined && entry.cwd !== canonical) || (selectedId && entry.providerSessionId !== selectedId)) continue
         const previous = entries.get(entry.providerSessionId)
         if (!previous || previous.mtimeMs < entry.mtimeMs) entries.set(entry.providerSessionId, entry)
       }
@@ -185,7 +188,8 @@ export class CodexSessionCatalog {
           structuredIds.add(id)
         }
         if (structured && event.role === 'user') structuredUsers.add(currentTurn)
-        candidates.push({ index: 0, kind: event.kind, ...(event.role ? { role: event.role } : {}),
+        candidates.push({ index: 0, path: entry.path, sortAt: event.timestamp ?? entry.createdAt ?? entry.updatedAt,
+          ...(typeof row.ordinal === 'number' ? { ordinal: row.ordinal } : {}), kind: event.kind, ...(event.role ? { role: event.role } : {}),
           ...(event.timestamp === undefined ? {} : { timestamp: event.timestamp }),
           ...(event.toolName ? { toolName: event.toolName } : {}), offset: line.offset, length: line.length,
           structured, turn: currentTurn, ...(id ? { id } : {}) })
@@ -198,45 +202,100 @@ export class CodexSessionCatalog {
       if (ref.id) seen.add(ref.id)
       return true
     }).map((ref, i) => ({ ...ref, index: i + 1 }))
-    const index: CodexIndex = { path: entry.path, size: entry.size, mtimeMs: entry.mtimeMs, events, hasCompletedTurn,
+    const index: CodexIndex = { fingerprint: `${entry.path}:${entry.size}:${entry.mtimeMs}`, path: entry.path, size: entry.size, mtimeMs: entry.mtimeMs, events, hasCompletedTurn,
       ...(model ? { model } : {}) }
     cachePut(this.#indexes, entry.path, index, SEARCH_CACHE_LIMIT)
     return index
   }
 
-  async #readEvents(index: CodexIndex, refs: IndexedCatalogEvent[], query: string): Promise<ClaudeSessionPreviewEvent[]> {
-    if (!refs.length) return []
-    let file
-    try {
-      file = await open(index.path, 'r')
-      const events: ClaudeSessionPreviewEvent[] = []
-      for (const batch of indexedEventBatches(refs)) {
-        const start = batch[0]!.offset
-        const end = batch.at(-1)!.offset + batch.at(-1)!.length
-        const buffer = Buffer.alloc(end - start)
-        const { bytesRead } = await file.read(buffer, 0, buffer.length, start)
-        if (bytesRead !== buffer.length) throw corrupt(index.path)
-        for (const ref of batch) {
-          const event = eventFromRow(parseRow(buffer.subarray(ref.offset - start, ref.offset - start + ref.length), index.path))
-          if (event) events.push({ ...event, index: ref.index, matched: Boolean(query && searchableEventText({ ...event, index: ref.index }).includes(query)) })
-        }
+  /** Follow only explicit history_base references, including parents in other
+   * Worktrees. No writes or durable format changes; all offsets stay file-local. */
+  async #historyIndex(entry: CodexMetadata, archive?: CodexMetadata[]): Promise<CodexIndex> {
+    const own = await this.#index(entry)
+    if (!entry.historyBase) return own
+    const byId = new Map((archive ?? await this.#workspace()).map(item => [item.providerSessionId, item]))
+    const visited = new Set([entry.providerSessionId])
+    let base: HistoryBase | undefined = entry.historyBase
+    let events = [...own.events]
+    const fingerprints = [own.fingerprint]
+    let warning: string | undefined
+    for (let depth = 0; base; depth++) {
+      if (depth >= 5) { warning = runtimeMessages().session.codexHistoryDepthLimit; break }
+      if (visited.has(base.threadId)) { warning = runtimeMessages().session.codexHistoryCycle; break }
+      visited.add(base.threadId)
+      const parent = byId.get(base.threadId)
+      if (!parent) {
+        warning = runtimeMessages().session.codexHistoryMissing
+        events = [...own.events]
+        break
       }
-      return events
-    } catch (error) { throw readableError(error) }
-    finally { await file?.close() }
+      let index: CodexIndex
+      try { index = await this.#index(parent) }
+      catch { warning = runtimeMessages().session.codexHistoryMissing; events = [...own.events]; break }
+      fingerprints.push(`${index.fingerprint}:${base.endOrdinal ?? ''}:${base.endOffset ?? ''}`)
+      const boundary = base
+      const inherited = index.events.filter(ref =>
+        (boundary.endOffset === undefined || ref.offset + ref.length <= boundary.endOffset) &&
+        (boundary.endOrdinal === undefined || ref.ordinal === undefined || ref.ordinal < boundary.endOrdinal))
+      events = [...inherited, ...events]
+      base = parent.historyBase
+    }
+    // Copied/mirrored items can occur in both files. Keep the oldest copy of a
+    // stable provider item id; messages with equal text but different ids remain.
+    const seen = new Set<string>()
+    events = events.filter(ref => {
+      if (!ref.id) return true
+      if (seen.has(ref.id)) return false
+      seen.add(ref.id); return true
+    }).sort((a, b) => a.sortAt - b.sortAt)
+    if (warning) events.push({ index: 0, path: entry.path, offset: 0, length: 0,
+      structured: true, sortAt: Infinity, kind: 'system', warning })
+    return { ...own, fingerprint: `${fingerprints.join('|')}|${warning ?? ''}`,
+      events: events.map((ref, i) => ({ ...ref, index: i + 1 })) }
+  }
+
+  async #readEvents(refs: IndexedCatalogEvent[], query: string): Promise<ClaudeSessionPreviewEvent[]> {
+    const events: ClaudeSessionPreviewEvent[] = []
+    const byPath = new Map<string, CodexEventRef[]>()
+    for (const ref of refs as CodexEventRef[]) {
+      if (ref.warning) {
+        events.push({ index: ref.index, kind: 'system', text: ref.warning, matched: false })
+      } else {
+        const group = byPath.get(ref.path) ?? []; group.push(ref); byPath.set(ref.path, group)
+      }
+    }
+    for (const [path, group] of byPath) {
+      let file
+      try {
+        file = await open(path, 'r')
+        for (const batch of indexedEventBatches(group.sort((a, b) => a.offset - b.offset))) {
+          const start = batch[0]!.offset
+          const end = batch.at(-1)!.offset + batch.at(-1)!.length
+          const buffer = Buffer.alloc(end - start)
+          const { bytesRead } = await file.read(buffer, 0, buffer.length, start)
+          if (bytesRead !== buffer.length) throw corrupt(path)
+          for (const ref of batch) {
+            const event = eventFromRow(parseRow(buffer.subarray(ref.offset - start, ref.offset - start + ref.length), path))
+            if (event) events.push({ ...event, index: ref.index, matched: Boolean(query && searchableEventText({ ...event, index: ref.index }).includes(query)) })
+          }
+        }
+      } catch (error) { throw readableError(error) }
+      finally { await file?.close() }
+    }
+    return events.sort((a, b) => a.index - b.index)
   }
 
   async #search(index: CodexIndex, query: string): Promise<ClaudeSessionSearchHit[]> {
     const key = `${index.path}\0${query}`
     const cached = this.#searches.get(key)
-    if (cached?.size === index.size && cached.mtimeMs === index.mtimeMs) return cached.hits
+    if (cached?.fingerprint === index.fingerprint) return cached.hits
     const hits: ClaudeSessionSearchHit[] = []
     for (const batch of indexedEventBatches(index.events)) {
-      for (const event of await this.#readEvents(index, batch, query)) {
+      for (const event of await this.#readEvents(batch, query)) {
         if (event.matched) hits.push({ eventIndex: event.index, kind: event.kind, excerpt: excerpt(event.text, query) })
       }
     }
-    cachePut(this.#searches, key, { size: index.size, mtimeMs: index.mtimeMs, hits }, SEARCH_CACHE_LIMIT)
+    cachePut(this.#searches, key, { fingerprint: index.fingerprint, hits }, SEARCH_CACHE_LIMIT)
     return hits
   }
 }
@@ -249,6 +308,13 @@ async function* rolloutPaths(directory: string): AsyncGenerator<string> {
     if (entry.isDirectory()) yield* rolloutPaths(join(directory, entry.name))
     else if (entry.isFile() && entry.name.startsWith('rollout-') && entry.name.endsWith('.jsonl')) yield join(directory, entry.name)
   }
+}
+function historyBase(value: unknown): HistoryBase | undefined {
+  if (!isRecord(value) || typeof value.thread_id !== 'string') return undefined
+  const bound = (n: unknown) => typeof n === 'number' && Number.isSafeInteger(n) && n >= 0 ? n : undefined
+  const endOrdinal = bound(value.end_ordinal_exclusive), endOffset = bound(value.end_byte_offset)
+  return { threadId: value.thread_id, ...(endOrdinal === undefined ? {} : { endOrdinal }),
+    ...(endOffset === undefined ? {} : { endOffset }) }
 }
 function summary(entry: CodexMetadata, title: string, named?: IndexTitle): ClaudeSessionSummary {
   return { provider: 'codex', providerSessionId: entry.providerSessionId, title, cwd: entry.cwd,

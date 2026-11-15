@@ -48,6 +48,14 @@ interface HookRegistrationRecord {
   mtExecutablePath?: string
   lastAgentState?: string
   errorLatched?: boolean
+  codexErrorWatch?: {
+    path: string
+    turnId: string
+    cwd?: string
+    notified: boolean
+    watcher: FSWatcher
+    debounce?: ReturnType<typeof setTimeout>
+  }
   retirementTimer?: ReturnType<typeof setTimeout>
   observedTitle?: string
   titleWatch?: {
@@ -215,6 +223,7 @@ export class ProviderHookServer {
     for (const record of records) {
       clearTimeout(record.retirementTimer)
       this.#stopTitleWatch(record)
+      this.#stopCodexErrorWatch(record)
     }
     await Promise.all(records.flatMap(({ settingsPath, statusScriptPath, systemMessagePath }) => [
       rm(settingsPath, { force: true }),
@@ -383,6 +392,7 @@ export class ProviderHookServer {
       disposePromise ??= (async () => {
         clearTimeout(record.retirementTimer)
         this.#stopTitleWatch(record)
+        this.#stopCodexErrorWatch(record)
         this.#registrations.delete(token)
         await Promise.all([
           rm(settingsPath, { force: true }),
@@ -437,7 +447,10 @@ export class ProviderHookServer {
       } : {}),
       ...(systemMessagePath === undefined ? {} : { systemMessagePath }),
       retire: (graceMs = DEFAULT_RETIREMENT_GRACE_MS, options = {}) => {
-        if (options.suppressSideEffects) record.acceptSideEffects = false
+        if (options.suppressSideEffects) {
+          record.acceptSideEffects = false
+          this.#stopCodexErrorWatch(record)
+        }
         if (disposePromise || record.retirementTimer) return
         // Keep the endpoint alive briefly for the final HUD/notification hooks, while
         // preventing a process that has already returned to Shell from resurrecting
@@ -708,6 +721,16 @@ export class ProviderHookServer {
         }
         if (observations.length > 0) await this.#onTeamObservations(observations)
       }
+      if (registration.provider === 'codex' && transcriptPath) {
+        if (eventName === 'UserPromptSubmit' && nonEmptyText(payload.turn_id)) {
+          registration.errorLatched = false
+          await this.#startCodexErrorWatch(registration, transcriptPath, payload)
+        }
+        if (eventName === 'Stop' || eventName === 'SessionEnd') {
+          await this.#observeCodexError(registration).catch(() => {})
+          if (eventName === 'SessionEnd') this.#stopCodexErrorWatch(registration)
+        }
+      }
       if (registration.provider === 'codex' && providerSessionId) {
         const indexPath = join(this.#codexRoot, 'session_index.jsonl')
         await this.#observeTitle(registration, providerSessionId, indexPath).catch(() => false)
@@ -738,7 +761,7 @@ export class ProviderHookServer {
         registration.provider,
         { ...(previousAgentState === undefined ? {} : { previousAgentState }) }
       )
-      if (notificationEvent) {
+      if (notificationEvent && !(registration.provider === 'codex' && eventName === 'Stop' && registration.errorLatched)) {
         this.#onNotification({
           runId: registration.runId,
           sessionId: registration.sessionId,
@@ -755,7 +778,7 @@ export class ProviderHookServer {
         })
       }
       if (registration.provider === 'codex') {
-        const workStatus = codexHookWorkStatus(eventName)
+        const workStatus = eventName === 'Stop' && registration.errorLatched ? 'error' : codexHookWorkStatus(eventName)
         if (workStatus) {
           this.#onWorkStatus({
             runId: registration.runId,
@@ -952,6 +975,66 @@ export class ProviderHookServer {
     } catch {
       return false
     }
+  }
+
+  /** Failed turns in 0.162.1 emit task_complete.error without a Stop hook.
+   * Watch only the current submitted turn's exact rollout, never terminal text,
+   * tool exit codes or historical errors in resumed conversations. */
+  async #startCodexErrorWatch(
+    registration: HookRegistrationRecord, path: string, payload: Record<string, unknown>
+  ): Promise<void> {
+    this.#stopCodexErrorWatch(registration)
+    if (!this.#acceptsSideEffects(registration)) return
+    try {
+      const watcher = watch(path, { persistent: false }, () => {
+        const active = registration.codexErrorWatch
+        if (!active || active.debounce || active.notified) return
+        active.debounce = setTimeout(() => {
+          delete active.debounce
+          void this.#observeCodexError(registration).catch(() => {})
+        }, TITLE_WATCH_DEBOUNCE_MS)
+        active.debounce.unref?.()
+      })
+      watcher.on('error', () => this.#stopCodexErrorWatch(registration))
+      const cwd = nonEmptyText(payload.cwd)
+      registration.codexErrorWatch = { path, turnId: nonEmptyText(payload.turn_id)!,
+        ...(cwd ? { cwd } : {}), notified: false, watcher }
+      await this.#observeCodexError(registration)
+    } catch { this.#stopCodexErrorWatch(registration) }
+  }
+
+  async #observeCodexError(registration: HookRegistrationRecord): Promise<void> {
+    const active = registration.codexErrorWatch
+    if (!active || active.notified || !this.#acceptsSideEffects(registration)) return
+    const tail = await readTranscriptTail(active.path)
+    if (registration.codexErrorWatch !== active || active.notified || !this.#acceptsSideEffects(registration)) return
+    for (const line of tail.split('\n')) {
+      let row: Record<string, unknown> | undefined
+      try { row = record(JSON.parse(line)) } catch { continue }
+      const payload = record(row?.payload)
+      if (row?.type !== 'event_msg' || payload?.type !== 'task_complete' || payload.turn_id !== active.turnId) continue
+      const error = record(payload.error)
+      const message = nonEmptyText(error?.message)
+      if (!message) continue
+      // Latch before callbacks, so concurrent file notifications cannot duplicate.
+      active.notified = true
+      registration.errorLatched = true
+      this.#onNotification({ runId: registration.runId, sessionId: registration.sessionId, provider: 'codex',
+        event: { eventType: 'error', title: 'Codex', subtitle: active.cwd ? `Error in ${basename(active.cwd)}` : 'Error',
+          body: message.replace(/\s+/g, ' ').trim().slice(0, 200), sound: true, cooldownKey: 'Stop',
+          replacementKey: `codex-turn-error:${active.turnId}` } })
+      this.#onWorkStatus({ runId: registration.runId, sessionId: registration.sessionId,
+        provider: 'codex', workStatus: 'error' })
+      return
+    }
+  }
+
+  #stopCodexErrorWatch(registration: HookRegistrationRecord): void {
+    const active = registration.codexErrorWatch
+    if (!active) return
+    delete registration.codexErrorWatch
+    clearTimeout(active.debounce)
+    active.watcher.close()
   }
 
   #stopTitleWatch(registration: HookRegistrationRecord): void {

@@ -232,6 +232,67 @@ describe('ProviderHookServer', () => {
     }
   })
 
+  it('reports one Codex turn error from the real task_complete.error shape without a Stop hook', async () => {
+    const path = join(root, 'rollout-error.jsonl')
+    const event = (payload: unknown) => JSON.stringify({ type: 'event_msg', payload }) + '\n'
+    await writeFile(path, event({ type: 'task_complete', turn_id: 'old', error: { message: 'old error' } }))
+    const registration = await hooks.registerCodexSession({ runId: 'codex-error', sessionId: 'session-1' })
+    const payload = { hook_event_name: 'UserPromptSubmit', session_id: 'codex-error-id',
+      turn_id: 'new', transcript_path: path, cwd: root }
+    await postHook(registration.hookUrl, payload)
+    // An ordinary failed tool and a user cancellation are not whole-turn errors.
+    await appendFile(path, event({ type: 'item_completed', turn_id: 'new',
+      item: { type: 'CommandExecution', exit_code: 2 } }) + event({ type: 'turn_aborted', turn_id: 'new' }))
+    await new Promise(resolve => setTimeout(resolve, 60))
+    expect(notificationEvents).toEqual([])
+    const failure = event({ type: 'task_complete', turn_id: 'new', last_agent_message: null,
+      error: { message: 'unexpected status 404 Not Found: model does not exist',
+        codex_error_info: { http_connection_failed: { http_status_code: 404 } } } })
+    // A partial final line must not become a premature notification.
+    await appendFile(path, failure.slice(0, -4))
+    await new Promise(resolve => setTimeout(resolve, 60))
+    expect(notificationEvents).toEqual([])
+    await appendFile(path, failure.slice(-4))
+    await waitFor(() => notificationEvents.length === 1, 1000)
+    expect(notificationEvents).toMatchObject([{ provider: 'codex', event: {
+      eventType: 'error', title: 'Codex', body: 'unexpected status 404 Not Found: model does not exist'
+    } }])
+    expect(workStatusEvents.at(-1)).toMatchObject({ provider: 'codex', workStatus: 'error' })
+    await appendFile(path, failure)
+    await postHook(registration.hookUrl, { ...payload, hook_event_name: 'Stop' })
+    expect(notificationEvents).toHaveLength(1)
+    expect(workStatusEvents.at(-1)).toMatchObject({ workStatus: 'error' })
+    await postHook(registration.hookUrl, { ...payload, turn_id: 'next' })
+    await appendFile(path, event({ type: 'task_complete', turn_id: 'next', error: null }))
+    await postHook(registration.hookUrl, { ...payload, hook_event_name: 'Stop', last_assistant_message: 'Recovered' })
+    expect(notificationEvents).toHaveLength(2)
+    expect(notificationEvents.at(-1)).toMatchObject({ event: { eventType: 'completed', title: 'Codex' } })
+  })
+
+  it('stops Codex error observations when the run is replaced or retired with effects suppressed', async () => {
+    const path = join(root, 'rollout-stale-error.jsonl')
+    await writeFile(path, '')
+    let run = 'codex-old'
+    const server = new ProviderHookServer(root, sessions, { currentRunId: () => run,
+      onNotification: event => notificationEvents.push(event) })
+    await server.start()
+    try {
+      const registration = await server.registerCodexSession({ runId: run, sessionId: 'session-1' })
+      const payload = { hook_event_name: 'UserPromptSubmit', session_id: 'codex-stale-id', turn_id: 't', transcript_path: path }
+      await postHook(registration.hookUrl, payload)
+      run = 'replacement'
+      await appendFile(path, JSON.stringify({ type: 'event_msg', payload: { type: 'task_complete',
+        turn_id: 't', error: { message: 'stale' } } }) + '\n')
+      await new Promise(resolve => setTimeout(resolve, 70))
+      expect(notificationEvents).toEqual([])
+      run = 'codex-old'
+      registration.retire(1000, { suppressSideEffects: true })
+      await appendFile(path, '\n')
+      await new Promise(resolve => setTimeout(resolve, 70))
+      expect(notificationEvents).toEqual([])
+    } finally { await server.stop() }
+  })
+
   it('ignores all late Codex effects after a newer run owns the card', async () => {
     let currentRun = 'codex-old-run'
     const server = new ProviderHookServer(root, sessions, {

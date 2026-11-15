@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
+import { createServer, type ServerResponse } from 'node:http'
 import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, unlink, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -49,7 +50,7 @@ function assertIsolatedPath(pathValue: string): void {
   }
 }
 
-async function createIsolatedWorkspace(prefix: string, options?: { secondCommit?: boolean }): Promise<{
+async function createIsolatedWorkspace(prefix: string, options?: { secondCommit?: boolean; copyAuth?: boolean }): Promise<{
   rootDir: string
   repoDir: string
   zdotDir: string
@@ -94,8 +95,10 @@ async function createIsolatedWorkspace(prefix: string, options?: { secondCommit?
   const codexHome = join(rootDir, 'codex-home')
   await mkdir(codexHome)
   // HOME remains real; only Codex trust/config/session writes are isolated.
-  await copyFile(join(process.env.HOME!, '.codex/auth.json'), join(codexHome, 'auth.json'))
-  await chmod(join(codexHome, 'auth.json'), 0o600)
+  if (options?.copyAuth !== false) {
+    await copyFile(join(process.env.HOME!, '.codex/auth.json'), join(codexHome, 'auth.json'))
+    await chmod(join(codexHome, 'auth.json'), 0o600)
+  }
   const config = [
     `model = ${JSON.stringify(process.env.MATOU_CODEX_ACCEPTANCE_MODEL ?? 'gpt-6-astra')}`,
     'model_reasoning_effort = "medium"',
@@ -644,6 +647,98 @@ test.describe('Codex packaged acceptance — real CLI and explicit controlled fi
       await expect(paneForSession(h.page, sid).locator('.provider-restore-banner')).toHaveCount(0)
       await saveScreenshot(h.page, '08-restart-memory.png')
       await saveProof('restart.json', { sid, providerId, bindingAfter: readDbRows(h.dataDir, sid).bindings })
+    } finally { await dispose(h) }
+  })
+
+  test('known issues: a real Codex model error notifies once and marks the card error; startup upgrade is disabled', async () => {
+    const dirs = await createIsolatedWorkspace('model-error', { copyAuth: false })
+    let pending: ServerResponse | undefined
+    const endpoint = createServer((_request, response) => { pending = response })
+    await new Promise<void>(resolve => endpoint.listen(0, '127.0.0.1', resolve))
+    const address = endpoint.address() as { port: number }
+    const configPath = join(dirs.rootDir, 'codex-home/config.toml')
+    let config = (await readFile(configPath, 'utf8')).replace('model_provider = "openai"', 'model_provider = "local_probe"')
+      .replace('check_for_update_on_startup = false\n', '')
+    config += `\n[model_providers.local_probe]\nname = "Local failure probe"\nbase_url = "http://127.0.0.1:${address.port}/v1"\nrequires_openai_auth = false\nwire_api = "responses"\nrequest_max_retries = 0\nstream_max_retries = 0\n`
+    await writeFile(configPath, config)
+    // Neither fixture config nor wrapper disables updates: the product must.
+    const wrapper = join(dirs.rootDir, 'codex-wrapper')
+    await writeFile(wrapper, (await readFile(wrapper, 'utf8')).replace(' -c check_for_update_on_startup=false', ''))
+    await writeFile(join(dirs.rootDir, 'codex-home/version.json'), JSON.stringify({ latest_version: '999.0.0',
+      last_checked_at: new Date().toISOString(), dismissed_version: null }))
+    const h = await launchPackagedApp(dirs)
+    try {
+      const { sessionId: sid, surface, dagPage } = await launchCodex(h)
+      await sendTerminalLine(surface, 'Reply only MODEL_PROBE_READY.')
+      const peer = await createSiblingShellAndFocus(h.page, sid)
+      await expect.poll(() => Boolean(pending), { timeout: 20_000 }).toBe(true)
+      const body = JSON.stringify({ error: { message: 'The model matou-probe-missing does not exist',
+        type: 'invalid_request_error', code: 'model_not_found' } })
+      pending!.writeHead(404, { 'content-type': 'application/json' }); pending!.end(body)
+      const providerId = await waitForProviderSessionId(h.dataDir, sid)
+      await expect.poll(async () => (await rolloutEvents(h, providerId))
+        .some(e => e.type === 'event_msg' && e.payload?.type === 'task_complete' && e.payload.error), { timeout: 20_000 }).toBe(true)
+      await expect.poll(() => readCurrentWorkStatus(h.dataDir, sid)?.status, { timeout: 10_000 }).toBe('error')
+      await waitForDagNodeStatus(dagPage, sid, 'status-error')
+      await expect(paneForSession(h.page, sid)).toHaveClass(/has-notification/)
+      await h.page.getByRole('button', { name: '通知中心', exact: true }).click()
+      const center = h.page.getByRole('region', { name: '通知中心', exact: true })
+      await expect(center.locator('.notification-item')).toHaveCount(1)
+      await expect(center.locator('.notification-item__title')).toHaveText('Codex')
+      await expect(center).toContainText('matou-probe-missing does not exist')
+      await expect(surface.locator('.xterm-rows')).toContainText('unexpected status 404')
+      await expect(surface.locator('.xterm-rows')).not.toContainText('Update available')
+      await saveScreenshot(h.page, 'error-notification.png')
+      await saveScreenshot(dagPage, 'error-dag.png')
+      await saveProof('model-error-ui.json', { sid, peerId: peer.sessionId, providerId,
+        status: readCurrentWorkStatus(h.dataDir, sid)?.status,
+        failedTurn: (await rolloutEvents(h, providerId)).findLast(e => e.payload?.type === 'task_complete'),
+        notificationCount: await center.locator('.notification-item').count(),
+        notificationTitle: await center.locator('.notification-item__title').innerText(),
+        startupUpgradePrompt: false, wrapperDisablesUpdates: false, configDisablesUpdates: false })
+    } finally {
+      await dispose(h)
+      endpoint.closeAllConnections(); await new Promise<void>(resolve => endpoint.close(() => resolve()))
+    }
+  })
+
+  test('known issues: history_base ancestor appears in preview and search; missing parent is labeled', async () => {
+    const dirs = await createIsolatedWorkspace('ancestor-history', { copyAuth: false })
+    const folder = join(dirs.rootDir, 'codex-home/sessions/2026/11/15')
+    await mkdir(folder, { recursive: true })
+    const id = (n: number) => `01a1ddd6-4064-70e1-a006-${String(n).padStart(12, '0')}`
+    const message = (text: string, n: number) => ({ timestamp: `2026-11-15T12:00:0${n}Z`, type: 'event_msg',
+      payload: { type: 'item_completed', turn_id: `t-${n}`, item: { type: 'AgentMessage', id: `a-${n}`,
+        content: [{ text }], phase: 'final_answer' } } })
+    for (const n of [1, 2, 3]) {
+      const records = [{ type: 'session_meta', payload: { id: id(n), cwd: dirs.repoDir,
+        ...(n === 1 ? {} : { history_base: { thread_id: id(n === 2 ? 1 : 99) } }) } },
+        message(n === 1 ? 'ancestral-needle-913' : `current-child-${n}`, n)]
+      await writeFile(join(folder, `rollout-${id(n)}.jsonl`), records.map(r => JSON.stringify(r)).join('\n') + '\n')
+    }
+    const h = await launchPackagedApp(dirs)
+    try {
+      const sid = (await visibleFocusedSurface(h.page).getAttribute('data-session-id'))!
+      await paneForSession(h.page, sid).locator('.pane-load-session').click()
+      const loader = h.page.getByRole('dialog')
+      await loader.getByRole('tab', { name: 'Codex', exact: true }).click()
+      const sessionsSearch = loader.locator('[data-search-scope="sessions"] input')
+      await sessionsSearch.fill(id(2))
+      await expect(loader.locator('.session-loader-result-main')).toHaveCount(1)
+      await loader.locator('.session-loader-result-main').click()
+      await expect(loader.locator('.session-loader-events')).toContainText('ancestral-needle-913')
+      await expect(loader.locator('.session-loader-events')).toContainText('current-child-2')
+      await loader.locator('.session-loader-content-search-group input').fill('ancestral-needle-913')
+      await expect(loader.locator('.session-loader-events')).toContainText('ancestral-needle-913')
+      await saveScreenshot(h.page, 'ancestor-preview-search.png')
+      await loader.locator('.session-loader-content-search-group input').fill('')
+      await sessionsSearch.fill(id(3))
+      await loader.locator('.session-loader-result-main').click()
+      await expect(loader.locator('.session-loader-events')).toContainText('仅显示当前会话')
+      await expect(loader.locator('.session-loader-events')).toContainText('current-child-3')
+      await saveScreenshot(h.page, 'ancestor-missing-note.png')
+      await saveProof('ancestor-ui.json', { fixture: 'controlled rollout records; no inference or live Fork',
+        ancestorVisibleInChild: true, ancestorSearchVisible: true, missingAncestorLabeled: true })
     } finally { await dispose(h) }
   })
 

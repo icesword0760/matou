@@ -1770,7 +1770,7 @@ sleep 30
       await waitUntilAsync(async () => Boolean((await readFile(log, 'utf8').catch(() => '')).trim()))
 
       expect((await readFile(log, 'utf8')).trim()).toBe(
-        '-c model_context_window=512000 -c model_auto_compact_token_limit=460800 ' +
+        '-c check_for_update_on_startup=false -c model_context_window=512000 -c model_auto_compact_token_limit=460800 ' +
         '-c model_auto_compact_token_limit_scope="total" ' +
         '--model codex-session-frozen-model --dangerously-bypass-approvals-and-sandbox ' +
         '-c tui.resume_cwd="current" fork codex-source-context|https://bound-codex.example/v1|KEY_A'
@@ -2250,7 +2250,7 @@ sleep 30
         return Boolean(text.trim()) && text.trim().split('\n').length === 2
       })
       expect((await readFile(log, 'utf8')).trim().split('\n')[1])
-        .toBe('-c model_context_window=512000 -c model_auto_compact_token_limit=460800 -c model_auto_compact_token_limit_scope="total" --model gpt-team --ask-for-approval on-request --sandbox workspace-write|https://codex.example/v1|OPENAI_TOKEN')
+        .toBe('-c check_for_update_on_startup=false -c model_context_window=512000 -c model_auto_compact_token_limit=460800 -c model_auto_compact_token_limit_scope="total" --model gpt-team --ask-for-approval on-request --sandbox workspace-write|https://codex.example/v1|OPENAI_TOKEN')
     } finally {
       for (const sessionId of ['provider-config-codex-running', 'provider-config-codex-next']) {
         port.receive({ type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION, sessionId })
@@ -5829,7 +5829,8 @@ sleep 30
           : permissionMode === 'plan'
             ? ['--ask-for-approval', 'on-request', '--sandbox', 'read-only']
             : permissionMode === 'bypassPermissions' ? ['--dangerously-bypass-approvals-and-sandbox'] : ['--ask-for-approval', 'on-request', '--sandbox', 'workspace-write']
-        expect(args.slice(6, -2)).toEqual(expected)
+        expect(args.slice(0, 2)).toEqual(['-c', 'check_for_update_on_startup=false'])
+        expect(args.slice(8, -2)).toEqual(expected)
       }
     } finally {
       await sessions.shutdownAll()
@@ -6784,7 +6785,7 @@ sleep 30
       await waitUntil(() => sessions.get('codex-context-shell')?.profile === 'codex')
       await waitUntilAsync(async () => (await readFile(argumentsPath, 'utf8').catch(() => '')).length > 0)
       expect((await readFile(argumentsPath, 'utf8')).trim().split('\n')).toEqual([
-        '-c', 'model_context_window=512000', '-c', 'model_auto_compact_token_limit=460800',
+        '-c', 'check_for_update_on_startup=false', '-c', 'model_context_window=512000', '-c', 'model_auto_compact_token_limit=460800',
         '-c', 'model_auto_compact_token_limit_scope="total"',
         '--ask-for-approval', 'on-request', '--sandbox', 'workspace-write'
       ])

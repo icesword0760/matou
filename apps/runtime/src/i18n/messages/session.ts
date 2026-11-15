@@ -15,6 +15,9 @@ export const sessionZhCN = {
   codexSessionNotInWorkspace: 'Codex 会话不存在或不属于当前工作目录',
   codexSessionIdInvalid: 'Codex 会话标识必须是完整 UUID',
   codexSessionCorrupt: 'Codex 会话文件已损坏，无法读取',
+  codexHistoryMissing: '祖先历史不完整：祖先文件缺失或不可读，仅显示当前会话。',
+  codexHistoryCycle: '祖先历史存在循环，已停止回溯并显示可读取的历史。',
+  codexHistoryDepthLimit: '祖先历史超过 5 层，仅显示已读取的历史。',
   codexSessionPermissionDenied: '没有权限读取 Codex 会话目录或文件，请检查访问权限后重试',
 
   // provider-hook-server.ts
@@ -39,6 +42,9 @@ export const sessionEn: CatalogShape<typeof sessionZhCN> = {
   codexSessionNotInWorkspace: 'That Codex session does not exist or does not belong to this working directory',
   codexSessionIdInvalid: 'A Codex session id must be a full UUID',
   codexSessionCorrupt: 'The Codex session file is damaged and cannot be read',
+  codexHistoryMissing: 'Ancestor history is incomplete: an ancestor file is missing or unreadable. Showing this session only.',
+  codexHistoryCycle: 'Ancestor history contains a cycle. Showing the readable history without following the cycle.',
+  codexHistoryDepthLimit: 'Ancestor history exceeds 5 levels. Showing the history read within that limit.',
   codexSessionPermissionDenied: 'Cannot read the Codex session directory or file. Check access permissions and retry',
 
   hookStatusMessage: 'Confirming the session',
