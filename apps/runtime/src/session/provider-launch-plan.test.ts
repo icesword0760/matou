@@ -44,7 +44,7 @@ describe('PRD 04 provider launch plan', () => {
       args: [
         '-c', 'model_context_window=512000', '-c', 'model_auto_compact_token_limit=460800', '-c', 'model_auto_compact_token_limit_scope="total"',
         '-c', 'developer_instructions="第一行\\n第二行有 \\"引号\\" 和 \\\\ 路径"',
-        'resume', 'codex-session-1'
+        '--ask-for-approval', 'on-request', '--sandbox', 'workspace-write', 'resume', 'codex-session-1'
       ],
       resuming: true
     })
@@ -57,7 +57,7 @@ describe('PRD 04 provider launch plan', () => {
     expect(resolvePtyCommand({
       contextWindow: 512_000, profile: 'codex', executable: '/fixture/codex', model: 'gpt-team',
       providerSessionId: 'codex-session-1'
-    }).args).toEqual(['-c', 'model_context_window=512000', '-c', 'model_auto_compact_token_limit=460800', '-c', 'model_auto_compact_token_limit_scope="total"', '--model', 'gpt-team', 'resume', 'codex-session-1'])
+    }).args).toEqual(['-c', 'model_context_window=512000', '-c', 'model_auto_compact_token_limit=460800', '-c', 'model_auto_compact_token_limit_scope="total"', '--model', 'gpt-team', '--ask-for-approval', 'on-request', '--sandbox', 'workspace-write', 'resume', 'codex-session-1'])
   })
 
   it('opens an ordinary login Shell without any provider resume arguments', () => {
@@ -106,7 +106,7 @@ describe('PRD 04 provider launch plan', () => {
       args: [
         '-c', 'model_context_window=512000', '-c', 'model_auto_compact_token_limit=460800', '-c', 'model_auto_compact_token_limit_scope="total"',
         '-c', 'developer_instructions="Use mt."',
-        '-c', 'tui.resume_cwd="current"', 'fork', 'codex-source-1'
+        '--ask-for-approval', 'on-request', '--sandbox', 'workspace-write', '-c', 'tui.resume_cwd="current"', 'fork', 'codex-source-1'
       ],
       resuming: true
     })
@@ -120,7 +120,8 @@ describe('PRD 04 provider launch plan', () => {
     }).args).toEqual([
       '-c', 'model_context_window=512000', '-c', 'model_auto_compact_token_limit=460800', '-c', 'model_auto_compact_token_limit_scope="total"',
       '-c', `hooks=${codexHooksConfig}`,
-      '--dangerously-bypass-hook-trust'
+      '--dangerously-bypass-hook-trust',
+      '--ask-for-approval', 'on-request', '--sandbox', 'workspace-write'
     ])
   })
 
@@ -192,6 +193,9 @@ describe('PRD 04 provider launch plan', () => {
         '-c', 'developer_instructions="Use mt."',
         '--model', 'gpt-x'
       ]
+      if (permissionMode === undefined || permissionMode === 'default') {
+        args.push('--ask-for-approval', 'on-request', '--sandbox', 'workspace-write')
+      }
       if (permissionMode === 'bypassPermissions') {
         args.push('--dangerously-bypass-approvals-and-sandbox')
       }
@@ -279,9 +283,37 @@ describe('PRD 04 provider launch plan', () => {
   })
 })
 
-it('keeps the CLI default when no budget is configured and applies a selected maximum and effort independently', () => {
-  expect(resolvePtyCommand({ profile: 'codex', executable: 'codex' }).args).toEqual([])
+it('applies explicit Default permissions independently of context budget and effort', () => {
+  expect(resolvePtyCommand({ profile: 'codex', executable: 'codex' }).args).toEqual(['--ask-for-approval', 'on-request', '--sandbox', 'workspace-write'])
   expect(resolvePtyCommand({ profile: 'codex', executable: 'codex', contextWindow: 872000, reasoningEffort: 'high', providerSessionId: 'same', forkSession: true }).args).toEqual([
-    '-c', 'model_context_window=872000', '-c', 'model_auto_compact_token_limit=784800', '-c', 'model_auto_compact_token_limit_scope="total"', '-c', 'model_reasoning_effort="high"', '-c', 'tui.resume_cwd="current"', 'fork', 'same'
+    '-c', 'model_context_window=872000', '-c', 'model_auto_compact_token_limit=784800', '-c', 'model_auto_compact_token_limit_scope="total"', '-c', 'model_reasoning_effort="high"', '--ask-for-approval', 'on-request', '--sandbox', 'workspace-write', '-c', 'tui.resume_cwd="current"', 'fork', 'same'
   ])
+})
+
+
+describe('Codex Default explicitly replaces inherited permissions', () => {
+  it.each([
+    { kind: 'new', providerSessionId: undefined, forkSession: false },
+    { kind: 'resume', providerSessionId: 'source', forkSession: false },
+    { kind: 'fork', providerSessionId: 'source', forkSession: true }
+  ])('uses configured Default for $kind instead of native resume inheritance', ({ providerSessionId, forkSession }) => {
+    const command = resolvePtyCommand({ profile: 'codex', executable: 'codex', permissionMode: 'default',
+      ...(providerSessionId ? { providerSessionId } : {}), forkSession,
+      codexDefaultPermissions: { approvalPolicy: 'never', sandboxMode: 'read-only' } })
+    expect(command.args.slice(0, 4)).toEqual(['--ask-for-approval', 'never', '--sandbox', 'read-only'])
+    if (providerSessionId) expect(command.args.slice(-2)).toEqual([forkSession ? 'fork' : 'resume', 'source'])
+  })
+
+  it.each(['bypassPermissions', 'plan'])('replaces %s flags on Default resume and fork', previous => {
+    for (const forkSession of [false, true]) {
+      const input = { profile: 'codex' as const, executable: 'codex', providerSessionId: 'same', forkSession }
+      const prior = resolvePtyCommand({ ...input, permissionMode: previous }).args
+      const next = resolvePtyCommand({ ...input, permissionMode: 'default' }).args
+      expect(prior).not.toEqual(next)
+      expect(next.slice(0, 4)).toEqual(['--ask-for-approval', 'on-request', '--sandbox', 'workspace-write'])
+      expect(next).not.toContain('--dangerously-bypass-approvals-and-sandbox')
+      expect(next).not.toContain('read-only')
+      expect(next.slice(-2)).toEqual([forkSession ? 'fork' : 'resume', 'same'])
+    }
+  })
 })

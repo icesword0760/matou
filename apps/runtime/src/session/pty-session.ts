@@ -22,6 +22,7 @@ import { PtyOutputBatcher } from './pty-output-batcher'
 import { OutputByteLedger } from './output-byte-ledger'
 import { executableExists, resolveProviderCommandEnvironment } from './provider-command-environment'
 import { resolvePtyCommand } from './provider-launch-plan'
+import { readCodexDefaultPermissions } from './codex-default-permissions'
 import { shellIntegrationEnvironment } from './shell-integration'
 import { buildClaudeLaunch, type ClaudeLaunch } from '../model-router/claude-launch'
 import { SubscriptionLaunchError, type SubscriptionAccounts } from '../model-router/subscription-accounts'
@@ -253,8 +254,13 @@ export class PtySession {
       const codexDeveloperInstructions = profile === 'codex' && options.controlAssetRoot
         ? await readProviderInstructions(options.controlAssetRoot)
         : undefined
+      const codexDefaultPermissions = profile === 'codex' &&
+          (options.permissionMode === undefined || options.permissionMode === 'default')
+        ? await readCodexDefaultPermissions({ ...process.env, ...options.env })
+        : undefined
       const command = resolvePtyCommand({
         profile,
+        ...(codexDefaultPermissions ? { codexDefaultPermissions } : {}),
         ...(contextWindow ? { contextWindow } : {}),
         ...(options.reasoningEffort ? { reasoningEffort: options.reasoningEffort } : {}),
         executable: resolveExecutable(profile),

@@ -647,26 +647,30 @@ test.describe('Codex packaged acceptance — real CLI and explicit controlled fi
     } finally { await dispose(h) }
   })
 
-  test('closure PRD 5: Bypass and Default confirm, respawn and retain a real new-turn memory', async () => {
-    const dirs = await createIsolatedWorkspace('modes-closure')
+  test('closure PRD 5: Default restores user permissions after Bypass and Plan', async () => {
+    const dirs = await createIsolatedWorkspace('default-fix')
+    const configPath = join(dirs.rootDir, 'codex-home/config.toml')
+    await writeFile(configPath, (await readFile(configPath, 'utf8')).replace('sandbox_mode = "read-only"', 'sandbox_mode = "workspace-write"'))
     const h = await launchPackagedApp(dirs)
     try {
       const { sessionId: sid, surface } = await launchCodex(h)
       await completeTurn(h, sid, surface, 'Remember mode codeword river-slate-842. Reply only MODES_READY.', /MODES_READY/)
       const providerId = await waitForProviderSessionId(h.dataDir, sid)
       const modes = []
-      for (const mode of ['Bypass Permissions', 'Default']) {
+      for (const [index, mode] of ['Bypass Permissions', 'Default', 'Plan Mode', 'Default'].entries()) {
         const processChange = await changeMode(h, sid, mode)
         await completeTurn(h, sid, paneForSession(h.page, sid).locator('.terminal-surface'),
           'Which mode codeword did I ask you to remember? Reply only that codeword.', /river-slate-842/)
         expect(await waitForProviderSessionId(h.dataDir, sid)).toBe(providerId)
         const context = (await rolloutEvents(h, providerId)).findLast((e) => e.type === 'turn_context')?.payload
-        const expectedSandbox = mode === 'Bypass Permissions' ? 'danger-full-access' : 'read-only'
+        modes.push({ mode, ...processChange, sandbox: context?.sandbox_policy?.type, approval: context?.approval_policy })
+        await saveProof('default-fix-modes.json', { sid, providerId,
+          configuredDefault: { approval: 'on-request', sandbox: 'workspace-write' }, modes, turns: h.turnProofs })
+        await saveScreenshot(h.page, `default-fix-${index + 1}-${mode.replaceAll(' ', '-').toLowerCase()}.png`)
+        const expectedSandbox = mode === 'Bypass Permissions' ? 'danger-full-access'
+          : mode === 'Plan Mode' ? 'read-only' : 'workspace-write'
         expect(context?.sandbox_policy?.type).toBe(expectedSandbox)
         expect(context?.approval_policy).toBe(mode === 'Bypass Permissions' ? 'never' : 'on-request')
-        modes.push({ mode, ...processChange, sandbox: context.sandbox_policy.type, approval: context.approval_policy })
-        await saveProof('closure-modes.json', { sid, providerId, modes, turns: h.turnProofs })
-        await saveScreenshot(h.page, mode === 'Bypass Permissions' ? 'closure-05-bypass.png' : 'closure-05-default.png')
       }
     } finally { await dispose(h) }
   })

@@ -1,5 +1,6 @@
 import { getAgentManifest, type SessionRunProfile } from '@matou/domain'
 import { join } from 'node:path'
+import { CODEX_DEFAULT_PERMISSIONS, type CodexDefaultPermissions } from './codex-default-permissions'
 
 export interface PtyCommandInput {
   profile: SessionRunProfile
@@ -11,6 +12,7 @@ export interface PtyCommandInput {
   codexHooksConfig?: string
   controlAssetRoot?: string
   codexDeveloperInstructions?: string
+  codexDefaultPermissions?: CodexDefaultPermissions
   contextWindow?: number
   reasoningEffort?: string
   model?: string
@@ -67,7 +69,10 @@ export function resolvePtyCommand(input: PtyCommandInput): PtyCommand {
     const permissionFlags = manifest.launch.permissionFlags[
       input.permissionMode as keyof typeof manifest.launch.permissionFlags
     ]
-    if (permissionFlags) args.push(...permissionFlags)
+    if (input.permissionMode === undefined || input.permissionMode === 'default') {
+      const defaults = input.codexDefaultPermissions ?? CODEX_DEFAULT_PERMISSIONS
+      args.push('--ask-for-approval', defaults.approvalPolicy, '--sandbox', defaults.sandboxMode)
+    } else if (permissionFlags) args.push(...permissionFlags)
     // Matou's Fork dialog already chose the execution directory. Do not let
     // the CLI wait behind the progress overlay for the same choice again.
     if (identity && input.forkSession) args.push('-c', 'tui.resume_cwd="current"')

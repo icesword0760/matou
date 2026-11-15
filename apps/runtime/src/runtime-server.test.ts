@@ -2200,6 +2200,8 @@ sleep 30
     process.env.MATOU_CODEX_COMMAND = executable
     registerSession(database, 'provider-config-codex-running', 'codex')
     registerSession(database, 'provider-config-codex-next', 'codex')
+    const previousCodexHome = process.env.CODEX_HOME
+    process.env.CODEX_HOME = join(root, 'missing-codex-default-config')
     try {
       port.receive({
         type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
@@ -2248,13 +2250,14 @@ sleep 30
         return Boolean(text.trim()) && text.trim().split('\n').length === 2
       })
       expect((await readFile(log, 'utf8')).trim().split('\n')[1])
-        .toBe('-c model_context_window=512000 -c model_auto_compact_token_limit=460800 -c model_auto_compact_token_limit_scope="total" --model gpt-team|https://codex.example/v1|OPENAI_TOKEN')
+        .toBe('-c model_context_window=512000 -c model_auto_compact_token_limit=460800 -c model_auto_compact_token_limit_scope="total" --model gpt-team --ask-for-approval on-request --sandbox workspace-write|https://codex.example/v1|OPENAI_TOKEN')
     } finally {
       for (const sessionId of ['provider-config-codex-running', 'provider-config-codex-next']) {
         port.receive({ type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION, sessionId })
       }
       await settle()
       restoreEnv('MATOU_CODEX_COMMAND', previousCommand)
+      restoreEnv('CODEX_HOME', previousCodexHome)
     }
   })
 
@@ -5801,6 +5804,8 @@ sleep 30
     ) VALUES (?, ?, 'codex', ?, 'available', ?, 1, 1, 1)`,
     'codex-mode-binding', sid, '11111111-1111-4111-8111-111111111111', JSON.stringify({ permissionMode: 'default' }))
     const modeServer = new RuntimeServer(modePort, root, database, undefined, undefined, sessions)
+    const previousCodexHome = process.env.CODEX_HOME
+    process.env.CODEX_HOME = join(root, 'missing-codex-default-config')
     try {
       modePort.receive({ type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'codex-mode-renderer' })
       modePort.receive({ type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION, sessionId: sid,
@@ -5823,7 +5828,7 @@ sleep 30
           ? ['--ask-for-approval', 'on-request', '--sandbox', 'workspace-write']
           : permissionMode === 'plan'
             ? ['--ask-for-approval', 'on-request', '--sandbox', 'read-only']
-            : permissionMode === 'bypassPermissions' ? ['--dangerously-bypass-approvals-and-sandbox'] : []
+            : permissionMode === 'bypassPermissions' ? ['--dangerously-bypass-approvals-and-sandbox'] : ['--ask-for-approval', 'on-request', '--sandbox', 'workspace-write']
         expect(args.slice(6, -2)).toEqual(expected)
       }
     } finally {
@@ -5831,6 +5836,7 @@ sleep 30
       modeServer.close()
       restoreEnv('MATOU_CODEX_COMMAND', previousCommand)
       restoreEnv('MATOU_TEST_ARGUMENT_FILE', previousArguments)
+      restoreEnv('CODEX_HOME', previousCodexHome)
     }
   })
 
@@ -6762,6 +6768,8 @@ sleep 30
     const sessions = createTestSessionRegistry()
     const port = new MockPort()
     const managed = new RuntimeServer(port, root, database, undefined, undefined, sessions)
+    const previousCodexHome = process.env.CODEX_HOME
+    process.env.CODEX_HOME = join(root, 'missing-codex-default-config')
     try {
       registerSession(database, 'codex-context-shell', 'shell')
       port.receive({ type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'codex-context' })
@@ -6777,7 +6785,8 @@ sleep 30
       await waitUntilAsync(async () => (await readFile(argumentsPath, 'utf8').catch(() => '')).length > 0)
       expect((await readFile(argumentsPath, 'utf8')).trim().split('\n')).toEqual([
         '-c', 'model_context_window=512000', '-c', 'model_auto_compact_token_limit=460800',
-        '-c', 'model_auto_compact_token_limit_scope="total"'
+        '-c', 'model_auto_compact_token_limit_scope="total"',
+        '--ask-for-approval', 'on-request', '--sandbox', 'workspace-write'
       ])
       expect(database.get<{ kind: string }>('SELECT kind FROM sessions WHERE id = ?', 'codex-context-shell')?.kind).toBe('codex')
       expect(port.sent.filter((message) => message.type === 'events.batch').flatMap((message) => message.events))
@@ -6787,6 +6796,7 @@ sleep 30
       await sessions.shutdownAll()
       managed.close()
       restoreEnv('MATOU_CODEX_COMMAND', previous)
+      restoreEnv('CODEX_HOME', previousCodexHome)
     }
   })
 
