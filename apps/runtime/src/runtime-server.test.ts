@@ -8989,6 +8989,8 @@ if (process.argv.includes('--dump-config')) {
       sceneId: `scene-${id}`, priority: 'active-session' as const, enqueueSequence: 1 }
     const launch = () => active!.ensureSessionRunning(job).then(() => 'recovered', error => String(error))
     const observer = async () => {
+      // Bound fixture process startup separately from the resume-identity deadline.
+      // Full-suite PTY load can exceed the generic two-second helper limit.
       await waitUntil(() => registry.has(id), 5000)
       let args: string[] = [], patch = '', runId = ''
       await waitUntilAsync(async () => {
@@ -9033,6 +9035,7 @@ if (process.argv.includes('--dump-config')) {
         expect(registry.has(id)).toBe(false)
         if (outcome !== 'mismatch') {
           if (outcome === 'exit-retry') {
+            // A failed early exit must release the queue and leave the UI retryable.
             expect(database.get<{ work_status: string }>('SELECT work_status FROM sessions WHERE id = ?', id)?.work_status).toBe('error')
             await writeFile(argsFile + '.retry', '')
           }
