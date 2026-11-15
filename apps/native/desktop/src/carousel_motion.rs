@@ -2,6 +2,7 @@
 
 #[derive(Clone, Copy, Debug)]
 pub enum Curve {
+    Ease,
     Width,
     Lift,
     Edge,
@@ -18,7 +19,7 @@ impl Curve {
 
         // Both curves have the same monotonically increasing X coordinate.
         // Solve X(t) for elapsed time before evaluating the distinct Y curves.
-        let x_control = if matches!(self, Self::Edge) {
+        let x_control = if matches!(self, Self::Edge | Self::Ease) {
             0.25
         } else {
             0.2
@@ -36,6 +37,7 @@ impl Curve {
         let y1 = match self {
             Self::Width | Self::Edge => 0.8,
             Self::Lift => 0.82,
+            Self::Ease => 0.1,
         };
         cubic_coordinate((low + high) * 0.5, y1, 1.0)
     }

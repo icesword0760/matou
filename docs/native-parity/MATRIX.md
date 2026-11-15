@@ -226,3 +226,13 @@ I01–I17 refer to artifacts/native-parity/native/evidence, whose original-refer
 
 
 N02ac invalid-startup follow-up: J02 original AX and J07 native visible rename field both read `COPY_WHILE_INVALID` after selecting/copying a disabled terminal. J06 was an unsuccessful initial attempt and is not acceptance. Frozen original J03 fails startup on unavailable root; J04 preserves failure after root returns; J05 succeeds only after retry. Native J08–J11 establish the same sequence, and final J12/J13 include corrected card rounding/footer plus direct input after retry. Real-zsh workspace_bridge now covers failed retry, no auto-start even after navigating away/back, same-session new run and dropping blocked inputs. This closes these specific behavior gaps; exact failure surface pixels, complete loading water animation, disabled IME and Windows behavior remain open. Source/binary binding: manual-recovery-build.json.
+
+
+#### A01/A02 workspace drag follow-up (N02ac; still in progress)
+
+| Scene | Frozen baseline | Native evidence | Remaining |
+| --- | --- | --- | --- |
+| Pinned workspace title drag | TaskSidebar parent section draggable, source .6 opacity/.99 scale, 140ms ease, retained last target; K01/K07 attempts | Final K15 + workspace-drag-order.json persist title-initiated reorder; previous order survives restart | Reference real drop did not complete reliably; ghost, scale, intermediate trajectory/timing and full pixel comparison open |
+| Invalid drop / cancellation | Source dragend clears state | Final K12 shows terminal input after outside-sidebar drop; source IDs reset when GPUI has no active drag | Esc-mid-drag, subsequent pinned-task drag and clipped-target path are code-reviewed only; K13 used unpinned tasks |
+| Ordinary buttons after title-event change | Existing button focus/activation; source active header transparent | K14 menu opens; normal buttons focus then stop, only title bubbles | Full focus matrix and menu pixels open |
+| Disabled-path IME | J02 copy accepted separately; OS IME behavior required | Input-method shortcuts did not expose candidate window | No IME acceptance; continue real candidate-window verification |
