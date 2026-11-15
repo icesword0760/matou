@@ -1,0 +1,8 @@
+
+ RUN  v4.1.11 /Users/icesword/Documents/AIProjects/matou-multi-agent-codex/apps/runtime
+
+
+ Test Files  3 passed (3)
+      Tests  58 passed (58)
+   Start at  20:59:12
+   Duration  7.24s (transform 237ms, setup 0ms, import 384ms, tests 6.66s, environment 0ms)

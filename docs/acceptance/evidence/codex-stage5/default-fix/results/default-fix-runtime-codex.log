@@ -1,0 +1,95 @@
+
+ RUN  v4.1.11 /Users/icesword/Documents/AIProjects/matou-multi-agent-codex/apps/runtime
+
+(node:92308) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+stderr | src/runtime-server.test.ts > RuntimeServer domain RPC > keeps a running Codex session and applies a global provider to the next launch
+[session.run-exit] database is closed
+
+stderr | src/runtime-server.test.ts > RuntimeServer domain RPC > promotes a typed Codex command to a managed session with the 512K budget
+[session.work-status] Session codex-context-shell does not exist in a canvas
+
+ ❯ src/runtime-server.test.ts (161 tests | 3 failed | 144 skipped) 7446ms
+     × keeps a running Codex session and applies a global provider to the next launch 569ms
+     × respawns every Codex HUD permission change with the same identity even when the UI requests an in-place switch 895ms
+     × promotes a typed Codex command to a managed session with the 512K budget 362ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 3 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/runtime-server.test.ts > RuntimeServer domain RPC > keeps a running Codex session and applies a global provider to the next launch
+AssertionError: expected '-c model_context_window=512000 -c mod…' to be '-c model_context_window=512000 -c mod…' // Object.is equality
+
+Expected: "-c model_context_window=512000 -c model_auto_compact_token_limit=460800 -c model_auto_compact_token_limit_scope="total" --model gpt-team|https://codex.example/v1|OPENAI_TOKEN"
+Received: "-c model_context_window=512000 -c model_auto_compact_token_limit=460800 -c model_auto_compact_token_limit_scope="total" --model gpt-team --ask-for-approval on-request --sandbox danger-full-access|https://codex.example/v1|OPENAI_TOKEN"
+
+ ❯ src/runtime-server.test.ts:2251:10
+    2249|       })
+    2250|       expect((await readFile(log, 'utf8')).trim().split('\n')[1])
+    2251|         .toBe('-c model_context_window=512000 -c model_auto_compact_to…
+       |          ^
+    2252|     } finally {
+    2253|       for (const sessionId of ['provider-config-codex-running', 'provi…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/3]⎯
+
+ FAIL  src/runtime-server.test.ts > RuntimeServer domain RPC > respawns every Codex HUD permission change with the same identity even when the UI requests an in-place switch
+AssertionError: expected [ '--ask-for-approval', …(3) ] to deeply equal []
+
+- Expected
++ Received
+
+- []
++ [
++   "--ask-for-approval",
++   "on-request",
++   "--sandbox",
++   "danger-full-access",
++ ]
+
+ ❯ src/runtime-server.test.ts:5827:35
+    5825|             ? ['--ask-for-approval', 'on-request', '--sandbox', 'read-…
+    5826|             : permissionMode === 'bypassPermissions' ? ['--dangerously…
+    5827|         expect(args.slice(6, -2)).toEqual(expected)
+       |                                   ^
+    5828|       }
+    5829|     } finally {
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/3]⎯
+
+ FAIL  src/runtime-server.test.ts > RuntimeServer domain RPC > promotes a typed Codex command to a managed session with the 512K budget
+AssertionError: expected [ '-c', …(9) ] to deeply equal [ '-c', …(5) ]
+
+- Expected
++ Received
+
+@@ -3,6 +3,10 @@
+    "model_context_window=512000",
+    "-c",
+    "model_auto_compact_token_limit=460800",
+    "-c",
+    "model_auto_compact_token_limit_scope=\"total\"",
++   "--ask-for-approval",
++   "on-request",
++   "--sandbox",
++   "danger-full-access",
+  ]
+
+ ❯ src/runtime-server.test.ts:6778:74
+    6776|       await waitUntil(() => sessions.get('codex-context-shell')?.profi…
+    6777|       await waitUntilAsync(async () => (await readFile(argumentsPath, …
+    6778|       expect((await readFile(argumentsPath, 'utf8')).trim().split('\n'…
+       |                                                                          ^
+    6779|         '-c', 'model_context_window=512000', '-c', 'model_auto_compact…
+    6780|         '-c', 'model_auto_compact_token_limit_scope="total"'
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/3]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  3 failed | 14 passed | 144 skipped (161)
+   Start at  21:01:01
+   Duration  8.48s (transform 741ms, setup 0ms, import 963ms, tests 7.45s, environment 0ms)
+
+undefined
+/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/apps/runtime:
+ ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL  Command failed with exit code 1: vitest run src/runtime-server.test.ts --maxWorkers=1 -t Codex|codex
