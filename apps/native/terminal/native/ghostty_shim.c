@@ -7,6 +7,7 @@ typedef void (*MatouHold)(void *, bool);
 typedef void (*MatouRow)(void *, bool, bool);
 typedef void (*MatouCell)(void *, const uint8_t *, size_t,
                           uint32_t, uint32_t, uint32_t, uint16_t, uint8_t);
+typedef void (*MatouHistoryCell)(void *, const uint32_t *, size_t, uint8_t);
 
 typedef struct {
     size_t history_lines;
@@ -183,6 +184,11 @@ static uint32_t style_color(GhosttyStyleColor color) {
     }
 }
 
+static uint8_t cell_width(GhosttyCellWide wide) {
+    return wide == GHOSTTY_CELL_WIDE_WIDE ? 2
+        : wide == GHOSTTY_CELL_WIDE_SPACER_TAIL ? 0 : 1;
+}
+
 static GhosttyResult emit_cell(GhosttyRenderStateRowCells cells, MatouCell emit, void *userdata) {
     GhosttyCell cell;
     GhosttyCellWide wide;
@@ -205,8 +211,7 @@ static GhosttyResult emit_cell(GhosttyRenderStateRowCells cells, MatouCell emit,
         TRY(ghostty_cell_get(cell, GHOSTTY_CELL_DATA_COLOR_RGB, &color));
         bg = MATOU_RGB | from_rgb(color);
     }
-    const uint8_t width = wide == GHOSTTY_CELL_WIDE_WIDE ? 2
-        : wide == GHOSTTY_CELL_WIDE_SPACER_TAIL ? 0 : 1;
+    const uint8_t width = cell_width(wide);
 
     uint8_t storage[128];
     GhosttyBuffer text = { .ptr = storage, .cap = sizeof(storage) };
@@ -227,6 +232,58 @@ static GhosttyResult emit_cell(GhosttyRenderStateRowCells cells, MatouCell emit,
         userdata, text.ptr, text.len, fg, bg, underline_color, style.flags, width);
     if (text.ptr != storage) free(text.ptr);
     return status;
+}
+
+static GhosttyResult emit_history_cell(const GhosttyGridRef *ref, MatouHistoryCell emit,
+                                       void *userdata) {
+    GhosttyCell cell;
+    GhosttyCellWide wide;
+    bool has_text;
+    TRY(ghostty_grid_ref_cell(ref, &cell));
+    TRY(ghostty_cell_get(cell, GHOSTTY_CELL_DATA_WIDE, &wide));
+    TRY(ghostty_cell_get(cell, GHOSTTY_CELL_DATA_HAS_TEXT, &has_text));
+    const uint8_t width = cell_width(wide);
+
+    uint32_t storage[8];
+    uint32_t *text = storage;
+    size_t len = 0;
+    GhosttyResult status = GHOSTTY_SUCCESS;
+    if (width != 0 && has_text) {
+        status = ghostty_grid_ref_graphemes(ref, text, sizeof(storage) / sizeof(storage[0]), &len);
+        if (status == GHOSTTY_OUT_OF_SPACE) {
+            if (len > SIZE_MAX / sizeof(*text)) return GHOSTTY_OUT_OF_MEMORY;
+            text = malloc(len * sizeof(*text));
+            if (text == NULL) return GHOSTTY_OUT_OF_MEMORY;
+            status = ghostty_grid_ref_graphemes(ref, text, len, &len);
+        }
+    }
+    if (status == GHOSTTY_SUCCESS) emit(userdata, text, len, width);
+    if (text != storage) free(text);
+    return status;
+}
+
+int matou_vt_history_row(const MatouVt *vt, size_t row, bool *wrap, bool *continuation,
+                          MatouHistoryCell emit, void *userdata) {
+    if (row > UINT32_MAX) return GHOSTTY_INVALID_VALUE;
+    uint16_t cols;
+    TRY(ghostty_terminal_get(vt->terminal, GHOSTTY_TERMINAL_DATA_COLS, &cols));
+    GhosttyPoint point = {
+        .tag = GHOSTTY_POINT_TAG_SCREEN,
+        .value.coordinate = { .x = 0, .y = (uint32_t)row },
+    };
+    GhosttyGridRef ref = {0};
+    GhosttyRow content;
+    TRY(ghostty_terminal_grid_ref(vt->terminal, point, &ref));
+    TRY(ghostty_grid_ref_row(&ref, &content));
+    TRY(ghostty_row_get(content, GHOSTTY_ROW_DATA_WRAP, wrap));
+    TRY(ghostty_row_get(content, GHOSTTY_ROW_DATA_WRAP_CONTINUATION, continuation));
+    TRY(emit_history_cell(&ref, emit, userdata));
+    for (uint16_t col = 1; col < cols; col++) {
+        point.value.coordinate.x = col;
+        TRY(ghostty_terminal_grid_ref(vt->terminal, point, &ref));
+        TRY(emit_history_cell(&ref, emit, userdata));
+    }
+    return GHOSTTY_SUCCESS;
 }
 
 int matou_vt_screen(MatouVt *vt, MatouScreen *screen, MatouRow emit_row,
