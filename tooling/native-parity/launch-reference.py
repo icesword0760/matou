@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 """Run the frozen product with isolated test data; never install or update it."""
-import argparse, json, os, plistlib, subprocess, tempfile
+import argparse, json, os, plistlib, subprocess, tempfile, time
 from pathlib import Path
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--asar-module', help='Existing @electron/asar lib/asar.js; needed on first preparation')
+parser.add_argument('--debug-port', type=int, help='Optional loopback CDP port for a separate performance diagnostic run')
+parser.add_argument('--locale', choices=['zh-CN', 'en-US', 'system'], default='zh-CN',
+                    help='Use system to test the product language preference without an environment override')
 args = parser.parse_args()
+if args.debug_port is not None and not 1024 <= args.debug_port <= 65535:
+    parser.error('--debug-port must be between 1024 and 65535')
 root = Path(__file__).resolve().parents[2]
 base = root / 'artifacts/native-parity'
 source = base / 'baseline/MatouReference.app'
@@ -38,7 +43,9 @@ env = {**os.environ, 'HOME': str(paths['home']),
        'MATOU_DEFAULT_WORKSPACE': str(paths['workspace']),
        'MATOU_DISABLE_AUTO_UPDATE': '1',
        'MATOU_UPDATE_BASE_URL': 'http://127.0.0.1:9/native-parity-disabled',
-       'MATOU_LOCALE': 'zh-CN'}
+       'MATOU_LOCALE': args.locale}
+if args.locale == 'system':
+    env.pop('MATOU_LOCALE', None)
 # Ordinary product behavior, not E2E mock/diagnostic/close overrides.
 for name in list(env):
     if name.startswith('MATOU_E2E') or name in ['ELECTRON_RUN_AS_NODE', 'MATOU_RUNTIME_ENTRY']:
@@ -55,12 +62,20 @@ if not (run / 'home-harness.json').exists():
     plist.write_bytes(plistlib.dumps(info))
     subprocess.run(['codesign', '--force', '--sign', '-', str(app)], check=True)
 info = plistlib.loads((app / 'Contents/Info.plist').read_bytes())
+command = [str(app / 'Contents/MacOS' / info['CFBundleExecutable']),
+           '--user-data-dir=' + str(paths['user-data'])]
+if args.debug_port is not None:
+    command.extend(['--remote-debugging-address=127.0.0.1',
+                    '--remote-debugging-port=' + str(args.debug_port)])
 with (run / 'app.log').open('ab') as log:
-    proc = subprocess.Popen([str(app / 'Contents/MacOS' / info['CFBundleExecutable']),
-                             '--user-data-dir=' + str(paths['user-data'])],
+    started_monotonic_ns = time.monotonic_ns()
+    started_unix_ns = time.time_ns()
+    proc = subprocess.Popen(command,
                             cwd=paths['workspace'], env=env,
                             stdout=log, stderr=log, start_new_session=True)
 record = {'pid': proc.pid, 'app': str(app), 'paths': {k: str(v) for k,v in paths.items()},
+          'started_monotonic_ns': started_monotonic_ns, 'started_unix_ns': started_unix_ns,
+          'debug_port': args.debug_port, 'locale_override': env.get('MATOU_LOCALE'),
           'baseline': str(source), 'product_logic_modified': False,
           'home_path_harness': str(run / 'home-harness.json'),
           'bundle_metadata_changes': ['CFBundleIdentifier', 'CFBundleDisplayName', 'ad-hoc signing']}
