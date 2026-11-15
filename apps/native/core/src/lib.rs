@@ -1,7 +1,11 @@
+pub mod backup;
 pub mod durability;
 pub mod hierarchy;
 pub mod journal;
 pub mod ownership;
 pub mod pty;
+pub mod recovery_marker;
+pub mod sessions;
 pub mod shell_history;
+pub mod startup;
 pub mod storage;
