@@ -23,7 +23,7 @@ use matou_native_runtime::{
     session::Session,
     worker::{SessionWorker, WorkerCommand, WorkerEvent},
 };
-use matou_native_terminal::{TerminalOptions, Theme};
+use matou_native_terminal::{GridPoint, SelectionAction, SelectionMode, TerminalOptions, Theme};
 
 fn shell(root: &Path, id: &str, segment_bytes: u64) -> Result<Session> {
     Session::launch(shell_options(root, id, segment_bytes)?)
@@ -480,6 +480,21 @@ fn storage_fault_keeps_saved_scrollback_readable_until_retry() -> Result<()> {
     let (saved, modes) = session.view()?;
     assert!(saved.history_lines > 40);
     assert!(!modes.application_cursor_keys);
+    let select_saved_output = |session: &mut Session| -> Result<()> {
+        let view = session.screen()?;
+        let last_row = usize::try_from(view.scrollbar.total)? - 1;
+        session.selection_action(SelectionAction::Begin {
+            mode: SelectionMode::Line,
+            row: 0,
+            x: 0.,
+        })?;
+        session.selection_action(SelectionAction::SetEnd(GridPoint {
+            row: last_row,
+            col: view.cols,
+        }))
+    };
+    select_saved_output(&mut session)?;
+    assert!(session.selected_text()?.contains("SAVED_HISTORY_001"));
 
     let range = root.path().join("journal/saved-scroll/range-index.json");
     if range.exists() {
@@ -489,10 +504,24 @@ fn storage_fault_keeps_saved_scrollback_readable_until_retry() -> Result<()> {
     let command = r#"printf '\033[?1h%4096s\nPERSISTED_AFTER_%s\n' '' RETRY; read -r answer"#;
     let marker = "PERSISTED_AFTER_RETRY";
     input(&mut session, command)?;
+    assert_eq!(session.selection_range()?, None);
     collect(&mut session, &mut events, |_, session| {
         session.durability_state() == State::Paused
     })?;
     assert!(!output_has(&events, marker));
+    select_saved_output(&mut session)?;
+    let paused_selection = session.selection_range()?;
+    let paused_copy = session.selected_text()?;
+    assert!(paused_copy.contains("FROM_PREVIOUS_RUN"));
+    assert!(paused_copy.contains("SAVED_HISTORY_080"));
+    assert!(!paused_copy.contains(marker));
+    assert!(
+        session
+            .write(b"input rejected while storage is paused\r")
+            .is_err()
+    );
+    assert_eq!(session.selection_range()?, paused_selection);
+    assert_eq!(session.selected_text()?, paused_copy);
 
     // Grid sizes are queued behind the failed output. A pixel-only update must
     // still resize cells in the current saved view without exposing those grids.
@@ -571,6 +600,12 @@ fn storage_fault_keeps_saved_scrollback_readable_until_retry() -> Result<()> {
         .map(|cell| cell.text.as_str())
         .collect();
     assert_eq!(text.matches(marker).count(), 1);
+    select_saved_output(&mut session)?;
+    let recovered_copy = session.selected_text()?;
+    assert_eq!(recovered_copy.matches(marker).count(), 1);
+    assert!(
+        recovered_copy.find("SAVED_HISTORY_080").unwrap() < recovered_copy.find(marker).unwrap()
+    );
     session.shutdown()?;
     Ok(())
 }

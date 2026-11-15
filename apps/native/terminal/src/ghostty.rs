@@ -1,6 +1,6 @@
 use std::{
     ffi::{c_int, c_void},
-    mem::MaybeUninit,
+    mem::{self, MaybeUninit},
     ptr::{self, NonNull},
     slice, str,
     time::{Duration, Instant},
@@ -9,8 +9,8 @@ use std::{
 use anyhow::{Context, Result, bail, ensure};
 
 use crate::{
-    Cell, Color, CursorStyle, HistoryCell, HistoryRow, InputModes, RowMetadata, Screen, Scrollbar,
-    Theme,
+    Cell, Color, CursorStyle, GridSelection, HistoryCell, HistoryRow, InputModes, RowMetadata,
+    Screen, Scrollbar, SelectionAction, SelectionState, Theme,
 };
 
 const SYNC_TIMEOUT: Duration = Duration::from_millis(150);
@@ -150,6 +150,9 @@ pub struct Terminal {
     // Owned Box<Effects> allocation borrowed synchronously by the C callbacks.
     // Using a raw owner lets the allocation keep the same provenance on moves.
     effects: NonNull<Effects>,
+    selection: SelectionState,
+    last_selection_epoch: usize,
+    last_history_trim: usize,
 }
 
 impl Terminal {
@@ -184,7 +187,12 @@ impl Terminal {
         let mut terminal = Self {
             handle: handle?,
             effects,
+            selection: SelectionState::default(),
+            last_selection_epoch: 0,
+            last_history_trim: 0,
         };
+        terminal.last_selection_epoch = terminal.selection_epoch()?;
+        terminal.last_history_trim = terminal.history_trimmed_rows()?;
         terminal.set_theme(options.theme)?;
         Ok(terminal)
     }
@@ -202,6 +210,7 @@ impl Terminal {
         cell_height_px: u32,
     ) -> Result<()> {
         check_dimensions(cols, rows, cell_width_px, cell_height_px)?;
+        self.reconcile_selection()?;
         check(
             unsafe {
                 matou_vt_resize(
@@ -213,7 +222,8 @@ impl Terminal {
                 )
             },
             "resize",
-        )
+        )?;
+        self.reconcile_selection()
     }
 
     pub fn set_theme(&mut self, theme: Theme) -> Result<()> {
@@ -350,6 +360,62 @@ impl Terminal {
             "read history trim count",
         )?;
         Ok(rows)
+    }
+
+    pub fn selection_action(&mut self, action: SelectionAction) -> Result<()> {
+        self.reconcile_selection()?;
+        match action {
+            SelectionAction::Begin { mode, row, x } => {
+                self.update_selection(|selection, terminal| selection.begin(terminal, mode, row, x))
+            }
+            SelectionAction::Extend { row, x } => {
+                self.update_selection(|selection, terminal| selection.extend(terminal, row, x))
+            }
+            SelectionAction::SetEnd(end) => {
+                self.selection.set_end(end);
+                Ok(())
+            }
+            SelectionAction::Clear => {
+                self.selection.clear();
+                Ok(())
+            }
+        }
+    }
+
+    pub fn selection_range(&mut self) -> Result<Option<GridSelection>> {
+        self.reconcile_selection()?;
+        let cols = self.screen()?.cols;
+        Ok(self.selection.range(cols))
+    }
+
+    pub fn selected_text(&mut self) -> Result<String> {
+        match self.selection_range()? {
+            Some(range) => range.text(self),
+            None => Ok(String::new()),
+        }
+    }
+
+    fn update_selection(
+        &mut self,
+        update: impl FnOnce(&mut SelectionState, &mut Self) -> Result<()>,
+    ) -> Result<()> {
+        let mut selection = mem::take(&mut self.selection);
+        let result = update(&mut selection, self);
+        self.selection = selection;
+        result
+    }
+
+    fn reconcile_selection(&mut self) -> Result<()> {
+        let epoch = self.selection_epoch()?;
+        let trimmed = self.history_trimmed_rows()?;
+        if epoch != self.last_selection_epoch {
+            self.selection.clear();
+        } else if trimmed > self.last_history_trim {
+            self.selection.trim(trimmed - self.last_history_trim);
+        }
+        self.last_selection_epoch = epoch;
+        self.last_history_trim = trimmed;
+        Ok(())
     }
 
     /// Scroll up by a positive number of lines, or down by a negative number.
