@@ -1,0 +1,28 @@
+{
+  "recordedAt": "2026-11-15T16:53:06.521971+00:00",
+  "commit": "1d736bf3f0dbed5ec7f7becc6b30a6b36d828dc4",
+  "productFixCommit": "00d9940",
+  "testAdjustmentCommits": [
+    "9f82f8d",
+    "0b4e6e2",
+    "1d736bf"
+  ],
+  "changes": [
+    "DSH early resume exit remains error/retryable and settles recovery waiter",
+    "Round DSH HUD occupancy at provider data boundary",
+    "DSH acceptance waits for native input and matches same-turn latency",
+    "Bound test fixture startup separately from resume deadline; explain early-exit regression"
+  ],
+  "targeted": {
+    "files": 2,
+    "passed": 9,
+    "notSelected": 161
+  },
+  "workspaceTypecheck": "passed",
+  "identifierCheck": "passed",
+  "logs": [
+    "closeout-step1-targeted.log",
+    "closeout-step1-typecheck.log",
+    "closeout-step1-identifiers.log"
+  ]
+}
