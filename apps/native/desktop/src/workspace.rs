@@ -865,6 +865,13 @@ impl Workspace {
                         },
                         cx,
                     ),
+                    SurfaceEvent::ScrollSelection(lines) => this.send(
+                        Command::ScrollSelection {
+                            session_id: session_id.clone(),
+                            lines: *lines,
+                        },
+                        cx,
+                    ),
                     SurfaceEvent::Scroll(lines) => this.send(
                         Command::Scroll {
                             session_id: session_id.clone(),

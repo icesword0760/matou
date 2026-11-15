@@ -70,6 +70,10 @@ pub enum WorkerCommand {
         lines: i32,
         reply: Sender<Result<()>>,
     },
+    ScrollSelection {
+        lines: i32,
+        reply: Sender<Result<()>>,
+    },
     SetTheme {
         theme: Theme,
         reply: Sender<Result<()>>,
@@ -302,6 +306,9 @@ fn run(
                 }
                 WorkerCommand::Scroll { lines, reply } => {
                     let _ = reply.send(session.scroll(lines));
+                }
+                WorkerCommand::ScrollSelection { lines, reply } => {
+                    let _ = reply.send(session.scroll_selection(lines));
                 }
                 WorkerCommand::SetTheme { theme, reply } => {
                     let _ = reply.send(session.set_theme(theme));

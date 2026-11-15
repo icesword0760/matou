@@ -371,6 +371,11 @@ impl Terminal {
             SelectionAction::Extend { row, x } => {
                 self.update_selection(|selection, terminal| selection.extend(terminal, row, x))
             }
+            SelectionAction::ExtendOutside { row, x, below } => {
+                self.update_selection(|selection, terminal| {
+                    selection.extend_outside(terminal, row, x, below)
+                })
+            }
             SelectionAction::SetEnd(end) => {
                 self.selection.set_end(end);
                 Ok(())

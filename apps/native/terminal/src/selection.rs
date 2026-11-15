@@ -87,6 +87,11 @@ pub enum SelectionAction {
         row: usize,
         x: f32,
     },
+    ExtendOutside {
+        row: usize,
+        x: f32,
+        below: bool,
+    },
     SetEnd(GridPoint),
     Clear,
 }
@@ -220,6 +225,20 @@ impl SelectionState {
         self.set_end(selection_candidate(
             terminal, self.mode, start, row, x, cols, total,
         )?);
+        Ok(())
+    }
+
+    pub fn extend_outside(
+        &mut self,
+        terminal: &mut Terminal,
+        row: usize,
+        x: f32,
+        below: bool,
+    ) -> Result<()> {
+        self.extend(terminal, row, x)?;
+        if let Some(end) = &mut self.end {
+            end.col = if below { terminal.screen()?.cols } else { 0 };
+        }
         Ok(())
     }
 
