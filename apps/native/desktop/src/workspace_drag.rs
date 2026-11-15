@@ -22,6 +22,53 @@ pub struct WorkspaceDragTask {
     pub hovered: bool,
 }
 
+pub fn active_marker(scale: f32) -> Div {
+    let s = |value: f32| px(value * scale);
+    let mut glow: Hsla = rgb(0x2d86ff).into();
+    glow.a = 0.32;
+
+    div()
+        .absolute()
+        .top(s(5.))
+        .bottom(s(5.))
+        .left_0()
+        .w(s(2.))
+        .rounded(s(99.))
+        .overflow_hidden()
+        .shadow(vec![BoxShadow {
+            color: glow,
+            offset: point(px(0.), px(0.)),
+            blur_radius: s(10.),
+            spread_radius: px(0.),
+        }])
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .h(relative(0.42))
+                .rounded_t(s(1.))
+                .w_full()
+                .bg(linear_gradient(
+                    180.,
+                    linear_color_stop(rgb(0x67b9ff), 0.),
+                    linear_color_stop(rgb(0x287cff), 1.),
+                )),
+        )
+        .child(
+            div()
+                .absolute()
+                .top(relative(0.42))
+                .bottom_0()
+                .rounded_b(s(1.))
+                .w_full()
+                .bg(linear_gradient(
+                    180.,
+                    linear_color_stop(rgb(0x287cff), 0.),
+                    linear_color_stop(rgb(0x71bfff), 1.),
+                )),
+        )
+}
+
 pub fn group(snapshot: &WorkspaceDragSnapshot, width: Pixels, scale: f32) -> Div {
     let s = |value: f32| px(value * scale);
 
@@ -75,6 +122,7 @@ pub fn group(snapshot: &WorkspaceDragSnapshot, width: Pixels, scale: f32) -> Div
                             .bg(rgb(0xeceef3))
                             .text_color(rgb(0x91949e))
                             .text_size(s(9.))
+                            .line_height(s(12.5))
                             .font_weight(FontWeight::SEMIBOLD)
                             .child("默认"),
                     )
@@ -92,6 +140,7 @@ pub fn group(snapshot: &WorkspaceDragSnapshot, width: Pixels, scale: f32) -> Div
                             .bg(rgba(0xd99d3c1a))
                             .text_color(rgb(0xd99d3c))
                             .text_size(s(9.))
+                            .line_height(s(12.5))
                             .child("路径失效"),
                     )
                 }),
@@ -145,6 +194,7 @@ pub fn group(snapshot: &WorkspaceDragSnapshot, width: Pixels, scale: f32) -> Div
                     .bg(rgb(0xfff8e8))
                     .text_color(rgb(0x9a6818))
                     .text_size(s(9.))
+                    .line_height(s(12.5))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -158,18 +208,7 @@ pub fn group(snapshot: &WorkspaceDragSnapshot, width: Pixels, scale: f32) -> Div
         .w(width * scale)
         .font_family(".AppleSystemUIFont")
         .text_color(rgb(0x303744))
-        .when(snapshot.active, |group| {
-            group.child(
-                div()
-                    .absolute()
-                    .top(s(5.))
-                    .bottom(s(5.))
-                    .left_0()
-                    .w(s(2.))
-                    .rounded(s(1.))
-                    .bg(rgb(0x67a6f4)),
-            )
-        })
+        .when(snapshot.active, |group| group.child(active_marker(scale)))
         .child(header)
         .when(!snapshot.collapsed, |group| {
             group.child(
