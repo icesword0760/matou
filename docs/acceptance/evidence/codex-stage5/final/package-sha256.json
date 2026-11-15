@@ -1,0 +1,36 @@
+{
+  "sourceCommit": "e62abdee8ff0382eaa65fee4c51adeca204cc302",
+  "command": "CSC_IDENTITY_AUTO_DISCOVERY=false pnpm package:dir",
+  "exitCode": 0,
+  "signed": false,
+  "bundle": "apps/desktop/release/mac-arm64/\u7801\u5934.app",
+  "components": {
+    "Contents/MacOS/\u7801\u5934": {
+      "sha256": "221d5695ab9eb2263b9107e4a5bb3f5780adc35963530e322673d5535e8eeae5",
+      "bytes": 33968
+    },
+    "Contents/Resources/app.asar": {
+      "sha256": "69e4cc57bf526447b0e697a5df184f0364ff68d5b11418da9cfdc4761962d597",
+      "bytes": 27724567
+    },
+    "Contents/Resources/runtime/index.cjs": {
+      "sha256": "50bd93fc1419318c7ef2b837503a65b0f90ab8655f1ccd1c7c284f190ee4180f",
+      "bytes": 2762628
+    },
+    "Contents/Resources/runtime/mt-cli.cjs": {
+      "sha256": "1264b84438150d6bf5eafbcc2d7eea385b9ba85ad237fbc05a67399b3b4bd86a",
+      "bytes": 649999
+    },
+    "Contents/Resources/runtime/control-assets/bin/mt": {
+      "sha256": "859676985a2b233e8d6dc7744e7760c3e955b59c6a56932bfcdff3f12a87bc03",
+      "bytes": 317
+    },
+    "Contents/Resources/runtime/control-assets/providers/codex-developer-instructions.md": {
+      "sha256": "585a4c6d09d3f934e4b2e66c8b0b5f09096a2ce2f07668b268c3d4bf35764b7a",
+      "bytes": 6142
+    }
+  },
+  "packagedAt": "2026-11-15T20:19:41.644883",
+  "log": "stage5-final-package.log",
+  "rebuildReason": "Product source changed after the initial bundle; final acceptance uses only this rebuilt bundle."
+}
