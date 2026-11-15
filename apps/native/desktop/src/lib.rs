@@ -11,3 +11,5 @@ pub mod tab_dialog_style;
 
 pub mod rename_input;
 pub mod sidebar_scrollbar;
+
+pub mod workspace_drag;

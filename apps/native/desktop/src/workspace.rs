@@ -21,6 +21,7 @@ use crate::{
     sidebar_scrollbar::{self, SidebarScrollbarState},
     tab_dialog_style as tabs_ui,
     terminal_surface::{SurfaceEvent, TerminalSurface},
+    workspace_drag::{self, WorkspaceDragSnapshot, WorkspaceDragTask},
 };
 
 #[cfg(debug_assertions)]
@@ -53,24 +54,18 @@ impl Render for TaskDrag {
 #[derive(Clone)]
 struct WorkspaceDrag {
     workspace_id: String,
-    name: String,
+    snapshot: WorkspaceDragSnapshot,
+    width: Pixels,
+    offset: Point<Pixels>,
 }
 impl Render for WorkspaceDrag {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .w(px(230.))
-            .h(px(34.))
-            .px(px(7.))
-            .rounded(px(8.))
-            .bg(rgba(0xeceef3b8))
-            .text_color(rgb(0x2f3547))
-            .text_size(px(13.))
-            .font_weight(FontWeight::SEMIBOLD)
-            .flex()
-            .items_center()
-            .gap(px(7.))
-            .child(icon("folder", 16., 0x4078f2))
-            .child(self.name.clone())
+        div().relative().w(self.width).child(
+            workspace_drag::group(&self.snapshot, self.width, 1.)
+                .relative()
+                .left(self.offset.x)
+                .top(self.offset.y),
+        )
     }
 }
 
@@ -80,6 +75,7 @@ struct CardMotion {
 }
 
 struct WorkspaceDragMotion {
+    scale: Transition,
     opacity: Transition,
     background: Transition,
 }
@@ -132,9 +128,12 @@ pub struct Workspace {
     workspace_paths: Vec<WorkspacePathState>,
     workspace_controls: HashMap<String, [FocusHandle; 4]>,
     workspace_drag_source: Option<String>,
+    workspace_drag_press: Option<(String, Point<Pixels>)>,
+    workspace_drag_gesture: bool,
     workspace_drag_target: Option<String>,
     workspace_drag_motion: HashMap<String, WorkspaceDragMotion>,
     workspace_bounds: HashMap<String, Bounds<Pixels>>,
+    workspace_group_bounds: HashMap<String, Bounds<Pixels>>,
     workspace_hover: Option<String>,
     workspace_collapsed: HashSet<String>,
     workspace_menu: Option<(String, Point<Pixels>, Vec<FocusHandle>)>,
@@ -235,9 +234,12 @@ impl Workspace {
             workspace_paths: Vec::new(),
             workspace_controls: HashMap::new(),
             workspace_drag_source: None,
+            workspace_drag_press: None,
+            workspace_drag_gesture: false,
             workspace_drag_target: None,
             workspace_drag_motion: HashMap::new(),
             workspace_bounds: HashMap::new(),
+            workspace_group_bounds: HashMap::new(),
             workspace_hover: None,
             workspace_collapsed: HashSet::new(),
             workspace_menu: None,
@@ -364,6 +366,8 @@ impl Workspace {
                 self.workspace_drag_motion
                     .retain(|id, _| workspaces.iter().any(|w| &w.id == id));
                 self.workspace_controls
+                    .retain(|id, _| workspaces.iter().any(|workspace| &workspace.id == id));
+                self.workspace_group_bounds
                     .retain(|id, _| workspaces.iter().any(|workspace| &workspace.id == id));
                 self.workspace_bounds
                     .retain(|id, _| workspaces.iter().any(|workspace| &workspace.id == id));
@@ -1314,6 +1318,7 @@ impl Workspace {
     fn workspace_group(
         &self,
         workspace: &HierarchyWorkspace,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let active = self
@@ -1337,18 +1342,78 @@ impl Workspace {
         let menu_id = id.clone();
         let bounds_id = id.clone();
         let view = cx.entity().downgrade();
+        let now = self.motion_clock.elapsed().as_secs_f64() * 1000.;
+        let scale = self
+            .workspace_drag_motion
+            .get(&id)
+            .map(|motion| motion.scale.value(now) as f32)
+            .unwrap_or(1.);
+        let opacity = self
+            .workspace_drag_motion
+            .get(&id)
+            .map(|motion| motion.opacity.value(now) as f32)
+            .unwrap_or(1.);
+        let group_bounds = self.workspace_group_bounds.get(&id).copied();
+        let task_count = self
+            .tasks
+            .iter()
+            .filter(|task| task.workspace_id == id)
+            .count();
+        let group_height = px(34.
+            + if collapsed {
+                0.
+            } else {
+                2. + task_count as f32 * 34. + task_count.saturating_sub(1) as f32
+            });
+        let group_measure_id = id.clone();
+        let content_measure_id = id.clone();
+        let content_measure_view = cx.entity().downgrade();
+        let press_id = id.clone();
+        let measure_view = cx.entity().downgrade();
+        let task_active = self
+            .hierarchy
+            .as_ref()
+            .and_then(|h| h.task.as_ref())
+            .map(|t| &t.id);
+        let snapshot = WorkspaceDragSnapshot {
+            name: workspace.name.clone(),
+            active,
+            collapsed,
+            is_default: workspace.is_default,
+            is_pinned: workspace.is_pinned,
+            invalid,
+            actions_visible,
+            header_hovered: group_bounds.is_some_and(|bounds| {
+                bounds.contains(&window.mouse_position())
+                    && window.mouse_position().y < bounds.top() + px(34.)
+            }),
+            tasks: self
+                .tasks
+                .iter()
+                .filter(|task| task.workspace_id == workspace.id)
+                .map(|task| WorkspaceDragTask {
+                    title: task.title.clone(),
+                    active: task_active == Some(&task.id),
+                    is_pinned: task.is_pinned,
+                    menu_visible: task_active == Some(&task.id)
+                        || self.task_hover.as_ref() == Some(&task.id)
+                        || self.task_menu.as_ref().is_some_and(|m| m.0 == task.id),
+                    hovered: self.task_hover.as_ref() == Some(&task.id),
+                })
+                .collect(),
+        };
 
         let toggle = self.button_inner(
             div()
                 .id(SharedString::from(format!("workspace-toggle:{id}")))
-                .h(px(34.))
+                .h(px(34. * scale))
                 .flex_1()
                 .min_w_0()
                 .flex()
                 .items_center()
-                .pl(px(7.))
-                .pr(px(5.))
-                .gap(px(7.))
+                .pl(px(7. * scale))
+                .pr(px(5. * scale))
+                .gap(px(7. * scale))
                 .cursor_pointer()
                 .child(icon(
                     if collapsed {
@@ -1356,12 +1421,12 @@ impl Workspace {
                     } else {
                         "chevron-down"
                     },
-                    14.,
+                    14. * scale,
                     0x777777,
                 ))
                 .child(icon(
                     "folder",
-                    16.,
+                    16. * scale,
                     if active { 0x4078f2 } else { 0x656d76 },
                 ))
                 .child(
@@ -1370,7 +1435,7 @@ impl Workspace {
                         .overflow_hidden()
                         .whitespace_nowrap()
                         .text_ellipsis()
-                        .text_size(px(13.))
+                        .text_size(px(13. * scale))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(rgb(if active { 0x2f3547 } else { 0x656d76 }))
                         .child(workspace.name.clone()),
@@ -1380,34 +1445,34 @@ impl Workspace {
                         .flex_none()
                         .flex()
                         .items_center()
-                        .gap(px(6.))
+                        .gap(px(6. * scale))
                         .when(workspace.is_default, |status| {
                             status.child(
                                 div()
                                     .flex_none()
-                                    .px(px(5.))
-                                    .py(px(1.))
-                                    .rounded(px(5.))
+                                    .px(px(5. * scale))
+                                    .py(px(1. * scale))
+                                    .rounded(px(5. * scale))
                                     .bg(rgb(0xeceef3))
                                     .text_color(rgb(0x91949e))
-                                    .text_size(px(9.))
+                                    .text_size(px(9. * scale))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .child("默认"),
                             )
                         })
                         .when(workspace.is_pinned, |status| {
-                            status.child(icon("pin", 13., 0x81848d))
+                            status.child(icon("pin", 13. * scale, 0x81848d))
                         })
                         .when(invalid, |status| {
                             status.child(
                                 div()
                                     .flex_none()
-                                    .px(px(4.))
-                                    .py(px(1.))
-                                    .rounded(px(4.))
+                                    .px(px(4. * scale))
+                                    .py(px(1. * scale))
+                                    .rounded(px(4. * scale))
                                     .bg(rgba(0xd99d3c1a))
                                     .text_color(rgb(0xd99d3c))
-                                    .text_size(px(9.))
+                                    .text_size(px(9. * scale))
                                     .child("路径失效"),
                             )
                         }),
@@ -1437,12 +1502,12 @@ impl Workspace {
 
         let add_btn = div()
             .id(SharedString::from(format!("workspace-add:{id}")))
-            .size(px(26.))
+            .size(px(26. * scale))
             .flex_none()
             .flex()
             .items_center()
             .justify_center()
-            .rounded(px(6.))
+            .rounded(px(6. * scale))
             .opacity(if invalid {
                 0.28
             } else if actions_visible {
@@ -1454,7 +1519,7 @@ impl Workspace {
                 btn.cursor_pointer().hover(|s| s.bg(rgba(0x00000014)))
             })
             .when(invalid, |btn| btn.cursor(CursorStyle::OperationNotAllowed))
-            .child(icon("plus", 14., 0x81848d));
+            .child(icon("plus", 14. * scale, 0x81848d));
         let add_el = if invalid {
             add_btn.into_any_element()
         } else {
@@ -1479,16 +1544,16 @@ impl Workspace {
             div()
                 .id(SharedString::from(format!("workspace-more:{id}")))
                 .relative()
-                .size(px(26.))
+                .size(px(26. * scale))
                 .flex_none()
                 .flex()
                 .items_center()
                 .justify_center()
-                .rounded(px(6.))
+                .rounded(px(6. * scale))
                 .opacity(if actions_visible { 1. } else { 0. })
                 .cursor_pointer()
                 .hover(|s| s.bg(rgba(0x00000014)))
-                .child(icon("ellipsis", 14., 0x81848d))
+                .child(icon("ellipsis", 14. * scale, 0x81848d))
                 .child(
                     canvas(
                         |_, _, _| (),
@@ -1510,10 +1575,10 @@ impl Workspace {
         );
 
         let header = div()
-            .min_h(px(34.))
+            .min_h(px(34. * scale))
             .flex()
             .items_center()
-            .rounded(px(8.))
+            .rounded(px(8. * scale))
             .when(!active, |header| header.hover(|s| s.bg(rgba(0x2f35470f))))
             .child(toggle)
             .child(add_el)
@@ -1523,15 +1588,15 @@ impl Workspace {
                     self.button(
                         div()
                             .id(SharedString::from(format!("workspace-relink:{id}")))
-                            .h(px(24.))
+                            .h(px(24. * scale))
                             .flex_none()
-                            .px(px(7.))
-                            .rounded(px(6.))
-                            .border_1()
+                            .px(px(7. * scale))
+                            .rounded(px(6. * scale))
+                            .border(px(scale))
                             .border_color(rgba(0x9a681840))
                             .bg(rgb(0xfff8e8))
                             .text_color(rgb(0x9a6818))
-                            .text_size(px(9.))
+                            .text_size(px(9. * scale))
                             .flex()
                             .items_center()
                             .justify_center()
@@ -1548,24 +1613,67 @@ impl Workspace {
             })
             .child(more_el);
 
+        let content = div()
+            .relative()
+            .when(active, |content| {
+                content.child(
+                    div()
+                        .absolute()
+                        .top(px(5. * scale))
+                        .bottom(px(5. * scale))
+                        .left_0()
+                        .w(px(2. * scale))
+                        .rounded(px(scale))
+                        .bg(rgb(0x67a6f4)),
+                )
+            })
+            .child(header)
+            .child(canvas(|_, _, _| (), move |bounds, _, _, cx| {
+                #[cfg(debug_assertions)]
+                let _ = content_measure_view.update(cx, |this, _| {
+                    if let Some(trace) = &this.motion_trace {
+                        let now = this.motion_clock.elapsed().as_secs_f64() * 1000.;
+                        record_motion(trace, &serde_json::json!({"kind":"workspace-drag-frame","at":now,"workspace":content_measure_id,"scale":scale,"opacity":opacity,"bounds":{"x":f32::from(bounds.origin.x),"y":f32::from(bounds.origin.y),"width":f32::from(bounds.size.width),"height":f32::from(bounds.size.height)}}));
+                    }
+                });
+            }).absolute().inset_0().size_full())
+            .when(!collapsed, |content| {
+                content.child(
+                    div()
+                        .ml(px(17. * scale))
+                        .pt(px(2. * scale))
+                        .flex()
+                        .flex_col()
+                        .gap(px(scale))
+                        .children(
+                            self.tasks
+                                .iter()
+                                .filter(|task| task.workspace_id == workspace.id)
+                                .map(|task| self.task_row(task, scale, cx).into_any_element()),
+                        ),
+                )
+            });
         let group = div()
             .id(SharedString::from(format!("workspace:{id}")))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, _, _| {
+                    this.workspace_drag_press = Some((press_id.clone(), event.position));
+                }),
+            )
             .relative()
             .mt(px(1.))
             .mb(px(8.))
             .when_some(
                 self.workspace_drag_motion.get(id.as_str()),
                 |group, motion| {
-                    let now = self.motion_clock.elapsed().as_secs_f64() * 1000.;
                     let mut background: Hsla = rgb(0x58a6ff).into();
                     background.a = if active {
                         0.
                     } else {
                         0.1 * motion.background.value(now) as f32
                     };
-                    group
-                        .opacity(motion.opacity.value(now) as f32)
-                        .bg(background)
+                    group.opacity(opacity).bg(background)
                 },
             )
             .when(
@@ -1590,35 +1698,36 @@ impl Workspace {
                 }
                 cx.notify();
             }))
-            .when(active, |group| {
-                group.child(
-                    div()
+            .child(if scale != 1. {
+                if let Some(bounds) = group_bounds {
+                    content
                         .absolute()
-                        .top(px(5.))
-                        .bottom(px(5.))
-                        .left_0()
-                        .w(px(2.))
-                        .rounded(px(1.))
-                        .bg(rgb(0x67a6f4)),
-                )
+                        .left(bounds.size.width * ((1. - scale) * 0.5))
+                        .top(group_height * ((1. - scale) * 0.5))
+                        .w(bounds.size.width * scale)
+                } else {
+                    content
+                }
+            } else {
+                content
             })
-            .child(header)
-            .when(!collapsed, |group| {
-                group.child(
-                    div()
-                        .ml(px(17.))
-                        .pt(px(2.))
-                        .flex()
-                        .flex_col()
-                        .gap(px(1.))
-                        .children(
-                            self.tasks
-                                .iter()
-                                .filter(|task| task.workspace_id == workspace.id)
-                                .map(|task| self.task_row(task, cx).into_any_element()),
-                        ),
+            .when(scale != 1., |group| {
+                group.when_some(group_bounds, |group, _| group.h(group_height))
+            })
+            .child(
+                canvas(
+                    |_, _, _| (),
+                    move |bounds, _, _, cx| {
+                        let _ = measure_view.update(cx, |this, _| {
+                            this.workspace_group_bounds
+                                .insert(group_measure_id.clone(), bounds);
+                        });
+                    },
                 )
-            });
+                .absolute()
+                .inset_0()
+                .size_full(),
+            );
 
         if workspace.is_pinned {
             let drag_target = workspace.id.clone();
@@ -1628,15 +1737,29 @@ impl Workspace {
                 .on_drag(
                     WorkspaceDrag {
                         workspace_id: workspace.id.clone(),
-                        name: workspace.name.clone(),
+                        snapshot,
+                        offset: Point::default(),
+                        width: group_bounds
+                            .map(|bounds| bounds.size.width)
+                            .unwrap_or_else(|| self.sidebar_scroll.bounds().size.width - px(12.)),
                     },
-                    move |info, _, _, cx| {
+                    move |info, cursor_offset, window, cx| {
+                        let mut preview = info.clone();
                         let _ = view.update(cx, |this, cx| {
+                            if let Some((id, press)) = this.workspace_drag_press.take() {
+                                if id == info.workspace_id {
+                                    // GPUI anchors at the threshold-crossing move; the source
+                                    // browser anchors its drag image at the original press.
+                                    let origin = window.mouse_position() - cursor_offset;
+                                    preview.offset = cursor_offset - (press - origin);
+                                }
+                            }
+                            this.workspace_drag_gesture = true;
                             this.workspace_drag_source = Some(info.workspace_id.clone());
                             this.workspace_drag_target = None;
                             cx.notify();
                         });
-                        cx.new(|_| info.clone())
+                        cx.new(|_| preview)
                     },
                 )
                 .on_drag_move(cx.listener(
@@ -1670,7 +1793,7 @@ impl Workspace {
         }
     }
 
-    fn sidebar(&self, cx: &mut Context<Self>) -> Div {
+    fn sidebar(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         let new_workspace = div()
             .id("new-workspace-btn")
             .min_w_0()
@@ -1756,9 +1879,9 @@ impl Workspace {
                                 // GPUI measures child border boxes for scroll extent. Keep the
                                 // group's CSS margins inside a flex wrapper so they count too.
                                 div().flex().flex_col().children(
-                                    self.workspaces
-                                        .iter()
-                                        .map(|workspace| self.workspace_group(workspace, cx)),
+                                    self.workspaces.iter().map(|workspace| {
+                                        self.workspace_group(workspace, window, cx)
+                                    }),
                                 ),
                             ),
                     )
@@ -1793,7 +1916,7 @@ impl Workspace {
             )
     }
 
-    fn task_row(&self, task: &Task, cx: &mut Context<Self>) -> Stateful<Div> {
+    fn task_row(&self, task: &Task, scale: f32, cx: &mut Context<Self>) -> Stateful<Div> {
         let active = self
             .hierarchy
             .as_ref()
@@ -1818,16 +1941,16 @@ impl Workspace {
                 &focus[0],
             )
             .relative()
-            .h(px(34.))
+            .h(px(34. * scale))
             .flex_none()
-            .rounded(px(8.))
+            .rounded(px(8. * scale))
             .flex()
             .items_center()
-            .px(px(7.))
-            .py(px(6.))
-            .gap(px(7.))
-            .text_size(px(13.))
-            .line_height(px(19.5))
+            .px(px(7. * scale))
+            .py(px(6. * scale))
+            .gap(px(7. * scale))
+            .text_size(px(13. * scale))
+            .line_height(px(19.5 * scale))
             .text_color(rgb(color))
             .bg(if active {
                 rgba(0x57657f18)
@@ -1840,7 +1963,7 @@ impl Workspace {
                 move |_, window, _| window.focus(&focus)
             })
             .on_click(cx.listener(move |this, event, _, cx| {
-                if !matches!(event, ClickEvent::Keyboard(_)) {
+                if !matches!(event, ClickEvent::Keyboard(_)) && !this.workspace_drag_gesture {
                     this.send(
                         Command::SelectTask {
                             task_id: id.clone(),
@@ -1881,13 +2004,13 @@ impl Workspace {
                 };
                 cx.notify();
             }))
-            .child(icon("task", 12., color))
+            .child(icon("task", 12. * scale, color))
             .child(
                 div()
                     .relative()
                     .flex_1()
                     .min_w_0()
-                    .line_height(px(19.5))
+                    .line_height(px(19.5 * scale))
                     .overflow_hidden()
                     .text_ellipsis()
                     .whitespace_nowrap()
@@ -1906,12 +2029,13 @@ impl Workspace {
                                         } else if bounds.bottom() > viewport.bottom() {
                                             viewport.bottom() - bounds.bottom()
                                         } else {
-                                            px(0.)
+                                            px(0. * scale)
                                         };
-                                        if delta != px(0.) {
+                                        if delta != px(0. * scale) {
                                             let offset = this.sidebar_scroll.offset();
                                             let max_y = this.sidebar_scroll.max_offset().height;
-                                            let next_y = (offset.y + delta).clamp(-max_y, px(0.));
+                                            let next_y =
+                                                (offset.y + delta).clamp(-max_y, px(0. * scale));
                                             this.sidebar_scroll.set_offset(point(offset.x, next_y));
                                             cx.notify();
                                         }
@@ -1924,21 +2048,23 @@ impl Workspace {
                         .size_full(),
                     ),
             )
-            .when(task.is_pinned, |row| row.child(icon("pin", 13., 0x81848d)))
+            .when(task.is_pinned, |row| {
+                row.child(icon("pin", 13. * scale, 0x81848d))
+            })
             .child(
                 self.button(
                     div()
                         .id(SharedString::from(format!("task-more:{}", task.id)))
-                        .size(px(22.))
+                        .size(px(22. * scale))
                         .flex_none()
-                        .rounded(px(4.))
+                        .rounded(px(4. * scale))
                         .flex()
                         .items_center()
                         .justify_center()
                         .opacity(if menu_visible { 1. } else { 0. })
                         .cursor_pointer()
                         .hover(|s| s.bg(rgba(0x0000000f)))
-                        .child(icon("ellipsis", 14., 0x656d76)),
+                        .child(icon("ellipsis", 14. * scale, 0x656d76)),
                     &focus[1],
                     move |this, _, cx| this.open_task_menu(&menu_id, true, cx),
                     cx,
@@ -2491,6 +2617,9 @@ impl Workspace {
             }))
             .on_click(cx.listener(move |this, event, window, cx| {
                 // GPUI synthesizes both clicks on keyup. Match button Enter on keydown.
+                if !stop_mouse_down && matches!(event, ClickEvent::Mouse(_)) && this.workspace_drag_gesture {
+                    return;
+                }
                 if !matches!(event, ClickEvent::Keyboard(event) if event.button == KeyboardButton::Enter) {
                     cx.stop_propagation();
                     activate(this, window, cx);
@@ -3323,9 +3452,20 @@ impl Render for Workspace {
                 .workspace_drag_motion
                 .entry(workspace.id.clone())
                 .or_insert_with(|| WorkspaceDragMotion {
+                    scale: Transition::new(1.),
                     opacity: Transition::new(1.),
                     background: Transition::new(0.),
                 });
+            motion.scale.retarget(
+                if dragging && self.workspace_drag_source.as_ref() == Some(&workspace.id) {
+                    0.99
+                } else {
+                    1.
+                },
+                now,
+                140.,
+                Curve::Ease,
+            );
             motion.opacity.retarget(
                 if dragging && self.workspace_drag_source.as_ref() == Some(&workspace.id) {
                     0.6
@@ -3346,7 +3486,10 @@ impl Render for Workspace {
                 140.,
                 Curve::Ease,
             );
-            if motion.opacity.is_running(now) || motion.background.is_running(now) {
+            if motion.scale.is_running(now)
+                || motion.opacity.is_running(now)
+                || motion.background.is_running(now)
+            {
                 window.request_animation_frame();
             }
         }
@@ -3915,7 +4058,10 @@ impl Render for Workspace {
         div()
             .id("workspace-root")
             .relative()
-            .capture_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, _, cx| {
+            .capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                if event.button == MouseButton::Left {
+                    this.workspace_drag_gesture = false;
+                }
                 if this.keyboard_focus {
                     this.keyboard_focus = false;
                     cx.notify();
@@ -3925,7 +4071,7 @@ impl Render for Workspace {
             .flex()
             .font_family(".AppleSystemUIFont")
             .text_color(rgb(0x303744))
-            .child(self.sidebar(cx))
+            .child(self.sidebar(window, cx))
             .child(
                 div()
                     .flex_1()
