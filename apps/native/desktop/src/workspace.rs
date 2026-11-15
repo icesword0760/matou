@@ -17,7 +17,7 @@ use crate::{
         Curve, Transition, centered_scroll, focus_scroll_step, fully_visible_scroll,
     },
     rename_input::{RenameInput, RenameInputEvent, trim_name},
-    runtime_bridge::{Command, Event},
+    runtime_bridge::{Command, Event, RecoveryState},
     sidebar_scrollbar::{self, SidebarScrollbarState},
     tab_dialog_style as tabs_ui,
     terminal_surface::{SurfaceEvent, TerminalSurface},
@@ -184,6 +184,8 @@ pub struct Workspace {
     geometry_writes: HashMap<String, (u64, u8)>,
     graph: Value,
     terminals: HashMap<String, Entity<TerminalSurface>>,
+    recovery: HashMap<String, RecoveryState>,
+    recovery_controls: HashMap<String, FocusHandle>,
     order: Vec<String>,
     focused: Option<String>,
     pending_focus: Option<(String, String)>,
@@ -285,6 +287,8 @@ impl Workspace {
             geometry_writes: HashMap::new(),
             graph: Value::Null,
             terminals: HashMap::new(),
+            recovery: HashMap::new(),
+            recovery_controls: HashMap::new(),
             order: Vec::new(),
             focused: None,
             pending_focus: None,
@@ -580,6 +584,10 @@ impl Workspace {
                 if (initializing || scene_changed || focus_changed)
                     && self.dialog.is_none()
                     && self.active_path_valid()
+                    && self
+                        .focused
+                        .as_ref()
+                        .is_none_or(|id| !self.recovery_blocked(id))
                     && (window.focused(cx).is_none()
                         || (workspace_changed
                             && self
@@ -604,6 +612,8 @@ impl Workspace {
             Event::ScenesDisposed(ids) => {
                 for id in ids {
                     self.terminals.remove(&id);
+                    self.recovery.remove(&id);
+                    self.recovery_controls.remove(&id);
                     self.card_controls.remove(&id);
                     self.card_motion.remove(&id);
                     self.resize_revisions.remove(&id);
@@ -717,6 +727,7 @@ impl Workspace {
                     if self.focused.as_ref() == Some(&session_id)
                         && self.dialog.is_none()
                         && self.active_path_valid()
+                        && !self.recovery_blocked(&session_id)
                         && window.focused(cx).is_none()
                     {
                         window.focus(&terminal.read(cx).focus);
@@ -729,6 +740,29 @@ impl Workspace {
                     },
                     cx,
                 );
+            }
+            Event::Recovery { session_id, state } => {
+                if matches!(state, RecoveryState::Failed(_)) {
+                    self.recovery_controls
+                        .entry(session_id.clone())
+                        .or_insert_with(|| cx.focus_handle().tab_stop(true));
+                } else if self
+                    .recovery_controls
+                    .get(&session_id)
+                    .is_some_and(|focus| focus.is_focused(window))
+                {
+                    window.blur();
+                }
+                if !matches!(state, RecoveryState::Ready)
+                    && self
+                        .terminals
+                        .get(&session_id)
+                        .is_some_and(|terminal| terminal.read(cx).focus.is_focused(window))
+                {
+                    window.blur();
+                }
+                self.recovery.insert(session_id, state);
+                self.sync_terminal_input(window, cx);
             }
             Event::StorageFault { message, .. } | Event::Diagnostic(message) => {
                 self.fault = Some(message)
@@ -1152,11 +1186,18 @@ impl Workspace {
         {
             window.blur();
         }
-        for terminal in self.terminals.values() {
+        for (id, terminal) in &self.terminals {
+            let disabled = disabled || self.recovery_blocked(id);
             terminal.update(cx, |terminal, cx| {
                 terminal.set_input_disabled(disabled, cx);
             });
         }
+    }
+
+    fn recovery_blocked(&self, session_id: &str) -> bool {
+        self.recovery
+            .get(session_id)
+            .is_some_and(|state| !matches!(state, RecoveryState::Ready))
     }
 
     fn workspace_invalid(&self, workspace_id: &str) -> bool {
@@ -3095,6 +3136,10 @@ impl Workspace {
     }
 
     fn footer(&self) -> Div {
+        let recovering = self
+            .focused
+            .as_ref()
+            .is_some_and(|id| self.recovery_blocked(id));
         let cwd = self
             .focused
             .as_ref()
@@ -3129,27 +3174,31 @@ impl Workspace {
                     .text_color(rgb(0x999999))
                     .child(format!("· {} 个会话", self.order.len())),
             )
-            .child(
-                div()
-                    .ml(px(8.))
-                    .pl(px(12.))
-                    .border_l_1()
-                    .border_color(rgb(0xe8e8e8))
-                    .child("zsh"),
-            )
+            .when(!recovering, |footer| {
+                footer.child(
+                    div()
+                        .ml(px(8.))
+                        .pl(px(12.))
+                        .border_l_1()
+                        .border_color(rgb(0xe8e8e8))
+                        .child("zsh"),
+                )
+            })
             .child(div().flex_1())
-            .child(
-                div()
-                    .max_w(px(160.))
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .child(
-                        cwd.rsplit(['/', '\\'])
-                            .find(|s| !s.is_empty())
-                            .map(|s| format!("~/{s}"))
-                            .unwrap_or_default(),
-                    ),
-            )
+            .when(!recovering, |footer| {
+                footer.child(
+                    div()
+                        .max_w(px(160.))
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .child(
+                            cwd.rsplit(['/', '\\'])
+                                .find(|s| !s.is_empty())
+                                .map(|s| format!("~/{s}"))
+                                .unwrap_or_default(),
+                        ),
+                )
+            })
             .child(
                 self.control(div(), "account")
                     .ml(px(14.))
@@ -3411,7 +3460,7 @@ impl Render for Workspace {
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _, window, cx| {
-                        if this.active_path_valid() {
+                        if this.active_path_valid() && !this.recovery_blocked(&session_id) {
                             window.focus(&focus);
                         }
                         this.hover_baseline = None;
@@ -3431,7 +3480,72 @@ impl Render for Workspace {
                         }
                     }),
                 );
-            let card = if narrow && !selected {
+            let card = if let Some(RecoveryState::Failed(error)) = self.recovery.get(id) {
+                let retry_id = id.clone();
+                card.child(
+                    div()
+                        .size_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .p(px(24.))
+                        .rounded(px(12.))
+                        .bg(rgb(0xfff7f6))
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(
+                            div()
+                                .w(px((width - 72.).min(360.).max(0.)))
+                                .flex()
+                                .flex_col()
+                                .items_center()
+                                .gap(px(9.))
+                                .p(px(22.))
+                                .border_1()
+                                .border_color(rgb(0xc8d4e3))
+                                .rounded(px(12.))
+                                .bg(rgb(0xffffff))
+                                .shadow(vec![shadow(0x1f2d3d, 0.14, 16., 44.)])
+                                .text_center()
+                                .text_color(rgb(0x29364a))
+                                .text_size(px(11.))
+                                .line_height(px(16.5))
+                                .child(div().font_weight(FontWeight::BOLD).child("终端恢复失败"))
+                                .child(
+                                    div()
+                                        .w_full()
+                                        .text_color(rgb(0x617086))
+                                        .child(error.clone()),
+                                )
+                                .child(
+                                    self.button(
+                                        div()
+                                            .id(SharedString::from(format!("retry-recovery-{id}")))
+                                            .px(px(12.))
+                                            .py(px(6.))
+                                            .border_1()
+                                            .border_color(rgb(0x516b8d))
+                                            .rounded(px(7.))
+                                            .text_color(rgb(0xe0ebfa))
+                                            .bg(rgb(0x2a3b51))
+                                            .text_size(px(11.))
+                                            .line_height(px(15.))
+                                            .cursor_pointer()
+                                            .child("重试"),
+                                        &self.recovery_controls[id],
+                                        move |this, _, cx| {
+                                            this.send(
+                                                Command::RetryRecovery {
+                                                    session_id: retry_id.clone(),
+                                                },
+                                                cx,
+                                            )
+                                        },
+                                        cx,
+                                    ),
+                                ),
+                        ),
+                )
+            } else if narrow && !selected {
                 let node = self.graph["nodes"]
                     .as_array()
                     .and_then(|nodes| nodes.iter().find(|node| node["sessionId"] == *id));
