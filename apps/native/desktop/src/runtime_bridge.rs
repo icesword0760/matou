@@ -15,9 +15,10 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use matou_native_core::{
     hierarchy::{
-        self, BootstrapWindowInput, HierarchyIds, HierarchyResult, Scene,
+        self, BootstrapWindowInput, HierarchyIds, HierarchyResult, Scene, Task,
         canvas::{CanvasIds, CanvasMessages, CreateCanvasInput, CreateShellSiblingInput},
         tabs::{CloseSceneInput, RenameSceneInput, ReorderSceneInput},
+        tasks,
     },
     journal::JournalOptions,
     pty::ShellLaunch,
@@ -47,6 +48,7 @@ pub enum Command {
     Input {
         session_id: String,
         bytes: Vec<u8>,
+        defer_ordering: bool,
     },
     Resize {
         session_id: String,
@@ -69,6 +71,28 @@ pub enum Command {
     },
     RetryStorage {
         session_id: String,
+    },
+    CreateTask {
+        workspace_id: String,
+    },
+    SelectTask {
+        task_id: String,
+    },
+    RenameTask {
+        task_id: String,
+        title: String,
+    },
+    SetTaskPinned {
+        task_id: String,
+        pinned: bool,
+    },
+    ReorderPinnedTask {
+        workspace_id: String,
+        task_id: String,
+        before_task_id: Option<String>,
+    },
+    DeleteTask {
+        task_id: String,
     },
     CreateCanvas {
         task_id: String,
@@ -109,6 +133,12 @@ pub enum Command {
 }
 
 pub enum Event {
+    Tasks(Vec<Task>),
+    TaskRenameResult {
+        task_id: String,
+        title: String,
+        error: Option<String>,
+    },
     Ready {
         hierarchy: HierarchyResult,
         scenes: Vec<Scene>,
@@ -267,7 +297,13 @@ fn run(
     if let Some(scene_id) = scene_id.as_deref() {
         ensure_scene_shells(&mut owner, &options, scene_id, &mut sessions)?;
     }
-    let scenes = owner.scenes(&hierarchy.task.as_ref().context("active task")?.id)?;
+    let scenes = hierarchy
+        .task
+        .as_ref()
+        .map(|task| owner.scenes(&task.id))
+        .transpose()?
+        .unwrap_or_default();
+    send_tasks(&owner, &hierarchy, window_id, send)?;
     send.send_blocking(Event::Ready {
         hierarchy,
         scenes,
@@ -285,6 +321,8 @@ fn run(
     let mut operations = Vec::<(String, Receiver<Result<()>>, bool)>::new();
     loop {
         let mut shutdown = false;
+        let mut graph_dirty = false;
+        let mut tasks_dirty = false;
         for _ in 0..128 {
             let command = match incoming.try_recv() {
                 Ok(command) => command,
@@ -296,7 +334,13 @@ fn run(
             };
             if matches!(
                 &command,
-                Command::CreateCanvas { .. }
+                Command::CreateTask { .. }
+                    | Command::SelectTask { .. }
+                    | Command::RenameTask { .. }
+                    | Command::SetTaskPinned { .. }
+                    | Command::ReorderPinnedTask { .. }
+                    | Command::DeleteTask { .. }
+                    | Command::CreateCanvas { .. }
                     | Command::CreateShellSibling { .. }
                     | Command::SelectScene { .. }
                     | Command::RenameScene { .. }
@@ -313,6 +357,12 @@ fn run(
                     } => Some((scene_id.clone(), session_id.clone())),
                     _ => None,
                 };
+                let rename = match &command {
+                    Command::RenameTask { task_id, title } => {
+                        Some((task_id.clone(), title.clone()))
+                    }
+                    _ => None,
+                };
                 match navigate(&mut owner, window_id, command) {
                     Ok((hierarchy, disposed)) => {
                         if !disposed.is_empty() {
@@ -327,13 +377,20 @@ fn run(
                             send.send_blocking(Event::ScenesDisposed(disposed))?;
                         }
                         scene_id = hierarchy.scene.as_ref().map(|scene| scene.id.clone());
-                        let scenes = owner.scenes(
-                            &hierarchy
-                                .task
-                                .as_ref()
-                                .context("active task after navigation")?
-                                .id,
-                        )?;
+                        let scenes = hierarchy
+                            .task
+                            .as_ref()
+                            .map(|task| owner.scenes(&task.id))
+                            .transpose()?
+                            .unwrap_or_default();
+                        send_tasks(&owner, &hierarchy, window_id, send)?;
+                        if let Some((task_id, title)) = rename {
+                            send.send_blocking(Event::TaskRenameResult {
+                                task_id,
+                                title,
+                                error: None,
+                            })?;
+                        }
                         send.send_blocking(Event::Navigation {
                             hierarchy,
                             scenes,
@@ -353,18 +410,40 @@ fn run(
                         // Existing workers and terminal surfaces remain alive across tab changes.
                         dirty.extend(sessions.iter().cloned());
                     }
-                    Err(error) => send.send_blocking(Event::NavigationFailed {
-                        message: format!("{error:#}"),
-                        attempted_focus,
-                    })?,
+                    Err(error) => {
+                        if let Some((task_id, title)) = rename {
+                            send.send_blocking(Event::TaskRenameResult {
+                                task_id,
+                                title,
+                                error: Some(format!("{error:#}")),
+                            })?;
+                        } else {
+                            send.send_blocking(Event::NavigationFailed {
+                                message: format!("{error:#}"),
+                                attempted_focus,
+                            })?;
+                        }
+                    }
                 }
                 continue;
             }
+            let interaction = match &command {
+                Command::Input {
+                    bytes,
+                    defer_ordering,
+                    ..
+                } => match bytes.as_slice() {
+                    [3] | [4] => Some(("control", *defer_ordering)),
+                    [13] | [10] => Some(("submit", *defer_ordering)),
+                    _ => None,
+                },
+                _ => None,
+            };
             let (reply, result) = mpsc::channel();
             let (session_id, request, refresh) = match command {
-                Command::Input { session_id, bytes } => {
-                    (session_id, WorkerCommand::Write { bytes, reply }, false)
-                }
+                Command::Input {
+                    session_id, bytes, ..
+                } => (session_id, WorkerCommand::Write { bytes, reply }, false),
                 Command::Resize {
                     session_id,
                     cols,
@@ -445,7 +524,13 @@ fn run(
                     )?))?;
                     continue;
                 }
-                Command::CreateCanvas { .. }
+                Command::CreateTask { .. }
+                | Command::SelectTask { .. }
+                | Command::RenameTask { .. }
+                | Command::SetTaskPinned { .. }
+                | Command::ReorderPinnedTask { .. }
+                | Command::DeleteTask { .. }
+                | Command::CreateCanvas { .. }
                 | Command::CreateShellSibling { .. }
                 | Command::SelectScene { .. }
                 | Command::RenameScene { .. }
@@ -459,15 +544,25 @@ fn run(
             };
             if let Err(error) = owner.send(&session_id, request) {
                 send.send_blocking(Event::Diagnostic(format!("{error:#}")))?;
-            } else {
-                operations.push((session_id, result, refresh));
+                continue;
             }
+            // Queue the bytes first, then persist the interaction before another
+            // command can change focus or shut down the owner.
+            if let Some((kind, defer_ordering)) = interaction {
+                match owner.record_interaction(&session_id, kind, defer_ordering) {
+                    Ok(_) => {
+                        graph_dirty = true;
+                        tasks_dirty = true;
+                    }
+                    Err(error) => send.send_blocking(Event::Diagnostic(format!("{error:#}")))?,
+                }
+            }
+            operations.push((session_id, result, refresh));
         }
         if shutdown {
             break;
         }
 
-        let mut graph_dirty = false;
         for event in owner.poll(Duration::from_millis(4))? {
             match event {
                 OwnerEvent::Domain(_) => graph_dirty = true,
@@ -512,13 +607,6 @@ fn run(
                 }
             }
         }
-        if graph_dirty {
-            send.send_blocking(Event::Graph(active_graph(
-                &owner,
-                scene_id.as_deref(),
-                window_id,
-            )?))?;
-        }
         operations.retain(|(session_id, result, refresh)| match result.try_recv() {
             Ok(Ok(())) => {
                 if *refresh {
@@ -536,6 +624,16 @@ fn run(
                 false
             }
         });
+        if graph_dirty {
+            send.send_blocking(Event::Graph(active_graph(
+                &owner,
+                scene_id.as_deref(),
+                window_id,
+            )?))?;
+        }
+        if tasks_dirty {
+            send_tasks(&owner, &owner.hierarchy(window_id)?, window_id, send)?;
+        }
         views.retain(|session_id, pending| match pending.receive.try_recv() {
             Ok(Ok((screen, modes))) => {
                 awaiting_ui.insert(session_id.clone());
@@ -632,6 +730,22 @@ fn active_graph(owner: &ShellOwner, scene_id: Option<&str>, window_id: &str) -> 
     }
 }
 
+fn send_tasks(
+    owner: &ShellOwner,
+    hierarchy: &HierarchyResult,
+    window_id: &str,
+    send: &async_channel::Sender<Event>,
+) -> Result<()> {
+    let tasks = hierarchy
+        .workspace
+        .as_ref()
+        .map(|workspace| owner.tasks(window_id, &workspace.id))
+        .transpose()?
+        .unwrap_or_default();
+    send.send_blocking(Event::Tasks(tasks))?;
+    Ok(())
+}
+
 fn navigate(
     owner: &mut ShellOwner,
     window_id: &str,
@@ -660,6 +774,87 @@ fn navigate(
         correlation_id: None,
     };
     match command {
+        Command::CreateTask { workspace_id } => {
+            let input = tasks::CreateTaskInput {
+                window_id: window_id.into(),
+                workspace_id,
+                title: None,
+                navigation: None,
+                now: time,
+            };
+            owner.create_task(
+                &metadata("hierarchy.create-task", &serde_json::to_value(&input)?),
+                &input,
+                &hierarchy_ids(),
+                time,
+            )?;
+        }
+        Command::SelectTask { task_id } => {
+            owner.select_task(&tasks::SelectTaskInput {
+                window_id: window_id.into(),
+                task_id,
+                now: time,
+            })?;
+        }
+        Command::RenameTask { task_id, title } => {
+            let input = tasks::RenameTaskInput {
+                task_id,
+                title,
+                now: time,
+            };
+            owner.rename_task(
+                &metadata("hierarchy.rename-task", &serde_json::to_value(&input)?),
+                &input,
+                time,
+            )?;
+        }
+        Command::SetTaskPinned { task_id, pinned } => {
+            let input = tasks::SetTaskPinnedInput {
+                task_id,
+                pinned,
+                now: time,
+            };
+            owner.set_task_pinned(
+                &metadata("hierarchy.set-task-pinned", &serde_json::to_value(&input)?),
+                &input,
+                time,
+            )?;
+        }
+        Command::ReorderPinnedTask {
+            workspace_id,
+            task_id,
+            before_task_id,
+        } => {
+            let input = tasks::ReorderPinnedTaskInput {
+                workspace_id,
+                task_id,
+                before_task_id,
+                now: time,
+            };
+            owner.reorder_pinned_task(
+                &metadata(
+                    "hierarchy.reorder-pinned-task",
+                    &serde_json::to_value(&input)?,
+                ),
+                &input,
+                time,
+            )?;
+        }
+        Command::DeleteTask { task_id } => {
+            let input = tasks::DeleteTaskInput {
+                window_id: window_id.into(),
+                confirmed_intent: Some(format!("delete-task:{task_id}")),
+                task_id,
+                now: time,
+            };
+            let disposed = owner.delete_task(
+                &metadata("hierarchy.delete-task", &serde_json::to_value(&input)?),
+                &input,
+                &hierarchy_ids(),
+                time,
+            )?;
+            return Ok((owner.hierarchy(window_id)?, disposed));
+        }
         Command::CreateCanvas { task_id } => {
             let input = CreateCanvasInput {
                 window_id: window_id.into(),
@@ -769,6 +964,17 @@ fn navigate(
     Ok((owner.hierarchy(window_id)?, Vec::new()))
 }
 
+fn hierarchy_ids() -> HierarchyIds {
+    HierarchyIds {
+        workspace_id: id(),
+        execution_context_id: id(),
+        task_id: id(),
+        scene_id: id(),
+        root_node_id: id(),
+        session_id: id(),
+        mount_id: id(),
+    }
+}
 fn id() -> String {
     Uuid::new_v4().to_string()
 }
@@ -777,4 +983,134 @@ fn now() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn interaction_precedes_queued_focus_and_shutdown() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("matou-interaction-order-{}", id()));
+        check_interaction_order(&root)
+            .with_context(|| format!("isolated bridge data: {}", root.display()))?;
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    fn check_interaction_order(root: &std::path::Path) -> Result<()> {
+        let options = LaunchOptions {
+            data_root: root.join("data"),
+            workspace: root.join("workspace"),
+            shell_home: root.join("home"),
+            shell: "/bin/zsh".into(),
+        };
+        let database = options.data_root.join("matou.sqlite");
+        let window_id = "main-window-1";
+        let (scene, first, second) = {
+            let BootstrapResult::Writable {
+                mut connection,
+                ownership,
+                ..
+            } = startup::open(&options.data_root, "seed")?
+            else {
+                bail!("test database is not writable");
+            };
+            let original = hierarchy::bootstrap_window(
+                &mut connection,
+                &CommandMetadata {
+                    command_id: id(),
+                    command_type: "window.bootstrap".into(),
+                    request_hash: "seed".into(),
+                    causation_id: None,
+                    correlation_id: None,
+                },
+                &BootstrapWindowInput {
+                    window_id: window_id.into(),
+                    default_root_directory: options.workspace.to_string_lossy().into_owned(),
+                    default_name: "Workspace".into(),
+                    now: 1,
+                },
+                &hierarchy_ids(),
+                "默认",
+                1,
+            )?;
+            let scene = original.scene.context("seed scene")?.id;
+            let first = original.session.context("seed session")?.id;
+            let mut owner = ShellOwner::new(connection, ownership, id)?;
+            let (selection, _) = navigate(
+                &mut owner,
+                window_id,
+                Command::CreateShellSibling {
+                    scene_id: scene.clone(),
+                    source_session_id: first.clone(),
+                    parent_session_id: None,
+                },
+            )?;
+            (
+                scene,
+                first,
+                selection.session.context("sibling session")?.id,
+            )
+        };
+
+        // Prequeue the commands to exercise a single command batch regardless of scheduler timing.
+        let (commands, incoming) = mpsc::channel();
+        let input = |session: &str| Command::Input {
+            session_id: session.to_owned(),
+            bytes: vec![13],
+            defer_ordering: true,
+        };
+        for command in [
+            input(&second),
+            Command::FocusSession {
+                scene_id: scene,
+                session_id: first.clone(),
+            },
+            input(&first),
+            Command::Shutdown,
+        ] {
+            commands.send(command)?;
+        }
+        let (send, events) = async_channel::unbounded();
+        run(options, incoming, &send)?;
+
+        let focus_graph = std::iter::from_fn(|| events.try_recv().ok())
+            .find_map(|event| match event {
+                Event::Navigation { graph, .. } => Some(graph),
+                _ => None,
+            })
+            .context("focus navigation graph")?;
+        let previous = focus_graph["nodes"]
+            .as_array()
+            .context("focus navigation nodes")?
+            .iter()
+            .find(|node| node["sessionId"] == second)
+            .context("previously focused Shell")?;
+        let connection = startup::open_read_only(&database)?;
+        let membership = |session: &str| {
+            connection.query_row(
+                "SELECT last_user_interaction_seq, pending_user_interaction_seq
+                 FROM session_canvas_memberships WHERE session_id = ?",
+                [session],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+        };
+        let receipts: i64 = connection.query_row(
+            "SELECT count(*) FROM command_deduplication WHERE command_type = 'session.user-interaction'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(
+            (
+                previous["lastUserInteractionSeq"].as_i64(),
+                membership(&second)?,
+                membership(&first)?,
+                receipts
+            ),
+            (Some(1), (1, 0), (0, 2), 2),
+            "the switch must apply the old Shell interaction and shutdown must retain the new one"
+        );
+        Ok(())
+    }
 }

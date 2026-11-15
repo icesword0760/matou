@@ -7,7 +7,7 @@ use std::{
 
 use gpui::{prelude::*, *};
 use matou_native_core::geometry::GeometryUpdate;
-use matou_native_core::hierarchy::{HierarchyResult, Scene};
+use matou_native_core::hierarchy::{HierarchyResult, Scene, Task};
 use serde_json::Value;
 
 use crate::{
@@ -23,12 +23,46 @@ use crate::{
 #[cfg(debug_assertions)]
 type MotionTrace = std::rc::Rc<std::cell::RefCell<std::fs::File>>;
 
+#[derive(Clone)]
+struct TaskDrag {
+    task_id: String,
+    workspace_id: String,
+    title: String,
+}
+impl Render for TaskDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .w(px(230.))
+            .h(px(34.))
+            .px(px(7.))
+            .rounded(px(8.))
+            .bg(rgba(0xeceef3b8))
+            .text_color(rgb(0x2f3547))
+            .text_size(px(13.))
+            .flex()
+            .items_center()
+            .gap(px(7.))
+            .child(icon("task", 12., 0x2f3547))
+            .child(self.title.clone())
+    }
+}
+
 struct CardMotion {
     width: Transition,
     lift: Transition,
 }
 
 enum TabDialog {
+    RenameTask {
+        task_id: String,
+        input: Entity<RenameInput>,
+        empty_submitted: bool,
+        failure: Option<(String, String)>,
+    },
+    DeleteTask {
+        task_id: String,
+        title: String,
+    },
     Rename {
         scene_id: String,
         input: Entity<RenameInput>,
@@ -61,6 +95,15 @@ pub struct Workspace {
     commands: Sender<Command>,
     hierarchy: Option<HierarchyResult>,
     scenes: Vec<Scene>,
+    tasks: Vec<Task>,
+    task_controls: HashMap<String, [FocusHandle; 2]>,
+    task_bounds: HashMap<String, Bounds<Pixels>>,
+    task_hover: Option<String>,
+    reveal_task: Option<String>,
+    task_menu: Option<(String, Point<Pixels>, Vec<FocusHandle>)>,
+    sidebar_scroll: ScrollHandle,
+    workspace_collapsed: bool,
+    task_toast: Option<String>,
     tab_scroll: ScrollHandle,
     tab_hover: Option<String>,
     tab_overflow: bool,
@@ -140,6 +183,15 @@ impl Workspace {
             commands,
             hierarchy: None,
             scenes: Vec::new(),
+            tasks: Vec::new(),
+            task_controls: HashMap::new(),
+            task_bounds: HashMap::new(),
+            task_hover: None,
+            reveal_task: None,
+            task_menu: None,
+            sidebar_scroll: ScrollHandle::new(),
+            workspace_collapsed: false,
+            task_toast: None,
             tab_scroll: ScrollHandle::new(),
             tab_hover: None,
             tab_overflow: false,
@@ -197,7 +249,10 @@ impl Workspace {
     fn send(&mut self, command: Command, cx: &mut Context<Self>) {
         if matches!(
             &command,
-            Command::SelectScene { .. }
+            Command::CreateTask { .. }
+                | Command::SelectTask { .. }
+                | Command::DeleteTask { .. }
+                | Command::SelectScene { .. }
                 | Command::CreateCanvas { .. }
                 | Command::CreateShellSibling { .. }
                 | Command::CloseScene { .. }
@@ -221,6 +276,51 @@ impl Workspace {
 
     fn apply(&mut self, event: Event, window: &mut Window, cx: &mut Context<Self>) {
         match event {
+            Event::Tasks(tasks) => {
+                self.task_controls
+                    .retain(|id, _| tasks.iter().any(|task| &task.id == id));
+                self.task_bounds
+                    .retain(|id, _| tasks.iter().any(|task| &task.id == id));
+                for task in &tasks {
+                    self.task_controls
+                        .entry(task.id.clone())
+                        .or_insert_with(|| {
+                            [
+                                cx.focus_handle().tab_stop(true),
+                                cx.focus_handle().tab_stop(true),
+                            ]
+                        });
+                }
+                self.tasks = tasks;
+            }
+            Event::TaskRenameResult {
+                task_id,
+                title,
+                error,
+            } => {
+                if let Some(TabDialog::RenameTask {
+                    task_id: current,
+                    failure,
+                    ..
+                }) = &mut self.dialog
+                    && *current == task_id
+                {
+                    if let Some(_error) = error {
+                        *failure = Some((title, "重命名失败：名称为空或已存在".into()));
+                    } else {
+                        self.close_dialog(window, cx);
+                        self.task_toast = Some("工作台已重命名".into());
+                        cx.spawn(async move |this, cx| {
+                            cx.background_executor().timer(Duration::from_secs(2)).await;
+                            let _ = this.update(cx, |this, cx| {
+                                this.task_toast = None;
+                                cx.notify();
+                            });
+                        })
+                        .detach();
+                    }
+                }
+            }
             Event::Ready {
                 hierarchy,
                 scenes,
@@ -299,6 +399,15 @@ impl Workspace {
                             ]
                         });
                 }
+                let task_changed = self
+                    .hierarchy
+                    .as_ref()
+                    .and_then(|h| h.task.as_ref())
+                    .map(|task| &task.id)
+                    != hierarchy.task.as_ref().map(|task| &task.id);
+                if task_changed && !self.workspace_collapsed {
+                    self.reveal_task = hierarchy.task.as_ref().map(|task| task.id.clone());
+                }
                 self.scenes = scenes;
                 self.focused = next_focus;
                 self.hierarchy = Some(hierarchy);
@@ -317,6 +426,11 @@ impl Workspace {
                 if (initializing || scene_changed || focus_changed)
                     && self.dialog.is_none()
                     && (window.focused(cx).is_none()
+                        || (task_changed
+                            && self
+                                .task_controls
+                                .values()
+                                .any(|controls| controls[0].is_focused(window)))
                         || self
                             .terminals
                             .values()
@@ -500,6 +614,7 @@ impl Workspace {
                         Command::Input {
                             session_id: session_id.clone(),
                             bytes: bytes.clone(),
+                            defer_ordering: true,
                         },
                         cx,
                     ),
@@ -853,18 +968,12 @@ impl Workspace {
         cx.notify();
     }
 
-    fn sidebar(&self) -> Div {
+    fn sidebar(&self, cx: &mut Context<Self>) -> Div {
         let workspace = self
             .hierarchy
             .as_ref()
             .and_then(|h| h.workspace.as_ref())
             .map(|w| w.name.as_str())
-            .unwrap_or("");
-        let task = self
-            .hierarchy
-            .as_ref()
-            .and_then(|h| h.task.as_ref())
-            .map(|t| t.title.as_str())
             .unwrap_or("");
         div()
             .w(px(260.))
@@ -898,88 +1007,147 @@ impl Workspace {
                     .child(self.control(div().child(icon("bell", 16., 0x8d96a3)), "notifications")),
             )
             .child(
-                div().flex_1().min_h_0().px(px(6.)).pt(px(8.)).child(
-                    div()
-                        .relative()
-                        .mt(px(1.))
-                        .mb(px(8.))
-                        .child(
-                            div()
-                                .absolute()
-                                .top(px(5.))
-                                .bottom(px(5.))
-                                .left_0()
-                                .w(px(2.))
-                                .rounded(px(1.))
-                                .bg(rgb(0x67a6f4)),
-                        )
-                        .child(
-                            self.control(div(), "workspace")
-                                .h(px(34.))
-                                .flex()
-                                .items_center()
-                                .pl(px(7.))
-                                .gap(px(7.))
-                                .child(icon("chevron-down", 14., 0x777777))
-                                .child(icon("folder", 16., 0x4078f2))
-                                .child(
-                                    div()
-                                        .text_size(px(13.))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .child(workspace.to_owned()),
-                                )
-                                .child(
-                                    div()
-                                        .px(px(5.))
-                                        .py(px(1.))
-                                        .rounded(px(5.))
-                                        .bg(rgb(0xeceef3))
-                                        .text_color(rgb(0x91949e))
-                                        .text_size(px(9.))
-                                        .child("默认"),
-                                )
-                                .child(icon("pin", 13., 0x81848d))
-                                .child(div().flex_1())
-                                .child(
-                                    self.control(
-                                        div().child(icon("plus", 14., 0x81848d)),
-                                        "add-task",
+                div()
+                    .id("sidebar-groups")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.sidebar_scroll)
+                    .px(px(6.))
+                    .pt(px(8.))
+                    .pb(px(20.))
+                    .child(
+                        div()
+                            .relative()
+                            .mt(px(1.))
+                            .mb(px(8.))
+                            .child(
+                                div()
+                                    .absolute()
+                                    .top(px(5.))
+                                    .bottom(px(5.))
+                                    .left_0()
+                                    .w(px(2.))
+                                    .rounded(px(1.))
+                                    .bg(rgb(0x67a6f4)),
+                            )
+                            .child(
+                                div()
+                                    .h(px(34.))
+                                    .flex()
+                                    .items_center()
+                                    .rounded(px(8.))
+                                    .child(
+                                        self.button(
+                                            div()
+                                                .id("workspace-toggle")
+                                                .h(px(34.))
+                                                .flex_1()
+                                                .min_w_0()
+                                                .flex()
+                                                .items_center()
+                                                .pl(px(7.))
+                                                .pr(px(5.))
+                                                .gap(px(7.))
+                                                .cursor_pointer()
+                                                .child(icon(
+                                                    if self.workspace_collapsed {
+                                                        "chevron-right"
+                                                    } else {
+                                                        "chevron-down"
+                                                    },
+                                                    14.,
+                                                    0x777777,
+                                                ))
+                                                .child(icon("folder", 16., 0x4078f2))
+                                                .child(
+                                                    div()
+                                                        .min_w_0()
+                                                        .overflow_hidden()
+                                                        .whitespace_nowrap()
+                                                        .text_ellipsis()
+                                                        .text_size(px(13.))
+                                                        .font_weight(FontWeight::SEMIBOLD)
+                                                        .child(workspace.to_owned()),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .flex_none()
+                                                        .px(px(5.))
+                                                        .py(px(1.))
+                                                        .rounded(px(5.))
+                                                        .bg(rgb(0xeceef3))
+                                                        .text_color(rgb(0x91949e))
+                                                        .text_size(px(9.))
+                                                        .font_weight(FontWeight::SEMIBOLD)
+                                                        .child("默认"),
+                                                )
+                                                .child(icon("pin", 13., 0x81848d)),
+                                            &self.control_focus["workspace"],
+                                            |this, _, cx| {
+                                                this.workspace_collapsed =
+                                                    !this.workspace_collapsed;
+                                                cx.notify();
+                                            },
+                                            cx,
+                                        ),
+                                    )
+                                    .child(
+                                        self.button(
+                                            div()
+                                                .id("add-task")
+                                                .size(px(26.))
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .rounded(px(6.))
+                                                .cursor_pointer()
+                                                .hover(|s| s.bg(rgba(0x0000000f)))
+                                                .child(icon("plus", 14., 0x81848d)),
+                                            &self.control_focus["add-task"],
+                                            |this, window, cx| {
+                                                if let Some(workspace) = this
+                                                    .hierarchy
+                                                    .as_ref()
+                                                    .and_then(|h| h.workspace.as_ref())
+                                                {
+                                                    this.send(
+                                                        Command::CreateTask {
+                                                            workspace_id: workspace.id.clone(),
+                                                        },
+                                                        cx,
+                                                    );
+                                                    window.blur();
+                                                }
+                                            },
+                                            cx,
+                                        ),
+                                    )
+                                    .child(
+                                        self.control(div(), "workspace-menu")
+                                            .w(px(26.))
+                                            .flex()
+                                            .justify_center()
+                                            .child(icon("ellipsis", 14., 0x81848d)),
                                     ),
-                                )
-                                .child(
-                                    self.control(div(), "workspace-menu")
-                                        .w(px(26.))
-                                        .flex()
-                                        .justify_center()
-                                        .child(icon("ellipsis", 14., 0x81848d)),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .ml(px(17.))
-                                .mr(px(1.))
-                                .mt(px(2.))
-                                .h(px(34.))
-                                .rounded(px(8.))
-                                .bg(rgba(0x57657f18))
-                                .flex()
-                                .items_center()
-                                .px(px(8.))
-                                .gap(px(8.))
-                                .child(icon("task", 12., 0x2f3547))
-                                .child(
-                                    div()
-                                        .text_size(px(13.))
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .child(task.to_owned()),
-                                )
-                                .child(div().flex_1())
-                                .child(self.control(
-                                    div().child(icon("ellipsis", 14., 0x656d76)),
-                                    "task-menu",
-                                )),
-                        ),
-                ),
+                            )
+                            .child(
+                                div()
+                                    .ml(px(17.))
+                                    .pt(px(2.))
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(1.))
+                                    .children(if self.workspace_collapsed {
+                                        Vec::new()
+                                    } else {
+                                        self.tasks
+                                            .iter()
+                                            .map(|task| self.task_row(task, cx).into_any_element())
+                                            .collect()
+                                    }),
+                            ),
+                    ),
             )
             .child(
                 div()
@@ -997,6 +1165,262 @@ impl Workspace {
                     .child(self.control(div().child(icon("settings-2", 16., 0x989da7)), "settings"))
                     .child(div().ml(px(7.)).child("设置")),
             )
+    }
+
+    fn task_row(&self, task: &Task, cx: &mut Context<Self>) -> Stateful<Div> {
+        let active = self
+            .hierarchy
+            .as_ref()
+            .and_then(|h| h.task.as_ref())
+            .is_some_and(|t| t.id == task.id);
+        let focus = &self.task_controls[&task.id];
+        let id = task.id.clone();
+        let menu_id = id.clone();
+        let right_id = id.clone();
+        let hover_id = id.clone();
+        let bounds_id = id.clone();
+        let view = cx.entity().downgrade();
+        let menu_visible = active
+            || self.task_hover.as_ref() == Some(&id)
+            || self.task_menu.as_ref().is_some_and(|m| m.0 == id);
+        let color = if active { 0x2f3547 } else { 0x6f7683 };
+        let row = self
+            .focus_control(
+                div().id(SharedString::from(format!("task:{id}"))),
+                &focus[0],
+            )
+            .relative()
+            .h(px(34.))
+            .flex_none()
+            .rounded(px(8.))
+            .flex()
+            .items_center()
+            .px(px(7.))
+            .py(px(6.))
+            .gap(px(7.))
+            .text_size(px(13.))
+            .line_height(px(19.5))
+            .text_color(rgb(color))
+            .bg(if active {
+                rgba(0x57657f18)
+            } else {
+                rgba(0x00000000)
+            })
+            .hover(|s| s.bg(rgba(0x57657f12)))
+            .on_mouse_down(MouseButton::Left, {
+                let focus = focus[0].clone();
+                move |_, window, _| window.focus(&focus)
+            })
+            .on_click(cx.listener(move |this, event, _, cx| {
+                if !matches!(event, ClickEvent::Keyboard(_)) {
+                    this.send(
+                        Command::SelectTask {
+                            task_id: id.clone(),
+                        },
+                        cx,
+                    );
+                }
+            }))
+            .on_key_down(cx.listener({
+                let id = task.id.clone();
+                move |this, e: &KeyDownEvent, _, cx| {
+                    if matches!(e.keystroke.key.as_str(), "enter" | "space")
+                        && !e.keystroke.modifiers.modified()
+                    {
+                        cx.stop_propagation();
+                        this.send(
+                            Command::SelectTask {
+                                task_id: id.clone(),
+                            },
+                            cx,
+                        );
+                    }
+                }
+            }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, _, window, cx| {
+                    window.focus(&this.task_controls[&right_id][0]);
+                    this.open_task_menu(&right_id, false, cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .on_hover(cx.listener(move |this, hovered, _, cx| {
+                this.task_hover = if *hovered {
+                    Some(hover_id.clone())
+                } else {
+                    None
+                };
+                cx.notify();
+            }))
+            .child(icon("task", 12., color))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(task.title.clone()),
+            )
+            .when(task.is_pinned, |row| row.child(icon("pin", 13., 0x81848d)))
+            .child(
+                self.button(
+                    div()
+                        .id(SharedString::from(format!("task-more:{}", task.id)))
+                        .size(px(22.))
+                        .flex_none()
+                        .rounded(px(4.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .opacity(if menu_visible { 1. } else { 0. })
+                        .cursor_pointer()
+                        .hover(|s| s.bg(rgba(0x0000000f)))
+                        .child(icon("ellipsis", 14., 0x656d76)),
+                    &focus[1],
+                    move |this, _, cx| this.open_task_menu(&menu_id, true, cx),
+                    cx,
+                ),
+            )
+            .child(
+                canvas(
+                    |_, _, _| (),
+                    move |bounds, _, _, cx| {
+                        let _ = view.update(cx, |this, cx| {
+                            this.task_bounds.insert(bounds_id.clone(), bounds);
+                            if this.reveal_task.as_ref() == Some(&bounds_id) {
+                                this.reveal_task = None;
+                                let viewport = this.sidebar_scroll.bounds();
+                                let delta = if bounds.top() < viewport.top() {
+                                    viewport.top() - bounds.top()
+                                } else if bounds.bottom() > viewport.bottom() {
+                                    viewport.bottom() - bounds.bottom()
+                                } else {
+                                    px(0.)
+                                };
+                                if delta != px(0.) {
+                                    let offset = this.sidebar_scroll.offset();
+                                    this.sidebar_scroll
+                                        .set_offset(point(offset.x, offset.y + delta));
+                                    cx.notify();
+                                }
+                            }
+                        });
+                    },
+                )
+                .absolute()
+                .inset_0()
+                .size_full(),
+            );
+        if task.is_pinned {
+            let target = task.id.clone();
+            let workspace_id = task.workspace_id.clone();
+            row.on_drag(
+                TaskDrag {
+                    task_id: task.id.clone(),
+                    workspace_id: workspace_id.clone(),
+                    title: task.title.clone(),
+                },
+                |info, _, _, cx| cx.new(|_| info.clone()),
+            )
+            .drag_over::<TaskDrag>(|s, _, _, _| s.bg(rgba(0x58a6ff24)))
+            .on_drop(cx.listener(move |this, drag: &TaskDrag, _, cx| {
+                if drag.workspace_id == workspace_id && drag.task_id != target {
+                    this.send(
+                        Command::ReorderPinnedTask {
+                            workspace_id: workspace_id.clone(),
+                            task_id: drag.task_id.clone(),
+                            before_task_id: Some(target.clone()),
+                        },
+                        cx,
+                    );
+                }
+            }))
+        } else {
+            row
+        }
+    }
+
+    fn open_task_menu(&mut self, task_id: &str, more_button: bool, cx: &mut Context<Self>) {
+        if self
+            .task_menu
+            .as_ref()
+            .is_some_and(|menu| menu.0 == task_id)
+        {
+            self.task_menu = None;
+        } else if let Some(bounds) = self.task_bounds.get(task_id) {
+            self.task_menu = Some((
+                task_id.into(),
+                point(
+                    bounds.right() + px(if more_button { -1. } else { 6. }),
+                    bounds.top() + bounds.size.height / 2.,
+                ),
+                (0..3).map(|_| cx.focus_handle().tab_stop(true)).collect(),
+            ));
+        }
+        self.tab_menu = None;
+        self.hidden_tabs = None;
+        cx.notify();
+    }
+
+    fn open_task_rename(&mut self, task_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(task) = self.tasks.iter().find(|task| task.id == task_id) else {
+            return;
+        };
+        let input = cx.new(|cx| {
+            let mut input = RenameInput::new(task.title.clone(), cx);
+            input.placeholder = "请输入事项名称".into();
+            input
+        });
+        self.dialog_controls = (0..3).map(|_| cx.focus_handle().tab_stop(true)).collect();
+        self.dialog_subscription =
+            Some(
+                cx.subscribe_in(&input, window, |this, _, event, window, cx| match event {
+                    RenameInputEvent::Changed => {
+                        if let Some(TabDialog::RenameTask {
+                            empty_submitted, ..
+                        }) = &mut this.dialog
+                        {
+                            *empty_submitted = false;
+                        }
+                        cx.notify();
+                    }
+                    RenameInputEvent::Cancel => this.close_dialog(window, cx),
+                    RenameInputEvent::Confirm => this.confirm_dialog(window, cx),
+                }),
+            );
+        window.focus(&input.read(cx).focus);
+        self.dialog = Some(TabDialog::RenameTask {
+            task_id,
+            input,
+            empty_submitted: false,
+            failure: None,
+        });
+        self.task_menu = None;
+        cx.notify();
+    }
+
+    fn task_rename_error(&self, task_id: &str, value: &str) -> Option<String> {
+        self.tasks
+            .iter()
+            .any(|task| task.id != task_id && task.title == value)
+            .then(|| format!("当前工作区下已存在名为\"{value}\"的工作台"))
+    }
+
+    fn open_task_delete(&mut self, task_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(task) = self.tasks.iter().find(|task| task.id == task_id) else {
+            return;
+        };
+        self.dialog = Some(TabDialog::DeleteTask {
+            task_id,
+            title: task.title.clone(),
+        });
+        self.dialog_controls = (0..3).map(|_| cx.focus_handle().tab_stop(true)).collect();
+        window.focus(&self.dialog_controls[0]);
+        self.task_menu = None;
+        cx.notify();
     }
 
     fn scene_title(&self, scene: &Scene) -> String {
@@ -1057,7 +1481,33 @@ impl Workspace {
             .then(|| format!("当前事项下已存在名为\"{value}\"的标签页"))
     }
     fn confirm_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(TabDialog::RenameTask { task_id, input, .. }) = &self.dialog {
+            let task_id = task_id.clone();
+            let text = input.read(cx);
+            if text.composing() {
+                return;
+            }
+            let title = trim_name(&text.text).to_owned();
+            if title.is_empty() {
+                if let Some(TabDialog::RenameTask {
+                    empty_submitted, ..
+                }) = &mut self.dialog
+                {
+                    *empty_submitted = true;
+                }
+                cx.notify();
+                return;
+            }
+            if self.task_rename_error(&task_id, &title).is_none() {
+                self.send(Command::RenameTask { task_id, title }, cx);
+            }
+            return;
+        }
         let command = match &self.dialog {
+            Some(TabDialog::RenameTask { .. }) => unreachable!("task rename handled above"),
+            Some(TabDialog::DeleteTask { task_id, .. }) => Some(Command::DeleteTask {
+                task_id: task_id.clone(),
+            }),
             Some(TabDialog::Rename { scene_id, input }) => {
                 let input = input.read(cx);
                 let name = trim_name(&input.text);
@@ -1224,12 +1674,15 @@ impl Workspace {
             cx.stop_propagation();
             return;
         }
-        let confirmation = matches!(self.dialog, Some(TabDialog::Close { .. }));
+        let confirmation = matches!(
+            self.dialog,
+            Some(TabDialog::Close { .. } | TabDialog::DeleteTask { .. })
+        );
         if stroke.key == "escape" {
             if confirmation {
                 self.close_dialog(window, cx);
                 cx.stop_propagation();
-            } else if self.tab_menu.take().is_some() {
+            } else if self.task_menu.take().is_some() || self.tab_menu.take().is_some() {
                 // SceneTabBar dismisses this menu in the window bubble listener;
                 // it neither moves focus nor consumes the underlying Escape.
                 cx.notify();
@@ -1245,7 +1698,7 @@ impl Workspace {
                 .terminals
                 .values()
                 .any(|terminal| terminal.read(cx).focus.is_focused(window))
-                || matches!(&self.dialog, Some(TabDialog::Rename { input, .. }) if input.read(cx).focus.is_focused(window) && input.read(cx).composing()))
+                || matches!(&self.dialog, Some(TabDialog::Rename { input, .. } | TabDialog::RenameTask { input, .. }) if input.read(cx).focus.is_focused(window) && input.read(cx).composing()))
         {
             return;
         }
@@ -1557,6 +2010,17 @@ impl Workspace {
     fn tab_overlay(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         if let Some(dialog) = &self.dialog {
             let (title, body, confirm, show_cancel, disabled) = match dialog {
+                TabDialog::RenameTask { task_id, input, empty_submitted, failure } => {
+                    let value = trim_name(&input.read(cx).text);
+                    let error = if *empty_submitted && value.is_empty() { Some("工作台名称不能为空".into()) }
+                        else { self.task_rename_error(task_id, value).or_else(|| failure.as_ref().filter(|(title, _)| title == value).map(|(_, message)| message.clone())) };
+                    let mut body = tabs_ui::dialog_body().child(input.clone());
+                    if let Some(error) = &error { body = body.child(tabs_ui::dialog_error(error.clone())); }
+                    ("重命名", body, "确定", true, error.is_some() && !value.is_empty())
+                }
+                TabDialog::DeleteTask { title, .. } => (
+                    "提示", tabs_ui::dialog_body().child(format!("删除 \"{title}\" 会丢失该事项下所有终端会话，但不会删除本地目录。 是否继续？")), "确定", true, false,
+                ),
                 TabDialog::Rename { scene_id, input } => {
                     let value = trim_name(&input.read(cx).text);
                     let error = self.rename_error(scene_id, value);
@@ -1678,6 +2142,90 @@ impl Workspace {
                             )
                             .child(body)
                             .child(footer),
+                    )
+                    .into_any_element(),
+            );
+        }
+        if let Some((id, position, controls)) = &self.task_menu {
+            let task = self.tasks.iter().find(|task| &task.id == id)?;
+            let pinned = task.is_pinned;
+            let pin_id = id.clone();
+            let rename_id = id.clone();
+            let delete_id = id.clone();
+            let menu_item = |id: &'static str, label: &'static str, symbol: &'static str| {
+                div()
+                    .id(id)
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .px(px(12.))
+                    .py(px(8.))
+                    .rounded(px(6.))
+                    .text_size(px(13.))
+                    .line_height(px(19.5))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(rgb(0xeceef3)))
+                    .child(icon(
+                        symbol,
+                        if symbol == "pin" { 13. } else { 14. },
+                        if symbol == "trash-2" {
+                            0xc5443e
+                        } else {
+                            0x2f3547
+                        },
+                    ))
+                    .child(label)
+            };
+            return Some(
+                tabs_ui::context_menu("task-context-menu")
+                    .w(px(120.))
+                    .p(px(6.))
+                    .rounded(px(10.))
+                    .border_1()
+                    .border_color(rgba(0x00000000))
+                    .left(position.x)
+                    .top(position.y - px(62.25))
+                    .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                        this.task_menu = None;
+                        cx.notify();
+                    }))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(self.button(
+                        menu_item("task-pin", if pinned { "取消置顶" } else { "置顶" }, "pin"),
+                        &controls[0],
+                        move |this, _, cx| {
+                            this.task_menu = None;
+                            this.send(
+                                Command::SetTaskPinned {
+                                    task_id: pin_id.clone(),
+                                    pinned: !pinned,
+                                },
+                                cx,
+                            );
+                        },
+                        cx,
+                    ))
+                    .child(self.button(
+                        menu_item("task-rename", "重命名", "pencil"),
+                        &controls[1],
+                        move |this, window, cx| {
+                            this.open_task_rename(rename_id.clone(), window, cx)
+                        },
+                        cx,
+                    ))
+                    .child(
+                        self.button(
+                            menu_item("task-delete", "删除", "trash-2")
+                                .mt(px(4.))
+                                .border_t_1()
+                                .border_color(rgb(0xeceef2))
+                                .text_color(rgb(0xc5443e)),
+                            &controls[2],
+                            move |this, window, cx| {
+                                this.open_task_delete(delete_id.clone(), window, cx)
+                            },
+                            cx,
+                        ),
                     )
                     .into_any_element(),
             );
@@ -2337,6 +2885,27 @@ impl Render for Workspace {
             .child(carousel)
             .child(indicator);
         let overlay = self.tab_overlay(window, cx);
+        let toast = self.task_toast.as_ref().map(|text| {
+            div()
+                .absolute()
+                .top(px(20.))
+                .left_0()
+                .right_0()
+                .flex()
+                .justify_center()
+                .child(
+                    div()
+                        .px(px(15.))
+                        .py(px(9.))
+                        .rounded(px(6.))
+                        .border_1()
+                        .border_color(rgba(0x67c23a59))
+                        .bg(rgb(0x1c2518))
+                        .text_color(rgb(0xb3e19d))
+                        .text_size(px(13.))
+                        .child(text.clone()),
+                )
+        });
         let geometry_view = cx.entity().downgrade();
         div()
             .id("workspace-root")
@@ -2351,7 +2920,7 @@ impl Render for Workspace {
             .flex()
             .font_family(".AppleSystemUIFont")
             .text_color(rgb(0x303744))
-            .child(self.sidebar())
+            .child(self.sidebar(cx))
             .child(
                 div()
                     .flex_1()
@@ -2384,6 +2953,7 @@ impl Render for Workspace {
                 .absolute()
                 .size(px(0.)),
             )
+            .children(toast)
             .children(overlay)
     }
 }

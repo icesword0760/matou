@@ -23,6 +23,7 @@ struct EditState {
 pub struct RenameInput {
     pub focus: FocusHandle,
     pub text: String,
+    pub placeholder: String,
     selection: Range<usize>,
     reversed: bool,
     marked: Option<Range<usize>>,
@@ -42,6 +43,7 @@ impl RenameInput {
         Self {
             focus: cx.focus_handle().tab_stop(true),
             text,
+            placeholder: "输入标签页名称".into(),
             selection: end..end,
             reversed: false,
             marked: None,
@@ -312,7 +314,7 @@ impl RenameInput {
         cx: &mut App,
     ) {
         let display: SharedString = if self.text.is_empty() {
-            "输入标签页名称".into()
+            self.placeholder.clone().into()
         } else {
             self.text.clone().into()
         };

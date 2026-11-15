@@ -291,6 +291,7 @@ fn input(bridge: &RuntimeBridge, session_id: &str, command: &str) -> Result<()> 
         Command::Input {
             session_id: session_id.into(),
             bytes: format!("{command}\r").into_bytes(),
+            defer_ordering: false,
         },
     )
 }

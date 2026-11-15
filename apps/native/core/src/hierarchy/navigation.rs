@@ -31,6 +31,17 @@ pub(super) fn activate_workspace(
     workspace_id: &str,
     now: i64,
 ) -> Result<()> {
+    set_active_workspace(connection, window_id, workspace_id, now)?;
+    let task_id = preferred_task(connection, window_id, workspace_id)?;
+    focus_task(connection, window_id, workspace_id, task_id.as_deref(), now)
+}
+
+fn set_active_workspace(
+    connection: &Connection,
+    window_id: &str,
+    workspace_id: &str,
+    now: i64,
+) -> Result<()> {
     connection.execute(
         "INSERT INTO window_navigation (window_id, active_workspace_id, updated_at)
          VALUES (?, ?, ?)
@@ -39,19 +50,53 @@ pub(super) fn activate_workspace(
            updated_at = excluded.updated_at",
         params![window_id, workspace_id, now],
     )?;
+    Ok(())
+}
 
-    let task_id: Option<String> = connection
+pub(super) fn preferred_task(
+    connection: &Connection,
+    window_id: &str,
+    workspace_id: &str,
+) -> Result<Option<String>> {
+    Ok(connection
         .query_row(
             "SELECT tasks.id FROM tasks
-         LEFT JOIN window_workspace_focus focus
-           ON focus.window_id = ? AND focus.workspace_id = tasks.workspace_id
-         WHERE tasks.workspace_id = ? AND tasks.archived_at IS NULL
-         ORDER BY (tasks.id = focus.active_task_id) DESC, tasks.sort_key, tasks.created_at
-         LIMIT 1",
+             LEFT JOIN window_workspace_focus focus
+               ON focus.window_id = ? AND focus.workspace_id = tasks.workspace_id
+             WHERE tasks.workspace_id = ? AND tasks.archived_at IS NULL
+             ORDER BY (tasks.id = focus.active_task_id) DESC, tasks.sort_key, tasks.created_at
+             LIMIT 1",
             [window_id, workspace_id],
             |row| row.get(0),
         )
-        .optional()?;
+        .optional()?)
+}
+
+pub(super) fn activate_task_in_transaction(
+    connection: &Connection,
+    window_id: &str,
+    task_id: &str,
+    now: i64,
+) -> Result<()> {
+    let workspace_id: String = connection
+        .query_row(
+            "SELECT workspace_id FROM tasks WHERE id = ? AND archived_at IS NULL",
+            [task_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .with_context(|| format!("Task {task_id} does not exist"))?;
+    set_active_workspace(connection, window_id, &workspace_id, now)?;
+    focus_task(connection, window_id, &workspace_id, Some(task_id), now)
+}
+
+fn focus_task(
+    connection: &Connection,
+    window_id: &str,
+    workspace_id: &str,
+    task_id: Option<&str>,
+    now: i64,
+) -> Result<()> {
     connection.execute(
         "INSERT INTO window_workspace_focus (window_id, workspace_id, active_task_id, updated_at)
          VALUES (?, ?, ?, ?)
@@ -357,7 +402,10 @@ pub fn list_scenes(connection: &Connection, task_id: &str) -> Result<Vec<Scene>>
         .collect::<rusqlite::Result<_>>()?)
 }
 
-fn read_navigation(connection: &Connection, window_id: &str) -> Result<WindowNavigation> {
+pub(super) fn read_navigation(
+    connection: &Connection,
+    window_id: &str,
+) -> Result<WindowNavigation> {
     let active_workspace_id = connection
         .query_row(
             "SELECT active_workspace_id FROM window_navigation WHERE window_id = ?",
