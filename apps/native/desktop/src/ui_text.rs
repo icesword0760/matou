@@ -6,10 +6,33 @@ use unicode_segmentation::UnicodeSegmentation;
 
 #[derive(IntoElement)]
 /// Match the frozen Mac UI font cascade without CoreText's automatic CJK scaling.
-pub struct UiText(SharedString);
+pub struct UiText {
+    text: SharedString,
+    #[cfg(target_os = "macos")]
+    normal_line_height: bool,
+}
 
 pub fn ui_text(text: impl Into<SharedString>) -> UiText {
-    UiText(text.into())
+    UiText {
+        text: text.into(),
+        #[cfg(target_os = "macos")]
+        normal_line_height: false,
+    }
+}
+
+impl UiText {
+    /// Use the font-dependent line height for a Mac single-line label.
+    pub fn normal_line_height(self) -> Self {
+        #[cfg(target_os = "macos")]
+        {
+            Self {
+                normal_line_height: true,
+                ..self
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        self
+    }
 }
 
 impl RenderOnce for UiText {
@@ -17,27 +40,24 @@ impl RenderOnce for UiText {
         #[cfg(target_os = "macos")]
         {
             let fonts = UiFonts::new(window);
-            let runs = fonts.runs(&self.0, window);
-            if let Some(TextOverflow::Truncate(suffix)) = fonts.style.text_overflow.clone()
-                && (fonts.style.white_space == WhiteSpace::Nowrap
-                    || fonts.style.line_clamp == Some(1))
-                && (!self.0.is_ascii() || fonts.primary.weight != fonts.style.font_weight)
-                && !self.0.contains('\n')
+            let runs = fonts.runs(&self.text, window);
+            if (fonts.style.white_space == WhiteSpace::Nowrap || fonts.style.line_clamp == Some(1))
+                && !self.text.contains('\n')
             {
                 return SingleLineText(Rc::new(SingleLineLabel {
-                    text: self.0,
-                    suffix,
+                    text: self.text,
                     fonts,
                     runs,
+                    normal_line_height: self.normal_line_height,
                 }))
                 .into_any();
             }
-            StyledText::new(self.0).with_runs(runs).into_any()
+            StyledText::new(self.text).with_runs(runs).into_any()
         }
         #[cfg(not(target_os = "macos"))]
         {
             let _ = window;
-            StyledText::new(self.0)
+            StyledText::new(self.text)
         }
     }
 }
@@ -108,9 +128,9 @@ impl UiFonts {
 #[cfg(target_os = "macos")]
 struct SingleLineLabel {
     text: SharedString,
-    suffix: SharedString,
     fonts: UiFonts,
     runs: Vec<TextRun>,
+    normal_line_height: bool,
 }
 
 #[cfg(target_os = "macos")]
@@ -125,9 +145,16 @@ impl SingleLineLabel {
             .next()
     }
 
-    fn fit(&self, width: Option<Pixels>, window: &Window) -> Option<WrappedLine> {
-        let full = self.shape(self.text.clone(), &self.runs, window)?;
-        let Some(width) = width.filter(|width| full.unwrapped_layout.width > *width) else {
+    fn fit(
+        &self,
+        full: WrappedLine,
+        width: Option<Pixels>,
+        window: &Window,
+    ) -> Option<WrappedLine> {
+        let (Some(width), Some(TextOverflow::Truncate(suffix))) = (
+            width.filter(|width| full.unwrapped_layout.width > *width),
+            &self.fonts.style.text_overflow,
+        ) else {
             return Some(full);
         };
 
@@ -143,8 +170,7 @@ impl SingleLineLabel {
         // whole candidates with the actual font runs so the suffix also fits.
         while start < end {
             let mid = start + (end - start) / 2;
-            let text: SharedString =
-                format!("{}{}", &self.text[..boundaries[mid]], self.suffix).into();
+            let text: SharedString = format!("{}{suffix}", &self.text[..boundaries[mid]]).into();
             let runs = self.fonts.runs(&text, window);
             let candidate = self.shape(text, &runs, window)?;
             if candidate.unwrapped_layout.width <= width {
@@ -156,12 +182,78 @@ impl SingleLineLabel {
         }
         best
     }
+
+    fn measure(&self, limit: Option<Pixels>, window: &Window) -> MeasuredLine {
+        let full = self.shape(self.text.clone(), &self.runs, window);
+        // Normal line height uses all fonts participating in layout before paint truncation.
+        let metrics = self.metrics(full.as_ref(), window);
+        let line = full.and_then(|line| self.fit(line, limit, window));
+        MeasuredLine {
+            limit,
+            line,
+            metrics,
+        }
+    }
+
+    fn metrics(&self, line: Option<&WrappedLine>, window: &Window) -> SingleLineMetrics {
+        let scale = window.scale_factor();
+        let system = window.text_system();
+        let size = self.fonts.size;
+        let rounded_metrics = |id| {
+            let ascent = (system.ascent(id, size) * scale).round();
+            let descent = px((f32::from(system.descent(id, size)).abs() * scale).round());
+            (ascent, descent)
+        };
+        let (mut ascent, mut descent) = rounded_metrics(self.fonts.primary_id);
+        let height = if self.normal_line_height {
+            if let Some(line) = line {
+                for run in &line.unwrapped_layout.runs {
+                    let (run_ascent, run_descent) = rounded_metrics(run.font_id);
+                    ascent = ascent.max(run_ascent);
+                    descent = descent.max(run_descent);
+                }
+            }
+            // The fixed Mac UI cascade (SF and PingFang SC) has zero font line gap.
+            (ascent + descent) / scale
+        } else {
+            self.fonts
+                .style
+                .line_height
+                .to_pixels(size.into(), window.rem_size())
+        };
+        // The reference lays out text at device scale and floors the upper half-leading.
+        let upper_leading = ((height * scale - ascent - descent) / 2.).floor();
+        SingleLineMetrics {
+            height,
+            baseline_from_top: ascent + upper_leading,
+            scale,
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+struct SingleLineMetrics {
+    height: Pixels,
+    baseline_from_top: Pixels,
+    scale: f32,
+}
+
+#[cfg(target_os = "macos")]
+impl SingleLineMetrics {
+    fn text_origin(&self, origin: Point<Pixels>, line: &WrappedLine) -> Point<Pixels> {
+        let baseline = ((origin.y * self.scale).round() + self.baseline_from_top) / self.scale;
+        let layout = &line.unwrapped_layout;
+        // Compensate for the baseline added by WrappedLine::paint.
+        let paint_baseline = (self.height - layout.ascent - layout.descent) / 2. + layout.ascent;
+        point(origin.x, baseline - paint_baseline)
+    }
 }
 
 #[cfg(target_os = "macos")]
 struct MeasuredLine {
     limit: Option<Pixels>,
     line: Option<WrappedLine>,
+    metrics: SingleLineMetrics,
 }
 
 #[cfg(target_os = "macos")]
@@ -178,8 +270,8 @@ impl IntoElement for SingleLineText {
 
 #[cfg(target_os = "macos")]
 impl Element for SingleLineText {
-    type RequestLayoutState = (Pixels, Rc<RefCell<Option<MeasuredLine>>>);
-    type PrepaintState = Option<WrappedLine>;
+    type RequestLayoutState = Rc<RefCell<Option<MeasuredLine>>>;
+    type PrepaintState = MeasuredLine;
 
     fn id(&self) -> Option<ElementId> {
         None
@@ -196,12 +288,6 @@ impl Element for SingleLineText {
         window: &mut Window,
         _: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        let line_height = self
-            .0
-            .fonts
-            .style
-            .line_height
-            .to_pixels(self.0.fonts.size.into(), window.rem_size());
         let measured = Rc::new(RefCell::new(None));
         let layout_id = window.request_measured_layout(Style::default(), {
             let measured = measured.clone();
@@ -211,15 +297,17 @@ impl Element for SingleLineText {
                     AvailableSpace::Definite(width) => Some(width),
                     _ => None,
                 });
-                let line = label.fit(limit, window);
-                let width = line
+                let result = label.measure(limit, window);
+                let width = result
+                    .line
                     .as_ref()
                     .map_or(px(0.), |line| line.unwrapped_layout.width.ceil());
-                measured.replace(Some(MeasuredLine { limit, line }));
-                size(limit.map_or(width, |limit| width.min(limit)), line_height)
+                let height = result.metrics.height;
+                measured.replace(Some(result));
+                size(limit.map_or(width, |limit| width.min(limit)), height)
             }
         });
-        (layout_id, (line_height, measured))
+        (layout_id, measured)
     }
 
     fn prepaint(
@@ -227,20 +315,17 @@ impl Element for SingleLineText {
         _: Option<&GlobalElementId>,
         _: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
-        (_, measured): &mut Self::RequestLayoutState,
+        measured: &mut Self::RequestLayoutState,
         window: &mut Window,
         _: &mut App,
     ) -> Self::PrepaintState {
         let width = bounds.size.width;
-        if let Some(MeasuredLine {
-            limit: Some(limit),
-            line,
-        }) = measured.take()
-            && limit == width
+        if let Some(result) = measured.take()
+            && result.limit == Some(width)
         {
-            return line;
+            return result;
         }
-        self.0.fit(Some(width), window)
+        self.0.measure(Some(width), window)
     }
 
     fn paint(
@@ -248,20 +333,26 @@ impl Element for SingleLineText {
         _: Option<&GlobalElementId>,
         _: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
-        (line_height, _): &mut Self::RequestLayoutState,
-        line: &mut Self::PrepaintState,
+        _: &mut Self::RequestLayoutState,
+        measured: &mut Self::PrepaintState,
         window: &mut Window,
         cx: &mut App,
     ) {
-        if let Some(line) = line {
+        if let Some(line) = &measured.line {
             let align = self.0.fonts.style.text_align;
-            if let Err(error) =
-                line.paint_background(bounds.origin, *line_height, align, Some(bounds), window, cx)
-            {
+            let metrics = &measured.metrics;
+            if let Err(error) = line.paint_background(
+                bounds.origin,
+                metrics.height,
+                align,
+                Some(bounds),
+                window,
+                cx,
+            ) {
                 eprintln!("Paint UI title background: {error:#}");
             }
-            if let Err(error) =
-                line.paint(bounds.origin, *line_height, align, Some(bounds), window, cx)
+            let origin = metrics.text_origin(bounds.origin, line);
+            if let Err(error) = line.paint(origin, metrics.height, align, Some(bounds), window, cx)
             {
                 eprintln!("Paint UI title: {error:#}");
             }
