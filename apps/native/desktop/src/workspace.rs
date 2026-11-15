@@ -1,7 +1,7 @@
 use std::{collections::HashMap, sync::mpsc::Sender, time::Duration};
 
 use gpui::{prelude::*, *};
-use matou_native_core::hierarchy::HierarchyResult;
+use matou_native_core::hierarchy::{HierarchyResult, Scene};
 use serde_json::Value;
 
 use crate::{
@@ -12,6 +12,9 @@ use crate::{
 pub struct Workspace {
     commands: Sender<Command>,
     hierarchy: Option<HierarchyResult>,
+    scenes: Vec<Scene>,
+    tab_scroll: ScrollHandle,
+    carousel_scroll: ScrollHandle,
     graph: Value,
     terminals: HashMap<String, Entity<TerminalSurface>>,
     order: Vec<String>,
@@ -41,6 +44,9 @@ impl Workspace {
         Self {
             commands,
             hierarchy: None,
+            scenes: Vec::new(),
+            tab_scroll: ScrollHandle::new(),
+            carousel_scroll: ScrollHandle::new(),
             graph: Value::Null,
             terminals: HashMap::new(),
             order: Vec::new(),
@@ -60,11 +66,40 @@ impl Workspace {
 
     fn apply(&mut self, event: Event, window: &mut Window, cx: &mut Context<Self>) {
         match event {
-            Event::Ready { hierarchy, graph } => {
+            Event::Ready {
+                hierarchy,
+                scenes,
+                graph,
+            }
+            | Event::Navigation {
+                hierarchy,
+                scenes,
+                graph,
+            } => {
+                self.scenes = scenes;
                 self.focused = hierarchy.session.as_ref().map(|session| session.id.clone());
                 self.hierarchy = Some(hierarchy);
                 self.graph = graph;
                 self.refresh_terminals(window, cx);
+                if let Some(index) = self.scenes.iter().position(|scene| {
+                    self.hierarchy
+                        .as_ref()
+                        .and_then(|h| h.scene.as_ref())
+                        .is_some_and(|active| active.id == scene.id)
+                }) {
+                    self.tab_scroll.scroll_to_item(index);
+                }
+                if let Some(index) = self
+                    .order
+                    .iter()
+                    .position(|id| Some(id) == self.focused.as_ref())
+                {
+                    self.carousel_scroll.scroll_to_item(index);
+                }
+                if let Some(terminal) = self.focused.as_ref().and_then(|id| self.terminals.get(id))
+                {
+                    window.focus(&terminal.read(cx).focus);
+                }
             }
             Event::Graph(graph) => {
                 self.graph = graph;
@@ -303,32 +338,68 @@ impl Workspace {
             )
     }
 
-    fn topbar(&self, _window: &mut Window) -> Div {
-        let title = self
+    fn topbar(&self, cx: &mut Context<Self>) -> Div {
+        let active_id = self
             .hierarchy
             .as_ref()
             .and_then(|h| h.scene.as_ref())
-            .map(|s| s.name.clone())
-            .unwrap_or_default();
-        div()
-            .h(px(48.))
-            .flex_none()
-            .px(px(8.))
+            .map(|s| &s.id);
+        let mut tabs = div()
+            .id("scene-tabs")
+            .flex_1()
+            .min_w_0()
             .flex()
             .items_center()
-            .bg(rgb(0xffffff))
-            .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
-            .child(
+            .overflow_x_scroll()
+            .overflow_y_hidden()
+            .track_scroll(&self.tab_scroll);
+        for scene in &self.scenes {
+            let active = active_id == Some(&scene.id);
+            let scene_id = scene.id.clone();
+            let mut title = scene.name.clone();
+            if active && !scene.title_pinned && title.starts_with("Shell · ") {
+                if let Some(cwd) = self.graph["nodes"]
+                    .as_array()
+                    .and_then(|nodes| {
+                        nodes
+                            .iter()
+                            .find(|node| node["sessionId"].as_str() == self.focused.as_deref())
+                    })
+                    .and_then(|node| node["cwd"].as_str())
+                {
+                    title = format!("Shell · {cwd}");
+                }
+            }
+            tabs = tabs.child(
                 div()
+                    .id(SharedString::from(format!("tab-{}", scene.id)))
                     .h(px(28.))
-                    .w(px(200.))
-                    .px(px(12.))
+                    .min_w(px(100.))
+                    .max_w(px(200.))
+                    .flex_none()
+                    .pl(px(12.))
+                    .pr(px(10.))
                     .rounded(px(6.))
-                    .bg(rgb(0xececf2))
+                    .bg(if active {
+                        rgba(0xeceef3ff)
+                    } else {
+                        rgba(0x00000000)
+                    })
+                    .text_color(if active { rgb(0x2f3547) } else { rgb(0x999999) })
                     .flex()
                     .items_center()
                     .gap(px(6.))
                     .text_size(px(12.))
+                    .cursor_pointer()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.send(
+                            Command::SelectScene {
+                                scene_id: scene_id.clone(),
+                            },
+                            cx,
+                        )
+                    }))
                     .child(
                         div()
                             .flex_1()
@@ -337,23 +408,58 @@ impl Workspace {
                             .text_ellipsis()
                             .child(title),
                     )
-                    .child(icon("x", 13., 0x606572)),
-            )
-            .child(
-                div()
-                    .ml(px(4.))
-                    .size(px(24.))
-                    .rounded(px(6.))
-                    .bg(rgb(0xf1f1f4))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(icon("plus", 15., 0x606572)),
-            )
-            .child(div().flex_1())
+                    .child(
+                        div()
+                            .opacity(if active { 1. } else { 0. })
+                            .child(icon("x", 13., 0x606572)),
+                    ),
+            );
+        }
+        let task = self
+            .hierarchy
+            .as_ref()
+            .and_then(|h| h.task.as_ref())
+            .map(|t| t.id.clone());
+        tabs = tabs.child(
+            div()
+                .id("create-canvas")
+                .ml(px(4.))
+                .size(px(24.))
+                .flex_none()
+                .rounded(px(6.))
+                .bg(rgb(0xf1f1f4))
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if let Some(task_id) = &task {
+                        this.send(
+                            Command::CreateCanvas {
+                                task_id: task_id.clone(),
+                            },
+                            cx,
+                        );
+                    }
+                }))
+                .child(icon("plus", 15., 0x606572)),
+        );
+        let scene = active_id.cloned();
+        let session = self.focused.clone();
+        div()
+            .h(px(48.))
+            .flex_none()
+            .px(px(8.))
+            .flex()
+            .items_center()
+            .bg(rgb(0xffffff))
+            .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
+            .child(tabs)
             .child(
                 div()
                     .size(px(28.))
+                    .flex_none()
                     .flex()
                     .items_center()
                     .justify_center()
@@ -361,15 +467,32 @@ impl Workspace {
             )
             .child(
                 div()
+                    .id("create-shell")
                     .size(px(28.))
+                    .flex_none()
                     .flex()
                     .items_center()
                     .justify_center()
+                    .cursor_pointer()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let (Some(scene_id), Some(source_session_id)) = (&scene, &session) {
+                            this.send(
+                                Command::CreateShellSibling {
+                                    scene_id: scene_id.clone(),
+                                    source_session_id: source_session_id.clone(),
+                                    parent_session_id: None,
+                                },
+                                cx,
+                            );
+                        }
+                    }))
                     .child(icon("panel-right-open", 16., 0x606572)),
             )
             .child(
                 div()
                     .size(px(30.))
+                    .flex_none()
                     .flex()
                     .items_center()
                     .justify_center()
@@ -448,7 +571,8 @@ impl Workspace {
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let content_width = f32::from(window.viewport_size().width) - 260. - 20.;
-        let width = (content_width * 0.48).min(620.);
+        let columns = (((content_width + 20. + 12.) / 292.).floor()).clamp(1., 4.);
+        let inactive_width = (content_width - (columns - 1.) * 12.) / columns;
         let mut carousel = div()
             .id("session-carousel")
             .flex_1()
@@ -459,6 +583,7 @@ impl Render for Workspace {
             .border_t_1()
             .border_color(rgb(0xe8e8e8))
             .overflow_x_scroll()
+            .track_scroll(&self.carousel_scroll)
             .overflow_y_hidden()
             .bg(rgb(0xe9edf2));
         for id in &self.order {
@@ -471,13 +596,25 @@ impl Render for Workspace {
                 .and_then(|node| node["title"].as_str())
                 .unwrap_or("Shell");
             let focus = terminal.read(cx).focus.clone();
+            let session_id = id.clone();
+            let scene_id = self
+                .hierarchy
+                .as_ref()
+                .and_then(|h| h.scene.as_ref())
+                .map(|s| s.id.clone());
+            let selected = self.focused.as_ref() == Some(id);
+            let width = if selected {
+                (content_width * 0.48).min(620.)
+            } else {
+                inactive_width
+            };
             let card = div()
                 .id(SharedString::from(format!("card-{id}")))
                 .w(px(width))
                 .h_full()
                 .flex_none()
                 .relative()
-                .top(px(-4.))
+                .top(px(if selected { -4. } else { 0. }))
                 .rounded(px(12.))
                 .overflow_hidden()
                 .bg(rgb(0xfcfcfd))
@@ -497,7 +634,23 @@ impl Render for Workspace {
                         spread_radius: px(0.),
                     },
                 ])
-                .on_mouse_down(MouseButton::Left, move |_, window, _| window.focus(&focus))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, window, cx| {
+                        window.focus(&focus);
+                        if this.focused.as_ref() != Some(&session_id) {
+                            if let Some(scene_id) = &scene_id {
+                                this.send(
+                                    Command::FocusSession {
+                                        scene_id: scene_id.clone(),
+                                        session_id: session_id.clone(),
+                                    },
+                                    cx,
+                                );
+                            }
+                        }
+                    }),
+                )
                 .child(
                     div()
                         .h(px(42.))
@@ -550,7 +703,7 @@ impl Render for Workspace {
                     .h_full()
                     .flex()
                     .flex_col()
-                    .child(self.topbar(window))
+                    .child(self.topbar(cx))
                     .child(carousel)
                     .child(self.footer()),
             )
