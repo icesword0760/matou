@@ -35,3 +35,4 @@ server.pid
 
 # Local native migration reference bundles, data and evidence
 /artifacts/native-parity/
+/apps/native/target/

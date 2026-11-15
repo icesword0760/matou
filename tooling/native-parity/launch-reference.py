@@ -6,6 +6,7 @@ from pathlib import Path
 parser = argparse.ArgumentParser()
 parser.add_argument('--asar-module', help='Existing @electron/asar lib/asar.js; needed on first preparation')
 parser.add_argument('--debug-port', type=int, help='Optional loopback CDP port for a separate performance diagnostic run')
+parser.add_argument('--startup-trace', action='store_true', help='Record the first 8 seconds, including compositor screenshots, as diagnostic evidence')
 parser.add_argument('--locale', choices=['zh-CN', 'en-US', 'system'], default='zh-CN',
                     help='Use system to test the product language preference without an environment override')
 args = parser.parse_args()
@@ -67,6 +68,14 @@ command = [str(app / 'Contents/MacOS' / info['CFBundleExecutable']),
 if args.debug_port is not None:
     command.extend(['--remote-debugging-address=127.0.0.1',
                     '--remote-debugging-port=' + str(args.debug_port)])
+startup_trace = None
+if args.startup_trace:
+    startup_trace = run / 'evidence' / ('startup-' + str(time.time_ns()) + '.json')
+    startup_trace.parent.mkdir(parents=True, exist_ok=True)
+    command.extend([
+        '--trace-startup=devtools.timeline,disabled-by-default-devtools.timeline,disabled-by-default-devtools.screenshot,electron,benchmark,cc,input,latencyInfo',
+        '--trace-startup-duration=8', '--trace-startup-format=json',
+        '--trace-startup-file=' + str(startup_trace)])
 with (run / 'app.log').open('ab') as log:
     started_monotonic_ns = time.monotonic_ns()
     started_unix_ns = time.time_ns()
@@ -76,8 +85,11 @@ with (run / 'app.log').open('ab') as log:
 record = {'pid': proc.pid, 'app': str(app), 'paths': {k: str(v) for k,v in paths.items()},
           'started_monotonic_ns': started_monotonic_ns, 'started_unix_ns': started_unix_ns,
           'debug_port': args.debug_port, 'locale_override': env.get('MATOU_LOCALE'),
+          'startup_trace': str(startup_trace) if startup_trace else None,
           'baseline': str(source), 'product_logic_modified': False,
           'home_path_harness': str(run / 'home-harness.json'),
           'bundle_metadata_changes': ['CFBundleIdentifier', 'CFBundleDisplayName', 'ad-hoc signing']}
 (run / 'launch.json').write_text(json.dumps(record, indent=2) + '\n')
+if startup_trace:
+    startup_trace.with_suffix('.metadata.json').write_text(json.dumps(record, indent=2) + '\n')
 print(json.dumps(record, indent=2))

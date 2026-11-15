@@ -1,0 +1,17 @@
+[workspace]
+members = ["core"]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+license = "GPL-3.0-only"
+publish = false
+
+[profile.dev]
+opt-level = 1
+debug = 0
+incremental = false
+
+[profile.release]
+debug = 0
+incremental = false

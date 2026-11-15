@@ -49,7 +49,7 @@ try {
   await send('Performance.enable')
   const before = await send('Performance.getMetrics')
   await send('Tracing.start', {
-    categories: 'devtools.timeline,disabled-by-default-devtools.timeline,benchmark,cc,input,latencyInfo',
+    categories: 'devtools.timeline,disabled-by-default-devtools.timeline,disabled-by-default-devtools.screenshot,benchmark,cc,input,latencyInfo',
     options: 'record-as-much-as-possible', transferMode: 'ReturnAsStream'
   })
   console.log(JSON.stringify({ recording: true, seconds, out, pid: launch.pid }))
