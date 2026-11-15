@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build pinned libghostty-vt with the frozen Matou character-width policy.
+"""Build pinned libghostty-vt with Matou's character widths and history trimming counter.
 
 Requires Zig 0.17.x (pass --zig). Release sources/dependencies are downloaded
 and verified; original source is left intact in the ignored build cache.
@@ -16,6 +16,7 @@ import tarfile
 
 ROOT = Path(__file__).resolve().parent.parent
 VERSION = '1.0.1'
+HISTORY_TRIM_PATCH_VERSION = 1
 BASE = f'https://release.files.ghostty.org/libghostty-vt/{VERSION}'
 ARCHIVES = {
     f'libghostty-vt-{VERSION}.tar.gz': '333dfce97641ef9b536bb9e08907ad86abaaada50e8f7417b70d9284adef37aa',
@@ -32,6 +33,65 @@ TARGETS = {
 def digest(path):
     with path.open('rb') as file:
         return hashlib.file_digest(file, 'sha256').hexdigest()
+
+
+def patch_source(original, source, path, replacements):
+    text = (original / path).read_text()
+    for before, after in replacements:
+        if text.count(before) != 1:
+            raise ValueError(f'Pinned source {path} changed near {before.strip().splitlines()[0]!r}')
+        text = text.replace(before, after)
+    (source / path).write_text(text)
+
+
+def patch_history_trim(original, source):
+    pages = 'src/terminal/PageList.zig'
+    terminal = 'src/terminal/c/terminal.zig'
+    patch_source(original, source, pages, [
+        (
+            'total_rows: usize,\n\n/// The list of tracked pins.',
+            'total_rows: usize,\n\n/// History prefix rows removed from this page list.\n'
+            'matou_history_trimmed: usize = 0,\n\n/// The list of tracked pins.',
+        ),
+        (
+            '            break :prune;\n        }\n\n'
+            '        // If we have a pin viewport cache then we need to update it.',
+            '            break :prune;\n        }\n\n'
+            '        self.matou_history_trimmed += first.rows();\n\n'
+            '        // If we have a pin viewport cache then we need to update it.',
+        ),
+        (
+            '            pagelist.total_rows -= first_rows;\n',
+            '            pagelist.total_rows -= first_rows;\n'
+            '            pagelist.matou_history_trimmed += first_rows;\n',
+        ),
+        (
+            '    self.eraseRows(.{ .history = .{} }, bl_pt);\n',
+            '    const before = self.total_rows;\n'
+            '    self.eraseRows(.{ .history = .{} }, bl_pt);\n'
+            '    self.matou_history_trimmed += before - self.total_rows;\n',
+        ),
+    ])
+    patch_source(original, source, terminal, [
+        (
+            '    memory_usage = 42,\n',
+            '    memory_usage = 42,\n    matou_history_trimmed = 0x4d540001,\n',
+        ),
+        (
+            '            .total_rows,\n            .scrollback_rows,\n',
+            '            .total_rows,\n            .scrollback_rows,\n'
+            '            .matou_history_trimmed,\n',
+        ),
+        (
+            '        .total_rows => out.* = t.screens.active.pages.total_rows,\n',
+            '        .total_rows => out.* = t.screens.active.pages.total_rows,\n'
+            '        .matou_history_trimmed => out.* = t.screens.active.pages.matou_history_trimmed,\n',
+        ),
+    ])
+    return {
+        'version': HISTORY_TRIM_PATCH_VERSION,
+        'files': {path: digest(source / path) for path in (pages, terminal)},
+    }
 
 
 def main():
@@ -72,12 +132,10 @@ def main():
         shutil.copytree(original, source)
     width = ROOT / 'native' / 'reference_width.zig'
     shutil.copy2(width, source / 'src/unicode/reference_width.zig')
-    props = (original / 'src/unicode/props_uucode.zig').read_text()
-    needle = '.width = uucode.get(.width, cp),'
-    if props.count(needle) != 1:
-        raise ValueError('Pinned Unicode generator changed')
-    (source / 'src/unicode/props_uucode.zig').write_text(
-        props.replace(needle, '.width = @import("reference_width.zig").get(cp),'))
+    patch_source(original, source, 'src/unicode/props_uucode.zig', [
+        ('.width = uucode.get(.width, cp),', '.width = @import("reference_width.zig").get(cp),'),
+    ])
+    history_trim_patch = patch_history_trim(original, source)
     target, package_name = TARGETS[args.target]
     package = ROOT / 'vendor/ghostty-vt' / package_name
     env = dict(os.environ, ZIG_GLOBAL_CACHE_DIR=str(cache / 'zig-global'))
@@ -94,6 +152,7 @@ def main():
         'version': VERSION, 'target': args.target, 'zig': zig_version,
         'sources': ARCHIVES, 'widthPolicy': 'xterm.js 6.0.0 / Unicode 6',
         'widthSha256': digest(width),
+        'historyTrimPatch': history_trim_patch,
     }, indent=2) + '\n')
     print(f'Built Matou libghostty-vt at {package}')
 

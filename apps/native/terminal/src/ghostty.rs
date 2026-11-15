@@ -95,6 +95,7 @@ unsafe extern "C" {
         emit_cell: HistoryCellCallback,
         data: *mut c_void,
     ) -> c_int;
+    fn matou_vt_history_trimmed_rows(terminal: *const c_void, out: *mut usize) -> c_int;
 }
 
 #[derive(Default)]
@@ -326,6 +327,17 @@ impl Terminal {
                 wrap_continuation,
             },
         })
+    }
+
+    /// Count history rows removed from the start of the active buffer's page list.
+    /// Use deltas within the same page list. Resets and buffer switches can change it.
+    pub fn history_trimmed_rows(&self) -> Result<usize> {
+        let mut rows = 0;
+        check(
+            unsafe { matou_vt_history_trimmed_rows(self.handle.as_ptr(), &mut rows) },
+            "read history trim count",
+        )?;
+        Ok(rows)
     }
 
     /// Scroll up by a positive number of lines, or down by a negative number.
