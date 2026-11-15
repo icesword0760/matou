@@ -257,3 +257,17 @@ N02ac confirmation paragraph follow-up: Mac confirmation text now uses per-visua
 
 
 N02ac menu diagnosis correction: actual center-click handler/open_remove/render telemetry and R03 prove activation works at the previously suspect location. Earlier old-screen observations are now a presentation/capture-timing issue, still unresolved, not accepted. Actual frame callbacks and Visible occlusion state reject a blanket hidden-window explanation. See menu-presentation-probe.log/patch and R01–R03; white partial captures are not parity evidence. Temporary probes fully removed, product source unchanged from e3e5741. Next inspect actual Metal submission versus capture freshness; no refresh workaround added.
+
+
+## A07 terminal selection — N02ad
+
+Evidence base: `artifacts/native-parity/native/evidence/`. Final source/bundle binding: `terminal-selection-build.json`.
+
+| Scenario | Reference operation/result | Native actual result | Evidence and remaining boundary |
+| --- | --- | --- | --- |
+| A07.03 | Double-click `beta-gamma/path` selects full token including slash/hyphen | Same range; Cmd+C then Cmd+V pastes the exact token | S01 reference, S03 pre-fix failure, S04/S05 final; no pixel/latency claim |
+| A07.04 | Triple-click mixed ASCII/Chinese output selects entire line | Same line selection; copy/paste retains Chinese and all text | S02 reference, S06/S07 final; pasted text cleared without execution |
+| A07.05 | Double-click on continuation of a two-row word selects both rows | Same start/end and row break boundary | S09 native / S10 reference; screen-external continuation remains incomplete |
+| A07.06 | Character, word and line selection retain their distinct drag boundaries | Character drag real-window regression passes; 46 actual-source probes cover word/line ranges and copied text | S08, terminal-selection-tests.log; held multi-click drag trajectories and automatic screen-edge scroll remain unverified/unimplemented respectively |
+
+Mac build and Windows compile pass. The IME shortcut attempt did not open candidates in either product; it is not composition acceptance. No threshold, mask, source expectation or reference product behavior was changed. A07 as a whole remains open.

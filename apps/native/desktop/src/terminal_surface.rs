@@ -10,7 +10,7 @@ use gpui::{
 use matou_native_terminal::{Cell, Color, CursorStyle, InputModes, Screen, Theme};
 
 use crate::terminal_input::{
-    Composition, GridPoint, GridSelection, byte_from_utf16, encode_paste, grid_boundary,
+    Composition, GridSelection, SelectionDrag, SelectionMode, byte_from_utf16, encode_paste,
     terminal_key, utf16_from_byte,
 };
 
@@ -82,6 +82,7 @@ pub struct TerminalSurface {
     theme: Theme,
     grid: Option<VisibleGrid>,
     selection: Option<GridSelection>,
+    selection_drag: Option<SelectionDrag>,
     selecting: bool,
     composition: Composition,
     caret: Option<Bounds<Pixels>>,
@@ -130,6 +131,7 @@ impl TerminalSurface {
             theme: Theme::default(),
             grid: None,
             selection: None,
+            selection_drag: None,
             selecting: false,
             composition: Composition::default(),
             caret: None,
@@ -272,27 +274,48 @@ impl TerminalSurface {
 
     fn clear_selection(&mut self) {
         self.selection = None;
+        self.selection_drag = None;
         self.selecting = false;
     }
 
-    fn selection_point(&self, position: Point<Pixels>) -> Option<GridPoint> {
+    fn selection_location(
+        &self,
+        position: Point<Pixels>,
+    ) -> Option<(&Screen, VisibleGrid, usize, f32)> {
         let screen = self.screen.as_ref()?;
-        let grid = self.grid?;
+        let mut grid = self.grid?;
+        grid.cols = grid.cols.min(screen.cols);
+        grid.rows = grid.rows.min(screen.rows);
         let row =
             f32::from((position.y - grid.bounds.top()) / self.metrics.height).max(0.) as usize;
         let x = f32::from((position.x - grid.bounds.left()) / self.metrics.width);
-        Some(grid_boundary(screen, row.min(grid.rows - 1), x, grid.cols))
+        Some((screen, grid, row.min(grid.rows - 1), x))
     }
 
     fn update_selection(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
-        if self.selecting
-            && let Some(end) = self.selection_point(position)
-            && let Some(selection) = &mut self.selection
-            && selection.end != end
-        {
-            selection.end = end;
+        if !self.selecting {
+            return;
+        }
+        let (Some(drag), Some((screen, grid, row, x))) =
+            (self.selection_drag, self.selection_location(position))
+        else {
+            return;
+        };
+        let selection = drag.extend(screen, row, x, grid.cols, grid.rows);
+        if self.selection != Some(selection) {
+            self.selection = Some(selection);
             cx.notify();
         }
+    }
+
+    fn finish_selection(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        if self
+            .selection_drag
+            .is_some_and(|drag| drag.mode == SelectionMode::Character)
+        {
+            self.update_selection(position, cx);
+        }
+        self.selecting = false;
     }
 
     pub fn contains_position(&self, position: Point<Pixels>) -> bool {
@@ -554,16 +577,27 @@ impl Render for TerminalSurface {
                 cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
                     this.focus.focus(window);
                     this.reset_blink();
+                    if event.click_count > 3 {
+                        this.selecting = this.selection_drag.is_some();
+                        cx.notify();
+                        return;
+                    }
                     this.clear_selection();
-                    if this
-                        .grid
-                        .is_some_and(|grid| grid.bounds.contains(&event.position))
-                        && let Some(anchor) = this.selection_point(event.position)
+                    if let Some((screen, grid, row, x)) = this.selection_location(event.position)
+                        && grid.bounds.contains(&event.position)
                     {
-                        this.selection = Some(GridSelection {
-                            anchor,
-                            end: anchor,
-                        });
+                        let mode = if event.modifiers.shift || event.modifiers.alt {
+                            SelectionMode::Character
+                        } else {
+                            match event.click_count {
+                                2 => SelectionMode::Word,
+                                3 => SelectionMode::Line,
+                                _ => SelectionMode::Character,
+                            }
+                        };
+                        let drag = SelectionDrag::begin(mode, screen, row, x, grid.cols, grid.rows);
+                        this.selection = Some(drag.initial);
+                        this.selection_drag = Some(drag);
                         this.selecting = true;
                     }
                     cx.notify();
@@ -577,15 +611,13 @@ impl Render for TerminalSurface {
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, event: &gpui::MouseUpEvent, _, cx| {
-                    this.update_selection(event.position, cx);
-                    this.selecting = false;
+                    this.finish_selection(event.position, cx);
                 }),
             )
             .on_mouse_up_out(
                 MouseButton::Left,
                 cx.listener(|this, event: &gpui::MouseUpEvent, _, cx| {
-                    this.update_selection(event.position, cx);
-                    this.selecting = false;
+                    this.finish_selection(event.position, cx);
                 }),
             )
             .on_scroll_wheel(cx.listener(|this, event, _, cx| this.on_scroll(event, cx)))
