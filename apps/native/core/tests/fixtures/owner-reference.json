@@ -1,0 +1,112 @@
+{
+  "source": "Frozen database-owner.ts on captured Electron; temporary paths; self pid normalized only.",
+  "cases": [
+    {
+      "name": "empty",
+      "acquired": {
+        "pid": "<self>",
+        "runtimeGeneration": "native-contract"
+      },
+      "format": "file",
+      "afterRelease": null,
+      "remains": false
+    },
+    {
+      "name": "live-file",
+      "error": "database is already owned by a live Runtime",
+      "acquired": {
+        "pid": "<self>",
+        "runtimeGeneration": "previous"
+      },
+      "format": "file",
+      "afterRelease": {
+        "pid": "<self>",
+        "runtimeGeneration": "previous"
+      },
+      "remains": true
+    },
+    {
+      "name": "stale-file",
+      "acquired": {
+        "pid": "<self>",
+        "runtimeGeneration": "native-contract"
+      },
+      "format": "file",
+      "afterRelease": null,
+      "remains": false
+    },
+    {
+      "name": "live-legacy",
+      "error": "database is already owned by a live Runtime",
+      "acquired": {
+        "pid": "<self>",
+        "runtimeGeneration": "previous"
+      },
+      "format": "directory",
+      "afterRelease": {
+        "pid": "<self>",
+        "runtimeGeneration": "previous"
+      },
+      "remains": true
+    },
+    {
+      "name": "dead-legacy",
+      "acquired": {
+        "pid": "<self>",
+        "runtimeGeneration": "native-contract"
+      },
+      "format": "file",
+      "afterRelease": null,
+      "remains": false
+    },
+    {
+      "name": "malformed",
+      "error": "database ownership state requires recovery: owner-record-malformed at <root>/matou.sqlite.owner: Expected property name or '}' in JSON at position 1 (line 1 column 2)",
+      "issue": "owner-record-malformed",
+      "code": "OWNERSHIP_RECOVERY_REQUIRED",
+      "acquired": null,
+      "format": "file",
+      "afterRelease": null,
+      "remains": true
+    },
+    {
+      "name": "invalid-pid",
+      "error": "database ownership state requires recovery: owner-record-malformed at <root>/matou.sqlite.owner: owner payload is invalid",
+      "issue": "owner-record-malformed",
+      "code": "OWNERSHIP_RECOVERY_REQUIRED",
+      "acquired": null,
+      "format": "file",
+      "afterRelease": null,
+      "remains": true
+    },
+    {
+      "name": "unusable-sidecar",
+      "error": "database ownership state requires recovery: takeover-sidecar-unusable at <root>/matou.sqlite.owner.takeover.sqlite: takeover sidecar is not a regular file",
+      "issue": "takeover-sidecar-unusable",
+      "code": "OWNERSHIP_RECOVERY_REQUIRED",
+      "acquired": {
+        "pid": 2147483647,
+        "runtimeGeneration": "previous"
+      },
+      "format": "file",
+      "afterRelease": {
+        "pid": 2147483647,
+        "runtimeGeneration": "previous"
+      },
+      "remains": true
+    },
+    {
+      "name": "generation-replaced",
+      "acquired": {
+        "pid": "<self>",
+        "runtimeGeneration": "native-contract"
+      },
+      "format": "file",
+      "afterRelease": {
+        "pid": "<self>",
+        "runtimeGeneration": "replacement"
+      },
+      "remains": true
+    }
+  ]
+}
