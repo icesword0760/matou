@@ -1513,3 +1513,47 @@ it('observes late Codex index titles, keeps manual names locked, restores latest
     expect(observed).toEqual(['First automatic title', 'New automatic title'])
   } finally { await server.stop() }
 })
+
+it('rejects a Codex Fork returning the parent UUID before binding, and revokes all subsequent side effects', async () => {
+  const parentId = '01a1ddd6-4064-70e1-a006-000000000001'
+  const childId = '01a1ddd6-4064-70e1-a006-000000000002'
+  const mismatches: unknown[] = []
+  const effects: unknown[] = []
+  const server = new ProviderHookServer(root, sessions, {
+    codexRoot: join(root, 'missing-codex'),
+    onIdentityMismatch: event => { mismatches.push(event) },
+    onHudPayload: event => { effects.push(event) }
+  })
+  await server.start()
+  try {
+    const registration = await server.registerCodexSession({
+      sessionId: 'session-1', runId: 'codex-parent-returned', forkSourceProviderSessionId: parentId
+    })
+    await postHook(registration.hookUrl, { hook_event_name: 'SessionStart', session_id: parentId })
+    expect(mismatches).toEqual([expect.objectContaining({ provider: 'codex', expectedProviderSessionId: parentId, actualProviderSessionId: parentId })])
+    expect(sessions.getResumeBinding('session-1', 'codex')).toBeUndefined()
+    await postHook(registration.hookUrl, { hook_event_name: 'SessionStart', session_id: childId })
+    expect(sessions.getResumeBinding('session-1', 'codex')).toBeUndefined()
+    expect(effects).toEqual([])
+  } finally { await server.stop() }
+})
+
+it('accepts only a new valid Codex Fork UUID and leaves the parent binding/title unchanged', async () => {
+  const parentId = '01a1ddd6-4064-70e1-a006-000000000001'
+  const childId = '01a1ddd6-4064-70e1-a006-000000000002'
+  sessions.createSession(command('codex-fork-parent-stage4'), {
+    id: 'codex-fork-parent-stage4', kind: 'codex', taskId: 'task-1', executionContextId: 'context-1', title: 'Parent title', now: 1
+  })
+  sessions.recordResumableProviderIdentity(command('codex-parent-stage4-binding'), {
+    id: 'codex-parent-stage4-binding', sessionId: 'codex-fork-parent-stage4', provider: 'codex',
+    providerSessionId: parentId, metadata: { canFork: true }, now: 2
+  })
+  const parent = sessions.getResumeBinding('codex-fork-parent-stage4', 'codex')
+  const registration = await hooks.registerCodexSession({
+    sessionId: 'session-1', runId: 'codex-new-child', forkSourceProviderSessionId: parentId, inheritedConversation: true
+  })
+  await postHook(registration.hookUrl, { hook_event_name: 'SessionStart', session_id: childId })
+  expect(sessions.getResumeBinding('session-1', 'codex')).toMatchObject({ providerSessionId: childId, metadata: { canFork: true } })
+  expect(sessions.getResumeBinding('codex-fork-parent-stage4', 'codex')).toEqual(parent)
+  expect(sessions.getSession('codex-fork-parent-stage4')?.title).toBe('Parent title')
+})

@@ -186,8 +186,8 @@ export const AGENT_MANIFESTS: Record<AgentProfileId, AgentManifest> = {
       supportsQuotaWindows: false
     },
     capabilities: {
-      fork: false,
-      sessionLoader: false,
+      fork: true,
+      sessionLoader: true,
       autoTitle: true,
       permissionModes: ['default', 'acceptEdits', 'plan', 'bypassPermissions'],
       permissionSwitchMode: 'respawn-only',
@@ -195,8 +195,8 @@ export const AGENT_MANIFESTS: Record<AgentProfileId, AgentManifest> = {
       accountSwitching: false,
       agentTeam: false,
       claudeTimeZone: false,
-      autoRestore: false,
-      forkRequiresCompletedTurn: false
+      autoRestore: true,
+      forkRequiresCompletedTurn: true
     }
   },
   antigravity: {

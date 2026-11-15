@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events'
 import { execFile } from 'node:child_process'
-import { chmod, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rm, stat, unlink, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
@@ -37,6 +37,7 @@ import { RuntimeSessionRegistry } from './session/runtime-session-registry'
 import { RuntimeRpcRouter } from './rpc/runtime-rpc-router'
 import { SessionHudRegistry } from './session/session-hud-registry'
 import { ProviderHookServer } from './session/provider-hook-server'
+import { CodexSessionCatalog } from './session/codex-session-catalog'
 import { createProviderHudPayloadHandler } from './session/provider-hud-payload-handler'
 import type { ProviderTranscriptHudSnapshot } from './session/provider-transcript-hud'
 import { SessionRepository } from './domain/session-repository'
@@ -8650,7 +8651,7 @@ it('continues structural disposal when status directory deletion fails', async (
   } finally { await chmod(directory, 0o700) }
 })
 
-it('treats Codex session.set-permission-mode as ephemeral like main even when a codex binding exists', async () => {
+it('persists Codex permission changes against its resumable binding', async () => {
   const executable = join(root, 'codex-ephemeral-perm.sh')
   await writeFile(executable, '#!/bin/sh\nsleep 30\n')
   await chmod(executable, 0o755)
@@ -8688,7 +8689,7 @@ it('treats Codex session.set-permission-mode as ephemeral like main even when a 
           requestHash: 'hash-codex-perm-1'
         },
         input: {
-          sessionId: 'codex-ephemeral-session', provider: 'claude-code',
+          sessionId: 'codex-ephemeral-session', provider: 'codex',
           permissionMode: 'bypassPermissions', now: 2
         }
       }
@@ -8696,24 +8697,23 @@ it('treats Codex session.set-permission-mode as ephemeral like main even when a 
     await waitUntil(() => testPort.findRpcResponse('codex-perm-1') !== undefined)
     expect(testPort.findRpcResponse('codex-perm-1')).toMatchObject({
       requestId: 'codex-perm-1',
-      result: {
-        sessionId: 'codex-ephemeral-session',
-        permissionMode: 'bypassPermissions',
-        persisted: false
-      }
+      result: { result: {
+        sessionId: 'codex-ephemeral-session', provider: 'codex',
+        metadata: { permissionMode: 'bypassPermissions' }
+      } }
     })
     expect(JSON.parse(database.get<{ metadata_json: string }>(
       `SELECT metadata_json FROM provider_bindings WHERE id = 'binding-codex-ephemeral'`
-    )?.metadata_json ?? '{}')).toMatchObject({ permissionMode: 'default' })
+    )?.metadata_json ?? '{}')).toMatchObject({ permissionMode: 'bypassPermissions' })
   } finally {
     testServer.close()
     restoreEnv('MATOU_CODEX_COMMAND', previousCommand)
   }
 })
 
-it('does not wait for provider recovery or block on failed bindings during Codex ensureSessionRunning', async () => {
+it('keeps Codex restore starting after a live full screen until the real identity is confirmed', async () => {
   const executable = join(root, 'codex-recovery-parity.sh')
-  await writeFile(executable, '#!/bin/sh\nsleep 30\n')
+  await writeFile(executable, '#!/bin/sh\nprintf \'%2300s\' x\nsleep 30\n')
   await chmod(executable, 0o755)
   const previousCommand = process.env.MATOU_CODEX_COMMAND
   process.env.MATOU_CODEX_COMMAND = executable
@@ -8721,31 +8721,128 @@ it('does not wait for provider recovery or block on failed bindings during Codex
   const testPort = new MockPort()
   const testServer = new RuntimeServer(testPort, root, database, undefined, undefined, sessions)
   try {
-    registerSession(database, 'codex-recover-session', 'codex')
+    registerCanvasSession(database, 'codex-recover-session', 'codex')
     database.run(
       `INSERT INTO provider_bindings (
          id, session_id, provider, provider_session_id, resume_state, restore_state, metadata_json,
          created_at, updated_at, validated_at
-       ) VALUES (?, ?, 'codex', ?, 'available', 'none', '{}', 1, 1, 1)`,
+       ) VALUES (?, ?, 'codex', ?, 'available', 'restoring', '{}', 1, 1, 1)`,
       'binding-codex-recover', 'codex-recover-session', 'codex-thread-recover'
     )
 
-    await expect(testServer.ensureSessionRunning({
+    let recovered = false
+    const recovery = testServer.ensureSessionRunning({
       sessionId: 'codex-recover-session',
       executionContextId: 'replay-context',
       profile: 'codex',
       sceneId: 'scene-1',
       priority: 'active-session',
       enqueueSequence: 1
-    })).resolves.toBeUndefined()
-
-    expect(sessions.has('codex-recover-session')).toBe(true)
-    testServer.providerIdentityRecorded('codex-recover-session', 'run-1')
+    }).then(() => { recovered = true })
+    await waitUntil(() => sessions.has('codex-recover-session'))
+    await new Promise(resolve => setTimeout(resolve, 80))
+    await recovery
+    expect(recovered).toBe(true)
+    expect(database.get<{ restore_state: string }>(
+      `SELECT restore_state FROM provider_bindings WHERE id = 'binding-codex-recover'`
+    )?.restore_state).toBe('restoring')
+    const runId = sessions.get('codex-recover-session')!.runId!
+    expect(sessions.providerIdentityConfirmed(runId)).toBe(false)
+    testServer.providerIdentityRecorded('codex-recover-session', runId)
+    await recovery
+    expect(recovered).toBe(true)
     expect(database.get<{ restore_state: string }>(
       `SELECT restore_state FROM provider_bindings WHERE id = 'binding-codex-recover'`
     )?.restore_state).toBe('none')
   } finally {
     testServer.close()
     restoreEnv('MATOU_CODEX_COMMAND', previousCommand)
+  }
+})
+
+it.each(['parent', 'missing', 'unique', 'ambiguous', 'mismatch', 'parent-after-discovery', 'recovery-mismatch', 'slow-discovery'] as const)('settles a managed Codex Fork with %s identity without touching its parent', async returned => {
+  const sourceId = '01a1ddd6-4064-70e1-a006-000000000001'
+  const source = 'codex-fenced-parent-stage4'; const child = 'codex-fenced-child-stage4'
+  registerCanvasSession(database, source, 'codex'); registerCanvasSession(database, child, 'codex')
+  const repository = new SessionRepository(database, new DomainTransactionManager(database))
+  repository.recordResumableProviderIdentity({ commandId: 'bind-codex-parent-stage4', commandType: 'test', requestHash: 'bind-parent' }, {
+    id: 'codex-parent-stage4', sessionId: source, provider: 'codex', providerSessionId: sourceId, metadata: { canFork: true }, now: 1
+  })
+  const beforeParent = repository.getResumeBinding(source, 'codex')
+  const intents = new SessionForkIntentRepository(database); const now = Date.now()
+  intents.accept({ operationId: 'codex-fenced-stage4', submissionKey: 'codex-fenced-stage4', sessionId: child,
+    sourceSessionId: source, sourceProvider: 'codex', sourceProviderSessionId: sourceId, permissionMode: 'default', displayName: 'Child',
+    worktreeMode: 'current', totalSteps: 2, now })
+  const lease = intents.acquireLease({ operationId: 'codex-fenced-stage4', owner: 'test', now, ttlMs: 60_000 })
+  if (lease.kind !== 'acquired') throw new Error('Missing test lease')
+  intents.advanceStage({ operationId: 'codex-fenced-stage4', lease: lease.lease, stage: 'restoring-provider', now })
+  const executable = join(root, 'codex-fork-stage4.sh'); await writeFile(executable, '#!/bin/sh\nexec sleep 30\n'); await chmod(executable, 0o755)
+  const previous = process.env.MATOU_CODEX_COMMAND; process.env.MATOU_CODEX_COMMAND = executable
+  const registry = createTestSessionRegistry(); const testPort = new MockPort()
+  let active: RuntimeServer
+  const hookServer = new ProviderHookServer(root, repository, { codexRoot: join(root, 'empty-codex'),
+    currentRunId: sessionId => registry.get(sessionId)?.runId,
+    onIdentityRecorded: event => active.providerIdentityRecorded(event.sessionId, event.runId),
+    onIdentityMismatch: event => active.providerIdentityMismatch(event) })
+  await hookServer.start()
+  const originalRegister = hookServer.registerCodexSession.bind(hookServer)
+  let hookUrl = ''
+  vi.spyOn(hookServer, 'registerCodexSession').mockImplementation(async input => {
+    const registration = await originalRegister(input); hookUrl = registration.hookUrl; return registration
+  })
+  let releaseSlowDiscovery: (() => void) | undefined
+  const slowDiscovery = returned === 'slow-discovery'
+    ? vi.spyOn(CodexSessionCatalog.prototype, 'forkCandidates').mockImplementation(() => new Promise(resolve => {
+        releaseSlowDiscovery = () => resolve([{ providerSessionId: '01a1ddd6-4064-70e1-a006-000000000002', path: 'unused' }])
+      })) : undefined
+  active = new RuntimeServer(testPort, root, database, undefined, undefined, registry,
+    hookServer, undefined, { forkProviderIdentityTimeoutMs: ['missing', 'ambiguous', 'slow-discovery'].includes(returned) ? 500 : 5000 })
+  try {
+    testPort.receive({ type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'codex-stage4-client' })
+    await active.startOrResumeSession({ sessionId: child, executionContextId: 'replay-context', profile: 'codex', cols: 80, rows: 24 }, {
+      operationId: 'codex-fenced-stage4', runId: 'codex-fenced-stage4-run', lease: lease.lease
+    })
+    const childId = '01a1ddd6-4064-70e1-a006-000000000002'
+    const otherId = '01a1ddd6-4064-70e1-a006-000000000003'
+    const discovered = ['unique', 'mismatch', 'parent-after-discovery', 'recovery-mismatch'].includes(returned)
+    if (discovered || returned === 'ambiguous') {
+      // Publish all candidates at once so polling never observes half a fixture.
+      const staged = join(root, 'staged-sessions'); await mkdir(staged)
+      for (const id of returned === 'ambiguous' ? [childId, otherId] : [childId]) {
+        await writeFile(join(staged, `rollout-${id}.jsonl`), JSON.stringify({ type: 'session_meta', payload: {
+          id, cwd: root, timestamp: new Date(Date.now() + 1).toISOString(), forked_from_id: sourceId
+        } }) + '\n')
+      }
+      await mkdir(join(root, 'empty-codex'), { recursive: true })
+      await rename(staged, join(root, 'empty-codex', 'sessions'))
+    }
+    if (discovered) {
+      await waitUntil(() => intents.state(child) === 'succeeded', 2000)
+      expect(repository.getResumeBinding(child, 'codex')).toMatchObject({ providerSessionId: childId, metadata: { codexForkAwaitingHook: true } })
+      // Real hook confirmation/rejection remains valid after the launch lease expires.
+      database.run(`UPDATE session_fork_intents SET lease_expires_at = 0 WHERE session_id = ?`, child)
+    }
+    if (returned === 'recovery-mismatch') {
+      hookUrl = (await originalRegister({ runId: 'codex-fenced-stage4-run', sessionId: child, expectedProviderSessionId: childId })).hookUrl
+    }
+    await fetch(hookUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+      hook_event_name: 'SessionStart',
+      ...(returned === 'parent' || returned === 'parent-after-discovery' ? { session_id: sourceId }
+        : ['mismatch', 'recovery-mismatch'].includes(returned) ? { session_id: otherId } : returned === 'unique' ? { session_id: childId } : {})
+    }) })
+    if (returned === 'unique') {
+      expect(intents.state(child)).toBe('succeeded')
+      expect(repository.getResumeBinding(child, 'codex')).toMatchObject({ providerSessionId: childId, metadata: { codexForkAwaitingHook: false } })
+      expect(registry.has(child)).toBe(true)
+    } else {
+      await waitUntil(() => intents.state(child) === 'failed', 2000)
+      if (releaseSlowDiscovery) { releaseSlowDiscovery(); await new Promise(resolve => setTimeout(resolve, 20)) }
+      if (discovered) expect(repository.getProviderSettingsBinding(child, 'codex')).toMatchObject({ providerSessionId: childId, resumeState: 'failed' })
+      else expect(repository.getResumeBinding(child, 'codex')).toBeUndefined()
+      expect(registry.has(child)).toBe(false)
+    }
+    expect(repository.getResumeBinding(source, 'codex')).toEqual(beforeParent)
+  } finally {
+    slowDiscovery?.mockRestore(); await registry.shutdownAll(); active.close(); await hookServer.stop(); restoreEnv('MATOU_CODEX_COMMAND', previous)
   }
 })

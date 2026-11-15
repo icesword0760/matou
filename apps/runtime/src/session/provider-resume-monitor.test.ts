@@ -165,6 +165,15 @@ describe('ProviderResumeMonitor', () => {
     expect(monitor.isSettled).toBe(true)
   })
 
+  it('keeps an identity-required Codex launch starting and detects failure after a full screen', () => {
+    const monitor = new ProviderResumeMonitor('provider-42', { requireIdentity: true })
+    expect(monitor.ingest('a'.repeat(2_001))).toBeUndefined()
+    expect(monitor.timeout()).toBeUndefined()
+    expect(monitor.isSettled).toBe(false)
+    expect(monitor.isMonitoring).toBe(true)
+    expect(monitor.ingest('No session found with session ID provider-42')).toBe('provider session not found')
+  })
+
   it('stops treating later conversation text as startup failure after substantial resume output', () => {
     const monitor = new ProviderResumeMonitor('provider-42')
 

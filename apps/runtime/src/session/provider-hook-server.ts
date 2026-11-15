@@ -18,6 +18,7 @@ import {
   defaultAntigravityRoot,
   latestAntigravityAutoTitle
 } from './antigravity-session-catalog'
+import { CodexSessionCatalog, isCodexSessionId } from './codex-session-catalog'
 import { latestCodexAutoTitle } from './codex-session-title'
 import { latestClaudeAutoTitle } from './claude-session-catalog'
 import { toProviderNotificationEvent, type ProviderNotificationEvent } from './provider-notification-event'
@@ -37,6 +38,7 @@ interface HookRegistrationRecord {
   identityRejected?: boolean
   inheritedConversation: boolean
   forkAuthority?: ProviderIdentityForkAuthority
+  discoveredForkAuthority?: ProviderIdentityForkAuthority
   forkSourceProviderSessionId?: string
   acceptIdentity: boolean
   acceptSideEffects: boolean
@@ -66,6 +68,7 @@ export interface ProviderHookNotification {
 }
 
 export interface ProviderIdentityMismatch {
+  forkAuthority?: ProviderIdentityForkAuthority
   runId: string
   sessionId: string
   provider: AgentProfileId
@@ -134,6 +137,7 @@ export interface ProviderHookRegistration {
   codexHooksConfig?: string
   hookUrl: string
   hookToken: string
+  discoverCodexFork?(input: { cwd: string; startedAt: number; isCurrent(): boolean }): Promise<boolean>
   systemMessagePath?: string
   retire(graceMs?: number, options?: { suppressSideEffects?: boolean }): void
   dispose(): Promise<void>
@@ -264,6 +268,7 @@ export class ProviderHookServer {
     model?: string
     expectedProviderSessionId?: string
     inheritedConversation?: boolean
+    forkSourceProviderSessionId?: string
     forkAuthority?: ProviderIdentityForkAuthority
   }): Promise<ProviderHookRegistration> {
     return this.#registerProviderSession('codex', input)
@@ -371,6 +376,8 @@ export class ProviderHookServer {
       ...(resolvedMtExecutablePath === undefined ? {} : { mtExecutablePath: resolvedMtExecutablePath })
     }
     this.#registrations.set(token, record)
+    const codexForkCatalog = provider === 'codex' && input.forkAuthority && input.forkSourceProviderSessionId
+      ? new CodexSessionCatalog(this.#codexRoot) : undefined
     let disposePromise: Promise<void> | undefined
     const dispose = (): Promise<void> => {
       disposePromise ??= (async () => {
@@ -390,6 +397,44 @@ export class ProviderHookServer {
       ...(provider === 'codex' ? { codexHooksConfig: codexInlineHookConfig(statusScriptPath) } : {}),
       hookUrl,
       hookToken: token,
+      ...(provider === 'codex' && input.forkAuthority && input.forkSourceProviderSessionId ? {
+        discoverCodexFork: async (discovery: { cwd: string; startedAt: number; isCurrent(): boolean }): Promise<boolean> => {
+          if (!record.acceptIdentity || record.identityRejected || record.confirmedProviderSessionId || record.discoveredForkAuthority) return false
+          const candidates = await codexForkCatalog!.forkCandidates({
+            cwd: discovery.cwd, startedAt: discovery.startedAt,
+            parentProviderSessionId: input.forkSourceProviderSessionId!
+          })
+          // A hook or process exit may have won while files were being read.
+          if (candidates.length !== 1 || !discovery.isCurrent() || !this.#acceptsSideEffects(record) ||
+              !record.acceptIdentity || record.identityRejected || record.confirmedProviderSessionId || record.discoveredForkAuthority) return false
+          const candidate = candidates[0]!
+          const authority = record.forkAuthority!
+          const now = Date.now()
+          try {
+            this.#sessions.recordResumableProviderIdentity({
+              commandId: `codex-fork-rollout-${record.runId}-${randomUUID()}`,
+              commandType: 'provider-hook.identity', requestHash: `${record.runId}:${candidate.providerSessionId}:${now}`
+            }, {
+              id: `provider-binding-${randomUUID()}`, sessionId: record.sessionId,
+              provider: 'codex', providerSessionId: candidate.providerSessionId, now, forkAuthority: authority,
+              metadata: { cwd: discovery.cwd, inheritedConversation: true, canFork: true,
+                codexForkAwaitingHook: true, lastHookEvent: 'CodexForkRollout',
+                ...(record.providerConfigId === undefined ? {} : { providerConfigId: record.providerConfigId }),
+                ...(record.model === undefined ? {} : { model: record.model }),
+                ...(record.permissionMode === undefined ? {} : { permissionMode: record.permissionMode }) }
+            })
+          } catch (error) {
+            if (!(error instanceof StaleForkProviderIdentityError)) throw error
+            return false
+          }
+          record.expectedProviderSessionId = candidate.providerSessionId
+          record.discoveredForkAuthority = authority
+          delete record.forkAuthority
+          this.#onIdentityRecorded({ sessionId: record.sessionId, runId: record.runId, provider: 'codex',
+            providerSessionId: candidate.providerSessionId, eventName: 'CodexForkRollout', forkAuthority: authority })
+          return true
+        }
+      } : {}),
       ...(systemMessagePath === undefined ? {} : { systemMessagePath }),
       retire: (graceMs = DEFAULT_RETIREMENT_GRACE_MS, options = {}) => {
         if (options.suppressSideEffects) record.acceptSideEffects = false
@@ -464,6 +509,21 @@ export class ProviderHookServer {
       const confirmsConversation = eventName !== 'SessionEnd' && (
         eventName !== 'unknown' || registration.acceptStatuslineIdentity
       )
+      if (registration.provider === 'codex' && registration.forkSourceProviderSessionId &&
+          providerSessionId && confirmsConversation && registration.acceptIdentity &&
+          (providerSessionId === registration.forkSourceProviderSessionId || !isCodexSessionId(providerSessionId))) {
+        registration.acceptIdentity = false
+        registration.identityRejected = true
+        this.#onIdentityMismatch({
+          runId: registration.runId, sessionId: registration.sessionId, provider: registration.provider,
+          expectedProviderSessionId: registration.expectedProviderSessionId ?? registration.forkSourceProviderSessionId,
+          actualProviderSessionId: providerSessionId, eventName,
+          ...((registration.forkAuthority ?? registration.discoveredForkAuthority)
+            ? { forkAuthority: (registration.forkAuthority ?? registration.discoveredForkAuthority)! } : {})
+        })
+        replyNoIntervention()
+        return
+      }
       if (registration.forkSourceProviderSessionId !== undefined) {
         if (!registration.acceptIdentity || !providerSessionId) {
           replyNoIntervention()
@@ -513,7 +573,8 @@ export class ProviderHookServer {
             provider: registration.provider,
             expectedProviderSessionId: registration.expectedProviderSessionId,
             actualProviderSessionId: providerSessionId,
-            eventName
+            eventName,
+            ...(registration.discoveredForkAuthority ? { forkAuthority: registration.discoveredForkAuthority } : {})
           })
           replyNoIntervention()
           return
@@ -542,6 +603,9 @@ export class ProviderHookServer {
         const now = Date.now()
         const forkAuthority = registration.forkAuthority
         const metadata = {
+          ...(registration.provider === 'codex' && (registration.discoveredForkAuthority ||
+            (currentBinding?.metadata as Record<string, unknown> | undefined)?.codexForkAwaitingHook === true)
+            ? { codexForkAwaitingHook: false } : {}),
           ...(registration.providerConfigId === undefined
             ? {} : { providerConfigId: registration.providerConfigId }),
           ...(model === undefined ? {} : { model }),
@@ -582,10 +646,12 @@ export class ProviderHookServer {
             // requested conversation is confirmed, later intentional conversation
             // changes from this same provider process follow the ordinary hook path.
             delete registration.expectedProviderSessionId
+            delete registration.discoveredForkAuthority
             // The first accepted provider identity atomically completes the
             // durable Fork. Later lifecycle hooks belong to the now ordinary
             // live Session and must not reuse the expired launch lease.
             if (forkAuthority !== undefined) delete registration.forkAuthority
+            if (registration.provider === 'codex') delete registration.forkSourceProviderSessionId
             this.#onIdentityRecorded({
               runId: registration.runId,
               sessionId: registration.sessionId,

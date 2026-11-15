@@ -67,14 +67,14 @@ describe('agent-manifest', () => {
     expect(codex.displayName).toBe('Codex')
     expect(codex.shortName).toBe('Codex')
     expect(codex.capabilities).toMatchObject({
-      fork: false,
-      sessionLoader: false,
+      fork: true,
+      sessionLoader: true,
       autoTitle: true,
       providerConfig: true,
       accountSwitching: false,
       agentTeam: false,
       claudeTimeZone: false,
-      autoRestore: false,
+      autoRestore: true,
       permissionSwitchMode: 'respawn-only',
       permissionModes: ['default', 'acceptEdits', 'plan', 'bypassPermissions']
     })
@@ -87,8 +87,8 @@ describe('agent-manifest', () => {
     })
   })
 
-  it('lists only auto-restore providers cleanly without codex', () => {
-    expect(listAutoRestoreAgentIds()).toEqual(['claude-code', 'antigravity'])
+  it('includes Codex in the auto-restore provider list', () => {
+    expect(listAutoRestoreAgentIds()).toEqual(['claude-code', 'codex', 'antigravity'])
   })
 
   it('declares antigravity manifest according to finalized product decisions', () => {

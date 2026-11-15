@@ -574,6 +574,8 @@ export class RuntimeServer {
     }
     const providerRecovery = getAgentManifest(job.profile)?.capabilities.autoRestore === true &&
       this.#sessionRepository.getResumeBinding(job.sessionId, job.profile as AgentProfileId)
+      // Queue readiness only mounts an interactive terminal. The binding stays
+      // restoring and provider-derived state remains gated until its real hook.
       ? this.#waitForProviderRecovery(job.sessionId)
       : undefined
     try {
@@ -2112,6 +2114,7 @@ export class RuntimeServer {
     let hookRunId: string | undefined
     try {
       const runId = forkAuthority?.runId ?? randomUUID()
+      const providerRunStartedAt = Date.now()
       hookRunId = runId
       const shellBlockCollector = persistOrdinaryShellHistory
         ? new ShellCommandBlockCollector()
@@ -2166,7 +2169,7 @@ export class RuntimeServer {
       }
       const resumeMonitor = providerSessionId === undefined
         ? undefined
-        : new ProviderResumeMonitor(providerSessionId)
+        : new ProviderResumeMonitor(providerSessionId, { requireIdentity: message.profile === 'codex' })
       // A mounted idle Session can be restored lazily by the Renderer after the
       // startup recovery queue has already settled. Scope this to any real
       // provider resume so the long-session choice behaves the same regardless
@@ -2277,7 +2280,10 @@ export class RuntimeServer {
               acceptStatuslineIdentity: providerSessionId !== undefined || supersedesRestoreFailure
             })
           : message.profile === 'codex'
-            ? await this.#providerHooks.registerCodexSession(providerHookInput)
+            ? await this.#providerHooks.registerCodexSession({
+                ...providerHookInput,
+                ...(forkLaunch ? { forkSourceProviderSessionId: forkLaunch.sourceProviderSessionId } : {})
+              })
             : message.profile === 'antigravity'
               ? await this.#providerHooks.registerAntigravitySession({
                   ...providerHookInput,
@@ -2483,7 +2489,8 @@ export class RuntimeServer {
             // Claude release delays or omits its statusline HTTP hook.
             // A short startup message alone can precede a failed process exit
             // and must not report a successful account restart.
-            this.#settleProviderRecovery(message.sessionId, undefined, !resumeMonitor.isSettled)
+            this.#settleProviderRecovery(message.sessionId, undefined,
+              message.profile === 'codex' || !resumeMonitor.isSettled)
           }
         },
         onExit: (exited, exitCode, signal, exitReason) => {
@@ -2723,6 +2730,9 @@ export class RuntimeServer {
           forkAuthority,
           message.profile === 'antigravity'
             ? Math.min(this.#forkProviderIdentityTimeoutMs, this.#antigravityForkNewIdTimeoutMs)
+            : undefined,
+          message.profile === 'codex' && hookRegistration?.discoverCodexFork
+            ? isCurrent => hookRegistration!.discoverCodexFork!({ cwd, startedAt: providerRunStartedAt, isCurrent })
             : undefined
         )
       } else if (resumeMonitor && resumeBinding) {
@@ -2758,7 +2768,7 @@ export class RuntimeServer {
     message: Extract<RendererMessage, { type: 'terminal.spawn' }>,
     session: PtySession,
     reason: string,
-    authority?: ForkExecutionAuthority
+    authority?: ForkExecutionAuthorityInput
   ): void {
     if (this.#sessions.get(message.sessionId) !== session) return
     const pendingFork = this.#pendingAntigravityForkRuns.get(message.sessionId)
@@ -2819,7 +2829,7 @@ export class RuntimeServer {
   #failFork(
     sessionId: string,
     reason: string,
-    authority?: ForkExecutionAuthority
+    authority?: ForkExecutionAuthorityInput
   ): boolean {
     const now = Date.now()
     const operation = authority
@@ -2843,8 +2853,11 @@ export class RuntimeServer {
       commandType: 'session.fork-failed',
       requestHash: `${operation.identity.operationId}:${reason}:${now}`
     }, ({ tx, emit }) => {
-      const failed = authority
-        ? this.#forkIntents.failOperation({
+      const failed = authority && operation.progress.stage === 'succeeded'
+        ? this.#forkIntents.rejectDiscoveredCodexIdentity({
+            ...authority, sessionId, error: reason, now
+          }, tx).kind === 'applied'
+        : authority ? this.#forkIntents.failOperation({
             operationId: authority.operationId,
             lease: authority.lease,
             error: reason,
@@ -2956,6 +2969,29 @@ export class RuntimeServer {
     const session = this.#sessions.get(sessionId)
     const message = this.#spawnDescriptors.get(sessionId)
     if (!mismatch || !session || !message || session.runId !== mismatch.runId) return false
+    // A discovered child may be restarted before its first turn emits a hook.
+    // Its durable candidate fence must still be revocable in that new run.
+    const discovered = mismatch.provider === 'codex' && !mismatch.forkAuthority
+      ? this.#database.get<{ operation_id: string; run_id: string; lease_token: string; lease_fence: number }>(
+          `SELECT fork.operation_id, fork.lease_token, fork.lease_fence,
+             json_extract(binding.metadata_json, '$.forkRunId') AS run_id
+           FROM provider_bindings binding JOIN session_fork_intents fork ON fork.session_id = binding.session_id
+           WHERE binding.session_id = ? AND binding.provider = 'codex' AND binding.provider_session_id = ?
+             AND json_extract(binding.metadata_json, '$.codexForkAwaitingHook') = 1
+             AND json_extract(binding.metadata_json, '$.forkOperationId') = fork.operation_id
+             AND json_extract(binding.metadata_json, '$.forkLeaseFence') = fork.lease_fence
+             AND fork.stage = 'succeeded' AND fork.lease_token IS NOT NULL`,
+          sessionId, mismatch.expectedProviderSessionId
+        ) : undefined
+    const forkAuthority = mismatch.forkAuthority ?? (discovered ? {
+      operationId: discovered.operation_id, runId: discovered.run_id,
+      lease: { token: discovered.lease_token, fence: discovered.lease_fence }
+    } : undefined)
+    if (mismatch.provider === 'codex' && forkAuthority) {
+      this.#providerIdentityMismatches.delete(sessionId)
+      this.#beginForkFailure(message, session, runtimeMessages().server.providerIdentityMismatch, forkAuthority)
+      return true
+    }
     const binding = this.#database.get<{ id: string }>(
       `SELECT id FROM provider_bindings
        WHERE session_id = ? AND provider = ? AND provider_session_id = ?
@@ -3004,21 +3040,30 @@ export class RuntimeServer {
     message: Extract<RendererMessage, { type: 'terminal.spawn' }>,
     session: PtySession,
     authority?: ForkExecutionAuthority,
-    timeoutMs: number = this.#forkProviderIdentityTimeoutMs
+    timeoutMs: number = this.#forkProviderIdentityTimeoutMs,
+    discoverIdentity?: (isCurrent: () => boolean) => Promise<boolean>
   ): void {
     if (this.#consumeProviderIdentityConfirmation(message.sessionId, session.runId)) return
     this.#clearProviderResumeTimer(message.sessionId)
-    this.#providerResumeTimers.set(message.sessionId, setTimeout(() => {
+    const timer = setTimeout(() => {
       this.#providerResumeTimers.delete(message.sessionId)
       if (this.#sessions.get(message.sessionId) !== session) return
-      this.#beginForkFailure(
-        message,
-        session,
-        runtimeMessages().server.forkIdentityTimeout,
-        authority
-      )
+      this.#beginForkFailure(message, session, runtimeMessages().server.forkIdentityTimeout, authority)
       this.flushSemanticEvents()
-    }, timeoutMs))
+    }, timeoutMs)
+    this.#providerResumeTimers.set(message.sessionId, timer)
+    if (!discoverIdentity) return
+    const isCurrent = (): boolean => !this.#closed && this.#sessions.get(message.sessionId) === session &&
+      this.#providerResumeTimers.get(message.sessionId) === timer &&
+      !this.#sessions.providerIdentityConfirmed(session.runId ?? '')
+    const poll = async (): Promise<void> => {
+      if (!isCurrent()) return
+      try { if (await discoverIdentity(isCurrent)) return } catch { /* Wait for the real hook on inconclusive files. */ }
+      // Keep the original deadline independent of a slow metadata scan. Every
+      // write rechecks this same run/timer fence, including after an async read.
+      if (isCurrent()) setTimeout(() => { void poll() }, 200).unref()
+    }
+    void poll()
   }
 
   #clearProviderResumeTimer(sessionId: string): void {
