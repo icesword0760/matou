@@ -374,6 +374,143 @@
           "expected": null
         }
       ]
+    },
+    {
+      "name": "incremental-word-forward-reverse-and-empty",
+      "cols": 24,
+      "rows": 4,
+      "text": "first prefix\r\nLEFT TARGET RIGHT\r\n中文后",
+      "mode": "word",
+      "point": [
+        7,
+        1
+      ],
+      "initial": {
+        "start": [
+          5,
+          1
+        ],
+        "end": [
+          11,
+          1
+        ]
+      },
+      "steps": [
+        {
+          "incremental": [
+            1,
+            2
+          ],
+          "expected": {
+            "start": [
+              5,
+              1
+            ],
+            "end": [
+              1,
+              2
+            ]
+          }
+        },
+        {
+          "incremental": [
+            2,
+            0
+          ],
+          "expected": {
+            "start": [
+              2,
+              0
+            ],
+            "end": [
+              11,
+              1
+            ]
+          }
+        },
+        {
+          "clear": true,
+          "expected": null
+        },
+        {
+          "incremental": [
+            7,
+            1
+          ],
+          "expected": null
+        }
+      ]
+    },
+    {
+      "name": "incremental-wrapped-line",
+      "cols": 10,
+      "rows": 6,
+      "text": "TOP\r\nab LONGPATH/abcdefghij END\r\nLAST",
+      "mode": "line",
+      "point": [
+        4,
+        2
+      ],
+      "initial": {
+        "start": [
+          0,
+          1
+        ],
+        "end": [
+          10,
+          3
+        ]
+      },
+      "steps": [
+        {
+          "incremental": [
+            2,
+            0
+          ],
+          "expected": {
+            "start": [
+              2,
+              0
+            ],
+            "end": [
+              10,
+              3
+            ]
+          }
+        },
+        {
+          "incremental": [
+            3,
+            1
+          ],
+          "expected": {
+            "start": [
+              0,
+              1
+            ],
+            "end": [
+              0,
+              4
+            ]
+          }
+        },
+        {
+          "incremental": [
+            3,
+            2
+          ],
+          "expected": {
+            "start": [
+              0,
+              1
+            ],
+            "end": [
+              3,
+              2
+            ]
+          }
+        }
+      ]
     }
   ]
 }

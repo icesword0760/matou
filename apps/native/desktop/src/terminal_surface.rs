@@ -601,6 +601,19 @@ impl Render for TerminalSurface {
                 cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
                     this.focus.focus(window);
                     this.reset_blink();
+                    if event.modifiers.shift {
+                        if let Some((_, row, x)) = this.selection_location(event.position) {
+                            this.selecting = true;
+                            this.drag_scroll_amount = 0;
+                            this.schedule_drag_scroll(cx);
+                            cx.emit(SurfaceEvent::Select(SelectionAction::IncrementalClick {
+                                row,
+                                x,
+                            }));
+                        }
+                        cx.notify();
+                        return;
+                    }
                     if event.click_count > 3 {
                         this.selecting = this.selection_drag.is_some();
                         this.drag_scroll_amount = 0;
@@ -611,7 +624,7 @@ impl Render for TerminalSurface {
                     if let Some((grid, row, x)) = this.selection_location(event.position)
                         && grid.bounds.contains(&event.position)
                     {
-                        let mode = if event.modifiers.shift || event.modifiers.alt {
+                        let mode = if event.modifiers.alt {
                             SelectionMode::Character
                         } else {
                             match event.click_count {

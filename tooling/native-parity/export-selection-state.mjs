@@ -40,6 +40,16 @@ const cases = [
     cols: 10, rows: 4, text: 'first\r\nsecond\r\nthird', mode: 'character', point: [3, 2],
     steps: [{ end: [4, 1] }, { trim: 1 }, { trim: 1 }],
   },
+  {
+    name: 'incremental-word-forward-reverse-and-empty',
+    cols: 24, rows: 4, text: 'first prefix\r\nLEFT TARGET RIGHT\r\n中文后', mode: 'word', point: [7, 1],
+    steps: [{ incremental: [1, 2] }, { incremental: [2, 0] }, { clear: true }, { incremental: [7, 1] }],
+  },
+  {
+    name: 'incremental-wrapped-line',
+    cols: 10, rows: 6, text: 'TOP\r\nab LONGPATH/abcdefghij END\r\nLAST', mode: 'line', point: [4, 2],
+    steps: [{ incremental: [2, 0] }, { incremental: [3, 1] }, { incremental: [3, 2] }],
+  },
 ]
 
 const entry = `
@@ -79,7 +89,10 @@ async function main(cases) {
     const resultsAfterSteps = []
     for (const action of steps) {
       if (action.end) model.selectionEnd = [...action.end]
-      else if (action.trim !== undefined) model.handleTrim(action.trim)
+      else if (action.incremental) {
+        selection._getMouseBufferCoords = () => [...action.incremental]
+        selection._handleIncrementalClick({})
+      } else if (action.trim !== undefined) model.handleTrim(action.trim)
       else if (action.clear) model.clearSelection()
       resultsAfterSteps.push({ ...action, expected: current() })
     }

@@ -62,6 +62,9 @@ fn selection_state_matches_frozen_model_after_each_action() -> Result<()> {
         for step in case["steps"].as_array().unwrap() {
             if let Some(end) = step.get("end") {
                 selection.set_end(point(end));
+            } else if let Some(target) = step.get("incremental") {
+                let target = point(target);
+                selection.incremental_click(&mut terminal, target.row, target.col as f32)?;
             } else if let Some(amount) = step["trim"].as_u64() {
                 selection.trim(usize::try_from(amount)?);
             } else if step["clear"].as_bool() == Some(true) {

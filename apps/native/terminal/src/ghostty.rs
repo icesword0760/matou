@@ -368,6 +368,11 @@ impl Terminal {
             SelectionAction::Begin { mode, row, x } => {
                 self.update_selection(|selection, terminal| selection.begin(terminal, mode, row, x))
             }
+            SelectionAction::IncrementalClick { row, x } => {
+                self.update_selection(|selection, terminal| {
+                    selection.incremental_click(terminal, row, x)
+                })
+            }
             SelectionAction::Extend { row, x } => {
                 self.update_selection(|selection, terminal| selection.extend(terminal, row, x))
             }
