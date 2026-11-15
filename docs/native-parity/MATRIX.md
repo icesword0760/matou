@@ -177,3 +177,18 @@ N02z continuation (A03/A08/A16, evidence `native/evidence/tab-focus-build.json`)
 | Button focus after navigation | Existing button retains focus; output only restores unclaimed active terminal | F08/F09 current/different tab, F10 delayed-output recovery | Full app/window/AX behavior |
 | Context and overflow focus | Context does not autofocus; Escape dismisses it. Overflow keeps trigger focus and ignores Escape | F11 reference AX; F12/F13 final native | No complete menu pixel claim |
 | Focus indicator | F07 frozen Mac cancel outline | F14 separately painted outline, transparent interior retained | Exact geometry/color and other platforms remain unverified |
+
+
+## Sidebar task operations — N02aa (in progress)
+
+Evidence base: artifacts/native-parity/native/evidence. Frozen logic: task-lifecycle-reference.json (33 steps), session-interaction-reference.json (9 steps).
+
+| Requirement | Frozen reference | Native observation | Remaining |
+| --- | --- | --- | --- |
+| A02.02 create/select | New task owns independent canvas and Shell; selection preserves prior Shell | G04 creation; G05 reference vs G09 native direct terminal input; actual multi-PTY bridge | Full multi-workspace/read-only/invalid-path UI |
+| A02.03/A02.04 menu/rename | G01/G02; 20-unit input, duplicate/empty rejection and toast | G06/G07/G13/G14 real Chinese rename, duplicate and empty state | Full modal focus/IME/pixel matrix |
+| A02 pin and order | Frozen listTasks/pin/reorder and interaction transactions | G08/G11/G12 pin, recency and drag end state; G20/G21 final create/switch/MRU | Full drag trajectory/timing open; rapid-input/focus/shutdown real-zsh regression passes |
+| A02.07 delete | G03 confirms sessions removed but local files kept | G15/G16 other task remains usable; real bridge retires all child sessions | Agent/worktree/window-specific disposal when those features are connected |
+| A02 last-task deletion | Frozen deleteTask creates default replacement | G18 executes cat in replacement Shell; exact fixture and bridge | Full pixel/loading/error feedback |
+| A02/A08 quit/reopen | Persist task/focus; approved D01 restores completed commands | G19 plus task-reopen.json, old process exit and fresh live output | Full app lifetime/recovery/Windows |
+| A02 sidebar visibility | Workspace header collapse and active-item reveal | G17 collapse/expand observed; reveal code follows active selection | Real long-list reveal and full sidebar layout remain unverified |

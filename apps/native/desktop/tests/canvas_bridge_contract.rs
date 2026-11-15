@@ -9,7 +9,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
-use matou_native_core::hierarchy::{HierarchyResult, Scene};
+use matou_native_core::hierarchy::{HierarchyResult, Scene, Task};
 use matou_native_desktop::runtime_bridge::{Command, Event, LaunchOptions, RuntimeBridge};
 use serde_json::Value;
 use uuid::Uuid;
@@ -204,6 +204,7 @@ fn verify_canvas(root: &Path) -> Result<()> {
 
 #[derive(Debug, PartialEq, Eq)]
 struct Navigation {
+    workspace_id: String,
     task_id: String,
     scene_id: String,
     session_id: String,
@@ -245,6 +246,10 @@ impl Navigation {
             })
             .collect::<Result<_>>()?;
         Ok(Self {
+            workspace_id: hierarchy
+                .workspace
+                .context("navigation has no workspace")?
+                .id,
             task_id: hierarchy.task.context("navigation has no active task")?.id,
             scene_id,
             session_id,
@@ -257,6 +262,8 @@ impl Navigation {
 struct Probe<'a> {
     bridge: &'a RuntimeBridge,
     frames: BTreeMap<String, (u64, Vec<String>)>,
+    tasks: Vec<Task>,
+    disposed: Vec<String>,
 }
 
 impl<'a> Probe<'a> {
@@ -264,6 +271,8 @@ impl<'a> Probe<'a> {
         Self {
             bridge,
             frames: BTreeMap::new(),
+            tasks: Vec::new(),
+            disposed: Vec::new(),
         }
     }
 
@@ -303,6 +312,7 @@ impl<'a> Probe<'a> {
         self.send(Command::Input {
             session_id: session_id.to_owned(),
             bytes: format!("{command}\r").into_bytes(),
+            defer_ordering: false,
         })
     }
 
@@ -346,6 +356,15 @@ impl<'a> Probe<'a> {
                     bail!("bridge closed")
                 }
                 Ok(event) => {
+                    if let Event::Tasks(tasks) = &event {
+                        self.tasks = tasks.clone();
+                    }
+                    if let Event::ScenesDisposed(ids) = &event {
+                        self.disposed.extend(ids.clone());
+                    }
+                    if let Event::NavigationFailed { message, .. } = &event {
+                        bail!("navigation failed: {message}");
+                    }
                     if let Event::Frame {
                         session_id,
                         screen,
@@ -380,4 +399,176 @@ impl<'a> Probe<'a> {
         }
         bail!("timed out waiting for bridge event")
     }
+}
+
+#[test]
+fn task_lifecycle_uses_independent_shells_and_retires_all_deleted_sessions() -> Result<()> {
+    let root = std::env::temp_dir().join(format!("matou-native-tasks-{}", Uuid::new_v4()));
+    let result = verify_tasks(&root);
+    result.with_context(|| format!("isolated task data: {}", root.display()))?;
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+fn verify_tasks(root: &Path) -> Result<()> {
+    let home = root.join("home");
+    fs::create_dir_all(&home)?;
+    fs::write(home.join(".zshrc"), format!("PROMPT='{PROMPT} '\n"))?;
+    let options = LaunchOptions {
+        data_root: root.join("data"),
+        workspace: root.join("workspace"),
+        shell_home: home,
+        shell: PathBuf::from("/bin/zsh"),
+    };
+    let mut bridge = RuntimeBridge::start(options.clone())?;
+    let mut probe = Probe::new(&bridge);
+    let first = probe.ready("initial task")?;
+    probe.frame(&first.session_id, "first task prompt", &[PROMPT])?;
+    probe.input(
+        &first.session_id,
+        "export TASK_PERSISTED=TASK_KEPT; printf 'TASK_%s\\n' ORIGINAL",
+    )?;
+    probe.frame(
+        &first.session_id,
+        "first task output",
+        &["TASK_ORIGINAL", PROMPT],
+    )?;
+    let second = probe.navigate(
+        "new task",
+        Command::CreateTask {
+            workspace_id: first.workspace_id.clone(),
+        },
+    )?;
+    assert_ne!(first.task_id, second.task_id);
+    assert_eq!(probe.tasks.len(), 2);
+    assert_eq!(second.nodes, BTreeSet::from([second.session_id.clone()]));
+    probe.frame(&second.session_id, "new task shell", &[PROMPT])?;
+    probe.send(Command::Input {
+        session_id: second.session_id.clone(),
+        bytes: b"printf 'TASK_%s\\n' RECENCY".to_vec(),
+        defer_ordering: true,
+    })?;
+    probe.send(Command::Input {
+        session_id: second.session_id.clone(),
+        bytes: vec![13],
+        defer_ordering: true,
+    })?;
+    probe.frame(
+        &second.session_id,
+        "submitted input updates task recency",
+        &["TASK_RECENCY", PROMPT],
+    )?;
+    assert_eq!(probe.tasks[0].id, second.task_id);
+    assert!(probe.tasks[0].last_opened_at > 0);
+
+    let sibling = probe.navigate(
+        "new task second shell",
+        Command::CreateShellSibling {
+            scene_id: second.scene_id.clone(),
+            source_session_id: second.session_id.clone(),
+            parent_session_id: None,
+        },
+    )?;
+    probe.frame(&sibling.session_id, "new task sibling prompt", &[PROMPT])?;
+    probe.navigate(
+        "rename task",
+        Command::RenameTask {
+            task_id: second.task_id.clone(),
+            title: "中文事项".into(),
+        },
+    )?;
+    assert_eq!(
+        probe
+            .tasks
+            .iter()
+            .find(|task| task.id == second.task_id)
+            .unwrap()
+            .title,
+        "中文事项"
+    );
+    probe.navigate(
+        "pin task",
+        Command::SetTaskPinned {
+            task_id: second.task_id.clone(),
+            pinned: true,
+        },
+    )?;
+    assert_eq!(probe.tasks[0].id, second.task_id);
+    assert!(probe.tasks[0].is_pinned);
+    let back = probe.navigate(
+        "back to original task",
+        Command::SelectTask {
+            task_id: first.task_id.clone(),
+        },
+    )?;
+    assert_eq!(back.session_id, first.session_id);
+    probe.input(&back.session_id, "printf '%s\\n' \"$TASK_PERSISTED\"")?;
+    probe.frame(
+        &back.session_id,
+        "original environment survives task switching",
+        &["TASK_KEPT", PROMPT],
+    )?;
+    let restored = probe.navigate(
+        "back to new task",
+        Command::SelectTask {
+            task_id: second.task_id.clone(),
+        },
+    )?;
+    assert_eq!(restored.session_id, sibling.session_id);
+    probe.navigate(
+        "select original before deletion",
+        Command::SelectTask {
+            task_id: first.task_id.clone(),
+        },
+    )?;
+    let retained = probe.navigate(
+        "delete other task",
+        Command::DeleteTask {
+            task_id: second.task_id.clone(),
+        },
+    )?;
+    assert_eq!(retained.task_id, first.task_id);
+    assert_eq!(probe.tasks.len(), 1);
+    assert_eq!(
+        probe.disposed.iter().cloned().collect::<BTreeSet<_>>(),
+        BTreeSet::from([second.session_id, sibling.session_id])
+    );
+    probe.input(&retained.session_id, "printf 'TASK_%s\\n' AFTER_DELETE")?;
+    probe.frame(
+        &retained.session_id,
+        "retained Shell usable after deletion",
+        &["TASK_AFTER_DELETE", PROMPT],
+    )?;
+    let replacement = probe.navigate(
+        "delete final task",
+        Command::DeleteTask {
+            task_id: first.task_id.clone(),
+        },
+    )?;
+    assert_ne!(replacement.task_id, first.task_id);
+    assert_eq!(probe.tasks.len(), 1);
+    assert_eq!(probe.tasks[0].title, "默认");
+    probe.frame(
+        &replacement.session_id,
+        "replacement Shell prompt",
+        &[PROMPT],
+    )?;
+    probe.input(&replacement.session_id, "printf 'TASK_%s\\n' REPLACEMENT")?;
+    probe.frame(
+        &replacement.session_id,
+        "replacement output",
+        &["TASK_REPLACEMENT", PROMPT],
+    )?;
+    bridge.shutdown()?;
+    let mut reopened = RuntimeBridge::start(options)?;
+    let mut probe = Probe::new(&reopened);
+    assert_eq!(probe.ready("task reopened")?, replacement);
+    assert_eq!(probe.tasks.len(), 1);
+    probe.frame(
+        &replacement.session_id,
+        "replacement history restored",
+        &["TASK_REPLACEMENT", DIVIDER, PROMPT],
+    )?;
+    reopened.shutdown()?;
+    Ok(())
 }

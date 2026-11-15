@@ -7,7 +7,10 @@ use std::{
 
 use anyhow::{Context, Result, ensure};
 use matou_native_core::{
-    hierarchy::{self, HierarchyResult, Scene, Session as StoredSession, canvas, tabs},
+    hierarchy::{
+        self, HierarchyIds, HierarchyResult, Scene, Session as StoredSession, Task, canvas, tabs,
+        tasks,
+    },
     ownership::DatabaseOwner,
     session_graph,
     sessions::{self, SessionRun, StartShellRunInput},
@@ -136,6 +139,106 @@ impl ShellOwner {
         hierarchy::list_scenes(&self.connection, task_id)
     }
 
+    pub fn tasks(&self, window_id: &str, workspace_id: &str) -> Result<Vec<Task>> {
+        tasks::list_tasks(&self.connection, window_id, workspace_id)
+    }
+
+    pub fn record_interaction(
+        &mut self,
+        session_id: &str,
+        kind: &str,
+        defer_ordering: bool,
+    ) -> Result<Value> {
+        let time = now();
+        let input = session_graph::RecordInteractionInput {
+            session_id: session_id.into(),
+            interaction_kind: kind.into(),
+            defer_ordering: Some(defer_ordering),
+            now: time,
+        };
+        let command = command(
+            (self.next_id)(),
+            "session.user-interaction",
+            serde_json::to_string(&input)?,
+        );
+        session_graph::record_interaction(
+            &mut self.connection,
+            &command,
+            &input,
+            "用户交互类型不参与会话排序",
+            time,
+        )
+    }
+
+    pub fn create_task(
+        &mut self,
+        command: &CommandMetadata,
+        input: &tasks::CreateTaskInput,
+        ids: &HierarchyIds,
+        committed_at: i64,
+    ) -> Result<Value> {
+        tasks::create_task(
+            &mut self.connection,
+            command,
+            input,
+            ids,
+            "新事项",
+            "工作区目录不可用，请先在本地恢复原路径，或移出该工作区",
+            committed_at,
+        )
+    }
+
+    pub fn select_task(&mut self, input: &tasks::SelectTaskInput) -> Result<HierarchyResult> {
+        tasks::select_task(&mut self.connection, input)
+    }
+
+    pub fn rename_task(
+        &mut self,
+        command: &CommandMetadata,
+        input: &tasks::RenameTaskInput,
+        committed_at: i64,
+    ) -> Result<Value> {
+        tasks::rename_task(&mut self.connection, command, input, committed_at)
+    }
+
+    pub fn set_task_pinned(
+        &mut self,
+        command: &CommandMetadata,
+        input: &tasks::SetTaskPinnedInput,
+        committed_at: i64,
+    ) -> Result<Value> {
+        tasks::set_task_pinned(&mut self.connection, command, input, committed_at)
+    }
+
+    pub fn reorder_pinned_task(
+        &mut self,
+        command: &CommandMetadata,
+        input: &tasks::ReorderPinnedTaskInput,
+        committed_at: i64,
+    ) -> Result<Value> {
+        tasks::reorder_pinned_task(&mut self.connection, command, input, committed_at)
+    }
+
+    pub fn delete_task(
+        &mut self,
+        command: &CommandMetadata,
+        input: &tasks::DeleteTaskInput,
+        ids: &HierarchyIds,
+        committed_at: i64,
+    ) -> Result<Vec<String>> {
+        let result = tasks::delete_task(
+            &mut self.connection,
+            command,
+            input,
+            ids,
+            "默认",
+            committed_at,
+        )?;
+        let disposed: Vec<String> = serde_json::from_value(result["disposedSessionIds"].clone())?;
+        self.retire_sessions(&disposed);
+        Ok(disposed)
+    }
+
     pub fn geometry(
         &self,
         scene_id: &str,
@@ -259,7 +362,12 @@ impl ShellOwner {
     ) -> Result<Vec<String>> {
         let result = tabs::close_scene(&mut self.connection, command, input, committed_at)?;
         let disposed: Vec<String> = serde_json::from_value(result["disposedSessionIds"].clone())?;
-        for id in &disposed {
+        self.retire_sessions(&disposed);
+        Ok(disposed)
+    }
+
+    fn retire_sessions(&mut self, disposed: &[String]) {
+        for id in disposed {
             self.summaries.remove(id);
             if let Some(shell) = self.shells.get_mut(id)
                 && !shell.retiring
@@ -271,7 +379,6 @@ impl ShellOwner {
                 let _ = shell.worker.send(WorkerCommand::Shutdown { reply: None });
             }
         }
-        Ok(disposed)
     }
 
     /// Resolve environment and geometry before calling. Startup handshaking stays

@@ -104,6 +104,7 @@ fn input(bridge: &RuntimeBridge, session_id: &str, command: &str) -> Result<()> 
         .send(Command::Input {
             session_id: session_id.to_owned(),
             bytes: format!("{command}\r").into_bytes(),
+            defer_ordering: false,
         })
         .map_err(|_| anyhow!("bridge disconnected while sending input"))
 }

@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, Row, params};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::storage::{CommandMetadata, DomainCommit, DomainEventInput, execute};
@@ -608,4 +609,131 @@ pub fn set_work_status(
         });
         Ok(result)
     })
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordInteractionInput {
+    pub session_id: String,
+    pub interaction_kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub defer_ordering: Option<bool>,
+    pub now: i64,
+}
+
+/// Persist a terminal interaction and keep its ordering deferred while the card has focus.
+pub fn record_interaction(
+    connection: &mut Connection,
+    command: &CommandMetadata,
+    input: &RecordInteractionInput,
+    invalid_kind_message: &str,
+    committed_at: i64,
+) -> Result<Value> {
+    ensure!(
+        matches!(
+            input.interaction_kind.as_str(),
+            "submit" | "control" | "provider-action"
+        ),
+        "{invalid_kind_message}"
+    );
+    let commit = execute(connection, command, committed_at, |tx, events| {
+        let session_id = &input.session_id;
+        let now = input.now;
+        let (scene_id, task_id, workspace_id): (String, String, String) = tx
+            .query_row(
+                "SELECT membership.scene_id, sessions.task_id, tasks.workspace_id
+                 FROM session_canvas_memberships AS membership
+                 JOIN sessions ON sessions.id = membership.session_id
+                 JOIN tasks ON tasks.id = sessions.task_id
+                 WHERE membership.session_id = ?
+                   AND sessions.archived_at IS NULL
+                   AND tasks.archived_at IS NULL",
+                [session_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?
+            .with_context(|| format!("Session {session_id} does not exist in an active canvas"))?;
+        tx.execute(
+            "UPDATE runtime_sequences SET value = value + 1 WHERE name = 'session-user-interaction'",
+            [],
+        )?;
+        let sequence: i64 = tx
+            .query_row(
+                "SELECT value FROM runtime_sequences WHERE name = 'session-user-interaction'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?
+            .context("session-user-interaction sequence does not exist")?;
+
+        let active = input.defer_ordering == Some(true)
+            || tx
+                .prepare("SELECT 1 FROM window_scene_focus WHERE active_session_id = ? LIMIT 1")?
+                .exists([session_id])?;
+        if active {
+            tx.execute(
+                "UPDATE session_canvas_memberships
+                 SET pending_user_interaction_seq = ?, updated_at = ?
+                 WHERE session_id = ?",
+                params![sequence, now, session_id],
+            )?;
+        } else {
+            tx.execute(
+                "UPDATE session_canvas_memberships
+                 SET last_user_interaction_seq = ?, pending_user_interaction_seq = 0, updated_at = ?
+                 WHERE session_id = ?",
+                params![sequence, now, session_id],
+            )?;
+        }
+        tx.execute(
+            "UPDATE sessions
+             SET last_activity_at = ?, updated_at = ?, version = version + 1
+             WHERE id = ?",
+            params![now, now, session_id],
+        )?;
+        tx.execute(
+            "UPDATE tasks SET last_opened_at = ? WHERE id = ?",
+            params![now, task_id],
+        )?;
+        tx.execute(
+            "UPDATE workspaces SET last_opened_at = ? WHERE id = ?",
+            params![now, workspace_id],
+        )?;
+
+        let focus_window: Option<String> = tx
+            .query_row(
+                "SELECT window_id FROM window_scene_focus
+             WHERE scene_id = ?
+             ORDER BY (active_session_id = ?) DESC, updated_at DESC
+             LIMIT 1",
+                params![scene_id, session_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let graph = project_scene_graph(tx, &scene_id, focus_window.as_deref())?;
+        let result = json!({
+            "sessionId": session_id,
+            "sceneId": scene_id,
+            "taskId": task_id,
+            "workspaceId": workspace_id,
+            "interactionKind": input.interaction_kind,
+            "sequence": sequence,
+            "graph": graph
+        });
+        events.push(DomainEventInput {
+            event_id: format!("{}:session-user-interacted", command.command_id),
+            event_type: "session.user-interacted".into(),
+            aggregate_type: "session".into(),
+            aggregate_id: session_id.clone(),
+            workspace_id: Some(workspace_id),
+            task_id: Some(task_id),
+            session_id: Some(session_id.clone()),
+            payload: result.clone(),
+            schema_version: None,
+            required_terminal_sequence: None,
+            occurred_at: now,
+        });
+        Ok(result)
+    })?;
+    Ok(commit.result)
 }
