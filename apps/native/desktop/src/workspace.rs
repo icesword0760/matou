@@ -1456,6 +1456,7 @@ impl Workspace {
                                     .bg(rgb(0xeceef3))
                                     .text_color(rgb(0x91949e))
                                     .text_size(px(9. * scale))
+                                    .line_height(px(12.5 * scale))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .child("默认"),
                             )
@@ -1473,6 +1474,7 @@ impl Workspace {
                                     .bg(rgba(0xd99d3c1a))
                                     .text_color(rgb(0xd99d3c))
                                     .text_size(px(9. * scale))
+                                    .line_height(px(12.5 * scale))
                                     .child("路径失效"),
                             )
                         }),
@@ -1597,6 +1599,7 @@ impl Workspace {
                             .bg(rgb(0xfff8e8))
                             .text_color(rgb(0x9a6818))
                             .text_size(px(9. * scale))
+                            .line_height(px(12.5 * scale))
                             .flex()
                             .items_center()
                             .justify_center()
@@ -1616,16 +1619,7 @@ impl Workspace {
         let content = div()
             .relative()
             .when(active, |content| {
-                content.child(
-                    div()
-                        .absolute()
-                        .top(px(5. * scale))
-                        .bottom(px(5. * scale))
-                        .left_0()
-                        .w(px(2. * scale))
-                        .rounded(px(scale))
-                        .bg(rgb(0x67a6f4)),
-                )
+                content.child(workspace_drag::active_marker(scale))
             })
             .child(header)
             .child(canvas(|_, _, _| (), move |bounds, _, _, cx| {
@@ -1662,7 +1656,15 @@ impl Workspace {
                 }),
             )
             .relative()
-            .mt(px(1.))
+            // Adjacent block margins collapse in the source: max(8px, 1px).
+            // The native flex wrapper must account for that explicitly.
+            .mt(px(
+                if self.workspaces.first().is_some_and(|first| first.id == id) {
+                    1.
+                } else {
+                    0.
+                },
+            ))
             .mb(px(8.))
             .when_some(
                 self.workspace_drag_motion.get(id.as_str()),
