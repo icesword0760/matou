@@ -1439,7 +1439,7 @@ impl Workspace {
                         .text_size(px(13. * scale))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(rgb(if active { 0x2f3547 } else { 0x656d76 }))
-                        .child(ui_text(workspace.name.clone())),
+                        .child(ui_text(workspace.name.clone()).normal_line_height()),
                 )
                 .child(
                     div()
@@ -3035,7 +3035,7 @@ impl Workspace {
                     .whitespace_nowrap()
                     .cursor_pointer()
                     .hover(|s| s.bg(rgb(0xeceef3)))
-                    .child(ui_text(label))
+                    .child(ui_text(label).normal_line_height())
             };
             let relink_id = id.clone();
             let pin_id = id.clone();
@@ -3086,7 +3086,10 @@ impl Workspace {
                             .cursor_pointer()
                             .hover(|s| s.bg(rgb(0xeceef3)))
                             .child(icon("pin", 13., 0x2f3547))
-                            .child(ui_text(if pinned { "取消置顶" } else { "置顶" })),
+                            .child(
+                                ui_text(if pinned { "取消置顶" } else { "置顶" })
+                                    .normal_line_height(),
+                            ),
                         &controls[next_focus],
                         move |this, _, cx| {
                             this.workspace_menu = None;
@@ -3142,7 +3145,7 @@ impl Workspace {
                             .cursor_pointer()
                             .hover(|s| s.bg(rgb(0xfff1f0)).text_color(rgb(0xa8322e)))
                             .child(icon("trash-2", 14., 0xc5443e))
-                            .child(ui_text("移出码头")),
+                            .child(ui_text("移出码头").normal_line_height()),
                         &controls[next_focus + 3],
                         move |this, window, cx| {
                             this.open_workspace_remove(remove_id.clone(), name.clone(), window, cx);

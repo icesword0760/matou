@@ -105,7 +105,7 @@ pub fn group(snapshot: &WorkspaceDragSnapshot, width: Pixels, scale: f32) -> Div
                 .text_size(s(13.))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(rgb(if snapshot.active { 0x2f3547 } else { 0x656d76 }))
-                .child(ui_text(snapshot.name.clone())),
+                .child(ui_text(snapshot.name.clone()).normal_line_height()),
         )
         .child(
             div()
