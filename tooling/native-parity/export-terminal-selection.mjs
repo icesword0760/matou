@@ -60,7 +60,7 @@ async function main(){
    else service._model.selectionEnd[0]=target[1]<service._model.selectionStart[1]?0:fixture.cols;
    probes.push({mode,point,target,expected:result()});
   }
-  results.push({name:fixture.name,cols:fixture.cols,rows:fixture.rows,grid,probes});
+  results.push({name:fixture.name,cols:fixture.cols,rows:fixture.rows,text:fixture.text,grid,probes});
   term.dispose();
  }
  const path=resolve('apps/native/desktop/tests/fixtures/terminal-selection-reference.json');
