@@ -39,7 +39,9 @@ export interface LaunchMatouOptions {
 }
 
 export async function launchMatou(options: LaunchMatouOptions = {}): Promise<MatouFixture> {
-  const root = options.root ?? await mkdtemp('/tmp/matou-e2e-')
+  const temporaryRoot = process.env.MATOU_E2E_TEMP_ROOT ?? '/tmp'
+  await mkdir(temporaryRoot, { recursive: true })
+  const root = options.root ?? await mkdtemp(join(temporaryRoot, process.env.MATOU_E2E_TEMP_PREFIX ?? 'matou-e2e-'))
   return startMatou(root, options)
 }
 

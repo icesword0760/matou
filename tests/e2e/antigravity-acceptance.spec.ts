@@ -9,13 +9,14 @@ import { expect, test, _electron as electron, type ElectronApplication, type Loc
 
 const execFileAsync = promisify(execFile)
 
-const SCRATCHPAD_ROOT =
-  '/private/tmp/claude-501/-Users-icesword-Documents-AIProjects-matou/da0ac5f4-7b9e-4679-81d7-890907cb84cf/scratchpad/agy-e2e'
+const SCRATCHPAD_ROOT = resolve(process.env.MATOU_ACCEPTANCE_SCRATCH_ROOT ??
+  resolve(import.meta.dirname, '../../.cache/antigravity-acceptance'))
 const PACKAGED_EXECUTABLE = resolve(
   import.meta.dirname,
   '../../apps/desktop/release/mac-arm64/码头.app/Contents/MacOS/码头'
 )
-const EVIDENCE_DIR = resolve(import.meta.dirname, '../../docs/acceptance/evidence/antigravity')
+const EVIDENCE_DIR = resolve(process.env.MATOU_ACCEPTANCE_EVIDENCE_DIR ??
+  resolve(import.meta.dirname, '../../docs/acceptance/evidence/antigravity'))
 const RESULTS_DIR = join(EVIDENCE_DIR, 'results')
 const GEMINI_CONVERSATIONS_ROOT = join(process.env.HOME ?? '/Users/icesword', '.gemini/antigravity-cli/conversations')
 const GEMINI_BRAIN_ROOT = join(process.env.HOME ?? '/Users/icesword', '.gemini/antigravity-cli/brain')
@@ -65,7 +66,9 @@ async function createIsolatedWorkspace(prefix: string, options?: { secondCommit?
   const userDataDir = join(rootDir, 'electron-user')
   // macOS sockaddr_un.sun_path is capped at 104 bytes; bind control/runtime.sock
   // via a short /tmp symlink pointing into the isolated scratchpad data dir.
-  const dataDir = `/tmp/m-e2e-${randomBytes(4).toString('hex')}`
+  const linkRoot = resolve(process.env.MATOU_ACCEPTANCE_LINK_ROOT ?? '/tmp')
+  await mkdir(linkRoot, { recursive: true })
+  const dataDir = join(linkRoot, `m-e2e-${randomBytes(4).toString('hex')}`)
   assertIsolatedPath(repoDir)
   assertIsolatedPath(zdotDir)
   assertIsolatedPath(realDataDir)
