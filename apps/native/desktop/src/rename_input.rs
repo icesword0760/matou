@@ -40,7 +40,7 @@ impl RenameInput {
     pub fn new(text: String, cx: &mut Context<Self>) -> Self {
         let end = text.len();
         Self {
-            focus: cx.focus_handle(),
+            focus: cx.focus_handle().tab_stop(true),
             text,
             selection: end..end,
             reversed: false,

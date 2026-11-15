@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    rc::Rc,
     sync::mpsc::Sender,
     time::{Duration, Instant},
 };
@@ -39,6 +40,23 @@ enum TabDialog {
     },
 }
 
+const CONTROLS: &[&str] = &[
+    "new-workspace",
+    "notifications",
+    "workspace",
+    "add-task",
+    "workspace-menu",
+    "task-menu",
+    "board",
+    "settings",
+    "add-tab",
+    "tab-overflow",
+    "graph",
+    "split",
+    "update",
+    "account",
+];
+
 pub struct Workspace {
     commands: Sender<Command>,
     hierarchy: Option<HierarchyResult>,
@@ -46,12 +64,15 @@ pub struct Workspace {
     tab_scroll: ScrollHandle,
     tab_hover: Option<String>,
     tab_overflow: bool,
-    hidden_tabs: Option<Vec<String>>,
-    tab_menu: Option<(String, Point<Pixels>)>,
+    hidden_tabs: Option<Vec<(String, FocusHandle)>>,
+    tab_menu: Option<(String, Point<Pixels>, FocusHandle)>,
+    control_focus: HashMap<&'static str, FocusHandle>,
+    tab_controls: HashMap<String, [FocusHandle; 2]>,
+    card_controls: HashMap<String, FocusHandle>,
+    keyboard_focus: bool,
     dialog: Option<TabDialog>,
     dialog_controls: Vec<FocusHandle>,
     dialog_subscription: Option<Subscription>,
-    dialog_return_focus: Option<FocusHandle>,
     pending_close: Option<String>,
     carousel_scroll: ScrollHandle,
     motion_clock: Instant,
@@ -107,6 +128,14 @@ impl Workspace {
             }
         })
         .detach();
+        let view = cx.weak_entity();
+        let workspace_window = window.window_handle();
+        // Cover the document even when window.blur() leaves no focused GPUI node.
+        let keyboard = cx.intercept_keystrokes(move |event, window, cx| {
+            if window.window_handle() == workspace_window {
+                let _ = view.update(cx, |this, cx| this.tab_key(&event.keystroke, window, cx));
+            }
+        });
         Self {
             commands,
             hierarchy: None,
@@ -116,10 +145,16 @@ impl Workspace {
             tab_overflow: false,
             hidden_tabs: None,
             tab_menu: None,
+            control_focus: CONTROLS
+                .iter()
+                .map(|&id| (id, cx.focus_handle().tab_stop(true)))
+                .collect(),
+            tab_controls: HashMap::new(),
+            card_controls: HashMap::new(),
+            keyboard_focus: false,
             dialog: None,
             dialog_controls: Vec::new(),
             dialog_subscription: None,
-            dialog_return_focus: None,
             pending_close: None,
             carousel_scroll: ScrollHandle::new(),
             motion_clock: Instant::now(),
@@ -155,7 +190,7 @@ impl Workspace {
             pending_focus: None,
             resize_revisions: HashMap::new(),
             fault: None,
-            subscriptions: Vec::new(),
+            subscriptions: vec![keyboard],
         }
     }
 
@@ -206,6 +241,8 @@ impl Workspace {
                     .map(|s| &s.id)
                     != next_scene;
                 let next_focus = hierarchy.session.as_ref().map(|session| session.id.clone());
+                let focus_changed = self.focused != next_focus;
+                let initializing = self.hierarchy.is_none();
                 if scene_changed
                     || self.pending_focus.as_ref().is_some_and(|(scene, session)| {
                         Some(scene) == next_scene && Some(session) == next_focus.as_ref()
@@ -231,10 +268,10 @@ impl Workspace {
                     self.hover_restore_at = None;
                     self.carousel_scroll.set_offset(point(px(0.), px(0.)));
                 }
-                if !scene_changed && self.focused != next_focus {
+                if !scene_changed && focus_changed {
                     self.restore_geometry = false;
                 }
-                if scene_changed || self.focused != next_focus {
+                if scene_changed || focus_changed {
                     let at = self.motion_clock.elapsed().as_secs_f64() * 1000.;
                     let from_preview = !scene_changed && self.hovered == next_focus;
                     self.focus_follow_until = if from_preview { None } else { Some(at + 440.) };
@@ -250,11 +287,23 @@ impl Workspace {
                         );
                     }
                 }
+                self.tab_controls
+                    .retain(|id, _| scenes.iter().any(|scene| &scene.id == id));
+                for scene in &scenes {
+                    self.tab_controls
+                        .entry(scene.id.clone())
+                        .or_insert_with(|| {
+                            [
+                                cx.focus_handle().tab_stop(true),
+                                cx.focus_handle().tab_stop(true),
+                            ]
+                        });
+                }
                 self.scenes = scenes;
                 self.focused = next_focus;
                 self.hierarchy = Some(hierarchy);
                 self.graph = graph;
-                self.refresh_terminals(window, cx);
+                self.refresh_terminals(cx);
                 if scene_changed
                     && let Some(index) = self.scenes.iter().position(|scene| {
                         self.hierarchy
@@ -265,7 +314,13 @@ impl Workspace {
                 {
                     self.tab_scroll.scroll_to_item(index);
                 }
-                if self.dialog.is_none()
+                if (initializing || scene_changed || focus_changed)
+                    && self.dialog.is_none()
+                    && (window.focused(cx).is_none()
+                        || self
+                            .terminals
+                            .values()
+                            .any(|terminal| terminal.read(cx).focus.is_focused(window)))
                     && let Some(terminal) =
                         self.focused.as_ref().and_then(|id| self.terminals.get(id))
                 {
@@ -275,6 +330,7 @@ impl Workspace {
             Event::ScenesDisposed(ids) => {
                 for id in ids {
                     self.terminals.remove(&id);
+                    self.card_controls.remove(&id);
                     self.card_motion.remove(&id);
                     self.resize_revisions.remove(&id);
                 }
@@ -286,9 +342,8 @@ impl Workspace {
             } => {
                 if self.pending_close.as_ref() == Some(&scene_id) {
                     self.pending_close = None;
-                    self.dialog_return_focus = window.focused(cx);
                     self.dialog_controls = (0..if is_last { 2 } else { 3 })
-                        .map(|_| cx.focus_handle())
+                        .map(|_| cx.focus_handle().tab_stop(true))
                         .collect();
                     window.focus(&self.dialog_controls[0]);
                     self.dialog = Some(TabDialog::Close {
@@ -372,7 +427,7 @@ impl Workspace {
             }
             Event::Graph(graph) => {
                 self.graph = graph;
-                self.refresh_terminals(window, cx);
+                self.refresh_terminals(cx);
             }
             Event::Frame {
                 session_id,
@@ -382,6 +437,14 @@ impl Workspace {
             } => {
                 if let Some(terminal) = self.terminals.get(&session_id) {
                     terminal.update(cx, |terminal, cx| terminal.set_screen(screen, modes, cx));
+                    // The reference live-output callback restores only an unclaimed
+                    // active terminal; dialogs and focused controls retain ownership.
+                    if self.focused.as_ref() == Some(&session_id)
+                        && self.dialog.is_none()
+                        && window.focused(cx).is_none()
+                    {
+                        window.focus(&terminal.read(cx).focus);
+                    }
                 }
                 self.send(
                     Command::Applied {
@@ -400,7 +463,7 @@ impl Workspace {
         cx.notify();
     }
 
-    fn refresh_terminals(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn refresh_terminals(&mut self, cx: &mut Context<Self>) {
         let Some(nodes) = self.graph["nodes"].as_array() else {
             return;
         };
@@ -427,6 +490,8 @@ impl Workspace {
                 continue;
             }
             let terminal = cx.new(TerminalSurface::new);
+            self.card_controls
+                .insert(id.clone(), cx.focus_handle().tab_stop(true));
             let session_id = id.clone();
             self.subscriptions.push(cx.subscribe(
                 &terminal,
@@ -479,9 +544,6 @@ impl Workspace {
                     }
                 },
             ));
-            if self.focused.as_ref() == Some(id) {
-                window.focus(&terminal.read(cx).focus);
-            }
             self.terminals.insert(id.clone(), terminal);
         }
     }
@@ -822,7 +884,10 @@ impl Workspace {
                     .pl(px(86.))
                     .pr(px(12.))
                     .gap(px(10.))
-                    .child(icon("square-pen", 17., 0x2f3547))
+                    .child(self.control(
+                        div().child(icon("square-pen", 17., 0x2f3547)),
+                        "new-workspace",
+                    ))
                     .child(
                         div()
                             .text_size(px(14.))
@@ -830,7 +895,7 @@ impl Workspace {
                             .child("新增工作空间"),
                     )
                     .child(div().flex_1())
-                    .child(icon("bell", 16., 0x8d96a3)),
+                    .child(self.control(div().child(icon("bell", 16., 0x8d96a3)), "notifications")),
             )
             .child(
                 div().flex_1().min_h_0().px(px(6.)).pt(px(8.)).child(
@@ -849,7 +914,7 @@ impl Workspace {
                                 .bg(rgb(0x67a6f4)),
                         )
                         .child(
-                            div()
+                            self.control(div(), "workspace")
                                 .h(px(34.))
                                 .flex()
                                 .items_center()
@@ -875,9 +940,14 @@ impl Workspace {
                                 )
                                 .child(icon("pin", 13., 0x81848d))
                                 .child(div().flex_1())
-                                .child(icon("plus", 14., 0x81848d))
                                 .child(
-                                    div()
+                                    self.control(
+                                        div().child(icon("plus", 14., 0x81848d)),
+                                        "add-task",
+                                    ),
+                                )
+                                .child(
+                                    self.control(div(), "workspace-menu")
                                         .w(px(26.))
                                         .flex()
                                         .justify_center()
@@ -904,7 +974,10 @@ impl Workspace {
                                         .child(task.to_owned()),
                                 )
                                 .child(div().flex_1())
-                                .child(icon("ellipsis", 14., 0x656d76)),
+                                .child(self.control(
+                                    div().child(icon("ellipsis", 14., 0x656d76)),
+                                    "task-menu",
+                                )),
                         ),
                 ),
             )
@@ -918,10 +991,10 @@ impl Workspace {
                     .text_size(px(12.))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgb(0x989da7))
-                    .child(icon("columns-3", 16., 0x989da7))
+                    .child(self.control(div().child(icon("columns-3", 16., 0x989da7)), "board"))
                     .child(div().ml(px(7.)).child("看板"))
                     .child(div().flex_1())
-                    .child(icon("settings-2", 16., 0x989da7))
+                    .child(self.control(div().child(icon("settings-2", 16., 0x989da7)), "settings"))
                     .child(div().ml(px(7.)).child("设置")),
             )
     }
@@ -953,9 +1026,7 @@ impl Workspace {
         self.dialog = None;
         self.dialog_subscription = None;
         self.dialog_controls.clear();
-        if let Some(focus) = self.dialog_return_focus.take() {
-            window.focus(&focus);
-        }
+        window.blur();
         cx.notify();
     }
     fn open_rename(&mut self, scene_id: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -964,13 +1035,7 @@ impl Workspace {
         };
         let text = self.scene_title(scene);
         let input = cx.new(|cx| RenameInput::new(text, cx));
-        self.dialog_return_focus = window.focused(cx);
-        self.dialog_controls = vec![
-            cx.focus_handle(),
-            input.read(cx).focus.clone(),
-            cx.focus_handle(),
-            cx.focus_handle(),
-        ];
+        self.dialog_controls = (0..3).map(|_| cx.focus_handle().tab_stop(true)).collect();
         self.dialog_subscription =
             Some(
                 cx.subscribe_in(&input, window, |this, _, event, window, cx| match event {
@@ -1026,57 +1091,267 @@ impl Workspace {
             self.send(command, cx);
         }
     }
-    fn tab_key(&mut self, e: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if self.dialog.is_some() {
-            let composing = matches!(&self.dialog,Some(TabDialog::Rename{input,..}) if input.read(cx).composing());
-            if e.keystroke.key == "escape" && !composing {
+    fn create_canvas(&mut self, cx: &mut Context<Self>) {
+        if let Some(task) = self.hierarchy.as_ref().and_then(|h| h.task.as_ref()) {
+            self.send(
+                Command::CreateCanvas {
+                    task_id: task.id.clone(),
+                },
+                cx,
+            );
+        }
+    }
+
+    fn split_horizontal(&mut self, cx: &mut Context<Self>) {
+        if let (Some(scene_id), Some(source_session_id)) =
+            (self.active_scene_id(), self.focused.as_ref())
+        {
+            self.send(
+                Command::CreateShellSibling {
+                    scene_id: scene_id.to_owned(),
+                    source_session_id: source_session_id.clone(),
+                    parent_session_id: None,
+                },
+                cx,
+            );
+        }
+    }
+
+    fn active_scene_id(&self) -> Option<&str> {
+        self.hierarchy
+            .as_ref()?
+            .scene
+            .as_ref()
+            .map(|scene| scene.id.as_str())
+    }
+
+    fn jump_to_scene(&mut self, index: usize, cx: &mut Context<Self>) {
+        if let Some(scene) = self.scenes.get(index) {
+            self.send(
+                Command::SelectScene {
+                    scene_id: scene.id.clone(),
+                },
+                cx,
+            );
+        }
+    }
+
+    fn step_scene(&mut self, offset: isize, cx: &mut Context<Self>) {
+        let index = self
+            .scenes
+            .iter()
+            .position(|scene| Some(scene.id.as_str()) == self.active_scene_id());
+        let len = self.scenes.len().max(1) as isize;
+        self.jump_to_scene(
+            (index.map_or(-1, |i| i as isize) + offset).rem_euclid(len) as usize,
+            cx,
+        );
+    }
+
+    fn move_scene(&mut self, offset: isize, cx: &mut Context<Self>) {
+        let Some(index) = self
+            .scenes
+            .iter()
+            .position(|scene| Some(scene.id.as_str()) == self.active_scene_id())
+        else {
+            return;
+        };
+        let Some(target) = index
+            .checked_add_signed(offset)
+            .filter(|&i| i < self.scenes.len())
+        else {
+            return;
+        };
+        let before = if offset < 0 { target } else { target + 1 };
+        self.send(
+            Command::ReorderScene {
+                scene_id: self.scenes[index].id.clone(),
+                before_scene_id: self.scenes.get(before).map(|scene| scene.id.clone()),
+            },
+            cx,
+        );
+    }
+
+    fn step_session(&mut self, offset: isize, cx: &mut Context<Self>) {
+        if self.order.len() <= 1 {
+            return;
+        }
+        let Some(scene_id) = self.active_scene_id() else {
+            return;
+        };
+        let current = self
+            .order
+            .iter()
+            .position(|id| Some(id) == self.focused.as_ref())
+            .unwrap_or(0);
+        let next = (current as isize + offset).rem_euclid(self.order.len() as isize) as usize;
+        self.send(
+            Command::FocusSession {
+                scene_id: scene_id.to_owned(),
+                session_id: self.order[next].clone(),
+            },
+            cx,
+        );
+    }
+
+    fn workspace_shortcut(&mut self, stroke: &Keystroke, cx: &mut Context<Self>) -> bool {
+        let mods = stroke.modifiers;
+        let mac = cfg!(target_os = "macos");
+        if mods.alt || !(if mac { mods.platform } else { mods.control }) {
+            return false;
+        }
+        match (stroke.key.as_str(), mods.shift) {
+            ("d", false) => self.split_horizontal(cx),
+            ("d", true) => {}
+            ("t", false) => self.create_canvas(cx),
+            ("]", false) => self.step_session(1, cx),
+            ("[", false) => self.step_session(-1, cx),
+            ("]" | "}", true) => self.step_scene(1, cx),
+            ("[" | "{", true) => self.step_scene(-1, cx),
+            ("tab", shift) if !mac => self.step_scene(if shift { -1 } else { 1 }, cx),
+            ("left" | "pageup", true) => self.move_scene(-1, cx),
+            ("right" | "pagedown", true) => self.move_scene(1, cx),
+            (key, false) if matches!(key.as_bytes(), [b'1'..=b'9']) => {
+                self.jump_to_scene(usize::from(key.as_bytes()[0] - b'1'), cx);
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    fn tab_key(&mut self, stroke: &Keystroke, window: &mut Window, cx: &mut Context<Self>) {
+        if self.workspace_shortcut(stroke, cx) {
+            cx.stop_propagation();
+            return;
+        }
+        let confirmation = matches!(self.dialog, Some(TabDialog::Close { .. }));
+        if stroke.key == "escape" {
+            if confirmation {
                 self.close_dialog(window, cx);
                 cx.stop_propagation();
-                return;
-            }
-            if e.keystroke.key == "tab" && !composing {
-                let disabled = matches!(&self.dialog,Some(TabDialog::Rename{scene_id,input}) if !trim_name(&input.read(cx).text).is_empty() && self.rename_error(scene_id,trim_name(&input.read(cx).text)).is_some());
-                let n = self.dialog_controls.len() - usize::from(disabled);
-                let i = self
-                    .dialog_controls
-                    .iter()
-                    .position(|f| f.is_focused(window))
-                    .unwrap_or(0);
-                let next = if e.keystroke.modifiers.shift {
-                    (i + n - 1) % n
-                } else {
-                    (i + 1) % n
-                };
-                window.focus(&self.dialog_controls[next]);
-                cx.stop_propagation();
-                return;
-            }
-            if matches!(e.keystroke.key.as_str(), "enter" | "space") && !composing {
-                let i = self
-                    .dialog_controls
-                    .iter()
-                    .position(|f| f.is_focused(window))
-                    .unwrap_or(0);
-                if matches!(&self.dialog, Some(TabDialog::Rename { .. })) && i == 1 {
-                    return;
-                }
-                if i + 1 == self.dialog_controls.len() {
-                    self.confirm_dialog(window, cx);
-                } else {
-                    self.close_dialog(window, cx);
-                }
-                cx.stop_propagation();
+            } else if self.tab_menu.take().is_some() {
+                // SceneTabBar dismisses this menu in the window bubble listener;
+                // it neither moves focus nor consumes the underlying Escape.
+                cx.notify();
             }
             return;
         }
-        if e.keystroke.key == "escape" && (self.tab_menu.is_some() || self.hidden_tabs.is_some()) {
-            self.tab_menu = None;
-            self.hidden_tabs = None;
-            cx.stop_propagation();
-            cx.notify();
+        let m = stroke.modifiers;
+        if stroke.key != "tab" || m.alt || m.control || m.platform {
+            return;
         }
+        if !confirmation
+            && (self
+                .terminals
+                .values()
+                .any(|terminal| terminal.read(cx).focus.is_focused(window))
+                || matches!(&self.dialog, Some(TabDialog::Rename { input, .. }) if input.read(cx).focus.is_focused(window) && input.read(cx).composing()))
+        {
+            return;
+        }
+        self.keyboard_focus = true;
+        if confirmation {
+            let controls = &self.dialog_controls;
+            let current = controls.iter().position(|focus| focus.is_focused(window));
+            let next = match (current, m.shift) {
+                (Some(i), true) => (i + controls.len() - 1) % controls.len(),
+                (Some(i), false) => (i + 1) % controls.len(),
+                (None, true) => controls.len() - 1,
+                (None, false) => 0,
+            };
+            window.focus(&controls[next]);
+        } else {
+            if m.shift {
+                window.focus_prev();
+            } else {
+                window.focus_next();
+            }
+            if let Some(index) = self.scenes.iter().position(|scene| {
+                self.tab_controls[&scene.id]
+                    .iter()
+                    .any(|focus| focus.is_focused(window))
+            }) {
+                self.tab_scroll.scroll_to_item(index);
+            }
+        }
+        cx.stop_propagation();
+        cx.notify();
     }
-    fn topbar(&self, cx: &mut Context<Self>) -> Div {
+
+    fn focus_control<E: InteractiveElement + ParentElement + Styled>(
+        &self,
+        mut element: E,
+        focus: &FocusHandle,
+    ) -> E {
+        let style_radii = &element.style().corner_radii;
+        let radii = Corners {
+            top_left: style_radii.top_left.unwrap_or_default(),
+            top_right: style_radii.top_right.unwrap_or_default(),
+            bottom_right: style_radii.bottom_right.unwrap_or_default(),
+            bottom_left: style_radii.bottom_left.unwrap_or_default(),
+        };
+        let element = element.track_focus(focus);
+        if !self.keyboard_focus {
+            return element;
+        }
+        let focus = focus.clone();
+        // Paint an outline without changing control geometry. A GPUI shadow
+        // fills transparent controls and cannot represent the reference ring.
+        element.relative().child(
+            canvas(
+                |_, _, _| (),
+                move |bounds, _, window, _| {
+                    if focus.is_focused(window) {
+                        let radii = radii.map(|radius| radius.to_pixels(window.rem_size()));
+                        window.paint_quad(
+                            outline(bounds, rgb(0xe3ab44), BorderStyle::default())
+                                .corner_radii(radii)
+                                .border_widths(px(2.)),
+                        );
+                    }
+                },
+            )
+            .absolute()
+            .inset_0()
+            .size_full(),
+        )
+    }
+
+    fn control(&self, element: Div, id: &str) -> Div {
+        self.focus_control(element, &self.control_focus[id])
+    }
+
+    fn button<E: StatefulInteractiveElement + ParentElement + Styled>(
+        &self,
+        element: E,
+        focus: &FocusHandle,
+        activate: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> E {
+        let activate = Rc::new(activate);
+        let key_activate = activate.clone();
+        let mouse_focus = focus.clone();
+        self.focus_control(element, focus)
+            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                window.focus(&mouse_focus);
+                cx.stop_propagation();
+            })
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "enter" && !event.keystroke.modifiers.modified() {
+                    cx.stop_propagation();
+                    key_activate(this, window, cx);
+                }
+            }))
+            .on_click(cx.listener(move |this, event, window, cx| {
+                // GPUI synthesizes both clicks on keyup. Match button Enter on keydown.
+                if !matches!(event, ClickEvent::Keyboard(event) if event.button == KeyboardButton::Enter) {
+                    cx.stop_propagation();
+                    activate(this, window, cx);
+                }
+            }))
+    }
+
+    fn topbar(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let active_id = self
             .hierarchy
             .as_ref()
@@ -1099,6 +1374,8 @@ impl Workspace {
             let menu_id = scene.id.clone();
             let hover_id = scene.id.clone();
             let title = self.scene_title(scene);
+            let [title_focus, close_focus] = &self.tab_controls[&scene.id];
+            let double_click_focus = title_focus.clone();
             tabs = tabs.child(
                 tabs_ui::tab(SharedString::from(format!("tab-{}", scene.id)), active)
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -1110,12 +1387,14 @@ impl Workspace {
                         MouseButton::Right,
                         cx.listener(move |this, e: &MouseDownEvent, window, cx| {
                             let size = window.viewport_size();
+                            let focus = cx.focus_handle().tab_stop(true);
                             this.tab_menu = Some((
                                 menu_id.clone(),
                                 point(
                                     e.position.x.clamp(px(8.), size.width - px(136.)),
                                     e.position.y.clamp(px(8.), size.height - px(44.)),
                                 ),
+                                focus,
                             ));
                             this.hidden_tabs = None;
                             cx.stop_propagation();
@@ -1123,33 +1402,40 @@ impl Workspace {
                         }),
                     )
                     .child(
-                        tabs_ui::tab_title(title)
-                            .id(SharedString::from(format!("tab-title-{}", scene.id)))
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, e: &MouseDownEvent, window, cx| {
-                                    if e.click_count == 2 {
-                                        this.open_rename(rename_id.clone(), window, cx);
-                                    }
-                                    cx.stop_propagation();
-                                }),
-                            )
-                            .on_click(cx.listener(move |this, _, _, cx| {
+                        self.button(
+                            tabs_ui::tab_title(title)
+                                .id(SharedString::from(format!("tab-title-{}", scene.id))),
+                            title_focus,
+                            move |this, _, cx| {
                                 this.send(
                                     Command::SelectScene {
                                         scene_id: select_id.clone(),
                                     },
                                     cx,
                                 );
-                            })),
+                            },
+                            cx,
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, e: &MouseDownEvent, window, cx| {
+                                window.focus(&double_click_focus);
+                                if e.click_count == 2 {
+                                    this.open_rename(rename_id.clone(), window, cx);
+                                }
+                                cx.stop_propagation();
+                            }),
+                        ),
                     )
-                    .child(
+                    .child(self.button(
                         tabs_ui::tab_close(
                             SharedString::from(format!("tab-close-{}", scene.id)),
-                            active || self.tab_hover.as_ref() == Some(&scene.id),
-                        )
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_click(cx.listener(move |this, _, _, cx| {
+                            active
+                                || self.tab_hover.as_ref() == Some(&scene.id)
+                                || close_focus.is_focused(window),
+                        ),
+                        close_focus,
+                        move |this, _, cx| {
                             this.pending_close = Some(close_id.clone());
                             this.send(
                                 Command::PreviewSceneClose {
@@ -1157,72 +1443,61 @@ impl Workspace {
                                 },
                                 cx,
                             );
-                            cx.stop_propagation();
-                        })),
-                    ),
+                        },
+                        cx,
+                    )),
             );
         }
-        let task = self
-            .hierarchy
-            .as_ref()
-            .and_then(|h| h.task.as_ref())
-            .map(|t| t.id.clone());
-        let add = |id: &'static str| {
-            tabs_ui::tab_add(id)
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_click(cx.listener({
-                    let task = task.clone();
-                    move |this, _, _, cx| {
-                        if let Some(task_id) = &task {
-                            this.send(
-                                Command::CreateCanvas {
-                                    task_id: task_id.clone(),
-                                },
-                                cx,
-                            );
-                        }
-                    }
-                }))
-        };
-        if !self.tab_overflow {
-            tabs = tabs.child(add("create-canvas"));
-        }
-        let overflow_actions = div()
+        let add = self.button(
+            tabs_ui::tab_add(if self.tab_overflow {
+                "create-canvas-overflow"
+            } else {
+                "create-canvas"
+            }),
+            &self.control_focus["add-tab"],
+            |this, _, cx| this.create_canvas(cx),
+            cx,
+        );
+        let mut overflow_actions = div()
             .flex()
             .flex_none()
             .items_center()
             .gap(px(4.))
-            .ml(px(8.))
-            .child(
-                tabs_ui::tab_overflow_btn("tab-overflow")
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(cx.listener(|this, _, _, cx| {
+            .ml(px(8.));
+        if !self.tab_overflow {
+            tabs = tabs.child(add);
+        } else {
+            overflow_actions = overflow_actions
+                .child(self.button(
+                    tabs_ui::tab_overflow_btn("tab-overflow"),
+                    &self.control_focus["tab-overflow"],
+                    |this, _, cx| {
                         if this.hidden_tabs.is_some() {
                             this.hidden_tabs = None;
                         } else {
                             let viewport = this.tab_scroll.bounds();
                             let offset = this.tab_scroll.offset();
-                            this.hidden_tabs = Some(
-                                this.scenes
-                                    .iter()
-                                    .enumerate()
-                                    .filter(|(i, _)| {
-                                        this.tab_scroll.bounds_for_item(*i).is_none_or(|b| {
-                                            b.left() + offset.x < viewport.left() - px(1.)
-                                                || b.right() + offset.x > viewport.right() + px(1.)
-                                        })
+                            let hidden = this
+                                .scenes
+                                .iter()
+                                .enumerate()
+                                .filter(|(i, _)| {
+                                    this.tab_scroll.bounds_for_item(*i).is_none_or(|b| {
+                                        b.left() + offset.x < viewport.left() - px(1.)
+                                            || b.right() + offset.x > viewport.right() + px(1.)
                                     })
-                                    .map(|(_, s)| s.id.clone())
-                                    .collect(),
-                            );
+                                })
+                                .map(|(_, s)| (s.id.clone(), cx.focus_handle().tab_stop(true)))
+                                .collect::<Vec<_>>();
+                            this.hidden_tabs = Some(hidden);
                         }
                         this.tab_menu = None;
                         cx.notify();
-                    })),
-            )
-            .child(add("create-canvas-overflow"));
-        let scene = active_id.cloned();
-        let session = self.focused.clone();
+                    },
+                    cx,
+                ))
+                .child(add);
+        }
         div()
             .h(px(48.))
             .flex_none()
@@ -1234,48 +1509,48 @@ impl Workspace {
             .child(tabs)
             .when(self.tab_overflow, |bar| bar.child(overflow_actions))
             .child(
-                div()
-                    .size(px(28.))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(icon("graph-ring", 16., 0x606572)),
+                self.control(
+                    div()
+                        .size(px(28.))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(icon("graph-ring", 16., 0x606572)),
+                    "graph",
+                )
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()),
             )
             .child(
-                div()
-                    .id("create-shell")
-                    .size(px(28.))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .cursor_pointer()
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if let (Some(scene_id), Some(source_session_id)) = (&scene, &session) {
-                            this.send(
-                                Command::CreateShellSibling {
-                                    scene_id: scene_id.clone(),
-                                    source_session_id: source_session_id.clone(),
-                                    parent_session_id: None,
-                                },
-                                cx,
-                            );
-                        }
-                    }))
-                    .child(icon("panel-right-open", 16., 0x606572)),
+                self.button(
+                    div()
+                        .id("create-shell")
+                        .size(px(28.))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer()
+                        .child(icon("panel-right-open", 16., 0x606572)),
+                    &self.control_focus["split"],
+                    |this, _, cx| this.split_horizontal(cx),
+                    cx,
+                ),
             )
             .child(
-                div()
-                    .size(px(30.))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(icon("upload", 16., 0x747b88).with_transformation(
-                        Transformation::rotate(Radians(std::f32::consts::PI)),
-                    )),
+                self.control(
+                    div()
+                        .size(px(30.))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(icon("upload", 16., 0x747b88).with_transformation(
+                            Transformation::rotate(Radians(std::f32::consts::PI)),
+                        )),
+                    "update",
+                )
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()),
             )
     }
 
@@ -1359,35 +1634,24 @@ impl Workspace {
             let n = self.dialog_controls.len();
             let mut footer = tabs_ui::dialog_footer();
             if show_cancel {
-                footer = footer.child(
-                    tabs_ui::dialog_button("dialog-cancel", "取消", false, false)
-                        .track_focus(&self.dialog_controls[n - 2])
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, _, window, _| {
-                                window.focus(&this.dialog_controls[n - 2])
-                            }),
-                        )
-                        .on_click(cx.listener(|this, _, window, cx| this.close_dialog(window, cx))),
-                );
+                footer = footer.child(self.button(
+                    tabs_ui::dialog_button("dialog-cancel", "取消", false, false),
+                    &self.dialog_controls[n - 2],
+                    |this, window, cx| this.close_dialog(window, cx),
+                    cx,
+                ));
             }
-            footer = footer.child(
-                tabs_ui::dialog_button("dialog-confirm", confirm, true, disabled)
-                    .track_focus(&self.dialog_controls[n - 1])
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, window, _| {
-                            if !disabled {
-                                window.focus(&this.dialog_controls[n - 1]);
-                            }
-                        }),
-                    )
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        if !disabled {
-                            this.confirm_dialog(window, cx);
-                        }
-                    })),
-            );
+            let confirm_button = tabs_ui::dialog_button("dialog-confirm", confirm, true, disabled);
+            footer = footer.child(if disabled {
+                confirm_button
+            } else {
+                self.button(
+                    confirm_button,
+                    &self.dialog_controls[n - 1],
+                    |this, window, cx| this.confirm_dialog(window, cx),
+                    cx,
+                )
+            });
             return Some(
                 tabs_ui::dialog_overlay("tab-dialog-overlay")
                     .on_mouse_down(
@@ -1405,19 +1669,12 @@ impl Workspace {
                             .child(
                                 tabs_ui::dialog_header()
                                     .child(tabs_ui::dialog_title(title))
-                                    .child(
-                                        tabs_ui::dialog_close("dialog-close")
-                                            .track_focus(&self.dialog_controls[0])
-                                            .on_mouse_down(
-                                                MouseButton::Left,
-                                                cx.listener(|this, _, window, _| {
-                                                    window.focus(&this.dialog_controls[0])
-                                                }),
-                                            )
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.close_dialog(window, cx)
-                                            })),
-                                    ),
+                                    .child(self.button(
+                                        tabs_ui::dialog_close("dialog-close"),
+                                        &self.dialog_controls[0],
+                                        |this, window, cx| this.close_dialog(window, cx),
+                                        cx,
+                                    )),
                             )
                             .child(body)
                             .child(footer),
@@ -1425,7 +1682,7 @@ impl Workspace {
                     .into_any_element(),
             );
         }
-        if let Some((id, position)) = &self.tab_menu {
+        if let Some((id, position, focus)) = &self.tab_menu {
             let id = id.clone();
             return Some(
                 tabs_ui::context_menu("tab-context-menu")
@@ -1435,11 +1692,12 @@ impl Workspace {
                         this.tab_menu = None;
                         cx.notify();
                     }))
-                    .child(
-                        tabs_ui::menu_item("tab-rename-menu", "重命名页签").on_click(cx.listener(
-                            move |this, _, window, cx| this.open_rename(id.clone(), window, cx),
-                        )),
-                    )
+                    .child(self.button(
+                        tabs_ui::menu_item("tab-rename-menu", "重命名页签"),
+                        focus,
+                        move |this, window, cx| this.open_rename(id.clone(), window, cx),
+                        cx,
+                    ))
                     .into_any_element(),
             );
         }
@@ -1452,7 +1710,7 @@ impl Workspace {
             let font = window.text_style().font();
             let menu_width = ids
                 .iter()
-                .filter_map(|id| self.scenes.iter().find(|s| &s.id == id))
+                .filter_map(|(id, _)| self.scenes.iter().find(|s| &s.id == id))
                 .map(|scene| {
                     let text: SharedString = self.scene_title(scene).into();
                     let run = TextRun {
@@ -1486,7 +1744,7 @@ impl Workspace {
                 .right(size.width - bounds.right())
                 .top(top)
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
-            for id in ids {
+            for (id, focus) in ids {
                 let Some(scene) = self.scenes.iter().find(|s| &s.id == id) else {
                     continue;
                 };
@@ -1497,10 +1755,12 @@ impl Workspace {
                     .is_some_and(|s| &s.id == id);
                 let id = id.clone();
                 panel = panel.child(
-                    tabs_ui::overflow_item(SharedString::from(format!("hidden-{id}")), active)
-                        .child(tabs_ui::overflow_title(self.scene_title(scene), active))
-                        .when(active, |item| item.child(tabs_ui::overflow_check()))
-                        .on_click(cx.listener(move |this, _, _, cx| {
+                    self.button(
+                        tabs_ui::overflow_item(SharedString::from(format!("hidden-{id}")), active)
+                            .child(tabs_ui::overflow_title(self.scene_title(scene), active))
+                            .when(active, |item| item.child(tabs_ui::overflow_check())),
+                        focus,
+                        move |this, _, cx| {
                             this.hidden_tabs = None;
                             if let Some(index) = this.scenes.iter().position(|s| s.id == id) {
                                 this.tab_scroll.scroll_to_item(index);
@@ -1511,7 +1771,9 @@ impl Workspace {
                                 },
                                 cx,
                             );
-                        })),
+                        },
+                        cx,
+                    ),
                 );
             }
             return Some(
@@ -1592,7 +1854,7 @@ impl Workspace {
                     ),
             )
             .child(
-                div()
+                self.control(div(), "account")
                     .ml(px(14.))
                     .text_color(rgb(0x60758b))
                     .child("Claude 账户"),
@@ -1959,7 +2221,10 @@ impl Render for Workspace {
                                 .child(title.to_owned()),
                         )
                         .child(div().flex_1())
-                        .child(icon("folder-input", 16., 0x687d92)),
+                        .child(self.focus_control(
+                            div().child(icon("folder-input", 16., 0x687d92)),
+                            &self.card_controls[id],
+                        )),
                 )
                 .child(
                     div()
@@ -2076,7 +2341,12 @@ impl Render for Workspace {
         div()
             .id("workspace-root")
             .relative()
-            .capture_key_down(cx.listener(Self::tab_key))
+            .capture_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                if this.keyboard_focus {
+                    this.keyboard_focus = false;
+                    cx.notify();
+                }
+            }))
             .size_full()
             .flex()
             .font_family(".AppleSystemUIFont")
@@ -2089,7 +2359,7 @@ impl Render for Workspace {
                     .h_full()
                     .flex()
                     .flex_col()
-                    .child(self.topbar(cx))
+                    .child(self.topbar(window, cx))
                     .child(carousel)
                     .child(self.footer()),
             )
