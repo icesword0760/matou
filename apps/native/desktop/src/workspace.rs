@@ -16,6 +16,7 @@ use crate::{
     },
     rename_input::{RenameInput, RenameInputEvent, trim_name},
     runtime_bridge::{Command, Event},
+    sidebar_scrollbar::{self, SidebarScrollbarState},
     tab_dialog_style as tabs_ui,
     terminal_surface::{SurfaceEvent, TerminalSurface},
 };
@@ -101,7 +102,9 @@ pub struct Workspace {
     task_hover: Option<String>,
     reveal_task: Option<String>,
     task_menu: Option<(String, Point<Pixels>, Vec<FocusHandle>)>,
-    sidebar_scroll: ScrollHandle,
+    pub(crate) sidebar_scroll: ScrollHandle,
+    sidebar_overflow: bool,
+    pub(crate) sidebar_scrollbar: SidebarScrollbarState,
     workspace_collapsed: bool,
     task_toast: Option<String>,
     tab_scroll: ScrollHandle,
@@ -190,6 +193,8 @@ impl Workspace {
             reveal_task: None,
             task_menu: None,
             sidebar_scroll: ScrollHandle::new(),
+            sidebar_overflow: false,
+            sidebar_scrollbar: SidebarScrollbarState::default(),
             workspace_collapsed: false,
             task_toast: None,
             tab_scroll: ScrollHandle::new(),
@@ -1008,146 +1013,181 @@ impl Workspace {
             )
             .child(
                 div()
-                    .id("sidebar-groups")
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.sidebar_scroll)
-                    .px(px(6.))
-                    .pt(px(8.))
-                    .pb(px(20.))
+                    .flex()
+                    .flex_row()
                     .child(
                         div()
-                            .relative()
-                            .mt(px(1.))
-                            .mb(px(8.))
+                            .id("sidebar-groups")
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.sidebar_scroll)
+                            .px(px(6.))
+                            .pt(px(8.))
+                            .pb(px(20.))
                             .child(
-                                div()
-                                    .absolute()
-                                    .top(px(5.))
-                                    .bottom(px(5.))
-                                    .left_0()
-                                    .w(px(2.))
-                                    .rounded(px(1.))
-                                    .bg(rgb(0x67a6f4)),
-                            )
-                            .child(
-                                div()
-                                    .h(px(34.))
-                                    .flex()
-                                    .items_center()
-                                    .rounded(px(8.))
-                                    .child(
-                                        self.button(
+                                // GPUI measures child border boxes for scroll extent. Keep the
+                                // group's CSS margins inside a flex wrapper so they count too.
+                                div().flex().flex_col().child(
+                                    div()
+                                        .relative()
+                                        .mt(px(1.))
+                                        .mb(px(8.))
+                                        .child(
                                             div()
-                                                .id("workspace-toggle")
+                                                .absolute()
+                                                .top(px(5.))
+                                                .bottom(px(5.))
+                                                .left_0()
+                                                .w(px(2.))
+                                                .rounded(px(1.))
+                                                .bg(rgb(0x67a6f4)),
+                                        )
+                                        .child(
+                                            div()
                                                 .h(px(34.))
-                                                .flex_1()
-                                                .min_w_0()
                                                 .flex()
                                                 .items_center()
-                                                .pl(px(7.))
-                                                .pr(px(5.))
-                                                .gap(px(7.))
-                                                .cursor_pointer()
-                                                .child(icon(
-                                                    if self.workspace_collapsed {
-                                                        "chevron-right"
-                                                    } else {
-                                                        "chevron-down"
-                                                    },
-                                                    14.,
-                                                    0x777777,
-                                                ))
-                                                .child(icon("folder", 16., 0x4078f2))
+                                                .rounded(px(8.))
                                                 .child(
-                                                    div()
-                                                        .min_w_0()
-                                                        .overflow_hidden()
-                                                        .whitespace_nowrap()
-                                                        .text_ellipsis()
-                                                        .text_size(px(13.))
-                                                        .font_weight(FontWeight::SEMIBOLD)
-                                                        .child(workspace.to_owned()),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .flex_none()
-                                                        .px(px(5.))
-                                                        .py(px(1.))
-                                                        .rounded(px(5.))
-                                                        .bg(rgb(0xeceef3))
-                                                        .text_color(rgb(0x91949e))
-                                                        .text_size(px(9.))
-                                                        .font_weight(FontWeight::SEMIBOLD)
-                                                        .child("默认"),
-                                                )
-                                                .child(icon("pin", 13., 0x81848d)),
-                                            &self.control_focus["workspace"],
-                                            |this, _, cx| {
-                                                this.workspace_collapsed =
-                                                    !this.workspace_collapsed;
-                                                cx.notify();
-                                            },
-                                            cx,
-                                        ),
-                                    )
-                                    .child(
-                                        self.button(
-                                            div()
-                                                .id("add-task")
-                                                .size(px(26.))
-                                                .flex()
-                                                .items_center()
-                                                .justify_center()
-                                                .rounded(px(6.))
-                                                .cursor_pointer()
-                                                .hover(|s| s.bg(rgba(0x0000000f)))
-                                                .child(icon("plus", 14., 0x81848d)),
-                                            &self.control_focus["add-task"],
-                                            |this, window, cx| {
-                                                if let Some(workspace) = this
-                                                    .hierarchy
-                                                    .as_ref()
-                                                    .and_then(|h| h.workspace.as_ref())
-                                                {
-                                                    this.send(
-                                                        Command::CreateTask {
-                                                            workspace_id: workspace.id.clone(),
+                                                    self.button(
+                                                        div()
+                                                            .id("workspace-toggle")
+                                                            .h(px(34.))
+                                                            .flex_1()
+                                                            .min_w_0()
+                                                            .flex()
+                                                            .items_center()
+                                                            .pl(px(7.))
+                                                            .pr(px(5.))
+                                                            .gap(px(7.))
+                                                            .cursor_pointer()
+                                                            .child(icon(
+                                                                if self.workspace_collapsed {
+                                                                    "chevron-right"
+                                                                } else {
+                                                                    "chevron-down"
+                                                                },
+                                                                14.,
+                                                                0x777777,
+                                                            ))
+                                                            .child(icon("folder", 16., 0x4078f2))
+                                                            .child(
+                                                                div()
+                                                                    .min_w_0()
+                                                                    .overflow_hidden()
+                                                                    .whitespace_nowrap()
+                                                                    .text_ellipsis()
+                                                                    .text_size(px(13.))
+                                                                    .font_weight(
+                                                                        FontWeight::SEMIBOLD,
+                                                                    )
+                                                                    .child(workspace.to_owned()),
+                                                            )
+                                                            .child(
+                                                                div()
+                                                                    .flex_none()
+                                                                    .px(px(5.))
+                                                                    .py(px(1.))
+                                                                    .rounded(px(5.))
+                                                                    .bg(rgb(0xeceef3))
+                                                                    .text_color(rgb(0x91949e))
+                                                                    .text_size(px(9.))
+                                                                    .font_weight(
+                                                                        FontWeight::SEMIBOLD,
+                                                                    )
+                                                                    .child("默认"),
+                                                            )
+                                                            .child(icon("pin", 13., 0x81848d)),
+                                                        &self.control_focus["workspace"],
+                                                        |this, _, cx| {
+                                                            this.workspace_collapsed =
+                                                                !this.workspace_collapsed;
+                                                            if this.workspace_collapsed {
+                                                                this.reveal_task = None;
+                                                            }
+                                                            cx.notify();
                                                         },
                                                         cx,
-                                                    );
-                                                    window.blur();
-                                                }
-                                            },
-                                            cx,
+                                                    ),
+                                                )
+                                                .child(
+                                                    self.button(
+                                                        div()
+                                                            .id("add-task")
+                                                            .size(px(26.))
+                                                            .flex()
+                                                            .items_center()
+                                                            .justify_center()
+                                                            .rounded(px(6.))
+                                                            .cursor_pointer()
+                                                            .hover(|s| s.bg(rgba(0x0000000f)))
+                                                            .child(icon("plus", 14., 0x81848d)),
+                                                        &self.control_focus["add-task"],
+                                                        |this, window, cx| {
+                                                            if let Some(workspace) = this
+                                                                .hierarchy
+                                                                .as_ref()
+                                                                .and_then(|h| h.workspace.as_ref())
+                                                            {
+                                                                this.send(
+                                                                    Command::CreateTask {
+                                                                        workspace_id: workspace
+                                                                            .id
+                                                                            .clone(),
+                                                                    },
+                                                                    cx,
+                                                                );
+                                                                window.blur();
+                                                            }
+                                                        },
+                                                        cx,
+                                                    ),
+                                                )
+                                                .child(
+                                                    self.control(div(), "workspace-menu")
+                                                        .w(px(26.))
+                                                        .flex()
+                                                        .justify_center()
+                                                        .child(icon("ellipsis", 14., 0x81848d)),
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .ml(px(17.))
+                                                .pt(px(2.))
+                                                .flex()
+                                                .flex_col()
+                                                .gap(px(1.))
+                                                .children(if self.workspace_collapsed {
+                                                    Vec::new()
+                                                } else {
+                                                    self.tasks
+                                                        .iter()
+                                                        .map(|task| {
+                                                            self.task_row(task, cx)
+                                                                .into_any_element()
+                                                        })
+                                                        .collect()
+                                                }),
                                         ),
-                                    )
-                                    .child(
-                                        self.control(div(), "workspace-menu")
-                                            .w(px(26.))
-                                            .flex()
-                                            .justify_center()
-                                            .child(icon("ellipsis", 14., 0x81848d)),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .ml(px(17.))
-                                    .pt(px(2.))
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(1.))
-                                    .children(if self.workspace_collapsed {
-                                        Vec::new()
-                                    } else {
-                                        self.tasks
-                                            .iter()
-                                            .map(|task| self.task_row(task, cx).into_any_element())
-                                            .collect()
-                                    }),
+                                ),
                             ),
-                    ),
+                    )
+                    .when(self.sidebar_overflow, |row| {
+                        row.child(sidebar_scrollbar::scrollbar(
+                            self.sidebar_scroll.clone(),
+                            self.sidebar_scrollbar,
+                            self.dialog.is_none()
+                                && self.hidden_tabs.is_none()
+                                && self.task_menu.is_none()
+                                && self.tab_menu.is_none(),
+                            cx.entity().downgrade(),
+                        ))
+                    }),
             )
             .child(
                 div()
@@ -1179,7 +1219,9 @@ impl Workspace {
         let right_id = id.clone();
         let hover_id = id.clone();
         let bounds_id = id.clone();
+        let reveal_id = id.clone();
         let view = cx.entity().downgrade();
+        let reveal_view = view.clone();
         let menu_visible = active
             || self.task_hover.as_ref() == Some(&id)
             || self.task_menu.as_ref().is_some_and(|m| m.0 == id);
@@ -1256,13 +1298,45 @@ impl Workspace {
             .child(icon("task", 12., color))
             .child(
                 div()
+                    .relative()
                     .flex_1()
                     .min_w_0()
+                    .line_height(px(19.5))
                     .overflow_hidden()
                     .text_ellipsis()
                     .whitespace_nowrap()
                     .font_weight(FontWeight::MEDIUM)
-                    .child(task.title.clone()),
+                    .child(task.title.clone())
+                    .child(
+                        canvas(
+                            |_, _, _| (),
+                            move |bounds, _, _, cx| {
+                                let _ = reveal_view.update(cx, |this, cx| {
+                                    if this.reveal_task.as_ref() == Some(&reveal_id) {
+                                        this.reveal_task = None;
+                                        let viewport = this.sidebar_scroll.bounds();
+                                        let delta = if bounds.top() < viewport.top() {
+                                            viewport.top() - bounds.top()
+                                        } else if bounds.bottom() > viewport.bottom() {
+                                            viewport.bottom() - bounds.bottom()
+                                        } else {
+                                            px(0.)
+                                        };
+                                        if delta != px(0.) {
+                                            let offset = this.sidebar_scroll.offset();
+                                            let max_y = this.sidebar_scroll.max_offset().height;
+                                            let next_y = (offset.y + delta).clamp(-max_y, px(0.));
+                                            this.sidebar_scroll.set_offset(point(offset.x, next_y));
+                                            cx.notify();
+                                        }
+                                    }
+                                });
+                            },
+                        )
+                        .absolute()
+                        .inset_0()
+                        .size_full(),
+                    ),
             )
             .when(task.is_pinned, |row| row.child(icon("pin", 13., 0x81848d)))
             .child(
@@ -1288,25 +1362,8 @@ impl Workspace {
                 canvas(
                     |_, _, _| (),
                     move |bounds, _, _, cx| {
-                        let _ = view.update(cx, |this, cx| {
+                        let _ = view.update(cx, |this, _| {
                             this.task_bounds.insert(bounds_id.clone(), bounds);
-                            if this.reveal_task.as_ref() == Some(&bounds_id) {
-                                this.reveal_task = None;
-                                let viewport = this.sidebar_scroll.bounds();
-                                let delta = if bounds.top() < viewport.top() {
-                                    viewport.top() - bounds.top()
-                                } else if bounds.bottom() > viewport.bottom() {
-                                    viewport.bottom() - bounds.bottom()
-                                } else {
-                                    px(0.)
-                                };
-                                if delta != px(0.) {
-                                    let offset = this.sidebar_scroll.offset();
-                                    this.sidebar_scroll
-                                        .set_offset(point(offset.x, offset.y + delta));
-                                    cx.notify();
-                                }
-                            }
                         });
                     },
                 )
@@ -2942,6 +2999,15 @@ impl Render for Workspace {
                                 this.tab_overflow = overflow;
                                 if !overflow {
                                     this.hidden_tabs = None;
+                                }
+                                cx.notify();
+                            }
+                            let sidebar_overflow =
+                                this.sidebar_scroll.max_offset().height > px(0.5);
+                            if sidebar_overflow != this.sidebar_overflow {
+                                this.sidebar_overflow = sidebar_overflow;
+                                if !sidebar_overflow {
+                                    this.sidebar_scrollbar.reset();
                                 }
                                 cx.notify();
                             }
