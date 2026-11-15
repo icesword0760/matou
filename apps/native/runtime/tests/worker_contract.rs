@@ -18,7 +18,7 @@ use matou_native_runtime::{
     SessionEvent, SessionOptions,
     worker::{SessionWorker, WorkerCommand, WorkerEvent},
 };
-use matou_native_terminal::TerminalOptions;
+use matou_native_terminal::{SelectionAction, SelectionMode, TerminalOptions};
 
 fn options(root: &Path, id: &str) -> Result<SessionOptions> {
     let home = root.join("home");
@@ -148,6 +148,34 @@ fn real_workers_keep_shell_output_independent_and_return_owned_screens() -> Resu
 
     let b_screen = b.screen()?;
     assert!(screen_has(&b_screen, "WORKER_B_ONLY"));
+    let output_row = b_screen
+        .cells
+        .chunks(b_screen.cols)
+        .position(|row| {
+            row.iter()
+                .map(|cell| cell.text.as_str())
+                .collect::<String>()
+                .starts_with("WORKER_B_ONLY")
+        })
+        .context("find the saved output row in the worker viewport")?;
+    let (reply, selected) = mpsc::channel();
+    b.send(WorkerCommand::Select {
+        action: SelectionAction::Begin {
+            mode: SelectionMode::Word,
+            row: usize::try_from(b_screen.scrollbar.offset)? + output_row,
+            x: 1.,
+        },
+        reply,
+    })?;
+    let (reply, copied) = mpsc::channel();
+    b.send(WorkerCommand::CopySelection { reply })?;
+    // Copy is queued before waiting for selection to finish.
+    assert_eq!(
+        copied.recv_timeout(Duration::from_secs(2))??,
+        "WORKER_B_ONLY"
+    );
+    selected.recv_timeout(Duration::from_secs(2))??;
+
     a.set_egress_frozen(false)?;
     a.write(b"printf 'WORKER_%s\\n' 'A_BACK'\r")?;
     seen.wait(&incoming, |seen| {

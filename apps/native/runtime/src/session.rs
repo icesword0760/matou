@@ -16,7 +16,7 @@ use matou_native_core::{
     pty::{ProcessExit, PtyProcess},
     shell_history::Collector,
 };
-use matou_native_terminal::{InputModes, Screen, Terminal, Theme};
+use matou_native_terminal::{GridSelection, InputModes, Screen, SelectionAction, Terminal, Theme};
 
 use crate::{
     SessionEvent, SessionOptions, StorageFaultCode,
@@ -337,6 +337,8 @@ impl Session {
             .process
             .as_mut()
             .context("Shell process not available")?;
+        self.display_terminal
+            .selection_action(SelectionAction::Clear)?;
         if bytes.iter().any(|byte| matches!(byte, b'\r' | b'\n')) {
             self.events.push(SessionEvent::InputSubmitted);
         }
@@ -523,6 +525,18 @@ impl Session {
 
     pub fn view(&mut self) -> Result<(Screen, InputModes)> {
         Ok((self.screen()?, self.display_terminal.input_modes()?))
+    }
+
+    pub fn selection_action(&mut self, action: SelectionAction) -> Result<()> {
+        self.display_terminal.selection_action(action)
+    }
+
+    pub fn selection_range(&mut self) -> Result<Option<GridSelection>> {
+        self.display_terminal.selection_range()
+    }
+
+    pub fn selected_text(&mut self) -> Result<String> {
+        self.display_terminal.selected_text()
     }
 
     pub fn scroll(&mut self, lines: i32) -> Result<()> {

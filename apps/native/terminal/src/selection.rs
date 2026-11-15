@@ -75,6 +75,22 @@ pub enum SelectionMode {
     Line,
 }
 
+/// Pointer operations use absolute rows of the active terminal buffer.
+#[derive(Clone, Copy)]
+pub enum SelectionAction {
+    Begin {
+        mode: SelectionMode,
+        row: usize,
+        x: f32,
+    },
+    Extend {
+        row: usize,
+        x: f32,
+    },
+    SetEnd(GridPoint),
+    Clear,
+}
+
 #[derive(Clone, Copy)]
 pub struct SelectionDrag {
     pub mode: SelectionMode,

@@ -6,7 +6,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
-use matou_native_terminal::{InputModes, Screen, Theme};
+use matou_native_terminal::{GridSelection, InputModes, Screen, SelectionAction, Theme};
 
 use crate::{
     SessionEvent, SessionOptions,
@@ -51,6 +51,16 @@ pub enum WorkerCommand {
     },
     View {
         reply: Sender<Result<(Screen, InputModes)>>,
+    },
+    Select {
+        action: SelectionAction,
+        reply: Sender<Result<()>>,
+    },
+    Selection {
+        reply: Sender<Result<Option<GridSelection>>>,
+    },
+    CopySelection {
+        reply: Sender<Result<String>>,
     },
     Scroll {
         lines: i32,
@@ -261,6 +271,15 @@ fn run(
                 }
                 WorkerCommand::View { reply } => {
                     let _ = reply.send(session.view());
+                }
+                WorkerCommand::Select { action, reply } => {
+                    let _ = reply.send(session.selection_action(action));
+                }
+                WorkerCommand::Selection { reply } => {
+                    let _ = reply.send(session.selection_range());
+                }
+                WorkerCommand::CopySelection { reply } => {
+                    let _ = reply.send(session.selected_text());
                 }
                 WorkerCommand::Scroll { lines, reply } => {
                     let _ = reply.send(session.scroll(lines));
