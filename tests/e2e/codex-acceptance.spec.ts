@@ -283,6 +283,7 @@ function readDbRows(dataDir: string, sessionId?: string): {
     provider: string
     provider_session_id: string
     resume_state: string
+    validated_at: number | null
     metadata_json: string
     updated_at: number
   }>
@@ -302,12 +303,13 @@ function readDbRows(dataDir: string, sessionId?: string): {
   const db = new DatabaseSync(join(dataDir, 'matou.sqlite'), { readOnly: true })
   try {
     const bindings = (sessionId
-      ? db.prepare('SELECT session_id, provider, provider_session_id, resume_state, metadata_json, updated_at FROM provider_bindings WHERE session_id = ? ORDER BY updated_at DESC, rowid DESC').all(sessionId)
-      : db.prepare('SELECT session_id, provider, provider_session_id, resume_state, metadata_json, updated_at FROM provider_bindings ORDER BY updated_at DESC, rowid DESC').all()) as Array<{
+      ? db.prepare('SELECT session_id, provider, provider_session_id, resume_state, validated_at, metadata_json, updated_at FROM provider_bindings WHERE session_id = ? ORDER BY updated_at DESC, rowid DESC').all(sessionId)
+      : db.prepare('SELECT session_id, provider, provider_session_id, resume_state, validated_at, metadata_json, updated_at FROM provider_bindings ORDER BY updated_at DESC, rowid DESC').all()) as Array<{
         session_id: string
         provider: string
         provider_session_id: string
         resume_state: string
+        validated_at: number | null
         metadata_json: string
         updated_at: number
       }>
@@ -405,7 +407,10 @@ async function waitForProviderSessionId(dataDir: string, sessionId: string, time
   let providerSessionId = ''
   await expect.poll(() => {
     const { bindings } = readDbRows(dataDir, sessionId)
-    const binding = bindings.find((b) => b.provider === 'codex' && b.resume_state !== 'expired')
+    // Fork launch settings inherit the source ID with state unknown. Only a
+    // confirmed resumable binding identifies the process that actually started.
+    const binding = bindings.find((b) => b.provider === 'codex' &&
+      (b.resume_state === 'available' || b.resume_state === 'resumed') && b.validated_at !== null)
     providerSessionId = binding?.provider_session_id ?? ''
     return providerSessionId
   }, { timeout }).toBeTruthy()
@@ -858,6 +863,11 @@ test.describe('Codex packaged acceptance — real CLI and explicit controlled fi
         }, { timeout: 30_000 }).toBeTruthy()
         const child = paneForSession(h.page, childId)
         await expect(child.locator('.fork-progress-overlay')).toHaveCount(0, { timeout: 60_000 })
+        const db = new DatabaseSync(join(h.dataDir, 'matou.sqlite'), { readOnly: true })
+        try {
+          const intent = db.prepare('SELECT state,error_message FROM session_fork_intents WHERE session_id=?').get(childId)
+          expect(intent, 'Native Fork must succeed before reading the child identity').toMatchObject({ state: 'succeeded' })
+        } finally { db.close() }
         const uuid = await waitForProviderSessionId(h.dataDir, childId)
         expect(uuid).not.toBe(parentUuid)
         const metadata = (await rolloutEvents(h, uuid)).find((e) => e.type === 'session_meta')?.payload

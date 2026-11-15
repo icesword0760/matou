@@ -1,0 +1,13 @@
+{
+  "createdAt": "2026-11-15T18:17:01.141206+00:00",
+  "buildCommand": "CSC_IDENTITY_AUTO_DISCOVERY=false pnpm package:dir",
+  "buildExitCode": 0,
+  "sourceBaseCommit": "816ed3d3139e8e096e371149c70cad9115fe2403",
+  "productDiffSHA256": "bfa2cb0c63be8118d7a3bd067c3e26aca305876aa28a0259f01422baa117a2b0",
+  "appPath": "apps/desktop/release/mac-arm64/码头.app",
+  "codeSigning": "unsigned local acceptance build; automatic signing discovery disabled",
+  "regularFiles": 604,
+  "bundleManifestSHA256": "278eace7af708014831f422a50a67540ce838db21343205b1d6edfec61c9a26a",
+  "runtimeSHA256": "059178468241196488db94e94e47ffce3540e6e749001dd9d221e5a2c86d23ce",
+  "scope": "Followup rebuild after the DSH-only parked-resume queue change. Not installed, published or pushed."
+}

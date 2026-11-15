@@ -8987,7 +8987,7 @@ if (process.argv.includes('--dump-config')) {
     )!
     const job = { sessionId: id, executionContextId: 'replay-context', profile: 'dsh' as const,
       sceneId: `scene-${id}`, priority: 'active-session' as const, enqueueSequence: 1 }
-    const launch = () => active!.ensureSessionRunning(job).then(() => 'recovered', error => String(error))
+    const launch = () => active!.ensureSessionRunning(job).then(() => 'queue-ready', error => String(error))
     const observer = async () => {
       // Bound fixture process startup separately from the resume-identity deadline.
       // Full-suite PTY load can exceed the generic two-second helper limit.
@@ -9013,7 +9013,14 @@ if (process.argv.includes('--dump-config')) {
     }
     try {
       let settled = false
-      const recovering = launch().then(result => { settled = true; return result })
+      const coordinator = new RuntimeRecoveryCoordinator({
+        concurrency: 1, jobs: [job], start: recoveryJob => active!.ensureSessionRunning(recoveryJob)
+      })
+      coordinator.start()
+      const recovering = coordinator.whenIdle().then(() => {
+        settled = true
+        return coordinator.snapshot()[0]?.state
+      })
       const first = await observer()
       expect(first.args.slice(-2)).toEqual(['--resume', 'native-original'])
       await new Promise(resolve => setTimeout(resolve, 60))
@@ -9024,13 +9031,16 @@ if (process.argv.includes('--dump-config')) {
         await first.ready('native-original', false)
         expect(settled).toBe(false)
         await first.ready('native-original')
-        expect(await recovering).toBe('recovered')
+        expect(await recovering).toBe('ready')
         expect(binding().restore_state).toBe('none')
         expect(registry.providerIdentityConfirmed(first.runId)).toBe(true)
       } else {
         if (outcome === 'mismatch') await first.ready('native-other')
-        expect(await recovering).not.toBe('recovered')
+        // The terminal queue releases its overlay while the provider-specific
+        // failure remains authoritative and exposes retry / fresh-start.
+        expect(await recovering).toBe('ready')
         expect(binding()).toMatchObject({ restore_state: 'failed', provider_session_id: 'native-original' })
+        expect(registry.providerIdentityConfirmed(first.runId)).toBe(false)
         expect(binding().restore_error).toBeTruthy()
         expect(registry.has(id)).toBe(false)
         if (outcome !== 'mismatch') {
@@ -9056,7 +9066,7 @@ if (process.argv.includes('--dump-config')) {
             expect(second.args).not.toContain('--resume')
             await second.ready('native-new', false)
           }
-          expect(await next).toBe('recovered')
+          expect(await next).toBe('queue-ready')
           expect(repository.getProviderSettingsBinding(id, 'dsh')?.providerSessionId).toBe(outcome !== 'timeout-fresh' ? 'native-original' : 'native-new')
         }
       }

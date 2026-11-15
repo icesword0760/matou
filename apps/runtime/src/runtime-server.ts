@@ -591,7 +591,14 @@ export class RuntimeServer {
       if (!this.#sessions.has(job.sessionId) && !this.#hasParkedProviderRestoreFailure(job.sessionId)) {
         throw new Error(`Session ${job.sessionId} did not reach a running state`)
       }
-      await providerRecovery?.promise
+      try {
+        await providerRecovery?.promise
+      } catch (error) {
+        // A parked DSH resume failure has its own retry / fresh-start banner.
+        // Finish mounting the card so the generic recovery overlay cannot lock
+        // those actions. The binding stays failed; no identity is confirmed.
+        if (job.profile !== 'dsh' || !this.#hasParkedProviderRestoreFailure(job.sessionId)) throw error
+      }
     } finally {
       providerRecovery?.cancel()
     }

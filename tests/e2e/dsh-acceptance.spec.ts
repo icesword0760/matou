@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process'
 import { createHash, randomBytes } from 'node:crypto'
+import { createServer } from 'node:http'
 import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, rm, symlink, unlink, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -81,9 +82,9 @@ async function dirs(prefix: string, fixture?: 'model-error' | 'resume-gate'): Pr
   const binary = (await exec('/usr/bin/which', ['dsh'])).stdout.trim()
   // Real dsh launcher in every ordinary run. Controlled variants modify only
   // this run's generated overlay or fail resume; user profiles stay untouched.
-  await writeFile(wrapper, `#!/usr/bin/env python3\nimport os,sys,pathlib,re\na=sys.argv[1:]\nroot=pathlib.Path(${JSON.stringify(root)})\n` +
+  await writeFile(wrapper, `#!/usr/bin/env python3\nimport os,sys,pathlib,re,json\na=sys.argv[1:]\nroot=pathlib.Path(${JSON.stringify(root)})\n` +
     (fixture === 'resume-gate' ? `if '--resume' in a and (root/'block-resume').exists():\n print('Controlled DSH resume failure',flush=True);sys.exit(1)\n` : '') +
-    (fixture === 'model-error' ? `if '--patch' in a:\n p=pathlib.Path(a[a.index('--patch')+1]);s=p.read_text()\n if re.search(r'^    model:',s,re.M):s=re.sub(r'^    model:.*$', '    model: matou-intentionally-unavailable-model',s,flags=re.M)\n else:s+='    model: matou-intentionally-unavailable-model\\n'\n p.write_text(s)\n` : '') +
+    (fixture === 'model-error' ? `if '--patch' in a:\n p=pathlib.Path(a[a.index('--patch')+1]);s=p.read_text()\n for k,v in [('model','deepseek-flash'),('provider','deepseek-official')]:\n  if re.search(r'^    '+k+':',s,re.M):s=re.sub(r'^    '+k+':.*$', '    '+k+': '+v,s,flags=re.M)\n  else:s+='    '+k+': '+v+'\\n'\n endpoint=(root/'model-error-endpoint').read_text().strip()\n s+='\\n- id: llm-deepseek\\n  config:\\n    baseURL: '+json.dumps(endpoint)+'\\n    apiKeyEnv: MATOU_DSH_TEST_API_KEY\\n    retryPolicy:\\n      mode: normal\\n      maxRetries: 0\\n'\n p.write_text(s)\n os.environ['MATOU_DSH_TEST_API_KEY']='matou-e2e-loopback-only'\n` : '') +
     `os.execv(${JSON.stringify(binary)},[${JSON.stringify(binary)},*a])\n`)
   await chmod(wrapper, 0o700)
   await mkdir('.c5', { recursive: true })
@@ -375,7 +376,7 @@ test.describe('DSH packaged acceptance — real native TUI in a PTY and disclose
       const { sid, d } = await start(h), peer = await sibling(h, sid), latency: Sample[] = []
       for (let round = 1; round <= 3; round++) {
         await pane(h.page, sid).click(); const seq = events(h, sid).at(-1)?.seq ?? 0, seen = (await observations(d)).length
-        await line(surface(h.page, sid), 'Use the bash tool exactly once to run printf MATOU_APPROVAL_OK, with sandbox_permissions set to danger-full-access and justification Matou approval notification probe. This is an approval UI test. Do not use another tool or command. Wait for approval.')
+        await line(surface(h.page, sid), `This is approval UI test ${round}, a new independent request. Use the bash tool exactly once to run printf MATOU_APPROVAL_OK_${round}, with sandbox_permissions set to danger-full-access and justification Matou approval notification probe ${round}. Do not use another tool or command. Wait for approval; after the result reply only APPROVAL_DONE_${round}.`)
         await pane(h.page, peer).click()
         await expect.poll(() => status(h, sid), { timeout: 90_000 }).toBe('needs-input')
         await expect(d.locator(`.dag-node-card[data-session-id="${sid}"]`)).toHaveClass(/status-needs-input/)
@@ -384,29 +385,49 @@ test.describe('DSH packaged acceptance — real native TUI in a PTY and disclose
         await expect(h.page.getByRole('region', { name: '通知中心', exact: true })).toContainText('DSH')
         await screenshot(h, `03-approval-${round}.png`)
         await h.page.getByRole('button', { name: '通知中心', exact: true }).click()
-        await pane(h.page, sid).click(); await key(surface(h.page, sid), 'Escape')
+        // Exercise allow-once first. Repeatedly denying the same command can
+        // correctly make the native model stop asking for that denied action.
+        await pane(h.page, sid).click(); await key(surface(h.page, sid), round < 3 ? 'Enter' : 'Escape')
         await expect.poll(async () => (await rows(h, await providerId(h, sid))).filter(r => r.type === 'approval/decided')).toHaveLength(round)
-        // Rejection resolves the approval; interrupt any follow-up model prose
-        // through the native TUI so the next sample starts from idle.
-        await key(surface(h.page, sid), 'Control+c')
+        if (round === 3) await key(surface(h.page, sid), 'Control+c')
+        await expect.poll(async () => (await rows(h, await providerId(h, sid))).filter(r => r.type === 'turn/end'), { timeout: 60_000 }).toHaveLength(round)
         await expect.poll(() => status(h, sid), { timeout: 30_000 }).toBe('idle')
       }
       await turn(h, sid, 'Reply only APPROVAL_RECOVERED. Do not use tools.', /APPROVAL_RECOVERED/)
       const permissionNotices = notices(h, sid).filter(n => n.eventType === 'permission')
       expect(permissionNotices).toHaveLength(3)
       expect(permissionNotices.every(n => n.title === 'DSH')).toBe(true)
-      await proof('approval.json', { sid, latency, permissionNotices, defaultModeChanged: false, nativeNotificationOsc: await assertNoNativeNotifications(h, sid) })
+      const decisions = (await rows(h, await providerId(h, sid))).filter(r => r.type === 'approval/decided').map(r => r.data.outcome)
+      expect(decisions).toEqual(['allowed-once', 'allowed-once', 'rejected'])
+      await proof('approval.json', { sid, latency, permissionNotices, decisions, defaultModeChanged: false, nativeNotificationOsc: await assertNoNativeNotifications(h, sid) })
     } finally { await dispose(h) }
   })
 
   test('PRD 2, 3: real native model error marks UI error and notifies once per turn', async () => {
-    const setup = await dirs('model-error', 'model-error'), h = await launch(setup)
+    const requests: Array<{ method: string; path: string }> = []
+    const server = createServer((request, response) => {
+      // Keep request bodies and headers out of evidence. The child uses only a
+      // fixture key; no real credential or request reaches an external endpoint.
+      requests.push({ method: request.method ?? '', path: request.url ?? '' })
+      request.resume()
+      response.writeHead(400, { 'content-type': 'application/json' })
+      response.end(JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message: 'MATOU_NATIVE_REQUEST_ERROR' } }))
+    })
+    await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve) })
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('Missing loopback fixture port')
+    const setup = await dirs('model-error', 'model-error')
+    await writeFile(join(setup.root, 'model-error-endpoint'), `http://127.0.0.1:${address.port}/anthropic`)
+    let launched: Harness | undefined
     try {
+      const h = await launch(setup)
+      launched = h
       const { sid, d } = await start(h), peer = await sibling(h, sid), latency: Sample[] = []
       for (let round = 1; round <= 3; round++) {
         await pane(h.page, sid).click(); const seq = events(h, sid).at(-1)?.seq ?? 0, seen = (await observations(d)).length
         await line(surface(h.page, sid), 'Reply only ERROR_PROBE.')
         await pane(h.page, peer).click()
+        await expect.poll(async () => (await rows(h, await providerId(h, sid))).filter(r => r.type === 'turn/end'), { timeout: 60_000 }).toHaveLength(round)
         await expect.poll(() => status(h, sid), { timeout: 60_000 }).toBe('error')
         await expect(d.locator(`.dag-node-card[data-session-id="${sid}"]`)).toHaveClass(/status-error/)
         latency.push(...await sample(h, d, sid, seq, seen, round, ['error']))
@@ -417,9 +438,13 @@ test.describe('DSH packaged acceptance — real native TUI in a PTY and disclose
       await h.page.getByRole('button', { name: '通知中心', exact: true }).click()
       const center = h.page.getByRole('region', { name: '通知中心', exact: true })
       await expect(center).toContainText('DSH'); await screenshot(h, '03-native-error.png')
-      await proof('error.json', { fixture: 'Real DSH with per-run overlay selecting an intentionally unavailable model; no profile write', sid, latency,
-        errors: notices(h, sid).filter(n => n.eventType === 'error'), nativeReasons: ends.map(e => e.data.reason.kind) })
-    } finally { await dispose(h) }
+      expect(requests.filter(r => r.method === 'POST').length).toBeGreaterThanOrEqual(3)
+      await proof('error.json', { fixture: 'Real DSH known model with per-run loopback HTTP 400 endpoint and fixture-only API key; no profile write or fabricated events', sid, latency,
+        requests, errors: notices(h, sid).filter(n => n.eventType === 'error'), nativeReasons: ends.map(e => e.data.reason.kind) })
+    } finally {
+      if (launched) await dispose(launched)
+      await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()))
+    }
   })
 
   test('PRD 8: controlled resume failure retries the same ID and new-start creates a fresh ID', async () => {

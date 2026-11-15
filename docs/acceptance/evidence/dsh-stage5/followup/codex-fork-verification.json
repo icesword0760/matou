@@ -1,0 +1,29 @@
+{
+  "scope": "Read-only cross-check of actual final Codex native session_meta, forked_from_id, successful intents and validated provider bindings after the full Fork/loader scenario. No identities or native instructions copied.",
+  "children": [
+    {
+      "mode": "current",
+      "intentSucceeded": true,
+      "bindingValidated": true,
+      "bindingDistinctFromParent": true,
+      "nativeIdMatchesBinding": true,
+      "nativeForkedFromMatchesParent": true,
+      "cwdMatchesNativeMetadata": true,
+      "cwdRelationMatchesMode": true,
+      "inheritedMemoryRecalled": true
+    },
+    {
+      "mode": "new",
+      "intentSucceeded": true,
+      "bindingValidated": true,
+      "bindingDistinctFromParent": true,
+      "nativeIdMatchesBinding": true,
+      "nativeForkedFromMatchesParent": true,
+      "cwdMatchesNativeMetadata": true,
+      "cwdRelationMatchesMode": true,
+      "inheritedMemoryRecalled": true
+    }
+  ],
+  "parentLoadedAgainAndRemembered": true,
+  "rawProof": ".cache/dsh-next/final/codex/evidence/results/fork-loader.json"
+}
