@@ -5,6 +5,7 @@ use std::{
     ffi::OsString,
     fs,
     path::Path,
+    sync::mpsc,
     thread,
     time::{Duration, Instant},
 };
@@ -20,10 +21,15 @@ use matou_native_runtime::{
     SessionEvent, SessionOptions, StorageFaultCode,
     flow::{CREDIT_HIGH_WATERMARK_BYTES, MAX_CODE_UNITS},
     session::Session,
+    worker::{SessionWorker, WorkerCommand, WorkerEvent},
 };
-use matou_native_terminal::TerminalOptions;
+use matou_native_terminal::{TerminalOptions, Theme};
 
 fn shell(root: &Path, id: &str, segment_bytes: u64) -> Result<Session> {
+    Session::launch(shell_options(root, id, segment_bytes)?)
+}
+
+fn shell_options(root: &Path, id: &str, segment_bytes: u64) -> Result<SessionOptions> {
     let home = root.join("home");
     let cwd = root.join("workspace");
     fs::create_dir_all(&home)?;
@@ -36,7 +42,7 @@ fn shell(root: &Path, id: &str, segment_bytes: u64) -> Result<Session> {
         ("SHELL".into(), "/bin/zsh".into()),
         ("LANG".into(), "en_US.UTF-8".into()),
     ]);
-    Session::launch(SessionOptions {
+    Ok(SessionOptions {
         session_id: id.into(),
         launch: ShellLaunch {
             executable: "/bin/zsh".into(),
@@ -93,6 +99,25 @@ fn collect(
         }) {
             anyhow::bail!("unexpected session diagnostic: {message}");
         }
+    }
+    Ok(())
+}
+
+fn collect_worker(
+    incoming: &mpsc::Receiver<WorkerEvent>,
+    events: &mut Vec<SessionEvent>,
+    timeout: Duration,
+    ready: impl Fn(&[SessionEvent]) -> bool,
+) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    while !ready(events) {
+        let event = incoming
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))?
+            .event;
+        if let SessionEvent::Diagnostic { message } = &event {
+            anyhow::bail!("unexpected session diagnostic: {message}");
+        }
+        events.push(event);
     }
     Ok(())
 }
@@ -530,6 +555,174 @@ fn slow_delivery_replays_saved_real_output_without_redoing_history() -> Result<(
     );
     assert!(published.len() > initially_delivered);
     assert_eq!(published, saved_output);
+    Ok(())
+}
+
+#[test]
+fn worker_view_scroll_and_theme_remain_available_after_shell_exit() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let (send_event, receive_event) = mpsc::channel();
+    let mut worker = SessionWorker::spawn(
+        shell_options(root.path(), "view", 16 * 1024 * 1024)?,
+        send_event,
+        "view-run".to_owned(),
+    )?;
+    let mut events = Vec::new();
+    let timeout = Duration::from_secs(5);
+    collect_worker(&receive_event, &mut events, timeout, |events| {
+        output_has(events, "MATOU_READY> ")
+    })?;
+    let command = r#"printf '\033[?1h\033[?2004h'; for n in {001..080}; do printf 'MATOU_HISTORY_%s\n' "$n"; done; printf 'MATOU_%s\n' VIEW_READY; read -r answer; exit 0"#;
+    worker.write(format!("{command}\r").as_bytes())?;
+    collect_worker(&receive_event, &mut events, timeout, |events| {
+        output_has(events, "MATOU_VIEW_READY\r\n")
+    })?;
+
+    let view = || {
+        let (reply, result) = mpsc::channel();
+        worker.send(WorkerCommand::View { reply })?;
+        result.recv_timeout(timeout)?
+    };
+    let scroll = |lines| {
+        let (reply, result) = mpsc::channel();
+        worker.send(WorkerCommand::Scroll { lines, reply })?;
+        result.recv_timeout(timeout)?
+    };
+    let frames = stored_frames(root.path(), "view")?;
+    let (bottom, modes) = view()?;
+    assert!(modes.application_cursor_keys && modes.bracketed_paste);
+    assert!(bottom.history_lines > 40);
+    assert_eq!(bottom.background, Theme::LIGHT.background);
+
+    scroll(10)?;
+    let (older, _) = view()?;
+    assert_eq!(older.scrollbar.offset + 10, bottom.scrollbar.offset);
+    let (reply, result) = mpsc::channel();
+    worker.send(WorkerCommand::SetTheme {
+        theme: Theme::DARK,
+        reply,
+    })?;
+    result.recv_timeout(timeout)??;
+    let (dark, _) = view()?;
+    assert_eq!(dark.scrollbar, older.scrollbar);
+    assert_eq!(dark.foreground, Theme::DARK.foreground);
+    assert_eq!(dark.background, Theme::DARK.background);
+    assert_eq!(stored_frames(root.path(), "view")?, frames);
+
+    worker.write(b"\r")?;
+    collect_worker(&receive_event, &mut events, timeout, |events| {
+        matches![
+            events.last(),
+            Some(SessionEvent::Exited {
+                status: ProcessExit { exit_code: 0, .. },
+                ..
+            })
+        ]
+    })?;
+    scroll(-100)?;
+    let (finished, _) = view()?;
+    assert_eq!(finished.background, Theme::DARK.background);
+    assert!(finished.history_lines > 40);
+    scroll(10)?;
+    assert_eq!(view()?.0.scrollbar.offset + 10, finished.scrollbar.offset);
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn an_idle_synchronized_shell_invalidates_its_screen_on_timeout() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let mut session = shell(root.path(), "sync", 16 * 1024 * 1024)?;
+    let mut events = Vec::new();
+    require_started(&mut session, &mut events)?;
+    let before = session.view()?.0;
+    let command = r#"printf '\033[?2026hMATOU_SYNC_%s\n' HELD; read -r answer; exit 0"#;
+    input(&mut session, command)?;
+    collect(&mut session, &mut events, |events, _| {
+        output_has(events, "\x1b[?2026hMATOU_SYNC_HELD\r\n")
+    })?;
+    assert_eq!(session.view()?.0, before);
+    let sequence = session.last_sequence();
+    let frames = stored_frames(root.path(), "sync")?;
+    let mut timeout_events = Vec::new();
+    collect(&mut session, &mut timeout_events, |events, _| {
+        events
+            .iter()
+            .any(|event| matches!(event, SessionEvent::ScreenInvalidated))
+    })?;
+    assert!(matches!(
+        timeout_events.as_slice(),
+        [SessionEvent::ScreenInvalidated]
+    ));
+    let (screen, _) = session.view()?;
+    assert!(screen.cells.chunks(screen.cols).any(|row| {
+        row.iter()
+            .map(|cell| cell.text.as_str())
+            .collect::<String>()
+            .contains("MATOU_SYNC_HELD")
+    }));
+    assert_eq!(session.last_sequence(), sequence);
+    assert_eq!(stored_frames(root.path(), "sync")?, frames);
+    assert!(session.poll(Duration::ZERO)?.is_empty());
+    session.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn synchronized_shell_still_invalidates_its_screen_after_exit() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let (send_event, receive_event) = mpsc::channel();
+    let mut worker = SessionWorker::spawn(
+        shell_options(root.path(), "sync-exit", 16 * 1024 * 1024)?,
+        send_event,
+        "sync-exit-run".to_owned(),
+    )?;
+    let timeout = Duration::from_secs(5);
+    let mut events = Vec::new();
+    collect_worker(&receive_event, &mut events, timeout, |events| {
+        output_has(events, "MATOU_READY> ")
+    })?;
+    worker.screen()?;
+    let started = Instant::now();
+    worker.write(b"printf '\\033[?2026hMATOU_SYNC_%s\\n' END; exit 0\r")?;
+    collect_worker(&receive_event, &mut events, timeout, |events| {
+        matches!(
+            events.last(),
+            Some(SessionEvent::Exited {
+                status: ProcessExit { exit_code: 0, .. },
+                ..
+            })
+        )
+    })?;
+    assert!(output_has(&events, "\x1b[?2026hMATOU_SYNC_END\r\n"));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, SessionEvent::ScreenInvalidated))
+    );
+    let frames = stored_frames(root.path(), "sync-exit")?;
+    assert!(matches!(frames.last(), Some(Frame::Exit { .. })));
+    assert!(
+        frames[..frames.len() - 1]
+            .iter()
+            .all(|frame| matches!(frame, Frame::Output { .. }))
+    );
+    assert_persisted_events(&events, &frames);
+
+    let released = receive_event.recv_timeout(timeout)?.event;
+    assert!(matches!(released, SessionEvent::ScreenInvalidated));
+    assert!(started.elapsed() >= Duration::from_millis(150));
+    let (reply, view) = mpsc::channel();
+    worker.send(WorkerCommand::View { reply })?;
+    let (screen, _) = view.recv_timeout(timeout)??;
+    assert!(screen.cells.chunks(screen.cols).any(|row| {
+        row.iter()
+            .map(|cell| cell.text.as_str())
+            .collect::<String>()
+            .contains("MATOU_SYNC_END")
+    }));
+    assert_eq!(stored_frames(root.path(), "sync-exit")?, frames);
+    worker.shutdown()?;
     Ok(())
 }
 

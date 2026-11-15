@@ -83,6 +83,8 @@ impl Default for Theme {
 pub struct Cell {
     /// Invisible text remains available to selection, search, and copy.
     pub text: String,
+    /// Whether this cell contains an explicit character, including a literal space.
+    pub has_content: bool,
     /// 0 for the continuation cell after a wide glyph, otherwise 1 or 2.
     pub width: u8,
     pub fg: Color,

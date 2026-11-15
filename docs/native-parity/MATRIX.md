@@ -2,7 +2,7 @@
 
 Initial source inventory, NOT a closed functional or acceptance matrix. Baseline and active DAG: STATUS.md. Full contract: OBJECTIVE.md.
 
-Group inventory below is not an acceptance result. Concrete observed scenarios follow it; unlisted states remain pending. Native storage and bootstrap source contracts are implemented; all Mac/Windows product parity verification remains pending. D01 is the approved Shell history restoration difference. Test names refer to tests/e2e/<name>.spec.ts; component names locate existing renderer/main/runtime code. As each group is observed, add concrete scenario IDs and preconditions, action, expected state/persistence/error, code owner, paired evidence, discrepancy. Do not generate duplicate reports for each row.
+Group inventory below is not an acceptance result. Concrete observed scenarios follow it; unlisted states remain pending. Native storage/runtime contracts and the first Mac Shell window are implemented; complete Mac/Windows product parity remains pending. D01 is the approved Shell history restoration difference. Test names refer to tests/e2e/<name>.spec.ts; component names locate existing renderer/main/runtime code. As each group is observed, add concrete scenario IDs and preconditions, action, expected state/persistence/error, code owner, paired evidence, discrepancy. Do not generate duplicate reports for each row.
 
 | Group | Scope | Source entry | Existing scenario seed |
 | --- | --- | --- | --- |
@@ -27,7 +27,7 @@ Group inventory below is not an acceptance result. Concrete observed scenarios f
 
 ## Observed reference scenarios — 2026-11-15
 
-Evidence base: artifacts/native-parity/reference/evidence/. All native result/evidence columns remain pending. Source baseline and path-only harness documented in STATUS.md. Screenshots are actual frozen product, not mockups.
+Evidence base: artifacts/native-parity/reference/evidence/. Native results for the first Shell slice are recorded below; other groups remain pending. Source baseline and path-only harness documented in STATUS.md. Screenshots are actual frozen product, not mockups.
 
 | Scenario | Preconditions and action | Actual reference result | Evidence / remaining question |
 | --- | --- | --- | --- |
@@ -113,3 +113,17 @@ The 9,509 recorded renderer main-thread tasks have max duration 11.713 ms, with 
 | A03/A05 graph and work state |16 frozen projection/status steps preserve graph values, rows, events and replay; same-status call retains source event behavior|core/tests/session_graph_contract.rs; provider/fork/worktree/detached branches awaiting respective capability-stage fixtures and UI|
 | A07 ordinary-Shell derivation |22 work streams/7 cwd streams/7 summaries/UTF16 boundary match frozen source|runtime/tests/derived_contract.rs; actual Shell success/error/read prompt/cwd results additionally exercised by owner tests|
 | A07/A08 live run and graph persistence |real startup, failed launch without run, PID/run start, success/error/needs-input/idle, delayed OS cwd capture, summary, natural exit7, new PID/ordinal; shutdown recovery interrupts old active work and disabled history does not collect|runtime/tests/owner_contract.rs (2); runtime Saved callbacks verified against journal independent of credit/replay; no visible GPUI acceptance yet|
+
+
+## Initial native window results — N02r/s
+
+This does not close a whole capability group. Images under `artifacts/native-parity/native/evidence/` bind to the isolated build record; source/automated results are detailed in STATUS.md.
+
+| Scenario | Native actual result | Evidence / differences still open |
+| --- | --- | --- |
+| A01.01 | Real GPUI initial Shell window, native runtime and zsh prompt; no browser runtime | Native screenshots and desktop bridge contract. Source-derived dimensions present; layered sidebar, header shadow, title truncation, icons, menus and AX remain incomplete. Same-state pixel comparison not passed. |
+| A07.01 | Chinese paste executes; selected Chinese text copied and pasted back into real prompt | CUA observed `COPY_中文_123`; A07-native-before-quit.png includes later completed marker. Basic text only; IME candidate composition probe inconclusive, full key/mouse protocol coverage pending. |
+| A03 resize | Actual native window resized to 1080×730; card and terminal reflow; input remains usable | CUA observation and before-quit screenshot. Animation/anchoring/timing comparison and geometry persistence remain open. |
+| A08.01 / D01 | Normal Cmd+Q exits process; same data reopens with completed Chinese output, restoration divider and new prompt | A08-native-after-reopen.png; real bridge test additionally proves further input after restore. This closes visible completed-history restoration for this simple Mac Shell case, not full crash/Agent/large-history recovery. |
+| Output confirmation | Initial pre-output frame releases UI slot without sending invalid credit ACK; later frames arrive without further input | bridge_contract exercises split real zsh output, continued command and shutdown/reopen. No mock. |
+| Windows desktop | Native desktop, core and runtime branches type-check for x86_64 MSVC | No Windows desktop executable/link/install/real UI result in this batch. |

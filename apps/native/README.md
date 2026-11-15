@@ -1,8 +1,9 @@
 # Matou native workspace
 
 This workspace implements the frozen Matou behavior in Rust. It currently contains
-the SQLite persistence, initial window hierarchy and live Shell runtime, not a runnable
-desktop application. Product scope and acceptance remain in
+the SQLite persistence, initial window hierarchy, live Shell runtime and an initial
+GPUI desktop window. This is an incomplete migration, not a parity release.
+Product scope and acceptance remain in
 `docs/native-parity/OBJECTIVE.md`, `STATUS.md` and `MATRIX.md` at the repository root.
 
 ## Current modules
@@ -46,10 +47,26 @@ desktop application. Product scope and acceptance remain in
   credit and are never rerun during display replay. Worker run identities reject
   late events after relaunch. This owner runs off the UI thread.
 
-The application must connect startup results and recovery choices to the runtime
-owner and views. No current entry point opens production data. Clean-exit backup,
-application process/IPC integration, GPUI views, native packaging
-and full platform acceptance are still pending.
+- `desktop`: real GPUI window, source-derived initial Shell layout and native
+  terminal painting/input/selection, connected to the domain owner off the UI
+  thread. Normal app quit drains the owner. Nonterminal controls are not yet wired.
+
+The desktop accepts only explicit absolute data/workspace/Shell-home paths.
+The isolated launcher supplies disposable paths and a distinct application ID.
+Recovery choices, clean-exit backup, separate runtime process/IPC, hierarchy
+actions, remaining controls, full packaging and platform acceptance remain open.
+
+## Run the current Mac slice
+
+```sh
+cargo build --locked --manifest-path apps/native/Cargo.toml -p matou-native-desktop
+python3 tooling/native-parity/launch-native.py --binary apps/native/target/debug/matou-native-desktop
+```
+
+The launcher creates `artifacts/native-parity/native/MatouNative.app`, signs it
+ad-hoc, and reuses its own recorded temporary environment on later launches.
+Quit that app before refreshing the bundle. It does not replace the installed
+Matou. A custom `CARGO_TARGET_DIR` requires passing its actual binary path.
 
 ## Check the implemented contracts
 
