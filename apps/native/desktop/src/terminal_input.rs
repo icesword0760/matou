@@ -1,6 +1,8 @@
 use std::ops::Range;
 
-use matou_native_terminal::{InputModes, Screen};
+use matou_native_terminal::{Cell, InputModes, Screen};
+
+const WORD_SEPARATORS: &str = " ()[]{}',\"`";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct GridPoint {
@@ -9,7 +11,7 @@ pub(crate) struct GridPoint {
 }
 
 /// Half-open selection over the visible grid, in reading order.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct GridSelection {
     pub anchor: GridPoint,
     pub end: GridPoint,
@@ -56,17 +58,236 @@ impl GridSelection {
                     }
                 }
             }
-            if row < last
-                && !screen
-                    .row_metadata
-                    .get(row + 1)
-                    .is_some_and(|row| row.wrap_continuation)
-            {
+            if row < last && !wrap_continues(screen, row + 1) {
                 result.push('\n');
             }
         }
         result
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SelectionMode {
+    Character,
+    Word,
+    Line,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct SelectionDrag {
+    pub mode: SelectionMode,
+    pub initial: GridSelection,
+}
+
+impl SelectionDrag {
+    pub fn begin(
+        mode: SelectionMode,
+        screen: &Screen,
+        row: usize,
+        x: f32,
+        cols: usize,
+        rows: usize,
+    ) -> Self {
+        let point = selection_cell(row, x, cols);
+        let mode = if mode == SelectionMode::Word && point.col == cols {
+            SelectionMode::Character
+        } else {
+            mode
+        };
+        let initial = match mode {
+            SelectionMode::Character => {
+                let anchor = grid_boundary(screen, row, x, cols);
+                GridSelection {
+                    anchor,
+                    end: anchor,
+                }
+            }
+            SelectionMode::Word => word_at(screen, point, cols, rows),
+            SelectionMode::Line => logical_line_at(screen, row, cols, rows),
+        };
+        Self { mode, initial }
+    }
+
+    pub fn extend(
+        self,
+        screen: &Screen,
+        row: usize,
+        x: f32,
+        cols: usize,
+        rows: usize,
+    ) -> GridSelection {
+        let anchor = self.initial.anchor;
+        match self.mode {
+            SelectionMode::Character => GridSelection {
+                anchor,
+                end: grid_boundary(screen, row, x, cols),
+            },
+            SelectionMode::Word => {
+                let point = selection_cell(row, x, cols);
+                let candidate = if point.col == cols {
+                    point
+                } else {
+                    let word = word_at(screen, point, cols, rows);
+                    if point < anchor {
+                        word.anchor
+                    } else {
+                        word.end
+                    }
+                };
+                self.extend_to(candidate, cols)
+            }
+            // The initial line follows soft wraps. Dragging snaps to the pointer's
+            // physical row, including when it lands on a continuation.
+            SelectionMode::Line => {
+                let col = if row < anchor.row { 0 } else { cols };
+                self.extend_to(GridPoint { row, col }, cols)
+            }
+        }
+    }
+
+    fn extend_to(self, candidate: GridPoint, cols: usize) -> GridSelection {
+        let GridSelection { anchor, end } = self.initial;
+        if candidate < anchor {
+            return GridSelection {
+                anchor: candidate,
+                end,
+            };
+        }
+        let end = if candidate.row != anchor.row {
+            candidate
+        } else if end.row > anchor.row {
+            // The anchored length wraps. An exact column multiple ends at
+            // column zero of the following row during a drag on the first row.
+            if end.col == cols {
+                GridPoint {
+                    row: end.row + 1,
+                    col: 0,
+                }
+            } else {
+                end
+            }
+        } else {
+            end.max(candidate)
+        };
+        GridSelection { anchor, end }
+    }
+}
+
+fn selection_cell(row: usize, x: f32, cols: usize) -> GridPoint {
+    // Selection hits use the nearest cell boundary, including one past the last cell.
+    let col = ((x + 0.5).ceil() - 1.).clamp(0., cols as f32) as usize;
+    GridPoint { row, col }
+}
+
+fn wrap_continues(screen: &Screen, row: usize) -> bool {
+    screen
+        .row_metadata
+        .get(row)
+        .is_some_and(|row| row.wrap_continuation)
+}
+
+fn logical_line_at(screen: &Screen, row: usize, cols: usize, rows: usize) -> GridSelection {
+    let mut first = row;
+    while first > 0 && wrap_continues(screen, first) {
+        first -= 1;
+    }
+    let mut last = row;
+    while last + 1 < rows && wrap_continues(screen, last + 1) {
+        last += 1;
+    }
+    GridSelection {
+        anchor: GridPoint { row: first, col: 0 },
+        end: GridPoint {
+            row: last,
+            col: cols,
+        },
+    }
+}
+
+fn row_cells(screen: &Screen, row: usize, cols: usize) -> &[Cell] {
+    let start = row * screen.cols;
+    &screen.cells[start..start + cols]
+}
+
+fn cell_head(cells: &[Cell], mut col: usize) -> usize {
+    while col > 0 && cells[col].width == 0 {
+        col -= 1;
+    }
+    col
+}
+
+fn word_in_row(cells: &[Cell], col: usize) -> Range<usize> {
+    let mut start = cell_head(cells, col);
+    let mut end = (start + usize::from(cells[start].width).max(1)).min(cells.len());
+    let space = cells[start].text == " ";
+    let includes = |cell: &Cell| {
+        if space {
+            cell.text == " "
+        } else {
+            cell.has_content && !WORD_SEPARATORS.contains(cell.text.as_str())
+        }
+    };
+    while start > 0 {
+        let previous = cell_head(cells, start - 1);
+        if !includes(&cells[previous]) {
+            break;
+        }
+        start = previous;
+    }
+    while end < cells.len() && includes(&cells[end]) {
+        end = (end + usize::from(cells[end].width).max(1)).min(cells.len());
+    }
+    start..end
+}
+
+fn written_space(cell: &Cell) -> bool {
+    cell.has_content && cell.text == " "
+}
+
+fn wrap_word(cells: &[Cell], col: usize) -> Option<Range<usize>> {
+    let span = word_in_row(cells, col);
+    cells[span.clone()]
+        .iter()
+        .any(|cell| !cell.text.trim().is_empty())
+        .then_some(span)
+}
+
+fn word_at(screen: &Screen, point: GridPoint, cols: usize, rows: usize) -> GridSelection {
+    let span = word_in_row(row_cells(screen, point.row, cols), point.col);
+    let mut anchor = GridPoint {
+        row: point.row,
+        col: span.start,
+    };
+    let mut end = GridPoint {
+        row: point.row,
+        col: span.end,
+    };
+    while anchor.col == 0
+        && anchor.row > 0
+        && wrap_continues(screen, anchor.row)
+        && !written_space(&row_cells(screen, anchor.row, cols)[0])
+    {
+        let row = anchor.row - 1;
+        let Some(span) = wrap_word(row_cells(screen, row, cols), cols - 1) else {
+            break;
+        };
+        anchor = GridPoint {
+            row,
+            col: span.start,
+        };
+    }
+    while end.col == cols
+        && end.row + 1 < rows
+        && wrap_continues(screen, end.row + 1)
+        && !written_space(&row_cells(screen, end.row, cols)[cols - 1])
+    {
+        let row = end.row + 1;
+        let Some(span) = wrap_word(row_cells(screen, row, cols), 0) else {
+            break;
+        };
+        end = GridPoint { row, col: span.end };
+    }
+    GridSelection { anchor, end }
 }
 
 /// Treat both cells of a wide grapheme as one hit target.
@@ -84,10 +305,7 @@ pub(crate) fn grid_boundary(
     if x >= cols as f32 {
         return GridPoint { row, col: cols };
     }
-    let mut col = x.floor() as usize;
-    while col > 0 && screen.cells[line + col].width == 0 {
-        col -= 1;
-    }
+    let col = cell_head(row_cells(screen, row, cols), x.floor() as usize);
     let width = usize::from(screen.cells[line + col].width).max(1);
     GridPoint {
         row,
@@ -223,8 +441,9 @@ impl Composition {
 mod tests {
     use super::*;
     use matou_native_terminal::{
-        Cell, Color, CursorStyle, RowMetadata, Scrollbar, Terminal, TerminalOptions,
+        Color, CursorStyle, RowMetadata, Scrollbar, Terminal, TerminalOptions,
     };
+    use serde_json::Value;
 
     fn sample() -> Screen {
         let cells = [
@@ -327,6 +546,82 @@ mod tests {
             end: GridPoint { row: 2, col: 6 },
         };
         assert_eq!(selection.text(&screen, 6), "中 \nABCD  Z中  ");
+        Ok(())
+    }
+
+    #[test]
+    fn word_and_line_selection_match_the_reference() -> anyhow::Result<()> {
+        let data: Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/terminal-selection-reference.json"
+        ))?;
+        let point = |value: &Value| GridPoint {
+            col: value[0].as_u64().unwrap() as usize,
+            row: value[1].as_u64().unwrap() as usize,
+        };
+        for case in data["cases"].as_array().unwrap() {
+            let mut screen = sample();
+            let plain = screen.cells[0].clone();
+            screen.cols = case["cols"].as_u64().unwrap() as usize;
+            screen.rows = case["rows"].as_u64().unwrap() as usize;
+            screen.cells.clear();
+            screen.row_metadata.clear();
+            for row in case["grid"].as_array().unwrap() {
+                screen.row_metadata.push(RowMetadata {
+                    wrap: false,
+                    wrap_continuation: row["continuation"].as_bool().unwrap(),
+                });
+                screen
+                    .cells
+                    .extend(row["cells"].as_array().unwrap().iter().map(|cell| Cell {
+                        text: cell["text"].as_str().unwrap().to_owned(),
+                        width: cell["width"].as_u64().unwrap() as u8,
+                        has_content: cell["hasContent"].as_bool().unwrap(),
+                        ..plain.clone()
+                    }));
+            }
+            for probe in case["probes"].as_array().unwrap() {
+                let mode = match probe["mode"].as_str().unwrap() {
+                    "word" => SelectionMode::Word,
+                    "line" => SelectionMode::Line,
+                    mode => panic!("Unexpected selection mode: {mode}"),
+                };
+                let start = point(&probe["point"]);
+                let drag = SelectionDrag::begin(
+                    mode,
+                    &screen,
+                    start.row,
+                    start.col as f32,
+                    screen.cols,
+                    screen.rows,
+                );
+                let selection = if let Some(target) = probe.get("target").map(point) {
+                    drag.extend(
+                        &screen,
+                        target.row,
+                        target.col as f32,
+                        screen.cols,
+                        screen.rows,
+                    )
+                } else {
+                    drag.initial
+                };
+                let expected = &probe["expected"];
+                let name = &case["name"];
+                assert_eq!(
+                    selection,
+                    GridSelection {
+                        anchor: point(&expected["start"]),
+                        end: point(&expected["end"]),
+                    },
+                    "{name}: {probe}"
+                );
+                assert_eq!(
+                    selection.text(&screen, screen.cols),
+                    expected["text"].as_str().unwrap(),
+                    "{name}: {probe}"
+                );
+            }
+        }
         Ok(())
     }
 
