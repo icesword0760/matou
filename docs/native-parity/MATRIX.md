@@ -191,4 +191,16 @@ Evidence base: artifacts/native-parity/native/evidence. Frozen logic: task-lifec
 | A02.07 delete | G03 confirms sessions removed but local files kept | G15/G16 other task remains usable; real bridge retires all child sessions | Agent/worktree/window-specific disposal when those features are connected |
 | A02 last-task deletion | Frozen deleteTask creates default replacement | G18 executes cat in replacement Shell; exact fixture and bridge | Full pixel/loading/error feedback |
 | A02/A08 quit/reopen | Persist task/focus; approved D01 restores completed commands | G19 plus task-reopen.json, old process exit and fresh live output | Full app lifetime/recovery/Windows |
-| A02 sidebar visibility | Workspace header collapse and active-item reveal | G17 collapse/expand observed; reveal code follows active selection | Real long-list reveal and full sidebar layout remain unverified |
+| A02 sidebar visibility | H01 active title span nearest; original 4px overflow scrollbar | H10/H19 corrected title reveal; H18 collapse removes scrollbar | Full sidebar visual/drag/gesture states remain open |
+
+
+N02ab continuation (A02; evidence `native/evidence/sidebar-build.json`):
+
+| Requirement | Frozen reference | Native observation | Remaining |
+| --- | --- | --- | --- |
+| Long-list active-title reveal | H01, source activeRef span scrollIntoView(nearest) | H10/H19 title aligns to viewport; row may remain partly clipped | Full multi-workspace states |
+| Thumb size / content extent | H03/H04 28 tasks, 4px track, real top/click extents | H14/H15 after including group margins | Full pixel/color comparison and minimum-thumb/system preference variants |
+| Hold paging and focus | H08 hold800ms reaches bottom | H16 same settled extent; HOLD_RELEASE_OK without terminal refocus | Intermediate timing, leave/reenter and outside-window release not demonstrated |
+| Option track placement | H09 and 29-item H20; pointer at screen y600 | H21 final 29-item thumb bounds [455,744) match H20; H22 real input | Option document dragging, alternate system preferences |
+| Thumb/wheel input | Reference scrollbar real track paths plus Chromium source | H13 initial thumb drag to top and wheel over track | Exact wheel/gesture distance and continuous trajectory remain open |
+| Pinned-task drag | Source draggable state and real settled original ordering | Existing G12 native end-state only | H06/H07 capture failed; no intermediate animation acceptance |
