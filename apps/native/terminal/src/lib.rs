@@ -7,4 +7,4 @@ pub use model::{
     Cell, Color, CursorStyle, HistoryCell, HistoryRow, InputModes, RowMetadata, Screen, Scrollbar,
     Theme,
 };
-pub use selection::{GridPoint, GridSelection, SelectionDrag, SelectionMode};
+pub use selection::{GridPoint, GridSelection, SelectionDrag, SelectionMode, SelectionState};

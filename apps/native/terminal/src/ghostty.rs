@@ -95,6 +95,7 @@ unsafe extern "C" {
         emit_cell: HistoryCellCallback,
         data: *mut c_void,
     ) -> c_int;
+    fn matou_vt_selection_epoch(terminal: *const c_void, out: *mut usize) -> c_int;
     fn matou_vt_history_trimmed_rows(terminal: *const c_void, out: *mut usize) -> c_int;
 }
 
@@ -327,6 +328,17 @@ impl Terminal {
                 wrap_continuation,
             },
         })
+    }
+
+    /// Changes whenever a buffer switch or hard reset invalidates selections,
+    /// including a switch away and back within a single feed.
+    pub fn selection_epoch(&self) -> Result<usize> {
+        let mut epoch = 0;
+        check(
+            unsafe { matou_vt_selection_epoch(self.handle.as_ptr(), &mut epoch) },
+            "read selection lifecycle",
+        )?;
+        Ok(epoch)
     }
 
     /// Count history rows removed from the start of the active buffer's page list.
