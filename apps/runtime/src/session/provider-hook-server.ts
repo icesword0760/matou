@@ -1004,6 +1004,7 @@ export class ProviderHookServer {
         }, { id: `provider-binding-${randomUUID()}`, sessionId: registration.sessionId,
           provider: 'dsh', providerSessionId: event.sessionId,
           provisional: !event.persisted, metadata: { ...(event.cwd ? { cwd: event.cwd } : {}), lastHookEvent: 'ready' }, now })
+        if (registration.confirmedProviderSessionId !== event.sessionId) delete registration.observedTitle
         registration.confirmedProviderSessionId = event.sessionId
         registration.dshPersisted = event.persisted
         delete registration.expectedProviderSessionId
@@ -1012,6 +1013,15 @@ export class ProviderHookServer {
       }
     }
     const result = events.ingest(event)
+    this.#onHudPayload({ runId: registration.runId, sessionId: registration.sessionId,
+      provider: 'dsh', payload: { dsh_session_id: event.sessionId,
+        ...(record(payload.hud) ? { dsh_hud: payload.hud } : {}), dsh_work_status: result.workStatus } })
+    const title = nonEmptyText(record(payload.hud)?.title)
+    if (title && title !== registration.observedTitle) {
+      registration.observedTitle = title
+      void Promise.resolve(this.#onTitleObserved({ runId: registration.runId, sessionId: registration.sessionId,
+        provider: 'dsh', providerSessionId: event.sessionId, title })).catch(() => {})
+    }
     // Notification consumers also derive a status; authoritative structured state wins last.
     if (result.notification) this.#onNotification({ runId: registration.runId,
       sessionId: registration.sessionId, provider: 'dsh', event: result.notification })

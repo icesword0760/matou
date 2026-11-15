@@ -13,6 +13,7 @@ import { ProviderHookServer } from './provider-hook-server'
 const command = (id: string) => ({ commandId: id, commandType: 'test', requestHash: id })
 let db: RuntimeDatabase, sessions: SessionRepository, hooks: ProviderHookServer
 let identities: unknown[], notifications: unknown[], statuses: unknown[], mismatches: unknown[]
+let huds: unknown[], titles: unknown[]
 let currentRun: string | undefined
 beforeEach(async () => {
   const root = await mkdtemp(join(tmpdir(), 'matou-dsh-hook-'))
@@ -24,9 +25,13 @@ beforeEach(async () => {
   workspaces.createTask(command('task'), { id: 't', workspaceId: 'w', executionContextId: 'c', title: 'DSH', status: 'active', sortKey: 'a', now: 1 })
   sessions = new SessionRepository(db, tx)
   for (const id of ['a', 'b']) sessions.createSession(command(id), { id, taskId: 't', executionContextId: 'c', kind: 'dsh', title: 'DSH', now: 2 })
-  identities = []; notifications = []; statuses = []; mismatches = []; currentRun = undefined
+  identities = []; notifications = []; statuses = []; mismatches = []; huds = []; titles = []; currentRun = undefined
   hooks = new ProviderHookServer(root, sessions, { currentRunId: () => currentRun,
     onIdentityRecorded: e => { identities.push(e) }, onNotification: e => { notifications.push(e) },
+    onHudPayload: e => { huds.push(e) }, onTitleObserved: e => {
+      titles.push(e)
+      sessions.observeProviderTitle(command('title-' + titles.length), { sessionId: e.sessionId, title: e.title, now: Date.now() })
+    },
     onWorkStatus: e => { statuses.push(e) }, onIdentityMismatch: e => { mismatches.push(e) } })
   await hooks.start()
 })
@@ -90,4 +95,26 @@ describe('DSH authenticated provider pipeline', () => {
     expect(sessions.getProviderSettingsBinding('a', 'dsh')?.providerSessionId).toBe('native-new')
     expect(notifications).toEqual([])
   })
+  it('follows native titles, keeps manual locks and restores the last observed title without replacing untitled cards', async () => {
+    const run = await hooks.registerSession('dsh', { sessionId: 'a', runId: 'r' })
+    await send(run.hookUrl, payload('ready', 1, { hud: {} }))
+    expect(sessions.getSession('a')?.title).toBe('DSH')
+    await send(run.hookUrl, payload('session/title', 2, { hud: { title: 'Native first', model: 'native' } }))
+    expect(sessions.getSession('a')).toMatchObject({ title: 'Native first', titleSource: 'auto' })
+    sessions.renameSession(command('manual-lock'), { sessionId: 'a', title: 'My card', now: Date.now() })
+    await send(run.hookUrl, payload('session/title', 3, { hud: { title: 'Native later' } }))
+    expect(sessions.getSession('a')).toMatchObject({ title: 'My card', providerTitle: 'Native later', titleSource: 'manual' })
+    sessions.restoreProviderTitle(command('restore-auto'), { sessionId: 'a', now: Date.now() })
+    expect(sessions.getSession('a')).toMatchObject({ title: 'Native later', titleSource: 'auto' })
+    await send(run.hookUrl, payload('ready', 4, { hud: { title: 'Native later' } }))
+    expect(titles).toHaveLength(2)
+    const count = huds.length
+    await send(run.hookUrl, payload('session/title', 5, { foreground: false, hud: { title: 'Background' } }))
+    currentRun = 'replacement'
+    await send(run.hookUrl, payload('session/title', 6, { hud: { title: 'Stale' } }))
+    expect(huds).toHaveLength(count)
+    expect(titles).toHaveLength(2)
+    expect(notifications).toEqual([])
+  })
+
 })

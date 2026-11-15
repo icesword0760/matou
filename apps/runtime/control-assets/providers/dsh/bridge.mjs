@@ -1,6 +1,7 @@
 import { readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { createHudState, foldHudEvent, observationHud } from './hud.mjs'
 
 export const name = 'matou-dsh-observer'
 export const inject = ['agents']
@@ -57,7 +58,7 @@ function persisted(agent, env) {
 export function apply(ctx, config) {
   const url = new URL(config.hookUrl)
   if (url.protocol !== 'http:' || url.hostname !== '127.0.0.1') throw new Error('Matou observer requires its local run hook')
-  const agents = new Map(), requests = new Map(), states = new Map()
+  const agents = new Map(), requests = new Map(), states = new Map(), hudStates = new Map()
   let current, generation = 0, sequence = 0, disposed = false, sending = false, polling = false, requestNumber = 0, lastSnapshot = 0
   const queue = [], controller = new AbortController()
   const disposers = []
@@ -95,7 +96,7 @@ export function apply(ctx, config) {
     if (queue.length >= 128) queue.shift()
     queue.push({ dsh_observation: 1, run_id: config.runId, sequence: ++sequence,
       generation, session_id: current, foreground: true, event_type: type,
-      event_data: observationData(type, data), agent_status: text(agent.status), ...options })
+      event_data: observationData(type, data), hud: observationHud(agent, ctx, hudStates.get(current)), agent_status: text(agent.status), ...options })
     void post()
   }
   const snapshot = () => {
@@ -107,17 +108,18 @@ export function apply(ctx, config) {
       turn_error: states.get(current)?.error === true })
   }
   own(ctx.on('agent/created', ({ agent }) => {
-    if (isTopLevelAgent(agent)) agents.set(idOf(agent), agent)
+    if (isTopLevelAgent(agent)) { agents.set(idOf(agent), agent); hudStates.set(idOf(agent), createHudState()) }
     // This serial listener must not await the HTTP endpoint or native UI.
   }))
-  own(ctx.on('agent/disposed', ({ agent }) => { agents.delete(idOf(agent)); states.delete(idOf(agent)) }))
+  own(ctx.on('agent/disposed', ({ agent }) => { agents.delete(idOf(agent)); states.delete(idOf(agent)); hudStates.delete(idOf(agent)) }))
   own(ctx.on('agent/status', ({ agent, status }) => {
     if (idOf(agent) === current && isTopLevelAgent(agent)) emit('agent/status', {}, { agent_status: text(status) })
   }))
-  const observedTypes = new Set(['turn/start', 'turn/end', 'approval/asked', 'approval/decided', 'tool/call', 'tool/result'])
+  const observedTypes = new Set(['turn/start', 'turn/end', 'approval/asked', 'approval/decided', 'tool/call', 'tool/result', 'session/title', 'model/selection', 'request/header', 'request/context', 'permission/preset', 'sandbox/mode', 'approval/policy', 'plan/mode', 'working-directory/change'])
   own(ctx.on('session/event', (session, event) => {
     const id = String(session.id)
     if (!agents.has(id) || !observedTypes.has(event.type)) return
+    foldHudEvent(hudStates.get(id) ?? createHudState(), event)
     if (event.type === 'turn/start') states.set(id, { error: false })
     if (event.type === 'turn/end' && record(event.data?.reason).kind === 'error') states.set(id, { error: true })
     if (id === current) emit(event.type, event.data)
@@ -140,7 +142,7 @@ export function apply(ctx, config) {
       }
     }))
   }
-  for (const agent of ctx.get('agents')?.list?.() ?? []) if (isTopLevelAgent(agent)) agents.set(idOf(agent), agent)
+  for (const agent of ctx.get('agents')?.list?.() ?? []) if (isTopLevelAgent(agent)) { agents.set(idOf(agent), agent); hudStates.set(idOf(agent), createHudState()) }
   const poll = async () => {
     if (polling || disposed) return
     polling = true

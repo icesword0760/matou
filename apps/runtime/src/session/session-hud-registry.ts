@@ -4,6 +4,7 @@ import {
   type AgentProfileId,
   type SessionRunProfile
 } from '@matou/domain'
+import { parseDshHud } from './dsh-hud-payload'
 import { sortAgents } from './external-agent-status'
 import { AccountUsageTracker } from './account-usage-tracker'
 import { existsSync, readFileSync } from 'node:fs'
@@ -41,6 +42,7 @@ export interface SessionHudSnapshot {
   gitBranch?: string
   gitDirty?: boolean
   startedAt: number
+  providerPermissionLabel?: string
   permissionMode?: HudPermissionMode
   modelStrategy?: HudModelStrategy
   model?: string
@@ -67,6 +69,7 @@ export interface SessionHudSnapshot {
 }
 
 interface MutableHud extends SessionHudSnapshot {
+  dshIdentity?: string
   codexCompletedTools: Map<string, string>
   activeTools: Map<string, { name: string; target?: string }>
   completedToolCounts: Map<string, number>
@@ -297,6 +300,24 @@ export class SessionHudRegistry {
   ingestProvider(sessionId: string, payload: Record<string, unknown>): void {
     const current = this.#states.get(sessionId)
     if (!current || current.mode !== 'agent') return
+
+    if (current.provider === 'dsh') {
+      const identity = text(payload.dsh_session_id)
+      if (identity && current.dshIdentity !== identity) {
+        current.dshIdentity = identity
+        delete current.model; delete current.effort; delete current.contextPercent; delete current.contextWindowSize
+        delete current.providerPermissionLabel; delete current.runningTools; delete current.toolCounts; delete current.lastTool
+      }
+      const observed = parseDshHud(payload.dsh_hud)
+      if (observed) {
+        delete current.model; delete current.effort; delete current.contextPercent; delete current.contextWindowSize
+        delete current.providerPermissionLabel; delete current.runningTools; delete current.toolCounts; delete current.lastTool
+        Object.assign(current, observed)
+      }
+      const status = payload.dsh_work_status
+      if (status === 'idle' || status === 'running' || status === 'needs-input' || status === 'error') current.taskStatus = status
+      return
+    }
 
     const cwd = text(payload.cwd)
     if (cwd) current.cwd = cwd
@@ -570,6 +591,7 @@ export class SessionHudRegistry {
     const state = this.#states.get(sessionId)
     if (!state) return undefined
     const {
+      dshIdentity: _dshIdentity,
       codexCompletedTools: _codexCompletedTools,
       activeTools: _activeTools, observedSubagents: _observedSubagents,
       providerStartedAt: _providerStartedAt, optimisticAgents: _optimisticAgents, externalAgents: _externalAgents, transcriptPath: _transcriptPath, sessionEnded: _sessionEnded,
@@ -591,7 +613,7 @@ export class SessionHudRegistry {
       snapshot.subagentCount = agents.length
       snapshot.subagents = agents.map(agent => agent.label)
     }
-    if (state.provider === 'codex') {
+    if (state.provider === 'codex' || state.provider === 'dsh') {
       delete snapshot.modelStrategy
       delete snapshot.subagentCount
       delete snapshot.subagents
@@ -600,6 +622,12 @@ export class SessionHudRegistry {
       delete snapshot.allUsageWindows
       delete snapshot.todos
       delete snapshot.mcpErrors
+    }
+    if (state.provider === 'dsh') {
+      delete snapshot.permissionMode; delete snapshot.configCounts; delete snapshot.instructionFileLabel
+      delete snapshot.teamRole; delete snapshot.teamStatus
+      // Spawn defaults are not observations of native tool activity.
+      if (!state.dshIdentity) { delete snapshot.runningTools; delete snapshot.toolCounts; delete snapshot.lastTool }
     }
     return structuredClone(snapshot)
   }

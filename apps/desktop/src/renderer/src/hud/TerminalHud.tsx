@@ -54,9 +54,16 @@ export function TerminalHud(props: {
 }) {
   const { hud } = props
   const m = useMessages().hud
+  const isDsh = hud?.provider === 'dsh'
+  const dshPermissionLabel = isDsh ? hud?.providerPermissionLabel?.trim() : undefined
   const manifest = getAgentManifest(hud?.provider ?? 'claude-code')
   const showAccountControl = manifest?.hud.showAccountControl ?? true
-  const instructionButtonLabel = manifest?.instructionFiles.buttonLabel ?? hud?.instructionFileLabel
+  const dshInstructionLabel = isDsh ? hud?.instructionFileLabel?.trim() : undefined
+  const instructionButtonLabel = isDsh
+    ? dshInstructionLabel
+    : manifest?.instructionFiles.buttonLabel ?? hud?.instructionFileLabel
+  const showInstructionButton = hud?.mode === 'agent' && Boolean(instructionButtonLabel) &&
+    (isDsh ? Boolean(dshInstructionLabel) : hud?.configCounts?.projectInstructionFileExists === true)
   const allowedPermissionModes = manifest?.capabilities.permissionModes ?? [
     'default', 'acceptEdits', 'plan', 'bypassPermissions'
   ]
@@ -143,7 +150,7 @@ export function TerminalHud(props: {
   }
 
   return <div className="status-info" data-hud-mode={hud?.mode ?? 'environment'} data-session-id={sessionId} ref={rootRef}>
-    {hud?.mode === 'agent' && hud.configCounts?.projectInstructionFileExists === true && instructionButtonLabel && <button type="button"
+    {hud?.mode === 'agent' && showInstructionButton && <button type="button"
       className="status-field status-instructions is-clickable"
       aria-label={instructionButtonLabel === 'ClaudeMd' ? m.editClaudeMd : instructionButtonLabel} disabled={!gitClient}
       title={instructionButtonLabel === 'ClaudeMd' ? m.editClaudeMdTitle : instructionButtonLabel}
@@ -152,15 +159,20 @@ export function TerminalHud(props: {
       }}>{instructionButtonLabel}</button>}
     <div className="status-info__primary">
     {hud?.mode === 'agent' ? <>
-      <button type="button" className={`status-field status-perm-badge is-clickable perm-${permissionMode}`}
-        disabled={disabled || switching || !props.onPermissionMode}
-        title={props.disabledReason ?? permissionTitle}
-        aria-label={permissionTitle}
-        onClick={openPermissionMenu}>{permissionAbbreviation(permissionMode)}</button>
+      {isDsh
+        ? dshPermissionLabel
+          ? <span className="status-field status-perm-badge" title={dshPermissionLabel}
+            aria-label={dshPermissionLabel}>{dshPermissionLabel}</span>
+          : null
+        : <button type="button" className={`status-field status-perm-badge is-clickable perm-${permissionMode}`}
+          disabled={disabled || switching || !props.onPermissionMode}
+          title={props.disabledReason ?? permissionTitle}
+          aria-label={permissionTitle}
+          onClick={openPermissionMenu}>{permissionAbbreviation(permissionMode)}</button>}
       {modelLabel(hud, m) && <span className="status-field status-model status-priority-8"
         title={m.modelTitle(modelLabel(hud, m))}>{modelLabel(hud, m)}</span>}
       {hud.contextPercent !== undefined ? <ContextRing percent={hud.contextPercent} /> :
-        hud.provider !== 'codex' && hud.contextWindowSize !== undefined && hud.contextWindowSize > 0 &&
+        !isDsh && hud.provider !== 'codex' && hud.contextWindowSize !== undefined && hud.contextWindowSize > 0 &&
         <span className="status-field status-priority-7">{zh ? '等待真实用量' : 'Awaiting usage'}</span>}
       {manifest?.hud.supportsMcpSummary !== false && hud.configCounts && hud.configCounts.mcpServers > 0 && <HudDetail
         label={`${hud.configCounts.mcpServers} MCPs`} title={m.mcpServers}
@@ -177,16 +189,16 @@ export function TerminalHud(props: {
       {manifest?.hud.supportsHooksCount !== false && hud.configCounts && hud.configCounts.hooks > 0 && <HudDetail
         label={`${hud.configCounts.hooks} hooks`} title="Hooks"
         items={hud.configCounts.hookNames ?? []} />}
-      {usageWindows.length === 0 && manifest?.hud.hideEmptyQuotaPlaceholder !== true && <span className="status-field status-usage status-priority-6" role="status"
+      {!isDsh && usageWindows.length === 0 && manifest?.hud.hideEmptyQuotaPlaceholder !== true && <span className="status-field status-usage status-priority-6" role="status"
         title={useDeviceQuota ? `${quotaAccount} · ${quotaEmpty}` : (zh ? '暂无用量数据' : 'Usage unavailable')}>—</span>}
-      {manifest?.hud.supportsQuotaWindows !== false && !useDeviceQuota && (hud.allUsageWindows?.length ?? 0) > 0
+      {!isDsh && (manifest?.hud.supportsQuotaWindows !== false && !useDeviceQuota && (hud.allUsageWindows?.length ?? 0) > 0
         ? <QuotaDetailWindows windows={usageWindows} allWindows={hud.allUsageWindows!} zh={zh} />
         : usageWindows.map((window, index) => <span
           className="status-field status-usage status-priority-6"
           title={`${useDeviceQuota ? `${quotaAccount} · ` : ''}${usageTitle(window, zh)}${useDeviceQuota && quotaProblem ? ` · ${quotaProblem}` : ''}`} key={`${window.label}:${index}`}>
           {window.label} <strong>{window.percent}%</strong><small> · {formatReset(window.resetsAt)}</small>
-        </span>)}
-      {hud.teamRole && <span className={`team-role-badge status-priority-5 team-${teamTone(hud.teamStatus)}`}>{hud.teamRole}</span>}
+        </span>))}
+      {!isDsh && hud.teamRole && <span className={`team-role-badge status-priority-5 team-${teamTone(hud.teamStatus)}`}>{hud.teamRole}</span>}
       {(hud.mcpErrors ?? []).map((name) => <span className="status-field status-mcp-error status-priority-5" key={name}>⚠ {name}</span>)}
       {manifest?.hud.supportsTodos !== false && todoDisplay(hud) && <span className="status-field status-todos status-priority-4">
         <span className={`tool-icon ${todoDisplay(hud)!.done ? 'tool-icon-done' : 'tool-icon-running'}`}>{todoDisplay(hud)!.icon}</span>
@@ -509,8 +521,12 @@ function modelLabel(hud: SessionHudView, m: HudMessages): string {
   const name = hud.model?.trim()
   const stripClaudePrefix = getAgentManifest(hud.provider ?? 'claude-code')?.hud.stripClaudeModelPrefix ?? true
   let label = (stripClaudePrefix ? name?.replace(/^Claude\s+/i, '') : name) ?? ''
-  if (hud.provider === 'codex' && label && hud.effort) label = `${label} (${hud.effort})`
-  if (!label && hud.provider !== 'codex' && hud.modelStrategy) label = m.model[hud.modelStrategy]
+  if ((hud.provider === 'codex' || hud.provider === 'dsh') && label && hud.effort) {
+    label = `${label} (${hud.effort})`
+  }
+  if (!label && hud.provider !== 'codex' && hud.provider !== 'dsh' && hud.modelStrategy) {
+    label = m.model[hud.modelStrategy]
+  }
   const context = formatContextWindow(hud.contextWindowSize)
   return label && context ? m.modelWithContext(label, context) : label
 }
@@ -573,9 +589,11 @@ function todoDisplay(hud: SessionHudView): { icon: string; text: string; progres
     : null
 }
 function hasAgentInfo(hud: SessionHudView): boolean {
-  return Boolean(hud.model || hud.modelStrategy || hud.contextPercent !== undefined ||
-    (hud.usageWindows?.length ?? 0) > 0 || hud.configCounts || (hud.mcpErrors?.length ?? 0) > 0 ||
-    agentDisplay(hud).count > 0 || hud.teamRole || todoDisplay(hud))
+  const dsh = hud.provider === 'dsh'
+  return Boolean(hud.model || (!dsh && hud.modelStrategy) || hud.contextPercent !== undefined ||
+    (hud.mcpErrors?.length ?? 0) > 0 ||
+    (!dsh && ((hud.usageWindows?.length ?? 0) > 0 || hud.configCounts || agentDisplay(hud).count > 0 ||
+      hud.teamRole || todoDisplay(hud))))
 }
 
 function bypassCopy(target: HudPermissionMode, resumable: boolean, agent: string, m: HudMessages): string {
