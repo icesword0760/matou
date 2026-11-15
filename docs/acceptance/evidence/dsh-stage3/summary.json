@@ -1,0 +1,82 @@
+{
+  "stage": 3,
+  "date": "2026-11-15",
+  "branch": "feat/multi-agent-dsh",
+  "scope": [
+    "hud",
+    "native auto title",
+    "cwd session catalog",
+    "identity-gated restart recovery"
+  ],
+  "nativePty": {
+    "driver": "Python pty.fork; real HOME; own temporary git cwd and own new session",
+    "modelObserved": true,
+    "effortObserved": true,
+    "contextObserved": true,
+    "nativeModeObserved": true,
+    "toolCountObserved": true,
+    "nativeRenameFollowed": true,
+    "catalogReadBack": true,
+    "visibleEvents": 8,
+    "searchHits": 2,
+    "configBackups": 35,
+    "protectedConfigsUnchanged": true,
+    "nativeRuntimeIndexesChanged": [
+      "workspace.json",
+      "last-used.json"
+    ]
+  },
+  "restartPty": {
+    "driver": "RuntimeServer and real node-pty; close/reopen same runtime database; automatic recovery plan",
+    "inputBytes": 0,
+    "twoDistinctRuntimeGenerations": true,
+    "runs": [
+      {
+        "automatic": true,
+        "sameRequestedNativeIdentity": true,
+        "readyAndPersisted": true,
+        "restoreStateAfter": "none",
+        "elapsedMsIncluding1200msObservation": 4888,
+        "modelObserved": true,
+        "contextObserved": true
+      },
+      {
+        "automatic": true,
+        "sameRequestedNativeIdentity": true,
+        "readyAndPersisted": true,
+        "restoreStateAfter": "none",
+        "elapsedMsIncluding1200msObservation": 3091,
+        "modelObserved": true,
+        "contextObserved": true
+      }
+    ],
+    "configHashesChecked": 35,
+    "configHashChanges": 0
+  },
+  "automated": {
+    "runtimeFiles": 13,
+    "runtimeTests": 165,
+    "serverRecoveryTests": 57,
+    "serverOtherTestsNotSelected": 108,
+    "desktopFiles": 8,
+    "desktopTests": 196,
+    "manifestTests": 5,
+    "allWorkspaceTypecheck": "passed",
+    "runtimeTypecheckAfterFinalChanges": "passed",
+    "identifiers": "passed",
+    "diffWhitespace": "passed"
+  },
+  "notVerified": [
+    "packaged app UI",
+    "notification center",
+    "focus scrolling and terminal-load interaction performance",
+    "complete 11-capability product acceptance"
+  ],
+  "outOfScope": [
+    "mode switching",
+    "mt injection",
+    "one-click fork",
+    "packaging",
+    "publishing"
+  ]
+}

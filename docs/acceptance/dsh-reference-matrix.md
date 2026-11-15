@@ -1,72 +1,59 @@
-# DSH 接入对照矩阵：第二关
+# DSH 接入对照矩阵：第三关
 
-日期：2026-11-15。基线：`a06812f`（Codex 期），分支 `feat/multi-agent-dsh`。
+日期：2026-11-15。基线：Codex 期 `a06812f`，分支 `feat/multi-agent-dsh`。启动器 0.2.2-rc.1、TUI 0.19.0；没有升级或修改用户 profile。
 
-本关交付一次性观察插件、零输入身份、状态与通知，以及显式 resume 的身份握手。**仍处于实现阶段，不是 11 项功能或 App 界面签收。** 未打包、发布或推送。
+本关完成 HUD、原生自动标题、按目录载入历史和身份确认后的自动恢复。**仍处于实现阶段，不是打包 App 的界面或 11 项完整产品签收。** 按交代不做执行模式切换、mt 注入、打包、发布或推送；卡片一键 Fork 继续关闭。
 
-## 实测结果
+## 第三关真实 PTY 结果
 
-真实 HOME、项目内临时 Git 仓库、Python `pty.fork()` 驱动 `dsh dsh-tui --patch <run.patch.yml>`；没有使用系统终端 App 或 CUA，只运行本轮新建会话及其中一个已结束的新会话的显式恢复。
-
-| 场景 | 原生事实与 Matou 实际结果 | 结论 |
+| 场景 | 原生基线与 Matou 实际结果 | 结论及边界 |
 | --- | --- | --- |
-| 零输入新建 | 当前进程的 inject ledger 与顶层 agent 匹配，输入消息前收到真实 ID；最初 `persisted=false`，绑定为 unknown，HUD 不宣称可恢复 | PTY + 真实 hook server 通过 |
-| 完成 | `idle → running → idle`；`turn/end.reason.kind=completed` 生成一条标题为 DSH 的完成通知 | 通过 |
-| 审批 | 请求 bash 的一次性原生沙箱升级，停在审批界面，未批准；`idle → running → needs-input`，一条 DSH permission 通知 | 通过；未扩大权限 |
-| 整轮错误 | 仅在探针本次 patch 指定不存在的模型，收到结构化整轮 error；`idle → running → error`，一条 DSH error 通知，没有 completed | 通过；未更改模型偏好 |
-| 显式恢复 | 对本轮已结束的新会话传 `--resume <完整ID>`；同一 ID + ready + persisted 后确认；没有模型输入，也没有回放完成通知 | 通过；不等于 App 重启恢复验收 |
-| 前台 `/new` | 空白前台切换产生新 ID；新会话未保存时不回退到旧绑定 | 原生切换、hook 集成和回归通过 |
-| 同 cwd 双终端 | 两个真实 Python PTY 共用同一临时 Git cwd，使用各自 run token；两个卡片拿到不同 ID | 通过 |
-| 运行会话进入后台 | 用原生空输入左键打开后台管理，再 Ctrl+N 建立新前台；观察至原任务的等待窗口之后；卡片跟随新 ID，后台未产生当前卡通知 | PTY 通过；子代理过滤另由定点测试覆盖 |
-| 前台解绑瞬间 | 每次发事件重新核对本进程输入归属，覆盖 100 ms 轮询之间的关闭窗口 | 定点自动验证通过 |
-| 重复与旧 run | 同序号重送不重复通知；旧 run、旧 generation、其它会话、后台标记均不修改当前卡 | 定点自动验证通过 |
-| 原生通知重复 | 所有成功 PTY 场景 OSC 9 / 99 / 777 通知数量为 0；Matou 只接收观察事件；OSC 7501 原生状态帧不作为通知 | 通过 |
+| 新会话 HUD | Python `pty.fork()` 运行真实 `dsh dsh-tui --patch`；同一前台 agent 的 current model / reasoning effort 与公开 projection 提供模型、档位、原生模式、真实上下文占用 | 管线实测通过；没有从累计 token 或终端文案猜占用率 |
+| 工具活动 | 仅要求新会话读取自建 Git 目录内 README；收到原生 read 开始与结束，HUD 计数 1、状态 completed | PTY 通过；桥接不发送正文、工具参数或结果 |
+| 原生标题 | 原生自动标题先后更新；随后在该 PTY 执行 `/rename Matou DSH Stage3`，Matou hook 同步新标题 | PTY 通过；Matou 不额外调用模型生成标题 |
+| 标题锁与恢复 | 手动命名后继续保存新的 provider title，卡片名称保持手动值；恢复自动标题后使用最新原生标题；空标题保持原名 | hook + repository 定点测试通过；真实 App 菜单点击留到下一关 |
+| 目录预览与搜索 | 按该 PTY 的 cwd 编码定位、再核对 header.cwd；真实多帧历史读回 8 条可见内容，标记搜索命中 2 条，原生新标题可见 | 真实文件 + RPC list/detail/search/load 通过；UI 页签/分页/载入由组件回归覆盖 |
+| 静置恢复 | 用真实 RuntimeServer/node-pty 恢复本关已结束的同一会话；之后关闭并重新打开同一 Runtime 数据库，自动恢复计划再次启动原 ID；两轮均零输入收到 persisted + ready | 真实 PTY / Runtime 数据库重开通过；分别约 4.9 / 3.1 秒，包含 1.2 秒额外观察，不作产品性能指标 |
+| 恢复握手与失败 | 即使输出完整终端屏幕，DSH 恢复队列也不提前完成；同 ID 但未保存的 ready 不确认；不同 ID 或期限内无 ready 进入 failed | Runtime 定点测试通过；其它 Agent 的输出/期限判定保持原样 |
+| 重试与新开 | failed 后重试仍带原 ID；新开不带 `--resume`；旧 run 的迟到 ready 不能覆盖失败或新 run | Runtime + 既有 transition 通过；真实 App 横幅按钮留到下一关 |
+| 配置保护 | Python PTY 启动前备份 35 份配置，33 份受保护文件哈希一致，仅 workspace / last-used 原生运行索引变化；真实恢复阶段另备份并核对 35 份，全部一致 | 没有修改 profile、模型偏好、版本或回滚共享索引 |
 
-脱敏汇总：[evidence/dsh-stage2/summary.json](evidence/dsh-stage2/summary.json)。原始 PTY 字节、临时 patch、备份和运行索引位于工作树忽略目录 `.cache/dsh-stage2/`，不提交真实会话 ID、凭据或用户会话正文。
+脱敏汇总：[evidence/dsh-stage3/summary.json](evidence/dsh-stage3/summary.json)。原始 PTY、patch、自己创建的会话 ID、完整自建样本历史及配置备份只放工作树忽略目录 `.cache/dsh-stage3/`；探针驱动位于忽略目录 `output/dsh-stage3/`，不提交真实 ID 或私有正文。
 
-最初两次后台探针把 slash 文本混入待提交输入，没有建立不同的前台 ID，因此判为探针失败，不作为后台隔离成功证据。改用原生空输入左键 + Ctrl+N 后重测通过。第一次简单 PTY 探针退出等待还需关闭主 fd；后续所有探针均有界停止并关闭自己的 fd/进程。
+## 数据与读取边界
 
-## 注入、身份和保护边界
-
-- `dsh --dump-config` 的 dsh-tui 原行配置逐字保留，包括惰性的 `!!js` 表达式及原有 inject 依赖；无法安全表达的配置直接报错，不清空配置。dump 有 15 秒及 1 MiB 上限。
-- 在 Matou provider-hooks 运行目录生成权限 0600 的单次 patch；自有 `providers/dsh/bridge.mjs` 随既有 control-assets 拷贝。通过 Cordis 依赖让观察器先于 TUI 创建 agent 就绪，不安装 profile 插件。
-- 本次启动只覆盖 `backend=dsh`、`taskNotifications=off`、`upstreamRetry=false`。最后一项避免 TUI 空启动时向持久化 provider retryPolicy 写默认值；其它模型、preset 和用户配置保留。
-- 插件不发送 prompt、工具参数/结果或完整日志；通过既有本地 run token hook URL 送出最小事件事实。网络发送不被原生事件监听 await，有界队列、状态合并、超时和周期快照；恢复连接不补弹历史通知。
-- 身份由原生 agent + 精确 PID 前台 ledger 确认，不按最新文件或 cwd 猜测。只读文件存在性用于区分已识别与已保存，不承担历史预览或损坏校验。
-- 初次 resume 必须匹配 expected ID 并且已保存；不同 ID 拒绝其后续流。原生 ready 之前不以大段终端输出宣称恢复成功。正常前台切换后按新 generation 更新绑定。
-- 空白当前会话使用既有 provisional binding；DSH 的恢复查询只认最新绑定，防止 unknown 被跳过后误恢复旧对话。其它 provider 的查询逻辑不变。
-- 只有真实用户请求进入等待才发审批/问答通知；audit asked、单个工具失败和终端错误文案不直接构成整轮错误。中断不冒充完成；错误保持到真实新一轮输入。
-
-每次 PTY 启动前备份 35 份相关 profile、偏好及存储文件。33 份受保护文件逐场及最终 SHA256 全部一致。新建场景仅原生 `workspace.json` 和 `last-used.json` 运行索引变化，显式 resume 场景 35 份均一致；没有回滚共享索引，没有修改或升级用户 profile。无需新增运行时 LLM 步骤、依赖、数据库或迁移；真实模型调用仅用于这次探针。
-
-启动器 0.2.2-rc.1，TUI 0.19.0，启动器使用 Node 24.13.0。本机 TUI 目录独立解析的 agent/session 包仍为 0.1.5-rc.2，第一关发现的混合解析链没有修复；本关只承诺已观察到的实测组合，不外推为所有版本兼容。
+- HUD 沿现有 hook → handler → registry → wire → TerminalHud 管线，只加 DSH 分支。获批的可选 `providerPermissionLabel` 是只读原生文字，不映射成 Claude 权限枚举或开放切换菜单。缺字段隐藏，真实测得的 0 可以显示，未知值不补 0。
+- 模型/推理档位来自 `agent.model.current()`；上下文采用公开 `contextPressure.projectedTokens ?? pressureTokens` 除以真实 `contextWindow`；标题来自公开 title projection / `session/title`；目录来自 workingDirectory projection / 当前 session header。工具只统计已观察到的配对事件，不回放历史通知。
+- Git 继续使用 Matou 现有环境探测。没有可靠的“实际已读项目指令文件路径”证据，按交代隐藏指令文件入口。费用、额度、账户、团队不显示。
+- Catalog 只读 v4 JSONL 与串联独立 Zstd 帧；逐帧扫描、解压与校验，完整损坏或未知必要事件明确报错；末尾未写完帧不发布，文件增长后重新读取。可见内容按 surface append/replace 投影，压缩替换掉的历史不再出现在预览或搜索。
+- 读取有界：单压缩/解压帧 32 MiB、单行 16 MiB、压缩文件/累计解压 512 MiB、单会话可见事件 10 万；索引/搜索缓存各最多 16 会话且总引用/命中 20 万，缓存不保存正文。响应沿用已有分页；大页按字节缩小，有单条/预览文字上限。超限只报错，不改写会话文件。
+- 载入复用现有 RPC 与 provider binding，启动仍是 `--resume <完整ID>`。DSH 只在同 ID、已落盘、真实 ready 后结束恢复；沿用现有 10 秒恢复期限，期限内未确认走现有 failed / 重试 / 新开流程。没有新数据库、迁移、依赖或 Matou 运行时 LLM 请求。
 
 ## reference product 交互对照矩阵
 
-DSH 原生 TUI 是本 provider 的行为基线，Matou 卡片层沿用已批准的 CLI 模块范围。此表保留后续关卡，不能把本关技术闭环当作 UI 1:1 验收。
+DSH 原生 TUI 为本 provider 的行为基线；Matou 卡片层沿用已批准 CLI 黑色工作区范围。组件验证不代表真实打包 App 的尺寸、焦点、滚动或交互性能已验收。
 
-| # | 能力与原生基线 | 本关 Matou 结果 | 差异 / 后续条件 |
+| # | 能力与原生基线 | 当前 Matou 结果 | 差异 / 未闭合项 |
 | --- | --- | --- | --- |
-| 1 | `dsh dsh-tui` 在指定 cwd 新建 | manifest、新建参数、三种精确 Shell 升级形式已接；真实 PTY 启动通过 | App 菜单、首帧、焦点和滚动未验 |
-| 2 | 原生 agent / turn / 审批事件 | 工作、等待、完成、错误和前台隔离通过 | App 可见状态与负载延迟未验 |
-| 3 | 原生完成/审批通知 | 本次关闭原生完成通知；Matou DSH 标题、单次事件通过 | macOS 可见通知与点击回卡未验 |
-| 4 | 原生模型/上下文/工具/权限 | 未接 HUD 数据，本关仅身份可恢复标记 | 后续关卡；未知数据不填 0 |
-| 5 | 原生权限/计划模式 | 未开放 Matou 模式菜单 | 后续验证官方控制与事实回读 |
-| 6 | 原生 session/title | 未开启自动标题 | 后续关卡 |
-| 7 | 原生会话目录与选择器 | 未开启 Matou 载入入口 | 后续完成有界目录/预览/分页 |
-| 8 | 显式 `--resume ID` | 同 ID ready 握手已实测；autoRestore 仍关闭 | App 重启队列、失败重试/新开未验 |
-| 9 | 原生 `/fork` 子会话 | 按评审决定，manifest fork=false，不显示卡片一键入口 | 不注入 `/fork`、不改草稿；后续载入原生子会话；上游正式调用口可用后再评估一键入口 |
-| 10 | 原生 system-prompt section / shell | 未注入 mt，沿既有环境但无能力成功声明 | 后续验证默认沙箱内真实跨卡 |
-| 11 | 账户/供应商/团队等 | DSH manifest 关闭这些入口 | 符合本期范围；App 显隐未验 |
+| 1 | `dsh dsh-tui` 在指定 cwd 新建 | manifest、启动参数、精确 Shell 升级与真实 PTY 启动在第二关已审通过 | App 菜单、首帧、焦点和滚动未验 |
+| 2 | 原生 agent / turn / 审批事件 | 工作、等待、完成、错误和前台隔离已审；本关 HUD/标题事件不改变原映射 | App 可见状态与终端负载响应未验 |
+| 3 | 原生完成/审批通知 | 单次 patch 关闭原生完成通知，Matou 标题 DSH；重复、旧 run、后台隔离第二关已审 | macOS 通知与点击回卡未验 |
+| 4 | 原生模型/档位/上下文/工具/目录/Git/指令 | 真实字段管线与缺失隐藏、只读模式、工具计数通过；Git 复用环境；指令路径未知则隐藏 | 打包 App HUD 外观/交互性能未验；没有可编辑指令入口的成功声明 |
+| 5 | 原生权限与计划模式 | 当前模式只读显示，无 Matou 模式切换菜单 | 按本关要求不做切换 |
+| 6 | 原生 session/title | 自动跟随、手动锁定、恢复最新标题、空标题保留原名；菜单复用 manifest 动态名称 | 真实 App「恢复 DSH 自动标题」点击未验 |
+| 7 | 原生会话目录与选择器 | DSH 页签、cwd 编码与 header 二次校验、多帧/损坏/缺失、有界缓存、分页/预览/搜索和精确载入通过 | 真实 App 大目录/加载反馈/焦点/滚动未验 |
+| 8 | 显式 resume 与恢复 | autoRestore 开启；真实 Runtime 数据库重开后原 ID 零输入 ready 通过；失败、重试和新开定点测试通过 | 打包 App 退出重启、横幅按钮与可见「启动中→已恢复」留下一关 |
+| 9 | 原生 `/fork` 子会话 | 按已审裁决 fork=false，不显示卡片一键入口；目录不依赖父会话猜测，原生子会话按自身 ID/cwd 读取 | 不注入 `/fork`、不改草稿；真实原生 Fork 子会话载入仍未专测；正式上游调用口可用后再评估一键入口 |
+| 10 | 原生 system-prompt section / shell | 本关未注入 mt | 下一关实测默认沙箱内跨卡 |
+| 11 | 账户/供应商/团队等 | DSH manifest 关闭；HUD 显式隐藏账户/额度/团队 | 符合范围；真实 App 入口显隐未验 |
 
-## 自动验证
+## 自动验证与未执行项
 
-- `pnpm typecheck` 全工作树通过；最后新增 runtime 定点测试后再执行 runtime typecheck 通过。
-- DSH 事件/身份/启动 + 既有 hook/通知/恢复/HUD 相关 8 文件、133 测试通过。
-- PTY、仓库身份和恢复相关 5 文件、74 测试通过；包括新增真实 PTY 启动边界的 stub 回归。
-- manifest 注册表 5 测试通过，仅更新总注册列表并新增 DSH；没有改写 Claude/Antigravity/Codex 的能力或行为断言。
-- runtime-server 身份/恢复/升级等相关子集 50 通过，111 因名称筛选未执行；没有宣称全量 runtime-server 通过。
-- 前台即时解绑边界测试通过；观察器/overlay 定点测试通过。
-- `pnpm check:identifiers`、`git diff --check` 通过。
+- 全工作树 `pnpm typecheck` 通过；最终 Runtime 文案/目录边界修改后，Runtime typecheck 再通过。
+- Runtime 的 DSH / HUD / hook / repository / RPC / provider-mode 13 文件、165 测试通过。
+- runtime-server 恢复/身份相关子集 57 测试通过，108 条因名称筛选未执行；其中新增 DSH 的匹配、不同 ID、超时重试、超时新开 4 场景。
+- TerminalHud / SessionLoaderDialog / HierarchyShell 8 文件、196 测试通过；开启 manifest 能力后统一复跑。原有其它 Agent 行为断言未更改；总注册/页签列表仅增加 DSH。
+- manifest 5 测试通过；`pnpm check:identifiers`、`git diff --check` 通过。
+- 真实 Python PTY HUD/标题/目录探针 1 条、真实 Runtime/node-pty 数据库重开探针 1 条通过。
 
-未执行：全量测试、打包、真实 Electron 界面、通知中心、11 项完整产品及性能签收。HUD、标题、目录、自动恢复、原生 Fork 子会话载入、模式控制和 mt 属后续关卡，本关停下交回。
+未执行全量测试、打包、真实 Electron 界面、通知中心和完整产品/性能签收。第二关已审证据保留于 [evidence/dsh-stage2/summary.json](evidence/dsh-stage2/summary.json) 与 Git 历史；本关停下交回。
