@@ -513,14 +513,22 @@ async function dispose(h: PackagedHarness): Promise<void> {
 async function changeMode(h: PackagedHarness, sid: string, mode: string): Promise<{ before: number; after: number }> {
   const surface = paneForSession(h.page, sid).locator('.terminal-surface')
   const before = await positivePid(surface)
-  await hudForSession(h.page, sid).locator('.status-perm-badge').click()
+  const badge = hudForSession(h.page, sid).locator('.status-perm-badge')
+  const leavingBypass = (await badge.innerText()).trim() === 'BP'
+  await badge.click()
   const menu = h.page.getByRole('menu', { name: '权限模式' })
   await expect(menu.getByRole('menuitem')).toHaveCount(4)
   await saveScreenshot(menu, '05-execution-modes.png')
   await menu.getByRole('menuitem', { name: mode, exact: true }).click()
-  const confirmation = h.page.getByRole('dialog')
-  if (await confirmation.isVisible().catch(() => false)) {
-    await confirmation.locator('button').last().click()
+  if (mode === 'Bypass Permissions' || leavingBypass) {
+    const confirmation = h.page.getByRole('alertdialog', {
+      name: mode === 'Bypass Permissions' ? '切换到高权限模式' : '退出高权限模式', exact: true
+    })
+    await expect(confirmation).toBeVisible()
+    await confirmation.getByRole('button', {
+      name: mode === 'Bypass Permissions' ? '确认切换' : '确认退出', exact: true
+    }).click()
+    await expect(confirmation).toHaveCount(0)
   }
   let after = before
   await expect.poll(async () => {
@@ -636,6 +644,72 @@ test.describe('Codex packaged acceptance — real CLI and explicit controlled fi
       await expect(paneForSession(h.page, sid).locator('.provider-restore-banner')).toHaveCount(0)
       await saveScreenshot(h.page, '08-restart-memory.png')
       await saveProof('restart.json', { sid, providerId, bindingAfter: readDbRows(h.dataDir, sid).bindings })
+    } finally { await dispose(h) }
+  })
+
+  test('closure PRD 5: Bypass and Default confirm, respawn and retain a real new-turn memory', async () => {
+    const dirs = await createIsolatedWorkspace('modes-closure')
+    const h = await launchPackagedApp(dirs)
+    try {
+      const { sessionId: sid, surface } = await launchCodex(h)
+      await completeTurn(h, sid, surface, 'Remember mode codeword river-slate-842. Reply only MODES_READY.', /MODES_READY/)
+      const providerId = await waitForProviderSessionId(h.dataDir, sid)
+      const modes = []
+      for (const mode of ['Bypass Permissions', 'Default']) {
+        const processChange = await changeMode(h, sid, mode)
+        await completeTurn(h, sid, paneForSession(h.page, sid).locator('.terminal-surface'),
+          'Which mode codeword did I ask you to remember? Reply only that codeword.', /river-slate-842/)
+        expect(await waitForProviderSessionId(h.dataDir, sid)).toBe(providerId)
+        const context = (await rolloutEvents(h, providerId)).findLast((e) => e.type === 'turn_context')?.payload
+        const expectedSandbox = mode === 'Bypass Permissions' ? 'danger-full-access' : 'read-only'
+        expect(context?.sandbox_policy?.type).toBe(expectedSandbox)
+        expect(context?.approval_policy).toBe(mode === 'Bypass Permissions' ? 'never' : 'on-request')
+        modes.push({ mode, ...processChange, sandbox: context.sandbox_policy.type, approval: context.approval_policy })
+        await saveProof('closure-modes.json', { sid, providerId, modes, turns: h.turnProofs })
+        await saveScreenshot(h.page, mode === 'Bypass Permissions' ? 'closure-05-bypass.png' : 'closure-05-default.png')
+      }
+    } finally { await dispose(h) }
+  })
+
+  test('closure PRD 8: independent restart stays starting for 10 seconds then recalls a codeword', async () => {
+    const dirs = await createIsolatedWorkspace('restart-closure')
+    let h = await launchPackagedApp(dirs)
+    try {
+      const { sessionId: sid, surface } = await launchCodex(h)
+      await completeTurn(h, sid, surface, 'Remember restart codeword cedar-brook-573. Reply only RESTART_READY.', /RESTART_READY/)
+      const providerId = await waitForProviderSessionId(h.dataDir, sid)
+      const originalTurn = h.turnProofs.at(-1)!
+      const turns = h.turnProofs
+      await h.close()
+      h = await launchPackagedApp(dirs)
+      h.turnProofs = turns
+      const pane = paneForSession(h.page, sid)
+      const restored = pane.locator('.terminal-surface')
+      await positivePid(restored)
+      const staticStartAt = Date.now()
+      await h.page.waitForTimeout(10_000)
+      const staticElapsedMs = Date.now() - staticStartAt
+      const staticStatus = readCurrentWorkStatus(h.dataDir, sid)?.status
+      expect(staticStatus).toBe('starting')
+      // Readiness is the visible DAG status and absence of a restored claim;
+      // the existing UI does not promise a restoring banner for every launch.
+      const banner = pane.locator('.provider-restore-banner')
+      const staticBanner = await banner.count() ? await banner.innerText() : null
+      await expect(pane).not.toContainText('已恢复')
+      const dag = await openDagWindow(h)
+      await waitForDagNodeStatus(dag, sid, 'status-starting')
+      await saveScreenshot(h.page, 'closure-08-static-restart.png')
+      await saveProof('closure-restart-static.json', { sid, providerId, staticElapsedMs, staticStatus,
+        banner: staticBanner, bindingBeforeQuestion: readDbRows(h.dataDir, sid).bindings })
+      const prompt = 'Which restart codeword did I ask you to remember? Reply only that codeword.'
+      expect(prompt).not.toContain('cedar-brook-573')
+      await completeTurn(h, sid, restored, prompt, /cedar-brook-573/)
+      expect(h.turnProofs.at(-1)!.turnId).not.toBe(originalTurn.turnId)
+      expect(await waitForProviderSessionId(h.dataDir, sid)).toBe(providerId)
+      await expect(pane.locator('.provider-restore-banner')).toHaveCount(0)
+      await saveScreenshot(h.page, 'closure-08-recalled-memory.png')
+      await saveProof('closure-restart.json', { sid, providerId, staticElapsedMs, staticStatus,
+        turns: h.turnProofs, bindingAfter: readDbRows(h.dataDir, sid).bindings })
     } finally { await dispose(h) }
   })
 

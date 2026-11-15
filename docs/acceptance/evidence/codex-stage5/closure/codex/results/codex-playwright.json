@@ -1,0 +1,235 @@
+{
+  "config": {
+    "argv": [
+      "/Users/icesword/.nvm/versions/node/v22.16.0/bin/node",
+      "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/node_modules/@playwright/test/cli.js",
+      "test",
+      "tests/e2e/codex-acceptance.spec.ts",
+      "--grep",
+      "closure PRD",
+      "--retries=0",
+      "--reporter=line,json",
+      "--trace=retain-on-failure",
+      "--output=.cache/c8/codex-test-results"
+    ],
+    "configFile": "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/playwright.config.ts",
+    "rootDir": "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tests/e2e",
+    "failOnFlakyTests": false,
+    "forbidOnly": false,
+    "fullyParallel": false,
+    "globalSetup": null,
+    "globalTeardown": null,
+    "globalTimeout": 0,
+    "grep": {},
+    "grepInvert": null,
+    "maxFailures": 0,
+    "metadata": {
+      "actualWorkers": 1
+    },
+    "preserveOutput": "always",
+    "projects": [
+      {
+        "outputDir": "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c8/codex-test-results",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "",
+        "name": "",
+        "testDir": "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tests/e2e",
+        "testIgnore": [],
+        "testMatch": [
+          "**/*.@(spec|test).?(c|m)[jt]s?(x)"
+        ],
+        "timeout": 30000
+      }
+    ],
+    "quiet": false,
+    "reporter": [
+      [
+        "line"
+      ],
+      [
+        "json"
+      ]
+    ],
+    "reportSlowTests": {
+      "max": 5,
+      "threshold": 300000
+    },
+    "shard": null,
+    "tags": [],
+    "updateSnapshots": "missing",
+    "updateSourceMethod": "patch",
+    "version": "1.62.1",
+    "workers": 1,
+    "webServer": null
+  },
+  "suites": [
+    {
+      "title": "codex-acceptance.spec.ts",
+      "file": "codex-acceptance.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [],
+      "suites": [
+        {
+          "title": "Codex packaged acceptance — real CLI and explicit controlled fixtures",
+          "file": "codex-acceptance.spec.ts",
+          "line": 541,
+          "column": 6,
+          "specs": [
+            {
+              "title": "closure PRD 5: Bypass and Default confirm, respawn and retain a real new-turn memory",
+              "ok": false,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 300000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "failed",
+                      "duration": 33122,
+                      "error": {
+                        "message": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBe\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m) // Object.is equality\u001b[22m\n\nExpected: \u001b[32m\"on-request\"\u001b[39m\nReceived: \u001b[31m\"never\"\u001b[39m",
+                        "stack": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBe\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m) // Object.is equality\u001b[22m\n\nExpected: \u001b[32m\"on-request\"\u001b[39m\nReceived: \u001b[31m\"never\"\u001b[39m\n    at /Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tests/e2e/codex-acceptance.spec.ts:666:42",
+                        "location": {
+                          "file": "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tests/e2e/codex-acceptance.spec.ts",
+                          "column": 42,
+                          "line": 666
+                        },
+                        "snippet": "  664 |         const expectedSandbox = mode === 'Bypass Permissions' ? 'danger-full-access' : 'read-only'\n  665 |         expect(context?.sandbox_policy?.type).toBe(expectedSandbox)\n> 666 |         expect(context?.approval_policy).toBe(mode === 'Bypass Permissions' ? 'never' : 'on-request')\n      |                                          ^\n  667 |         modes.push({ mode, ...processChange, sandbox: context.sandbox_policy.type, approval: context.approval_policy })\n  668 |         await saveProof('closure-modes.json', { sid, providerId, modes, turns: h.turnProofs })\n  669 |         await saveScreenshot(h.page, mode === 'Bypass Permissions' ? 'closure-05-bypass.png' : 'closure-05-default.png')"
+                      },
+                      "errors": [
+                        {
+                          "location": {
+                            "file": "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tests/e2e/codex-acceptance.spec.ts",
+                            "column": 42,
+                            "line": 666
+                          },
+                          "message": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBe\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m) // Object.is equality\u001b[22m\n\nExpected: \u001b[32m\"on-request\"\u001b[39m\nReceived: \u001b[31m\"never\"\u001b[39m\n\n  664 |         const expectedSandbox = mode === 'Bypass Permissions' ? 'danger-full-access' : 'read-only'\n  665 |         expect(context?.sandbox_policy?.type).toBe(expectedSandbox)\n> 666 |         expect(context?.approval_policy).toBe(mode === 'Bypass Permissions' ? 'never' : 'on-request')\n      |                                          ^\n  667 |         modes.push({ mode, ...processChange, sandbox: context.sandbox_policy.type, approval: context.approval_policy })\n  668 |         await saveProof('closure-modes.json', { sid, providerId, modes, turns: h.turnProofs })\n  669 |         await saveScreenshot(h.page, mode === 'Bypass Permissions' ? 'closure-05-bypass.png' : 'closure-05-default.png')\n    at /Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tests/e2e/codex-acceptance.spec.ts:666:42"
+                        }
+                      ],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-11-15T12:44:20.913Z",
+                      "annotations": [],
+                      "attachments": [
+                        {
+                          "name": "error-context",
+                          "contentType": "text/markdown",
+                          "path": "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c8/codex-test-results/codex-acceptance-Codex-pac-3a750-tain-a-real-new-turn-memory/error-context.md"
+                        },
+                        {
+                          "name": "trace",
+                          "contentType": "application/zip",
+                          "path": "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c8/codex-test-results/codex-acceptance-Codex-pac-3a750-tain-a-real-new-turn-memory/trace.zip"
+                        }
+                      ],
+                      "errorLocation": {
+                        "file": "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tests/e2e/codex-acceptance.spec.ts",
+                        "column": 42,
+                        "line": 666
+                      }
+                    }
+                  ],
+                  "status": "unexpected"
+                }
+              ],
+              "id": "b33e2b54a6e36ead1596-f4321150afca4ace0b5e",
+              "file": "codex-acceptance.spec.ts",
+              "line": 650,
+              "column": 3
+            },
+            {
+              "title": "closure PRD 8: independent restart stays starting for 10 seconds then recalls a codeword",
+              "ok": false,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 300000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 1,
+                      "parallelIndex": 0,
+                      "status": "failed",
+                      "duration": 43180,
+                      "error": {
+                        "message": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mlocator\u001b[39m\u001b[2m).\u001b[22mtoBeVisible\u001b[2m(\u001b[22m\u001b[2m)\u001b[22m failed\n\nLocator: locator('[data-session-card=\"faaace09-d75a-44c0-9165-414d97ba0765\"] [data-testid=\"terminal-pane\"]:visible').locator('.provider-restore-banner.restoring')\nExpected: visible\nTimeout: 15000ms\nError: element(s) not found\n\nCall log:\n\u001b[2m  - Expect \"toBeVisible\" with timeout 15000ms\u001b[22m\n\u001b[2m  - waiting for locator('[data-session-card=\"faaace09-d75a-44c0-9165-414d97ba0765\"] [data-testid=\"terminal-pane\"]:visible').locator('.provider-restore-banner.restoring')\u001b[22m\n",
+                        "stack": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mlocator\u001b[39m\u001b[2m).\u001b[22mtoBeVisible\u001b[2m(\u001b[22m\u001b[2m)\u001b[22m failed\n\nLocator: locator('[data-session-card=\"faaace09-d75a-44c0-9165-414d97ba0765\"] [data-testid=\"terminal-pane\"]:visible').locator('.provider-restore-banner.restoring')\nExpected: visible\nTimeout: 15000ms\nError: element(s) not found\n\nCall log:\n\u001b[2m  - Expect \"toBeVisible\" with timeout 15000ms\u001b[22m\n\u001b[2m  - waiting for locator('[data-session-card=\"faaace09-d75a-44c0-9165-414d97ba0765\"] [data-testid=\"terminal-pane\"]:visible').locator('.provider-restore-banner.restoring')\u001b[22m\n\n    at /Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tests/e2e/codex-acceptance.spec.ts:695:28",
+                        "location": {
+                          "file": "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tests/e2e/codex-acceptance.spec.ts",
+                          "column": 28,
+                          "line": 695
+                        },
+                        "snippet": "  693 |       expect(staticStatus).toBe('starting')\n  694 |       const banner = pane.locator('.provider-restore-banner.restoring')\n> 695 |       await expect(banner).toBeVisible()\n      |                            ^\n  696 |       await expect(banner).toContainText('正在恢复 Codex 会话')\n  697 |       await expect(banner).not.toContainText('已恢复')\n  698 |       const dag = await openDagWindow(h)"
+                      },
+                      "errors": [
+                        {
+                          "location": {
+                            "file": "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tests/e2e/codex-acceptance.spec.ts",
+                            "column": 28,
+                            "line": 695
+                          },
+                          "message": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mlocator\u001b[39m\u001b[2m).\u001b[22mtoBeVisible\u001b[2m(\u001b[22m\u001b[2m)\u001b[22m failed\n\nLocator: locator('[data-session-card=\"faaace09-d75a-44c0-9165-414d97ba0765\"] [data-testid=\"terminal-pane\"]:visible').locator('.provider-restore-banner.restoring')\nExpected: visible\nTimeout: 15000ms\nError: element(s) not found\n\nCall log:\n\u001b[2m  - Expect \"toBeVisible\" with timeout 15000ms\u001b[22m\n\u001b[2m  - waiting for locator('[data-session-card=\"faaace09-d75a-44c0-9165-414d97ba0765\"] [data-testid=\"terminal-pane\"]:visible').locator('.provider-restore-banner.restoring')\u001b[22m\n\n\n  693 |       expect(staticStatus).toBe('starting')\n  694 |       const banner = pane.locator('.provider-restore-banner.restoring')\n> 695 |       await expect(banner).toBeVisible()\n      |                            ^\n  696 |       await expect(banner).toContainText('正在恢复 Codex 会话')\n  697 |       await expect(banner).not.toContainText('已恢复')\n  698 |       const dag = await openDagWindow(h)\n    at /Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tests/e2e/codex-acceptance.spec.ts:695:28"
+                        }
+                      ],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-11-15T12:44:54.332Z",
+                      "annotations": [],
+                      "attachments": [
+                        {
+                          "name": "error-context",
+                          "contentType": "text/markdown",
+                          "path": "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c8/codex-test-results/codex-acceptance-Codex-pac-cfbd5-nds-then-recalls-a-codeword/error-context.md"
+                        },
+                        {
+                          "name": "trace",
+                          "contentType": "application/zip",
+                          "path": "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c8/codex-test-results/codex-acceptance-Codex-pac-cfbd5-nds-then-recalls-a-codeword/trace.zip"
+                        }
+                      ],
+                      "errorLocation": {
+                        "file": "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tests/e2e/codex-acceptance.spec.ts",
+                        "column": 28,
+                        "line": 695
+                      }
+                    }
+                  ],
+                  "status": "unexpected"
+                }
+              ],
+              "id": "b33e2b54a6e36ead1596-956de0a8076c67f543ce",
+              "file": "codex-acceptance.spec.ts",
+              "line": 674,
+              "column": 3
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "errors": [],
+  "stats": {
+    "startTime": "2026-11-15T12:44:20.484Z",
+    "duration": 77082.23000000001,
+    "expected": 0,
+    "skipped": 0,
+    "unexpected": 2,
+    "flaky": 0
+  }
+}

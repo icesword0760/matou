@@ -1,0 +1,34 @@
+{
+  "sid": "7ac05e59-a705-433f-a961-1f5b2e5d9b3e",
+  "providerId": "01a1df3f-8840-78a0-b954-9af370ab98db",
+  "staticElapsedMs": 10003,
+  "staticStatus": "starting",
+  "turns": [
+    {
+      "sessionId": "7ac05e59-a705-433f-a961-1f5b2e5d9b3e",
+      "providerSessionId": "01a1df3f-8840-78a0-b954-9af370ab98db",
+      "turnId": "01a1df3f-8984-7f12-892d-19af19291d89",
+      "prompt": "Remember restart codeword cedar-brook-573. Reply only RESTART_READY.",
+      "finalAnswer": "RESTART_READY",
+      "completedAnswer": "RESTART_READY"
+    },
+    {
+      "sessionId": "7ac05e59-a705-433f-a961-1f5b2e5d9b3e",
+      "providerSessionId": "01a1df3f-8840-78a0-b954-9af370ab98db",
+      "turnId": "01a1df40-0b65-79c3-8130-f47a6f4c4f50",
+      "prompt": "Which restart codeword did I ask you to remember? Reply only that codeword.",
+      "finalAnswer": "cedar-brook-573",
+      "completedAnswer": "cedar-brook-573"
+    }
+  ],
+  "bindingAfter": [
+    {
+      "session_id": "7ac05e59-a705-433f-a961-1f5b2e5d9b3e",
+      "provider": "codex",
+      "provider_session_id": "01a1df3f-8840-78a0-b954-9af370ab98db",
+      "resume_state": "available",
+      "metadata_json": "{\"providerConfigId\":\"openai-official\",\"model\":\"gpt-6-astra\",\"permissionMode\":\"default\",\"cwd\":\"/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c8/codex-restart-recheck/restart-closure-kJcEBl/repo\",\"lastHookEvent\":\"Stop\",\"canFork\":true,\"observedUserPrompt\":true,\"observedNormalStop\":true}",
+      "updated_at": 1794746896014
+    }
+  ]
+}

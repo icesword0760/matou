@@ -1,0 +1,34 @@
+{
+  "originalFinalPackageAllComponentsMatch": {
+    "Contents/MacOS/\u7801\u5934": true,
+    "Contents/Resources/app.asar": true,
+    "Contents/Resources/runtime/index.cjs": true,
+    "Contents/Resources/runtime/mt-cli.cjs": true,
+    "Contents/Resources/runtime/control-assets/bin/mt": true,
+    "Contents/Resources/runtime/control-assets/providers/codex-developer-instructions.md": true
+  },
+  "branchProductSourceChanged": false,
+  "copiedCodexAuthRemaining": [],
+  "productCommit": "e62abdee8ff0382eaa65fee4c51adeca204cc302",
+  "published": false,
+  "testsRunThisRound": {
+    "codexInitial": {
+      "failed": 2,
+      "retries": 0
+    },
+    "restartRecheck": {
+      "passed": 1,
+      "retries": 0
+    },
+    "mainAntigravityTarget": {
+      "failed": 1,
+      "retries": 0
+    }
+  },
+  "closureVerdict": {
+    "bypass": "passed",
+    "default": "failed: approval policy never rather than configured on-request",
+    "normalStaticRestart": "passed",
+    "antigravityFailure": "existing test selector issue reproduced on main 7315400"
+  }
+}

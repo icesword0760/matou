@@ -1,0 +1,31 @@
+{
+  "sid": "55f6db0a-a4a1-442e-9bb4-f703433d516a",
+  "providerId": "01a1df3c-c979-79a0-9604-29720adf41ce",
+  "modes": [
+    {
+      "mode": "Bypass Permissions",
+      "before": 1721,
+      "after": 3381,
+      "sandbox": "danger-full-access",
+      "approval": "never"
+    }
+  ],
+  "turns": [
+    {
+      "sessionId": "55f6db0a-a4a1-442e-9bb4-f703433d516a",
+      "providerSessionId": "01a1df3c-c979-79a0-9604-29720adf41ce",
+      "turnId": "01a1df3c-cac9-7fb1-8cf9-349ad791f564",
+      "prompt": "Remember mode codeword river-slate-842. Reply only MODES_READY.",
+      "finalAnswer": "MODES_READY",
+      "completedAnswer": "MODES_READY"
+    },
+    {
+      "sessionId": "55f6db0a-a4a1-442e-9bb4-f703433d516a",
+      "providerSessionId": "01a1df3c-c979-79a0-9604-29720adf41ce",
+      "turnId": "01a1df3c-f11b-7612-a358-b93dcc99444a",
+      "prompt": "Which mode codeword did I ask you to remember? Reply only that codeword.",
+      "finalAnswer": "river-slate-842",
+      "completedAnswer": "river-slate-842"
+    }
+  ]
+}
