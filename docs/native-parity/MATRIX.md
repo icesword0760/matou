@@ -127,3 +127,16 @@ This does not close a whole capability group. Images under `artifacts/native-par
 | A08.01 / D01 | Normal Cmd+Q exits process; same data reopens with completed Chinese output, restoration divider and new prompt | A08-native-after-reopen.png; real bridge test additionally proves further input after restore. This closes visible completed-history restoration for this simple Mac Shell case, not full crash/Agent/large-history recovery. |
 | Output confirmation | Initial pre-output frame releases UI slot without sending invalid credit ACK; later frames arrive without further input | bridge_contract exercises split real zsh output, continued command and shutdown/reopen. No mock. |
 | Windows desktop | Native desktop, core and runtime branches type-check for x86_64 MSVC | No Windows desktop executable/link/install/real UI result in this batch. |
+
+
+## Canvas and multi-Shell results — N02t/u/v
+
+| Scenario | Reference baseline | Native actual result / evidence | Remaining difference |
+| --- | --- | --- | --- |
+| A02/A03 create canvas | Frozen SessionCanvasService createCanvas; numbered default titles, pinned-name conflict, receipts and navigation | 16-operation creation contract (includes sibling cases), 19-table source snapshots; B02-native-create-canvas.png proves immediate Chinese input after top plus | Full loading/error/disabled treatment and complete tab controls open |
+| A03 horizontal Shell | Frozen SceneTabBar control → createShellSibling; source-created Shell receives focus | B01-reference-create-shell.png vs B03-native-create-shell.png; source transaction contract, real three-PTY bridge | Remove-node control, source motion/shadows and pixel alignment open |
+| A03/A08 select/focus | Frozen activateScene/setFocusedSession and 12-operation source fixture | B04–B06 native card/old-tab/return evidence; independent marker input; saved focus survives navigation | Scrolling motion/anchoring, narrow layout, full keyboard navigation open |
+| A07 background Shell | Existing canvas hides views while owner retains the sessions | canvas_bridge_contract releases old command only while new canvas is selected; observes its real output, preserved env and no cross-session markers | Full background restart scheduling and UI performance evidence open |
+| A08 multi-Shell reopen | Source persistent navigation plus D01 completed-command restoration | B07-native-reopen-canvas.png shows active canvas, first-card focus, both histories and a fresh executed marker; actual app quit/relaunch | Full crash, Agent, large-history and window geometry cases open |
+
+The screenshots are functional evidence, not a passed same-state pixel comparison. All referenced images and canvas-build.json are under artifacts/native-parity/native/evidence; B01 is a reference-app image captured there for this paired sequence.

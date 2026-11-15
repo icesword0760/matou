@@ -49,12 +49,12 @@ Product scope and acceptance remain in
 
 - `desktop`: real GPUI window, source-derived initial Shell layout and native
   terminal painting/input/selection, connected to the domain owner off the UI
-  thread. Normal app quit drains the owner. Nonterminal controls are not yet wired.
+  thread. Normal app quit drains the owner. New canvas, horizontal Shell, tab selection and card focus are wired; other controls and full interaction/visual parity remain open.
 
 The desktop accepts only explicit absolute data/workspace/Shell-home paths.
 The isolated launcher supplies disposable paths and a distinct application ID.
-Recovery choices, clean-exit backup, separate runtime process/IPC, hierarchy
-actions, remaining controls, full packaging and platform acceptance remain open.
+Recovery choices, clean-exit backup, separate runtime process/IPC, remaining hierarchy
+actions and controls, full packaging and platform acceptance remain open.
 
 ## Run the current Mac slice
 

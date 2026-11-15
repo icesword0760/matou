@@ -7,7 +7,7 @@ use std::{
 
 use anyhow::{Context, Result, ensure};
 use matou_native_core::{
-    hierarchy::Session as StoredSession,
+    hierarchy::{self, HierarchyResult, Scene, Session as StoredSession, canvas},
     ownership::DatabaseOwner,
     session_graph,
     sessions::{self, SessionRun, StartShellRunInput},
@@ -125,6 +125,77 @@ impl ShellOwner {
     }
     pub fn graph(&self, scene_id: &str, window_id: Option<&str>) -> Result<Value> {
         session_graph::project_scene_graph(&self.connection, scene_id, window_id)
+    }
+
+    pub fn hierarchy(&self, window_id: &str) -> Result<HierarchyResult> {
+        hierarchy::read_hierarchy(&self.connection, window_id)
+    }
+
+    pub fn scenes(&self, task_id: &str) -> Result<Vec<Scene>> {
+        hierarchy::list_scenes(&self.connection, task_id)
+    }
+
+    pub fn select_scene(
+        &mut self,
+        window_id: &str,
+        scene_id: &str,
+        now: i64,
+    ) -> Result<HierarchyResult> {
+        hierarchy::select_scene(&mut self.connection, window_id, scene_id, now)
+    }
+
+    pub fn focus_session(
+        &mut self,
+        window_id: &str,
+        scene_id: &str,
+        session_id: &str,
+        now: i64,
+        message: &str,
+    ) -> Result<Value> {
+        hierarchy::focus_session(
+            &mut self.connection,
+            window_id,
+            scene_id,
+            session_id,
+            now,
+            message,
+        )
+    }
+
+    pub fn create_canvas(
+        &mut self,
+        command: &CommandMetadata,
+        input: &canvas::CreateCanvasInput,
+        ids: &canvas::CanvasIds,
+        messages: &canvas::CanvasMessages<'_>,
+        committed_at: i64,
+    ) -> Result<Value> {
+        canvas::create_canvas(
+            &mut self.connection,
+            command,
+            input,
+            ids,
+            messages,
+            committed_at,
+        )
+    }
+
+    pub fn create_shell_sibling(
+        &mut self,
+        command: &CommandMetadata,
+        input: &canvas::CreateShellSiblingInput,
+        ids: &canvas::CanvasIds,
+        messages: &canvas::CanvasMessages<'_>,
+        committed_at: i64,
+    ) -> Result<Value> {
+        canvas::create_shell_sibling(
+            &mut self.connection,
+            command,
+            input,
+            ids,
+            messages,
+            committed_at,
+        )
     }
 
     /// Resolve environment and geometry before calling. Startup handshaking stays

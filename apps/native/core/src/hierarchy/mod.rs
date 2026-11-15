@@ -1,3 +1,4 @@
+pub mod canvas;
 mod model;
 mod navigation;
 
@@ -10,7 +11,7 @@ use crate::storage::{CommandMetadata, DomainEventInput, execute};
 pub use model::{
     ExecutionContext, HierarchyResult, Mount, Scene, Session, Task, WindowNavigation, Workspace,
 };
-pub use navigation::read_hierarchy;
+pub use navigation::{focus_session, list_scenes, read_created_path, read_hierarchy, select_scene};
 
 use navigation::{activate_workspace, register_window};
 

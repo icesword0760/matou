@@ -14,7 +14,10 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, bail};
 use matou_native_core::{
-    hierarchy::{self, BootstrapWindowInput, HierarchyIds, HierarchyResult},
+    hierarchy::{
+        self, BootstrapWindowInput, HierarchyIds, HierarchyResult, Scene,
+        canvas::{CanvasIds, CanvasMessages, CreateCanvasInput, CreateShellSiblingInput},
+    },
     journal::JournalOptions,
     pty::ShellLaunch,
     startup::{self, BootstrapResult},
@@ -66,6 +69,21 @@ pub enum Command {
     RetryStorage {
         session_id: String,
     },
+    CreateCanvas {
+        task_id: String,
+    },
+    CreateShellSibling {
+        scene_id: String,
+        source_session_id: String,
+        parent_session_id: Option<String>,
+    },
+    SelectScene {
+        scene_id: String,
+    },
+    FocusSession {
+        scene_id: String,
+        session_id: String,
+    },
     Refresh,
     Shutdown,
 }
@@ -73,6 +91,12 @@ pub enum Command {
 pub enum Event {
     Ready {
         hierarchy: HierarchyResult,
+        scenes: Vec<Scene>,
+        graph: Value,
+    },
+    Navigation {
+        hierarchy: HierarchyResult,
+        scenes: Vec<Scene>,
         graph: Value,
     },
     Graph(Value),
@@ -199,62 +223,20 @@ fn run(
         "默认",
         now(),
     )?;
-    let scene_id = hierarchy
+    let mut scene_id = hierarchy
         .scene
         .as_ref()
         .context("active native scene")?
         .id
         .clone();
     let mut owner = ShellOwner::new(connection, ownership, id)?;
-    let graph = owner.graph(&scene_id, None)?;
-    let nodes = graph["nodes"].as_array().context("scene graph nodes")?;
-    let mut sessions = Vec::new();
-    for node in nodes {
-        if node["currentMode"] != "shell" {
-            continue;
-        }
-        let session_id = node["sessionId"]
-            .as_str()
-            .context("graph session id")?
-            .to_owned();
-        let stored = owner
-            .session(&session_id)?
-            .context("stored scene session")?;
-        if stored.archived_at.is_some() {
-            continue;
-        }
-        let mut inherited_env: BTreeMap<OsString, OsString> = std::env::vars_os().collect();
-        inherited_env.insert("HOME".into(), options.shell_home.clone().into_os_string());
-        inherited_env.insert(
-            "ZDOTDIR".into(),
-            options.shell_home.clone().into_os_string(),
-        );
-        inherited_env.insert("SHELL".into(), options.shell.clone().into_os_string());
-        owner.launch(
-            SessionOptions {
-                session_id: session_id.clone(),
-                launch: ShellLaunch {
-                    executable: options.shell.clone(),
-                    cwd: stored.cwd.into(),
-                    data_root: options.data_root.clone(),
-                    inherited_env,
-                    env: BTreeMap::new(),
-                    cols: 80,
-                    rows: 24,
-                },
-                terminal: TerminalOptions::new(80, 24, 7, 14),
-                journal: JournalOptions::default(),
-                restored_history: Vec::new(),
-                collect_history: true,
-            },
-            true,
-            "──────── 会话已恢复 ────────",
-        )?;
-        sessions.push(session_id);
-    }
+    let mut sessions = HashSet::new();
+    ensure_scene_shells(&mut owner, &options, &scene_id, &mut sessions)?;
+    let scenes = owner.scenes(&hierarchy.task.as_ref().context("active task")?.id)?;
     send.send_blocking(Event::Ready {
         hierarchy,
-        graph: owner.graph(&scene_id, None)?,
+        scenes,
+        graph: owner.graph(&scene_id, Some(window_id))?,
     })?;
     let mut dirty: HashSet<String> = sessions.iter().cloned().collect();
     let mut sequence = HashMap::<String, u64>::new();
@@ -272,6 +254,47 @@ fn run(
                     break;
                 }
             };
+            if matches!(
+                &command,
+                Command::CreateCanvas { .. }
+                    | Command::CreateShellSibling { .. }
+                    | Command::SelectScene { .. }
+                    | Command::FocusSession { .. }
+            ) {
+                // Each command mutates the authoritative domain before the view changes.
+                // A failed launch leaves its real created structure available for recovery.
+                match navigate(&mut owner, window_id, command) {
+                    Ok(hierarchy) => {
+                        scene_id = hierarchy
+                            .scene
+                            .as_ref()
+                            .context("active scene after navigation")?
+                            .id
+                            .clone();
+                        let scenes = owner.scenes(
+                            &hierarchy
+                                .task
+                                .as_ref()
+                                .context("active task after navigation")?
+                                .id,
+                        )?;
+                        send.send_blocking(Event::Navigation {
+                            hierarchy,
+                            scenes,
+                            graph: owner.graph(&scene_id, Some(window_id))?,
+                        })?;
+                        if let Err(error) =
+                            ensure_scene_shells(&mut owner, &options, &scene_id, &mut sessions)
+                        {
+                            send.send_blocking(Event::Diagnostic(format!("{error:#}")))?;
+                        }
+                        // Existing workers and terminal surfaces remain alive across tab changes.
+                        dirty.extend(sessions.iter().cloned());
+                    }
+                    Err(error) => send.send_blocking(Event::Diagnostic(format!("{error:#}")))?,
+                }
+                continue;
+            }
             let (reply, result) = mpsc::channel();
             let (session_id, request, refresh) = match command {
                 Command::Input { session_id, bytes } => {
@@ -323,9 +346,13 @@ fn run(
                 Command::Refresh => {
                     dirty.extend(sessions.iter().cloned());
                     awaiting_ui.clear();
-                    send.send_blocking(Event::Graph(owner.graph(&scene_id, None)?))?;
+                    send.send_blocking(Event::Graph(owner.graph(&scene_id, Some(window_id))?))?;
                     continue;
                 }
+                Command::CreateCanvas { .. }
+                | Command::CreateShellSibling { .. }
+                | Command::SelectScene { .. }
+                | Command::FocusSession { .. } => unreachable!("navigation handled above"),
                 Command::Shutdown => {
                     shutdown = true;
                     break;
@@ -384,7 +411,7 @@ fn run(
             }
         }
         if graph_dirty {
-            send.send_blocking(Event::Graph(owner.graph(&scene_id, None)?))?;
+            send.send_blocking(Event::Graph(owner.graph(&scene_id, Some(window_id))?))?;
         }
         operations.retain(|(session_id, result, refresh)| match result.try_recv() {
             Ok(Ok(())) => {
@@ -442,6 +469,140 @@ fn run(
     }
     owner.shutdown()?;
     Ok(())
+}
+
+fn ensure_scene_shells(
+    owner: &mut ShellOwner,
+    options: &LaunchOptions,
+    scene_id: &str,
+    sessions: &mut HashSet<String>,
+) -> Result<()> {
+    let graph = owner.graph(scene_id, None)?;
+    for node in graph["nodes"].as_array().context("scene graph nodes")? {
+        if node["currentMode"] != "shell" || node.get("archivedAt").is_some() {
+            continue;
+        }
+        let session_id = node["sessionId"].as_str().context("graph session id")?;
+        if sessions.contains(session_id) {
+            continue;
+        }
+        let stored = owner.session(session_id)?.context("stored scene session")?;
+        let mut inherited_env: BTreeMap<OsString, OsString> = std::env::vars_os().collect();
+        inherited_env.insert("HOME".into(), options.shell_home.clone().into_os_string());
+        inherited_env.insert(
+            "ZDOTDIR".into(),
+            options.shell_home.clone().into_os_string(),
+        );
+        inherited_env.insert("SHELL".into(), options.shell.clone().into_os_string());
+        owner.launch(
+            SessionOptions {
+                session_id: session_id.to_owned(),
+                launch: ShellLaunch {
+                    executable: options.shell.clone(),
+                    cwd: stored.cwd.into(),
+                    data_root: options.data_root.clone(),
+                    inherited_env,
+                    env: BTreeMap::new(),
+                    cols: 80,
+                    rows: 24,
+                },
+                terminal: TerminalOptions::new(80, 24, 7, 14),
+                journal: JournalOptions::default(),
+                restored_history: Vec::new(),
+                collect_history: true,
+            },
+            true,
+            "──────── 会话已恢复 ────────",
+        )?;
+        sessions.insert(session_id.to_owned());
+    }
+    Ok(())
+}
+
+fn navigate(owner: &mut ShellOwner, window_id: &str, command: Command) -> Result<HierarchyResult> {
+    let time = now();
+    let ids = CanvasIds {
+        scene_id: id(),
+        root_node_id: id(),
+        secondary_node_id: id(),
+        session_id: id(),
+        mount_id: id(),
+        relation_id: id(),
+    };
+    let messages = CanvasMessages {
+        new_canvas: "新画布",
+        duplicate_scene_name: "当前事项下已存在同名页签",
+        workspace_path_invalid: "工作区目录不可用，请先在本地恢复原路径，或移出该工作区",
+        detached_session_must_return: "独立窗口中的会话需要先回到原会话列表",
+    };
+    let metadata = |kind: &str, input: &Value| CommandMetadata {
+        command_id: id(),
+        command_type: kind.into(),
+        request_hash: input.to_string(),
+        causation_id: None,
+        correlation_id: None,
+    };
+    match command {
+        Command::CreateCanvas { task_id } => {
+            let input = CreateCanvasInput {
+                window_id: window_id.into(),
+                task_id,
+                title: None,
+                navigation: None,
+                now: time,
+            };
+            owner.create_canvas(
+                &metadata("hierarchy.create-canvas", &serde_json::to_value(&input)?),
+                &input,
+                &ids,
+                &messages,
+                time,
+            )?;
+        }
+        Command::CreateShellSibling {
+            scene_id,
+            source_session_id,
+            parent_session_id,
+        } => {
+            let input = CreateShellSiblingInput {
+                window_id: window_id.into(),
+                scene_id,
+                source_session_id,
+                parent_session_id,
+                execution_context_id: None,
+                title: None,
+                navigation: None,
+                now: time,
+            };
+            owner.create_shell_sibling(
+                &metadata(
+                    "hierarchy.create-shell-sibling",
+                    &serde_json::to_value(&input)?,
+                ),
+                &input,
+                &ids,
+                &messages,
+                time,
+            )?;
+        }
+        Command::SelectScene { scene_id } => {
+            owner.select_scene(window_id, &scene_id, time)?;
+        }
+        Command::FocusSession {
+            scene_id,
+            session_id,
+        } => {
+            owner.focus_session(
+                window_id,
+                &scene_id,
+                &session_id,
+                time,
+                "会话不在当前画布中",
+            )?;
+        }
+        _ => unreachable!("only navigation commands reach navigate"),
+    }
+    owner.hierarchy(window_id)
 }
 
 fn id() -> String {
