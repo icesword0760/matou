@@ -102,6 +102,7 @@ export interface SessionHudView {
   permissionMode?: HudPermissionMode
   modelStrategy?: HudModelStrategy
   model?: string
+  effort?: string
   sessionName?: string
   contextPercent?: number
   contextWindowSize?: number

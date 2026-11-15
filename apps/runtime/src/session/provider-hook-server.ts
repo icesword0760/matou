@@ -5,7 +5,7 @@ import type { AgentProfileId, SessionWorkStatus } from '@matou/domain'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 
 import { runtimeMessages } from '../i18n/messages'
 import {
@@ -18,6 +18,7 @@ import {
   defaultAntigravityRoot,
   latestAntigravityAutoTitle
 } from './antigravity-session-catalog'
+import { latestCodexAutoTitle } from './codex-session-title'
 import { latestClaudeAutoTitle } from './claude-session-catalog'
 import { toProviderNotificationEvent, type ProviderNotificationEvent } from './provider-notification-event'
 
@@ -85,6 +86,7 @@ export interface AgentTeamObservation {
 
 export interface ProviderHookServerOptions {
   antigravitySettingsPath?: string
+  codexRoot?: string
   antigravityRoot?: string
   controlAssetRoot?: string
   currentRunId?: (sessionId: string) => string | undefined
@@ -146,6 +148,7 @@ export class ProviderHookServer {
   readonly #dataRoot: string
   readonly #sessions: SessionRepository
   readonly #antigravitySettingsPath: string
+  readonly #codexRoot: string
   readonly #antigravityRoot: string
   readonly #defaultMtExecutablePath: string | undefined
   readonly #registrations = new Map<string, HookRegistrationRecord>()
@@ -162,6 +165,7 @@ export class ProviderHookServer {
   #port: number | undefined
 
   constructor(dataRoot: string, sessions: SessionRepository, options: ProviderHookServerOptions = {}) {
+    this.#codexRoot = options.codexRoot ?? (process.env.CODEX_HOME || join(homedir(), '.codex'))
     this.#dataRoot = dataRoot
     this.#sessions = sessions
     this.#antigravitySettingsPath = options.antigravitySettingsPath ??
@@ -638,6 +642,12 @@ export class ProviderHookServer {
         }
         if (observations.length > 0) await this.#onTeamObservations(observations)
       }
+      if (registration.provider === 'codex' && providerSessionId) {
+        const indexPath = join(this.#codexRoot, 'session_index.jsonl')
+        await this.#observeTitle(registration, providerSessionId, indexPath).catch(() => false)
+        if (eventName === 'SessionEnd') this.#stopTitleWatch(registration)
+        else await this.#startTitleWatch(registration, providerSessionId, indexPath)
+      }
       if (registration.provider === 'antigravity' && !isStatusline && eventName === 'Stop') {
         const antigravitySessionId = providerSessionId ?? registration.confirmedProviderSessionId
         if (antigravitySessionId) {
@@ -709,15 +719,16 @@ export class ProviderHookServer {
       this.#stopTitleWatch(registration)
       return false
     }
-    const transcript = await readTranscriptTail(transcriptPath).catch(() => '')
+    const title = registration.provider === 'codex'
+      ? await latestCodexAutoTitle(transcriptPath, providerSessionId)
+      : latestClaudeAutoTitle(await readTranscriptTail(transcriptPath).catch(() => ''), providerSessionId)
     if (!this.#acceptsSideEffects(registration)) {
       this.#stopTitleWatch(registration)
       return false
     }
-    const title = latestClaudeAutoTitle(transcript, providerSessionId)
     if (!title) return false
     if (registration.observedTitle === title) {
-      this.#stopTitleWatch(registration)
+      if (registration.provider !== 'codex') this.#stopTitleWatch(registration)
       return true
     }
     await this.#onTitleObserved({
@@ -728,7 +739,7 @@ export class ProviderHookServer {
       title
     })
     registration.observedTitle = title
-    this.#stopTitleWatch(registration)
+    if (registration.provider !== 'codex') this.#stopTitleWatch(registration)
     return true
   }
 
@@ -747,7 +758,9 @@ export class ProviderHookServer {
 
     let watcher: FSWatcher
     try {
-      watcher = watch(transcriptPath, { persistent: false }, () => {
+      const codex = registration.provider === 'codex'
+      watcher = watch(codex ? dirname(transcriptPath) : transcriptPath, { persistent: false }, (_event, filename) => {
+        if (codex && filename && filename !== basename(transcriptPath)) return
         const active = registration.titleWatch
         if (!active || active.debounce) return
         active.debounce = setTimeout(() => {

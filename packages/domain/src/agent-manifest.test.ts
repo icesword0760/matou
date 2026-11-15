@@ -38,7 +38,7 @@ describe('agent-manifest', () => {
     expect(getAgentManifest('unknown')).toBeUndefined()
   })
 
-  it('preserves exact baseline capabilities for claude-code and codex', () => {
+  it('preserves Claude baseline and exposes only stage-three Codex capabilities', () => {
     const claude = AGENT_MANIFESTS['claude-code']
     expect(claude.displayName).toBe('Claude Code')
     expect(claude.shortName).toBe('Claude')
@@ -69,7 +69,7 @@ describe('agent-manifest', () => {
     expect(codex.capabilities).toMatchObject({
       fork: false,
       sessionLoader: false,
-      autoTitle: false,
+      autoTitle: true,
       providerConfig: true,
       accountSwitching: false,
       agentTeam: false,
@@ -78,10 +78,12 @@ describe('agent-manifest', () => {
       permissionSwitchMode: 'respawn-only',
       permissionModes: ['default', 'acceptEdits', 'plan', 'bypassPermissions']
     })
-    expect(codex.hud.showAccountControl).toBe(true)
+    expect(codex.hud.showAccountControl).toBe(false)
+    expect(codex.hud).toMatchObject({ hideEmptyQuotaPlaceholder: true, supportsTodos: false,
+      supportsAgentsCount: false, supportsMcpSummary: false, supportsHooksCount: false, supportsQuotaWindows: false })
     expect(codex.instructionFiles).toEqual({
-      candidates: ['CLAUDE.md'],
-      buttonLabel: 'ClaudeMd'
+      candidates: ['AGENTS.md'],
+      buttonLabel: 'AGENTS.md'
     })
   })
 

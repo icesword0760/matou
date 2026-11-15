@@ -3643,6 +3643,13 @@ export class RuntimeServer {
     } else {
       gitDirectory = await resolveGitDirectory(current.cwd)
     }
+    if (current.provider === 'codex') {
+      const runId = this.#sessions.get(sessionId)?.runId
+      if (runId) await this.#hud.refreshCodexTranscript(sessionId, {
+        runId, currentRunId: () => this.#closed ? undefined : this.#sessions.get(sessionId)?.runId
+      })
+      if (this.#closed) return
+    }
     this.#hud.refreshConfig(sessionId)
     this.#hud.updateEnvironment(sessionId, {
       cwd: current.cwd,

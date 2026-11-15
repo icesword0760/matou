@@ -69,3 +69,47 @@ it.each(['unknown', 'paused', ''])('removes task notifications with non-error st
 it('removes task notifications with missing status', async () => {
   expect((await write(use(), { type: 'user', message: { content: notification().replace('<status>completed</status>', '') } }))?.agents).toEqual([])
 })
+
+describe('Codex rollout HUD', () => {
+  const row = (type: string, payload: unknown) => ({ type, payload })
+  const tokens = (used: unknown, size: unknown = 258400) => row('event_msg', { type: 'token_count', info: {
+    last_token_usage: { total_tokens: used }, total_token_usage: { total_tokens: 9999999 }, model_context_window: size
+  } })
+  it('uses the latest request usage and actual model/effort, ignoring cumulative totals and wrapper exec', async () => {
+    const hud = await write(row('session_meta', { timestamp: stamp }),
+      row('turn_context', { model: 'gpt-6-astra', effort: 'medium' }), tokens(34069), tokens(34175),
+      row('response_item', { type: 'custom_tool_call', name: 'exec', call_id: 'wrapper' }))
+    expect(hud).toMatchObject({ model: 'gpt-6-astra', effort: 'medium', contextPercent: 13, contextWindowSize: 258400,
+      toolCounts: [], todos: [] })
+    expect(hud?.sessionName).toBeUndefined()
+    await appendFile(path, JSON.stringify(row('turn_context', { model: 'gpt-6.1-sol' })) + '\n')
+    expect(await reader.read(path)).toMatchObject({ model: 'gpt-6.1-sol' })
+    expect((await reader.read(path))?.effort).toBeUndefined()
+  })
+  it.each([null, undefined, -1, '20'])('hides invalid or missing token data %s', async used => {
+    expect((await write(tokens(1), tokens(used)))?.contextPercent).toBeUndefined()
+  })
+  it('invalidates context on compaction until a fresh valid sample, preserving true zero', async () => {
+    expect((await write(tokens(12000), row('compacted', {})))?.contextPercent).toBeUndefined()
+    await appendFile(path, JSON.stringify(tokens(0)) + '\n')
+    expect((await reader.read(path))?.contextPercent).toBe(0)
+    await appendFile(path, JSON.stringify(row('event_msg', { type: 'context_compacted' })) + '\n')
+    expect((await reader.read(path))?.contextPercent).toBeUndefined()
+    await appendFile(path, JSON.stringify(tokens(100, 0)) + '\n')
+    expect((await reader.read(path))?.contextWindowSize).toBeUndefined()
+  })
+  it('counts only completed structured commands once per ID and supports incremental partial rows', async () => {
+    const command = row('event_msg', { type: 'item_completed', item: {
+      type: 'CommandExecution', id: 'exec-1', status: 'completed', exit_code: 0, command: ['python3', '-c', 'print(2)']
+    } })
+    await write(command, command)
+    const next = JSON.stringify({ ...command, payload: { ...command.payload as object, item: {
+      type: 'CommandExecution', id: 'exec-2', status: 'failed', exit_code: 127
+    } } })
+    await appendFile(path, next.slice(0, 40))
+    expect((await reader.read(path))?.toolCounts).toEqual([{ name: 'Bash', count: 1 }])
+    await appendFile(path, next.slice(40) + '\n')
+    expect(await reader.read(path)).toMatchObject({ toolCounts: [{ name: 'Bash', count: 2 }], lastTool: { status: 'error' },
+      completedToolCalls: [{ id: 'exec-1', name: 'Bash' }, { id: 'exec-2', name: 'Bash' }] })
+  })
+})

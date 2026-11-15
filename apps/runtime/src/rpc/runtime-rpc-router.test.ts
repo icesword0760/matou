@@ -964,3 +964,20 @@ function payload(commandId: string, input: Record<string, unknown>) {
 function runGit(cwd: string, ...args: string[]): string {
   return execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8' })
 }
+
+it('uses only AGENTS.md for Codex instruction reads and saves', async () => {
+  const cwd = join(testRoot, 'codex-instructions')
+  await mkdir(cwd)
+  await writeFile(join(cwd, 'CLAUDE.md'), '# Other provider\n')
+  const created = await router.handle('hierarchy.bootstrap-window', payload('codex-instructions', {
+    windowId: 'codex-instructions-window', defaultRootDirectory: cwd, defaultName: 'Codex', now: 1
+  })) as { session: { id: string } }
+  database.run("UPDATE sessions SET kind = 'codex' WHERE id = ?", created.session.id)
+  expect(await router.handle('session.instructions-read', { sessionId: created.session.id })).toEqual({
+    path: join(cwd, 'AGENTS.md'), content: '', exists: false
+  })
+  expect(await router.handle('session.instructions-write', { sessionId: created.session.id, content: '# Codex instructions\n' })).toEqual({
+    path: join(cwd, 'AGENTS.md'), content: '# Codex instructions\n', exists: true
+  })
+  expect(await readFile(join(cwd, 'CLAUDE.md'), 'utf8')).toBe('# Other provider\n')
+})

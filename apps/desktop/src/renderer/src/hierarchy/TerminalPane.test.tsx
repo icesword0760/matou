@@ -1068,3 +1068,14 @@ function worktreeEnvironment(
   if (state === 'missing' || state === 'failed') return { ...base, state, error: 'path-missing' }
   return { ...base, state }
 }
+
+it('offers restore Codex automatic title for a manually named card without enabling Fork', async () => {
+  const props = fixture()
+  const onRestoreAutoTitle = vi.fn()
+  render(<TerminalPane {...props} session={{ ...props.session, kind: 'codex', titleSource: 'manual' }}
+    onRestoreAutoTitle={onRestoreAutoTitle} onFork={vi.fn()} />)
+  await userEvent.setup().pointer({ keys: '[MouseRight]', target: screen.getByRole('banner') })
+  await userEvent.setup().click(screen.getByRole('menuitem', { name: '恢复 Codex 自动标题' }))
+  expect(onRestoreAutoTitle).toHaveBeenCalledWith('session-1')
+  expect(screen.queryByRole('menuitem', { name: '⑂ Fork 会话' })).toBeNull()
+})

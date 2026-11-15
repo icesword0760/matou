@@ -75,7 +75,7 @@ export function TerminalHud(props: {
     account?.usageIssue === 'unsupported' ? (zh ? '暂无用量数据' : 'Usage unavailable') :
     accountState?.usageRefreshFailed || account?.usageIssue ? (zh ? '读取失败，保留上次数据' : 'Read failed; last known usage') :
     account?.usage?.stale ? (zh ? '上次记录，使用后更新' : 'Last known; updates after use') : ''
-  const usageWindows = (useDeviceQuota ? deviceWindows : hud?.usageWindows ?? [])
+  const usageWindows = (manifest?.hud.supportsQuotaWindows === false ? [] : useDeviceQuota ? deviceWindows : hud?.usageWindows ?? [])
     .filter(window => Number.isFinite(window.percent))
   const quotaEmpty = quotaProblem || (!accountState ? (zh ? '正在读取用量' : 'Loading usage') :
     accountState.operation === 'idle' && !account ? (zh ? '添加账户后查看用量' : 'Add an account to view usage') :
@@ -160,7 +160,7 @@ export function TerminalHud(props: {
       {modelLabel(hud, m) && <span className="status-field status-model status-priority-8"
         title={m.modelTitle(modelLabel(hud, m))}>{modelLabel(hud, m)}</span>}
       {hud.contextPercent !== undefined ? <ContextRing percent={hud.contextPercent} /> :
-        hud.contextWindowSize !== undefined && hud.contextWindowSize > 0 &&
+        hud.provider !== 'codex' && hud.contextWindowSize !== undefined && hud.contextWindowSize > 0 &&
         <span className="status-field status-priority-7">{zh ? '等待真实用量' : 'Awaiting usage'}</span>}
       {manifest?.hud.supportsMcpSummary !== false && hud.configCounts && hud.configCounts.mcpServers > 0 && <HudDetail
         label={`${hud.configCounts.mcpServers} MCPs`} title={m.mcpServers}
@@ -179,7 +179,7 @@ export function TerminalHud(props: {
         items={hud.configCounts.hookNames ?? []} />}
       {usageWindows.length === 0 && manifest?.hud.hideEmptyQuotaPlaceholder !== true && <span className="status-field status-usage status-priority-6" role="status"
         title={useDeviceQuota ? `${quotaAccount} · ${quotaEmpty}` : (zh ? '暂无用量数据' : 'Usage unavailable')}>—</span>}
-      {!useDeviceQuota && (hud.allUsageWindows?.length ?? 0) > 0
+      {manifest?.hud.supportsQuotaWindows !== false && !useDeviceQuota && (hud.allUsageWindows?.length ?? 0) > 0
         ? <QuotaDetailWindows windows={usageWindows} allWindows={hud.allUsageWindows!} zh={zh} />
         : usageWindows.map((window, index) => <span
           className="status-field status-usage status-priority-6"
@@ -509,7 +509,8 @@ function modelLabel(hud: SessionHudView, m: HudMessages): string {
   const name = hud.model?.trim()
   const stripClaudePrefix = getAgentManifest(hud.provider ?? 'claude-code')?.hud.stripClaudeModelPrefix ?? true
   let label = (stripClaudePrefix ? name?.replace(/^Claude\s+/i, '') : name) ?? ''
-  if (!label && hud.modelStrategy) label = m.model[hud.modelStrategy]
+  if (hud.provider === 'codex' && label && hud.effort) label = `${label} (${hud.effort})`
+  if (!label && hud.provider !== 'codex' && hud.modelStrategy) label = m.model[hud.modelStrategy]
   const context = formatContextWindow(hud.contextWindowSize)
   return label && context ? m.modelWithContext(label, context) : label
 }

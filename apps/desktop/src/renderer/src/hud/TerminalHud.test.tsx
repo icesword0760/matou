@@ -686,8 +686,8 @@ it('keeps hooks details in the original plain list shell', () => {
   expect(tooltip.querySelector('li')?.className).toBe('')
 })
 
-describe('main parity for Codex HUD controls', () => {
-  it('renders ClaudeAccountsControl, empty quota placeholder, ClaudeMd button, and all 4 permission options on Codex cards', async () => {
+describe('Codex HUD controls', () => {
+  it('hides unsupported controls, shows AGENTS.md and preserves all 4 permission options on Codex cards', async () => {
     const user = userEvent.setup()
     const win = window as unknown as { matouDesktop: Record<string, unknown> | undefined }
     const previousBridge = win.matouDesktop
@@ -710,9 +710,10 @@ describe('main parity for Codex HUD controls', () => {
           onPermissionMode={vi.fn()}
         />
       )
-      expect(screen.getByRole('button', { name: 'Claude 账户' })).toBeTruthy()
-      expect(screen.getByRole('status').textContent).toBe('—')
-      expect(screen.getByRole('button', { name: '编辑 ClaudeMd' }).textContent).toBe('ClaudeMd')
+      expect(screen.queryByRole('button', { name: 'Claude 账户' })).toBeNull()
+      expect(screen.queryByRole('status')).toBeNull()
+      expect(screen.getByRole('button', { name: 'AGENTS.md' }).textContent).toBe('AGENTS.md')
+      expect(screen.queryByRole('button', { name: '编辑 ClaudeMd' })).toBeNull()
 
       await user.click(screen.getByRole('button', { name: /当前权限模式：Default/ }))
       expect(screen.getByRole('menuitem', { name: /^Default/ })).toBeTruthy()
@@ -853,4 +854,40 @@ describe('Antigravity agent-aware HUD copy', () => {
     await user.click(screen.getByRole('menuitem', { name: 'Default' }))
     expect(onPermissionMode).toHaveBeenCalledWith('session-1', 'default', false, 'antigravity')
   })
+})
+
+it('renders Codex actual model/effort while hiding unsupported or unavailable telemetry, and saves AGENTS.md', async () => {
+  const user = userEvent.setup()
+  const request = vi.fn(async (method: RpcMethod, payload: unknown) => ({
+    path: '/repo/AGENTS.md', content: method === 'session.instructions-read' ? '# Initial' : (payload as { content: string }).content, exists: true
+  }))
+  const runtimeClient: GitRequestClient = { request: async function<T>(method: RpcMethod, payload: unknown): Promise<T> {
+    return await request(method, payload) as T
+  } }
+  const hud: SessionHudView = {
+    sessionId: 'codex-ui', provider: 'codex', mode: 'agent', startedAt: 1,
+    model: 'gpt-6-astra', effort: 'medium', contextWindowSize: 258400,
+    usageWindows: [{ label: '5h', percent: 20 }], allUsageWindows: [{ label: 'Weekly', percent: 30 }],
+    configCounts: { instructionFiles: 1, projectInstructionFileExists: true, hooks: 2, mcpServers: 3 },
+    subagentCount: 4, todos: [{ content: 'Unsupported plan', status: 'pending' }]
+  }
+  const { container, rerender } = render(<TerminalHud hud={hud} runtimeClient={runtimeClient} />)
+  expect(container.querySelector('.status-model')?.textContent).toContain('gpt-6-astra (medium)')
+  expect(container.querySelector('.status-usage')).toBeNull()
+  expect(container.textContent).not.toMatch(/Waiting|等待|5h|Weekly|MCPs|hooks|Agents|Unsupported plan|opusplan|0%/)
+  await user.click(screen.getByRole('button', { name: 'AGENTS.md' }))
+  const editor = await screen.findByRole('textbox', { name: 'AGENTS.md 内容' })
+  await user.clear(editor)
+  await user.type(editor, '# Updated')
+  await user.click(screen.getByRole('button', { name: '保存' }))
+  expect(request).toHaveBeenCalledWith('session.instructions-write', { sessionId: 'codex-ui', content: '# Updated' })
+  const withoutEffort = { ...hud, contextPercent: 13 }
+  delete withoutEffort.effort
+  rerender(<TerminalHud hud={withoutEffort} runtimeClient={runtimeClient} />)
+  expect(container.querySelector('.status-model')?.textContent).not.toContain('medium')
+  expect(screen.getByText('13%')).toBeTruthy()
+  const withoutModel: SessionHudView = { ...withoutEffort, modelStrategy: 'opusplan' }
+  delete withoutModel.model
+  rerender(<TerminalHud hud={withoutModel} runtimeClient={runtimeClient} />)
+  expect(container.querySelector('.status-model')).toBeNull()
 })

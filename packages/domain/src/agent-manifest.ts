@@ -172,23 +172,23 @@ export const AGENT_MANIFESTS: Record<AgentProfileId, AgentManifest> = {
       assetRelativePath: 'providers/codex-developer-instructions.md'
     },
     instructionFiles: {
-      candidates: ['CLAUDE.md'],
-      buttonLabel: 'ClaudeMd'
+      candidates: ['AGENTS.md'],
+      buttonLabel: 'AGENTS.md'
     },
     hud: {
-      stripClaudeModelPrefix: true,
-      showAccountControl: true,
-      hideEmptyQuotaPlaceholder: false,
-      supportsTodos: true,
-      supportsAgentsCount: true,
-      supportsMcpSummary: true,
-      supportsHooksCount: true,
-      supportsQuotaWindows: true
+      stripClaudeModelPrefix: false,
+      showAccountControl: false,
+      hideEmptyQuotaPlaceholder: true,
+      supportsTodos: false,
+      supportsAgentsCount: false,
+      supportsMcpSummary: false,
+      supportsHooksCount: false,
+      supportsQuotaWindows: false
     },
     capabilities: {
       fork: false,
       sessionLoader: false,
-      autoTitle: false,
+      autoTitle: true,
       permissionModes: ['default', 'acceptEdits', 'plan', 'bypassPermissions'],
       permissionSwitchMode: 'respawn-only',
       providerConfig: true,

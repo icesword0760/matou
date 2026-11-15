@@ -1473,3 +1473,43 @@ async function waitFor(predicate: () => boolean, timeoutMs: number): Promise<voi
   }
   expect(predicate()).toBe(true)
 }
+
+it('observes late Codex index titles, keeps manual names locked, restores latest auto title, and fences retired runs', async () => {
+  const codexRoot = join(root, 'codex-title')
+  await mkdir(codexRoot)
+  const index = join(codexRoot, 'session_index.jsonl')
+  const id = '01a1ddd6-4064-70e1-a006-79d310600776'
+  let run = 'codex-title-run'
+  const observed: string[] = []
+  sessions.createSession(command('codex-title-session'), {
+    id: 'codex-title-session', taskId: 'task-1', executionContextId: 'context-1', kind: 'codex', title: 'Codex', now: 1
+  })
+  const server = new ProviderHookServer(root, sessions, {
+    codexRoot, currentRunId: () => run,
+    onTitleObserved: ({ sessionId, title }) => {
+      observed.push(title)
+      sessions.observeProviderTitle(command(`codex-title-${observed.length}`), { sessionId, title, now: observed.length + 10 })
+    }
+  })
+  await server.start()
+  try {
+    const registration = await server.registerCodexSession({ runId: run, sessionId: 'codex-title-session' })
+    const hook = (hook_event_name: string) => postHook(registration.hookUrl, { hook_event_name, session_id: id })
+    await hook('SessionStart')
+    expect(sessions.getSession('codex-title-session')?.title).toBe('Codex')
+    await writeFile(index, JSON.stringify({ id, thread_name: 'First automatic title', updated_at: '2026-11-15T06:13:00Z' }) + '\n')
+    await waitFor(() => observed.length === 1, 2000)
+    expect(sessions.getSession('codex-title-session')).toMatchObject({ title: 'First automatic title', titleSource: 'auto' })
+    sessions.renameSession(command('manual-codex-title'), { sessionId: 'codex-title-session', title: 'My title', now: 20 })
+    await appendFile(index, JSON.stringify({ id, thread_name: 'New automatic title', updated_at: '2026-11-15T06:14:00Z' }) + '\n')
+    await waitFor(() => observed.length === 2, 2000)
+    expect(sessions.getSession('codex-title-session')).toMatchObject({ title: 'My title', titleSource: 'manual', providerTitle: 'New automatic title' })
+    expect(sessions.restoreProviderTitle(command('restore-codex-title'), { sessionId: 'codex-title-session', now: 21 }).result)
+      .toMatchObject({ title: 'New automatic title', titleSource: 'auto' })
+    run = 'replacement-run'
+    await appendFile(index, JSON.stringify({ id, thread_name: 'Retired title', updated_at: '2026-11-15T06:15:00Z' }) + '\n')
+    await hook('Stop')
+    await new Promise(resolve => setTimeout(resolve, 70))
+    expect(observed).toEqual(['First automatic title', 'New automatic title'])
+  } finally { await server.stop() }
+})
