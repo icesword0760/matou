@@ -391,7 +391,10 @@ export class SessionHudRegistry {
       }
       return
     }
-    if (eventName === 'SessionStart') current.sessionEnded = false
+    if (eventName === 'SessionStart') {
+      current.sessionEnded = false
+      if (current.provider === 'codex') current.taskStatus = 'idle'
+    }
     const toolCall = object(payload.toolCall)
     const toolName = text(payload.tool_name) ?? text(payload.toolName) ?? text(toolCall?.name)
     const toolId = text(payload.tool_use_id) ?? text(payload.toolUseId) ?? text(toolCall?.id) ??
@@ -400,6 +403,8 @@ export class SessionHudRegistry {
       object(toolCall?.args) ?? {}
 
     if (eventName === 'UserPromptSubmit' || eventName === 'PreInvocation' || eventName === 'PreToolUse') {
+      current.taskStatus = 'running'
+    } else if (current.provider === 'codex' && eventName === 'PostToolUse') {
       current.taskStatus = 'running'
     } else if (eventName === 'PermissionRequest') {
       current.taskStatus = 'needs-input'

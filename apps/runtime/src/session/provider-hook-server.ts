@@ -433,6 +433,19 @@ export class ProviderHookServer {
         return
       }
       const providerSessionId = providerSessionIdentity(payload, registration.provider)
+      if (registration.provider === 'codex' && (
+        // Codex can reuse launch hooks for a separate, non-transcript run.
+        // It must not claim the card before the interactive conversation does.
+        (payload.transcript_path === null && !providerTranscriptPath(payload, 'codex')) ||
+        // Once this run has claimed its conversation, unrelated conversations
+        // sharing its hook config cannot overwrite any of its visible state.
+        // A Fork's first new identity is still accepted before confirmation.
+        (registration.confirmedProviderSessionId !== undefined &&
+          providerSessionId !== registration.confirmedProviderSessionId)
+      )) {
+        replyNoIntervention()
+        return
+      }
       const eventName = nonEmptyText(payload.hook_event_name) ??
         nonEmptyText(payload.hookEventName) ??
         'unknown'
@@ -592,10 +605,6 @@ export class ProviderHookServer {
           }
         }
       }
-      if (registration.provider === 'codex') {
-        replyNoIntervention()
-        return
-      }
       if (!this.#acceptsSideEffects(registration)) {
         this.#stopTitleWatch(registration)
         replyNoIntervention()
@@ -668,6 +677,17 @@ export class ProviderHookServer {
           provider: registration.provider,
           workStatus: antigravityWorkStatus
         })
+      }
+      if (registration.provider === 'codex') {
+        const workStatus = codexHookWorkStatus(eventName)
+        if (workStatus) {
+          this.#onWorkStatus({
+            runId: registration.runId,
+            sessionId: registration.sessionId,
+            provider: registration.provider,
+            workStatus
+          })
+        }
       }
       if (isPreToolUseRequest) {
         if (preToolDecision) sendJson(response, 200, preToolDecision)
@@ -886,12 +906,21 @@ function claudeHookSettings(hookUrl: string, statusScriptPath: string): unknown 
   }
 }
 
+const CODEX_HOOK_TIMEOUTS = [
+  ['SessionStart', 5],
+  ['UserPromptSubmit', 5],
+  ['PreToolUse', 10],
+  ['PermissionRequest', 10],
+  ['PostToolUse', 10],
+  ['Stop', 5],
+  ['SessionEnd', 3]
+] as const
+
 function codexHookSettings(statusScriptPath: string): unknown {
   return {
-    hooks: {
-      SessionStart: [{ hooks: [codexCommandHook(statusScriptPath, 5)] }],
-      SessionEnd: [{ hooks: [codexCommandHook(statusScriptPath, 3)] }]
-    }
+    hooks: Object.fromEntries(CODEX_HOOK_TIMEOUTS.map(([event, timeout]) => [
+      event, [{ hooks: [codexCommandHook(statusScriptPath, timeout)] }]
+    ]))
   }
 }
 
@@ -900,7 +929,17 @@ function codexInlineHookConfig(statusScriptPath: string): string {
   const statusMessage = JSON.stringify(runtimeMessages().session.hookStatusMessage)
   const event = (timeout: number) =>
     `{ hooks = [{ type = "command", command = ${command}, timeout = ${timeout}, statusMessage = ${statusMessage} }] }`
-  return `{ SessionStart = [${event(5)}], SessionEnd = [${event(3)}] }`
+  return `{ ${CODEX_HOOK_TIMEOUTS.map(([name, timeout]) => `${name} = [${event(timeout)}]`).join(', ')} }`
+}
+
+function codexHookWorkStatus(eventName: string): SessionWorkStatus | undefined {
+  if (eventName === 'SessionStart' || eventName === 'Stop') return 'idle'
+  if (eventName === 'UserPromptSubmit' || eventName === 'PreToolUse' || eventName === 'PostToolUse') {
+    return 'running'
+  }
+  if (eventName === 'PermissionRequest') return 'needs-input'
+  if (eventName === 'SessionEnd') return 'exited'
+  return undefined
 }
 
 function codexCommandHook(statusScriptPath: string, timeout: number): Record<string, unknown> {
