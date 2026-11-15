@@ -21,7 +21,7 @@ impl RenderOnce for UiText {
             if let Some(TextOverflow::Truncate(suffix)) = fonts.style.text_overflow.clone()
                 && (fonts.style.white_space == WhiteSpace::Nowrap
                     || fonts.style.line_clamp == Some(1))
-                && !self.0.is_ascii()
+                && (!self.0.is_ascii() || fonts.primary.weight != fonts.style.font_weight)
                 && !self.0.contains('\n')
             {
                 return SingleLineText(Rc::new(SingleLineLabel {
@@ -56,7 +56,12 @@ struct UiFonts {
 impl UiFonts {
     fn new(window: &Window) -> Self {
         let style = window.text_style();
-        let primary = style.font();
+        let mut primary = style.font();
+        // font-kit maps Apple's Medium trait (0.23) to 530, so requesting CSS
+        // 500 otherwise selects Regular. Match the frozen browser's Medium face.
+        if primary.weight == FontWeight::MEDIUM {
+            primary.weight = FontWeight(530.);
+        }
         let fallback = Font {
             family: "PingFang SC".into(),
             ..primary.clone()

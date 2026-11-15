@@ -25,6 +25,15 @@ mod probe {
                     ] {
                         verify_mixed(title, expected, next, window, cx);
                     }
+                    // Medium has a corrected native face on Mac, including ASCII
+                    // titles; the measured element must use that face's advances.
+                    window.with_text_style(
+                        Some(TextStyleRefinement {
+                            font_weight: Some(FontWeight::MEDIUM),
+                            ..Default::default()
+                        }),
+                        |window| verify_mixed("workspace release", "work…", "works…", window, cx),
+                    );
                 },
             );
             div()
