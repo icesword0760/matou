@@ -1,0 +1,65 @@
+{
+  "fixture": "controlled executable prints sign-in, emits no hooks",
+  "sid": "9cf04d36-f672-42a2-af00-045600f2668e",
+  "db": {
+    "bindings": [],
+    "events": [
+      {
+        "seq": 4,
+        "event_type": "session.created",
+        "session_id": "9cf04d36-f672-42a2-af00-045600f2668e",
+        "payload_json": "{\"id\":\"9cf04d36-f672-42a2-af00-045600f2668e\",\"taskId\":\"95b5be56-0f0f-404f-a8cc-3cfa3ba48960\",\"executionContextId\":\"ebb7d72f-e17e-432d-97ec-399df54c99e8\",\"kind\":\"shell\",\"status\":\"created\",\"title\":\"Shell\",\"titleSource\":\"default\",\"cwd\":\"/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/final-codex/unauth-FvNmzx/repo\",\"createdAt\":1794745658906,\"updatedAt\":1794745658906,\"lastActivityAt\":1794745658906,\"version\":1}",
+        "occurred_at": 1794745658906
+      },
+      {
+        "seq": 5,
+        "event_type": "scene.session-mounted",
+        "session_id": "9cf04d36-f672-42a2-af00-045600f2668e",
+        "payload_json": "{\"id\":\"b0ea549a-4434-4258-96dc-34c576c0f9c9\",\"sceneId\":\"16568393-8a14-4c7b-b8fa-730f8d07d02f\",\"sceneNodeId\":\"4edd182a-e9ae-4622-aa94-e9a83d5a0bfe\",\"sessionId\":\"9cf04d36-f672-42a2-af00-045600f2668e\",\"createdAt\":1794745658906}",
+        "occurred_at": 1794745658906
+      },
+      {
+        "seq": 7,
+        "event_type": "session.run-started",
+        "session_id": "9cf04d36-f672-42a2-af00-045600f2668e",
+        "payload_json": "{\"run\":{\"id\":\"97adfb89-136f-46c9-818c-e3839a883e7d\",\"sessionId\":\"9cf04d36-f672-42a2-af00-045600f2668e\",\"ordinal\":1,\"runtimeGeneration\":\"08bf114b-bae8-44f0-923c-490486583279\",\"profile\":\"shell\",\"pid\":51232,\"status\":\"running\",\"cols\":80,\"rows\":24,\"startedAt\":1794745658970}}",
+        "occurred_at": 1794745658970
+      },
+      {
+        "seq": 8,
+        "event_type": "session.graph-summary-changed",
+        "session_id": "9cf04d36-f672-42a2-af00-045600f2668e",
+        "payload_json": "{\"sessionId\":\"9cf04d36-f672-42a2-af00-045600f2668e\",\"sceneId\":\"16568393-8a14-4c7b-b8fa-730f8d07d02f\",\"previousStatus\":\"idle\",\"workStatus\":\"running\",\"graph\":{\"sceneId\":\"16568393-8a14-4c7b-b8fa-730f8d07d02f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"9cf04d36-f672-42a2-af00-045600f2668e\",\"sceneId\":\"16568393-8a14-4c7b-b8fa-730f8d07d02f\",\"currentMode\":\"shell\",\"workStatus\":\"running\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/final-codex/unauth-FvNmzx/repo\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/final-codex/unauth-FvNmzx/repo\",\"localExecutionContextId\":\"ebb7d72f-e17e-432d-97ec-399df54c99e8\"},\"hasOwnedWorktree\":false,\"git\":{\"state\":\"ready\",\"branch\":\"main\",\"dirty\":false},\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1794745658970}],\"edges\":[]}}",
+        "occurred_at": 1794745659138
+      },
+      {
+        "seq": 9,
+        "event_type": "session.run-exited",
+        "session_id": "9cf04d36-f672-42a2-af00-045600f2668e",
+        "payload_json": "{\"run\":{\"id\":\"97adfb89-136f-46c9-818c-e3839a883e7d\",\"sessionId\":\"9cf04d36-f672-42a2-af00-045600f2668e\",\"ordinal\":1,\"runtimeGeneration\":\"08bf114b-bae8-44f0-923c-490486583279\",\"profile\":\"shell\",\"pid\":51232,\"status\":\"exited\",\"cols\":80,\"rows\":24,\"startedAt\":1794745658970,\"endedAt\":1794745659171,\"exitCode\":1,\"signal\":0}}",
+        "occurred_at": 1794745659171
+      },
+      {
+        "seq": 10,
+        "event_type": "session.updated",
+        "session_id": "9cf04d36-f672-42a2-af00-045600f2668e",
+        "payload_json": "{\"session\":{\"id\":\"9cf04d36-f672-42a2-af00-045600f2668e\",\"taskId\":\"95b5be56-0f0f-404f-a8cc-3cfa3ba48960\",\"executionContextId\":\"ebb7d72f-e17e-432d-97ec-399df54c99e8\",\"kind\":\"codex\",\"status\":\"exited\",\"title\":\"Codex\",\"titleSource\":\"default\",\"cwd\":\"/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/final-codex/unauth-FvNmzx/repo\",\"createdAt\":1794745658906,\"updatedAt\":1794745659172,\"lastActivityAt\":1794745659172,\"version\":5}}",
+        "occurred_at": 1794745659172
+      },
+      {
+        "seq": 11,
+        "event_type": "session.run-started",
+        "session_id": "9cf04d36-f672-42a2-af00-045600f2668e",
+        "payload_json": "{\"run\":{\"id\":\"2a56fb00-521a-477b-bdad-d359f5fee6fc\",\"sessionId\":\"9cf04d36-f672-42a2-af00-045600f2668e\",\"ordinal\":2,\"runtimeGeneration\":\"08bf114b-bae8-44f0-923c-490486583279\",\"profile\":\"codex\",\"pid\":51323,\"status\":\"running\",\"cols\":60,\"rows\":43,\"startedAt\":1794745659190}}",
+        "occurred_at": 1794745659190
+      }
+    ],
+    "sessions": [
+      {
+        "id": "9cf04d36-f672-42a2-af00-045600f2668e",
+        "title": "Codex",
+        "kind": "codex"
+      }
+    ]
+  }
+}

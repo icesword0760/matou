@@ -531,7 +531,7 @@ async function changeMode(h: PackagedHarness, sid: string, mode: string): Promis
 }
 
 test.describe('Codex packaged acceptance — real CLI and explicit controlled fixtures', () => {
-  test.setTimeout(600_000)
+  test.setTimeout(300_000)
 
   test('PRD 1–6, 8, 10: lifecycle, HUD, notifications, title, modes, restart and latency 3x', async () => {
     const dirs = await createIsolatedWorkspace('core')

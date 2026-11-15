@@ -1,0 +1,22 @@
+{
+  "sid": "3f00da61-4496-49fd-a9ce-22a860127101",
+  "parentUuid": "01a1df2a-be27-7771-aae3-4be71d5c5547",
+  "children": [
+    {
+      "childId": "138f0b96-64eb-4e2a-a12f-3d5107818fbb",
+      "uuid": "01a1df2a-e548-7662-97ab-cb029c953472",
+      "mode": "current",
+      "cwd": "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/final-codex/fork-load-M4nFbe/repo",
+      "answer": "amber-cove-419"
+    },
+    {
+      "childId": "970fca8b-3009-4a10-aaba-e7074d875ca1",
+      "uuid": "01a1df2b-23b6-7d50-a3a7-70b20ddd75b4",
+      "mode": "new",
+      "cwd": "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/final-codex/fork-load-M4nFbe/matou-data/worktrees/bbbc0037-9bfd-4f82-b5ab-6600a00f70d6/970fca8b-3009-4a10-aaba-e7074d875ca1",
+      "answer": "amber-cove-419"
+    }
+  ],
+  "loadedId": "ac7f6b7e-ec59-41dc-8d4e-0a3398ba7a3f",
+  "loadedAnswer": "amber-cove-419"
+}

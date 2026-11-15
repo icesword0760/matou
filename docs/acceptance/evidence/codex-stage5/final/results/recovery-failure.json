@@ -1,0 +1,24 @@
+{
+  "sid": "48958459-38b8-4b93-ae85-84577fa2ddb4",
+  "originalUuid": "01a1df2c-b3de-7c42-88d2-6306b7bcc219",
+  "freshUuid": "01a1df2d-3635-7411-9950-5a2816d8606f",
+  "stimulus": "Temporarily moved only this isolated real CLI rollout; no fake hooks or database edits",
+  "bindingAfter": [
+    {
+      "session_id": "48958459-38b8-4b93-ae85-84577fa2ddb4",
+      "provider": "codex",
+      "provider_session_id": "01a1df2d-3635-7411-9950-5a2816d8606f",
+      "resume_state": "available",
+      "metadata_json": "{\"providerConfigId\":\"openai-official\",\"model\":\"gpt-6-astra\",\"permissionMode\":\"default\",\"cwd\":\"/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/final-codex/recovery-failure-wi7nsO/repo\",\"lastHookEvent\":\"Stop\",\"canFork\":true,\"observedUserPrompt\":true,\"observedNormalStop\":true}",
+      "updated_at": 1794745650106
+    },
+    {
+      "session_id": "48958459-38b8-4b93-ae85-84577fa2ddb4",
+      "provider": "codex",
+      "provider_session_id": "01a1df2c-b3de-7c42-88d2-6306b7bcc219",
+      "resume_state": "expired",
+      "metadata_json": "{\"providerConfigId\":\"openai-official\",\"model\":\"gpt-6-astra\",\"permissionMode\":\"default\",\"cwd\":\"/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/final-codex/recovery-failure-wi7nsO/repo\",\"lastHookEvent\":\"Stop\",\"canFork\":true,\"observedUserPrompt\":true,\"observedNormalStop\":true,\"spawnRevision\":1794745643378}",
+      "updated_at": 1794745643378
+    }
+  ]
+}
