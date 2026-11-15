@@ -1952,3 +1952,179 @@ new file mode 100644
 +		}
 +	}
 +}
+diff --git a/internal/runtime/executor/antigravity_translation_boundary_test.go b/internal/runtime/executor/antigravity_translation_boundary_test.go
+new file mode 100644
+--- /dev/null
++++ b/internal/runtime/executor/antigravity_translation_boundary_test.go
+@@ -0,0 +1,171 @@
++package executor
++
++import (
++	"context"
++	"fmt"
++	"io"
++	"net/http"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/MoeForge/moego/ojson"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
++	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
++	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
++	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
++)
++
++// Exercise the executor boundary: translation alone does not include thinking
++// normalization, provider caps, signature replay, or final HTTP serialization.
++// The transport is entirely in memory; no credentials or upstream are used.
++func antigravityTranslationBoundaryRequest(t *testing.T, model string, payload []byte, stream bool) []byte {
++	t.Helper()
++	var captured []byte
++	calls := 0
++	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
++		calls++
++		if !strings.HasSuffix(req.URL.Path, ":streamGenerateContent") && !strings.HasSuffix(req.URL.Path, ":generateContent") {
++			return nil, fmt.Errorf("unexpected upstream path: %s", req.URL.Path)
++		}
++		var err error
++		captured, err = io.ReadAll(req.Body)
++		if err != nil {
++			return nil, err
++		}
++		_ = req.Body.Close()
++		reply := `{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"OK"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}}}`
++		contentType := "application/json"
++		if strings.HasSuffix(req.URL.Path, ":streamGenerateContent") {
++			reply = "data: " + reply + "\n\n"
++			contentType = "text/event-stream"
++		}
++		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {contentType}}, Body: io.NopCloser(strings.NewReader(reply)), Request: req}, nil
++	}))
++	executor := NewAntigravityExecutor(&config.Config{})
++	auth := &cliproxyauth.Auth{ID: "translation-boundary", Provider: "antigravity", Metadata: map[string]any{
++		"access_token": "test-token", "project_id": "test-project", "expired": time.Now().Add(time.Hour).Format(time.RFC3339),
++	}}
++	req := cliproxyexecutor.Request{Model: model, Payload: payload}
++	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude, OriginalRequest: payload, Stream: stream}
++	if stream {
++		res, err := executor.ExecuteStream(ctx, auth, req, opts)
++		if err != nil {
++			t.Fatalf("ExecuteStream: %v", err)
++		}
++		for chunk := range res.Chunks {
++			if chunk.Err != nil {
++				t.Fatalf("stream chunk: %v", chunk.Err)
++			}
++		}
++	} else if _, err := executor.Execute(ctx, auth, req, opts); err != nil {
++		t.Fatalf("Execute: %v", err)
++	}
++	if calls != 1 || !ojson.ValidBytes(captured) {
++		t.Fatalf("expected one valid final HTTP request, calls=%d body=%s", calls, captured)
++	}
++	return captured
++}
++
++func TestAntigravityTranslationBoundaryBudget(t *testing.T) {
++	const model = "claude-sonnet-4-5"
++	// Capability fixture for a budget-capable Claude model. Production obtains
++	// these limits from its registry; no static model catalog is assumed here.
++	client := "translation-boundary-budget"
++	registry.GetGlobalRegistry().RegisterClient(client, "antigravity", []*registry.ModelInfo{{
++		ID: model, MaxCompletionTokens: 64000,
++		Thinking: &registry.ThinkingSupport{Min: 1024, Max: 32768, ZeroAllowed: true, DynamicAllowed: true},
++	}})
++	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(client) })
++	for _, stream := range []bool{false, true} {
++		for _, tc := range []struct {
++			name                             string
++			max, budget, wantMax, wantBudget int
++			wantThinking                     bool
++		}{
++			{"budget below max", 8192, 4096, 8192, 4096, true},
++			{"budget equal max", 4096, 4096, 4096, 4095, true},
++			{"budget above max", 4096, 8192, 4096, 4095, true},
++			{"max below minimum thinking", 1024, 8192, 1024, 0, false},
++			{"dynamic budget", 4096, -1, 4096, -1, true},
++			{"registry output cap", 128000, 8192, 64000, 8192, true},
++		} {
++			t.Run(fmt.Sprintf("%s/stream=%t", tc.name, stream), func(t *testing.T) {
++				payload := []byte(fmt.Sprintf(`{"model":%q,"max_tokens":%d,"thinking":{"type":"enabled","budget_tokens":%d},"messages":[{"role":"user","content":"Reply OK"}]}`, model, tc.max, tc.budget))
++				translated := sdktranslator.TranslateRequest(sdktranslator.FormatClaude, sdktranslator.FormatAntigravity, model, payload, stream)
++				// Demonstrate why separately inspecting the translator would
++				// incorrectly classify this as a missing protocol safeguard.
++				if got := ojson.GetBytes(translated, "request.generationConfig.thinkingConfig.thinkingBudget").Int(); got != int64(tc.budget) {
++					t.Fatalf("translator budget=%d, want original %d", got, tc.budget)
++				}
++				body := antigravityTranslationBoundaryRequest(t, model, payload, stream)
++				max := ojson.GetBytes(body, "request.generationConfig.maxOutputTokens").Int()
++				thinking := ojson.GetBytes(body, "request.generationConfig.thinkingConfig")
++				budget := thinking.Get("thinkingBudget").Int()
++				if max != int64(tc.wantMax) || thinking.Exists() != tc.wantThinking || (tc.wantThinking && budget != int64(tc.wantBudget)) {
++					t.Fatalf("unexpected final budget/max: %s", body)
++				}
++				if tc.wantThinking && budget > 0 && budget >= max {
++					t.Fatalf("positive budget must be below max: %s", body)
++				}
++				t.Logf("translator max/budget=%d/%d; final max=%d thinking=%s", tc.max, tc.budget, max, thinking.Raw)
++			})
++		}
++	}
++}
++
++func TestAntigravityTranslationBoundaryParallelMCP(t *testing.T) {
++	payload := []byte(`{
++        "max_tokens":4096,
++        "system":[{"type":"text","text":"x-anthropic-billing-header: sample"},{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude.\nKeep ` + "`OpenAI`" + ` unchanged."}],
++        "tools":[{"name":"mcp__docs__read","description":"Read a document","input_schema":{"type":"object","properties":{"title":{"type":"string"},"format":{"type":"string"}},"required":["title"]}}],
++        "messages":[
++            {"role":"user","content":"Read both documents"},
++            {"role":"assistant","content":[{"type":"tool_use","id":"call-1","name":"mcp__docs__read","input":{"title":"first","format":"raw"}},{"type":"tool_use","id":"call-2","name":"mcp__docs__read","input":{"title":"second","format":"raw"}}]},
++            {"role":"user","content":[{"type":"tool_result","tool_use_id":"call-2","content":"second failed","is_error":true},{"type":"tool_result","tool_use_id":"call-1","content":""}]}
++        ]}`)
++	for _, stream := range []bool{false, true} {
++		t.Run(fmt.Sprintf("stream=%t", stream), func(t *testing.T) {
++			body := antigravityTranslationBoundaryRequest(t, "claude-sonnet-4-5", payload, stream)
++			system := ojson.GetBytes(body, "request.systemInstruction")
++			if system.Get("parts.#").Int() != 1 || system.Get("parts.0.text").String() != "You are Antigravity, an agentic AI coding assistant.\nKeep `OpenAI` unchanged." {
++				t.Fatalf("system layout, sanitizer, or code exemption changed: %s", system.Raw)
++			}
++			if strings.Contains(string(body), "MCP XML") || strings.Contains(string(body), "SYSTEM_PROMPT_END") {
++				t.Fatalf("unexpected prompt injection: %s", body)
++			}
++			contents := ojson.GetBytes(body, "request.contents").Array()
++			var calls, results []ojson.Result
++			for _, content := range contents {
++				for _, part := range content.Get("parts").Array() {
++					if fc := part.Get("functionCall"); fc.Exists() {
++						calls = append(calls, fc)
++					}
++					if fr := part.Get("functionResponse"); fr.Exists() {
++						results = append(results, fr)
++					}
++				}
++			}
++			if len(calls) != 2 || len(results) != 2 {
++				t.Fatalf("parallel call/result lost: %s", body)
++			}
++			for i, title := range []string{"first", "second"} {
++				id := fmt.Sprintf("call-%d", i+1)
++				if calls[i].Get("id").String() != id || results[i].Get("id").String() != id || calls[i].Get("name").String() != "mcp__docs__read" || results[i].Get("name").String() != "mcp__docs__read" {
++					t.Fatalf("parallel identity/alignment lost: %s", body)
++				}
++				if calls[i].Get("args.title").String() != title || calls[i].Get("args.format").String() != "raw" {
++					t.Fatalf("schema cleaner mutated historical tool arguments: %s", body)
++				}
++			}
++			if result := results[0].Get("response.result"); !result.Exists() || result.String() != "" {
++				t.Fatalf("empty result must remain empty: %s", body)
++			}
++			if results[1].Get("response.error").String() != "second failed" {
++				t.Fatalf("error result lost: %s", body)
++			}
++			t.Logf("final request: %s", body)
++		})
++	}
++}
