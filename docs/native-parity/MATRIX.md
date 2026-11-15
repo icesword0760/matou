@@ -215,11 +215,14 @@ N02ab continuation (A02; evidence `native/evidence/sidebar-build.json`):
 | Create and immediate input | I01 original creation/default Shell | I05 failed focus attempt retained; I06 direct input succeeds | Exact picker/window/keyboard parity |
 | Switch and keep Shell | Source workspace focus/MRU rules | I07 old variable preserved; real multi-PTY bridge | All window combinations |
 | Pin and remove | I02/I03 original menu/confirmation | I08–I11, DB and file preservation; source fallback navigation retained | Pixel comparison, pinned drag trajectory, cancellation/focus details |
-| Live path loss | I04 original warning and disabled creation | I16 final build retains content and blocks typed input; initial hover panic fixed | Exact warning pixels, disabled clipboard and IME |
+| Live path loss | I04 original warning and disabled creation | I16 final build retains content and blocks typed input; initial hover panic fixed | Exact warning pixels and disabled IME; clipboard now verified in J02/J07 |
 | Relink and restart | I05 original relink/new Shell | I13/I14 initial relink; I17 final relink clears old env, retains history and accepts direct input | Feedback timing measurement and all failure/cancel states |
 | Hidden scene restoration | Source TerminalPane revision + foreground-only surface | Real bridge proves old background run survives until selection, then replacement | Actual multi-tab UI side-by-side comparison |
 | Invalid switch-away/return | Source projected state transitions | Real bridge test verifies same-session/new run on return | UI sequence timing |
-| Quit/reopen workspace | Source persistence contract | I15 final build retains pinned workspace, relinked root and history | Invalid-startup history currently empty until relink: compare original and close |
+| Quit/reopen workspace | Source persistence contract | I15 final build retains pinned workspace, relinked root and history | Invalid-startup failure/retry now verified in J03-J05/J08-J13; full recovery scheduler and loading animation open |
 | Finder opening | Frozen main revealDirectory uses shell.openPath | Final native action opens 项目甲-final containing KEEP.txt, observed via Finder AX | Windows Explorer equivalent |
 
 I01–I17 refer to artifacts/native-parity/native/evidence, whose original-reference and native filenames are distinct. workspace-build.json records staged versus final screenshots. These captures do not constitute full pixel comparison. Overall node remains in progress.
+
+
+N02ac invalid-startup follow-up: J02 original AX and J07 native visible rename field both read `COPY_WHILE_INVALID` after selecting/copying a disabled terminal. J06 was an unsuccessful initial attempt and is not acceptance. Frozen original J03 fails startup on unavailable root; J04 preserves failure after root returns; J05 succeeds only after retry. Native J08–J11 establish the same sequence, and final J12/J13 include corrected card rounding/footer plus direct input after retry. Real-zsh workspace_bridge now covers failed retry, no auto-start even after navigating away/back, same-session new run and dropping blocked inputs. This closes these specific behavior gaps; exact failure surface pixels, complete loading water animation, disabled IME and Windows behavior remain open. Source/binary binding: manual-recovery-build.json.

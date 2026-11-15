@@ -16,7 +16,9 @@ use matou_native_core::{
     startup::open_read_only,
     workspace_paths::WorkspacePathState,
 };
-use matou_native_desktop::runtime_bridge::{Command, Event, LaunchOptions, RuntimeBridge};
+use matou_native_desktop::runtime_bridge::{
+    Command, Event, LaunchOptions, RecoveryState, RuntimeBridge,
+};
 use uuid::Uuid;
 
 const PROMPT: &str = "MATOU_WORKSPACE_READY>";
@@ -28,6 +30,104 @@ fn workspace_navigation_preserves_shells_and_removes_only_the_target() -> Result
     verify_workspaces(&root)
         .with_context(|| format!("isolated workspace data: {}", root.display()))?;
     fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn unavailable_workspace_reopen_requires_an_explicit_retry() -> Result<()> {
+    let root = std::env::temp_dir().join(format!("matou-workspace-retry-{}", Uuid::new_v4()));
+    verify_workspace_retry(&root)
+        .with_context(|| format!("isolated workspace data: {}", root.display()))?;
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+fn verify_workspace_retry(root: &Path) -> Result<()> {
+    let home = root.join("home");
+    fs::create_dir_all(&home)?;
+    fs::write(home.join(".zshrc"), format!("PROMPT='{PROMPT} '\n"))?;
+    let options = LaunchOptions {
+        data_root: root.join("data"),
+        workspace: root.join("default"),
+        shell_home: home,
+        shell: "/bin/zsh".into(),
+    };
+    let project = root.join("project");
+    let missing = root.join("missing");
+    fs::create_dir_all(&project)?;
+    let mut bridge = RuntimeBridge::start(options.clone())?;
+    let mut probe = Probe::new(&bridge);
+    let default = probe.ready()?.workspace.context("default workspace")?.id;
+    let added = probe.navigate(Command::CreateWorkspace {
+        root_directory: project.to_string_lossy().into_owned(),
+    })?;
+    let workspace_id = added.workspace.context("created workspace")?.id;
+    let session_id = added.session.context("created Shell")?.id;
+    probe.output(&session_id, PROMPT)?;
+    bridge.shutdown()?;
+    fs::rename(&project, &missing)?;
+
+    let database = options.data_root.join("matou.sqlite");
+    let mut bridge = RuntimeBridge::start(options)?;
+    let mut probe = Probe::new(&bridge);
+    let reopened = probe.ready()?.session.context("reopened session")?.id;
+    assert_eq!(reopened, session_id);
+    let failed = RecoveryState::Failed(format!(
+        "Session {session_id} did not reach a running state"
+    ));
+    probe.recovery_state(&session_id, &failed)?;
+    let initial_path = probe.path_state(&workspace_id, "invalid")?;
+    assert_eq!(initial_path.reason, "missing");
+    assert!(!probe.frames.contains(&session_id));
+
+    let db = open_read_only(&database)?;
+    let before = list_runs(&db, &session_id)?;
+    assert_eq!(before.len(), 1, "invalid startup must not spawn a Shell");
+    let retry = || Command::RetryRecovery {
+        session_id: session_id.clone(),
+    };
+    probe.send(retry())?;
+    probe.recovery_state(&session_id, &RecoveryState::Restoring)?;
+    probe.recovery_state(&session_id, &failed)?;
+    probe.path_state(&workspace_id, "invalid")?;
+    assert!(!probe.frames.contains(&session_id));
+    assert_eq!(list_runs(&db, &session_id)?.len(), 1);
+    probe.input(&session_id, "touch .input-while-invalid")?;
+
+    fs::rename(&missing, &project)?;
+    probe.path_state(&workspace_id, "valid")?;
+    probe.input(&session_id, "touch .input-before-retry")?;
+    probe.navigate(Command::SelectWorkspace {
+        workspace_id: default,
+    })?;
+    let selected = probe.navigate(Command::SelectWorkspace {
+        workspace_id: workspace_id.clone(),
+    })?;
+    assert_eq!(
+        selected.session.context("same failed Shell")?.id,
+        session_id
+    );
+    probe.path_state(&workspace_id, "valid")?;
+    assert!(
+        !probe.frames.contains(&session_id),
+        "restoring the path must not start the failed Shell"
+    );
+    assert_eq!(list_runs(&db, &session_id)?.len(), 1);
+
+    probe.send(retry())?;
+    probe.recovery_state(&session_id, &RecoveryState::Restoring)?;
+    probe.recovery_state(&session_id, &RecoveryState::Ready)?;
+    probe.input(&session_id, "printf 'WORKSPACE_%s\\n' RETRY_SUCCEEDED")?;
+    probe.output(&session_id, "WORKSPACE_RETRY_SUCCEEDED")?;
+    let after = list_runs(&db, &session_id)?;
+    assert_eq!(after.len(), 2);
+    assert_eq!(after[0].id, before[0].id);
+    assert_ne!(after[1].id, before[0].id);
+    assert_eq!(after[1].status, "running");
+    assert!(!project.join(".input-while-invalid").exists());
+    assert!(!project.join(".input-before-retry").exists());
+    drop(db);
+    bridge.shutdown()?;
     Ok(())
 }
 
@@ -359,6 +459,7 @@ struct Probe<'a> {
     tasks: Vec<Task>,
     disposed: Vec<String>,
     last_action: Option<ActionResult>,
+    frames: BTreeSet<String>,
 }
 
 impl<'a> Probe<'a> {
@@ -369,6 +470,7 @@ impl<'a> Probe<'a> {
             tasks: Vec::new(),
             disposed: Vec::new(),
             last_action: None,
+            frames: BTreeSet::new(),
         }
     }
 
@@ -412,6 +514,19 @@ impl<'a> Probe<'a> {
             Event::WorkspacePaths(paths) => Ok(paths
                 .into_iter()
                 .find(|state| state.workspace_id == workspace_id && state.status == status)),
+            _ => Ok(None),
+        })
+    }
+
+    fn recovery_state(&mut self, session_id: &str, expected: &RecoveryState) -> Result<()> {
+        self.wait("Shell recovery state", |event| match event {
+            Event::Recovery {
+                session_id: id,
+                state,
+            } if id == session_id => {
+                assert_eq!(&state, expected);
+                Ok(Some(()))
+            }
             _ => Ok(None),
         })
     }
@@ -469,10 +584,13 @@ impl<'a> Probe<'a> {
                             session_id,
                             sequence,
                             ..
-                        } => self.send(Command::Applied {
-                            session_id: session_id.clone(),
-                            sequence: *sequence,
-                        })?,
+                        } => {
+                            self.frames.insert(session_id.clone());
+                            self.send(Command::Applied {
+                                session_id: session_id.clone(),
+                                sequence: *sequence,
+                            })?;
+                        }
                         _ => {}
                     }
                     if let Some(value) = accept(event)? {
