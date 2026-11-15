@@ -79,6 +79,11 @@ struct CardMotion {
     lift: Transition,
 }
 
+struct WorkspaceDragMotion {
+    opacity: Transition,
+    background: Transition,
+}
+
 enum TabDialog {
     RemoveWorkspace {
         workspace_id: String,
@@ -126,6 +131,9 @@ pub struct Workspace {
     workspaces: Vec<HierarchyWorkspace>,
     workspace_paths: Vec<WorkspacePathState>,
     workspace_controls: HashMap<String, [FocusHandle; 4]>,
+    workspace_drag_source: Option<String>,
+    workspace_drag_target: Option<String>,
+    workspace_drag_motion: HashMap<String, WorkspaceDragMotion>,
     workspace_bounds: HashMap<String, Bounds<Pixels>>,
     workspace_hover: Option<String>,
     workspace_collapsed: HashSet<String>,
@@ -226,6 +234,9 @@ impl Workspace {
             workspaces: Vec::new(),
             workspace_paths: Vec::new(),
             workspace_controls: HashMap::new(),
+            workspace_drag_source: None,
+            workspace_drag_target: None,
+            workspace_drag_motion: HashMap::new(),
             workspace_bounds: HashMap::new(),
             workspace_hover: None,
             workspace_collapsed: HashSet::new(),
@@ -350,6 +361,8 @@ impl Workspace {
     fn apply(&mut self, event: Event, window: &mut Window, cx: &mut Context<Self>) {
         match event {
             Event::Workspaces(workspaces) => {
+                self.workspace_drag_motion
+                    .retain(|id, _| workspaces.iter().any(|w| &w.id == id));
                 self.workspace_controls
                     .retain(|id, _| workspaces.iter().any(|workspace| &workspace.id == id));
                 self.workspace_bounds
@@ -1325,7 +1338,7 @@ impl Workspace {
         let bounds_id = id.clone();
         let view = cx.entity().downgrade();
 
-        let toggle = self.button(
+        let toggle = self.button_inner(
             div()
                 .id(SharedString::from(format!("workspace-toggle:{id}")))
                 .h(px(34.))
@@ -1418,6 +1431,7 @@ impl Workspace {
                     window.blur();
                 }
             },
+            false,
             cx,
         );
 
@@ -1500,7 +1514,7 @@ impl Workspace {
             .flex()
             .items_center()
             .rounded(px(8.))
-            .hover(|s| s.bg(rgba(0x2f35470f)))
+            .when(!active, |header| header.hover(|s| s.bg(rgba(0x2f35470f))))
             .child(toggle)
             .child(add_el)
             .when(invalid && !workspace.is_default, |header| {
@@ -1539,6 +1553,35 @@ impl Workspace {
             .relative()
             .mt(px(1.))
             .mb(px(8.))
+            .when_some(
+                self.workspace_drag_motion.get(id.as_str()),
+                |group, motion| {
+                    let now = self.motion_clock.elapsed().as_secs_f64() * 1000.;
+                    let mut background: Hsla = rgb(0x58a6ff).into();
+                    background.a = if active {
+                        0.
+                    } else {
+                        0.1 * motion.background.value(now) as f32
+                    };
+                    group
+                        .opacity(motion.opacity.value(now) as f32)
+                        .bg(background)
+                },
+            )
+            .when(
+                cx.has_active_drag() && self.workspace_drag_target.as_ref() == Some(&id),
+                |group| {
+                    group.child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .w_full()
+                            .h(px(1.))
+                            .bg(rgb(0x4697e8)),
+                    )
+                },
+            )
             .on_hover(cx.listener(move |this, hovered, _, cx| {
                 if *hovered {
                     this.workspace_hover = Some(hover_id.clone());
@@ -1579,16 +1622,38 @@ impl Workspace {
 
         if workspace.is_pinned {
             let drag_target = workspace.id.clone();
+            let move_target = drag_target.clone();
+            let view = cx.entity().downgrade();
             group
                 .on_drag(
                     WorkspaceDrag {
                         workspace_id: workspace.id.clone(),
                         name: workspace.name.clone(),
                     },
-                    |info, _, _, cx| cx.new(|_| info.clone()),
+                    move |info, _, _, cx| {
+                        let _ = view.update(cx, |this, cx| {
+                            this.workspace_drag_source = Some(info.workspace_id.clone());
+                            this.workspace_drag_target = None;
+                            cx.notify();
+                        });
+                        cx.new(|_| info.clone())
+                    },
                 )
-                .drag_over::<WorkspaceDrag>(|s, _, _, _| s.bg(rgba(0x58a6ff1a)))
+                .on_drag_move(cx.listener(
+                    move |this, event: &DragMoveEvent<WorkspaceDrag>, _, cx| {
+                        if event.bounds.contains(&event.event.position)
+                            && this.sidebar_scroll.bounds().contains(&event.event.position)
+                            && event.drag(cx).workspace_id != move_target
+                            && this.workspace_drag_target.as_ref() != Some(&move_target)
+                        {
+                            this.workspace_drag_target = Some(move_target.clone());
+                            cx.notify();
+                        }
+                    },
+                ))
                 .on_drop(cx.listener(move |this, drag: &WorkspaceDrag, _, cx| {
+                    this.workspace_drag_source = None;
+                    this.workspace_drag_target = None;
                     if drag.workspace_id != drag_target {
                         this.send(
                             Command::ReorderPinnedWorkspace {
@@ -2270,6 +2335,14 @@ impl Workspace {
     }
 
     fn tab_key(&mut self, stroke: &Keystroke, window: &mut Window, cx: &mut Context<Self>) {
+        if stroke.key == "escape" && self.workspace_drag_source.is_some() && cx.has_active_drag() {
+            cx.stop_active_drag(window);
+            self.workspace_drag_source = None;
+            self.workspace_drag_target = None;
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
         if self.workspace_shortcut(stroke, cx) {
             cx.stop_propagation();
             return;
@@ -2388,13 +2461,27 @@ impl Workspace {
         activate: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> E {
+        self.button_inner(element, focus, activate, true, cx)
+    }
+
+    // Workspace titles must let mouse-down reach their draggable group.
+    fn button_inner<E: StatefulInteractiveElement + ParentElement + Styled>(
+        &self,
+        element: E,
+        focus: &FocusHandle,
+        activate: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        stop_mouse_down: bool,
+        cx: &mut Context<Self>,
+    ) -> E {
         let activate = Rc::new(activate);
         let key_activate = activate.clone();
         let mouse_focus = focus.clone();
         self.focus_control(element, focus)
             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                 window.focus(&mouse_focus);
-                cx.stop_propagation();
+                if stop_mouse_down {
+                    cx.stop_propagation();
+                }
             })
             .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
                 if event.keystroke.key == "enter" && !event.keystroke.modifiers.modified() {
@@ -3226,6 +3313,44 @@ impl Render for Workspace {
             (content_width * 0.48).min(620.)
         };
         let now = self.motion_clock.elapsed().as_secs_f64() * 1000.;
+        let dragging = cx.has_active_drag();
+        if !dragging {
+            self.workspace_drag_source = None;
+            self.workspace_drag_target = None;
+        }
+        for workspace in &self.workspaces {
+            let motion = self
+                .workspace_drag_motion
+                .entry(workspace.id.clone())
+                .or_insert_with(|| WorkspaceDragMotion {
+                    opacity: Transition::new(1.),
+                    background: Transition::new(0.),
+                });
+            motion.opacity.retarget(
+                if dragging && self.workspace_drag_source.as_ref() == Some(&workspace.id) {
+                    0.6
+                } else {
+                    1.
+                },
+                now,
+                140.,
+                Curve::Ease,
+            );
+            motion.background.retarget(
+                if dragging && self.workspace_drag_target.as_ref() == Some(&workspace.id) {
+                    1.
+                } else {
+                    0.
+                },
+                now,
+                140.,
+                Curve::Ease,
+            );
+            if motion.opacity.is_running(now) || motion.background.is_running(now) {
+                window.request_animation_frame();
+            }
+        }
+
         let capacity = columns as u32;
         if self.column_capacity != Some(capacity) {
             self.column_capacity = Some(capacity);
