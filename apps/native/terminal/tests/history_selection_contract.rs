@@ -39,6 +39,7 @@ fn selection_matches_reference_probes_on_terminal_output() -> Result<()> {
             let expected_range = GridSelection {
                 anchor: point(&expected["start"]),
                 end: point(&expected["end"]),
+                column: false,
             };
             if selection != expected_range || text != expected["text"].as_str().unwrap() {
                 differences.push(format!(
@@ -69,6 +70,7 @@ fn selection_crosses_soft_wrapped_and_offscreen_rows_without_moving_the_viewport
         GridSelection {
             anchor: GridPoint { row: 0, col: 3 },
             end: GridPoint { row: 2, col: 2 },
+            column: false,
         }
     );
     assert!(drag.initial.end.row >= top.rows);

@@ -12,11 +12,13 @@ pub struct GridPoint {
     pub col: usize,
 }
 
-/// Half-open selection in reading order over absolute rows of the active buffer.
+/// Selection over absolute buffer rows, either linear or rectangular.
+/// Columns are half-open, including on each row of a rectangular selection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GridSelection {
     pub anchor: GridPoint,
     pub end: GridPoint,
+    pub column: bool,
 }
 
 impl GridSelection {
@@ -26,13 +28,22 @@ impl GridSelection {
         if row < first.row || row > last.row {
             return 0..0;
         }
-        let left = if row == first.row { first.col } else { 0 };
-        let right = if row == last.row { last.col } else { cols };
+        let (left, right) = if self.column {
+            (
+                self.anchor.col.min(self.end.col),
+                self.anchor.col.max(self.end.col),
+            )
+        } else {
+            (
+                if row == first.row { first.col } else { 0 },
+                if row == last.row { last.col } else { cols },
+            )
+        };
         left.min(cols)..right.min(cols)
     }
 
     pub fn text(self, terminal: &mut Terminal) -> Result<String> {
-        if self.anchor == self.end {
+        if self.anchor == self.end || (self.column && self.anchor.col == self.end.col) {
             return Ok(String::new());
         }
         let (cols, total) = grid_size(terminal)?;
@@ -41,7 +52,7 @@ impl GridSelection {
         let mut result = String::new();
         for row in first..=last.min(total - 1) {
             let history = terminal.history_row(row)?;
-            if row > first && !history.metadata.wrap_continuation {
+            if row > first && (self.column || !history.metadata.wrap_continuation) {
                 result.push('\n');
             }
             let cells = &history.cells;
@@ -53,18 +64,21 @@ impl GridSelection {
                 .find(|(_, cell)| cell.width != 0 && cell.has_content)
                 .map_or(0, |(col, cell)| col + usize::from(cell.width));
             let end = range.end.min(content_end);
-            if range.start < end {
-                for (col, cell) in cells.iter().enumerate().take(end) {
-                    if cell.width != 0 && col + usize::from(cell.width) > range.start {
-                        result.push_str(&cell.text);
-                    }
+            let mut col = range.start;
+            while col < end {
+                let cell = &cells[col];
+                if cell.width == 0 || cell.text.is_empty() {
+                    result.push(' ');
+                } else {
+                    result.push_str(&cell.text);
                 }
+                col += usize::from(cell.width).max(1);
             }
         }
         if first < total && last >= total {
             result.push('\n');
         }
-        Ok(result)
+        Ok(result.replace('\u{a0}', " "))
     }
 }
 
@@ -73,6 +87,7 @@ pub enum SelectionMode {
     Character,
     Word,
     Line,
+    Column,
 }
 
 /// Pointer operations use absolute rows of the active terminal buffer.
@@ -95,6 +110,9 @@ pub enum SelectionAction {
         row: usize,
         x: f32,
         below: bool,
+    },
+    Scroll {
+        lines: i32,
     },
     SetEnd(GridPoint),
     Clear,
@@ -128,11 +146,12 @@ impl SelectionDrag {
             mode
         };
         let initial = match mode {
-            SelectionMode::Character => {
+            SelectionMode::Character | SelectionMode::Column => {
                 let anchor = grid_boundary(terminal, row, x, cols)?;
                 GridSelection {
                     anchor,
                     end: anchor,
+                    column: mode == SelectionMode::Column,
                 }
             }
             SelectionMode::Word => word_at(terminal, point, cols, total)?,
@@ -145,21 +164,23 @@ impl SelectionDrag {
         let (cols, total) = grid_size(terminal)?;
         let anchor = self.initial.anchor;
         let candidate = selection_candidate(terminal, self.mode, anchor, row, x, cols, total)?;
-        if self.mode == SelectionMode::Character {
+        if matches!(self.mode, SelectionMode::Character | SelectionMode::Column) {
             return Ok(GridSelection {
                 anchor,
                 end: candidate,
+                column: self.mode == SelectionMode::Column,
             });
         }
         Ok(self.extend_to(candidate, cols))
     }
 
     fn extend_to(self, candidate: GridPoint, cols: usize) -> GridSelection {
-        let GridSelection { anchor, end } = self.initial;
+        let GridSelection { anchor, end, .. } = self.initial;
         if candidate < anchor {
             return GridSelection {
                 anchor: candidate,
                 end,
+                column: false,
             };
         }
         let end = if candidate.row != anchor.row {
@@ -178,7 +199,11 @@ impl SelectionDrag {
         } else {
             end.max(candidate)
         };
-        GridSelection { anchor, end }
+        GridSelection {
+            anchor,
+            end,
+            column: false,
+        }
     }
 }
 
@@ -211,7 +236,7 @@ impl SelectionState {
     ) -> Result<()> {
         let (cols, total) = grid_size(terminal)?;
         let drag = SelectionDrag::begin_on_grid(terminal, mode, row, x, cols, total)?;
-        let GridSelection { anchor, end } = drag.initial;
+        let GridSelection { anchor, end, .. } = drag.initial;
         *self = Self {
             mode: drag.mode,
             start: Some(anchor),
@@ -248,8 +273,32 @@ impl SelectionState {
         below: bool,
     ) -> Result<()> {
         self.extend(terminal, row, x)?;
-        if let Some(end) = &mut self.end {
+        if self.mode != SelectionMode::Column
+            && let Some(end) = &mut self.end
+        {
             end.col = if below { terminal.screen()?.cols } else { 0 };
+        }
+        Ok(())
+    }
+
+    pub fn scroll(&mut self, terminal: &mut Terminal, lines: i32) -> Result<()> {
+        if self.start.is_none() || lines == 0 {
+            return Ok(());
+        }
+        let Some(end) = &mut self.end else {
+            return Ok(());
+        };
+        terminal.scroll(lines)?;
+        let screen = terminal.screen()?;
+        let offset = usize::try_from(screen.scrollbar.offset)?;
+        end.row = if lines > 0 {
+            offset
+        } else {
+            let last_row = usize::try_from(screen.scrollbar.total)? - 1;
+            (offset + screen.rows).min(last_row)
+        };
+        if self.mode != SelectionMode::Column {
+            end.col = if lines > 0 { 0 } else { screen.cols };
         }
         Ok(())
     }
@@ -285,7 +334,11 @@ impl SelectionState {
                 col: initial_end_col % cols,
             },
         };
-        Some(GridSelection { anchor, end })
+        Some(GridSelection {
+            anchor,
+            end,
+            column: self.mode == SelectionMode::Column,
+        })
     }
 
     pub fn trim(&mut self, amount: usize) {
@@ -317,7 +370,7 @@ fn selection_candidate(
 ) -> Result<GridPoint> {
     let row = row.min(total - 1);
     match mode {
-        SelectionMode::Character => grid_boundary(terminal, row, x, cols),
+        SelectionMode::Character | SelectionMode::Column => grid_boundary(terminal, row, x, cols),
         SelectionMode::Word => {
             let point = selection_cell(row, x, cols);
             if point.col == cols {
@@ -366,6 +419,7 @@ fn logical_line_at(
             row: last,
             col: cols,
         },
+        column: false,
     })
 }
 
@@ -455,7 +509,11 @@ fn word_at(
         no_trailing_space = !written_space(&next.cells[cols - 1]);
         end = GridPoint { row, col: span.end };
     }
-    Ok(GridSelection { anchor, end })
+    Ok(GridSelection {
+        anchor,
+        end,
+        column: false,
+    })
 }
 
 /// Treat both cells of a wide grapheme as one hit target.

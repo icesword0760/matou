@@ -15,6 +15,7 @@ fn expected_range(value: &Value) -> Option<GridSelection> {
     (!value.is_null()).then(|| GridSelection {
         anchor: point(&value["start"]),
         end: point(&value["end"]),
+        column: false,
     })
 }
 

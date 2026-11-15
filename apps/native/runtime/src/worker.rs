@@ -22,6 +22,11 @@ pub struct WorkerEvent {
     pub event: SessionEvent,
 }
 
+pub struct SelectionCopy {
+    pub text: String,
+    pub interrupted: bool,
+}
+
 /// Requests can be forwarded without blocking the central owner on a busy session.
 pub enum WorkerCommand {
     Write {
@@ -64,7 +69,7 @@ pub enum WorkerCommand {
     },
     CopySelection {
         interrupt_if_empty: bool,
-        reply: Sender<Result<String>>,
+        reply: Sender<Result<SelectionCopy>>,
     },
     Scroll {
         lines: i32,
@@ -296,12 +301,17 @@ fn run(
                     reply,
                     interrupt_if_empty,
                 } => {
-                    let result = session.selected_text().and_then(|text| {
-                        if text.is_empty() && interrupt_if_empty {
+                    let result = (|| {
+                        let has_selection = session
+                            .selection_range()?
+                            .is_some_and(|range| range.anchor != range.end);
+                        let text = session.selected_text()?;
+                        let interrupted = !has_selection && interrupt_if_empty;
+                        if interrupted {
                             session.write(&[3])?;
                         }
-                        Ok(text)
-                    });
+                        Ok(SelectionCopy { text, interrupted })
+                    })();
                     let _ = reply.send(result);
                 }
                 WorkerCommand::Scroll { lines, reply } => {

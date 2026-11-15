@@ -381,6 +381,9 @@ impl Terminal {
                     selection.extend_outside(terminal, row, x, below)
                 })
             }
+            SelectionAction::Scroll { lines } => {
+                self.update_selection(|selection, terminal| selection.scroll(terminal, lines))
+            }
             SelectionAction::SetEnd(end) => {
                 self.selection.set_end(end);
                 Ok(())

@@ -174,7 +174,7 @@ fn real_workers_keep_shell_output_independent_and_return_owned_screens() -> Resu
     })?;
     // Copy is queued before waiting for selection to finish.
     assert_eq!(
-        copied.recv_timeout(Duration::from_secs(2))??,
+        copied.recv_timeout(Duration::from_secs(2))??.text,
         "WORKER_B_ONLY"
     );
     selected.recv_timeout(Duration::from_secs(2))??;
@@ -237,11 +237,11 @@ fn drag_scroll_extends_selection_in_the_new_worker_viewport() -> Result<()> {
         scrolled.recv_timeout(timeout)??;
         Ok((screen, selection))
     };
-    let copy = || -> Result<String> {
+    let copy = |interrupt_if_empty| -> Result<_> {
         let (reply, copied) = mpsc::channel();
         worker.send(WorkerCommand::CopySelection {
             reply,
-            interrupt_if_empty: false,
+            interrupt_if_empty,
         })?;
         copied.recv_timeout(timeout)?
     };
@@ -260,12 +260,21 @@ fn drag_scroll_extends_selection_in_the_new_worker_viewport() -> Result<()> {
         reply,
     })?;
     selected.recv_timeout(timeout)??;
+    let (unchanged, selection) = scroll(2)?;
+    assert_eq!(unchanged.scrollbar.offset, initial.scrollbar.offset);
+    assert!(selection.is_some());
+    let (reply, extended) = mpsc::channel();
+    worker.send(WorkerCommand::Select {
+        action: SelectionAction::Extend { row: 99, x: 2. },
+        reply,
+    })?;
+    extended.recv_timeout(timeout)??;
     let (top, selection) = scroll(1000)?;
     assert_eq!(top.scrollbar.offset, 0);
     let selection = selection.context("selection after scrolling up")?;
     assert_eq!(selection.anchor, GridPoint { row: 0, col: 0 });
     assert_eq!(selection.end, GridPoint { row: 99, col: 7 });
-    let upward_text = copy()?;
+    let upward_text = copy(false)?.text;
     assert!(upward_text.starts_with("line000\n"));
     assert!(upward_text.ends_with("line099"));
 
@@ -280,9 +289,37 @@ fn drag_scroll_extends_selection_in_the_new_worker_viewport() -> Result<()> {
             col: bottom.cols,
         }
     );
-    let downward_text = copy()?;
+    let downward_text = copy(false)?.text;
     assert!(downward_text.starts_with("line099\n"));
     assert!(downward_text.contains("WORKER_READY>"));
+
+    let (reply, selected) = mpsc::channel();
+    worker.send(WorkerCommand::Select {
+        action: SelectionAction::Begin {
+            mode: SelectionMode::Column,
+            row: 97,
+            x: 2.,
+        },
+        reply,
+    })?;
+    selected.recv_timeout(timeout)??;
+    let (reply, extended) = mpsc::channel();
+    worker.send(WorkerCommand::Select {
+        action: SelectionAction::Extend { row: 99, x: 2. },
+        reply,
+    })?;
+    extended.recv_timeout(timeout)??;
+    let empty_column = copy(true)?;
+    assert!(empty_column.text.is_empty());
+    assert!(!empty_column.interrupted);
+    let (reply, selected) = mpsc::channel();
+    worker.send(WorkerCommand::Selection { reply })?;
+    let range = selected
+        .recv_timeout(timeout)??
+        .context("empty column selection remains active after copying")?;
+    assert!(range.column);
+    assert_eq!(range.anchor, GridPoint { row: 97, col: 2 });
+    assert_eq!(range.end, GridPoint { row: 99, col: 2 });
     worker.shutdown()?;
     Ok(())
 }
