@@ -1255,3 +1255,239 @@ index 42cf15b..851f2b4 100644
 +	}
 +	return "anonymous"
 +}
+diff --git a/internal/translator/antigravity/claude/antigravity_claude_request.go b/internal/translator/antigravity/claude/antigravity_claude_request.go
+--- a/internal/translator/antigravity/claude/antigravity_claude_request.go
++++ b/internal/translator/antigravity/claude/antigravity_claude_request.go
+@@ -337,14 +337,14 @@
+ 				}
+ 				partJSON := []byte(`{}`)
+ 				if systemPrompt != "" {
+-					partJSON, _ = ojson.SetBytes(partJSON, "text", systemPrompt)
++					partJSON, _ = ojson.SetBytes(partJSON, "text", util.NeutralizeClaudeCodeSystemIdentity(systemPrompt))
+ 				}
+ 				systemParts = append(systemParts, partJSON)
+ 			}
+ 		}
+ 	} else if systemResult.Type == ojson.String && !util.IsClaudeCodeAttributionSystemText(systemResult.String()) {
+ 		partJSON := []byte(`{"text":""}`)
+-		partJSON, _ = ojson.SetBytes(partJSON, "text", systemResult.String())
++		partJSON, _ = ojson.SetBytes(partJSON, "text", util.NeutralizeClaudeCodeSystemIdentity(systemResult.String()))
+ 		systemParts = append(systemParts, partJSON)
+ 	}
+ 
+diff --git a/internal/translator/codex/claude/codex_claude_request.go b/internal/translator/codex/claude/codex_claude_request.go
+--- a/internal/translator/codex/claude/codex_claude_request.go
++++ b/internal/translator/codex/claude/codex_claude_request.go
+@@ -109,7 +109,7 @@
+ 			}
+ 
+ 			content := []byte(`{"type":"input_text","text":""}`)
+-			content, _ = ojson.SetBytes(content, "text", text)
++			content, _ = ojson.SetBytes(content, "text", util.NeutralizeClaudeCodeSystemIdentity(text))
+ 			contentItems = append(contentItems, content)
+ 		}
+ 
+diff --git a/internal/translator/subscription_prompt_test.go b/internal/translator/subscription_prompt_test.go
+new file mode 100644
+--- /dev/null
++++ b/internal/translator/subscription_prompt_test.go
+@@ -0,0 +1,133 @@
++package translator
++
++import (
++	"bytes"
++	"encoding/json"
++	"reflect"
++	"strings"
++	"testing"
++
++	"github.com/MoeForge/moego/ojson"
++	antigravityclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/antigravity/claude"
++	codexclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/codex/claude"
++)
++
++const subscriptionBilling = "\n\t x-anthropic-billing-header: cc_version=sample; cch=12345;"
++
++var subscriptionIdentities = []string{
++	"You are Claude Code, Anthropic's official CLI for Claude.",
++	"You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK.",
++	"You are a Claude agent, built on Anthropic's Claude Agent SDK.",
++}
++
++const subscriptionGuidance = "Read CLAUDE.md; use claude.ai; keep anthropic-version, x-anthropic-beta and Claude.\nx-anthropic-custom: keep this lowercase header."
++
++type subscriptionTranslation struct {
++	name, model, systemParts, userText, tool, schema string
++	convert                                          func(string, []byte, bool) ([]byte, error)
++}
++
++var subscriptionTranslations = []subscriptionTranslation{
++	{"antigravity", "claude-sonnet-4-5", "request.systemInstruction.parts", "request.contents.0.parts.0.text", "request.tools.0.functionDeclarations.0", "parametersJsonSchema", antigravityclaude.ConvertClaudeRequestToAntigravity},
++	{"codex", "codex-test", "input.0.content", "input.1.content.0.text", "tools.0", "parameters", codexclaude.ConvertClaudeRequestToCodex},
++}
++
++func subscriptionPayload(t *testing.T, system any) []byte {
++	t.Helper()
++	// Identity and billing strings deliberately also occur outside system.
++	protected := strings.Join(subscriptionIdentities, "\n") + subscriptionBilling
++	payload, err := json.Marshal(map[string]any{
++		"system":   system,
++		"messages": []any{map[string]any{"role": "user", "content": protected}},
++		"tools": []any{map[string]any{
++			"name": "Claude", "description": protected,
++			"input_schema": map[string]any{"type": "object", "properties": map[string]any{
++				"text": map[string]any{"type": "string", "description": protected},
++			}},
++		}},
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	return payload
++}
++
++func TestSubscriptionPromptTranslations(t *testing.T) {
++	for _, route := range subscriptionTranslations {
++		t.Run(route.name, func(t *testing.T) {
++			for _, shape := range []string{"array", "string"} {
++				t.Run(shape, func(t *testing.T) {
++					want := []string{"You are a coding assistant.", "You are a coding assistant.", "You are a coding agent.", subscriptionGuidance}
++					var system any
++					if shape == "array" {
++						parts := []any{map[string]any{"type": "text", "text": subscriptionBilling}}
++						for _, text := range append(append([]string{}, subscriptionIdentities...), subscriptionGuidance) {
++							parts = append(parts, map[string]any{"type": "text", "text": text, "cache_control": map[string]string{"type": "ephemeral"}})
++						}
++						system = parts
++					} else {
++						system = strings.Join(subscriptionIdentities, "\n") + "\n" + subscriptionGuidance
++						want = []string{strings.Join(want, "\n")}
++					}
++					input := subscriptionPayload(t, system)
++					original := bytes.Clone(input)
++					output, err := route.convert(route.model, input, false)
++					if err != nil {
++						t.Fatal(err)
++					}
++					var got []string
++					for _, part := range ojson.GetBytes(output, route.systemParts).Array() {
++						got = append(got, part.Get("text").String())
++					}
++					if !reflect.DeepEqual(got, want) {
++						t.Fatalf("system parts = %q, want %q", got, want)
++					}
++					protected := strings.Join(subscriptionIdentities, "\n") + subscriptionBilling
++					for _, path := range []string{route.userText, route.tool + ".description", route.tool + "." + route.schema + ".properties.text.description"} {
++						if got := ojson.GetBytes(output, path).String(); got != protected {
++							t.Errorf("protected %s changed: %q", path, got)
++						}
++					}
++					if got := ojson.GetBytes(output, route.tool+".name").String(); got != "Claude" {
++						t.Errorf("tool name changed: %q", got)
++					}
++					if route.name == "codex" {
++						if got := ojson.GetBytes(output, "input.0.role").String(); got != "developer" {
++							t.Errorf("system role changed: %q", got)
++						}
++						if got := ojson.GetBytes(output, "instructions"); got.Type != ojson.String || got.String() != "" {
++							t.Errorf("instructions must remain empty: %s", got.Raw)
++						}
++					}
++					if !bytes.Equal(input, original) {
++						t.Fatal("source payload mutated")
++					}
++					repeated, err := route.convert(route.model, input, false)
++					if err != nil || !bytes.Equal(repeated, output) {
++						t.Fatalf("identical input must produce a stable prompt: %v", err)
++					}
++				})
++			}
++		})
++	}
++}
++
++func TestSubscriptionPromptBillingOnlySystem(t *testing.T) {
++	for _, route := range subscriptionTranslations {
++		t.Run(route.name, func(t *testing.T) {
++			for _, system := range []any{subscriptionBilling, []any{map[string]string{"type": "text", "text": subscriptionBilling}}} {
++				output, err := route.convert(route.model, subscriptionPayload(t, system), false)
++				if err != nil {
++					t.Fatal(err)
++				}
++				if route.name == "antigravity" {
++					if ojson.GetBytes(output, "request.systemInstruction").Exists() {
++						t.Fatalf("billing-only system must be dropped: %s", output)
++					}
++				} else if got := ojson.GetBytes(output, "input.0.role").String(); got != "user" {
++					t.Fatalf("billing-only developer message must be dropped: %s", output)
++				}
++			}
++		})
++	}
++}
+diff --git a/internal/util/claude_system_identity.go b/internal/util/claude_system_identity.go
+new file mode 100644
+--- /dev/null
++++ b/internal/util/claude_system_identity.go
+@@ -0,0 +1,16 @@
++package util
++
++import "strings"
++
++var claudeCodeSystemIdentityReplacer = strings.NewReplacer(
++	"You are Claude Code, Anthropic's official CLI for Claude.", "You are a coding assistant.",
++	"You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK.", "You are a coding assistant.",
++	"You are a Claude agent, built on Anthropic's Claude Agent SDK.", "You are a coding agent.",
++)
++
++// NeutralizeClaudeCodeSystemIdentity replaces only the three complete, case-sensitive
++// client identity sentences. Callers must restrict its use to system instructions.
++// All other bytes, including whitespace and project guidance, are preserved.
++func NeutralizeClaudeCodeSystemIdentity(text string) string {
++	return claudeCodeSystemIdentityReplacer.Replace(text)
++}
+diff --git a/internal/util/claude_system_identity_test.go b/internal/util/claude_system_identity_test.go
+new file mode 100644
+--- /dev/null
++++ b/internal/util/claude_system_identity_test.go
+@@ -0,0 +1,40 @@
++package util
++
++import (
++	"strings"
++	"testing"
++)
++
++func TestNeutralizeClaudeCodeSystemIdentity(t *testing.T) {
++	tests := []struct{ name, input, want string }{
++		{"cli", "You are Claude Code, Anthropic's official CLI for Claude.", "You are a coding assistant."},
++		{"cli sdk", "You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK.", "You are a coding assistant."},
++		{"agent sdk", "You are a Claude agent, built on Anthropic's Claude Agent SDK.", "You are a coding agent."},
++		{"preserve surrounding bytes", "\tRules\nYou are Claude Code, Anthropic's official CLI for Claude.\nRead CLAUDE.md.  ", "\tRules\nYou are a coding assistant.\nRead CLAUDE.md.  "},
++	}
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			got := NeutralizeClaudeCodeSystemIdentity(tt.input)
++			if got != tt.want {
++				t.Fatalf("got %q, want %q", got, tt.want)
++			}
++			if again := NeutralizeClaudeCodeSystemIdentity(got); again != got {
++				t.Fatalf("replacement is not idempotent: %q", again)
++			}
++		})
++	}
++}
++
++func TestNeutralizeClaudeCodeSystemIdentityPreservesOtherText(t *testing.T) {
++	for _, text := range []string{
++		"", "CLAUDE.md claude.ai anthropic-version x-anthropic-beta x-anthropic-* Claude",
++		"x-anthropic-billing-header: cc_version=sample; cch=12345;",
++		"You are Claude Code, Anthropic's official CLI for Claude",
++		"You are Claude Code, Anthropic's official CLI for Claude, running within a different SDK.",
++		strings.ToLower("You are Claude Code, Anthropic's official CLI for Claude."),
++	} {
++		if got := NeutralizeClaudeCodeSystemIdentity(text); got != text {
++			t.Errorf("changed unrelated text: %q -> %q", text, got)
++		}
++	}
++}
