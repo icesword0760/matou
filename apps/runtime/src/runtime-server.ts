@@ -2595,7 +2595,8 @@ export class RuntimeServer {
                 exited.runId,
                 { exitCode, ...(signal === undefined ? {} : { signal }), now: Date.now() }
               )
-              this.#setWorkStatus(message.sessionId, shellStartupFailure ? 'error' : 'exited')
+              this.#setWorkStatus(message.sessionId,
+                shellStartupFailure || (resumeExitFallback && exited.profile === 'codex') ? 'error' : 'exited')
             } catch (error) {
               console.error(`[session.run-exit] ${errorMessage(error)}`)
             }
@@ -3835,7 +3836,7 @@ export class RuntimeServer {
     if (method !== 'session.set-permission-mode') return
     const target = typeof input.permissionMode === 'string' ? input.permissionMode : ''
     const respawn = input.respawn === true
-    if (respawn) {
+    if (respawn || session?.profile === 'codex') {
       await this.#respawnWithPermission(sessionId, target as HudPermissionMode)
     } else if (session?.profile === 'antigravity') {
       this.#hud.updatePermission(sessionId, target)
@@ -4242,6 +4243,7 @@ export class RuntimeServer {
         if (!replacement || replacement.profile !== launch.profile) {
           throw new Error(`${launch.profile} process did not start`)
         }
+        if (launch.profile === 'codex') RuntimeServer.#flushSemanticEventsForAll()
         return true
       } catch (error) {
         console.error(`[session.shell-promote-agent] ${errorMessage(error)}`)

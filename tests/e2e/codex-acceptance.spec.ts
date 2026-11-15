@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
-import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, rm, symlink, unlink, writeFile } from 'node:fs/promises'
+import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, unlink, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { promisify } from 'node:util'
@@ -328,23 +328,18 @@ function readDbRows(dataDir: string, sessionId?: string): {
   }
 }
 
-function readLatestWorkStatus(dataDir: string, sessionId: string): { status: string; occurredAt: number; seq: number } | null {
-  const { events } = readDbRows(dataDir, sessionId)
-  for (let i = events.length - 1; i >= 0; i -= 1) {
-    const ev = events[i]!
-    if (ev.event_type === 'session.work_status_changed' || ev.event_type === 'session.work-status-changed') {
-      try {
-        const parsed = JSON.parse(ev.payload_json) as { workStatus?: string; status?: string }
-        const st = parsed.workStatus ?? parsed.status
-        if (st) return { status: st, occurredAt: ev.occurred_at, seq: ev.seq }
-      } catch { /* ignore */ }
-    }
-    try {
-      const parsed = JSON.parse(ev.payload_json) as { workStatus?: string }
-      if (parsed.workStatus) return { status: parsed.workStatus, occurredAt: ev.occurred_at, seq: ev.seq }
-    } catch { /* ignore */ }
-  }
-  return null
+function eventWorkStatus(event: { payload_json: string }, sessionId: string): string | undefined {
+  const parsed = JSON.parse(event.payload_json)
+  return parsed.workStatus
+    ?? parsed.graph?.nodes?.find((node: any) => node.sessionId === sessionId)?.workStatus
+    ?? (parsed.session?.id === sessionId ? parsed.session.workStatus : undefined)
+}
+
+function readCurrentWorkStatus(dataDir: string, sessionId: string): { status: string } | null {
+  const db = new DatabaseSync(join(dataDir, 'matou.sqlite'), { readOnly: true })
+  try {
+    return db.prepare('SELECT work_status AS status FROM sessions WHERE id = ?').get(sessionId) as { status: string } | null
+  } finally { db.close() }
 }
 
 async function openDagWindow(harness: PackagedHarness): Promise<Page> {
@@ -480,9 +475,9 @@ async function completeTurn(h: PackagedHarness, sid: string, surface: Locator, p
     final = assistant?.payload.content?.filter((c: any) => c.type === 'output_text').map((c: any) => c.text).join('\n') ?? ''
     return final === completedAnswer ? final : '' 
   }, { timeout: 150_000, intervals: [200, 500, 1000] }).toMatch(answer)
-  await expect.poll(() => readLatestWorkStatus(h.dataDir, sid)?.status, { timeout: 20_000 }).toBe('idle')
   h.turnProofs.push({ sessionId: sid, providerSessionId: id, turnId: finalTurn, prompt, finalAnswer: final, completedAnswer })
   await saveProof(`turns-${h.rootDir.split('/').at(-1)}.json`, h.turnProofs)
+  await expect.poll(() => readCurrentWorkStatus(h.dataDir, sid)?.status, { timeout: 20_000 }).toBe('idle')
   return final
 }
 
@@ -491,6 +486,8 @@ async function launchCodex(h: PackagedHarness): Promise<{ sessionId: string; sur
   const sessionId = (await surface.getAttribute('data-session-id'))!
   await positivePid(surface)
   await waitForEmptyShellPrompt(surface)
+  const dagPage = await openDagWindow(h)
+  await installDagStatusObserver(dagPage, sessionId)
   await h.page.bringToFront()
   await sendTerminalLine(surface, 'codex')
   await expect(surface.locator('.xterm-rows')).toContainText(/Codex/, { timeout: 45_000 })
@@ -499,9 +496,6 @@ async function launchCodex(h: PackagedHarness): Promise<{ sessionId: string; sur
   expect(rows).not.toMatch(/Update available|Updating Codex/)
   if (/trust.*(?:folder|directory)|trust the contents/i.test(rows)) await sendTerminalRawKey(surface, 'Enter')
   await expect(paneForSession(h.page, sessionId).locator('.pane-title')).toHaveText('Codex')
-  const dagPage = await openDagWindow(h)
-  await installDagStatusObserver(dagPage, sessionId)
-  await h.page.bringToFront()
   await expect(dagPage.locator(`.dag-node-card[data-session-id="${sessionId}"]`)).toContainText('Codex')
   await waitForDagNodeStatus(dagPage, sessionId, 'status-starting')
   await saveScreenshot(h.page, '01-codex-starting.png')
@@ -537,7 +531,7 @@ async function changeMode(h: PackagedHarness, sid: string, mode: string): Promis
 }
 
 test.describe('Codex packaged acceptance — real CLI and explicit controlled fixtures', () => {
-  test.setTimeout(720_000)
+  test.setTimeout(600_000)
 
   test('PRD 1–6, 8, 10: lifecycle, HUD, notifications, title, modes, restart and latency 3x', async () => {
     const dirs = await createIsolatedWorkspace('core')
@@ -556,12 +550,9 @@ test.describe('Codex packaged acceptance — real CLI and explicit controlled fi
         const observed = (await readDagStatusObserver(dagPage)).slice(obs)
         const events = readDbRows(h.dataDir, sid).events.filter((e) => e.seq > seq)
         await saveProof(`latency-round-${round}.json`, { observed,
-          events: events.filter((e) => JSON.parse(e.payload_json).workStatus) })
+          events: events.filter((e) => eventWorkStatus(e, sid)).map((e) => ({ ...e, status: eventWorkStatus(e, sid) })) })
         for (const status of ['running', 'idle']) {
-          const ev = events.filter((e) => {
-            const p = JSON.parse(e.payload_json)
-            return (p.workStatus ?? p.status) === status
-          }).at(status === 'idle' ? -1 : 0)
+          const ev = events.filter((e) => eventWorkStatus(e, sid) === status).at(status === 'idle' ? -1 : 0)
           const ui = observed.filter((o) => o.status === `status-${status}`).at(status === 'idle' ? -1 : 0)
           expect(ev, `round ${round}: missing ${status} runtime event`).toBeTruthy()
           expect(ui, `round ${round}: missing ${status} DOM mutation`).toBeTruthy()
@@ -606,29 +597,39 @@ test.describe('Codex packaged acceptance — real CLI and explicit controlled fi
       await sendTerminalLine(surface, 'Read README.md with a shell tool and reply only NOTIFY_DONE.')
       const peer = await createSiblingShellAndFocus(h.page, sid)
       await expect(pane).toHaveClass(/has-notification/, { timeout: 150_000 })
-      await h.page.getByRole('button', { name: '通知中心' }).click()
-      const center = h.page.getByRole('region', { name: '通知中心' })
+      await h.page.getByRole('button', { name: '通知中心', exact: true }).click()
+      const center = h.page.getByRole('region', { name: '通知中心', exact: true })
       await expect(center).toContainText('Codex')
       await saveScreenshot(center, '03-completion-notification.png')
-      await h.page.getByRole('button', { name: '通知中心' }).click()
+      await h.page.getByRole('button', { name: '通知中心', exact: true }).click()
       await pane.click()
-      await expect.poll(() => readLatestWorkStatus(h.dataDir, sid)?.status, { timeout: 150_000 }).toBe('idle')
+      await expect.poll(() => readCurrentWorkStatus(h.dataDir, sid)?.status, { timeout: 150_000 }).toBe('idle')
+      await saveProof('core-front.json', { sid, providerId, automaticTitle,
+        model: await hud.locator('.status-model').innerText(), peerId: peer.sessionId, turns: h.turnProofs })
 
       const modes = []
       for (const mode of ['Accept Edits', 'Plan Mode', 'Bypass Permissions', 'Default']) {
-        modes.push({ mode, ...await changeMode(h, sid, mode) })
+        const processChange = await changeMode(h, sid, mode)
         await completeTurn(h, sid, pane.locator('.terminal-surface'),
           'Which codeword did I ask you to remember? Reply only that codeword.', /opal-harbor-628/)
         expect(await waitForProviderSessionId(h.dataDir, sid)).toBe(providerId)
+        const context = (await rolloutEvents(h, providerId)).findLast((e) => e.type === 'turn_context')?.payload
+        const expectedSandbox = mode === 'Accept Edits' ? 'workspace-write'
+          : mode === 'Bypass Permissions' ? 'danger-full-access' : 'read-only'
+        expect(context?.sandbox_policy?.type).toBe(expectedSandbox)
+        modes.push({ mode, ...processChange, sandbox: context.sandbox_policy.type, approval: context.approval_policy })
+        await saveProof('modes-progress.json', { sid, providerId, modes, turns: h.turnProofs })
       }
       await saveProof('modes-and-core.json', { sid, providerId, peerId: peer.sessionId, modes, automaticTitle,
         actualModel: await hud.locator('.status-model').innerText(), db: readDbRows(h.dataDir, sid) })
+      const turnsBeforeRestart = h.turnProofs
       await h.close()
       h = await launchPackagedApp(dirs)
+      h.turnProofs = turnsBeforeRestart
       const restored = paneForSession(h.page, sid).locator('.terminal-surface')
       await positivePid(restored)
       await h.page.waitForTimeout(10_000)
-      expect(readLatestWorkStatus(h.dataDir, sid)?.status).toBe('starting')
+      expect(readCurrentWorkStatus(h.dataDir, sid)?.status).toBe('starting')
       await saveScreenshot(h.page, '08-static-restart.png')
       await completeTurn(h, sid, restored, 'Which codeword did I ask you to remember? Reply only that codeword.', /opal-harbor-628/)
       expect(await waitForProviderSessionId(h.dataDir, sid)).toBe(providerId)
@@ -729,7 +730,9 @@ test.describe('Codex packaged acceptance — real CLI and explicit controlled fi
         'Use the mt CLI to list cards and read the Shell sibling (mt read left --lines 30). Reply only its PEER_ token. Do not guess the token.', new RegExp(token))
       const uuid = await waitForProviderSessionId(h.dataDir, sid)
       const events = await rolloutEvents(h, uuid)
-      expect(JSON.stringify(events.filter((e) => e.payload?.type === 'function_call'))).toMatch(/mt (?:list|read)/)
+      const commands = events.filter((e) => e.payload?.type === 'item_completed' && e.payload.item?.type === 'CommandExecution')
+        .map((e) => e.payload.item)
+      expect(commands.some((item) => item.command?.some((part: string) => /mt read/.test(part)) && item.exit_code === 0 && item.aggregated_output?.includes(token))).toBe(true)
       await saveScreenshot(h.page, '11-mt-cross-card.png')
       await saveProof('mt.json', { shellId, sid, uuid, token, answer })
     } finally { await dispose(h) }
@@ -747,10 +750,10 @@ test.describe('Codex packaged acceptance — real CLI and explicit controlled fi
       await createSiblingShellAndFocus(h.page, sid)
       await waitForDagNodeStatus(dagPage, sid, 'status-needs-input', 90_000)
       await expect(paneForSession(h.page, sid)).toHaveClass(/has-notification/, { timeout: 15_000 })
-      await h.page.getByRole('button', { name: '通知中心' }).click()
-      await expect(h.page.getByRole('region', { name: '通知中心' })).toContainText('Codex')
+      await h.page.getByRole('button', { name: '通知中心', exact: true }).click()
+      await expect(h.page.getByRole('region', { name: '通知中心', exact: true })).toContainText('Codex')
       await saveScreenshot(h.page, '02-approval-notification.png')
-      await h.page.getByRole('button', { name: '通知中心' }).click()
+      await h.page.getByRole('button', { name: '通知中心', exact: true }).click()
       await paneForSession(h.page, sid).click()
       await saveScreenshot(h.page, '02-approval-terminal.png')
       await sendTerminalRawKey(surface, 'Enter')
@@ -760,11 +763,62 @@ test.describe('Codex packaged acceptance — real CLI and explicit controlled fi
       await waitForDagNodeStatus(dagPage, sid, 'status-running')
       await h.page.waitForTimeout(2500)
       await sendTerminalRawKey(surface, 'Escape')
-      await expect.poll(() => readLatestWorkStatus(h.dataDir, sid)?.status).toBe('interrupted')
+      await expect.poll(() => readCurrentWorkStatus(h.dataDir, sid)?.status).toBe('interrupted')
       await saveScreenshot(h.page, '02-interrupted.png')
       await completeTurn(h, sid, surface, 'Reply only AFTER_INTERRUPT_OK.', /AFTER_INTERRUPT_OK/)
       await saveProof('approval-interrupt.json', { sid, events: readDbRows(h.dataDir, sid).events })
     } finally { await dispose(h) }
+  })
+
+  test('PRD 2, 8: real missing local rollout, recovery failure, retry and new conversation', async () => {
+    const dirs = await createIsolatedWorkspace('recovery-failure')
+    let h = await launchPackagedApp(dirs)
+    let hidden: { original: string; held: string } | undefined
+    try {
+      const { sessionId: sid, surface } = await launchCodex(h)
+      await completeTurn(h, sid, surface, 'Remember recovery codeword jade-ridge-386. Reply only SAVED.', /SAVED/)
+      const uuid = await waitForProviderSessionId(h.dataDir, sid)
+      const original = await rolloutFile(h, uuid)
+      const held = join(dirs.rootDir, 'held-rollout.jsonl')
+      const hideAndRestart = async () => {
+        await h.close()
+        await rename(original, held)
+        hidden = { original, held }
+        h = await launchPackagedApp(dirs)
+        const banner = paneForSession(h.page, sid).locator('.provider-restore-banner:not(.restoring)')
+        await expect(banner).toContainText('恢复失败', { timeout: 90_000 })
+        expect(readCurrentWorkStatus(h.dataDir, sid)?.status).toBe('error')
+        const dag = await openDagWindow(h)
+        await waitForDagNodeStatus(dag, sid, 'status-error')
+        await saveScreenshot(dag, '02-real-error-dag.png')
+        await h.page.bringToFront()
+        await saveScreenshot(h.page, '08-real-recovery-failure.png')
+        return banner
+      }
+      const failed = await hideAndRestart()
+      await rename(held, original)
+      hidden = undefined
+      await failed.getByRole('button', { name: '重试恢复', exact: true }).click()
+      await positivePid(paneForSession(h.page, sid).locator('.terminal-surface'))
+      await completeTurn(h, sid, paneForSession(h.page, sid).locator('.terminal-surface'),
+        'Which recovery codeword did I ask you to remember? Reply only that codeword.', /jade-ridge-386/)
+      expect(await waitForProviderSessionId(h.dataDir, sid)).toBe(uuid)
+      await saveScreenshot(h.page, '08-real-retry-memory.png')
+      const failedAgain = await hideAndRestart()
+      await failedAgain.getByRole('button', { name: '新开 Codex', exact: true }).click()
+      await positivePid(paneForSession(h.page, sid).locator('.terminal-surface'))
+      await completeTurn(h, sid, paneForSession(h.page, sid).locator('.terminal-surface'), 'Reply only FRESH_OK.', /FRESH_OK/)
+      const freshUuid = await waitForProviderSessionId(h.dataDir, sid)
+      expect(freshUuid).not.toBe(uuid)
+      await saveScreenshot(h.page, '08-real-start-fresh.png')
+      await saveProof('recovery-failure.json', { sid, originalUuid: uuid, freshUuid,
+        stimulus: 'Temporarily moved only this isolated real CLI rollout; no fake hooks or database edits',
+        bindingAfter: readDbRows(h.dataDir, sid).bindings })
+    } finally {
+      await h.close().catch(() => {})
+      if (hidden) await rename(hidden.held, hidden.original).catch(() => {})
+      await dispose(h)
+    }
   })
 
   test('controlled fixtures: missing CLI and unauthenticated sign-in; no real login is revoked', async () => {

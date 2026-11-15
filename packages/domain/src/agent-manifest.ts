@@ -157,6 +157,8 @@ export const AGENT_MANIFESTS: Record<AgentProfileId, AgentManifest> = {
       modelFlag: '--model',
       permissionFlags: {
         default: [],
+        acceptEdits: ['--ask-for-approval', 'on-request', '--sandbox', 'workspace-write'],
+        plan: ['--ask-for-approval', 'on-request', '--sandbox', 'read-only'],
         bypassPermissions: ['--dangerously-bypass-approvals-and-sandbox']
       }
     },

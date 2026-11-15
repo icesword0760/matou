@@ -63,9 +63,14 @@ export function resolvePtyCommand(input: PtyCommandInput): PtyCommand {
       )
     }
     if (input.model?.trim()) args.push('--model', input.model.trim())
-    if (input.permissionMode === 'bypassPermissions') {
-      args.push('--dangerously-bypass-approvals-and-sandbox')
-    }
+    const manifest = getAgentManifest('codex')!
+    const permissionFlags = manifest.launch.permissionFlags[
+      input.permissionMode as keyof typeof manifest.launch.permissionFlags
+    ]
+    if (permissionFlags) args.push(...permissionFlags)
+    // Matou's Fork dialog already chose the execution directory. Do not let
+    // the CLI wait behind the progress overlay for the same choice again.
+    if (identity && input.forkSession) args.push('-c', 'tui.resume_cwd="current"')
     if (identity) args.push(input.forkSession ? 'fork' : 'resume', identity)
     return { file: input.executable, args, resuming: Boolean(identity) }
   }

@@ -106,7 +106,7 @@ describe('PRD 04 provider launch plan', () => {
       args: [
         '-c', 'model_context_window=512000', '-c', 'model_auto_compact_token_limit=460800', '-c', 'model_auto_compact_token_limit_scope="total"',
         '-c', 'developer_instructions="Use mt."',
-        'fork', 'codex-source-1'
+        '-c', 'tui.resume_cwd="current"', 'fork', 'codex-source-1'
       ],
       resuming: true
     })
@@ -195,6 +195,10 @@ describe('PRD 04 provider launch plan', () => {
       if (permissionMode === 'bypassPermissions') {
         args.push('--dangerously-bypass-approvals-and-sandbox')
       }
+      if (permissionMode === 'acceptEdits' || permissionMode === 'plan') {
+        args.push('--ask-for-approval', 'on-request', '--sandbox', permissionMode === 'plan' ? 'read-only' : 'workspace-write')
+      }
+      if (providerSessionId && forkSession) args.push('-c', 'tui.resume_cwd="current"')
       if (providerSessionId) args.push(forkSession ? 'fork' : 'resume', providerSessionId)
       return { file: '/fixture/codex', args, resuming: Boolean(providerSessionId) }
     }
@@ -278,6 +282,6 @@ describe('PRD 04 provider launch plan', () => {
 it('keeps the CLI default when no budget is configured and applies a selected maximum and effort independently', () => {
   expect(resolvePtyCommand({ profile: 'codex', executable: 'codex' }).args).toEqual([])
   expect(resolvePtyCommand({ profile: 'codex', executable: 'codex', contextWindow: 872000, reasoningEffort: 'high', providerSessionId: 'same', forkSession: true }).args).toEqual([
-    '-c', 'model_context_window=872000', '-c', 'model_auto_compact_token_limit=784800', '-c', 'model_auto_compact_token_limit_scope="total"', '-c', 'model_reasoning_effort="high"', 'fork', 'same'
+    '-c', 'model_context_window=872000', '-c', 'model_auto_compact_token_limit=784800', '-c', 'model_auto_compact_token_limit_scope="total"', '-c', 'model_reasoning_effort="high"', '-c', 'tui.resume_cwd="current"', 'fork', 'same'
   ])
 })

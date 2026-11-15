@@ -114,6 +114,19 @@ setInterval(() => {}, 1_000)
   })
 })
 
+describe('Codex executable preflight', () => {
+  it.skipIf(process.platform === 'win32')('rejects a missing executable before starting a short-lived PTY', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'matou-codex-missing-'))
+    roots.push(root)
+    const previous = process.env.MATOU_CODEX_COMMAND
+    process.env.MATOU_CODEX_COMMAND = join(root, 'does-not-exist')
+    try {
+      await expect(PtySession.create({ sessionId: 'missing-codex', executionContextId: 'local-default',
+        profile: 'codex', cols: 80, rows: 24, cwd: root, dataRoot: root })).rejects.toMatchObject({ code: 'ENOENT' })
+    } finally { restoreEnv('MATOU_CODEX_COMMAND', previous) }
+  })
+})
+
 describe('PtySession live catch-up', () => {
   it.each([true, false])('restores a previous Agent viewport before redraw (checkpoint: %s)', async (withCheckpoint) => {
     const root = await mkdtemp(join(tmpdir(), 'matou-pty-screen-recovery-'))

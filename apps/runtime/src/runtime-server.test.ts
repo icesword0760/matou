@@ -1773,7 +1773,7 @@ sleep 30
         '-c model_context_window=512000 -c model_auto_compact_token_limit=460800 ' +
         '-c model_auto_compact_token_limit_scope="total" ' +
         '--model codex-session-frozen-model --dangerously-bypass-approvals-and-sandbox ' +
-        'fork codex-source-context|https://bound-codex.example/v1|KEY_A'
+        '-c tui.resume_cwd="current" fork codex-source-context|https://bound-codex.example/v1|KEY_A'
       )
     } finally {
       forkPort.receive({
@@ -5782,6 +5782,89 @@ sleep 30
     }
   })
 
+  it('respawns every Codex HUD permission change with the same identity even when the UI requests an in-place switch', async () => {
+    const executable = join(root, 'codex-permission-respawn.sh')
+    const argumentFile = join(root, 'codex-permission-respawn-args.txt')
+    await writeFile(executable, '#!/bin/sh\nprintf "%s\\n" "$@" > "$MATOU_TEST_ARGUMENT_FILE"\nwhile :; do sleep 0.05; done\n')
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CODEX_COMMAND
+    const previousArguments = process.env.MATOU_TEST_ARGUMENT_FILE
+    process.env.MATOU_CODEX_COMMAND = executable
+    process.env.MATOU_TEST_ARGUMENT_FILE = argumentFile
+    const sessions = createTestSessionRegistry()
+    const modePort = new MockPort()
+    const sid = 'codex-hud-mode-respawn'
+    registerCanvasSession(database, sid, 'codex')
+    database.run(`INSERT INTO provider_bindings (
+      id, session_id, provider, provider_session_id, resume_state, metadata_json,
+      created_at, updated_at, validated_at
+    ) VALUES (?, ?, 'codex', ?, 'available', ?, 1, 1, 1)`,
+    'codex-mode-binding', sid, '11111111-1111-4111-8111-111111111111', JSON.stringify({ permissionMode: 'default' }))
+    const modeServer = new RuntimeServer(modePort, root, database, undefined, undefined, sessions)
+    try {
+      modePort.receive({ type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'codex-mode-renderer' })
+      modePort.receive({ type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION, sessionId: sid,
+        executionContextId: 'replay-context', profile: 'codex', cols: 80, rows: 24 })
+      await waitUntil(() => sessions.has(sid))
+      for (const [index, permissionMode] of ['acceptEdits', 'plan', 'bypassPermissions', 'default'].entries()) {
+        modeServer.providerIdentityRecorded(sid, sessions.get(sid)!.runId!)
+        const before = sessions.get(sid)!.pid
+        const requestId = `codex-mode-${index}`
+        modePort.receive(rpc(requestId, 'session.set-permission-mode', {
+          sessionId: sid, provider: 'codex', permissionMode, respawn: false, now: 2 + index
+        }))
+        await waitUntil(() => modePort.findRpcResponse(requestId) !== undefined, 5000)
+        expect(modePort.findRpcError(requestId)).toBeUndefined()
+        expect(sessions.get(sid)?.pid).not.toBe(before)
+        await waitUntilAsync(async () => (await readFile(argumentFile, 'utf8').catch(() => '')).includes('resume'))
+        const args = (await readFile(argumentFile, 'utf8')).trim().split('\n')
+        expect(args.slice(-2)).toEqual(['resume', '11111111-1111-4111-8111-111111111111'])
+        const expected = permissionMode === 'acceptEdits'
+          ? ['--ask-for-approval', 'on-request', '--sandbox', 'workspace-write']
+          : permissionMode === 'plan'
+            ? ['--ask-for-approval', 'on-request', '--sandbox', 'read-only']
+            : permissionMode === 'bypassPermissions' ? ['--dangerously-bypass-approvals-and-sandbox'] : []
+        expect(args.slice(6, -2)).toEqual(expected)
+      }
+    } finally {
+      await sessions.shutdownAll()
+      modeServer.close()
+      restoreEnv('MATOU_CODEX_COMMAND', previousCommand)
+      restoreEnv('MATOU_TEST_ARGUMENT_FILE', previousArguments)
+    }
+  })
+
+  it('keeps a failed Codex recovery in error after the unconfirmed process exits', async () => {
+    const executable = join(root, 'codex-failed-recovery.sh')
+    await writeFile(executable, '#!/bin/sh\nsleep 0.05\nexit 1\n')
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CODEX_COMMAND
+    process.env.MATOU_CODEX_COMMAND = executable
+    const sid = 'codex-failed-recovery'
+    registerCanvasSession(database, sid, 'codex')
+    database.run(`INSERT INTO provider_bindings (
+      id, session_id, provider, provider_session_id, resume_state, metadata_json,
+      created_at, updated_at, validated_at
+    ) VALUES (?, ?, 'codex', ?, 'available', '{}', 1, 1, 1)`,
+    'codex-failed-recovery-binding', sid, '22222222-2222-4222-8222-222222222222')
+    const sessions = createTestSessionRegistry()
+    const failurePort = new MockPort()
+    const failureServer = new RuntimeServer(failurePort, root, database, undefined, undefined, sessions)
+    try {
+      failurePort.receive({ type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'codex-failure-renderer' })
+      failurePort.receive({ type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION, sessionId: sid,
+        executionContextId: 'replay-context', profile: 'codex', cols: 80, rows: 24 })
+      await waitUntil(() => database.get<{ restore_state: string }>(
+        'SELECT restore_state FROM provider_bindings WHERE id = ?', 'codex-failed-recovery-binding')?.restore_state === 'failed')
+      await waitUntil(() => !sessions.has(sid))
+      expect(workStatus(sid)).toBe('error')
+    } finally {
+      await sessions.shutdownAll()
+      failureServer.close()
+      restoreEnv('MATOU_CODEX_COMMAND', previousCommand)
+    }
+  })
+
   it('switches live permission modes in place and respawns across the Bypass boundary', async () => {
     const executable = join(root, 'provider-live-permission.sh')
     const argumentFile = join(root, 'provider-live-permission-arguments.txt')
@@ -6685,6 +6768,9 @@ sleep 30
       port.receive({ type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
         sessionId: 'codex-context-shell', executionContextId: 'replay-context', profile: 'shell', cols: 80, rows: 24 })
       await waitUntil(() => sessions.get('codex-context-shell')?.profile === 'shell')
+      port.receive({ type: 'events.subscribe', protocolVersion: PROTOCOL_VERSION,
+        consumerId: 'already-open-codex-dag', afterSequence: 0, batchSize: 100 })
+      await settle()
       port.receive({ type: 'terminal.input', protocolVersion: PROTOCOL_VERSION,
         sessionId: 'codex-context-shell', data: 'codex\r' })
       await waitUntil(() => sessions.get('codex-context-shell')?.profile === 'codex')
@@ -6694,6 +6780,9 @@ sleep 30
         '-c', 'model_auto_compact_token_limit_scope="total"'
       ])
       expect(database.get<{ kind: string }>('SELECT kind FROM sessions WHERE id = ?', 'codex-context-shell')?.kind).toBe('codex')
+      expect(port.sent.filter((message) => message.type === 'events.batch').flatMap((message) => message.events))
+        .toEqual(expect.arrayContaining([expect.objectContaining({ eventType: 'session.updated',
+          payload: expect.objectContaining({ session: expect.objectContaining({ kind: 'codex' }) }) })]))
     } finally {
       await sessions.shutdownAll()
       managed.close()

@@ -308,7 +308,7 @@ export class PtySession {
       const providerCommandEnvironment = profile === 'shell'
         ? {}
         : await resolveProviderCommandEnvironment(command.file, baseEnvironment)
-      if (profile === 'antigravity' && process.platform !== 'win32') {
+      if ((profile === 'antigravity' || profile === 'codex') && process.platform !== 'win32') {
         const resolvedPath = providerCommandEnvironment.PATH ?? baseEnvironment.PATH
         if (!(await executableExists(command.file, resolvedPath))) {
           throw Object.assign(new Error(`spawn ${command.file} ENOENT`), { code: 'ENOENT' })
