@@ -1520,7 +1520,7 @@ diff --git a/internal/translator/subscription_prompt_test.go b/internal/translat
 new file mode 100644
 --- /dev/null
 +++ b/internal/translator/subscription_prompt_test.go
-@@ -0,0 +1,198 @@
+@@ -0,0 +1,303 @@
 +package translator
 +
 +import (
@@ -1719,11 +1719,116 @@ new file mode 100644
 +		}
 +	}
 +}
++
++// Exercise both real translation entry points and both system shapes. Outside
++// prose remains sanitizable, while each complete code sample stays byte-exact.
++func TestSubscriptionPromptCodeRegions(t *testing.T) {
++	identity := subscriptionIdentities[0]
++	code := identity + "\n由腾讯开发，使用通义千问和深度求索。"
++	outside := identity + " 由腾讯开发\n"
++	for _, route := range subscriptionTranslations {
++		t.Run(route.name, func(t *testing.T) {
++			wantOutside := "You are a coding assistant. 由腾讯开发\n"
++			if route.name == "antigravity" {
++				wantOutside = "You are Antigravity, an agentic AI coding assistant. 由Google开发\n"
++			}
++			for _, tc := range []struct {
++				name, sample string
++				unclosed     bool
++			}{
++				{"audit literal backticks", "```python\nmarker = \"```\"\n" + code + "\n```", false},
++				{"ordinary fence", "```text\n" + code + "\n```", false},
++				{"longer closing fence", "````text\n```\n" + code + "\n`````", false},
++				{"indented fence", " \t```text\n" + code + "\n\t ```` \t", false},
++				{"closing fence at EOF", "```\n" + code + "\n```", true},
++				{"non standalone run", "```text\n``` extra\n" + code + "\n```", false},
++				{"embedded long run", "```text\nmarker = \"`````\"\n" + code + "\n```", false},
++				{"unclosed fence", "```text\nmarker = \"```\"\n" + code, true},
++				{"short closing run", "````text\n" + code + "\n```\n" + identity, true},
++				{"inline with literal backtick", "``literal ` " + identity + " 由腾讯开发``", false},
++				{"multiline inline", "`first line\n" + code + "\nlast line`", false},
++				{"multiline double inline", "``first ` line\n" + code + "\nlast ``` line``", false},
++				{"midline triple inline", "example ```first\n" + code + "\nlast```", false},
++				{"exact inline run", "``literal ``` " + identity + " 由腾讯开发``", false},
++				{"protected fence-like run", "``first\n```text\n" + code + "\nlast``", false},
++				{"ordinary inline", "`" + identity + " 由腾讯开发`", false},
++			} {
++				t.Run(tc.name, func(t *testing.T) {
++					for _, newline := range []string{"\n", "\r\n", "\r"} {
++						sample := strings.ReplaceAll(tc.sample, "\n", newline)
++						prefix := strings.ReplaceAll(outside, "\n", newline)
++						wantPrefix := strings.ReplaceAll(wantOutside, "\n", newline)
++						input, want := prefix+sample, wantPrefix+sample
++						if !tc.unclosed {
++							input += newline + prefix
++							want += newline + wantPrefix
++						}
++						for _, system := range []any{input, []any{map[string]string{"type": "text", "text": input}}} {
++							output, err := route.convert(route.model, subscriptionPayload(t, system), false)
++							if err != nil {
++								t.Fatal(err)
++							}
++							parts := ojson.GetBytes(output, route.systemParts).Array()
++							if len(parts) != 1 {
++								t.Fatalf("unexpected system parts: %s", output)
++							}
++							if got := parts[0].Get("text").String(); got != want {
++								t.Fatalf("code/prose boundary changed:\ngot  %q\nwant %q", got, want)
++							}
++						}
++					}
++				})
++			}
++		})
++	}
++}
++
++func TestSubscriptionPromptInlineFallback(t *testing.T) {
++	identity := subscriptionIdentities[0]
++	line := identity + " 由腾讯开发"
++	for _, route := range subscriptionTranslations {
++		t.Run(route.name, func(t *testing.T) {
++			clean := "You are a coding assistant. 由腾讯开发"
++			if route.name == "antigravity" {
++				clean = "You are Antigravity, an agentic AI coding assistant. 由Google开发"
++			}
++			for _, tc := range []struct{ name, input, want string }{
++				{"unclosed single", "`" + line + "\n" + line, "`" + line + "\n" + clean},
++				{"unclosed double", "``" + line + "\n" + line, "``" + line + "\n" + clean},
++				{"midline run is not a fence", "example ```" + line + "\n" + line, "example ```" + line + "\n" + clean},
++				{"200 lines inclusive", "`opening\n" + strings.Repeat("line\n", 198) + line + "`", "`opening\n" + strings.Repeat("line\n", 198) + line + "`"},
++				{"201 lines falls back", "`opening\n" + strings.Repeat("line\n", 199) + line + "`", "`opening\n" + strings.Repeat("line\n", 199) + clean + "`"},
++				{"different run cannot close", "``opening\n" + line + "```", "``opening\n" + clean + "```"},
++				{"fence after unmatched inline", "`opening\n```text\n" + line + "\n```\n" + line, "`opening\n```text\n" + line + "\n```\n" + clean},
++			} {
++				t.Run(tc.name, func(t *testing.T) {
++					for _, newline := range []string{"\n", "\r\n", "\r"} {
++						input := strings.ReplaceAll(tc.input, "\n", newline)
++						want := strings.ReplaceAll(tc.want, "\n", newline)
++						for _, system := range []any{input, []any{map[string]string{"type": "text", "text": input}}} {
++							output, err := route.convert(route.model, subscriptionPayload(t, system), false)
++							if err != nil {
++								t.Fatal(err)
++							}
++							parts := ojson.GetBytes(output, route.systemParts).Array()
++							if len(parts) != 1 {
++								t.Fatalf("unexpected system parts: %s", output)
++							}
++							if got := parts[0].Get("text").String(); got != want {
++								t.Fatalf("inline fallback changed:\ngot  %q\nwant %q", got, want)
++							}
++						}
++					}
++				})
++			}
++		})
++	}
++}
 diff --git a/internal/util/claude_system_identity.go b/internal/util/claude_system_identity.go
 new file mode 100644
 --- /dev/null
 +++ b/internal/util/claude_system_identity.go
-@@ -0,0 +1,88 @@
+@@ -0,0 +1,141 @@
 +package util
 +
 +import (
@@ -1762,12 +1867,18 @@ new file mode 100644
 +	return text
 +}
 +
-+// Backtick spans are copied verbatim, without placeholder strings. An unclosed
-+// fence protects the remainder; an unclosed inline span protects to end of line.
++// Backtick spans are copied verbatim, without placeholder strings. Fences
++// start at an indented line boundary and close only on a standalone run at least
++// as long as the opener. Inline spans close on an exact run within 200 lines;
++// if unmatched, only the rest of the opening line is protected.
 +func SystemTextCodeMask(text string) []bool {
 +	mask := make([]bool, len(text))
++	lineStart := 0
 +	for i := 0; i < len(text); {
 +		if text[i] != '`' {
++			if text[i] == '\r' || text[i] == '\n' {
++				lineStart = i + 1
++			}
 +			i++
 +			continue
 +		}
@@ -1775,20 +1886,67 @@ new file mode 100644
 +		for i+width < len(text) && text[i+width] == '`' {
 +			width++
 +		}
-+		delimiter := text[i : i+width]
 +		end := len(text)
-+		search := text[i+width:]
-+		if width < 3 {
-+			if newline := strings.IndexAny(search, "\r\n"); newline >= 0 {
-+				search = search[:newline]
++		if width >= 3 && strings.TrimSpace(text[lineStart:i]) == "" {
++			// Skip the complete opening line, including its info string.
++			for search := i + width; search < len(text); {
++				newline := strings.IndexAny(text[search:], "\r\n")
++				if newline < 0 {
++					break
++				}
++				start := search + newline + 1
++				if text[start-1] == '\r' && start < len(text) && text[start] == '\n' {
++					start++
++				}
++				lineEnd := len(text)
++				if newline := strings.IndexAny(text[start:], "\r\n"); newline >= 0 {
++					lineEnd = start + newline
++				}
++				line := strings.TrimSpace(text[start:lineEnd])
++				if len(line) >= width && strings.Trim(line, "`") == "" {
++					end = lineEnd
++					break
++				}
++				search = lineEnd
++			}
++		} else {
++			// Preserve the existing conservative fallback for unmatched inline code.
++			if newline := strings.IndexAny(text[i+width:], "\r\n"); newline >= 0 {
 +				end = i + width + newline
 +			}
-+		}
-+		if close := strings.Index(search, delimiter); close >= 0 {
-+			end = i + width + close + width
++			lines := 1
++			for search := i + width; search < len(text); {
++				if text[search] == '\r' || text[search] == '\n' {
++					lines++
++					if lines > 200 {
++						break
++					}
++					if text[search] == '\r' && search+1 < len(text) && text[search+1] == '\n' {
++						search++
++					}
++					search++
++					continue
++				}
++				if text[search] != '`' {
++					search++
++					continue
++				}
++				closeEnd := search + 1
++				for closeEnd < len(text) && text[closeEnd] == '`' {
++					closeEnd++
++				}
++				if closeEnd-search == width {
++					end = closeEnd
++					break
++				}
++				search = closeEnd
++			}
 +		}
 +		for j := i; j < end; j++ {
 +			mask[j] = true
++		}
++		if newline := strings.LastIndexAny(text[i:end], "\r\n"); newline >= 0 {
++			lineStart = i + newline + 1
 +		}
 +		i = end
 +	}
