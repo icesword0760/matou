@@ -7,7 +7,7 @@ use std::{
 
 use anyhow::{Context, Result, ensure};
 use matou_native_core::{
-    hierarchy::{self, HierarchyResult, Scene, Session as StoredSession, canvas},
+    hierarchy::{self, HierarchyResult, Scene, Session as StoredSession, canvas, tabs},
     ownership::DatabaseOwner,
     session_graph,
     sessions::{self, SessionRun, StartShellRunInput},
@@ -32,6 +32,7 @@ struct RunningShell {
     work_tracker: WorkStatusTracker,
     emitted_output: bool,
     ended: bool,
+    retiring: bool,
     cwd_capture: Option<(Instant, bool)>,
 }
 
@@ -211,6 +212,68 @@ impl ShellOwner {
         )
     }
 
+    pub fn rename_scene(
+        &mut self,
+        command: &CommandMetadata,
+        input: &tabs::RenameSceneInput,
+        duplicate_scene_name: &str,
+        committed_at: i64,
+    ) -> Result<Value> {
+        tabs::rename_scene(
+            &mut self.connection,
+            command,
+            input,
+            duplicate_scene_name,
+            committed_at,
+        )
+    }
+
+    pub fn reorder_scene(
+        &mut self,
+        command: &CommandMetadata,
+        input: &tabs::ReorderSceneInput,
+        committed_at: i64,
+    ) -> Result<Value> {
+        tabs::reorder_scene(&mut self.connection, command, input, committed_at)
+    }
+
+    pub fn scene_close_preview(&self, window_id: &str, scene_id: &str) -> Result<(Value, bool)> {
+        let is_last = self.connection.query_row(
+            "SELECT (SELECT COUNT(*) FROM scenes AS active
+                       WHERE active.task_id = task.id AND active.archived_at IS NULL) = 1
+                AND (SELECT COUNT(*) FROM tasks AS active
+                       WHERE active.workspace_id = task.workspace_id AND active.archived_at IS NULL) = 1
+             FROM scenes AS scene JOIN tasks AS task ON task.id = scene.task_id
+             WHERE scene.id = ? AND scene.archived_at IS NULL AND task.archived_at IS NULL",
+            [scene_id],
+            |row| row.get(0),
+        )?;
+        Ok((self.graph(scene_id, Some(window_id))?, is_last))
+    }
+
+    pub fn close_scene(
+        &mut self,
+        command: &CommandMetadata,
+        input: &tabs::CloseSceneInput,
+        committed_at: i64,
+    ) -> Result<Vec<String>> {
+        let result = tabs::close_scene(&mut self.connection, command, input, committed_at)?;
+        let disposed: Vec<String> = serde_json::from_value(result["disposedSessionIds"].clone())?;
+        for id in &disposed {
+            self.summaries.remove(id);
+            if let Some(shell) = self.shells.get_mut(id)
+                && !shell.retiring
+            {
+                shell.retiring = true;
+                shell.cwd_capture = None;
+                // Keep the run registered until its final exit record is handled.
+                // If the channel already closed, poll will reap and report the worker.
+                let _ = shell.worker.send(WorkerCommand::Shutdown { reply: None });
+            }
+        }
+        Ok(disposed)
+    }
+
     /// Resolve environment and geometry before calling. Startup handshaking stays
     /// on the runtime thread; subsequent session requests are forwarded without waiting.
     pub fn launch(
@@ -285,6 +348,7 @@ impl ShellOwner {
                 work_tracker: WorkStatusTracker::default(),
                 emitted_output: false,
                 ended: false,
+                retiring: false,
                 cwd_capture: None,
             },
         );
@@ -295,6 +359,7 @@ impl ShellOwner {
     pub fn send(&self, session_id: &str, command: WorkerCommand) -> Result<()> {
         self.shells
             .get(session_id)
+            .filter(|shell| !shell.retiring)
             .context("Shell worker does not exist")?
             .worker
             .send(command)
@@ -302,8 +367,14 @@ impl ShellOwner {
 
     pub fn poll(&mut self, max_wait: Duration) -> Result<Vec<OwnerEvent>> {
         let mut events = std::mem::take(&mut self.pending);
+        let finished_before_poll: Vec<_> = self
+            .shells
+            .iter()
+            .filter(|(_, shell)| shell.retiring && !shell.ended && shell.worker.is_finished())
+            .map(|(id, _)| id.clone())
+            .collect();
         self.start_due_cwd_captures();
-        let wait = if events.is_empty() {
+        let wait = if events.is_empty() && finished_before_poll.is_empty() {
             self.summaries
                 .values()
                 .filter_map(|s| s.deadline)
@@ -324,12 +395,38 @@ impl ShellOwner {
                 return Err(anyhow::anyhow!("Shell event channel disconnected"));
             }
         }
+        let mut drained = false;
         for _ in 0..127 {
             let Ok(event) = self.receive.try_recv() else {
+                drained = true;
                 break;
             };
             self.apply(event, &mut events);
         }
+        self.shells.retain(|id, shell| {
+            // For a worker without SavedExit, only an empty queue observed after
+            // its thread stopped proves there is no final exit still to apply.
+            let missing_exit = drained && finished_before_poll.contains(id);
+            if !shell.retiring || !(shell.ended || missing_exit) || !shell.worker.is_finished() {
+                return true;
+            }
+            match shell.worker.join_after_shutdown() {
+                Err(error) => diagnostic(
+                    &mut events,
+                    id,
+                    format!("shut down closed Shell session: {error:#}"),
+                ),
+                Ok(()) if !shell.ended => {
+                    diagnostic(
+                        &mut events,
+                        id,
+                        "closed Shell stopped before recording its exit".into(),
+                    );
+                }
+                Ok(()) => {}
+            }
+            false
+        });
         self.flush_due_summaries(&mut events);
         self.start_due_cwd_captures();
         Ok(events)
@@ -337,12 +434,22 @@ impl ShellOwner {
 
     fn apply(&mut self, event: WorkerEvent, events: &mut Vec<OwnerEvent>) {
         // A failed run-start transaction has already shut down its unregistered PTY.
-        if !self
+        let Some(shell) = self
             .shells
             .get(&event.session_id)
-            .is_some_and(|shell| shell.run_id == event.run_id)
-        {
+            .filter(|shell| shell.run_id == event.run_id)
+        else {
             return;
+        };
+        if shell.retiring {
+            match &event.event {
+                SessionEvent::SavedExit { .. } => {}
+                SessionEvent::Diagnostic { message } => {
+                    diagnostic(events, &event.session_id, message.clone());
+                    return;
+                }
+                _ => return,
+            }
         }
         let result = match &event.event {
             SessionEvent::InputSubmitted => {
@@ -521,17 +628,20 @@ impl ShellOwner {
         disposed: bool,
         events: &mut Vec<OwnerEvent>,
     ) -> Result<()> {
-        self.flush_summary(id, events);
+        let retiring = self.shells[id].retiring;
+        if !retiring {
+            self.flush_summary(id, events);
+        }
         let shell = self.shells.get_mut(id).expect("registered Shell exit");
         if shell.ended {
             return Ok(());
         }
         shell.ended = true;
         shell.cwd_capture = None;
-        let shutdown = disposed && self.closing;
+        let shutdown = disposed && self.closing && !retiring;
         let run = shell.run_id.clone();
         let pid = shell.worker.process_id();
-        let startup_failed = !shell.emitted_output && !shutdown;
+        let startup_failed = !shell.emitted_output && !shutdown && !retiring;
         if shutdown {
             let work: String = self.connection.query_row(
                 "SELECT work_status FROM sessions WHERE id=?",
@@ -640,7 +750,12 @@ impl ShellOwner {
         self.closing = true;
         let mut first_error = None;
         for shell in self.shells.values_mut() {
-            if let Err(error) = shell.worker.shutdown() {
+            let result = if shell.retiring {
+                shell.worker.join_after_shutdown()
+            } else {
+                shell.worker.shutdown()
+            };
+            if let Err(error) = result {
                 first_error.get_or_insert(error);
             }
         }

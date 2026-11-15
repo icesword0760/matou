@@ -152,3 +152,16 @@ The screenshots are functional evidence, not a passed same-state pixel compariso
 | A03 narrow card | Frozen source compact summary styles and widths | Native compact summary renders/activates; ordinary terminal input works after selection | Full narrow state/resize pixel matrix open |
 | A03/A16 canvas anchor | Frozen geometry repository fixture and source saved root-group geometry | `geometry_contract`, SQLite `geometry-before-reopen.json`, D07 and D11/D12 tab/quit/reopen | Nested groups/DAG/window geometry not yet connected |
 | A16 geometry write failure | Source latest-write retry120ms, up to3 retries | Real SQLite trigger failure then same-value success129.1ms, D22/`geometry-transient-failure.json` | Latest build exact-value retry127.4ms passed; delayed-focus/tab switch verified with a real DB lock; sub120ms failure/reentry ordering source-reviewed only |
+
+
+## Canvas tab operations — N02y (in progress)
+
+| Scenario | Frozen reference | Native result / evidence | Remaining difference |
+| --- | --- | --- | --- |
+| A02/A03 rename/reorder/close storage | 18 actual TypeScript service operations and SQLite snapshots | `scene_tabs_contract`; same results, errors, rows and events | Delayed-exit bridge and real UI disposal passed; complete Agent disposal remains open |
+| A03 rename UI | E01/E02, live HTML input undo/word editing | E04–E07/E17–E19: Chinese names, duplicate/FEFF trim, 20-unit input, selected-word undo and redo | Genuine IME, complete focus traversal and pixel comparison open |
+| A02.05/A02.08 close UI | E03 and earlier original close/last-tab captures | E08–E10; background tab removed, retained Shell takes input; sole tab preserved | Slow-exit concurrency/run persistence pass in bridge; E20/scene-tabs-final-exit.json confirm real UI result; multi-task UI open |
+| A03 overflow tabs | E13/E14 hidden list and selection | E11/E12/E15/E16 visible menu, selection, width and long-title ellipsis | Full keyboard/unread/disabled/pixel states open |
+| A03 modal interaction | Original input Tab → cancel → confirm → underlying new-workspace | Native scroll/right-click occluded; disabled confirm skipped | Native currently traps Tab within dialog; original does not. Full focus parity NOT passed |
+
+| A03/A08 slow closed Shell | Original private runtime disposal retains normal run-exit recording and does not serialize other session input | Real HUP-ignoring zsh bridge: retained input completes before closed PID exits; run exited + code/signal persisted unchanged across reopen. E20 + scene-tabs-final-exit.json show same user route in native app | UI pixel/timing equivalence of structural removal versus event/RPC projection still open; no Agent/multiwindow claim |
