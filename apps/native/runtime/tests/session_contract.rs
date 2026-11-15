@@ -465,6 +465,86 @@ fn real_storage_fault_stops_one_session_and_retries_the_same_sequence() -> Resul
 }
 
 #[test]
+fn clipboard_writes_are_emitted_once_from_saved_live_output() -> Result<()> {
+    fn writes(events: &[SessionEvent]) -> Vec<&str> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                SessionEvent::ClipboardWrite { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    let root = tempfile::tempdir()?;
+    let mut options = shell_options(root.path(), "clipboard", 128)?;
+    options.restored_history = b"\x1b]52;c;aGlzdG9yeQ==\x07".to_vec();
+    let mut session = Session::launch(options)?;
+    let mut events = Vec::new();
+    require_started(&mut session, &mut events)?;
+    assert!(
+        writes(&events).is_empty(),
+        "replay must not request a clipboard write"
+    );
+
+    // Defer the third OSC until the journal cannot rotate. Disabling echo makes
+    // that OSC the first output from the subsequent trigger input.
+    let command = r#"stty -echo; printf '\033]52;c;b25l\007\033]52;c;dHdv\007CLIP_%s%512s\n' WAITING ''; read -r trigger; printf '\033]52;c;dGhyZWU=\007CLIP_%s\n' RETRIED; read -r stop"#;
+    input(&mut session, command)?;
+    let waiting = format!("CLIP_WAITING{}\r\n", " ".repeat(512));
+    collect(&mut session, &mut events, |events, _| {
+        output_has(events, &waiting)
+    })?;
+    assert_eq!(writes(&events), ["one", "two"]);
+
+    let range = root.path().join("journal/clipboard/range-index.json");
+    if range.exists() {
+        fs::remove_file(&range)?;
+    }
+    fs::create_dir(&range)?;
+    input(&mut session, "trigger")?;
+    collect(&mut session, &mut events, |_, session| {
+        session.durability_state() == State::Paused
+    })?;
+    let failed = events
+        .iter()
+        .find_map(|event| match event {
+            SessionEvent::StorageFault { sequence, .. } => Some(*sequence),
+            _ => None,
+        })
+        .expect("the live OSC must encounter the journal fault");
+    assert_eq!(writes(&events), ["one", "two"]);
+
+    fs::remove_dir(&range)?;
+    session.retry_storage()?;
+    assert_eq!(session.durability_state(), State::Healthy);
+    collect(&mut session, &mut events, |events, _| {
+        output_has(events, "CLIP_RETRIED\r\n")
+    })?;
+    let third_osc = "\x1b]52;c;dGhyZWU=\x07";
+    assert!(
+        stored_frames(root.path(), "clipboard")?
+            .iter()
+            .any(|frame| {
+                matches!(frame, Frame::Output { sequence, data } if *sequence == failed
+            && data.starts_with(third_osc.as_bytes()))
+            })
+    );
+    let stored = events.iter().position(
+        |event| matches!(event, SessionEvent::SavedOutput { sequence, .. } if *sequence == failed),
+    );
+    let copied = events.iter().position(
+        |event| matches!(event, SessionEvent::ClipboardWrite { text } if text == "three"),
+    );
+    assert!(matches!((stored, copied), (Some(saved), Some(copy)) if saved < copy));
+    assert_eq!(writes(&events), ["one", "two", "three"]);
+    session.shutdown()?;
+    events.extend(session.poll(Duration::ZERO)?);
+    assert_eq!(writes(&events), ["one", "two", "three"]);
+    Ok(())
+}
+
+#[test]
 fn storage_fault_keeps_saved_scrollback_readable_until_retry() -> Result<()> {
     let root = tempfile::tempdir()?;
     let mut options = shell_options(root.path(), "saved-scroll", 512)?;

@@ -27,6 +27,7 @@ typedef struct {
     void *userdata;
     MatouWrite write;
     MatouHold hold;
+    MatouWrite clipboard;
 } MatouVt;
 
 #define TRY(operation) do {                                     \
@@ -45,6 +46,22 @@ static void render_hold(GhosttyTerminal terminal, void *userdata, bool held) {
     (void)terminal;
     MatouVt *vt = userdata;
     vt->hold(vt->userdata, held);
+}
+
+static void unknown_sequence(GhosttyTerminal terminal, void *userdata,
+                             const GhosttyTerminalUnknownSequence *sequence) {
+    (void)terminal;
+    if (sequence->tag != GHOSTTY_TERMINAL_UNKNOWN_SEQUENCE_OSC || sequence->value.osc.truncated) return;
+    GhosttyString content = sequence->value.osc.content;
+    size_t index = 0;
+    unsigned command = 0;
+    while (index < content.len && content.ptr[index] >= '0' && content.ptr[index] <= '9') {
+        command = command * 10 + content.ptr[index++] - '0';
+        if (command > 52) return;
+    }
+    if (index == 0 || command != 52 || index == content.len || content.ptr[index] != ';') return;
+    MatouVt *vt = userdata;
+    vt->clipboard(vt->userdata, content.ptr + index + 1, content.len - index - 1);
 }
 
 static bool report_size(GhosttyTerminal terminal, void *userdata, GhosttySizeReportSize *size) {
@@ -104,6 +121,11 @@ static GhosttyResult initialize(MatouVt *vt, uint16_t cols, uint16_t rows,
     TRY(ghostty_terminal_set(vt->terminal, GHOSTTY_TERMINAL_OPT_WRITE_PTY, write_pty));
     TRY(ghostty_terminal_set(vt->terminal, GHOSTTY_TERMINAL_OPT_RENDER_HOLD, render_hold));
     TRY(ghostty_terminal_set(vt->terminal, GHOSTTY_TERMINAL_OPT_SIZE, report_size));
+    // The frozen OSC handler caps content at ten million UTF-16 units.
+    // This byte ceiling allows any valid UTF-8 representation; Rust enforces the unit limit.
+    size_t osc_bytes = 40000003;
+    TRY(ghostty_terminal_set(vt->terminal, GHOSTTY_TERMINAL_OPT_UNKNOWN_MAX_BYTES, &osc_bytes));
+    TRY(ghostty_terminal_set(vt->terminal, GHOSTTY_TERMINAL_OPT_UNKNOWN_SEQUENCE, unknown_sequence));
 
     size_t unlimited_bytes = SIZE_MAX;
     TRY(ghostty_terminal_set(vt->terminal, GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES, &unlimited_bytes));
@@ -126,12 +148,13 @@ static GhosttyResult initialize(MatouVt *vt, uint16_t cols, uint16_t rows,
 int matou_vt_new(MatouVt **out, uint16_t cols, uint16_t rows,
                  uint32_t cell_width_px, uint32_t cell_height_px,
                  size_t history_lines, bool pull_scrollback,
-                 void *userdata, MatouWrite write, MatouHold hold) {
+                 void *userdata, MatouWrite write, MatouHold hold, MatouWrite clipboard) {
     MatouVt *vt = calloc(1, sizeof(*vt));
     if (vt == NULL) return GHOSTTY_OUT_OF_MEMORY;
     vt->userdata = userdata;
     vt->write = write;
     vt->hold = hold;
+    vt->clipboard = clipboard;
 
     GhosttyResult status = initialize(vt, cols, rows, cell_width_px, cell_height_px,
                                        history_lines, pull_scrollback);

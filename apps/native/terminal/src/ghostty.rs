@@ -56,6 +56,7 @@ unsafe extern "C" {
         data: *mut c_void,
         write: WriteCallback,
         hold: HoldCallback,
+        clipboard: WriteCallback,
     ) -> c_int;
     fn matou_vt_free(terminal: *mut c_void);
     fn matou_vt_set_theme(
@@ -104,6 +105,7 @@ unsafe extern "C" {
 #[derive(Default)]
 struct Effects {
     responses: Vec<u8>,
+    clipboard: Vec<String>,
     hold_deadline: Option<Instant>,
 }
 
@@ -179,6 +181,7 @@ impl Terminal {
                 effects.as_ptr().cast(),
                 on_write,
                 on_hold,
+                on_clipboard,
             )
         };
         let handle = check(status, "initialize")
@@ -464,6 +467,10 @@ impl Terminal {
         )
     }
 
+    pub fn drain_clipboard(&mut self) -> Vec<String> {
+        mem::take(&mut unsafe { self.effects.as_mut() }.clipboard)
+    }
+
     pub fn drain_responses(&mut self) -> Vec<u8> {
         std::mem::take(&mut unsafe { self.effects.as_mut() }.responses)
     }
@@ -539,6 +546,19 @@ unsafe extern "C" fn on_write(data: *mut c_void, bytes: *const u8, len: usize) {
         effects
             .responses
             .extend_from_slice(unsafe { slice::from_raw_parts(bytes, len) });
+    }
+}
+
+unsafe extern "C" fn on_clipboard(data: *mut c_void, bytes: *const u8, len: usize) {
+    if len == 0 {
+        return;
+    }
+    let content = unsafe { slice::from_raw_parts(bytes, len) };
+    if let Ok(content) = str::from_utf8(content)
+        && let Some(text) = crate::decode_clipboard(content)
+    {
+        let effects = unsafe { &mut *data.cast::<Effects>() };
+        effects.clipboard.push(text);
     }
 }
 

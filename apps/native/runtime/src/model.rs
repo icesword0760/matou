@@ -44,6 +44,9 @@ pub enum SessionEvent {
         rows: u16,
     },
     ScreenInvalidated,
+    ClipboardWrite {
+        text: String,
+    },
     /// Emitted once for live output after it reaches the journal.
     SavedOutput {
         sequence: u64,
