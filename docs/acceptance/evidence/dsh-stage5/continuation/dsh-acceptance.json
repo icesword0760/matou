@@ -1,0 +1,359 @@
+{
+  "forkAndLoader": {
+    "nativeChildIdDistinct": true,
+    "nativeChildLinkedToParent": true,
+    "childListedAndSearchable": true,
+    "exactChildLoadedAndInheritedMemoryRecalled": true,
+    "cardForkEntry": false,
+    "retries": 0
+  },
+  "mt": {
+    "defaultNativeMode": "workspace-write",
+    "createdDshCard": true,
+    "nativeIdentifyListRead": true,
+    "independentShellScreenMarkerInNativeToolResultAndAnswer": true,
+    "retries": 0
+  },
+  "missingCli": {
+    "nonexistentExecutableFixture": true,
+    "actionableInstallFeedback": true
+  },
+  "recordedAt": "2026-11-15T18:48:11.413428+00:00",
+  "reportSource": ".cache/dsh-continuation/dsh/report.json",
+  "sourceCommit": "479e620",
+  "firstPass": 6,
+  "passedAfterRetry": 1,
+  "finalPassed": 7,
+  "failed": 0,
+  "skipped": 0,
+  "durationMs": 215810.331,
+  "configuredRetries": 1,
+  "core": {
+    "staticRestoreMs": 7136,
+    "nativeNotificationOsc": 0,
+    "notificationDelta": 1,
+    "label": "DSH",
+    "hudModel": "deepseek-flash (max) (1M context)",
+    "retries": 0,
+    "rememberedOriginalCodeword": true
+  },
+  "approval": {
+    "latency": [
+      {
+        "round": 1,
+        "status": "needs-input",
+        "runtimeAt": 1794768328507,
+        "uiAt": 1794768328509,
+        "latencyMs": 2,
+        "nativeAt": 1794768328403,
+        "nativeToUiMs": 106,
+        "rawNativeToUiMs": 106,
+        "nativeLatencyValid": true
+      },
+      {
+        "round": 2,
+        "status": "needs-input",
+        "runtimeAt": 1794768335348,
+        "uiAt": 1794768335350,
+        "latencyMs": 2,
+        "nativeAt": 1794768335245,
+        "nativeToUiMs": 105,
+        "rawNativeToUiMs": 105,
+        "nativeLatencyValid": true
+      },
+      {
+        "round": 3,
+        "status": "needs-input",
+        "runtimeAt": 1794768341387,
+        "uiAt": 1794768341389,
+        "latencyMs": 2,
+        "nativeAt": 1794768341285,
+        "nativeToUiMs": 104,
+        "rawNativeToUiMs": 104,
+        "nativeLatencyValid": true
+      }
+    ],
+    "permissionNotices": [
+      {
+        "eventType": "permission",
+        "title": "DSH",
+        "subtitle": "Permission",
+        "body": "bash requires approval",
+        "sound": true,
+        "cooldownKey": "Notification"
+      },
+      {
+        "eventType": "permission",
+        "title": "DSH",
+        "subtitle": "Permission",
+        "body": "bash requires approval",
+        "sound": true,
+        "cooldownKey": "Notification"
+      },
+      {
+        "eventType": "permission",
+        "title": "DSH",
+        "subtitle": "Permission",
+        "body": "bash requires approval",
+        "sound": true,
+        "cooldownKey": "Notification"
+      }
+    ],
+    "decisions": [
+      "allowed-once",
+      "allowed-once",
+      "rejected"
+    ],
+    "defaultModeChanged": false,
+    "nativeNotificationOsc": 0
+  },
+  "error": {
+    "fixture": "Real DSH known model with per-run loopback HTTP 400 endpoint and fixture-only API key; no profile write or fabricated events",
+    "latency": [
+      {
+        "round": 1,
+        "status": "error",
+        "runtimeAt": 1794768357296,
+        "uiAt": 1794768357302,
+        "latencyMs": 6,
+        "nativeAt": 1794768357288,
+        "nativeToUiMs": 14,
+        "rawNativeToUiMs": 14,
+        "nativeLatencyValid": true
+      },
+      {
+        "round": 2,
+        "status": "error",
+        "runtimeAt": 1794768358028,
+        "uiAt": 1794768358035,
+        "latencyMs": 7,
+        "nativeAt": 1794768358018,
+        "nativeToUiMs": 17,
+        "rawNativeToUiMs": 17,
+        "nativeLatencyValid": true
+      },
+      {
+        "round": 3,
+        "status": "error",
+        "runtimeAt": 1794768358904,
+        "uiAt": 1794768358919,
+        "latencyMs": 15,
+        "nativeAt": 1794768358894,
+        "nativeToUiMs": 25,
+        "rawNativeToUiMs": 25,
+        "nativeLatencyValid": true
+      }
+    ],
+    "requests": [
+      {
+        "method": "POST",
+        "path": "/anthropic/v1/messages"
+      },
+      {
+        "method": "POST",
+        "path": "/anthropic/v1/messages"
+      },
+      {
+        "method": "POST",
+        "path": "/anthropic/v1/messages"
+      },
+      {
+        "method": "POST",
+        "path": "/anthropic/v1/messages"
+      }
+    ],
+    "errors": [
+      {
+        "eventType": "error",
+        "title": "DSH",
+        "subtitle": "Error",
+        "body": "MATOU_NATIVE_REQUEST_ERROR",
+        "sound": true,
+        "cooldownKey": "Stop"
+      },
+      {
+        "eventType": "error",
+        "title": "DSH",
+        "subtitle": "Error",
+        "body": "MATOU_NATIVE_REQUEST_ERROR",
+        "sound": true,
+        "cooldownKey": "Stop"
+      },
+      {
+        "eventType": "error",
+        "title": "DSH",
+        "subtitle": "Error",
+        "body": "MATOU_NATIVE_REQUEST_ERROR",
+        "sound": true,
+        "cooldownKey": "Stop"
+      }
+    ],
+    "nativeReasons": [
+      "error",
+      "error",
+      "error"
+    ]
+  },
+  "recovery": {
+    "fixture": "Launcher exits only --resume while marker exists; all successful runs use real dsh",
+    "sameIdRetry": true,
+    "newIdStart": true,
+    "retries": 0,
+    "freshIdActuallyDistinct": true
+  },
+  "protectedConfiguration": {
+    "checked": 9,
+    "changed": []
+  },
+  "latency": [
+    {
+      "round": 1,
+      "status": "running",
+      "runtimeAt": 1794768202266,
+      "uiAt": 1794768202268,
+      "latencyMs": 2,
+      "nativeAt": 1794768202276,
+      "nativeToUiMs": 0,
+      "rawNativeToUiMs": -8,
+      "nativeLatencyValid": false
+    },
+    {
+      "round": 1,
+      "status": "idle",
+      "runtimeAt": 1794768207022,
+      "uiAt": 1794768207024,
+      "latencyMs": 2,
+      "nativeAt": 1794768206828,
+      "nativeToUiMs": 196,
+      "rawNativeToUiMs": 196,
+      "nativeLatencyValid": true
+    },
+    {
+      "round": 2,
+      "status": "running",
+      "runtimeAt": 1794768209492,
+      "uiAt": 1794768209493,
+      "latencyMs": 1,
+      "nativeAt": 1794768209499,
+      "nativeToUiMs": 0,
+      "rawNativeToUiMs": -6,
+      "nativeLatencyValid": false
+    },
+    {
+      "round": 2,
+      "status": "idle",
+      "runtimeAt": 1794768211384,
+      "uiAt": 1794768211386,
+      "latencyMs": 2,
+      "nativeAt": 1794768211377,
+      "nativeToUiMs": 9,
+      "rawNativeToUiMs": 9,
+      "nativeLatencyValid": true
+    },
+    {
+      "round": 3,
+      "status": "running",
+      "runtimeAt": 1794768213723,
+      "uiAt": 1794768213725,
+      "latencyMs": 2,
+      "nativeAt": 1794768213728,
+      "nativeToUiMs": 0,
+      "rawNativeToUiMs": -3,
+      "nativeLatencyValid": false
+    },
+    {
+      "round": 3,
+      "status": "idle",
+      "runtimeAt": 1794768215242,
+      "uiAt": 1794768215245,
+      "latencyMs": 3,
+      "nativeAt": 1794768215234,
+      "nativeToUiMs": 11,
+      "rawNativeToUiMs": 11,
+      "nativeLatencyValid": true
+    },
+    {
+      "round": 1,
+      "status": "needs-input",
+      "runtimeAt": 1794768328507,
+      "uiAt": 1794768328509,
+      "latencyMs": 2,
+      "nativeAt": 1794768328403,
+      "nativeToUiMs": 106,
+      "rawNativeToUiMs": 106,
+      "nativeLatencyValid": true
+    },
+    {
+      "round": 2,
+      "status": "needs-input",
+      "runtimeAt": 1794768335348,
+      "uiAt": 1794768335350,
+      "latencyMs": 2,
+      "nativeAt": 1794768335245,
+      "nativeToUiMs": 105,
+      "rawNativeToUiMs": 105,
+      "nativeLatencyValid": true
+    },
+    {
+      "round": 3,
+      "status": "needs-input",
+      "runtimeAt": 1794768341387,
+      "uiAt": 1794768341389,
+      "latencyMs": 2,
+      "nativeAt": 1794768341285,
+      "nativeToUiMs": 104,
+      "rawNativeToUiMs": 104,
+      "nativeLatencyValid": true
+    },
+    {
+      "round": 1,
+      "status": "error",
+      "runtimeAt": 1794768357296,
+      "uiAt": 1794768357302,
+      "latencyMs": 6,
+      "nativeAt": 1794768357288,
+      "nativeToUiMs": 14,
+      "rawNativeToUiMs": 14,
+      "nativeLatencyValid": true
+    },
+    {
+      "round": 2,
+      "status": "error",
+      "runtimeAt": 1794768358028,
+      "uiAt": 1794768358035,
+      "latencyMs": 7,
+      "nativeAt": 1794768358018,
+      "nativeToUiMs": 17,
+      "rawNativeToUiMs": 17,
+      "nativeLatencyValid": true
+    },
+    {
+      "round": 3,
+      "status": "error",
+      "runtimeAt": 1794768358904,
+      "uiAt": 1794768358919,
+      "latencyMs": 15,
+      "nativeAt": 1794768358894,
+      "nativeToUiMs": 25,
+      "rawNativeToUiMs": 25,
+      "nativeLatencyValid": true
+    }
+  ],
+  "approvalFirstAttemptFailure": {
+    "failingAttempt": 0,
+    "round": 2,
+    "assertionLine": 187,
+    "storedNativeToUiMs": 7240,
+    "storedNativeTimestampEqualsPreviousRound": true,
+    "storedNativeAt": 1794768307227,
+    "actualRound2NativeAt": 1794768314361,
+    "actualUiAt": 1794768314467,
+    "actualRuntimeToUiMs": 3,
+    "recomputedNativeToUiMsForDiagnosisOnly": 106,
+    "nativeAskedCountBeforeCleanup": 2,
+    "nativeDecidedCountBeforeCleanup": 1,
+    "stepsNotReached": "First attempt stopped at round 2 latency assertion; round 2 decision and all round 3 / final recovery steps were not executed. Retry independently completed all three rounds and final recovery.",
+    "conclusion": "The sampler read the prior approval/asked before the second event was flushed to the native journal. The original failed assertion and retry classification remain unchanged; corrected timing is explanatory evidence only. The sampling race remains unresolved; no spec mutation or extra rerun occurred."
+  },
+  "latencyInterpretation": "Successful attempt samples are used for each scenario and never combined across failed attempts. Runtime-to-UI is actual domain-event to DAG DOM mutation. Negative raw native deltas are invalid native latency measurements. Approval first attempt failed due to prior-round timestamp reuse; this remains flaky even though the later native log explains the false 7240ms value."
+}

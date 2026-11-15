@@ -1,6 +1,84 @@
-# DSH 接入对照矩阵：续跑验收
+# DSH 接入对照矩阵：本轮续跑验收
 
-2026-11-16 本轮从断点继续。恢复修复、五场景单测、三轮审批和真实模型错误夹具均沿用已有成果。先提交并执行类型/命名检查，再使用同一已核验安装包，将 DSH、Antigravity、Codex 各完整重跑一次（retries=1）。本轮结果待回填；下节是上一轮已完成的基线对照与补验，不能替代本轮重跑。
+2026-11-16，从现有断点继续，产品、单测与 spec 已提交 `479e620`（`feat/multi-agent-dsh`）。以下是本轮独立三套重跑结果；旧基线与上一轮证据保留在后面的历史记录，未拿旧结果代替本轮执行。
+
+## 三套对照与失败集合
+
+| 套件 | `a06812f` 基线 | 本轮结果 | 逐条对照结论 |
+| --- | --- | --- | --- |
+| DSH | 不适用（尚未接入） | **6 首次通过 + 1 重试通过；0 最终失败、0 跳过**（3分36秒） | 审批首试 `:187` 采样误读上一轮原生时间；重试独立完整三轮通过。恢复、模型错误等其余6项首次通过 |
+| Antigravity | 4通过 / 1失败，`:876` 定位器歧义 | **4 首次通过 / 1 最终失败、0 跳过**（3分19秒） | 首试、重试均 `:876` 同一定位器歧义；后续 Fork/载入未到，属于基线同点问题 |
+| Codex | 9通过 / 1失败，`:862` 新Worktree原生启动失败后误读继承ID | **9 首次通过 + 1 重试通过；0 最终失败、0 跳过**（11分44秒） | 首试 `:485`（调用 `:912`）在最终载入回忆超时，原生错误与基线同为路由发现超时；重试完整通过，两个子ID独立且父关联正确 |
+
+三套各完整启动一次、1 worker、`--retries=1`。同一已核验打包 App；真实 HOME、空 ZDOTDIR、临时 Git 仓库、独立 Matou/Electron 数据和 Codex 配置/认证/会话目录。基线沿用已核验的独立 `a06812f` worktree 结果，没有重跑基线。[本轮逐用例与全部尝试](evidence/dsh-stage5/continuation/ui-regression.json)、[基线失败集合](evidence/dsh-stage5/followup/baseline-results.json)。
+
+上一轮 Antigravity 的 `:497/:802/:408` 和 Codex 的两处首轮身份等待、Fork继承ID误判均未在本轮重现。结合共享源码审计和各自原生记录，未发现本轮由 DSH 共享代码变动造成的产品回归。Codex 本轮首试失败发生在更后的载入步骤，不能称为与基线“同一断言失败”；实际原生错误类别相同，重试完成了后续步骤。[本轮 Codex 首试现场审计](evidence/dsh-stage5/continuation/codex-first-attempt-audit.json)。两项重试通过都保留 flaky 分类，不写成稳定首过。
+
+## Codex Fork 误报澄清
+
+上一轮报“父子 UUID 相同”时，原生子进程启动失败、Fork intent=failed，没有生成子 rollout；测试却把继承的 unknown / 未验证父 ID 当成子身份。独立 `a06812f` 基线也发生原生路由发现超时，并被旧断言误读。它不能证明成功子会话绑定到了父会话。
+
+修正后的测试先要求 Fork 成功、再读取 available/resumed 且 validated 的绑定，仍要求子 UUID 独立、原生 `session_meta.id` 与绑定一致、`forked_from_id` 指向父会话。用户已核验的上一轮两个子会话均满足这些条件。[原生与共享源码审计](evidence/dsh-stage5/followup/failure-source-audit.json)、[已核验父子证据](evidence/dsh-stage5/followup/codex-fork-verification.json)。本轮主代理再次核验两种 Fork 的成功 intent、validated 绑定、独立 UUID 及原生父关联均一致，重试后原父会话载入也找回暗号。[本轮逐字段核验](evidence/dsh-stage5/continuation/codex-fork-verification.json)。没有修改 Codex 原生路由或将失败占位绑定伪装成成功。
+
+## 本轮 DSH reference product 交互对照矩阵
+
+可运行原生 dsh-TUI 与现存代码为 provider 双重基线；Matou 使用已有卡片、HUD、通知和载入/恢复入口。只比较 CLI 模块；原生模式只读、卡片不提供一键 Fork 为已裁决范围。
+
+| # | 原生基线 / Matou 行为 | 本轮真实 App 结果 | 状态与边界 |
+| --- | --- | --- | --- |
+| 1 新建 | 原生启动、manifest、Shell 升级、mt 建卡 | 新建、标签、缺 CLI 的可操作提示通过 | 首次通过；缺 CLI 是不存在命令夹具 |
+| 2 工作状态 | 原生 turn/status/approval → 卡片和 DAG | 工作、空闲、三轮审批、三轮原生错误通过 | 审批整项重试通过；其它首次通过 |
+| 3 通知 | 原生完成/审批/错误 → 共享通知中心 | 后台完成一次、审批三次、错误三次；原生 OSC 0 | 审批整项重试通过；未声明系统通知点击或音效签收 |
+| 4 HUD | model.current / sessionProjections / 工具事件 | 模型/档位、占用、只读原生模式、工具、目录/Git 通过 | 首次通过；没有可靠来源的项目指令入口隐藏 |
+| 5 执行模式 | 原生权限偏好会全局持久化 | 只读徽标可见，没有模式切换入口 | 已裁决范围首次通过 |
+| 6 自动标题 | 原生 session/title、手动锁定、恢复自动 | 自动更新、手动锁定、恢复最新标题通过 | 首次通过；无新增标题模型请求 |
+| 7 载入会话 | 原生 v4 历史、cwd、预览/搜索/精确 resume | 原生子会话搜索、预览、载入并回忆继承暗号通过 | 首次通过；未声明大规模目录 UI 压测 |
+| 8 重启恢复 | 同 ID、持久化与真实 ready；失败重试/新开 | 正常重启、失败横幅、重试原 ID 找回暗号、新开不同 ID 通过 | 首次通过；五场景单测覆盖真实恢复协调器 |
+| 9 Fork | 原生 /fork 独立 ID 与父关联 | 原生子会话搜索、载入与记忆通过；无卡片一键入口 | 已裁决范围首次通过；未复制上游编排 |
+| 10 mt 跨卡 | 原生 system section + shellEnv，默认 workspace-write | 真实 identify/list/read；独立兄弟屏幕标记在工具结果与回复均出现 | 首次通过；不声明本轮逐项操作所有 mt 命令 |
+| 11 不提供入口 | manifest 与共享 HUD/menu | 账户、费用/额度、供应商、团队与不可靠指令入口均未出现 | 首次通过 |
+
+[本轮 DSH 汇总](evidence/dsh-stage5/continuation/dsh-acceptance.json)、[主代理原生交叉核验](evidence/dsh-stage5/continuation/native-cross-check.json)、[失败横幅](evidence/dsh-stage5/continuation/screenshots/08-restore-failed.png)、[重试与新开](evidence/dsh-stage5/continuation/screenshots/08-retry-new.png)。9 项受保护配置无变化。完整原生日志、数据库、截图及失败现场保留在 `.cache/dsh-continuation/`。
+
+## 审批重试原因与实际性能
+
+本轮审批首试在第二轮 `sample():187` 报 7240ms >1000ms。原始采样把第一轮的 `approval/asked` 时间用于第二轮；主代理只读解压完成后日志，第二轮原生时间为 1794768314361，实际 UI 为 1794768314467，对应 106ms，Runtime→UI 为3ms。这个核对只解释原因，不改写原始失败或把它计作首过。首试停在第二轮性能断言，第二轮审批决定、第三轮及最终恢复未执行；重试独立完成全部三轮和恢复。[采样审计](evidence/dsh-stage5/continuation/approval-sampling-audit.json)。采样在原生事件落盘前读取上一轮记录的竞争仍保留为未修问题，本轮不追加实验或重跑。
+
+四类状态各3次，Runtime domain event 到实际 DAG DOM mutation 的门槛≤1000ms。每个场景只采用完整通过的那次尝试，不跨失败/重试拼接样本。
+
+| 状态 | Runtime→UI（ms） | 原生→UI辅证（ms） | 判定 |
+| --- | --- | --- | --- |
+| 工作中 | 2 / 1 / 2 | UI早于原生 turn/start 8 / 6 / 3 | Runtime三次达标；负值不可作为原生延迟成功样本 |
+| 回到空闲 | 2 / 2 / 3 | 196 / 9 / 11 | 两口径三次达标 |
+| 需要输入 | 2 / 2 / 2 | 106 / 105 / 104 | 重试完整三轮的样本达标；首试采样失败仍保留 |
+| 出错 | 6 / 7 / 15 | 14 / 17 / 25 | 两口径三次达标；原生 error ends 与独立通知各三次 |
+
+错误夹具使用真实 DSH、已知模型和本 run 的回环 HTTP400端点/专用假 key，不伪造事件或改用户 profile。审批使用独立 printf 请求，前两轮 allow-once、最后拒绝并中断，默认权限未变。
+
+## 已修改与自动验证
+
+- 产品修复只调整 `runtime-server.ts`：已明确停放的 DSH provider 恢复失败释放外层终端挂载队列，让已有失败横幅接管重试/新开；binding 仍 failed、身份仍未确认，其它 Agent 的规则不变。
+- 五种恢复单测接入真实 `RuntimeRecoveryCoordinator`，覆盖匹配、错 ID、超时重试、超时新开、进程早退重试。上一轮全部 Runtime server166/166通过；相关源码/单测未变，复用有效结果，没有重复跑整批。
+- 本轮 `pnpm typecheck`、`pnpm check:identifiers` 与 diff 检查通过；Codex spec 单独严格检查的三条既有诊断在 `a06812f` 同样存在，不属于工作树 typecheck，不宣称它已修复。[本轮检查记录](evidence/dsh-stage5/continuation/source-checks.json)。
+- 提交产品、单测、spec、既有证据和该任务 PRD 为 `479e620`。无新依赖、存储或产品运行时 LLM 步骤。
+- 包内604个普通文件及已提交产品源码均与已有包匹配，复用清单 `278eace7af708014831f422a50a67540ce838db21343205b1d6edfec61c9a26a`；未重打包。[复用核验](evidence/dsh-stage5/continuation/package-reuse.json)。包未签名、未安装至 Applications、未发布或推送。
+
+## 我自己做的决定
+
+1. 主代理：从断点提交现有成果，新三套结果独立记录；基线和历史结果只作对照。
+2. 主代理：产品与包相符，沿用同一包；不重复构建、基线或无变化的166项单测。
+3. 主代理：用原生落盘事件解释审批7240ms采样误差，保留失败和重试分类；不在本轮追加修复或实验。
+4. Terra界面子代理：按指定隔离与顺序运行三套，只清理核实归属的自有进程/认证副本/短链；无额外产品决定。
+
+## 残余未闭合项与交回
+
+- Antigravity 既有 `:876` 按钮定位器歧义仍阻断该旅程，当前目录/新Worktree/运行中父会话 Fork 与后续载入未执行；本轮未扩展修复。
+- DSH 审批采样仍有原生事件落盘前误读上一轮时间的竞争，本轮审批为重试通过；没有把7240ms改写成首过。DSH 指定功能闭环均已取得真实事件与完整通过证据。
+- Codex 原生路由发现超时在基线和本轮首试均出现；重试成功不代表该外部启动波动永久修复。原“父子UUID相同”误报已澄清，未观察到成功子会话绑回父身份。
+- Codex spec 单独严格类型检查的三条既有诊断仍在；工作树 typecheck 已通过。系统通知点击、真实音效和大规模目录 UI 压测不在本轮成功声明内。
+- Terra已核实本轮临时认证副本、验收进程和短链均无残留；旧dsh-stage5短链不属于本轮，未触碰。
+
+本轮到达交回关卡，停止继续实验和产品修改。下面保留之前的完整记录，均有各轮边界，不能替代上面的本轮结果。
 
 ## 上一轮基线对照与补验
 
