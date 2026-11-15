@@ -1,0 +1,65 @@
+真实 Electron 隔离实例；通过 mt create session --canvas current --profile antigravity --enter 启动假 agent。
+profile=antigravity; session=a1d5984c-42cd-4d32-9775-6e4db1644768
+HUD: D
+~/matou_workspace
+feat/login-browser-integration*
+🇺🇸 美国 · 出口正常
+网络检查面板:
+网络检查
+检测于 19:11
+重新检查
+×
+Claude（Anthropic）
+✓
+出口不在中国大陆
+美国 · 203.0.113.10
+✓
+出口符合出口规则
+✓
+登录与 API 同一出口
+Codex（OpenAI）
+✓
+出口不在中国大陆
+美国 · 203.0.113.10
+✓
+出口符合出口规则
+✓
+登录与 API 同一出口
+Google（通用出口检测）
+✓
+出口不在中国大陆
+美国 · 203.0.113.20
+✓
+出口符合出口规则
+?
+登录与 API 同一出口
+无法确认（检测超时）
+本机
+✓
+终端 agent 走代理
+✓
+登录浏览器与终端同一出口
+✓
+没有暴露大陆时区
+✓
+无 IPv6 绕过
+
+!
+检测到 ChatGPT 桌面版正在运行，它的出口不在保护范围
+
+出口规则
+同一国家／地区（推荐）
+固定 IP
+出口保护：出口异常时暂停 Claude / Codex / Antigravity 会话
+安全浏览器
+未安装
+登录 Claude / ChatGPT / Antigravity 时使用
+获取安装包
+参考检查（不影响状态）
+IP 质量 ↗
+浏览器环境 ↗
+
+点击后才访问第三方站点，站点会收到你的出口 IP。
+
+检测为每分钟抽查，无法保证每条连接都使用同一出口。Google 线路使用通用出口检测，不能保证 Google 实际看到的出口。
+复制报告

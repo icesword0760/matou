@@ -28,7 +28,8 @@ describe('EGRESS_HOSTS', () => {
     expect(EGRESS_HOSTS).toEqual({
       anthropic: { api: 'api.anthropic.com', login: 'claude.ai' },
       openai: { api: 'api.openai.com', login: 'chatgpt.com' },
-      'chatgpt-subscription': { api: 'chatgpt.com', login: 'auth.openai.com' }
+      'chatgpt-subscription': { api: 'chatgpt.com', login: 'auth.openai.com' },
+      google: { api: 'www.cloudflare.com', login: 'accounts.google.com' }
     })
   })
 })
@@ -254,5 +255,44 @@ describe('evaluateEgress', () => {
     })
     expect(result.families.find((f) => f.family === 'anthropic')?.state).toBe('ok')
     expect(result.families.find((f) => f.family === 'openai')?.state).toBe('ok')
+  })
+})
+
+
+describe('Google generic egress', () => {
+  function googleSample(country = 'US', ip = '203.0.113.20'): EgressSample {
+    return makeBaseSample({ hosts: { google: {
+      api: { host: EGRESS_HOSTS.google.api, ip, country },
+      login: { host: EGRESS_HOSTS.google.login, error: 'invalid' }
+    } } })
+  }
+
+  it('marks Google CN api abnormal with mainland violation', () => {
+    const result = evaluateEgress(googleSample('CN'), { mode: 'country', baselines: {} })
+    expect(result.state).toBe('abnormal')
+    expect(result.families[0]).toMatchObject({ family: 'google', state: 'abnormal', violation: 'mainland' })
+  })
+
+  it('does not lower Google or overall status for unknown login', () => {
+    const result = evaluateEgress(googleSample(), { mode: 'country', baselines: {} })
+    expect(result.state).toBe('ok')
+    expect(result.families[0]?.state).toBe('ok')
+    expect(result.checks).toContainEqual({ id: 'login-api-match', family: 'google', result: 'unknown' })
+  })
+
+  it.each(['country', 'ip'] as const)('enforces saved Google %s rule', (mode) => {
+    const result = evaluateEgress(googleSample('JP', '203.0.113.21'), {
+      mode, baselines: { google: { ip: '203.0.113.20', country: 'US' } }
+    })
+    expect(result.families[0]).toMatchObject({ state: 'abnormal', violation: 'rule' })
+  })
+
+  it('only warns when Google login and api exits differ', () => {
+    const sample = googleSample()
+    sample.hosts.google!.login = { host: EGRESS_HOSTS.google.login, ip: '203.0.113.21', country: 'JP' }
+    const result = evaluateEgress(sample, { mode: 'country', baselines: {} })
+    expect(result.state).toBe('warning')
+    expect(result.families[0]).toMatchObject({ state: 'warning' })
+    expect(result.families[0]?.violation).toBeUndefined()
   })
 })

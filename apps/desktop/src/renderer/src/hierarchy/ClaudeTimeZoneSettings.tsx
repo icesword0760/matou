@@ -57,8 +57,8 @@ export function ClaudeTimeZoneSettings({ client }: { client: ProviderConfigClien
   return <div className="claude-time-zone-settings" aria-busy={!stored && !error || saving}>
     <label htmlFor="claude-time-zone">{t('时区', 'Time zone')}</label>
     <p id="claude-time-zone-help">{t(
-      '自动：本机是大陆时区时，Claude Code 和 Codex 使用同为东八区的新加坡时区（出口在台湾时用台北），时间读数不变。',
-      'Automatic: when this Mac uses a mainland China time zone, Claude Code and Codex use another UTC+8 zone (Singapore, or Taipei when your exit is in Taiwan), so clock times stay the same.'
+      '自动：本机是大陆时区时，Claude Code、Codex 和 Antigravity 使用同为东八区的新加坡时区（出口在台湾时用台北），时间读数不变。',
+      'Automatic: when this Mac uses a mainland China time zone, Claude Code, Codex and Antigravity use another UTC+8 zone (Singapore, or Taipei when your exit is in Taiwan), so clock times stay the same.'
     )}</p>
     <select id="claude-time-zone" aria-describedby="claude-time-zone-help claude-time-zone-scope"
       value={draft} disabled={!stored || saving} onChange={event => { setDraft(event.target.value); setSaved(false); setError('') }}>
@@ -68,8 +68,8 @@ export function ClaudeTimeZoneSettings({ client }: { client: ProviderConfigClien
     </select>
     {preview && <p className="claude-time-zone-settings__preview">{t('当前时间', 'Current time')}：{preview} · {effective}</p>}
     <p id="claude-time-zone-scope">{t(
-      '仅影响码头启动的 Claude Code、Codex 及其子进程。保存后，新建、恢复和重启的会话自动使用该时区。正在运行的会话需重启后生效；保存不会中断任务。',
-      'Applies only to Claude Code, Codex and their child processes launched by Matou. New, resumed and restarted sessions use the saved zone automatically. Running sessions need a restart; saving does not interrupt tasks.'
+      '仅影响码头启动的 Claude Code、Codex、Antigravity 及其子进程。保存后，新建、恢复和重启的会话自动使用该时区。正在运行的会话需重启后生效；保存不会中断任务。',
+      'Applies only to Claude Code, Codex, Antigravity and their child processes launched by Matou. New, resumed and restarted sessions use the saved zone automatically. Running sessions need a restart; saving does not interrupt tasks.'
     )}</p>
     <div className="claude-time-zone-settings__actions">
       <button type="button" disabled={!stored || saving || draft === stored.timeZone && !error} onClick={() => void save()}>

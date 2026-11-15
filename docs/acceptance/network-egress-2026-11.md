@@ -50,7 +50,7 @@
 ## 未覆盖 / 已知限制
 
 - **Codex 的端到端流程**：e2e 只用了假 Claude；Codex 的登记、冻结与时区由单测覆盖。界面目前没有直接新建 Codex 卡片的入口，在 Shell 里手动输入 `codex` 不受保护，待多 Agent「Codex 补齐」期解决。
-- **Antigravity**：不在本期范围，接入后补 `google` 类别（PRD 第 8 节）。
+- **Antigravity**：2026-11-15 已扩展原生 `antigravity` profile 的 `google` 类别，见下方追加验收；真实 Google 看到的出口仍不能保证。
 - **Windows**：冻结只停输出读取、阻止输入，未在 Windows 实机验证。
 - **登录浏览器时区**：系统浏览器隐私窗口仍使用本机时区，能否跟随未实测（PRD 第 8 节）。
 - **性能**：启动到首个终端 2.8 s（真实网络、检测在后台），未与改动前做严格 A/B；冻结与解冻 20 个会话的耗时未单独测量。
@@ -85,3 +85,113 @@ main 在验收期间合入了「订阅账号接入 Claude Code」（`e731b50`）
 - **结果**：typecheck、build 通过；desktop 944、runtime 主体 1429 项单测通过；`network-egress.spec.ts` 回归连续 2 次通过。
 - **runtime-server.test.ts**：本分支每次运行有 1–2 项随机失败，且每次失败的测试不同（Shell 命令与工作目录时序类）。同时段在 `main`（`6132501`）上运行 2 次，分别有 7 项和 6 项随机失败。判定为本机负载下的既有时序不稳定，不是本次改动引入。
 - **e2e 中的单字符混入**：执行者首两次运行时，Claude 终端出现单个 `1` 或 `(`。冻结期间测试敲入的是整串 `FROZEN_SHOULD_NOT_ECHO`，从未泄漏。单字符来自测试窗口在主屏抢焦点时的外部键盘输入，不是缺陷。
+
+
+## Google 原生 Antigravity 会话（2026-11-15）
+
+范围为 `feat/login-browser-integration` 上的原生 `antigravity` profile；Claude Code 的 Antigravity 订阅分支仍只隐藏时区。Google 没有可用 trace，通用出口取自 `www.cloudflare.com/cdn-cgi/trace`，登录探测目标为 `accounts.google.com`，无有效 trace 时显示未知。该近似不能保证 Google 实际看到的出口；代理按域名分流时可能不同。
+
+### reference product 交互对照矩阵
+
+reference product 没有此能力；按已确认 PRD 第 10 节和 `docs/mockups/login-browser-integration.html` 验收。检查详情依原始交代复用现有通用文案，不新增 Google 专用检查术语。
+
+| 场景 | PRD / Mockup 基线 | Matou 结果与证据 | 结论 |
+|---|---|---|---|
+| Google 注册与启动计划 | `family=google`、`exitFamily=google`、`hideTimeZone=true` | `egress.test.ts`、`egress-monitor.test.ts` 启动计划测试 | 通过（自动测试） |
+| 通用 api 为 CN、登录未知 | mainland 异常，暂停 Google 会话，Claude/Codex 不受影响 | evaluator CN 测试、monitor 隔离冻结测试 | 通过（自动测试） |
+| 已保存国家 / IP 规则被违反 | rule 异常 | evaluator 参数化规则测试 | 通过（自动测试） |
+| 登录未知 / 已知海外出口不同 | unknown 不拉低整体正常状态；不一致仅提醒 | evaluator unknown 与 mismatch 测试 | 通过（自动测试） |
+| 异常中新开会话、网络恢复 | 出生即冻结；15 秒复检 + 5 秒确认后自动继续 | monitor Google 冻结恢复测试 | 通过（自动测试） |
+| 全量 / 轻量采样 | 全量包括 Google api/login；活跃 Google 每分钟轻量只请求通用 api trace | sampler 全量目标、请求 URL 与 monitor 活跃计时测试 | 通过（自动测试） |
+| 原生启动、时区与真实 PTY | 注册 Google，上海时区依现有策略替换（TW 取台北），异常调用现有冻结 | runtime-server 原生 antigravity 接线测试 | 通过（自动测试） |
+| HUD 与面板 | 复用 HUD 状态标签；Google 组在订阅组之后、本机之前；标题中英文准确；底部限制句准确 | `EgressChip.test.tsx`、`EgressPanel.test.tsx`；真实界面证据补在下文 | 通过（组件测试 + 真实界面） |
+
+### 新增测试名
+
+- `registers antigravity launches as google`
+- `protects antigravity with Google exit and existing time-zone policy`
+- `marks Google CN api abnormal with mainland violation`
+- `does not lower Google or overall status for unknown login`
+- `enforces saved Google %s rule`（country / ip）
+- `only warns when Google login and api exits differ`
+- `freezes only Google sessions and auto-resumes after the existing recovery confirmations`
+- `light-samples an active Google session on the existing one-minute timer`
+- `light sample requests only the generic api trace through the agent proxy`
+- `reads Google api and unknown login from the existing e2e fixture`
+- `registers native antigravity with Google protection, exit TZ and actual PTY freeze`
+- `applies the existing automatic time-zone policy to native Antigravity without provider configuration`
+- `renders the shared HUD exit label for a registered Google session and opens its panel`
+- `renders Google heading, unknown login and sampling limit in %s`（zh-CN / en）
+
+### 本次验证结果
+
+- `pnpm typecheck`、`pnpm build`：时区修正及最终枚举文案完成后已重新完整通过。
+- `pnpm test`：最终完整命令退出码 0。domain 12、contracts 71、desktop 1102（1 跳过）+ 性能 3、runtime 主体 1529（36 跳过）、runtime-server 151、journal 9 全部通过。最终未开启重试；此前失败与复跑记录见下节。
+- `pnpm check:identifiers`：最终通过。`git diff --check` 通过。
+- 运行逻辑定点：evaluator / monitor / sampler 共 60 项通过；修正后的原生 Antigravity 真实 PTY 启动、台湾出口时区和冻结测试通过。
+
+真实 Electron 界面使用独立数据目录和假 agent，经 `mt create session --canvas current --profile antigravity --enter && mt focus right` 创建原生 Antigravity 会话，`data-profile=antigravity`。主代理已回读最终截图：
+
+- [HUD](evidence/network-egress-google-2026-11/01-antigravity-hud.png)：当前会话 Antigravity，HUD `🇺🇸 美国 · 出口正常`；终端 `AG_TZ=Asia/Singapore`（宿主 `TZ=Asia/Shanghai`）。HUD 复用现有国家/状态文案，类别名显示在面板中。
+- [Google 面板](evidence/network-egress-google-2026-11/02-google-panel.png)：Google 组位于 Codex 后、本机前（该实例未配置 ChatGPT 订阅）；标题 `Google（通用出口检测）`；api 显示 `美国 · 203.0.113.20`，登录项显示现有通用 `无法确认（检测超时）`。底部完整显示「Google 线路使用通用出口检测，不能保证 Google 实际看到的出口。」；无文字遮挡。
+- [保护开关](evidence/network-egress-google-2026-11/03-protection-switch.png)：最终构建实际显示「出口保护：出口异常时暂停 Claude / Codex / Antigravity 会话」，底部 Google 限制句仍完整可见。
+- [文字证据](evidence/network-egress-google-2026-11/evidence.txt)：记录会话 profile、HUD 和面板实际文本。中文实际 App 与英文组件测试分别验证；本轮真实界面未操作 CN 冻结/自动恢复，该闭环由 monitor 状态机和 runtime-server 真实 PTY 测试覆盖。
+
+英文实际 App 本轮未操作，英文标题、开关与说明由组件测试验证。
+
+界面验收临时数据保留在工作区 `output/` 下。因 macOS Unix socket 路径长度限制，验证使用工作区内较短目录；未碰其他 worktree 或用户现有应用。清理命令 `rm -rf` 被自动审批拒绝（禁止该类命令），因此保留数据。
+
+
+### 用户确认的枚举文案收尾
+
+真实界面核对发现保护开关原先只列出 Claude / Codex。用户在监督渠道选择 B，要求所有相关枚举文案明确包含 Antigravity。现已将开关改为「出口保护：出口异常时暂停 Claude / Codex / Antigravity 会话」/「Exit protection: pause Claude / Codex / Antigravity sessions when the exit is wrong」，并同步时区设置说明中的 agent 枚举。冻结横幅、恢复横幅和通知不枚举 agent，直接复用通用会话文案。出口 UI 与时区文案相关组件测试共 34 项通过。
+
+### 本次发现并修复
+
+首轮全量 `pnpm test` 中 runtime-server 150 通过、1 失败，失败项是新增原生 Antigravity 时区接线测试。单独重跑同一测试仍失败，确认不是本机抖动：`ClaudeSettings.environment` 因 `providerConfig=false` 提前排除了 Antigravity，使启动计划的 `hideTimeZone` 无法生效。最小修正仅对 `antigravity` 放行该守卫，继续调用现有 `agentTimeZone` 自动策略，不改变 manifest 能力、Claude Code / Codex、PTY 或进程组。修正后该真实 PTY 定点测试通过，并补自动时区策略单测；最终全量结果见上文。
+
+时区修正后的一轮全量测试中，runtime-server 的 `tracks real Shell commands as running, idle, error, and interrupted work` 在等待 interrupted 状态时超时（其余 150 项通过）；单独重跑整个 runtime-server 后该项通过，失败点变成 `watches idle provider configuration and republishes changed HUD counts` 的监控回调超时（其余 150 项通过）。随后相关 Shell 定点批次 8/8 通过，文件监控单项 1/1 通过。两个失败项均未被本次修改，表现为不稳定的时序超时；本次未修改它们的等待阈值或启用测试重试。最后在隔离验收实例关闭后重新运行完整 `pnpm test`，runtime-server 151/151 与后续 journal 9/9 通过，完整命令退出码 0。相关原始日志保留为 `test-final.log`、`runtime-server-isolated-rerun.log`、`runtime-server-shell-targeted.log`、`runtime-server-watch-targeted.log`。
+
+### 边界
+
+- 不改判定权重、定时器、PTY 或进程组逻辑；Claude Code / Codex / 订阅启动分支保持原样。
+- 未对真实 Google 服务端所见 IP、真实 Antigravity 模型请求、MCP 子进程网络路径或 Windows 实机做验证；假 agent 和出口 fixture 用于检查 Matou 的登记、UI 与暂停恢复闭环。
+- Google 检查详情保留原有通用 unknown 文案；准确的近似限制在分组标题和面板底部明确说明。
+
+
+### 本次改动文件
+
+- `apps/desktop/src/renderer/src/egress/EgressChip.test.tsx`
+- `apps/desktop/src/renderer/src/egress/EgressChip.tsx`
+- `apps/desktop/src/renderer/src/egress/EgressPanel.test.tsx`
+- `apps/desktop/src/renderer/src/egress/EgressPanel.tsx`
+- `apps/desktop/src/renderer/src/egress/egress-copy.ts`
+- `apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.test.tsx`
+- `apps/desktop/src/renderer/src/hierarchy/ClaudeTimeZoneSettings.tsx`
+- `apps/runtime/src/egress/egress-evaluator.test.ts`
+- `apps/runtime/src/egress/egress-evaluator.ts`
+- `apps/runtime/src/egress/egress-monitor.test.ts`
+- `apps/runtime/src/egress/egress-monitor.ts`
+- `apps/runtime/src/egress/egress-sampler.test.ts`
+- `apps/runtime/src/egress/egress-sampler.ts`
+- `apps/runtime/src/runtime-server.test.ts`
+- `apps/runtime/src/session/claude-settings.test.ts`
+- `apps/runtime/src/session/claude-settings.ts`
+- `docs/acceptance/network-egress-2026-11.md`
+- `docs/prd/PRD-Matou-网络出口检测.md`
+- `packages/contracts/src/egress.test.ts`
+- `packages/contracts/src/egress.ts`
+- `docs/acceptance/evidence/network-egress-google-2026-11/01-antigravity-hud.png`
+- `docs/acceptance/evidence/network-egress-google-2026-11/02-google-panel.png`
+- `docs/acceptance/evidence/network-egress-google-2026-11/03-protection-switch.png`
+- `docs/acceptance/evidence/network-egress-google-2026-11/evidence.txt`
+
+
+### 最终日志
+
+日志目录：`/Users/icesword/.claude/agent-foreman/runs/Matou-Antigravity出口-04/logs/`。
+
+- `typecheck-final-copy.log`、`build-final-copy.log`：最终源码完整类型检查与构建通过。
+- `test-complete.log`：最终完整 `pnpm test` 通过，包含 runtime-server 151/151、journal 9/9。
+- `identifiers-final.log`：最终标识检查通过。
+- `desktop-final-copy.log`：枚举文案收尾后的出口 UI 和时区说明定点 34/34 通过。

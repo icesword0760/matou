@@ -501,8 +501,8 @@ export function EgressPanel({
             />
             <span>
               {zh
-                ? '出口保护：出口异常时暂停 Claude / Codex 会话'
-                : 'Exit protection: pause Claude / Codex sessions when the exit is wrong'}
+                ? '出口保护：出口异常时暂停 Claude / Codex / Antigravity 会话'
+                : 'Exit protection: pause Claude / Codex / Antigravity sessions when the exit is wrong'}
             </span>
           </label>
         </section>
@@ -540,8 +540,8 @@ export function EgressPanel({
       <footer className="egress-panel__footer">
         <span className="egress-panel__sampling-note">
           {zh
-            ? '检测为每分钟抽查，无法保证每条连接都使用同一出口。'
-            : 'Checks are sampled every minute and cannot guarantee every connection uses the same exit.'}
+            ? '检测为每分钟抽查，无法保证每条连接都使用同一出口。Google 线路使用通用出口检测，不能保证 Google 实际看到的出口。'
+            : 'Checks are sampled every minute and cannot guarantee every connection uses the same exit. Google uses a generic exit check, which cannot guarantee the exit Google actually sees.'}
         </span>
         <div className="egress-panel__copy-wrap">
           {copied && (

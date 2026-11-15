@@ -7846,6 +7846,50 @@ describe('RuntimeServer egress monitoring', () => {
     }
   }
 
+  it('registers native antigravity with Google protection, exit TZ and actual PTY freeze', async () => {
+    const sample = okSample()
+    sample.hosts.google = {
+      api: { host: EGRESS_HOSTS.google.api, ip: '203.0.113.55', country: 'TW' },
+      login: { host: EGRESS_HOSTS.google.login, error: 'invalid' }
+    }
+    const harness = createHarness(sample)
+    await harness.monitor.recheck()
+    const tzFile = join(root, 'antigravity-tz.txt')
+    const executable = join(root, 'antigravity-egress-stub.sh')
+    await writeFile(executable, `#!/bin/sh\nprintf "%s" "$TZ" > '${tzFile}'\nsleep 30\n`)
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_ANTIGRAVITY_COMMAND
+    const previousTz = process.env.TZ
+    process.env.MATOU_ANTIGRAVITY_COMMAND = executable
+    process.env.TZ = 'Asia/Shanghai'
+    try {
+      registerCanvasSession(database, 'egress-native-ag', 'antigravity')
+      harness.testPort.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'egress-native-ag', executionContextId: 'replay-context',
+        profile: 'antigravity', cols: 80, rows: 24
+      })
+      await waitUntil(() => harness.testPort.last('terminal.spawned')?.sessionId === 'egress-native-ag')
+      await waitUntilAsync(async () => (await readFile(tzFile, 'utf8').catch(() => '')) === 'Asia/Taipei')
+      expect(harness.monitor.status().sessionFamilies['egress-native-ag']).toBe('google')
+      const cnSample = okSample()
+      cnSample.hosts.google = {
+        api: { host: EGRESS_HOSTS.google.api, ip: '223.5.5.5', country: 'CN' },
+        login: { host: EGRESS_HOSTS.google.login, error: 'invalid' }
+      }
+      harness.setSample(cnSample)
+      await harness.monitor.recheck()
+      expect(harness.sessions.get('egress-native-ag')?.egressFrozen).toBe(true)
+      harness.testPort.receive({ type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION, sessionId: 'egress-native-ag' })
+      await waitUntil(() => !harness.sessions.has('egress-native-ag'))
+      expect(harness.monitor.status().sessionFamilies['egress-native-ag']).toBeUndefined()
+    } finally {
+      harness.cleanup()
+      restoreEnv('MATOU_ANTIGRAVITY_COMMAND', previousCommand)
+      restoreEnv('TZ', previousTz)
+    }
+  })
+
   it('registers official claude-code sessions with exitCountry TZ and unregisters on exit', async () => {
     const harness = createHarness(okSample('TW', '203.0.113.55'))
     await harness.monitor.recheck()
@@ -8080,7 +8124,7 @@ describe('RuntimeServer egress monitoring', () => {
 
       // Invalid params -> INVALID_REQUEST
       sendRpc(harness.testPort, 'bad-rule', 'egress.set-rule', { mode: 'asn' })
-      sendRpc(harness.testPort, 'bad-family', 'egress.accept-current', { family: 'google' })
+      sendRpc(harness.testPort, 'bad-family', 'egress.accept-current', { family: 'unsupported' })
       sendRpc(harness.testPort, 'bad-override', 'egress.override', { family: 123 })
       sendRpc(harness.testPort, 'bad-prot', 'egress.set-protection', { enabled: 'yes' })
       await waitUntil(() => harness.testPort.findRpcError('bad-prot') !== undefined)
@@ -8439,7 +8483,7 @@ function seedReplayAuthority(database: RuntimeDatabase, root: string): void {
 function registerSession(
   database: RuntimeDatabase,
   sessionId: string,
-  kind: 'shell' | 'claude-code' | 'codex' = 'shell'
+  kind: 'shell' | 'claude-code' | 'codex' | 'antigravity' = 'shell'
 ): void {
   database.run(
     `INSERT INTO sessions (
@@ -8453,7 +8497,7 @@ function registerSession(
 function registerCanvasSession(
   database: RuntimeDatabase,
   sessionId: string,
-  kind: 'shell' | 'claude-code' | 'codex' = 'shell'
+  kind: 'shell' | 'claude-code' | 'codex' | 'antigravity' = 'shell'
 ): void {
   registerSession(database, sessionId, kind)
   database.run(
