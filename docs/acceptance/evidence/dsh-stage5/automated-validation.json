@@ -36,5 +36,8 @@
   "fullRuntimePassed": false,
   "uiRegression": "pending",
   "dshPackagedAcceptance": "pending",
-  "logs": "Private run logs stage5-runtime-all-except-server.log, stage5-runtime-server.log, stage5-runtime-journal-isolated.log, stage5-desktop-all.log; workspace local .cache/dsh-stage5/typecheck.log and spec-typecheck.log."
+  "logs": "Private run logs stage5-runtime-all-except-server.log, stage5-runtime-server.log, stage5-runtime-journal-isolated.log, stage5-desktop-all.log; workspace local .cache/dsh-stage5/typecheck.log and spec-typecheck.log.",
+  "latestCloseoutRecord": "closeout/automated-regression.json",
+  "latestUiRecord": "closeout/ui-regression.json",
+  "recordScope": "Initial stage-five regression before packaged fixes; retained as historical evidence. See latestCloseoutRecord for the completed closeout run."
 }

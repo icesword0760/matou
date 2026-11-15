@@ -1,8 +1,75 @@
-# DSH 接入对照矩阵：第四关
+# DSH 接入对照矩阵：第五关收口
 
-日期：2026-11-15 至 2026-11-16。基线：Codex 期 `a06812f`，分支 `feat/multi-agent-dsh`。启动器 0.2.2-rc.1、TUI 0.19.0；没有升级或修改用户 profile。
+2026-11-16，`feat/multi-agent-dsh`。本次收口按用户要求停止新增实验与产品调试；先提交代码/说明和门禁，再核对最终包，完整运行 DSH（允许一次自动重试），随后执行指定回归。**DSH 正式验收 7 项：4 项首跑通过、3 项重试后仍失败、0 跳过。矩阵未闭合，继续处于实现阶段，尚未产品签收。**
 
-本关完成模式切换结论与 mt 接入。**仍处于实现阶段，不是打包 App 的界面或 11 项完整产品签收。** 不打包、不发布、不推送；卡片一键 Fork 继续关闭。下方保留第三关已审证据。
+## 当前产物、范围与改动
+
+- 当前测试包对应产品源码 `9f82f8d`，其后仅测试说明与证据变更。收口时逐一验证包内 604 个普通文件，指纹无差异，本次没有重打包。整个第五关曾打包两次：首次包验收后出现产品源码修正，才生成当前包；[初始记录](evidence/dsh-stage5/package-initial.json)保留。
+- 最终包：`apps/desktop/release/mac-arm64/码头.app`，未签名、未安装到 Applications、未发布、未推送。逐文件清单 SHA-256：`1207ec4457ab31ad111fcff53d42963ef4ec8dae6a4daa17e4e42903e08699f6`；runtime SHA-256：`fc8bbe7dee21eda293512b29ab619dae00e2838bddd427f692368f6b4529b48c`。[完整指纹](evidence/dsh-stage5/package.json)、[复用核对](evidence/dsh-stage5/closeout/package-reuse.json)。
+- 已提交的产品调整：DSH 恢复早退沿用 error 状态并结束恢复等待；HUD 百分比在 DSH 数据边界取整。自动回归通过，但真实恢复按钮仍禁用，不能宣称恢复重试已修好。
+- `runtime-server.test.ts` 新增早退后同 ID 重试检查；fixture 启动等待与原生恢复期限分开，前者有界 5 秒，未延长产品恢复期限。DSH 验收增加原生输入就绪等待、按同轮原生事件关联状态样本、拒批后原生中断后续解释。[收口代码与门禁](evidence/dsh-stage5/closeout/step1.json)。
+- 启动器 0.2.2-rc.1 / TUI 0.19.0；未升级或改 profile。真实 HOME、空 ZDOTDIR、临时 Git 仓库、独立 Electron user-data / Matou 数据 / DSH 新会话目录；短 socket 别名仅指向本轮隔离数据。9 项受保护配置检查均无变化。
+
+## reference product 交互对照矩阵：最终包
+
+原生 dsh-TUI 可运行会话及其现存代码为 provider 行为基线；Matou 侧以现有 CLI 工作区、卡片、HUD、通知与载入/恢复管线为基线。只比较 CLI 模块；外部产品导航与品牌外壳不计入。第四关官方模式调用、第三关原生 projection/会话日志与第二关事件管线证据保留在下方；本表以真实最终包结果覆盖旧的“待 App 验证”状态。模式只读、卡片 Fork 不提供为已裁决边界，不按原 PRD 字面冒充已实现。
+
+| # | 原生基线及 Matou 代码入口 | 最终 App 实际与证据 | 状态、差异与重试 |
+| --- | --- | --- | --- |
+| 1 新建 | 原生 `dsh dsh-tui`；manifest、provider launch、Shell 升级与 mt create | 综合旅程、mt 建卡及不存在命令的可操作提示通过；[HUD](evidence/dsh-stage5/closeout/screenshots/04-dsh-hud.png)、[未安装](evidence/dsh-stage5/closeout/screenshots/missing-cli.png) | 通过，均首跑；未安装为不存在命令 fixture |
+| 2 工作状态与标签 | 原生 agent/status、turn/start/end、approval；共享 WorkStatus/DAG 投影 | DSH 主卡/DAG 标签、启动、工作、空闲通过；审批首跑第2轮、重试第3轮停留 idle；模型错误 fixture 两次首轮仍 idle，未完成原生错误诱发/映射闭环 | 部分通过；审批/错误整项各2次尝试均失败，不能宣布六态全部闭合 |
+| 3 通知 | 原生审批/完成与 TUI OSC；provider events、共享通知中心 | 后台完成通知及无重复原生 OSC 通过；审批前轮通知/拒批执行过，[审批](evidence/dsh-stage5/closeout/screenshots/03-approval-2.png)；模型错误通知未到断言 | 部分通过；失败轮后续与最终通知 proof 未执行；没有真实音效/系统通知点击签收声明 |
+| 4 HUD | 原生 model.current / sessionProjections / paired tool events；TerminalHud | 模型/档位、占用、只读原生模式、工具、目录/Git，以及不可靠指令路径隐藏均通过；[HUD](evidence/dsh-stage5/closeout/screenshots/04-dsh-hud.png) | 代表旅程首跑通过；未知字段隐藏，不猜测已读指令文件 |
+| 5 执行模式 | 原生 commands.execute / permissionPresets.set；原生权限偏好会全局持久化 | 本期只读徽标，manifest 模式菜单关闭；真实 App 确认无模式按钮 | 已裁决范围通过；不宣称可切换。未来开放仍需裁决全局偏好写入 |
+| 6 自动标题 | 原生 session/title；title policy、共享重命名/恢复菜单 | 自动跟随、手动锁定、原生改名后恢复最新标题通过 | 首跑通过；沿用原生标题，无新增标题生成请求 |
+| 7 载入会话 | 原生 v4 历史与 cwd；DSH catalog、SessionLoaderDialog | 原生子会话预览、搜索和精确载入后答出父暗号；[预览/搜索](evidence/dsh-stage5/closeout/screenshots/07-child-preview-search.png) | 首跑通过；边界/损坏/分页由既有自动检查覆盖，不声明大规模目录真实 UI 压测 |
+| 8 重启恢复 | 原生 --resume；ProviderResumeMonitor/恢复队列/横幅 | 正常重启静置和暗号记忆通过，[恢复记忆](evidence/dsh-stage5/closeout/screenshots/08-memory-restored.png)；受控早退后按钮仍显示“当前终端仍在恢复”，[失败横幅](evidence/dsh-stage5/closeout/screenshots/08-restore-failed.png) | 部分通过；失败场景两次均卡 :439。成功重试、重试后记忆与新开均未执行；未闭合 |
+| 9 Fork | 原生 /fork 创建独立子会话；卡片 fork=false | 原生 Fork 的独立 ID/父关联、目录读取、搜索、载入与记忆通过；卡片菜单不提供一键 Fork | 已裁决阶段范围首跑通过；未注入 /fork，不复制上游编排；一键能力留后续正式上游调用口 |
+| 10 mt 跨卡 | 原生独立 system section 与 shellEnv；现有 mt CLI/server | 默认 workspace-write 下建 DSH 卡，identify/list/read 读回独立 Shell 兄弟屏幕随机标记，原生工具结果与回复均确认；[跨卡](evidence/dsh-stage5/closeout/screenshots/10-mt-screen-read.png) | 代表读取旅程首跑通过；其它 mt 操作沿用已有自动边界，不宣称本轮逐项真实操作全部命令 |
+| 11 不提供的入口 | DSH manifest 与共享 HUD/menu | 账户、费用/额度、供应商面板、团队、不可靠项目指令入口均未出现 | 首跑通过；没有补造原生缺失接口 |
+
+[7 条旅程、10 次尝试与未到断言明细](evidence/dsh-stage5/closeout/dsh-acceptance.json)。原始日志 `closeout-dsh-acceptance.log`，完整 proof/每次失败现场分别保存在工作树 `.cache/dsh-stage5/closeout-evidence/`、`closeout-results/`；挑选的8张真实截图已随本矩阵提交。之前 retries=0 的一轮被宿主中断，保留现场但不作为这次完整签收依据。
+
+## 性能：实际状态到 DAG DOM
+
+同一主机的真实 Runtime domain event 与 MutationObserver 时间，门槛每类3次、≤1000ms。首轮旧采样曾错误关联更早的乐观状态，已作废；以下只使用正式收口轮。
+
+| 状态 | Runtime → UI（ms） | 原生 → UI（ms） | 判定 |
+| --- | --- | --- | --- |
+| 工作中 | 2 / 3 / 1 | UI 早于原生 turn/start 4 / 3 / 2；原程序将负值截成0，该0不可当作有效原生延迟 | Runtime口径3次达标；不声明原生口径有效测量 |
+| 回到空闲 | 2 / 2 / 3 | 131 / 7 / 8 | 两口径3次均达标 |
+| 需要输入 | 2 / 2 / 2 | 105 / 104 / 105 | 三次分属首跑第1轮及重试第1/2轮；样本达标，审批旅程整体仍失败 |
+| 出错 | 未取得 | 未取得 | 错误第一轮未进入预期状态；3次门槛未闭合 |
+
+## 指定回归：收口轮
+
+Runtime 主批 `1653 passed / 36 skipped`，server 独立 `--maxWorkers=1` 为 `166 passed`；合计1819通过、36跳过、0失败。RSS门禁本次通过，之前两次超限与基线副本通过仅保留为历史波动，不改写为稳定无波动。Desktop 功能1031项与性能3项全通过；[完整自动回归记录](evidence/dsh-stage5/closeout/automated-regression.json)。三组界面回归均完整执行一次、0重试，结果如下。断线前已完成的组未重跑；重连后只补尚未启动的Codex。不使用历史单条补测冒充本轮全套。
+
+| UI 回归 | 通过 / 失败 / 跳过 | 与已知矩阵对照及未执行项 |
+| --- | --- | --- |
+| Claude 四规格 | 10 / 3 / 0（1.8分钟） | Fork :187 relations=[]、:276失败卡为0均历史已知；载入 :164搜索到2/2但虚拟预览无350，与历史同类失败一致，后续曾过，不宣称稳定修复。失败后的恢复/载入步骤未执行 |
+| Antigravity | 2 / 3 / 0（8.9分钟） | :497等DAG idle 90秒、:802自动标题30秒为空、:408模型HUD 45秒未出现，均不同于最新矩阵已知:876选择器失败；是本轮新失败点，原因未知，后续标题/重启/Fork/载入部分未执行。mt及受控异常通过 |
+| Codex | 7 / 3 / 0（8.8分钟） | :559和:805首次对话等待身份30秒为空，后者尚未执行到重启；:862当前目录Fork子UUID等于父UUID，后续隔离/新Worktree/载入未执行。三处为相对最新矩阵的新失败点，原因未知；模型错误通知、防升级、祖先历史、Default权限恢复、mt、审批中断、异常恢复及受控缺命令/未登录通过 |
+
+[完整UI回归报告](evidence/dsh-stage5/closeout/ui-regression.md)、[结构化结果](evidence/dsh-stage5/closeout/ui-regression.json)。已知对照来自现有矩阵历史，本轮没有另开main实验。不能把六个新的失败点一概归为旧问题，也不能仅凭失败就确定由DSH改动造成；目前不能给出“其它Agent无新回归”的签收结论。
+
+## 仍未闭合与本轮边界
+
+DSH审批后续轮次、模型错误诱发到状态/通知/性能的闭环、恢复失败后的重试和新开未闭合。Claude三处失败、Antigravity三处新失败、Codex三处新失败及其被阻断的后续断言均保留；错误性能三次门槛也未闭合。没有放宽断言、删除权限检查、追加实验、继续修产品或推送发布。
+
+本轮已到收口交回关卡，在此停止。打包App未签名、未安装到Applications、未发布；不将自动门禁全绿当作真实产品签收。原有未跟踪PRD保留。
+
+## 我自己做的决定
+
+1. 主代理：恢复早退用error并结束等待；HUD在DSH数据边界取整，避免扩展共享UI。恢复修改虽有单测，真实按钮仍失败，保持未闭合。
+2. 主代理：fixture启动最多等5秒，与产品恢复身份期限分开，未改变产品10秒期限；补上早退后同ID重试的回归与说明。
+3. 主代理：产品源码打包后未变，604文件指纹一致，复用最终包；仅测试和文档变更不重打包。
+4. 主代理：running的原生时间晚于乐观UI，截零值不当有效原生延迟；审批样本注明分属两次尝试，不用样本达标替代整项通过。
+5. terra界面代理：被中断的旧retries=0轮保留为非正式现场；按新要求独立执行retries=1全套。重连后确认Claude/Agy已有完整汇总，只补未启动的Codex；精确核对归属后结束旧测试残留，清理本轮临时认证/链接，不动用户真实App或认证。
+
+步骤提交：产品修正`00d9940`，测试说明`1d736bf`，源码门禁`4fbd0bf`，包复用`86e5891`，DSH正式验收`dde6ca2`，完整回归`aaf25f1`。原始日志与完整临时现场保留；本矩阵及挑选截图/脱敏结果为提交证据。
+
+以下保留前关已审记录，不能替代上面的最终 App 失败结论。
 
 ## 第四关结果与产品边界
 
@@ -46,7 +113,7 @@
 - 读取有界：单压缩/解压帧 32 MiB、单行 16 MiB、压缩文件/累计解压 512 MiB、单会话可见事件 10 万；索引/搜索缓存各最多 16 会话且总引用/命中 20 万，缓存不保存正文。响应沿用已有分页；大页按字节缩小，有单条/预览文字上限。超限只报错，不改写会话文件。
 - 载入复用现有 RPC 与 provider binding，启动仍是 `--resume <完整ID>`。DSH 只在同 ID、已落盘、真实 ready 后结束恢复；沿用现有 10 秒恢复期限，期限内未确认走现有 failed / 重试 / 新开流程。没有新数据库、迁移、依赖或 Matou 运行时 LLM 请求。
 
-## reference product 交互对照矩阵
+## 第三关历史 reference product 交互对照矩阵
 
 DSH 原生 TUI 为本 provider 的行为基线；Matou 卡片层沿用已批准 CLI 黑色工作区范围。组件验证不代表真实打包 App 的尺寸、焦点、滚动或交互性能已验收。
 
