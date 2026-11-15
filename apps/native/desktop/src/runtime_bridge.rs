@@ -4,31 +4,33 @@
 //! vertical slice hosts the owner in a background thread; standalone runtime
 //! transport and additional windows remain separate migration work.
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     ffi::OsString,
-    path::PathBuf,
+    path::{Component, Path, PathBuf},
     sync::mpsc::{self, Receiver, Sender},
     thread::{self, JoinHandle},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, anyhow, bail};
 use matou_native_core::{
     hierarchy::{
-        self, BootstrapWindowInput, HierarchyIds, HierarchyResult, Scene, Task,
+        self, BootstrapWindowInput, HierarchyIds, HierarchyResult, Scene, Task, Workspace,
         canvas::{CanvasIds, CanvasMessages, CreateCanvasInput, CreateShellSiblingInput},
         tabs::{CloseSceneInput, RenameSceneInput, ReorderSceneInput},
-        tasks,
+        tasks, workspaces,
     },
     journal::JournalOptions,
     pty::ShellLaunch,
     startup::{self, BootstrapResult},
     storage::CommandMetadata,
+    workspace_paths::WorkspacePathState,
 };
 use matou_native_runtime::{
     SessionEvent, SessionOptions,
     owner::{OwnerEvent, ShellOwner},
     worker::WorkerCommand,
+    workspace_paths::WorkspacePathChecks,
 };
 use matou_native_terminal::{InputModes, Screen, TerminalOptions, Theme};
 use serde_json::Value;
@@ -71,6 +73,27 @@ pub enum Command {
     },
     RetryStorage {
         session_id: String,
+    },
+    CreateWorkspace {
+        root_directory: String,
+    },
+    SelectWorkspace {
+        workspace_id: String,
+    },
+    RelinkWorkspace {
+        workspace_id: String,
+        root_directory: String,
+    },
+    SetWorkspacePinned {
+        workspace_id: String,
+        pinned: bool,
+    },
+    ReorderPinnedWorkspace {
+        workspace_id: String,
+        before_workspace_id: Option<String>,
+    },
+    RemoveWorkspace {
+        workspace_id: String,
     },
     CreateTask {
         workspace_id: String,
@@ -129,11 +152,23 @@ pub enum Command {
         update: matou_native_core::geometry::GeometryUpdate,
     },
     Refresh,
+    #[cfg(all(test, target_os = "macos"))]
+    TestPause {
+        paused: Sender<()>,
+        resume: Receiver<()>,
+    },
     Shutdown,
 }
 
 pub enum Event {
+    Workspaces(Vec<Workspace>),
+    WorkspacePaths(Vec<WorkspacePathState>),
     Tasks(Vec<Task>),
+    WorkspaceActionResult {
+        action: String,
+        workspace_id: Option<String>,
+        error: Option<String>,
+    },
     TaskRenameResult {
         task_id: String,
         title: String,
@@ -234,6 +269,18 @@ struct PendingView {
     sequence: u64,
 }
 
+struct PendingInput {
+    workspace_id: String,
+    session_id: String,
+    bytes: Vec<u8>,
+    defer_ordering: bool,
+}
+
+const WORKSPACE_PATH_INVALID: &str = "工作区目录不可用，请先在本地恢复原路径，或移出该工作区";
+const ACTIVE_PATH_INTERVAL: Duration = Duration::from_millis(400);
+const WORKSPACE_POLL_INTERVAL: Duration = Duration::from_secs(30);
+type WorkerOperation = (String, Receiver<Result<()>>, bool);
+
 fn run(
     options: LaunchOptions,
     incoming: Receiver<Command>,
@@ -292,37 +339,222 @@ fn run(
         now(),
     )?;
     let mut scene_id = hierarchy.scene.as_ref().map(|scene| scene.id.clone());
+    let mut active_task = hierarchy.task.as_ref().map(|task| task.id.clone());
     let mut owner = ShellOwner::new(connection, ownership, id)?;
     let mut sessions = HashSet::new();
-    if let Some(scene_id) = scene_id.as_deref() {
-        ensure_scene_shells(&mut owner, &options, scene_id, &mut sessions)?;
+    let mut active_workspace = hierarchy
+        .workspace
+        .as_ref()
+        .map(|workspace| workspace.id.clone());
+    let mut checks = WorkspacePathChecks::default();
+    let graph = active_graph(&owner, scene_id.as_deref(), window_id)?;
+    let mut pending_launch = unstarted_shells(&graph, &sessions);
+    let mut foreground_shells: HashSet<_> = shell_ids(&graph).map(str::to_owned).collect();
+    let mut deferred_recovery = HashSet::new();
+    let mut launch_directories = HashMap::<String, Receiver<Option<String>>>::new();
+    let mut recovering = HashMap::<String, String>::new();
+    let mut launch_validated = false;
+    let mut pending_input = VecDeque::<PendingInput>::new();
+    let mut terminal_layouts = HashMap::new();
+    let mut next_active_check = Instant::now() + ACTIVE_PATH_INTERVAL;
+    let mut next_workspace_poll = Instant::now() + WORKSPACE_POLL_INTERVAL;
+    if let Some(workspace_id) = &active_workspace {
+        checks.request(&owner, workspace_id)?;
     }
+    let mut projected_paths = owner
+        .workspace_path_states()?
+        .into_iter()
+        .map(|state| (state.workspace_id.clone(), state))
+        .collect::<BTreeMap<_, _>>();
+    let mut active_path_invalid =
+        workspace_is_invalid(&projected_paths, active_workspace.as_deref());
+    send.send_blocking(Event::WorkspacePaths(
+        projected_paths.values().cloned().collect(),
+    ))?;
     let scenes = hierarchy
         .task
         .as_ref()
         .map(|task| owner.scenes(&task.id))
         .transpose()?
         .unwrap_or_default();
-    send_tasks(&owner, &hierarchy, window_id, send)?;
+    send_sidebar(&owner, window_id, send)?;
     send.send_blocking(Event::Ready {
         hierarchy,
         scenes,
-        graph: active_graph(&owner, scene_id.as_deref(), window_id)?,
+        graph,
         geometry: scene_id
             .as_deref()
             .map(|id| owner.geometry(id))
             .transpose()?
             .unwrap_or_default(),
     })?;
-    let mut dirty: HashSet<String> = sessions.iter().cloned().collect();
+    let mut dirty = HashSet::<String>::new();
     let mut sequence = HashMap::<String, u64>::new();
     let mut views = HashMap::<String, PendingView>::new();
-    let mut awaiting_ui = HashSet::<String>::new();
-    let mut operations = Vec::<(String, Receiver<Result<()>>, bool)>::new();
+    let mut awaiting_ui = HashMap::<String, u64>::new();
+    let mut operations = Vec::<WorkerOperation>::new();
     loop {
         let mut shutdown = false;
         let mut graph_dirty = false;
         let mut tasks_dirty = false;
+        let now = Instant::now();
+        if now >= next_active_check {
+            if let Some(workspace_id) = &active_workspace {
+                checks.request(&owner, workspace_id)?;
+            }
+            next_active_check = now + ACTIVE_PATH_INTERVAL;
+        }
+        if now >= next_workspace_poll {
+            for workspace_id in owner.workspace_path_poll_targets()? {
+                if let Err(error) = checks.request(&owner, &workspace_id) {
+                    eprintln!("[workspace-path:{workspace_id}] {error:#}");
+                }
+            }
+            next_workspace_poll = now + WORKSPACE_POLL_INTERVAL;
+        }
+        let completed_checks = checks.poll(&mut owner);
+        let path_checked = !completed_checks.is_empty();
+        for completion in completed_checks {
+            let state = match completion {
+                Ok(state) => state,
+                Err(error) => {
+                    send.send_blocking(Event::Diagnostic(format!("{error:#}")))?;
+                    continue;
+                }
+            };
+            projected_paths.insert(state.workspace_id.clone(), state.clone());
+            let invalid = state.status == "invalid";
+            if invalid {
+                let before = pending_input.len();
+                pending_input.retain(|input| input.workspace_id != state.workspace_id);
+                if pending_input.len() != before {
+                    send.send_blocking(Event::Diagnostic(WORKSPACE_PATH_INVALID.into()))?;
+                }
+            }
+            if active_workspace.as_ref() != Some(&state.workspace_id) {
+                continue;
+            }
+            if !invalid {
+                if active_path_invalid && let Some(task_id) = &active_task {
+                    for scene in owner.scenes(task_id)? {
+                        let graph = owner.graph(&scene.id, None)?;
+                        deferred_recovery.extend(
+                            shell_ids(&graph)
+                                .filter(|id| sessions.contains(*id))
+                                .map(str::to_owned),
+                        );
+                    }
+                }
+                // The reference increments the background pane's revision, then
+                // replaces its worker only when the pane attaches in the foreground.
+                let running: Vec<_> = foreground_shells
+                    .iter()
+                    .filter(|id| deferred_recovery.remove(*id))
+                    .cloned()
+                    .collect();
+                owner.retire_sessions(&running);
+                operations.retain(|(id, _, _)| !running.contains(id));
+                for id in running {
+                    sessions.remove(&id);
+                    dirty.remove(&id);
+                    sequence.remove(&id);
+                    views.remove(&id);
+                    awaiting_ui.remove(&id);
+                    recovering.insert(id, state.workspace_id.clone());
+                }
+            }
+            active_path_invalid = invalid;
+            launch_validated = !invalid;
+        }
+        if path_checked {
+            send.send_blocking(Event::WorkspacePaths(
+                projected_paths.values().cloned().collect(),
+            ))?;
+        }
+
+        let mut launch_candidates = HashSet::new();
+        if launch_validated {
+            launch_candidates.extend(
+                pending_launch
+                    .iter()
+                    .filter(|id| !recovering.contains_key(*id))
+                    .cloned(),
+            );
+        }
+        for (session_id, workspace_id) in &recovering {
+            if !owner.has_shell_worker(session_id)
+                && owner
+                    .workspace_path_state(workspace_id)?
+                    .is_some_and(|state| state.status == "valid")
+            {
+                launch_candidates.insert(session_id.clone());
+            }
+        }
+        launch_directories.retain(|id, _| launch_candidates.contains(id));
+        for session_id in launch_candidates {
+            if !launch_directories.contains_key(&session_id) {
+                let candidates =
+                    owner.shell_directory_candidates(&session_id, &options.shell_home)?;
+                launch_directories.insert(session_id, choose_launch_directory(candidates)?);
+            }
+        }
+        let mut completed_launches = Vec::new();
+        launch_directories.retain(|id, result| match result.try_recv() {
+            Ok(directory) => {
+                completed_launches.push((id.clone(), directory));
+                false
+            }
+            Err(mpsc::TryRecvError::Empty) => true,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                completed_launches.push((id.clone(), None));
+                false
+            }
+        });
+        let mut started_shell = false;
+        for (session_id, directory) in completed_launches {
+            pending_launch.remove(&session_id);
+            recovering.remove(&session_id);
+            let result = directory
+                .context("execution context is not registered")
+                .and_then(|directory| {
+                    owner.set_shell_launch_directory(&session_id, &directory)?;
+                    launch_shell(
+                        &mut owner,
+                        &options,
+                        &session_id,
+                        directory,
+                        &terminal_layouts,
+                    )
+                });
+            match result {
+                Ok(()) => {
+                    dirty.insert(session_id.clone());
+                    sessions.insert(session_id);
+                    graph_dirty = true;
+                    started_shell = true;
+                }
+                Err(error) => send.send_blocking(Event::Diagnostic(format!("{error:#}")))?,
+            }
+        }
+        if path_checked || started_shell {
+            for _ in 0..pending_input.len() {
+                let input = pending_input.pop_front().expect("queued terminal input");
+                if sessions.contains(&input.session_id)
+                    && !(foreground_shells.contains(&input.session_id)
+                        && deferred_recovery.contains(&input.session_id))
+                    && owner
+                        .workspace_path_state(&input.workspace_id)?
+                        .is_some_and(|state| state.status == "valid")
+                {
+                    if send_input(&mut owner, input, &mut operations, send)? {
+                        tasks_dirty = true;
+                        graph_dirty = true;
+                    }
+                } else {
+                    pending_input.push_back(input);
+                }
+            }
+        }
         for _ in 0..128 {
             let command = match incoming.try_recv() {
                 Ok(command) => command,
@@ -334,7 +566,13 @@ fn run(
             };
             if matches!(
                 &command,
-                Command::CreateTask { .. }
+                Command::CreateWorkspace { .. }
+                    | Command::SelectWorkspace { .. }
+                    | Command::RelinkWorkspace { .. }
+                    | Command::SetWorkspacePinned { .. }
+                    | Command::ReorderPinnedWorkspace { .. }
+                    | Command::RemoveWorkspace { .. }
+                    | Command::CreateTask { .. }
                     | Command::SelectTask { .. }
                     | Command::RenameTask { .. }
                     | Command::SetTaskPinned { .. }
@@ -363,6 +601,27 @@ fn run(
                     }
                     _ => None,
                 };
+                let workspace_action = match &command {
+                    Command::CreateWorkspace { .. } => Some(("create", None)),
+                    Command::RelinkWorkspace { workspace_id, .. } => {
+                        Some(("relink", Some(workspace_id.clone())))
+                    }
+                    Command::SetWorkspacePinned { workspace_id, .. } => {
+                        Some(("pin", Some(workspace_id.clone())))
+                    }
+                    _ => None,
+                };
+                let check_target = matches!(
+                    &command,
+                    Command::CreateWorkspace { .. }
+                        | Command::SelectWorkspace { .. }
+                        | Command::RelinkWorkspace { .. }
+                        | Command::CreateTask { .. }
+                        | Command::SelectTask { .. }
+                        | Command::CreateCanvas { .. }
+                        | Command::CreateShellSibling { .. }
+                        | Command::SelectScene { .. }
+                );
                 match navigate(&mut owner, window_id, command) {
                     Ok((hierarchy, disposed)) => {
                         if !disposed.is_empty() {
@@ -372,18 +631,64 @@ fn run(
                                 sequence.remove(id);
                                 views.remove(id);
                                 awaiting_ui.remove(id);
+                                terminal_layouts.remove(id);
+                                recovering.remove(id);
+                                deferred_recovery.remove(id);
                             }
+                            pending_input.retain(|input| !disposed.contains(&input.session_id));
                             operations.retain(|(id, _, _)| sessions.contains(id));
                             send.send_blocking(Event::ScenesDisposed(disposed))?;
                         }
-                        scene_id = hierarchy.scene.as_ref().map(|scene| scene.id.clone());
+                        let next_scene = hierarchy.scene.as_ref().map(|scene| scene.id.clone());
+                        let next_workspace = hierarchy
+                            .workspace
+                            .as_ref()
+                            .map(|workspace| workspace.id.clone());
+                        let workspace_changed = active_workspace != next_workspace;
+                        let target_changed = scene_id != next_scene || workspace_changed;
+                        if workspace_changed {
+                            active_path_invalid =
+                                workspace_is_invalid(&projected_paths, next_workspace.as_deref());
+                        }
+                        scene_id = next_scene;
+                        active_task = hierarchy.task.as_ref().map(|task| task.id.clone());
+                        active_workspace = next_workspace;
+                        let graph = active_graph(&owner, scene_id.as_deref(), window_id)?;
+                        pending_launch = unstarted_shells(&graph, &sessions);
+                        foreground_shells = shell_ids(&graph).map(str::to_owned).collect();
+                        if (target_changed || check_target || !pending_launch.is_empty())
+                            && let Some(workspace_id) = &active_workspace
+                        {
+                            checks.request(&owner, workspace_id)?;
+                            launch_validated = false;
+                            next_active_check = Instant::now() + ACTIVE_PATH_INTERVAL;
+                        }
                         let scenes = hierarchy
                             .task
                             .as_ref()
                             .map(|task| owner.scenes(&task.id))
                             .transpose()?
                             .unwrap_or_default();
-                        send_tasks(&owner, &hierarchy, window_id, send)?;
+                        send_sidebar(&owner, window_id, send)?;
+                        if let Some((action, workspace_id)) = workspace_action {
+                            if action == "relink"
+                                && let Some(workspace_id) = &workspace_id
+                                && Some(workspace_id) != active_workspace.as_ref()
+                            {
+                                checks.request(&owner, workspace_id)?;
+                            }
+                            let workspace_id = workspace_id.or_else(|| {
+                                hierarchy
+                                    .workspace
+                                    .as_ref()
+                                    .map(|workspace| workspace.id.clone())
+                            });
+                            send.send_blocking(Event::WorkspaceActionResult {
+                                action: action.into(),
+                                workspace_id,
+                                error: None,
+                            })?;
+                        }
                         if let Some((task_id, title)) = rename {
                             send.send_blocking(Event::TaskRenameResult {
                                 task_id,
@@ -394,24 +699,24 @@ fn run(
                         send.send_blocking(Event::Navigation {
                             hierarchy,
                             scenes,
-                            graph: active_graph(&owner, scene_id.as_deref(), window_id)?,
+                            graph,
                             geometry: scene_id
                                 .as_deref()
                                 .map(|id| owner.geometry(id))
                                 .transpose()?
                                 .unwrap_or_default(),
                         })?;
-                        if let Some(scene_id) = scene_id.as_deref()
-                            && let Err(error) =
-                                ensure_scene_shells(&mut owner, &options, scene_id, &mut sessions)
-                        {
-                            send.send_blocking(Event::Diagnostic(format!("{error:#}")))?;
-                        }
                         // Existing workers and terminal surfaces remain alive across tab changes.
                         dirty.extend(sessions.iter().cloned());
                     }
                     Err(error) => {
-                        if let Some((task_id, title)) = rename {
+                        if let Some((action, workspace_id)) = workspace_action {
+                            send.send_blocking(Event::WorkspaceActionResult {
+                                action: action.into(),
+                                workspace_id,
+                                error: Some(format!("{error:#}")),
+                            })?;
+                        } else if let Some((task_id, title)) = rename {
                             send.send_blocking(Event::TaskRenameResult {
                                 task_id,
                                 title,
@@ -427,54 +732,103 @@ fn run(
                 }
                 continue;
             }
-            let interaction = match &command {
-                Command::Input {
-                    bytes,
-                    defer_ordering,
-                    ..
-                } => match bytes.as_slice() {
-                    [3] | [4] => Some(("control", *defer_ordering)),
-                    [13] | [10] => Some(("submit", *defer_ordering)),
-                    _ => None,
-                },
-                _ => None,
-            };
             let (reply, result) = mpsc::channel();
             let (session_id, request, refresh) = match command {
                 Command::Input {
-                    session_id, bytes, ..
-                } => (session_id, WorkerCommand::Write { bytes, reply }, false),
+                    session_id,
+                    bytes,
+                    defer_ordering,
+                } => {
+                    let Some(workspace_id) = owner.session_workspace(&session_id)? else {
+                        continue;
+                    };
+                    let state = owner.workspace_path_state(&workspace_id)?;
+                    if state
+                        .as_ref()
+                        .is_some_and(|state| state.status == "invalid")
+                    {
+                        send.send_blocking(Event::Diagnostic(WORKSPACE_PATH_INVALID.into()))?;
+                        continue;
+                    }
+                    let input = PendingInput {
+                        workspace_id,
+                        session_id,
+                        bytes,
+                        defer_ordering,
+                    };
+                    if state.is_none()
+                        || !sessions.contains(&input.session_id)
+                        || (foreground_shells.contains(&input.session_id)
+                            && deferred_recovery.contains(&input.session_id))
+                    {
+                        checks.request(&owner, &input.workspace_id)?;
+                        pending_input.push_back(input);
+                    } else if send_input(&mut owner, input, &mut operations, send)? {
+                        tasks_dirty = true;
+                        graph_dirty = true;
+                    }
+                    continue;
+                }
                 Command::Resize {
                     session_id,
                     cols,
                     rows,
                     cell_width_px,
                     cell_height_px,
-                } => (
-                    session_id,
-                    WorkerCommand::Resize {
-                        cols,
-                        rows,
-                        cell_width_px,
-                        cell_height_px,
-                        reply,
-                    },
-                    true,
-                ),
+                } => {
+                    let live = sessions.contains(&session_id);
+                    if live || owner.session_workspace(&session_id)?.is_some() {
+                        let options = terminal_layouts
+                            .entry(session_id.clone())
+                            .or_insert_with(default_terminal_options);
+                        options.cols = cols;
+                        options.rows = rows;
+                        options.cell_width_px = cell_width_px;
+                        options.cell_height_px = cell_height_px;
+                    }
+                    if !live {
+                        continue;
+                    }
+                    (
+                        session_id,
+                        WorkerCommand::Resize {
+                            cols,
+                            rows,
+                            cell_width_px,
+                            cell_height_px,
+                            reply,
+                        },
+                        true,
+                    )
+                }
                 Command::Scroll { session_id, lines } => {
+                    if !sessions.contains(&session_id) {
+                        continue;
+                    }
                     (session_id, WorkerCommand::Scroll { lines, reply }, true)
                 }
                 Command::Theme { session_id, theme } => {
+                    let live = sessions.contains(&session_id);
+                    if live || owner.session_workspace(&session_id)?.is_some() {
+                        terminal_layouts
+                            .entry(session_id.clone())
+                            .or_insert_with(default_terminal_options)
+                            .theme = theme;
+                    }
+                    if !live {
+                        continue;
+                    }
                     (session_id, WorkerCommand::SetTheme { theme, reply }, true)
                 }
                 Command::Applied {
                     session_id,
                     sequence,
                 } => {
+                    if awaiting_ui.get(&session_id) != Some(&sequence) {
+                        continue;
+                    }
                     awaiting_ui.remove(&session_id);
-                    // A first layout/theme frame can precede any PTY output.
-                    // Zero means no output credit has been sent yet; it still
-                    // releases the UI frame slot, but has nothing to acknowledge.
+                    // A layout frame before any PTY output has no output credit.
                     if sequence == 0 || !sessions.contains(&session_id) {
                         continue;
                     }
@@ -485,6 +839,9 @@ fn run(
                     )
                 }
                 Command::RetryStorage { session_id } => {
+                    if !sessions.contains(&session_id) {
+                        continue;
+                    }
                     (session_id, WorkerCommand::RetryStorage { reply }, true)
                 }
                 Command::PutGeometry { sequence, update } => {
@@ -517,14 +874,23 @@ fn run(
                 Command::Refresh => {
                     dirty.extend(sessions.iter().cloned());
                     awaiting_ui.clear();
-                    send.send_blocking(Event::Graph(active_graph(
-                        &owner,
-                        scene_id.as_deref(),
-                        window_id,
-                    )?))?;
+                    let graph = active_graph(&owner, scene_id.as_deref(), window_id)?;
+                    pending_launch = unstarted_shells(&graph, &sessions);
+                    foreground_shells = shell_ids(&graph).map(str::to_owned).collect();
+                    if let Some(workspace_id) = &active_workspace {
+                        checks.request(&owner, workspace_id)?;
+                        launch_validated = false;
+                    }
+                    send.send_blocking(Event::Graph(graph))?;
                     continue;
                 }
-                Command::CreateTask { .. }
+                Command::CreateWorkspace { .. }
+                | Command::SelectWorkspace { .. }
+                | Command::RelinkWorkspace { .. }
+                | Command::SetWorkspacePinned { .. }
+                | Command::ReorderPinnedWorkspace { .. }
+                | Command::RemoveWorkspace { .. }
+                | Command::CreateTask { .. }
                 | Command::SelectTask { .. }
                 | Command::RenameTask { .. }
                 | Command::SetTaskPinned { .. }
@@ -537,6 +903,12 @@ fn run(
                 | Command::ReorderScene { .. }
                 | Command::CloseScene { .. }
                 | Command::FocusSession { .. } => unreachable!("navigation handled above"),
+                #[cfg(all(test, target_os = "macos"))]
+                Command::TestPause { paused, resume } => {
+                    paused.send(())?;
+                    resume.recv_timeout(Duration::from_secs(8))?;
+                    continue;
+                }
                 Command::Shutdown => {
                     shutdown = true;
                     break;
@@ -545,17 +917,6 @@ fn run(
             if let Err(error) = owner.send(&session_id, request) {
                 send.send_blocking(Event::Diagnostic(format!("{error:#}")))?;
                 continue;
-            }
-            // Queue the bytes first, then persist the interaction before another
-            // command can change focus or shut down the owner.
-            if let Some((kind, defer_ordering)) = interaction {
-                match owner.record_interaction(&session_id, kind, defer_ordering) {
-                    Ok(_) => {
-                        graph_dirty = true;
-                        tasks_dirty = true;
-                    }
-                    Err(error) => send.send_blocking(Event::Diagnostic(format!("{error:#}")))?,
-                }
             }
             operations.push((session_id, result, refresh));
         }
@@ -632,11 +993,11 @@ fn run(
             )?))?;
         }
         if tasks_dirty {
-            send_tasks(&owner, &owner.hierarchy(window_id)?, window_id, send)?;
+            send_sidebar(&owner, window_id, send)?;
         }
         views.retain(|session_id, pending| match pending.receive.try_recv() {
             Ok(Ok((screen, modes))) => {
-                awaiting_ui.insert(session_id.clone());
+                awaiting_ui.insert(session_id.clone(), pending.sequence);
                 let _ = send.send_blocking(Event::Frame {
                     session_id: session_id.clone(),
                     screen,
@@ -656,7 +1017,7 @@ fn run(
             }
         });
         for session_id in dirty.clone() {
-            if views.contains_key(&session_id) || awaiting_ui.contains(&session_id) {
+            if views.contains_key(&session_id) || awaiting_ui.contains_key(&session_id) {
                 continue;
             }
             let (reply, receive) = mpsc::channel();
@@ -675,52 +1036,118 @@ fn run(
     Ok(())
 }
 
-fn ensure_scene_shells(
+fn send_input(
+    owner: &mut ShellOwner,
+    input: PendingInput,
+    operations: &mut Vec<WorkerOperation>,
+    send: &async_channel::Sender<Event>,
+) -> Result<bool> {
+    let PendingInput {
+        session_id,
+        bytes,
+        defer_ordering,
+        ..
+    } = input;
+    let interaction = match bytes.as_slice() {
+        [3] | [4] => Some("control"),
+        [13] | [10] => Some("submit"),
+        _ => None,
+    };
+    let (reply, result) = mpsc::channel();
+    if let Err(error) = owner.send(&session_id, WorkerCommand::Write { bytes, reply }) {
+        send.send_blocking(Event::Diagnostic(format!("{error:#}")))?;
+        return Ok(false);
+    }
+    // Record the interaction after queueing bytes and before a queued focus or shutdown.
+    let changed = if let Some(kind) = interaction {
+        match owner.record_interaction(&session_id, kind, defer_ordering) {
+            Ok(_) => true,
+            Err(error) => {
+                send.send_blocking(Event::Diagnostic(format!("{error:#}")))?;
+                false
+            }
+        }
+    } else {
+        false
+    };
+    operations.push((session_id, result, false));
+    Ok(changed)
+}
+
+fn workspace_is_invalid(paths: &BTreeMap<String, WorkspacePathState>, id: Option<&str>) -> bool {
+    id.and_then(|id| paths.get(id))
+        .is_some_and(|state| state.status == "invalid")
+}
+
+fn shell_ids(graph: &Value) -> impl Iterator<Item = &str> {
+    graph["nodes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|node| node["currentMode"] == "shell" && node.get("archivedAt").is_none())
+        .filter_map(|node| node["sessionId"].as_str())
+}
+
+fn unstarted_shells(graph: &Value, sessions: &HashSet<String>) -> HashSet<String> {
+    shell_ids(graph)
+        .filter(|id| !sessions.contains(*id))
+        .map(str::to_owned)
+        .collect()
+}
+
+fn default_terminal_options() -> TerminalOptions {
+    TerminalOptions::new(80, 24, 7, 14)
+}
+
+fn choose_launch_directory(candidates: Vec<String>) -> Result<Receiver<Option<String>>> {
+    let (send, receive) = mpsc::channel();
+    thread::Builder::new()
+        .name("shell-directory".into())
+        .spawn(move || {
+            let directory = candidates.into_iter().find(|path| Path::new(path).is_dir());
+            let _ = send.send(directory);
+        })?;
+    Ok(receive)
+}
+
+fn launch_shell(
     owner: &mut ShellOwner,
     options: &LaunchOptions,
-    scene_id: &str,
-    sessions: &mut HashSet<String>,
+    session_id: &str,
+    cwd: String,
+    terminal_layouts: &HashMap<String, TerminalOptions>,
 ) -> Result<()> {
-    let graph = owner.graph(scene_id, None)?;
-    for node in graph["nodes"].as_array().context("scene graph nodes")? {
-        if node["currentMode"] != "shell" || node.get("archivedAt").is_some() {
-            continue;
-        }
-        let session_id = node["sessionId"].as_str().context("graph session id")?;
-        if sessions.contains(session_id) {
-            continue;
-        }
-        let stored = owner.session(session_id)?.context("stored scene session")?;
-        let mut inherited_env: BTreeMap<OsString, OsString> = std::env::vars_os().collect();
-        inherited_env.insert("HOME".into(), options.shell_home.clone().into_os_string());
-        inherited_env.insert(
-            "ZDOTDIR".into(),
-            options.shell_home.clone().into_os_string(),
-        );
-        inherited_env.insert("SHELL".into(), options.shell.clone().into_os_string());
-        owner.launch(
-            SessionOptions {
-                session_id: session_id.to_owned(),
-                launch: ShellLaunch {
-                    executable: options.shell.clone(),
-                    cwd: stored.cwd.into(),
-                    data_root: options.data_root.clone(),
-                    inherited_env,
-                    env: BTreeMap::new(),
-                    cols: 80,
-                    rows: 24,
-                },
-                terminal: TerminalOptions::new(80, 24, 7, 14),
-                journal: JournalOptions::default(),
-                restored_history: Vec::new(),
-                collect_history: true,
+    let terminal = terminal_layouts
+        .get(session_id)
+        .copied()
+        .unwrap_or_else(default_terminal_options);
+    let mut inherited_env: BTreeMap<OsString, OsString> = std::env::vars_os().collect();
+    inherited_env.insert("HOME".into(), options.shell_home.clone().into_os_string());
+    inherited_env.insert(
+        "ZDOTDIR".into(),
+        options.shell_home.clone().into_os_string(),
+    );
+    inherited_env.insert("SHELL".into(), options.shell.clone().into_os_string());
+    owner.launch(
+        SessionOptions {
+            session_id: session_id.to_owned(),
+            launch: ShellLaunch {
+                executable: options.shell.clone(),
+                cwd: cwd.into(),
+                data_root: options.data_root.clone(),
+                inherited_env,
+                env: BTreeMap::new(),
+                cols: terminal.cols,
+                rows: terminal.rows,
             },
-            true,
-            "──────── 会话已恢复 ────────",
-        )?;
-        sessions.insert(session_id.to_owned());
-    }
-    Ok(())
+            terminal,
+            journal: JournalOptions::default(),
+            restored_history: Vec::new(),
+            collect_history: true,
+        },
+        true,
+        "──────── 会话已恢复 ────────",
+    )
 }
 
 fn active_graph(owner: &ShellOwner, scene_id: Option<&str>, window_id: &str) -> Result<Value> {
@@ -730,20 +1157,50 @@ fn active_graph(owner: &ShellOwner, scene_id: Option<&str>, window_id: &str) -> 
     }
 }
 
-fn send_tasks(
+fn send_sidebar(
     owner: &ShellOwner,
-    hierarchy: &HierarchyResult,
     window_id: &str,
     send: &async_channel::Sender<Event>,
 ) -> Result<()> {
-    let tasks = hierarchy
-        .workspace
-        .as_ref()
-        .map(|workspace| owner.tasks(window_id, &workspace.id))
-        .transpose()?
-        .unwrap_or_default();
+    let mut workspaces = owner.workspaces()?;
+    workspaces.sort_by(|left, right| {
+        right
+            .is_pinned
+            .cmp(&left.is_pinned)
+            .then_with(|| {
+                if left.is_pinned {
+                    left.pin_sort_key.cmp(&right.pin_sort_key)
+                } else {
+                    right
+                        .last_opened_at
+                        .cmp(&left.last_opened_at)
+                        .then(left.created_at.cmp(&right.created_at))
+                }
+            })
+            .then(left.id.cmp(&right.id))
+    });
+    let mut tasks = Vec::new();
+    for workspace in &workspaces {
+        tasks.extend(owner.tasks(window_id, &workspace.id)?);
+    }
+    send.send_blocking(Event::Workspaces(workspaces))?;
     send.send_blocking(Event::Tasks(tasks))?;
     Ok(())
+}
+
+fn resolve_workspace_directory(directory: &str) -> Result<PathBuf> {
+    let mut resolved = PathBuf::new();
+    let directory = Path::new(if directory.is_empty() { "." } else { directory });
+    for component in std::path::absolute(directory)?.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                resolved.pop();
+            }
+            other => resolved.push(other.as_os_str()),
+        }
+    }
+    Ok(resolved)
 }
 
 fn navigate(
@@ -763,7 +1220,7 @@ fn navigate(
     let messages = CanvasMessages {
         new_canvas: "新画布",
         duplicate_scene_name: "当前事项下已存在同名页签",
-        workspace_path_invalid: "工作区目录不可用，请先在本地恢复原路径，或移出该工作区",
+        workspace_path_invalid: WORKSPACE_PATH_INVALID,
         detached_session_must_return: "独立窗口中的会话需要先回到原会话列表",
     };
     let metadata = |kind: &str, input: &Value| CommandMetadata {
@@ -774,6 +1231,98 @@ fn navigate(
         correlation_id: None,
     };
     match command {
+        Command::CreateWorkspace { root_directory } => {
+            let directory = resolve_workspace_directory(&root_directory)?;
+            let input = workspaces::CreateWorkspaceInput {
+                window_id: window_id.into(),
+                name: directory
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "工作区".into()),
+                root_directory: directory.to_string_lossy().into_owned(),
+                navigation: None,
+                now: time,
+            };
+            owner.create_workspace(
+                &metadata("hierarchy.create-workspace", &serde_json::to_value(&input)?),
+                &input,
+                &hierarchy_ids(),
+                time,
+            )?;
+        }
+        Command::SelectWorkspace { workspace_id } => {
+            owner.select_workspace(&workspaces::SelectWorkspaceInput {
+                window_id: window_id.into(),
+                workspace_id,
+                now: time,
+            })?;
+        }
+        Command::RelinkWorkspace {
+            workspace_id,
+            root_directory,
+        } => {
+            let directory = resolve_workspace_directory(&root_directory)?;
+            let input = workspaces::RelinkWorkspaceInput {
+                workspace_id,
+                root_directory: directory.to_string_lossy().into_owned(),
+                now: time,
+            };
+            owner.relink_workspace(
+                &metadata("hierarchy.relink-workspace", &serde_json::to_value(&input)?),
+                &input,
+                time,
+            )?;
+        }
+        Command::SetWorkspacePinned {
+            workspace_id,
+            pinned,
+        } => {
+            let input = workspaces::SetWorkspacePinnedInput {
+                workspace_id,
+                pinned,
+                now: time,
+            };
+            owner.set_workspace_pinned(
+                &metadata(
+                    "hierarchy.set-workspace-pinned",
+                    &serde_json::to_value(&input)?,
+                ),
+                &input,
+                time,
+            )?;
+        }
+        Command::ReorderPinnedWorkspace {
+            workspace_id,
+            before_workspace_id,
+        } => {
+            let input = workspaces::ReorderPinnedWorkspaceInput {
+                workspace_id,
+                before_workspace_id,
+                now: time,
+            };
+            owner.reorder_pinned_workspace(
+                &metadata(
+                    "hierarchy.reorder-pinned-workspace",
+                    &serde_json::to_value(&input)?,
+                ),
+                &input,
+                time,
+            )?;
+        }
+        Command::RemoveWorkspace { workspace_id } => {
+            let input = workspaces::RemoveWorkspaceInput {
+                window_id: window_id.into(),
+                confirmed_intent: format!("remove-workspace:{workspace_id}"),
+                workspace_id,
+                now: time,
+            };
+            let disposed = owner.remove_workspace(
+                &metadata("hierarchy.remove-workspace", &serde_json::to_value(&input)?),
+                &input,
+                time,
+            )?;
+            return Ok((owner.hierarchy(window_id)?, disposed));
+        }
         Command::CreateTask { workspace_id } => {
             let input = tasks::CreateTaskInput {
                 window_id: window_id.into(),
@@ -1054,8 +1603,37 @@ mod tests {
             )
         };
 
-        // Prequeue the commands to exercise a single command batch regardless of scheduler timing.
-        let (commands, incoming) = mpsc::channel();
+        let mut bridge = RuntimeBridge::start(options)?;
+        let mut ready = HashSet::new();
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while !ready.contains(&first) || !ready.contains(&second) {
+            anyhow::ensure!(
+                Instant::now() < deadline,
+                "timed out waiting for Shell startup"
+            );
+            match bridge.events.try_recv() {
+                Ok(Event::Frame { session_id, .. }) => {
+                    ready.insert(session_id);
+                }
+                Ok(Event::Diagnostic(message)) => bail!("{message}"),
+                Err(async_channel::TryRecvError::Closed) => {
+                    bail!("bridge stopped during Shell startup")
+                }
+                Err(async_channel::TryRecvError::Empty) => thread::sleep(Duration::from_millis(2)),
+                _ => {}
+            }
+        }
+        // Hold the owner at a test barrier so all four messages are in one batch.
+        let (paused, wait_paused) = mpsc::channel();
+        let (resume, wait_resume) = mpsc::channel();
+        bridge
+            .commands
+            .send(Command::TestPause {
+                paused,
+                resume: wait_resume,
+            })
+            .map_err(|_| anyhow!("runtime command channel closed"))?;
+        wait_paused.recv_timeout(Duration::from_secs(8))?;
         let input = |session: &str| Command::Input {
             session_id: session.to_owned(),
             bytes: vec![13],
@@ -1070,10 +1648,14 @@ mod tests {
             input(&first),
             Command::Shutdown,
         ] {
-            commands.send(command)?;
+            bridge
+                .commands
+                .send(command)
+                .map_err(|_| anyhow!("runtime command channel closed"))?;
         }
-        let (send, events) = async_channel::unbounded();
-        run(options, incoming, &send)?;
+        resume.send(())?;
+        let events = bridge.events.clone();
+        bridge.shutdown()?;
 
         let focus_graph = std::iter::from_fn(|| events.try_recv().ok())
             .find_map(|event| match event {

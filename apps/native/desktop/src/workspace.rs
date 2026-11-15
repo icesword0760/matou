@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    path::PathBuf,
     rc::Rc,
     sync::mpsc::Sender,
     time::{Duration, Instant},
@@ -7,7 +8,8 @@ use std::{
 
 use gpui::{prelude::*, *};
 use matou_native_core::geometry::GeometryUpdate;
-use matou_native_core::hierarchy::{HierarchyResult, Scene, Task};
+use matou_native_core::hierarchy::{HierarchyResult, Scene, Task, Workspace as HierarchyWorkspace};
+use matou_native_core::workspace_paths::WorkspacePathState;
 use serde_json::Value;
 
 use crate::{
@@ -48,12 +50,40 @@ impl Render for TaskDrag {
     }
 }
 
+#[derive(Clone)]
+struct WorkspaceDrag {
+    workspace_id: String,
+    name: String,
+}
+impl Render for WorkspaceDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .w(px(230.))
+            .h(px(34.))
+            .px(px(7.))
+            .rounded(px(8.))
+            .bg(rgba(0xeceef3b8))
+            .text_color(rgb(0x2f3547))
+            .text_size(px(13.))
+            .font_weight(FontWeight::SEMIBOLD)
+            .flex()
+            .items_center()
+            .gap(px(7.))
+            .child(icon("folder", 16., 0x4078f2))
+            .child(self.name.clone())
+    }
+}
+
 struct CardMotion {
     width: Transition,
     lift: Transition,
 }
 
 enum TabDialog {
+    RemoveWorkspace {
+        workspace_id: String,
+        name: String,
+    },
     RenameTask {
         task_id: String,
         input: Entity<RenameInput>,
@@ -78,9 +108,6 @@ enum TabDialog {
 const CONTROLS: &[&str] = &[
     "new-workspace",
     "notifications",
-    "workspace",
-    "add-task",
-    "workspace-menu",
     "task-menu",
     "board",
     "settings",
@@ -96,6 +123,14 @@ pub struct Workspace {
     commands: Sender<Command>,
     hierarchy: Option<HierarchyResult>,
     scenes: Vec<Scene>,
+    workspaces: Vec<HierarchyWorkspace>,
+    workspace_paths: Vec<WorkspacePathState>,
+    workspace_controls: HashMap<String, [FocusHandle; 4]>,
+    workspace_bounds: HashMap<String, Bounds<Pixels>>,
+    workspace_hover: Option<String>,
+    workspace_collapsed: HashSet<String>,
+    workspace_menu: Option<(String, Point<Pixels>, Vec<FocusHandle>)>,
+    creating_workspace: bool,
     tasks: Vec<Task>,
     task_controls: HashMap<String, [FocusHandle; 2]>,
     task_bounds: HashMap<String, Bounds<Pixels>>,
@@ -105,8 +140,8 @@ pub struct Workspace {
     pub(crate) sidebar_scroll: ScrollHandle,
     sidebar_overflow: bool,
     pub(crate) sidebar_scrollbar: SidebarScrollbarState,
-    workspace_collapsed: bool,
     task_toast: Option<String>,
+    toast_generation: u64,
     tab_scroll: ScrollHandle,
     tab_hover: Option<String>,
     tab_overflow: bool,
@@ -186,6 +221,14 @@ impl Workspace {
             commands,
             hierarchy: None,
             scenes: Vec::new(),
+            workspaces: Vec::new(),
+            workspace_paths: Vec::new(),
+            workspace_controls: HashMap::new(),
+            workspace_bounds: HashMap::new(),
+            workspace_hover: None,
+            workspace_collapsed: HashSet::new(),
+            workspace_menu: None,
+            creating_workspace: false,
             tasks: Vec::new(),
             task_controls: HashMap::new(),
             task_bounds: HashMap::new(),
@@ -195,8 +238,8 @@ impl Workspace {
             sidebar_scroll: ScrollHandle::new(),
             sidebar_overflow: false,
             sidebar_scrollbar: SidebarScrollbarState::default(),
-            workspace_collapsed: false,
             task_toast: None,
+            toast_generation: 0,
             tab_scroll: ScrollHandle::new(),
             tab_hover: None,
             tab_overflow: false,
@@ -251,10 +294,31 @@ impl Workspace {
         }
     }
 
+    fn show_toast(&mut self, message: impl Into<String>, cx: &mut Context<Self>) {
+        self.toast_generation += 1;
+        let generation = self.toast_generation;
+        self.task_toast = Some(message.into());
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_secs(2)).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.toast_generation == generation {
+                    this.task_toast = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn send(&mut self, command: Command, cx: &mut Context<Self>) {
         if matches!(
             &command,
-            Command::CreateTask { .. }
+            Command::CreateWorkspace { .. }
+                | Command::SelectWorkspace { .. }
+                | Command::ReorderPinnedWorkspace { .. }
+                | Command::RemoveWorkspace { .. }
+                | Command::CreateTask { .. }
                 | Command::SelectTask { .. }
                 | Command::DeleteTask { .. }
                 | Command::SelectScene { .. }
@@ -281,6 +345,84 @@ impl Workspace {
 
     fn apply(&mut self, event: Event, window: &mut Window, cx: &mut Context<Self>) {
         match event {
+            Event::Workspaces(workspaces) => {
+                self.workspace_controls
+                    .retain(|id, _| workspaces.iter().any(|workspace| &workspace.id == id));
+                self.workspace_bounds
+                    .retain(|id, _| workspaces.iter().any(|workspace| &workspace.id == id));
+                self.workspace_collapsed
+                    .retain(|id| workspaces.iter().any(|workspace| &workspace.id == id));
+                if self
+                    .workspace_menu
+                    .as_ref()
+                    .is_some_and(|(id, _, _)| !workspaces.iter().any(|w| &w.id == id))
+                {
+                    self.workspace_menu = None;
+                }
+                for workspace in &workspaces {
+                    self.workspace_controls
+                        .entry(workspace.id.clone())
+                        .or_insert_with(|| {
+                            [
+                                cx.focus_handle().tab_stop(true),
+                                cx.focus_handle().tab_stop(true),
+                                cx.focus_handle().tab_stop(true),
+                                cx.focus_handle().tab_stop(true),
+                            ]
+                        });
+                }
+                self.workspaces = workspaces;
+            }
+            Event::WorkspacePaths(paths) => {
+                self.workspace_paths = paths;
+                self.sync_terminal_input(window, cx);
+            }
+            Event::WorkspaceActionResult {
+                action,
+                workspace_id,
+                error,
+            } => match action.as_str() {
+                "create" => {
+                    self.creating_workspace = false;
+                    if error.is_some() {
+                        self.show_toast("工作空间添加失败，请重试", cx);
+                    } else if self.control_focus["new-workspace"].is_focused(window) {
+                        // Let the following navigation focus the created Shell.
+                        window.blur();
+                    }
+                }
+                "relink" => {
+                    if error.is_some() {
+                        self.show_toast("工作目录恢复失败，请重新选择", cx);
+                    } else {
+                        let name = workspace_id
+                            .as_deref()
+                            .and_then(|id| self.workspaces.iter().find(|w| w.id == id))
+                            .map(|w| w.name.as_str())
+                            .unwrap_or("");
+                        self.show_toast(format!("已恢复 {name} 的工作目录"), cx);
+                    }
+                }
+                "pin" => {
+                    if error.is_some() {
+                        self.show_toast("工作空间置顶状态更新失败", cx);
+                    } else {
+                        let pinned = workspace_id
+                            .as_deref()
+                            .and_then(|id| self.workspaces.iter().find(|w| w.id == id))
+                            .is_some_and(|w| w.is_pinned);
+                        self.show_toast(
+                            if pinned {
+                                "工作空间已置顶"
+                            } else {
+                                "已取消工作空间置顶"
+                            },
+                            cx,
+                        );
+                    }
+                }
+                _ => {}
+            },
             Event::Tasks(tasks) => {
                 self.task_controls
                     .retain(|id, _| tasks.iter().any(|task| &task.id == id));
@@ -314,15 +456,7 @@ impl Workspace {
                         *failure = Some((title, "重命名失败：名称为空或已存在".into()));
                     } else {
                         self.close_dialog(window, cx);
-                        self.task_toast = Some("工作台已重命名".into());
-                        cx.spawn(async move |this, cx| {
-                            cx.background_executor().timer(Duration::from_secs(2)).await;
-                            let _ = this.update(cx, |this, cx| {
-                                this.task_toast = None;
-                                cx.notify();
-                            });
-                        })
-                        .detach();
+                        self.show_toast("工作台已重命名", cx);
                     }
                 }
             }
@@ -338,6 +472,16 @@ impl Workspace {
                 graph,
                 geometry,
             } => {
+                let next_workspace = hierarchy.workspace.as_ref().map(|workspace| &workspace.id);
+                let workspace_changed = self
+                    .hierarchy
+                    .as_ref()
+                    .and_then(|h| h.workspace.as_ref())
+                    .map(|w| &w.id)
+                    != next_workspace;
+                if workspace_changed && let Some(workspace_id) = next_workspace {
+                    self.workspace_collapsed.remove(workspace_id);
+                }
                 let next_scene = hierarchy.scene.as_ref().map(|scene| &scene.id);
                 let scene_changed = self
                     .hierarchy
@@ -410,7 +554,11 @@ impl Workspace {
                     .and_then(|h| h.task.as_ref())
                     .map(|task| &task.id)
                     != hierarchy.task.as_ref().map(|task| &task.id);
-                if task_changed && !self.workspace_collapsed {
+                let active_collapsed = hierarchy
+                    .workspace
+                    .as_ref()
+                    .is_some_and(|w| self.workspace_collapsed.contains(&w.id));
+                if task_changed && !active_collapsed {
                     self.reveal_task = hierarchy.task.as_ref().map(|task| task.id.clone());
                 }
                 self.scenes = scenes;
@@ -418,6 +566,7 @@ impl Workspace {
                 self.hierarchy = Some(hierarchy);
                 self.graph = graph;
                 self.refresh_terminals(cx);
+                self.sync_terminal_input(window, cx);
                 if scene_changed
                     && let Some(index) = self.scenes.iter().position(|scene| {
                         self.hierarchy
@@ -430,7 +579,13 @@ impl Workspace {
                 }
                 if (initializing || scene_changed || focus_changed)
                     && self.dialog.is_none()
+                    && self.active_path_valid()
                     && (window.focused(cx).is_none()
+                        || (workspace_changed
+                            && self
+                                .workspace_controls
+                                .values()
+                                .any(|controls| controls[0].is_focused(window)))
                         || (task_changed
                             && self
                                 .task_controls
@@ -547,6 +702,7 @@ impl Workspace {
             Event::Graph(graph) => {
                 self.graph = graph;
                 self.refresh_terminals(cx);
+                self.sync_terminal_input(window, cx);
             }
             Event::Frame {
                 session_id,
@@ -560,6 +716,7 @@ impl Workspace {
                     // active terminal; dialogs and focused controls retain ownership.
                     if self.focused.as_ref() == Some(&session_id)
                         && self.dialog.is_none()
+                        && self.active_path_valid()
                         && window.focused(cx).is_none()
                     {
                         window.focus(&terminal.read(cx).focus);
@@ -608,7 +765,12 @@ impl Workspace {
             if self.terminals.contains_key(id) {
                 continue;
             }
-            let terminal = cx.new(TerminalSurface::new);
+            let disabled = !self.active_path_valid();
+            let terminal = cx.new(|cx| {
+                let mut surface = TerminalSurface::new(cx);
+                surface.set_input_disabled(disabled, cx);
+                surface
+            });
             self.card_controls
                 .insert(id.clone(), cx.focus_handle().tab_stop(true));
             let session_id = id.clone();
@@ -973,13 +1135,475 @@ impl Workspace {
         cx.notify();
     }
 
-    fn sidebar(&self, cx: &mut Context<Self>) -> Div {
-        let workspace = self
+    fn active_path_valid(&self) -> bool {
+        self.hierarchy
+            .as_ref()
+            .and_then(|h| h.workspace.as_ref())
+            .is_none_or(|workspace| !self.workspace_invalid(&workspace.id))
+    }
+
+    fn sync_terminal_input(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let disabled = !self.active_path_valid();
+        // A removed recovery button no longer owns focus in the source DOM.
+        if self
+            .workspace_controls
+            .iter()
+            .any(|(id, controls)| !self.workspace_invalid(id) && controls[2].is_focused(window))
+        {
+            window.blur();
+        }
+        for terminal in self.terminals.values() {
+            terminal.update(cx, |terminal, cx| {
+                terminal.set_input_disabled(disabled, cx);
+            });
+        }
+    }
+
+    fn workspace_invalid(&self, workspace_id: &str) -> bool {
+        self.workspace_paths
+            .iter()
+            .any(|state| state.workspace_id == workspace_id && state.status == "invalid")
+    }
+
+    fn choose_workspace_directory(&mut self, cx: &mut Context<Self>) {
+        if self.creating_workspace {
+            return;
+        }
+        let picker = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: None,
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(mut paths))) = picker.await else {
+                return;
+            };
+            let Some(path) = paths.pop() else {
+                return;
+            };
+            let root_directory = path.to_string_lossy().into_owned();
+            let _ = this.update(cx, |this, cx| {
+                this.creating_workspace = true;
+                this.send(Command::CreateWorkspace { root_directory }, cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn relink_workspace_directory(&mut self, workspace_id: String, cx: &mut Context<Self>) {
+        let picker = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: None,
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(mut paths))) = picker.await else {
+                return;
+            };
+            let Some(path) = paths.pop() else {
+                return;
+            };
+            let root_directory = path.to_string_lossy().into_owned();
+            let _ = this.update(cx, |this, cx| {
+                this.send(
+                    Command::RelinkWorkspace {
+                        workspace_id,
+                        root_directory,
+                    },
+                    cx,
+                );
+            });
+        })
+        .detach();
+    }
+
+    fn open_workspace_menu(&mut self, workspace_id: &str, cx: &mut Context<Self>) {
+        if self
+            .workspace_menu
+            .as_ref()
+            .is_some_and(|menu| menu.0 == workspace_id)
+        {
+            self.workspace_menu = None;
+        } else if let Some(bounds) = self.workspace_bounds.get(workspace_id) {
+            self.workspace_menu = Some((
+                workspace_id.into(),
+                point(
+                    bounds.right() + px(6.),
+                    bounds.top() + bounds.size.height / 2.,
+                ),
+                (0..5).map(|_| cx.focus_handle().tab_stop(true)).collect(),
+            ));
+        }
+        self.task_menu = None;
+        self.tab_menu = None;
+        self.hidden_tabs = None;
+        cx.notify();
+    }
+
+    fn open_workspace_remove(
+        &mut self,
+        workspace_id: String,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.dialog = Some(TabDialog::RemoveWorkspace { workspace_id, name });
+        self.dialog_controls = (0..3).map(|_| cx.focus_handle().tab_stop(true)).collect();
+        window.focus(&self.dialog_controls[0]);
+        self.workspace_menu = None;
+        cx.notify();
+    }
+
+    fn workspace_group(
+        &self,
+        workspace: &HierarchyWorkspace,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let active = self
             .hierarchy
             .as_ref()
             .and_then(|h| h.workspace.as_ref())
-            .map(|w| w.name.as_str())
-            .unwrap_or("");
+            .is_some_and(|w| w.id == workspace.id);
+        let invalid = self.workspace_invalid(&workspace.id);
+        let collapsed = self.workspace_collapsed.contains(&workspace.id);
+        let menu_open = self
+            .workspace_menu
+            .as_ref()
+            .is_some_and(|menu| menu.0 == workspace.id);
+        let hovered = self.workspace_hover.as_ref() == Some(&workspace.id);
+        let actions_visible = active || hovered || menu_open;
+        let controls = &self.workspace_controls[&workspace.id];
+        let id = workspace.id.clone();
+        let hover_id = id.clone();
+        let toggle_id = id.clone();
+        let add_id = id.clone();
+        let menu_id = id.clone();
+        let bounds_id = id.clone();
+        let view = cx.entity().downgrade();
+
+        let toggle = self.button(
+            div()
+                .id(SharedString::from(format!("workspace-toggle:{id}")))
+                .h(px(34.))
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .pl(px(7.))
+                .pr(px(5.))
+                .gap(px(7.))
+                .cursor_pointer()
+                .child(icon(
+                    if collapsed {
+                        "chevron-right"
+                    } else {
+                        "chevron-down"
+                    },
+                    14.,
+                    0x777777,
+                ))
+                .child(icon(
+                    "folder",
+                    16.,
+                    if active { 0x4078f2 } else { 0x656d76 },
+                ))
+                .child(
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .text_size(px(13.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(if active { 0x2f3547 } else { 0x656d76 }))
+                        .child(workspace.name.clone()),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .when(workspace.is_default, |status| {
+                            status.child(
+                                div()
+                                    .flex_none()
+                                    .px(px(5.))
+                                    .py(px(1.))
+                                    .rounded(px(5.))
+                                    .bg(rgb(0xeceef3))
+                                    .text_color(rgb(0x91949e))
+                                    .text_size(px(9.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child("默认"),
+                            )
+                        })
+                        .when(workspace.is_pinned, |status| {
+                            status.child(icon("pin", 13., 0x81848d))
+                        })
+                        .when(invalid, |status| {
+                            status.child(
+                                div()
+                                    .flex_none()
+                                    .px(px(4.))
+                                    .py(px(1.))
+                                    .rounded(px(4.))
+                                    .bg(rgba(0xd99d3c1a))
+                                    .text_color(rgb(0xd99d3c))
+                                    .text_size(px(9.))
+                                    .child("路径失效"),
+                            )
+                        }),
+                ),
+            &controls[0],
+            move |this, window, cx| {
+                if active {
+                    if !this.workspace_collapsed.remove(&toggle_id) {
+                        this.workspace_collapsed.insert(toggle_id.clone());
+                        this.reveal_task = None;
+                    }
+                    cx.notify();
+                } else {
+                    this.workspace_collapsed.remove(&toggle_id);
+                    this.send(
+                        Command::SelectWorkspace {
+                            workspace_id: toggle_id.clone(),
+                        },
+                        cx,
+                    );
+                    window.blur();
+                }
+            },
+            cx,
+        );
+
+        let add_btn = div()
+            .id(SharedString::from(format!("workspace-add:{id}")))
+            .size(px(26.))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(6.))
+            .opacity(if invalid {
+                0.28
+            } else if actions_visible {
+                1.
+            } else {
+                0.
+            })
+            .when(!invalid, |btn| {
+                btn.cursor_pointer().hover(|s| s.bg(rgba(0x00000014)))
+            })
+            .when(invalid, |btn| btn.cursor(CursorStyle::OperationNotAllowed))
+            .child(icon("plus", 14., 0x81848d));
+        let add_el = if invalid {
+            add_btn.into_any_element()
+        } else {
+            self.button(
+                add_btn,
+                &controls[1],
+                move |this, window, cx| {
+                    this.send(
+                        Command::CreateTask {
+                            workspace_id: add_id.clone(),
+                        },
+                        cx,
+                    );
+                    window.blur();
+                },
+                cx,
+            )
+            .into_any_element()
+        };
+
+        let more_el = self.button(
+            div()
+                .id(SharedString::from(format!("workspace-more:{id}")))
+                .relative()
+                .size(px(26.))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(6.))
+                .opacity(if actions_visible { 1. } else { 0. })
+                .cursor_pointer()
+                .hover(|s| s.bg(rgba(0x00000014)))
+                .child(icon("ellipsis", 14., 0x81848d))
+                .child(
+                    canvas(
+                        |_, _, _| (),
+                        move |bounds, _, _, cx| {
+                            let _ = view.update(cx, |this, _| {
+                                this.workspace_bounds.insert(bounds_id.clone(), bounds);
+                            });
+                        },
+                    )
+                    .absolute()
+                    .inset_0()
+                    .size_full(),
+                ),
+            &controls[3],
+            move |this, _, cx| {
+                this.open_workspace_menu(&menu_id, cx);
+            },
+            cx,
+        );
+
+        let header = div()
+            .min_h(px(34.))
+            .flex()
+            .items_center()
+            .rounded(px(8.))
+            .hover(|s| s.bg(rgba(0x2f35470f)))
+            .child(toggle)
+            .child(add_el)
+            .when(invalid && !workspace.is_default, |header| {
+                let relink_id = id.clone();
+                header.child(
+                    self.button(
+                        div()
+                            .id(SharedString::from(format!("workspace-relink:{id}")))
+                            .h(px(24.))
+                            .flex_none()
+                            .px(px(7.))
+                            .rounded(px(6.))
+                            .border_1()
+                            .border_color(rgba(0x9a681840))
+                            .bg(rgb(0xfff8e8))
+                            .text_color(rgb(0x9a6818))
+                            .text_size(px(9.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgba(0xd99d3c26)))
+                            .child("恢复目录"),
+                        &controls[2],
+                        move |this, _, cx| {
+                            this.relink_workspace_directory(relink_id.clone(), cx);
+                        },
+                        cx,
+                    ),
+                )
+            })
+            .child(more_el);
+
+        let group = div()
+            .id(SharedString::from(format!("workspace:{id}")))
+            .relative()
+            .mt(px(1.))
+            .mb(px(8.))
+            .on_hover(cx.listener(move |this, hovered, _, cx| {
+                if *hovered {
+                    this.workspace_hover = Some(hover_id.clone());
+                } else if this.workspace_hover.as_ref() == Some(&hover_id) {
+                    this.workspace_hover = None;
+                }
+                cx.notify();
+            }))
+            .when(active, |group| {
+                group.child(
+                    div()
+                        .absolute()
+                        .top(px(5.))
+                        .bottom(px(5.))
+                        .left_0()
+                        .w(px(2.))
+                        .rounded(px(1.))
+                        .bg(rgb(0x67a6f4)),
+                )
+            })
+            .child(header)
+            .when(!collapsed, |group| {
+                group.child(
+                    div()
+                        .ml(px(17.))
+                        .pt(px(2.))
+                        .flex()
+                        .flex_col()
+                        .gap(px(1.))
+                        .children(
+                            self.tasks
+                                .iter()
+                                .filter(|task| task.workspace_id == workspace.id)
+                                .map(|task| self.task_row(task, cx).into_any_element()),
+                        ),
+                )
+            });
+
+        if workspace.is_pinned {
+            let drag_target = workspace.id.clone();
+            group
+                .on_drag(
+                    WorkspaceDrag {
+                        workspace_id: workspace.id.clone(),
+                        name: workspace.name.clone(),
+                    },
+                    |info, _, _, cx| cx.new(|_| info.clone()),
+                )
+                .drag_over::<WorkspaceDrag>(|s, _, _, _| s.bg(rgba(0x58a6ff1a)))
+                .on_drop(cx.listener(move |this, drag: &WorkspaceDrag, _, cx| {
+                    if drag.workspace_id != drag_target {
+                        this.send(
+                            Command::ReorderPinnedWorkspace {
+                                workspace_id: drag.workspace_id.clone(),
+                                before_workspace_id: Some(drag_target.clone()),
+                            },
+                            cx,
+                        );
+                    }
+                }))
+                .into_any_element()
+        } else {
+            group.into_any_element()
+        }
+    }
+
+    fn sidebar(&self, cx: &mut Context<Self>) -> Div {
+        let new_workspace = div()
+            .id("new-workspace-btn")
+            .min_w_0()
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .px(px(8.))
+            .py(px(7.))
+            .rounded(px(7.))
+            .text_color(rgb(0x2f3547))
+            .text_size(px(14.))
+            .font_weight(FontWeight::SEMIBOLD)
+            .when(!self.creating_workspace, |btn| {
+                btn.cursor_pointer().hover(|s| s.bg(rgba(0x2f35470f)))
+            })
+            .when(self.creating_workspace, |btn| btn.opacity(0.6))
+            .child(icon("square-pen", 17., 0x2f3547))
+            .child(
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .child(if self.creating_workspace {
+                        "正在添加…"
+                    } else {
+                        "新增工作空间"
+                    }),
+            );
+        let new_workspace = if self.creating_workspace {
+            self.focus_control(new_workspace, &self.control_focus["new-workspace"])
+        } else {
+            self.button(
+                new_workspace,
+                &self.control_focus["new-workspace"],
+                |this, _, cx| this.choose_workspace_directory(cx),
+                cx,
+            )
+        };
         div()
             .w(px(260.))
             .h_full()
@@ -995,21 +1619,15 @@ impl Workspace {
                     .flex_none()
                     .flex()
                     .items_center()
-                    .pl(px(86.))
+                    .pl(px(78.))
                     .pr(px(12.))
-                    .gap(px(10.))
-                    .child(self.control(
-                        div().child(icon("square-pen", 17., 0x2f3547)),
-                        "new-workspace",
-                    ))
-                    .child(
-                        div()
-                            .text_size(px(14.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child("新增工作空间"),
-                    )
+                    .gap(px(8.))
+                    .child(new_workspace)
                     .child(div().flex_1())
-                    .child(self.control(div().child(icon("bell", 16., 0x8d96a3)), "notifications")),
+                    .child(
+                        self.control(div().child(icon("bell", 16., 0x8d96a3)), "notifications")
+                            .flex_none(),
+                    ),
             )
             .child(
                 div()
@@ -1031,149 +1649,10 @@ impl Workspace {
                             .child(
                                 // GPUI measures child border boxes for scroll extent. Keep the
                                 // group's CSS margins inside a flex wrapper so they count too.
-                                div().flex().flex_col().child(
-                                    div()
-                                        .relative()
-                                        .mt(px(1.))
-                                        .mb(px(8.))
-                                        .child(
-                                            div()
-                                                .absolute()
-                                                .top(px(5.))
-                                                .bottom(px(5.))
-                                                .left_0()
-                                                .w(px(2.))
-                                                .rounded(px(1.))
-                                                .bg(rgb(0x67a6f4)),
-                                        )
-                                        .child(
-                                            div()
-                                                .h(px(34.))
-                                                .flex()
-                                                .items_center()
-                                                .rounded(px(8.))
-                                                .child(
-                                                    self.button(
-                                                        div()
-                                                            .id("workspace-toggle")
-                                                            .h(px(34.))
-                                                            .flex_1()
-                                                            .min_w_0()
-                                                            .flex()
-                                                            .items_center()
-                                                            .pl(px(7.))
-                                                            .pr(px(5.))
-                                                            .gap(px(7.))
-                                                            .cursor_pointer()
-                                                            .child(icon(
-                                                                if self.workspace_collapsed {
-                                                                    "chevron-right"
-                                                                } else {
-                                                                    "chevron-down"
-                                                                },
-                                                                14.,
-                                                                0x777777,
-                                                            ))
-                                                            .child(icon("folder", 16., 0x4078f2))
-                                                            .child(
-                                                                div()
-                                                                    .min_w_0()
-                                                                    .overflow_hidden()
-                                                                    .whitespace_nowrap()
-                                                                    .text_ellipsis()
-                                                                    .text_size(px(13.))
-                                                                    .font_weight(
-                                                                        FontWeight::SEMIBOLD,
-                                                                    )
-                                                                    .child(workspace.to_owned()),
-                                                            )
-                                                            .child(
-                                                                div()
-                                                                    .flex_none()
-                                                                    .px(px(5.))
-                                                                    .py(px(1.))
-                                                                    .rounded(px(5.))
-                                                                    .bg(rgb(0xeceef3))
-                                                                    .text_color(rgb(0x91949e))
-                                                                    .text_size(px(9.))
-                                                                    .font_weight(
-                                                                        FontWeight::SEMIBOLD,
-                                                                    )
-                                                                    .child("默认"),
-                                                            )
-                                                            .child(icon("pin", 13., 0x81848d)),
-                                                        &self.control_focus["workspace"],
-                                                        |this, _, cx| {
-                                                            this.workspace_collapsed =
-                                                                !this.workspace_collapsed;
-                                                            if this.workspace_collapsed {
-                                                                this.reveal_task = None;
-                                                            }
-                                                            cx.notify();
-                                                        },
-                                                        cx,
-                                                    ),
-                                                )
-                                                .child(
-                                                    self.button(
-                                                        div()
-                                                            .id("add-task")
-                                                            .size(px(26.))
-                                                            .flex()
-                                                            .items_center()
-                                                            .justify_center()
-                                                            .rounded(px(6.))
-                                                            .cursor_pointer()
-                                                            .hover(|s| s.bg(rgba(0x0000000f)))
-                                                            .child(icon("plus", 14., 0x81848d)),
-                                                        &self.control_focus["add-task"],
-                                                        |this, window, cx| {
-                                                            if let Some(workspace) = this
-                                                                .hierarchy
-                                                                .as_ref()
-                                                                .and_then(|h| h.workspace.as_ref())
-                                                            {
-                                                                this.send(
-                                                                    Command::CreateTask {
-                                                                        workspace_id: workspace
-                                                                            .id
-                                                                            .clone(),
-                                                                    },
-                                                                    cx,
-                                                                );
-                                                                window.blur();
-                                                            }
-                                                        },
-                                                        cx,
-                                                    ),
-                                                )
-                                                .child(
-                                                    self.control(div(), "workspace-menu")
-                                                        .w(px(26.))
-                                                        .flex()
-                                                        .justify_center()
-                                                        .child(icon("ellipsis", 14., 0x81848d)),
-                                                ),
-                                        )
-                                        .child(
-                                            div()
-                                                .ml(px(17.))
-                                                .pt(px(2.))
-                                                .flex()
-                                                .flex_col()
-                                                .gap(px(1.))
-                                                .children(if self.workspace_collapsed {
-                                                    Vec::new()
-                                                } else {
-                                                    self.tasks
-                                                        .iter()
-                                                        .map(|task| {
-                                                            self.task_row(task, cx)
-                                                                .into_any_element()
-                                                        })
-                                                        .collect()
-                                                }),
-                                        ),
+                                div().flex().flex_col().children(
+                                    self.workspaces
+                                        .iter()
+                                        .map(|workspace| self.workspace_group(workspace, cx)),
                                 ),
                             ),
                     )
@@ -1183,6 +1662,7 @@ impl Workspace {
                             self.sidebar_scrollbar,
                             self.dialog.is_none()
                                 && self.hidden_tabs.is_none()
+                                && self.workspace_menu.is_none()
                                 && self.task_menu.is_none()
                                 && self.tab_menu.is_none(),
                             cx.entity().downgrade(),
@@ -1417,6 +1897,7 @@ impl Workspace {
                 (0..3).map(|_| cx.focus_handle().tab_stop(true)).collect(),
             ));
         }
+        self.workspace_menu = None;
         self.tab_menu = None;
         self.hidden_tabs = None;
         cx.notify();
@@ -1460,9 +1941,18 @@ impl Workspace {
     }
 
     fn task_rename_error(&self, task_id: &str, value: &str) -> Option<String> {
+        let workspace_id = self
+            .tasks
+            .iter()
+            .find(|task| task.id == task_id)
+            .map(|task| task.workspace_id.as_str());
         self.tasks
             .iter()
-            .any(|task| task.id != task_id && task.title == value)
+            .any(|task| {
+                task.id != task_id
+                    && workspace_id.is_none_or(|ws| task.workspace_id == ws)
+                    && task.title == value
+            })
             .then(|| format!("当前工作区下已存在名为\"{value}\"的工作台"))
     }
 
@@ -1527,6 +2017,7 @@ impl Workspace {
             );
         window.focus(&input.read(cx).focus);
         self.dialog = Some(TabDialog::Rename { scene_id, input });
+        self.workspace_menu = None;
         self.tab_menu = None;
         self.hidden_tabs = None;
         cx.notify();
@@ -1562,6 +2053,11 @@ impl Workspace {
         }
         let command = match &self.dialog {
             Some(TabDialog::RenameTask { .. }) => unreachable!("task rename handled above"),
+            Some(TabDialog::RemoveWorkspace { workspace_id, .. }) => {
+                Some(Command::RemoveWorkspace {
+                    workspace_id: workspace_id.clone(),
+                })
+            }
             Some(TabDialog::DeleteTask { task_id, .. }) => Some(Command::DeleteTask {
                 task_id: task_id.clone(),
             }),
@@ -1599,6 +2095,9 @@ impl Workspace {
         }
     }
     fn create_canvas(&mut self, cx: &mut Context<Self>) {
+        if !self.active_path_valid() {
+            return;
+        }
         if let Some(task) = self.hierarchy.as_ref().and_then(|h| h.task.as_ref()) {
             self.send(
                 Command::CreateCanvas {
@@ -1610,6 +2109,9 @@ impl Workspace {
     }
 
     fn split_horizontal(&mut self, cx: &mut Context<Self>) {
+        if !self.active_path_valid() {
+            return;
+        }
         if let (Some(scene_id), Some(source_session_id)) =
             (self.active_scene_id(), self.focused.as_ref())
         {
@@ -1733,13 +2235,20 @@ impl Workspace {
         }
         let confirmation = matches!(
             self.dialog,
-            Some(TabDialog::Close { .. } | TabDialog::DeleteTask { .. })
+            Some(
+                TabDialog::Close { .. }
+                    | TabDialog::DeleteTask { .. }
+                    | TabDialog::RemoveWorkspace { .. }
+            )
         );
         if stroke.key == "escape" {
             if confirmation {
                 self.close_dialog(window, cx);
                 cx.stop_propagation();
-            } else if self.task_menu.take().is_some() || self.tab_menu.take().is_some() {
+            } else if self.workspace_menu.take().is_some()
+                || self.task_menu.take().is_some()
+                || self.tab_menu.take().is_some()
+            {
                 // SceneTabBar dismisses this menu in the window bubble listener;
                 // it neither moves focus nor consumes the underlying Escape.
                 cx.notify();
@@ -1906,6 +2415,8 @@ impl Workspace {
                                 ),
                                 focus,
                             ));
+                            this.workspace_menu = None;
+                            this.task_menu = None;
                             this.hidden_tabs = None;
                             cx.stop_propagation();
                             cx.notify();
@@ -1958,16 +2469,30 @@ impl Workspace {
                     )),
             );
         }
-        let add = self.button(
-            tabs_ui::tab_add(if self.tab_overflow {
+        let path_valid = self.active_path_valid();
+        let add_btn = tabs_ui::tab_add(
+            if self.tab_overflow {
                 "create-canvas-overflow"
             } else {
                 "create-canvas"
-            }),
-            &self.control_focus["add-tab"],
-            |this, _, cx| this.create_canvas(cx),
-            cx,
+            },
+            path_valid,
         );
+        let add = if path_valid {
+            self.button(
+                add_btn,
+                &self.control_focus["add-tab"],
+                |this, _, cx| this.create_canvas(cx),
+                cx,
+            )
+            .into_any_element()
+        } else {
+            add_btn
+                .opacity(0.5)
+                .cursor(CursorStyle::OperationNotAllowed)
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .into_any_element()
+        };
         let mut overflow_actions = div()
             .flex()
             .flex_none()
@@ -2001,6 +2526,8 @@ impl Workspace {
                                 .collect::<Vec<_>>();
                             this.hidden_tabs = Some(hidden);
                         }
+                        this.workspace_menu = None;
+                        this.task_menu = None;
                         this.tab_menu = None;
                         cx.notify();
                     },
@@ -2031,22 +2558,33 @@ impl Workspace {
                 )
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()),
             )
-            .child(
-                self.button(
-                    div()
-                        .id("create-shell")
-                        .size(px(28.))
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .cursor_pointer()
-                        .child(icon("panel-right-open", 16., 0x606572)),
-                    &self.control_focus["split"],
-                    |this, _, cx| this.split_horizontal(cx),
-                    cx,
-                ),
-            )
+            .child({
+                let split_disabled =
+                    !path_valid || self.active_scene_id().is_none() || self.focused.is_none();
+                let split_btn = div()
+                    .id("create-shell")
+                    .size(px(28.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(icon("panel-right-open", 16., 0x606572));
+                if split_disabled {
+                    split_btn
+                        .opacity(0.5)
+                        .cursor(CursorStyle::OperationNotAllowed)
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .into_any_element()
+                } else {
+                    self.button(
+                        split_btn.cursor_pointer(),
+                        &self.control_focus["split"],
+                        |this, _, cx| this.split_horizontal(cx),
+                        cx,
+                    )
+                    .into_any_element()
+                }
+            })
             .child(
                 self.control(
                     div()
@@ -2075,6 +2613,15 @@ impl Workspace {
                     if let Some(error) = &error { body = body.child(tabs_ui::dialog_error(error.clone())); }
                     ("重命名", body, "确定", true, error.is_some() && !value.is_empty())
                 }
+                TabDialog::RemoveWorkspace { name, .. } => (
+                    "移出工作空间",
+                    tabs_ui::dialog_body().child(format!(
+                        "移出 \"{name}\" 会关闭该空间下的事项和终端会话，本地文件保持原样。 是否继续？"
+                    )),
+                    "移出",
+                    true,
+                    false,
+                ),
                 TabDialog::DeleteTask { title, .. } => (
                     "提示", tabs_ui::dialog_body().child(format!("删除 \"{title}\" 会丢失该事项下所有终端会话，但不会删除本地目录。 是否继续？")), "确定", true, false,
                 ),
@@ -2202,6 +2749,149 @@ impl Workspace {
                     )
                     .into_any_element(),
             );
+        }
+        if let Some((id, position, controls)) = &self.workspace_menu {
+            let workspace = self.workspaces.iter().find(|w| &w.id == id)?;
+            let invalid = self.workspace_invalid(id);
+            let show_relink = invalid && !workspace.is_default;
+            let show_remove = !workspace.is_default;
+            let pinned = workspace.is_pinned;
+            let root_directory = workspace.root_directory.clone();
+            let name = workspace.name.clone();
+            let count = 3 + usize::from(show_relink) + usize::from(show_remove);
+            let height = 14. + count as f32 * 34.5 + if show_remove { 5. } else { 0. };
+            let top = position.y - px(height / 2.);
+            let text_item = |item_id: &'static str, label: &'static str| {
+                div()
+                    .id(item_id)
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .px(px(12.))
+                    .py(px(8.))
+                    .rounded(px(6.))
+                    .text_size(px(13.))
+                    .line_height(px(18.5))
+                    .whitespace_nowrap()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(rgb(0xeceef3)))
+                    .child(label)
+            };
+            let relink_id = id.clone();
+            let pin_id = id.clone();
+            let finder_path = root_directory.clone();
+            let copy_path = root_directory;
+            let remove_id = id.clone();
+            let mut next_focus = 0;
+            let mut menu = tabs_ui::context_menu("workspace-context-menu")
+                .w_auto()
+                .min_w(px(120.))
+                .p(px(6.))
+                .rounded(px(10.))
+                .border_1()
+                .border_color(rgba(0x00000000))
+                .left(position.x)
+                .top(top)
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                    this.workspace_menu = None;
+                    cx.notify();
+                }))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
+            if show_relink {
+                menu = menu.child(self.button(
+                    text_item("workspace-menu-relink", "重新关联工作空间目录"),
+                    &controls[next_focus],
+                    move |this, _, cx| {
+                        this.workspace_menu = None;
+                        this.relink_workspace_directory(relink_id.clone(), cx);
+                    },
+                    cx,
+                ));
+                next_focus += 1;
+            }
+            menu = menu
+                .child(
+                    self.button(
+                        div()
+                            .id("workspace-menu-pin")
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .px(px(12.))
+                            .py(px(8.))
+                            .rounded(px(6.))
+                            .text_size(px(13.))
+                            .line_height(px(18.5))
+                            .whitespace_nowrap()
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(0xeceef3)))
+                            .child(icon("pin", 13., 0x2f3547))
+                            .child(if pinned { "取消置顶" } else { "置顶" }),
+                        &controls[next_focus],
+                        move |this, _, cx| {
+                            this.workspace_menu = None;
+                            this.send(
+                                Command::SetWorkspacePinned {
+                                    workspace_id: pin_id.clone(),
+                                    pinned: !pinned,
+                                },
+                                cx,
+                            );
+                        },
+                        cx,
+                    ),
+                )
+                .child(self.button(
+                    text_item("workspace-menu-finder", "在 Finder 中显示"),
+                    &controls[next_focus + 1],
+                    move |this, _, cx| {
+                        this.workspace_menu = None;
+                        cx.open_with_system(&PathBuf::from(&finder_path));
+                        cx.notify();
+                    },
+                    cx,
+                ))
+                .child(self.button(
+                    text_item("workspace-menu-copy", "复制路径"),
+                    &controls[next_focus + 2],
+                    move |this, _, cx| {
+                        this.workspace_menu = None;
+                        cx.write_to_clipboard(ClipboardItem::new_string(copy_path.clone()));
+                        this.show_toast("路径已复制", cx);
+                    },
+                    cx,
+                ));
+            if show_remove {
+                menu = menu.child(
+                    self.button(
+                        div()
+                            .id("workspace-menu-remove")
+                            .mt(px(4.))
+                            .border_t_1()
+                            .border_color(rgb(0xeceef2))
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .px(px(12.))
+                            .py(px(8.))
+                            .rounded_b(px(6.))
+                            .text_size(px(13.))
+                            .line_height(px(18.5))
+                            .text_color(rgb(0xc5443e))
+                            .whitespace_nowrap()
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(0xfff1f0)).text_color(rgb(0xa8322e)))
+                            .child(icon("trash-2", 14., 0xc5443e))
+                            .child("移出码头"),
+                        &controls[next_focus + 3],
+                        move |this, window, cx| {
+                            this.open_workspace_remove(remove_id.clone(), name.clone(), window, cx);
+                        },
+                        cx,
+                    ),
+                );
+            }
+            return Some(menu.into_any_element());
         }
         if let Some((id, position, controls)) = &self.task_menu {
             let task = self.tasks.iter().find(|task| &task.id == id)?;
@@ -2390,6 +3080,8 @@ impl Workspace {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _, _, cx| {
+                            this.workspace_menu = None;
+                            this.task_menu = None;
                             this.hidden_tabs = None;
                             cx.stop_propagation();
                             cx.notify();
@@ -2661,6 +3353,7 @@ impl Render for Workspace {
                     this.edge_intent(window.mouse_position(), window, cx);
                 }
             }));
+        let path_valid = self.active_path_valid();
         for id in &self.order {
             let Some(terminal) = self.terminals.get(id) else {
                 continue;
@@ -2718,7 +3411,9 @@ impl Render for Workspace {
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _, window, cx| {
-                        window.focus(&focus);
+                        if this.active_path_valid() {
+                            window.focus(&focus);
+                        }
                         this.hover_baseline = None;
                         this.hover_restore_at = None;
                         this.hover_follow_until = None;
@@ -2831,6 +3526,20 @@ impl Render for Workspace {
                             &self.card_controls[id],
                         )),
                 )
+                .when(!path_valid, |card| {
+                    card.child(
+                        div()
+                            .flex_none()
+                            .w_full()
+                            .px(px(10.))
+                            .py(px(7.))
+                            .bg(rgb(0x2a1e17))
+                            .text_color(rgb(0xe4aa78))
+                            .text_size(px(11.))
+                            .line_height(px(15.4))
+                            .child("工作区目录不可用，请先在本地恢复原路径，或移出该工作区"),
+                    )
+                })
                 .child(
                     div()
                         .flex_1()

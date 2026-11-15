@@ -3,6 +3,7 @@ mod model;
 mod navigation;
 pub mod tabs;
 pub mod tasks;
+pub mod workspaces;
 
 use anyhow::{Result, ensure};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
@@ -79,10 +80,17 @@ pub fn bootstrap_window(
                 workspace_id
             }
             None => {
-                create_default_hierarchy(
+                create_complete_hierarchy(
                     tx,
                     events,
-                    input,
+                    CompleteHierarchy {
+                        window_id: &input.window_id,
+                        name: &input.default_name,
+                        root: &input.default_root_directory,
+                        now: input.now,
+                        is_default: true,
+                        is_pinned: true,
+                    },
                     ids,
                     default_task_title,
                     &command.command_id,
@@ -107,16 +115,25 @@ pub fn bootstrap_window(
     Ok(serde_json::from_value(commit.result)?)
 }
 
-fn create_default_hierarchy(
+struct CompleteHierarchy<'a> {
+    window_id: &'a str,
+    name: &'a str,
+    root: &'a str,
+    now: i64,
+    is_default: bool,
+    is_pinned: bool,
+}
+
+fn create_complete_hierarchy(
     tx: &Transaction<'_>,
     events: &mut Vec<DomainEventInput>,
-    input: &BootstrapWindowInput,
+    input: CompleteHierarchy<'_>,
     ids: &HierarchyIds,
     default_task_title: &str,
     command_id: &str,
 ) -> Result<()> {
     // Match ECMAScript String.trim, including the zero-width no-break space.
-    let name = input.default_name.trim_matches(|character| {
+    let name = input.name.trim_matches(|character| {
         matches!(character,
             '\u{0009}'..='\u{000D}' | ' ' | '\u{00A0}' | '\u{1680}' |
             '\u{2000}'..='\u{200A}' | '\u{2028}' | '\u{2029}' | '\u{202F}' |
@@ -124,14 +141,14 @@ fn create_default_hierarchy(
         )
     });
     ensure!(!name.is_empty(), "Workspace name must not be empty");
-    let root = &input.default_root_directory;
+    let root = input.root;
     let now = input.now;
 
     tx.execute(
         "INSERT INTO workspaces (
            id, name, root_directory, path_identity, task_order_json,
            created_at, updated_at, version, is_default, is_pinned, pin_sort_key, last_opened_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, 2, 1, 1, 'a0', ?)",
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, 2, ?, ?, ?, ?)",
         params![
             ids.workspace_id,
             name,
@@ -140,6 +157,9 @@ fn create_default_hierarchy(
             serde_json::to_string(&[&ids.task_id])?,
             now,
             now,
+            input.is_default,
+            input.is_pinned,
+            if input.is_pinned { "a0" } else { "" },
             now,
         ],
     )?;
@@ -213,7 +233,7 @@ fn create_default_hierarchy(
          VALUES (?, ?, 0, ?)",
         params![input.window_id, ids.task_id, now],
     )?;
-    activate_workspace(tx, &input.window_id, &ids.workspace_id, now)?;
+    activate_workspace(tx, input.window_id, &ids.workspace_id, now)?;
 
     let workspace = tx.query_row(
         "SELECT * FROM workspaces WHERE id = ?",

@@ -8,8 +8,8 @@ use std::{
 use anyhow::{Context, Result, ensure};
 use matou_native_core::{
     hierarchy::{
-        self, HierarchyIds, HierarchyResult, Scene, Session as StoredSession, Task, canvas, tabs,
-        tasks,
+        self, HierarchyIds, HierarchyResult, Scene, Session as StoredSession, Task, Workspace,
+        canvas, tabs, tasks, workspaces,
     },
     ownership::DatabaseOwner,
     session_graph,
@@ -141,6 +141,119 @@ impl ShellOwner {
 
     pub fn tasks(&self, window_id: &str, workspace_id: &str) -> Result<Vec<Task>> {
         tasks::list_tasks(&self.connection, window_id, workspace_id)
+    }
+
+    pub fn workspace_path_states(
+        &self,
+    ) -> Result<Vec<matou_native_core::workspace_paths::WorkspacePathState>> {
+        matou_native_core::workspace_paths::list(&self.connection)
+    }
+    pub fn workspace_path_state(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Option<matou_native_core::workspace_paths::WorkspacePathState>> {
+        matou_native_core::workspace_paths::get(&self.connection, workspace_id)
+    }
+    pub fn workspace_path_target(&self, workspace_id: &str) -> Result<String> {
+        matou_native_core::workspace_paths::target(&self.connection, workspace_id)
+    }
+    pub fn workspace_path_poll_targets(&self) -> Result<Vec<String>> {
+        matou_native_core::workspace_paths::poll_targets(&self.connection)
+    }
+    pub fn session_workspace(&self, session_id: &str) -> Result<Option<String>> {
+        matou_native_core::workspace_paths::session_workspace(&self.connection, session_id)
+    }
+    pub fn commit_workspace_path(
+        &mut self,
+        state: &matou_native_core::workspace_paths::WorkspacePathState,
+    ) -> Result<()> {
+        let command_id = format!("workspace-path-{}", (self.next_id)());
+        matou_native_core::workspace_paths::commit(&mut self.connection, command_id, state, now())?;
+        Ok(())
+    }
+
+    pub fn workspaces(&self) -> Result<Vec<Workspace>> {
+        workspaces::list_workspaces(&self.connection)
+    }
+
+    pub fn create_workspace(
+        &mut self,
+        command: &CommandMetadata,
+        input: &workspaces::CreateWorkspaceInput,
+        ids: &HierarchyIds,
+        committed_at: i64,
+    ) -> Result<Value> {
+        workspaces::create_workspace(
+            &mut self.connection,
+            command,
+            input,
+            ids,
+            "默认",
+            committed_at,
+        )
+    }
+
+    pub fn select_workspace(
+        &mut self,
+        input: &workspaces::SelectWorkspaceInput,
+    ) -> Result<HierarchyResult> {
+        workspaces::select_workspace(&mut self.connection, input)
+    }
+
+    pub fn rename_workspace(&self, input: &workspaces::RenameWorkspaceInput) -> Result<Value> {
+        workspaces::rename_workspace(&self.connection, input, "工作空间名称跟随目录名称")
+    }
+
+    pub fn relink_workspace(
+        &mut self,
+        command: &CommandMetadata,
+        input: &workspaces::RelinkWorkspaceInput,
+        committed_at: i64,
+    ) -> Result<Value> {
+        workspaces::relink_workspace(
+            &mut self.connection,
+            command,
+            input,
+            "默认工作空间始终指向 macOS 用户目录",
+            "该目录已经属于另一个工作空间",
+            committed_at,
+        )
+    }
+
+    pub fn set_workspace_pinned(
+        &mut self,
+        command: &CommandMetadata,
+        input: &workspaces::SetWorkspacePinnedInput,
+        committed_at: i64,
+    ) -> Result<Value> {
+        workspaces::set_workspace_pinned(&mut self.connection, command, input, committed_at)
+    }
+
+    pub fn reorder_pinned_workspace(
+        &mut self,
+        command: &CommandMetadata,
+        input: &workspaces::ReorderPinnedWorkspaceInput,
+        committed_at: i64,
+    ) -> Result<Value> {
+        workspaces::reorder_pinned_workspace(&mut self.connection, command, input, committed_at)
+    }
+
+    pub fn remove_workspace(
+        &mut self,
+        command: &CommandMetadata,
+        input: &workspaces::RemoveWorkspaceInput,
+        committed_at: i64,
+    ) -> Result<Vec<String>> {
+        let result = workspaces::remove_workspace(
+            &mut self.connection,
+            command,
+            input,
+            "默认工作空间会保留在侧栏中",
+            committed_at,
+        )?;
+        let disposed: Vec<String> = serde_json::from_value(result["disposedSessionIds"].clone())?;
+        self.retire_sessions(&disposed);
+        Ok(disposed)
     }
 
     pub fn record_interaction(
@@ -366,7 +479,8 @@ impl ShellOwner {
         Ok(disposed)
     }
 
-    fn retire_sessions(&mut self, disposed: &[String]) {
+    /// Stop runs without blocking the other sessions. The stable sessions remain in storage.
+    pub fn retire_sessions(&mut self, disposed: &[String]) {
         for id in disposed {
             self.summaries.remove(id);
             if let Some(shell) = self.shells.get_mut(id)
@@ -379,6 +493,39 @@ impl ShellOwner {
                 let _ = shell.worker.send(WorkerCommand::Shutdown { reply: None });
             }
         }
+    }
+
+    /// Candidate order follows the frozen runtime's firstUsableDirectory call.
+    /// The desktop supplies its isolated HOME for both final home candidates.
+    pub fn shell_directory_candidates(
+        &self,
+        session_id: &str,
+        shell_home: &Path,
+    ) -> Result<Vec<String>> {
+        let (cwd, root, context): (String, String, Option<String>) = self.connection.query_row(
+            "SELECT sessions.cwd, workspaces.root_directory, contexts.cwd FROM sessions
+             JOIN tasks ON tasks.id=sessions.task_id
+             JOIN workspaces ON workspaces.id=tasks.workspace_id
+             LEFT JOIN execution_contexts contexts ON contexts.id=sessions.execution_context_id AND contexts.archived_at IS NULL
+             WHERE sessions.id=? AND sessions.archived_at IS NULL",
+            [session_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        let mut candidates = vec![cwd, root];
+        candidates.extend(context);
+        candidates.push(shell_home.to_string_lossy().into_owned());
+        Ok(candidates)
+    }
+
+    /// Called after the off-thread directory stat, before the launch authority check.
+    pub fn set_shell_launch_directory(&mut self, session_id: &str, cwd: &str) -> Result<()> {
+        let mut events = Vec::new();
+        self.commit_cwd(session_id, cwd, &mut events)?;
+        self.pending.extend(events);
+        Ok(())
+    }
+
+    pub fn has_shell_worker(&self, session_id: &str) -> bool {
+        self.shells.contains_key(session_id)
     }
 
     /// Resolve environment and geometry before calling. Startup handshaking stays
@@ -672,6 +819,10 @@ impl ShellOwner {
         if !Path::new(cwd).is_dir() {
             return Ok(());
         }
+        self.commit_cwd(id, cwd, events)
+    }
+
+    fn commit_cwd(&mut self, id: &str, cwd: &str, events: &mut Vec<OwnerEvent>) -> Result<()> {
         let Some(session) = self.session(id)? else {
             return Ok(());
         };

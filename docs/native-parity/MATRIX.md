@@ -204,3 +204,22 @@ N02ab continuation (A02; evidence `native/evidence/sidebar-build.json`):
 | Option track placement | H09 and 29-item H20; pointer at screen y600 | H21 final 29-item thumb bounds [455,744) match H20; H22 real input | Option document dragging, alternate system preferences |
 | Thumb/wheel input | Reference scrollbar real track paths plus Chromium source | H13 initial thumb drag to top and wheel over track | Exact wheel/gesture distance and continuous trajectory remain open |
 | Pinned-task drag | Source draggable state and real settled original ordering | Existing G12 native end-state only | H06/H07 capture failed; no intermediate animation acceptance |
+
+
+## N02ac workspace/path integration (partial acceptance)
+
+| Scenario | Frozen source/reference evidence | Native evidence and current result | Still open |
+| --- | --- | --- | --- |
+| A01 workspace domain lifecycle | Original service 31-step, 23-table fixture; I01–I03 original UI | workspace_contract; create/activate/pin/reorder/remove/relink/replay and reopen match | Entire hierarchy scope not complete |
+| A01 directory validity | Original path service 7-step real-filesystem fixture | workspace_path_contract; generations/events/receipts match | Windows actual filesystem behavior |
+| Create and immediate input | I01 original creation/default Shell | I05 failed focus attempt retained; I06 direct input succeeds | Exact picker/window/keyboard parity |
+| Switch and keep Shell | Source workspace focus/MRU rules | I07 old variable preserved; real multi-PTY bridge | All window combinations |
+| Pin and remove | I02/I03 original menu/confirmation | I08–I11, DB and file preservation; source fallback navigation retained | Pixel comparison, pinned drag trajectory, cancellation/focus details |
+| Live path loss | I04 original warning and disabled creation | I16 final build retains content and blocks typed input; initial hover panic fixed | Exact warning pixels, disabled clipboard and IME |
+| Relink and restart | I05 original relink/new Shell | I13/I14 initial relink; I17 final relink clears old env, retains history and accepts direct input | Feedback timing measurement and all failure/cancel states |
+| Hidden scene restoration | Source TerminalPane revision + foreground-only surface | Real bridge proves old background run survives until selection, then replacement | Actual multi-tab UI side-by-side comparison |
+| Invalid switch-away/return | Source projected state transitions | Real bridge test verifies same-session/new run on return | UI sequence timing |
+| Quit/reopen workspace | Source persistence contract | I15 final build retains pinned workspace, relinked root and history | Invalid-startup history currently empty until relink: compare original and close |
+| Finder opening | Frozen main revealDirectory uses shell.openPath | Final native action opens 项目甲-final containing KEEP.txt, observed via Finder AX | Windows Explorer equivalent |
+
+I01–I17 refer to artifacts/native-parity/native/evidence, whose original-reference and native filenames are distinct. workspace-build.json records staged versus final screenshots. These captures do not constitute full pixel comparison. Overall node remains in progress.
