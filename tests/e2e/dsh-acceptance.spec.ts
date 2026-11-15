@@ -54,6 +54,15 @@ async function line(target: Locator, text: string) {
   await target.page().waitForTimeout(300)
   await input.press('Enter')
 }
+async function nativeInputReady(h: Harness, sid: string) {
+  await expect(hud(h.page, sid)).toHaveAttribute('data-hud-mode', 'agent')
+  await expect.poll(() => status(h, sid), { timeout: 30_000 }).toBe('idle')
+  await expect(pane(h.page, sid).locator('.provider-restore-banner')).toHaveCount(0)
+  await expect(surface(h.page, sid).locator('.xterm-rows')).not.toContainText(/Context lo(?:ading)?/i, { timeout: 30_000 })
+  // The native ready observation precedes TUI input mounting. Let its initial
+  // prompt render finish before sending any user keystrokes.
+  await h.page.waitForTimeout(1500)
+}
 async function key(target: Locator, value: string) {
   const input = target.locator('.xterm-helper-textarea'); await input.focus(); await input.press(value)
 }
@@ -119,6 +128,7 @@ function message(row: any): string {
     ? content.filter((b: any) => b.type === 'text').map((b: any) => b.text).join('\n') : ''
 }
 async function turn(h: Harness, sid: string, prompt: string, answer: RegExp) {
+  await nativeInputReady(h, sid)
   const id = await providerId(h, sid), before = (await rows(h, id)).filter(r => r.type === 'turn/end').length
   await line(surface(h.page, sid), prompt)
   let result: { turn?: number; reason?: string; assistant?: string; promptMatched?: boolean } = {}
@@ -159,10 +169,13 @@ async function sample(h: Harness, page: Page, sid: string, baseline: number, see
   const db = events(h, sid).filter(e => e.seq > baseline), ui = (await observations(page)).slice(seen)
   const native = await rows(h, await providerId(h, sid))
   const result = states.map(state => {
-    const ev = db.find(e => eventStatus(e, sid) === state), dom = ui.find(e => e.status === 'status-' + state)
-    expect(ev, `${state} runtime event`).toBeTruthy(); expect(dom, `${state} actual DAG mutation`).toBeTruthy()
     const type = state === 'running' ? 'turn/start' : state === 'needs-input' ? 'approval/asked' : 'turn/end'
     const nativeEvent = native.findLast(r => r.type === type)
+    const after = typeof nativeEvent?.time === 'number' ? nativeEvent.time - 10 : 0
+    const ev = db.find(e => e.occurred_at >= after && eventStatus(e, sid) === state)
+    const dom = ui.find(e => e.at >= after && e.status === 'status-' + state)
+    expect(ev, `${state} runtime event in native turn`).toBeTruthy(); expect(dom, `${state} actual DAG mutation in native turn`).toBeTruthy()
+    expect(dom!.at).toBeGreaterThanOrEqual(ev!.occurred_at - 10)
     return { round, status: state, runtimeAt: ev!.occurred_at, uiAt: dom!.at, latencyMs: Math.max(0, dom!.at - ev!.occurred_at),
       ...(typeof nativeEvent?.time === 'number' ? { nativeAt: nativeEvent.time, nativeToUiMs: Math.max(0, dom!.at - nativeEvent.time) } : {}) }
   })
@@ -183,6 +196,7 @@ async function start(h: Harness) {
   await expect.poll(() => status(h, sid), { timeout: 30_000 }).toBe('idle')
   await expect(pane(h.page, sid).locator('.pane-title')).toHaveText('DSH')
   await expect(d.locator(`.dag-node-card[data-session-id="${sid}"]`)).toContainText('DSH')
+  await nativeInputReady(h, sid)
   return { sid, target: surface(h.page, sid), d }
 }
 async function sibling(h: Harness, sid: string) {
@@ -371,6 +385,10 @@ test.describe('DSH packaged acceptance — real native TUI in a PTY and disclose
         await screenshot(h, `03-approval-${round}.png`)
         await h.page.getByRole('button', { name: '通知中心', exact: true }).click()
         await pane(h.page, sid).click(); await key(surface(h.page, sid), 'Escape')
+        await expect.poll(async () => (await rows(h, await providerId(h, sid))).filter(r => r.type === 'approval/decided')).toHaveLength(round)
+        // Rejection resolves the approval; interrupt any follow-up model prose
+        // through the native TUI so the next sample starts from idle.
+        await key(surface(h.page, sid), 'Control+c')
         await expect.poll(() => status(h, sid), { timeout: 30_000 }).toBe('idle')
       }
       await turn(h, sid, 'Reply only APPROVAL_RECOVERED. Do not use tools.', /APPROVAL_RECOVERED/)
