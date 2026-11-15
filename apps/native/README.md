@@ -1,7 +1,7 @@
 # Matou native workspace
 
 This workspace implements the frozen Matou behavior in Rust. It currently contains
-the SQLite persistence and initial window hierarchy foundations, not a runnable
+the SQLite persistence, initial window hierarchy and live Shell runtime, not a runnable
 desktop application. Product scope and acceptance remain in
 `docs/native-parity/OBJECTIVE.md`, `STATUS.md` and `MATRIX.md` at the repository root.
 
@@ -20,10 +20,23 @@ desktop application. Product scope and acceptance remain in
   the restoration preference and localized divider text.
 - `core::ownership`: atomic data-directory owner publication, live-process
   exclusion, stale takeover and generation-safe release before opening SQLite.
+- `core::journal` and `core::durability`: ordered segmented output, indexes,
+  compression, recovery and bounded storage-fault pause/retry.
+- `core::pty`: real platform PTY launch, environment, resize, process control
+  and exit status, including the existing zsh integration.
+- `runtime::session` and `runtime::worker`: real Shell/terminal owner threads,
+  incremental decoding/batching, persisted event delivery, credited log replay,
+  terminal replies and shutdown. `WorkerCommand` carries typed reply channels
+  so the central owner need not block on another session's disk or PTY.
+- `runtime::owner`: serializes completed-command SQLite writes before forwarding
+  their terminal output, reads restoration preference/results supplied at launch,
+  and seeds the new terminal before its live prompt. It consumes a pre-opened
+  database and lease; it does not replace database startup/recovery policy.
 
 The connection caller owns data-directory locking, pre-migration backups and the
-recovery interface. No current entry point opens production data. Runtime/PTY,
-GPUI views, native packaging and platform acceptance are still pending.
+recovery interface. No current entry point opens production data. Runtime startup,
+domain lifecycle, process/IPC integration, GPUI views, native packaging and full
+platform acceptance are still pending.
 
 ## Check the implemented contracts
 
@@ -31,6 +44,7 @@ From the repository root with Rust/Cargo installed:
 
 ```sh
 cargo test --manifest-path apps/native/Cargo.toml -p matou-native-core
+cargo test --manifest-path apps/native/Cargo.toml -p matou-native-runtime
 cargo fmt --manifest-path apps/native/Cargo.toml --all --check
 ```
 

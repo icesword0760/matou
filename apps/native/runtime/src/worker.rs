@@ -1,0 +1,295 @@
+//! Thread-affine owner for one live Shell session.
+use std::{
+    sync::mpsc::{self, Receiver, Sender, TryRecvError},
+    thread::{self, JoinHandle},
+    time::Duration,
+};
+
+use anyhow::{Context, Result, anyhow};
+use matou_native_terminal::Screen;
+
+use crate::{
+    SessionEvent, SessionOptions,
+    session::{Session, SessionWaker},
+};
+
+const MAX_POLL_WAIT: Duration = Duration::from_millis(250);
+
+#[derive(Debug)]
+pub struct WorkerEvent {
+    pub session_id: String,
+    pub event: SessionEvent,
+}
+
+/// Requests can be forwarded without blocking the central owner on a busy session.
+pub enum WorkerCommand {
+    Write {
+        bytes: Vec<u8>,
+        reply: Sender<Result<()>>,
+    },
+    Resize {
+        cols: u16,
+        rows: u16,
+        cell_width_px: u32,
+        cell_height_px: u32,
+        reply: Sender<Result<()>>,
+    },
+    Acknowledge {
+        sequence: u64,
+        reply: Sender<Result<()>>,
+    },
+    RetryStorage {
+        reply: Sender<Result<()>>,
+    },
+    SetEgressFrozen {
+        frozen: bool,
+        reply: Sender<Result<()>>,
+    },
+    Screen {
+        reply: Sender<Result<Screen>>,
+    },
+    Shutdown {
+        reply: Option<Sender<Result<()>>>,
+    },
+}
+
+pub struct SessionWorker {
+    commands: Sender<WorkerCommand>,
+    wake: SessionWaker,
+    thread: Option<JoinHandle<Result<()>>>,
+}
+
+impl SessionWorker {
+    pub fn spawn(options: SessionOptions, events: Sender<WorkerEvent>) -> Result<Self> {
+        let (commands, incoming) = mpsc::channel();
+        let (started, startup) = mpsc::sync_channel(1);
+        let thread = thread::Builder::new()
+            .name("matou-shell-session".into())
+            .spawn(move || {
+                let session_id = options.session_id.clone();
+                match Session::launch(options) {
+                    Ok(mut session) => {
+                        if started.send(Ok(session.waker())).is_err() {
+                            return finish(&mut session, &session_id, &events);
+                        }
+                        run(&mut session, &session_id, &incoming, &events)
+                    }
+                    Err(error) => {
+                        let _ = started.send(Err(error));
+                        Ok(())
+                    }
+                }
+            })
+            .context("start Shell session worker")?;
+        match startup.recv() {
+            Ok(Ok(wake)) => Ok(Self {
+                commands,
+                wake,
+                thread: Some(thread),
+            }),
+            Ok(Err(error)) => {
+                let _ = join(thread);
+                Err(error)
+            }
+            Err(error) => {
+                join(thread)?;
+                Err(error).context("Shell session worker did not report startup")
+            }
+        }
+    }
+
+    pub fn write(&self, bytes: &[u8]) -> Result<()> {
+        self.request(move |reply| WorkerCommand::Write {
+            bytes: bytes.to_vec(),
+            reply,
+        })
+    }
+
+    pub fn resize(
+        &self,
+        cols: u16,
+        rows: u16,
+        cell_width_px: u32,
+        cell_height_px: u32,
+    ) -> Result<()> {
+        self.request(move |reply| WorkerCommand::Resize {
+            cols,
+            rows,
+            cell_width_px,
+            cell_height_px,
+            reply,
+        })
+    }
+
+    pub fn acknowledge(&self, sequence: u64) -> Result<()> {
+        self.request(move |reply| WorkerCommand::Acknowledge { sequence, reply })
+    }
+
+    pub fn retry_storage(&self) -> Result<()> {
+        self.request(|reply| WorkerCommand::RetryStorage { reply })
+    }
+
+    pub fn set_egress_frozen(&self, frozen: bool) -> Result<()> {
+        self.request(move |reply| WorkerCommand::SetEgressFrozen { frozen, reply })
+    }
+
+    pub fn screen(&self) -> Result<Screen> {
+        self.request(|reply| WorkerCommand::Screen { reply })
+    }
+
+    pub fn shutdown(&mut self) -> Result<()> {
+        let Some(thread) = self.thread.take() else {
+            return Ok(());
+        };
+        let (reply, result) = mpsc::channel();
+        let requested = self.send(WorkerCommand::Shutdown { reply: Some(reply) });
+        let result = requested.and_then(|()| {
+            result
+                .recv()
+                .context("Shell session worker did not report shutdown")?
+        });
+        let exited = join(thread);
+        // The join result can retain an earlier fatal poll error even if
+        // the worker stopped before receiving this shutdown command.
+        exited?;
+        result
+    }
+
+    fn request<T>(&self, build: impl FnOnce(Sender<Result<T>>) -> WorkerCommand) -> Result<T> {
+        let (reply, result) = mpsc::channel();
+        self.send(build(reply))?;
+        result
+            .recv()
+            .context("Shell session worker did not respond")?
+    }
+
+    pub fn send(&self, command: WorkerCommand) -> Result<()> {
+        self.commands
+            .send(command)
+            .map_err(|_| anyhow!("Shell session worker stopped"))?;
+        self.wake.wake();
+        Ok(())
+    }
+}
+
+impl Drop for SessionWorker {
+    fn drop(&mut self) {
+        if self.thread.is_some() {
+            let _ = self.send(WorkerCommand::Shutdown { reply: None });
+        }
+    }
+}
+
+fn join(thread: JoinHandle<Result<()>>) -> Result<()> {
+    thread
+        .join()
+        .map_err(|_| anyhow!("Shell session worker panicked"))?
+}
+
+fn run(
+    session: &mut Session,
+    id: &str,
+    incoming: &Receiver<WorkerCommand>,
+    events: &Sender<WorkerEvent>,
+) -> Result<()> {
+    let mut next = None;
+    loop {
+        loop {
+            let command = match next.take().map_or_else(|| incoming.try_recv(), Ok) {
+                Ok(command) => command,
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => return finish(session, id, events),
+            };
+            match command {
+                WorkerCommand::Write { bytes, reply } => {
+                    let _ = reply.send(session.write(&bytes));
+                }
+                WorkerCommand::Resize {
+                    cols,
+                    rows,
+                    cell_width_px,
+                    cell_height_px,
+                    reply,
+                } => {
+                    let _ = reply.send(session.resize(cols, rows, cell_width_px, cell_height_px));
+                }
+                WorkerCommand::Acknowledge { sequence, reply } => {
+                    let _ = reply.send(session.acknowledge(sequence));
+                }
+                WorkerCommand::RetryStorage { reply } => {
+                    let _ = reply.send(session.retry_storage());
+                }
+                WorkerCommand::SetEgressFrozen { frozen, reply } => {
+                    let _ = reply.send(session.set_egress_frozen(frozen));
+                }
+                WorkerCommand::Screen { reply } => {
+                    let _ = reply.send(session.screen());
+                }
+                WorkerCommand::Shutdown { reply } => {
+                    let result = finish(session, id, events);
+                    if let Some(reply) = reply {
+                        let _ = reply.send(result);
+                        return Ok(());
+                    }
+                    if let Err(error) = &result {
+                        diagnostic(events, id, format!("shut down Shell session: {error:#}"));
+                    }
+                    return result;
+                }
+            }
+        }
+
+        let wait = if session.is_closed() {
+            Duration::ZERO
+        } else {
+            MAX_POLL_WAIT
+        };
+        match session.poll(wait) {
+            Ok(batch) => {
+                if let Err(error) = publish(events, id, batch) {
+                    let _ = finish(session, id, events);
+                    return Err(error);
+                }
+            }
+            Err(error) => {
+                diagnostic(events, id, format!("poll Shell session: {error:#}"));
+                if let Err(cleanup) = finish(session, id, events) {
+                    diagnostic(events, id, format!("shut down Shell session: {cleanup:#}"));
+                }
+                return Err(error);
+            }
+        }
+        if session.is_closed() {
+            // The last screen and unsent credited output remain queryable
+            // after the PTY has exited. Wait for commands without busy-polling.
+            match incoming.recv() {
+                Ok(command) => next = Some(command),
+                Err(_) => return finish(session, id, events),
+            }
+        }
+    }
+}
+
+fn finish(session: &mut Session, id: &str, events: &Sender<WorkerEvent>) -> Result<()> {
+    let stopped = session.shutdown();
+    let final_events = session
+        .poll(Duration::ZERO)
+        .and_then(|batch| publish(events, id, batch));
+    stopped.and(final_events)
+}
+
+fn publish(events: &Sender<WorkerEvent>, id: &str, batch: Vec<SessionEvent>) -> Result<()> {
+    for event in batch {
+        events
+            .send(WorkerEvent {
+                session_id: id.to_owned(),
+                event,
+            })
+            .context("Shell event receiver stopped")?;
+    }
+    Ok(())
+}
+
+fn diagnostic(events: &Sender<WorkerEvent>, id: &str, message: String) {
+    let _ = publish(events, id, vec![SessionEvent::Diagnostic { message }]);
+}

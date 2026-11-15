@@ -1,0 +1,16 @@
+[package]
+name = "matou-native-runtime"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow = "1"
+matou-native-core = { path = "../core" }
+matou-native-terminal = { path = "../terminal" }
+rusqlite = { version = "=0.42.0", features = ["bundled"] }
+
+[dev-dependencies]
+tempfile = "3"
+serde_json = "1"

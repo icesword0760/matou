@@ -328,6 +328,40 @@ impl PtyProcess {
         Ok(())
     }
 
+    pub fn pause_execution(&self) -> Result<()> {
+        #[cfg(unix)]
+        {
+            let child = &*self.handles.as_ref().expect("spawned Shell handles").child;
+            send_signal(-unix_pid(child)?, libc::SIGSTOP)
+                .context("pause the Shell process group")?;
+        }
+        // ConPTY output admission is paused by the session owner.
+        Ok(())
+    }
+
+    pub fn resume_execution(&self) -> Result<()> {
+        #[cfg(unix)]
+        {
+            let child = &*self.handles.as_ref().expect("spawned Shell handles").child;
+            send_signal(-unix_pid(child)?, libc::SIGCONT)
+                .context("resume the Shell process group")?;
+        }
+        Ok(())
+    }
+
+    /// Force the child to exit. The caller still observes and reaps its status.
+    pub fn force_kill(&mut self) -> Result<()> {
+        if self.try_wait()?.is_some() {
+            return Ok(());
+        }
+        let child = &mut *self.handles_mut().child;
+        #[cfg(unix)]
+        send_signal(unix_pid(child)?, libc::SIGKILL).context("force termination of the Shell")?;
+        #[cfg(windows)]
+        child.kill().context("force termination of the Shell")?;
+        Ok(())
+    }
+
     fn handles_mut(&mut self) -> &mut Handles {
         self.handles.as_mut().expect("spawned Shell handles")
     }

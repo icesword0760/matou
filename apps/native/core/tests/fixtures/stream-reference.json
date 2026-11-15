@@ -1,0 +1,332 @@
+{
+  "decoding": [
+    {
+      "chunks": [
+        [
+          97,
+          228
+        ],
+        [
+          184
+        ],
+        [
+          173,
+          240,
+          159
+        ],
+        [
+          153,
+          130,
+          98
+        ]
+      ],
+      "outputs": [
+        "a",
+        "",
+        "中",
+        "🙂b"
+      ],
+      "end": ""
+    },
+    {
+      "chunks": [
+        [
+          240,
+          159
+        ]
+      ],
+      "outputs": [
+        ""
+      ],
+      "end": "�"
+    },
+    {
+      "chunks": [
+        [
+          226
+        ],
+        [
+          40,
+          161
+        ]
+      ],
+      "outputs": [
+        "",
+        "�(�"
+      ],
+      "end": ""
+    },
+    {
+      "chunks": [
+        [
+          239
+        ],
+        [
+          187
+        ],
+        [
+          191,
+          65
+        ]
+      ],
+      "outputs": [
+        "",
+        "",
+        "﻿A"
+      ],
+      "end": ""
+    },
+    {
+      "chunks": [
+        [
+          192,
+          175,
+          237,
+          160,
+          128,
+          255
+        ]
+      ],
+      "outputs": [
+        "������"
+      ],
+      "end": ""
+    },
+    {
+      "chunks": [
+        [
+          240
+        ],
+        [
+          159
+        ],
+        [
+          65,
+          128
+        ]
+      ],
+      "outputs": [
+        "",
+        "",
+        "�A�"
+      ],
+      "end": ""
+    },
+    {
+      "chunks": [
+        [
+          228,
+          184
+        ],
+        [],
+        [
+          173
+        ]
+      ],
+      "outputs": [
+        "",
+        "",
+        "中"
+      ],
+      "end": ""
+    }
+  ],
+  "batching": [
+    {
+      "maxCodeUnits": 4,
+      "steps": [
+        {
+          "chunk": "ab",
+          "emitted": []
+        },
+        {
+          "chunk": "cd",
+          "emitted": [
+            "abcd"
+          ]
+        },
+        {
+          "chunk": "e",
+          "emitted": [
+            "abcd"
+          ]
+        }
+      ],
+      "flushed": [
+        "abcd",
+        "e"
+      ]
+    },
+    {
+      "maxCodeUnits": 4,
+      "steps": [
+        {
+          "chunk": "🙂",
+          "emitted": []
+        },
+        {
+          "chunk": "中",
+          "emitted": []
+        },
+        {
+          "chunk": "a",
+          "emitted": [
+            "🙂中a"
+          ]
+        }
+      ],
+      "flushed": [
+        "🙂中a"
+      ]
+    },
+    {
+      "maxCodeUnits": 4,
+      "steps": [
+        {
+          "chunk": "",
+          "emitted": []
+        },
+        {
+          "chunk": "one",
+          "emitted": []
+        },
+        {
+          "chunk": "二",
+          "emitted": [
+            "one二"
+          ]
+        }
+      ],
+      "flushed": [
+        "one二"
+      ]
+    }
+  ],
+  "credit": [
+    {
+      "steps": [
+        {
+          "action": [
+            "send",
+            1,
+            70
+          ],
+          "unackedBytes": 70,
+          "paused": false,
+          "events": []
+        },
+        {
+          "action": [
+            "send",
+            2,
+            50
+          ],
+          "unackedBytes": 120,
+          "paused": true,
+          "events": [
+            "pause"
+          ]
+        },
+        {
+          "action": [
+            "ack",
+            1
+          ],
+          "unackedBytes": 50,
+          "paused": true,
+          "events": [
+            "pause"
+          ]
+        },
+        {
+          "action": [
+            "ack",
+            2
+          ],
+          "unackedBytes": 0,
+          "paused": false,
+          "events": [
+            "pause",
+            "resume"
+          ]
+        },
+        {
+          "action": [
+            "ack",
+            2
+          ],
+          "unackedBytes": 0,
+          "paused": false,
+          "events": [
+            "pause",
+            "resume"
+          ]
+        },
+        {
+          "action": [
+            "ack",
+            3
+          ],
+          "unackedBytes": 0,
+          "paused": false,
+          "events": [
+            "pause",
+            "resume"
+          ],
+          "error": "acknowledgement exceeds latest sent sequence"
+        }
+      ]
+    },
+    {
+      "steps": [
+        {
+          "action": [
+            "send",
+            1,
+            100
+          ],
+          "unackedBytes": 100,
+          "paused": false,
+          "events": []
+        },
+        {
+          "action": [
+            "send",
+            2,
+            1
+          ],
+          "unackedBytes": 101,
+          "paused": true,
+          "events": [
+            "pause"
+          ]
+        },
+        {
+          "action": [
+            "send",
+            2,
+            1
+          ],
+          "unackedBytes": 101,
+          "paused": true,
+          "events": [
+            "pause"
+          ],
+          "error": "sent sequence must increase monotonically"
+        },
+        {
+          "action": [
+            "ack",
+            2
+          ],
+          "unackedBytes": 0,
+          "paused": false,
+          "events": [
+            "pause",
+            "resume"
+          ]
+        }
+      ]
+    }
+  ]
+}
