@@ -734,6 +734,13 @@ impl Workspace {
                 self.refresh_terminals(cx);
                 self.sync_terminal_input(window, cx);
             }
+            Event::ClipboardWrite { session_id, text } => {
+                // The active card belongs to the visible scene even while the
+                // OS window is obscured or a dialog owns keyboard focus.
+                if self.focused.as_ref() == Some(&session_id) && self.order.contains(&session_id) {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                }
+            }
             Event::Copied { request_id, text } => {
                 if request_id == self.copy_request_id && !text.is_empty() {
                     cx.write_to_clipboard(ClipboardItem::new_string(text));

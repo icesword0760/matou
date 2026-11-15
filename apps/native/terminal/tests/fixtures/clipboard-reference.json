@@ -1,0 +1,306 @@
+{
+  "source": "Frozen renderer OSC 52 handler and OscHandler",
+  "cases": [
+    {
+      "name": "ascii",
+      "content": "c;SGVsbG8sIE1hdG91IQ==",
+      "contentUnits": 22,
+      "text": "Hello, Matou!"
+    },
+    {
+      "name": "chinese-and-emoji",
+      "content": "p;5Lit5paH8J+Zgg==",
+      "contentUnits": 18,
+      "text": "中文🙂"
+    },
+    {
+      "name": "empty-selector",
+      "content": ";YQ==",
+      "contentUnits": 5,
+      "text": "a"
+    },
+    {
+      "name": "arbitrary-selector",
+      "content": "clip-任意🙂;YQ==",
+      "contentUnits": 14,
+      "text": "a"
+    },
+    {
+      "name": "utf8-bom",
+      "content": "c;77u/aGVsbG8=",
+      "contentUnits": 14,
+      "text": "hello"
+    },
+    {
+      "name": "double-bom",
+      "content": "c;77u/77u/aGVsbG8=",
+      "contentUnits": 18,
+      "text": "﻿hello"
+    },
+    {
+      "name": "empty-decoded-bom",
+      "content": "c;77u/",
+      "contentUnits": 6,
+      "text": ""
+    },
+    {
+      "name": "empty-decoded-whitespace",
+      "content": "c; \t\r\n\f",
+      "contentUnits": 7,
+      "text": ""
+    },
+    {
+      "name": "omitted-padding-two-bits",
+      "content": "c;YQ",
+      "contentUnits": 4,
+      "text": "a"
+    },
+    {
+      "name": "omitted-padding-four-bits",
+      "content": "c;YWI",
+      "contentUnits": 5,
+      "text": "ab"
+    },
+    {
+      "name": "noncanonical-tail-two-pads",
+      "content": "c;YR==",
+      "contentUnits": 6,
+      "text": "a"
+    },
+    {
+      "name": "noncanonical-tail-one-pad",
+      "content": "c;YWJ=",
+      "contentUnits": 6,
+      "text": "ab"
+    },
+    {
+      "name": "base64-html-whitespace",
+      "content": "c;Y Q\t=\r\n\f=",
+      "contentUnits": 11,
+      "text": "a"
+    },
+    {
+      "name": "vertical-tab-is-not-html-whitespace",
+      "content": "c;YQ==\u000b",
+      "contentUnits": 7,
+      "text": null
+    },
+    {
+      "name": "nbsp-is-not-html-whitespace",
+      "content": "c;YQ== ",
+      "contentUnits": 7,
+      "text": null
+    },
+    {
+      "name": "invalid-base64-alphabet",
+      "content": "c;Y@==",
+      "contentUnits": 6,
+      "text": null
+    },
+    {
+      "name": "url-safe-base64-is-not-accepted",
+      "content": "c;YQ-_",
+      "contentUnits": 6,
+      "text": null
+    },
+    {
+      "name": "one-base64-symbol",
+      "content": "c;A",
+      "contentUnits": 3,
+      "text": null
+    },
+    {
+      "name": "partial-padding",
+      "content": "c;YQ=",
+      "contentUnits": 5,
+      "text": null
+    },
+    {
+      "name": "excess-padding",
+      "content": "c;YQ===",
+      "contentUnits": 7,
+      "text": null
+    },
+    {
+      "name": "internal-padding",
+      "content": "c;Y=Q=",
+      "contentUnits": 6,
+      "text": null
+    },
+    {
+      "name": "invalid-utf8",
+      "content": "c;/w==",
+      "contentUnits": 6,
+      "text": null
+    },
+    {
+      "name": "overlong-utf8",
+      "content": "c;wK8=",
+      "contentUnits": 6,
+      "text": null
+    },
+    {
+      "name": "extra-semicolon",
+      "content": "c;YQ==;Yg==",
+      "contentUnits": 11,
+      "text": null
+    },
+    {
+      "name": "missing-semicolon",
+      "content": "YQ==",
+      "contentUnits": 4,
+      "text": null
+    },
+    {
+      "name": "empty-payload",
+      "content": "c;",
+      "contentUnits": 2,
+      "text": null
+    },
+    {
+      "name": "read-request",
+      "content": "c;?",
+      "contentUnits": 3,
+      "text": null
+    },
+    {
+      "name": "read-request-with-whitespace",
+      "content": "c; ? ",
+      "contentUnits": 5,
+      "text": null
+    },
+    {
+      "name": "payload-at-limit",
+      "generated": {
+        "prefix": "c;",
+        "unit": " ",
+        "count": 4194300,
+        "suffix": "YQ=="
+      },
+      "contentUnits": 4194306,
+      "text": "a"
+    },
+    {
+      "name": "payload-over-limit",
+      "generated": {
+        "prefix": "c;",
+        "unit": " ",
+        "count": 4194301,
+        "suffix": "YQ=="
+      },
+      "contentUnits": 4194307,
+      "text": null
+    },
+    {
+      "name": "unicode-selector-at-osc-limit",
+      "generated": {
+        "prefix": "",
+        "unit": "🙂",
+        "count": 4999997,
+        "suffix": "x;YQ=="
+      },
+      "contentUnits": 10000000,
+      "text": "a"
+    },
+    {
+      "name": "unicode-selector-over-osc-limit",
+      "generated": {
+        "prefix": "",
+        "unit": "🙂",
+        "count": 4999997,
+        "suffix": "xx;YQ=="
+      },
+      "contentUnits": 10000001,
+      "text": null
+    }
+  ],
+  "streams": [
+    {
+      "name": "bel-and-st",
+      "chunks": [
+        "\u001b]52;c;SGVsbG8=\u0007",
+        "\u001b]52;p;5Lit5paH8J+Zgg==\u001b\\"
+      ],
+      "writes": [
+        "Hello",
+        "中文🙂"
+      ],
+      "responses": []
+    },
+    {
+      "name": "fragmented",
+      "chunks": [
+        "\u001b]",
+        "52;",
+        "c;Y",
+        "Q==",
+        "\u001b",
+        "\\"
+      ],
+      "writes": [
+        "a"
+      ],
+      "responses": []
+    },
+    {
+      "name": "control-cancel",
+      "chunks": [
+        "\u001b]52;c;YQ==\u0018",
+        "\u001b]52;c;Yg==\u001a",
+        "\u001b]52;c;Yw==\u0007"
+      ],
+      "writes": [
+        "c"
+      ],
+      "responses": []
+    },
+    {
+      "name": "query-and-malformed",
+      "chunks": [
+        "\u001b]52;c;?\u0007\u001b]52;c;/w==\u0007\u001b]52;c;Y@==\u0007"
+      ],
+      "writes": [],
+      "responses": []
+    },
+    {
+      "name": "unicode-selector",
+      "chunks": [
+        "\u001b]52;任意🙂;YQ==\u0007"
+      ],
+      "writes": [
+        "a"
+      ],
+      "responses": []
+    },
+    {
+      "name": "control-whitespace",
+      "chunks": [
+        "\u001b]52;c;Y Q\t=\r\n\f=\u0007"
+      ],
+      "writes": [
+        "a"
+      ],
+      "responses": []
+    },
+    {
+      "name": "empty-result",
+      "chunks": [
+        "\u001b]52;c;77u/\u0007"
+      ],
+      "writes": [
+        ""
+      ],
+      "responses": []
+    },
+    {
+      "name": "leading-zero-command",
+      "chunks": [
+        "\u001b]0052;c;YQ==\u0007"
+      ],
+      "writes": [
+        "a"
+      ],
+      "responses": []
+    }
+  ]
+}

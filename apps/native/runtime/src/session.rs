@@ -254,9 +254,10 @@ impl Session {
         let mut protocol_terminal = Terminal::new(options.terminal)?;
         let mut display_terminal = Terminal::new(options.terminal)?;
         for terminal in [&mut protocol_terminal, &mut display_terminal] {
-            // The restored history seeds each parser without sending its replies to the new Shell.
+            // The restored history seeds each parser without replaying its side effects.
             terminal.feed(&options.restored_history);
             terminal.drain_responses();
+            terminal.drain_clipboard();
         }
         let visible_screen = display_terminal.screen()?;
         let geometry = (
@@ -689,6 +690,7 @@ impl Session {
     fn enqueue_output(&mut self, data: String) -> Result<()> {
         let bytes = data.into_bytes();
         self.protocol_terminal.feed(&bytes);
+        self.protocol_terminal.drain_clipboard();
         self.send_terminal_replies();
         let len = bytes.len();
         self.admit(
@@ -825,6 +827,7 @@ impl Session {
                         let decoded = std::str::from_utf8(data)?;
                         display_terminal.feed(data);
                         display_terminal.drain_responses();
+                        let clipboard = display_terminal.drain_clipboard();
                         events.push(SessionEvent::SavedOutput {
                             sequence: *sequence,
                             data: decoded.to_owned(),
@@ -834,6 +837,11 @@ impl Session {
                                 .unwrap_or_default(),
                         });
                         delivery.publish_output(&mut events, *sequence, data)?;
+                        events.extend(
+                            clipboard
+                                .into_iter()
+                                .map(|text| SessionEvent::ClipboardWrite { text }),
+                        );
                     }
                     Frame::Resize {
                         sequence,

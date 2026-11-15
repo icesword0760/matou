@@ -16,7 +16,7 @@ import tarfile
 
 ROOT = Path(__file__).resolve().parent.parent
 VERSION = '1.0.1'
-HISTORY_TRIM_PATCH_VERSION = 3
+HISTORY_TRIM_PATCH_VERSION = 4
 BASE = f'https://release.files.ghostty.org/libghostty-vt/{VERSION}'
 ARCHIVES = {
     f'libghostty-vt-{VERSION}.tar.gz': '333dfce97641ef9b536bb9e08907ad86abaaada50e8f7417b70d9284adef37aa',
@@ -108,9 +108,14 @@ def patch_history_trim(original, source):
         ('.mouse_format_urxvt => self.terminal.flags.mouse_format = if (enabled) .urxvt else .x10,',
          '.mouse_format_urxvt => {}, // Not supported by the frozen terminal.'),
     ])
+    osc = 'src/terminal/osc.zig'
+    patch_source(original, source, osc, [
+        ('            .@"52",\n            .@"66",\n',
+         '            .@"52" => self.unknownOrInvalid(c),\n\n            .@"66",\n'),
+    ])
     return {
         'version': HISTORY_TRIM_PATCH_VERSION,
-        'files': {path: digest(source / path) for path in (pages, terminal, lifecycle, stream)},
+        'files': {path: digest(source / path) for path in (pages, terminal, lifecycle, stream, osc)},
     }
 
 

@@ -232,6 +232,10 @@ pub enum Event {
         error: Option<String>,
     },
     Graph(Value),
+    ClipboardWrite {
+        session_id: String,
+        text: String,
+    },
     Copied {
         request_id: u64,
         text: String,
@@ -1105,6 +1109,9 @@ fn run(
                         | SessionEvent::Resized { .. }
                         | SessionEvent::Exited { .. } => {
                             dirty.insert(session_id);
+                        }
+                        SessionEvent::ClipboardWrite { text } => {
+                            send.send_blocking(Event::ClipboardWrite { session_id, text })?;
                         }
                         SessionEvent::ScreenInvalidated => {
                             dirty.insert(session_id);
