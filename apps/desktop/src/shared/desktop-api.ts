@@ -21,6 +21,11 @@ export interface MatouDesktopApi {
   openDirectoryInTerminal(path: string): Promise<void>
   openProviderKeyPage?(cli: 'claude-code' | 'codex', presetId: string): Promise<void>
   openExternal?(url: string): Promise<boolean>
+  safeBrowserStatus?(): Promise<{ installed: boolean; version: string | null }>
+  safeBrowserOpen?(): Promise<void>
+  safeBrowserCheckUpdate?(): Promise<{ latest: string | null; failed: boolean }>
+  openSafeBrowserReleases?(): Promise<void>
+  runningDesktopClients?(): Promise<Array<'claude' | 'chatgpt'>>
   reportEgressCountry?(country: string | undefined): void
   writeClipboardText(text: string): Promise<void>
   hideWindow(windowId: string): Promise<void>
@@ -201,6 +206,11 @@ export const DESKTOP_CHANNELS = {
   openDirectoryInTerminal: 'matou:open-directory-in-terminal',
   openProviderKeyPage: 'matou:provider-key-page',
   openExternal: 'matou:open-external',
+  safeBrowserStatus: 'matou:safe-browser-status',
+  safeBrowserOpen: 'matou:safe-browser-open',
+  safeBrowserCheckUpdate: 'matou:safe-browser-check-update',
+  openSafeBrowserReleases: 'matou:safe-browser-releases',
+  runningDesktopClients: 'matou:running-desktop-clients',
   reportEgressCountry: 'matou:egress-country',
   writeClipboardText: 'matou:write-clipboard-text',
   terminalCopyFocus: 'matou:terminal-copy-focus',

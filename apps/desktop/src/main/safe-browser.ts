@@ -1,4 +1,4 @@
-import { spawn, execFileSync, type ChildProcess } from 'node:child_process'
+import { spawn, execFile, execFileSync, type ChildProcess } from 'node:child_process'
 import { randomInt } from 'node:crypto'
 import {
   accessSync, constants, closeSync, fchmodSync, fstatSync, lstatSync, mkdirSync,
@@ -6,7 +6,9 @@ import {
 } from 'node:fs'
 import { dirname, join } from 'node:path'
 import type { Readable, Writable } from 'node:stream'
-import { app } from 'electron'
+import { app, net } from 'electron'
+import { promisify } from 'node:util'
+import { SAFE_BROWSER_REPOSITORY } from './external-url-policy'
 
 import { BrowserPipe } from './safe-browser-pipe'
 
@@ -54,6 +56,53 @@ export function safeBrowserStatus(): SafeBrowserStatus {
     ], { encoding: 'utf8', timeout: 2000, maxBuffer: 4096, stdio: ['ignore', 'pipe', 'ignore'] }).trim() || null
   } catch { /* An executable without bundle metadata remains usable for tests. */ }
   return { installed: true, version }
+}
+
+/** A null latest means no newer release; failures never affect sign-in. */
+export async function safeBrowserCheckUpdate(): Promise<{ latest: string | null; failed: boolean }> {
+  try {
+    const response = await net.fetch(`https://api.github.com/repos/${SAFE_BROWSER_REPOSITORY}/releases/latest`, {
+      headers: { Accept: 'application/vnd.github+json' },
+      signal: AbortSignal.timeout(10_000)
+    })
+    if (!response.ok) return { latest: null, failed: true }
+    const release: unknown = await response.json()
+    const tag = (release as { tag_name?: unknown } | null)?.tag_name
+    const latest = typeof tag === 'string' ? tag.replace(/^v/, '') : ''
+    const installed = safeBrowserStatus().version?.replace(/^v/, '')
+    if (!/^\d+(?:\.\d+)*$/.test(latest) || !installed || !/^\d+(?:\.\d+)*$/.test(installed)) {
+      return { latest: null, failed: true }
+    }
+    const next = latest.split('.').map(BigInt), current = installed.split('.').map(BigInt)
+    for (let i = 0; i < Math.max(next.length, current.length); i++) {
+      if ((next[i] ?? 0n) > (current[i] ?? 0n)) return { latest, failed: false }
+      if ((next[i] ?? 0n) < (current[i] ?? 0n)) break
+    }
+    return { latest: null, failed: false }
+  } catch { return { latest: null, failed: true } }
+}
+
+const execFileAsync = promisify(execFile)
+
+export async function runningDesktopClients(): Promise<Array<'claude' | 'chatgpt'>> {
+  if (process.platform !== 'darwin') return []
+  try {
+    const results = await Promise.all((['claude', 'chatgpt'] as const).map(async client => {
+      const name = client === 'claude' ? 'Claude' : 'ChatGPT'
+      try {
+        // Match only the desktop app executable, excluding CLI tools and helpers.
+        const { stdout } = await execFileAsync('/usr/bin/pgrep', ['-f', `/${name}\\.app/Contents/MacOS/${name}([[:space:]]|$)`], {
+          encoding: 'utf8', timeout: 2000, maxBuffer: 4096
+        })
+        return stdout.trim() ? client : null
+      } catch (error) {
+        // pgrep exit 1 means no matching process, rather than a detection failure.
+        if ((error as { code?: unknown }).code === 1) return null
+        throw error
+      }
+    }))
+    return results.filter((client): client is 'claude' | 'chatgpt' => client !== null)
+  } catch { return [] }
 }
 
 export function browserTimeZone(country?: string): string {

@@ -33,6 +33,7 @@ import { resolveAppUpdateInstallMode } from './app-update-install-mode'
 import { LocaleStore } from './locale-store'
 import { mainMessages } from './messages'
 import { RuntimeHost } from './runtime-host'
+import { registerSafeBrowserIpc } from './safe-browser-ipc'
 import { SafeBrowserController, reportSafeBrowserCountry, safeBrowserAccountEnv, safeBrowserTimeZone } from './safe-browser'
 import { resolvePackagedApplication } from './app-environment'
 import { applyApplicationBrand } from './application-brand'
@@ -118,6 +119,7 @@ if (process.env.ELECTRON_USER_DATA_DIR) {
 }
 
 const safeBrowser = new SafeBrowserController()
+registerSafeBrowserIpc(safeBrowser, browserWindows)
 
 const localeStore = new LocaleStore({
   file: join(app.getPath('userData'), 'locale.json'),

@@ -12,7 +12,7 @@ vi.mock('electron', async () => {
   const { EventEmitter } = await import('node:events')
   return { app: Object.assign(new EventEmitter(), { getPath: vi.fn(), quit: vi.fn() }) }
 })
-vi.mock('node:child_process', () => ({ spawn: vi.fn(), execFileSync: vi.fn() }))
+vi.mock('node:child_process', () => ({ spawn: vi.fn(), execFile: vi.fn(), execFileSync: vi.fn() }))
 vi.mock('node:fs', async importOriginal => {
   const actual = await importOriginal<typeof import('node:fs')>()
   return { ...actual, statSync: vi.fn(actual.statSync), accessSync: vi.fn(actual.accessSync) }

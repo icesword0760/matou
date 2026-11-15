@@ -1,3 +1,6 @@
+export const SAFE_BROWSER_REPOSITORY = 'icesword0760/safe-browser'
+export const SAFE_BROWSER_RELEASES_URL = `https://github.com/${SAFE_BROWSER_REPOSITORY}/releases/latest`
+
 export const ALLOWED_EXTERNAL_HOSTS: ReadonlySet<string> = new Set([
   'ip.net.coffee',
   'fuck-claude.vercel.app'
@@ -12,5 +15,9 @@ export function isAllowedExternalUrl(url: unknown): url is string {
   } catch {
     return false
   }
-  return parsed.protocol === 'https:' && ALLOWED_EXTERNAL_HOSTS.has(parsed.hostname)
+  if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.port) return false
+  if (ALLOWED_EXTERNAL_HOSTS.has(parsed.hostname)) return true
+  const releasesPrefix = `/${SAFE_BROWSER_REPOSITORY}/releases`
+  return parsed.hostname === 'github.com' &&
+    (parsed.pathname === releasesPrefix || parsed.pathname.startsWith(`${releasesPrefix}/`))
 }

@@ -18,3 +18,19 @@ describe('isAllowedExternalUrl', () => {
     expect(isAllowedExternalUrl('not a url')).toBe(false)
   })
 })
+
+it('allows only the exact safe-browser repository release path on GitHub', () => {
+  expect(isAllowedExternalUrl('https://github.com/icesword0760/safe-browser/releases/latest')).toBe(true)
+  expect(isAllowedExternalUrl('https://github.com/icesword0760/safe-browser/releases/tag/v148.1')).toBe(true)
+  for (const url of [
+    'http://github.com/icesword0760/safe-browser/releases/latest',
+    'https://sub.github.com/icesword0760/safe-browser/releases/latest',
+    'https://github.com.evil.invalid/icesword0760/safe-browser/releases/latest',
+    'https://github.com/other/safe-browser/releases/latest',
+    'https://github.com/icesword0760/safe-browser',
+    'https://github.com/icesword0760/safe-browser/releases-evil/latest',
+    'https://github.com/icesword0760/safe-browser/releases/../../other',
+    'https://github.com:444/icesword0760/safe-browser/releases/latest',
+    'https://user@github.com/icesword0760/safe-browser/releases/latest'
+  ]) expect(isAllowedExternalUrl(url)).toBe(false)
+})

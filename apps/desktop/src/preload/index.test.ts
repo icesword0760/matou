@@ -21,3 +21,14 @@ it('reports egress country through fire-and-forget IPC without invoking a reques
   api.reportEgressCountry!(undefined)
   expect(electron.send).toHaveBeenLastCalledWith(DESKTOP_CHANNELS.reportEgressCountry, undefined)
 })
+
+it('exposes all five safe browser panel commands without forwarding renderer arguments', async () => {
+  await import('./index')
+  const api = electron.exposeInMainWorld.mock.calls[0]![1] as MatouDesktopApi
+  electron.invoke.mockClear()
+  for (const name of ['safeBrowserStatus', 'safeBrowserOpen', 'safeBrowserCheckUpdate', 'openSafeBrowserReleases', 'runningDesktopClients'] as const) {
+    await (api[name] as (...args: unknown[]) => Promise<unknown>)('/untrusted', 'https://untrusted.invalid')
+    expect(electron.invoke).toHaveBeenLastCalledWith(DESKTOP_CHANNELS[name])
+  }
+  expect(electron.invoke).toHaveBeenCalledTimes(5)
+})
