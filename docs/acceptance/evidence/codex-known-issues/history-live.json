@@ -1,0 +1,37 @@
+{
+  "input": "Unmodified real Codex 0.162.1 Fork rollouts from the previously accepted current/new Worktree run",
+  "reports": [
+    {
+      "childId": "01a1df2a-e548-7662-97ab-cb029c953472",
+      "parentReference": {
+        "thread_id": "01a1df2a-be27-7771-aae3-4be71d5c5547",
+        "end_ordinal_exclusive": 15,
+        "end_byte_offset": 131109
+      },
+      "cwd": "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/final-codex/fork-load-M4nFbe/repo",
+      "currentFileRecords": 24,
+      "mergedPreviewCount": 6,
+      "hitCount": 2,
+      "inheritedPrompt": "Remember parent codeword amber-cove-419. Reply only PARENT_OK.",
+      "inheritedEventIndex": 1,
+      "excerpt": "Remember parent codeword amber-cove-419. Reply only PARENT_OK.",
+      "warningCount": 0
+    },
+    {
+      "childId": "01a1df2b-23b6-7d50-a3a7-70b20ddd75b4",
+      "parentReference": {
+        "thread_id": "01a1df2a-be27-7771-aae3-4be71d5c5547",
+        "end_ordinal_exclusive": 27,
+        "end_byte_offset": 224271
+      },
+      "cwd": "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/final-codex/fork-load-M4nFbe/matou-data/worktrees/bbbc0037-9bfd-4f82-b5ab-6600a00f70d6/970fca8b-3009-4a10-aaba-e7074d875ca1",
+      "currentFileRecords": 24,
+      "mergedPreviewCount": 8,
+      "hitCount": 3,
+      "inheritedPrompt": "Remember parent codeword amber-cove-419. Reply only PARENT_OK.",
+      "inheritedEventIndex": 1,
+      "excerpt": "Remember parent codeword amber-cove-419. Reply only PARENT_OK.",
+      "warningCount": 0
+    }
+  ]
+}

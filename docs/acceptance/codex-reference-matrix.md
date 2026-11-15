@@ -1,15 +1,15 @@
 # Codex 打包版交互对照矩阵
 
-2026-11-15，`feat/multi-agent-codex`。矩阵、截图和性能已获接受。本轮按裁决仅修复 **#5 Default 权限恢复**，源码 `3f71baa` 重打包后，一次真实场景依次验证 Bypass → Default → Plan → Default，全部通过，#5 已闭合。正常静置重启和 Antigravity 既有选择器问题结论保持不变；其余已接受边界与未验证项保留，不宣称全项通过。
+2026-11-15，`feat/multi-agent-codex`。本轮源码 `cc2b1db` 收口错误通知、history_base 祖先历史与启动防升级提示：结构化模型错误进入通知和卡片/DAG error；祖先回溯、搜索及缺失标注已验证；升级开关真实对照有效。#5 Default 的上轮通过结论保留，其余矩阵和已接受性能结果不重跑。外部同父 Fork 继续保留 fail-safe 边界，不再尝试。
 
 ## 最终产物与改动原因
 
-- 当前产品提交 `3f71baa`，仅修 #5 Default；[当前打包指纹](evidence/codex-stage5/default-fix/package-sha256.json)。上一轮产品 `e62abde`、打包指纹 `96f4f40`、验收 `03555c8`、回归 `23563de` 的结果继续作为其余场景证据；没有重跑整套。更早的 `60714be` 不作为最终验收依据。
+- 当前产品提交 `cc2b1db`，仅收口本轮三项；[当前打包指纹](evidence/codex-known-issues/package-sha256.json)。#5 Default 对应 `3f71baa` 与[上轮指纹](evidence/codex-stage5/default-fix/package-sha256.json)；更早产品 `e62abde`、验收 `03555c8`、回归 `23563de` 的结果作为其余场景证据。没有重跑整套，`60714be` 不作为最终验收依据。
 - 重新执行一次 `CSC_IDENTITY_AUTO_DISCOVERY=false pnpm package:dir`，exit 0。产物 `apps/desktop/release/mac-arm64/码头.app`，未签名、未安装到 Applications、未发布。
 - `app.asar` SHA-256：`69e4cc57bf526447b0e697a5df184f0364ff68d5b11418da9cfdc4761962d597`。
-- 当前 runtime SHA-256：`1d076a0b0a17687d51f680c4cb963189ff5bdd9986beedb4be674f80dee16488`；app.asar 与上一轮相同。上一轮 [完整指纹](evidence/codex-stage5/final/package-sha256.json) 和 [首次包指纹](evidence/codex-stage5/package-initial-sha256.json) 保留，不与当前 runtime 混用。
+- 当前 runtime SHA-256：`de362514737dc43be027807b6fe60c41d2dfee4ac7594f01dd267b4fac191dc7`；app.asar 与上一轮相同。[更早完整指纹](evidence/codex-stage5/final/package-sha256.json) 和 [首次包指纹](evidence/codex-stage5/package-initial-sha256.json) 保留，不与当前 runtime 混用。
 
-`e62abde` 与本轮 `3f71baa` 的用户可见改动：
+`e62abde`、Default 修复 `3f71baa` 与本轮 `cc2b1db` 的用户可见改动：
 
 | 改动 | 用户原因 | 验收结果 |
 | --- | --- | --- |
@@ -18,6 +18,9 @@
 | 缺命令提前检查 | 未安装 Codex 时能看到启动失败卡，避免卡在无效会话 | 受控不存在命令的打包 UI 通过 |
 | 恢复失败保留 error 状态 | 恢复记录缺失时，卡片与 DAG 应一致显示出错，并允许重试或新开 | 真实隔离 rollout 暂移、还原重试、新开均通过 |
 | Shell 升级后及时刷新 DAG | 用户先打开 DAG 再输入 codex，也应立即看到 Codex 标签 | 最终两次核心启动均通过，旧包 Shell 标签停留差异已闭合 |
+| Codex 整轮错误通知与出错状态 | 模型报错后不能一直显示工作中或误报完成 | 按真实task_complete.error判定，仅当前Codex回合生效；真实App通知/DB/DAG error已通过 |
+| history_base祖先消息回溯 | 子会话预览与搜索应能找到Fork前的父对话；缺失时给出原因 | 真实旧Fork回读、受控App预览/搜索/缺失标注通过；5层/环/边界自动检查通过 |
+| 启动时关闭CLI升级提示 | 避免终端输入误触全局CLI升级 | 统一一次性参数；真实true/false开关对照有效，不写用户配置 |
 
 ## 验收口径
 
@@ -30,7 +33,7 @@
 
 ## reference product 交互对照矩阵
 
-下表原有截图与JSON默认相对于 [上一轮最终证据目录](evidence/codex-stage5/final)；三项收口证据使用closure路径；本轮 #5 修复证据使用default-fix路径。上一轮详细记录见 [最终UI报告](evidence/codex-stage5/final/ui-report.md)。
+下表原有截图与JSON默认相对于 [上一轮最终证据目录](evidence/codex-stage5/final)；三项收口证据使用closure路径；Default修复证据使用default-fix路径，本轮三项使用codex-known-issues路径。上一轮详细记录见 [最终UI报告](evidence/codex-stage5/final/ui-report.md)。
 
 | 场景（PRD #） | Claude 同场景基线与代码入口 | Codex 最终实际 / 证据 | 结论 |
 | --- | --- | --- | --- |
@@ -38,18 +41,20 @@
 | 2 主卡与 DAG 标签 | 共享 `DagCanvas.tsx`、provider mode 投影；Claude 四规格回归 | 先打开 DAG 再升级，主卡和 DAG 均显示 Codex；两次核心均过断言 | 通过；旧包差异已闭合 |
 | 2 启动 / 工作 / 空闲 / 等输入 / 出错 | `SessionWorkStatusService`、`ProviderModeService`；Claude 通知 / 持久化路径 | starting、running、idle、审批 needs-input、恢复失败 error 均走真实 CLI；`results/latency-round-*.json`、`02-approval-*.png`、`02-real-error-dag.png` | 五态通过；不把命令退出127当整轮模型 error |
 | 3 完成与审批通知 | 共享 notification store、`agent-event-ingestion`；Claude 通知四项回归 | 另一卡聚焦时完成通知与审批通知可见；批准后继续，中断后新 turn 回复成功。`03-completion-notification.png`、`02-approval-notification.png`、`results/approval-interrupt.json` | 这两类真实通过；聚焦免打扰 / 声音 / 冷却由共享自动规则覆盖，未单独做真实 Codex 音频验收 |
-| 3 错误通知 | 共享错误通知管线 | 未诱发真实模型级失败，未验证 | 按本轮指示保留，不强行造错 |
+| 3 错误通知 | 共享通知与work-status管线；仅Codex增加当前turn的rollout观察 | 真实0.162.1对本机受控404写task_complete.error且无Stop；真实App发唯一Codex错误通知，正文匹配，卡片/DB/DAG error。[实测与实现](evidence/codex-known-issues/report.md)、[逐次UI记录](evidence/codex-known-issues/ui-report.md) | **闭合**；重连中和SIGKILL无模型错误事件，保持边界，不以工具非零退出推断 |
 | 4 HUD 字段 | `TerminalHud.tsx`、HUD service；Claude HUD 回归 | 图中可见 gpt-6-astra (medium)、486K context、5%、1 Tools、~/repo、main；无5h / Weekly。`04-hud.png` | 代表场景通过；完整上下文百分比算法尚无独立模型预算真值对照 |
 | 5 Accept Edits / Plan | 共享权限菜单；`provider-mode-service`、`provider-launch-plan.ts` | 两次均 PID 改变、UUID不变，真实新 turn 回答原暗号，rollout 分别 workspace-write/on-request 与 read-only/on-request。`results/modes-progress.json` | 通过；Codex 重启为 PRD 明确差异 |
 | 5 Bypass / Default | 同一四项菜单及高权限确认；`TerminalHud.tsx`；Default只读用户顶层配置 | 当前包单次 Bypass → Default → Plan → Default，四次均新PID、同UUID，新turn答出暗号。Bypass为never/danger-full-access；两次Default均恢复隔离配置on-request/workspace-write。[逐步实测](evidence/codex-stage5/default-fix/ui-report.md)、[结构化结果](evidence/codex-stage5/default-fix/ui/results/default-fix-modes.json) | **通过，#5闭合**；真实fork权限本轮未另跑，new/resume/fork参数由单测覆盖 |
 | 6 自动标题 / 手工锁定 / 恢复 | `provider-title-source.ts`、pane 菜单；Claude 同类规则 | 自动标题来自真实索引；重命名后新回复不覆盖，恢复原自动标题。`06-title.png`、`results/core-front.json` | 通过 |
-| 7 列表 / 预览 / 搜索 / 载入 | `SessionLoaderDialog.tsx`；Claude load-existing 两项回归 | Codex 页签、父会话预览、全文搜索、载入父 UUID及新 turn 暗号通过。`07-loader.png`、`07-loaded-memory.png`、`results/fork-loader.json` | 父会话场景通过；history_base 祖先历史见边界 |
+| 7 列表 / 预览 / 搜索 / 载入 | `SessionLoaderDialog.tsx`；Claude load-existing 两项回归 | Codex 页签、父会话预览、全文搜索、载入父 UUID及新 turn 暗号通过。`07-loader.png`、`07-loaded-memory.png`、`results/fork-loader.json` | 父会话原载入通过；祖先预览/搜索本轮闭合，见下一行 |
+| 7 history_base祖先历史 | 同一预览/全文搜索/载入入口；不改存储格式 | 最多5层、防环、按时间合并、遵守Fork边界；祖先缺失仅当前文件并标注。两份真实旧Fork回读通过；真实App受控fixture预览/搜索/缺失提示通过。[真实回读](evidence/codex-known-issues/history-live.json)、[UI证据](evidence/codex-known-issues/ui-report.md) | **闭合**；原生载入仍按子UUID，未为本项另发推理请求 |
 | 8 正常重启静置 / 首轮接回 | 共享恢复monitor / queue / provider binding；既有持久化入口 | 独立重启静置10003ms，DB starting、可见DAG节点status-starting，未显示已恢复；不含暗号的新问题，同UUID新turn答出暗号。[补测记录](evidence/codex-stage5/closure/codex-restart-recheck/results/summary.md)、[逐turn证据](evidence/codex-stage5/closure/codex-restart-recheck/results/closure-restart.json) | 通过；共享DAG文案仍为“运行中”，starting以节点状态类与DB核验，不另改文案 |
 | 8 恢复失败 / 重试 / 新开 | 共享恢复横幅；`provider-mode-service`；Claude恢复同类入口 | 仅暂移隔离真实rollout，失败卡和DAG error一致；还原并重试取回暗号；再次暂移后新开得到不同UUID。`08-real-*.png`、`results/recovery-failure.json` | 通过；不替代正常静置重启 |
 | 9 当前目录 / 新 Worktree Fork | `fork-workflow-service`；[既有真实 Claude Fork](evidence/prd-06/matou/real-claude-fork-validation.json) 为历史，另有本轮回归 | 两子UUID不同、forked_from父UUID匹配、cwd匹配、继承父暗号；父回复不包含子暗号。`09-fork-current.png`、`09-fork-new.png`、`09-fork-dag.png`、`results/turns-fork-load-M4nFbe.json` | 通过；外部同父并发未实测 |
 | 10 AGENTS.md | `TerminalHud.tsx` 共用编辑器，Claude指令文件路径 | 界面保存后读真实文件核对成功，`10-agents-saved.png` | 通过；文件名差异为既定规格 |
 | 11 mt 跨卡 | `mt-cli.ts` / host control / caller identity；一期同类路径 | 兄弟Shell随机令牌不写入用户问题；真实Codex执行mt read并正确回答，命令exit0与输出核对。`11-mt-cross-card.png`、`results/mt.json` | 通过 |
 | 未安装 / 未登录 | 既有启动失败与登录提示入口 | 不存在命令显示失败卡；登录替身无真实身份绑定。`fixture-missing.png`、`fixture-unauthenticated.png`、对应JSON | 受控fixture通过；未撤销真实登录，不代表真实首次登录流程全测 |
+| 启动防升级误触 | 不改菜单/用户配置；只对Codex启动参数生效 | 官方键check_for_update_on_startup，所有new/resume/fork注入false。真实999版本缓存true有弹窗、false无弹窗。[开关对照](evidence/codex-known-issues/probes/update-summary.json) | **闭合**；未执行升级，仍可由用户在Matou外自行维护CLI |
 | 交互性能 | 一期 Runtime domain-event→DAG DOM MutationObserver 同口径 | 六样本见下，均≤1000ms | 本机指定负载通过 |
 
 ## 性能数值与重试说明
@@ -66,7 +71,7 @@
 
 ## 最终源码回归
 
-下表全量回归对应产品源码 `e62abde`，该批未改产品或断言。本轮 `3f71baa` 仅补 Default 相关定点验证，复用其余既有全量结果，见下方修复节。所有首次失败保留，日志见 [最终结果目录](evidence/codex-stage5/final/results)。
+下表全量回归对应产品源码 `e62abde`，该批未改产品或断言。Default修复 `3f71baa` 与本轮 `cc2b1db` 各补相关定点验证，复用其余既有全量结果，见下方修复节。所有首次失败保留，日志见 [最终结果目录](evidence/codex-stage5/final/results)。
 
 | 检查 | 本轮结果 | 范围与解释 |
 | --- | --- | --- |
@@ -106,7 +111,7 @@ main基线固定为本轮开始捕获的 **73154003bc16e8612a23d7fca8c264b6fb630
 
 本轮Codex两条首跑均失败，#8定点补跑一次通过；#5不再重跑。main Agy单条一次，无自动重试。没有无限调试；错误通知按用户指示只写“未诱发真实模型级失败，未验证”。
 
-## 本轮 #5 Default 修复与验收（`3f71baa`）
+## 上轮 #5 Default 修复与验收（`3f71baa`）
 
 原因是原生 resume 会继承上次会话权限，Default 仅省略参数不能恢复用户配置。现在每次 Codex Default 新建、resume、fork 前，只读启动环境 CODEX_HOME（未设置时为 `~/.codex`）的 config.toml 顶层 `approval_policy` / `sandbox_mode`，显式传入启动参数；缺失、读取失败或无法解析的字段回退为 on-request / workspace-write。不读取 profile 值，不写回配置。实际用户顶层 approval_policy 缺失、sandbox_mode 为 danger-full-access；产品尊重该显式沙箱选择，不能将它误判为继承缺陷。真实补测用隔离配置 on-request / workspace-write 验证恢复能力。
 
@@ -114,13 +119,23 @@ main基线固定为本轮开始捕获的 **73154003bc16e8612a23d7fca8c264b6fb630
 - 打包真实验收：一次场景，retries=0，61.5秒，退出0。PID 12341→14448→15999→17840→19680，UUID始终不变；两次Default的真实turn_context均为on-request/workspace-write，Plan为on-request/read-only，Bypass为never/danger-full-access。四次切换后的新问题均不含暗号，final_answer与task_complete均答出原暗号。[截图、turn与PID](evidence/codex-stage5/default-fix/ui-report.md)。
 - [主代理完整性回读](evidence/codex-stage5/default-fix/results/final-integrity.json)确认当前包六个组件指纹一致、四个真实turn_context与结果记录一致，认证副本与相关进程清理完成。没有新增依赖、运行时LLM请求或配置写入；没有重采已接受的性能数据，没有重跑其余UI或全量回归。真实fork权限本轮未另测，fork显式参数由自动检查覆盖。
 
+## 本轮已知问题收口（`cc2b1db`）
+
+[完整实测报告](evidence/codex-known-issues/report.md)记录三种失败形态、hook与Stop载荷、真实TUI、退出码、祖先读取和防升级开关；[验证摘要](evidence/codex-known-issues/validation-summary.json)记录184个不同相关用例最终通过、workspace类型检查及首次4个旧参数断言失败与修正。未重跑全量回归或已接受性能。
+
+模型404的task_complete.error为真实CLI结构化记录，不是把普通命令非零退出当整轮失败。失败没有Stop，所以只观察当前run/turn的真实rollout；每回合只发一条Codex错误通知。网络不可达样本仍在持续重连，主动中断才有turn_aborted；SIGKILL样本退出-9但没有模型级error或Stop，不能从该rollout宣称模型失败。
+
+祖先历史沿显式history_base回溯，深度上限5并防环；复用既有预览system项标注缺失/循环/上限。两份既有真实Fork的未改rollout已实测祖先预览/全文搜索/会话列表命中，真实App另用受控fixture验证可见效果。外部同父Fork并发本轮不再测试。
+
+[逐次App记录](evidence/codex-known-issues/ui-report.md)保留所有尝试：祖先场景首跑通过。错误场景前两次本机fixture未回应全部并发POST，未产生error；修端点后第三次已通过真实错误、通知与DB/DAG断言，但后续TUI检查错误定位到新聚焦的Shell。主代理修测试定位器后，第四次8.034秒、retries=0、退出0，全部断言及通知/DAG截图通过。错误场景前四次为27.376 / 26.260 / 21.167 / 8.034秒；祖先场景首跑5.133秒通过。产品包始终不变；不把调试过程称为首跑全绿。
+
 ## 已接受边界与未闭合项
 
-- **history_base**：按第四关裁决本期不修。catalog 不展开祖先引用；Fork子会话预览/搜索可能只有当前rollout。父会话载入通过不代表祖先历史完整性通过。
+- **history_base已闭合**：按本轮新裁决回溯最多5层、防环、合并搜索，祖先缺失回退当前并提示；Fork后新增父消息按已有byte/ordinal边界排除，不改存储格式。
 - **外部同父 Fork 并发**：唯一候选须同时满足创建时间、父UUID、canonical cwd；多个候选继续等真实钩子或超时，无外部锁。如果外部Fork恰为唯一候选，可能在真实钩子前暂时绑定错误候选；首次真实钩子不符则撤销并失败。这是已知风险，自动测试覆盖候选/冲突处理，未做外部并发真实验收。
 - **#5已闭合**：Default恢复配置的缺陷由 `3f71baa` 修复并通过上述真实补测；Bypass、正常静置重启与新问题接回的既有通过结论保留。
-- **错误通知**：未诱发真实模型级失败，未验证；不强行造错。其余既有未覆盖项仍为声音、结构化update_plan代表样本、上下文百分比与CLI TUI算法的独立真值对照。
+- **错误通知已闭合**：真实模型端点404的task_complete.error触发通知与出错状态。仍在重连不算终局错误；SIGKILL没有模型错误记录，沿用进程退出处理。其余既有未覆盖项仍为声音、结构化update_plan代表样本、上下文百分比与CLI TUI算法的独立真值对照。
 - 未测试 Windows、默认 daemon / 备用TUI、签名分发、安装升级；没有发布、push或安装到Applications。
-- 上轮[完整性回读](evidence/codex-stage5/final/results/final-integrity.json)及三张PNG的无损重压说明继续保留：仅消除压缩字节偶然命中禁用短标识，解压字节逐一相同，原图留在忽略的缓存；没有改像素或放宽门禁。本轮改动后重新打包，当前各组件指纹已重新核对，隔离认证副本及相关进程无残留。
+- 上轮[完整性回读](evidence/codex-stage5/final/results/final-integrity.json)及三张PNG的无损重压说明继续保留：仅消除压缩字节偶然命中禁用短标识，解压字节逐一相同，原图留在忽略的缓存；没有改像素或放宽门禁。本轮cc2b1db改动后重新打包，[当前完整性回读](evidence/codex-known-issues/final-integrity.json)确认各组件一致、隔离认证副本及相关进程无残留。
 
 旧包首次失败 / 逐轮调试材料继续保留在 [历史 UI 现场记录](evidence/codex-stage5/ui-report.md)，不可与本页最终包状态混用。

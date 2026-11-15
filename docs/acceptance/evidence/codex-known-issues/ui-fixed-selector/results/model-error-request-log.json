@@ -1,0 +1,16 @@
+[
+  {
+    "method": "POST",
+    "url": "/v1/responses",
+    "bytes": 105576,
+    "ended": true,
+    "responded": true
+  },
+  {
+    "method": "POST",
+    "url": "/v1/responses",
+    "bytes": 55137,
+    "ended": true,
+    "responded": true
+  }
+]

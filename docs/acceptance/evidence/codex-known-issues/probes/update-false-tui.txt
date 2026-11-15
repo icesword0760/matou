@@ -1,0 +1,6 @@
+GPT-6-Astradefault·~/Documents/AIProjects/matou-multi-agent-codex/.cache/c10/model/repo⚠8warnings·f2toview
+
+  >_ OpenAI Codex (v0.162.1)
+     ~/Documents/AIProjects/matou-multi-agent-codex/.cache/c10/model/repo
+
+  Tip: Maximize usage with GPT-6.1 Sol. Try it on complex work for near-Astra performance at a lower cost.  › Ask Codex to do anything   GPT-6-Astra default · ~/Documents/AIProjects/matou-multi-agent-codex/.cache/c10/model/repo                      ⚠ 8 warnings · f2 to view

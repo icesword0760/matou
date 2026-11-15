@@ -912,7 +912,7 @@ sleep 30
         ])
       expect((await readFile(join(root, 'control-codex-session.args'), 'utf8')).trim().split('\n'))
         .toEqual([
-          '-c', 'model_context_window=512000', '-c', 'model_auto_compact_token_limit=460800', '-c', 'model_auto_compact_token_limit_scope="total"',
+          '-c', 'check_for_update_on_startup=false', '-c', 'model_context_window=512000', '-c', 'model_auto_compact_token_limit=460800', '-c', 'model_auto_compact_token_limit_scope="total"',
           '-c', 'developer_instructions="Task 8 fixture\\n"',
           '--model', 'codex-persisted', '--dangerously-bypass-approvals-and-sandbox',
           'resume', 'provider-codex'

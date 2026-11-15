@@ -1,0 +1,162 @@
+{
+  "config": {
+    "argv": [
+      "/Users/icesword/.nvm/versions/node/v22.16.0/bin/node",
+      "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/node_modules/@playwright/test/cli.js",
+      "test",
+      "tests/e2e/codex-acceptance.spec.ts",
+      "--grep",
+      "known issues: a real Codex",
+      "--workers=1",
+      "--retries=0",
+      "--reporter=line,json",
+      "--output",
+      ".cache/c10/playwright-recheck-results"
+    ],
+    "configFile": "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/playwright.config.ts",
+    "rootDir": "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tests/e2e",
+    "failOnFlakyTests": false,
+    "forbidOnly": false,
+    "fullyParallel": false,
+    "globalSetup": null,
+    "globalTeardown": null,
+    "globalTimeout": 0,
+    "grep": {},
+    "grepInvert": null,
+    "maxFailures": 0,
+    "metadata": {
+      "actualWorkers": 1
+    },
+    "preserveOutput": "always",
+    "projects": [
+      {
+        "outputDir": "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c10/playwright-recheck-results",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "",
+        "name": "",
+        "testDir": "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tests/e2e",
+        "testIgnore": [],
+        "testMatch": [
+          "**/*.@(spec|test).?(c|m)[jt]s?(x)"
+        ],
+        "timeout": 30000
+      }
+    ],
+    "quiet": false,
+    "reporter": [
+      [
+        "line"
+      ],
+      [
+        "json"
+      ]
+    ],
+    "reportSlowTests": {
+      "max": 5,
+      "threshold": 300000
+    },
+    "shard": null,
+    "tags": [],
+    "updateSnapshots": "missing",
+    "updateSourceMethod": "patch",
+    "version": "1.62.1",
+    "workers": 1,
+    "webServer": null
+  },
+  "suites": [
+    {
+      "title": "codex-acceptance.spec.ts",
+      "file": "codex-acceptance.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [],
+      "suites": [
+        {
+          "title": "Codex packaged acceptance — real CLI and explicit controlled fixtures",
+          "file": "codex-acceptance.spec.ts",
+          "line": 544,
+          "column": 6,
+          "specs": [
+            {
+              "title": "known issues: a real Codex model error notifies once and marks the card error; startup upgrade is disabled",
+              "ok": false,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 300000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "failed",
+                      "duration": 26260,
+                      "error": {
+                        "message": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBe\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m) // Object.is equality\u001b[22m\n\nExpected: \u001b[32mtrue\u001b[39m\nReceived: \u001b[31mfalse\u001b[39m\n\nCall Log:\n- Timeout 20000ms exceeded while waiting on the predicate",
+                        "stack": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBe\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m) // Object.is equality\u001b[22m\n\nExpected: \u001b[32mtrue\u001b[39m\nReceived: \u001b[31mfalse\u001b[39m\n\nCall Log:\n- Timeout 20000ms exceeded while waiting on the predicate\n    at /Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tests/e2e/codex-acceptance.spec.ts:697:124",
+                        "location": {
+                          "file": "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tests/e2e/codex-acceptance.spec.ts",
+                          "column": 124,
+                          "line": 697
+                        },
+                        "snippet": "  695 |       const providerId = await waitForProviderSessionId(h.dataDir, sid)\n  696 |       await expect.poll(async () => (await rolloutEvents(h, providerId))\n> 697 |         .some(e => e.type === 'event_msg' && e.payload?.type === 'task_complete' && e.payload.error), { timeout: 20_000 }).toBe(true)\n      |                                                                                                                            ^\n  698 |       await expect.poll(() => readCurrentWorkStatus(h.dataDir, sid)?.status, { timeout: 10_000 }).toBe('error')\n  699 |       await waitForDagNodeStatus(dagPage, sid, 'status-error')\n  700 |       await expect(paneForSession(h.page, sid)).toHaveClass(/has-notification/)"
+                      },
+                      "errors": [
+                        {
+                          "location": {
+                            "file": "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tests/e2e/codex-acceptance.spec.ts",
+                            "column": 124,
+                            "line": 697
+                          },
+                          "message": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBe\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m) // Object.is equality\u001b[22m\n\nExpected: \u001b[32mtrue\u001b[39m\nReceived: \u001b[31mfalse\u001b[39m\n\nCall Log:\n- Timeout 20000ms exceeded while waiting on the predicate\n\n  695 |       const providerId = await waitForProviderSessionId(h.dataDir, sid)\n  696 |       await expect.poll(async () => (await rolloutEvents(h, providerId))\n> 697 |         .some(e => e.type === 'event_msg' && e.payload?.type === 'task_complete' && e.payload.error), { timeout: 20_000 }).toBe(true)\n      |                                                                                                                            ^\n  698 |       await expect.poll(() => readCurrentWorkStatus(h.dataDir, sid)?.status, { timeout: 10_000 }).toBe('error')\n  699 |       await waitForDagNodeStatus(dagPage, sid, 'status-error')\n  700 |       await expect(paneForSession(h.page, sid)).toHaveClass(/has-notification/)\n    at /Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tests/e2e/codex-acceptance.spec.ts:697:124"
+                        }
+                      ],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-11-15T13:35:45.093Z",
+                      "annotations": [],
+                      "attachments": [
+                        {
+                          "name": "error-context",
+                          "contentType": "text/markdown",
+                          "path": "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c10/playwright-recheck-results/codex-acceptance-Codex-pac-add21-startup-upgrade-is-disabled/error-context.md"
+                        }
+                      ],
+                      "errorLocation": {
+                        "file": "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tests/e2e/codex-acceptance.spec.ts",
+                        "column": 124,
+                        "line": 697
+                      }
+                    }
+                  ],
+                  "status": "unexpected"
+                }
+              ],
+              "id": "b33e2b54a6e36ead1596-9d51ca0cfc3f2b5f9287",
+              "file": "codex-acceptance.spec.ts",
+              "line": 653,
+              "column": 3
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "errors": [],
+  "stats": {
+    "startTime": "2026-11-15T13:35:44.656Z",
+    "duration": 26723.728000000003,
+    "expected": 0,
+    "skipped": 0,
+    "unexpected": 1,
+    "flaky": 0
+  }
+}

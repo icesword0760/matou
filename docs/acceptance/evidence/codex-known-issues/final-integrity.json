@@ -1,0 +1,33 @@
+{
+  "productCommit": "cc2b1dbc0e5956960bda2d2b17cf6709bb5410ed",
+  "checkedAt": "2026-11-15T21:42:35.716771",
+  "componentsMatch": {
+    "Contents/MacOS/\u7801\u5934": true,
+    "Contents/Resources/app.asar": true,
+    "Contents/Resources/runtime/index.cjs": true,
+    "Contents/Resources/runtime/mt-cli.cjs": true,
+    "Contents/Resources/runtime/control-assets/bin/mt": true,
+    "Contents/Resources/runtime/control-assets/providers/codex-developer-instructions.md": true
+  },
+  "rawRolloutVerification": [
+    {
+      "sameTurn": true,
+      "turnId": "01a1df6f-d30b-70f0-a91c-e37b1d33e6f0",
+      "error": {
+        "message": "unexpected status 404 Not Found: The model matou-probe-missing does not exist, url: http://127.0.0.1:55062/v1/responses",
+        "codex_error_info": {
+          "http_connection_failed": {
+            "http_status_code": 404
+          }
+        }
+      },
+      "matchesUiProof": true
+    }
+  ],
+  "notificationCountFromUi": 1,
+  "uiState": "error",
+  "authCopiesRemaining": 0,
+  "relatedProcessPids": [],
+  "cliVersionBefore": "codex-cli 0.162.1",
+  "cliVersionAfter": "codex-cli 0.162.1"
+}

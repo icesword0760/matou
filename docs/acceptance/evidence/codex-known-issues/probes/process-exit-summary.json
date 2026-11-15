@@ -1,0 +1,15 @@
+{
+  "name": "process-exit",
+  "pid": 98833,
+  "exitCode": -9,
+  "elapsed": 7.01201479206793,
+  "hookEvents": [
+    "SessionStart",
+    "UserPromptSubmit"
+  ],
+  "stopPayloads": [],
+  "eventTypes": [
+    "task_started",
+    "item_completed"
+  ]
+}

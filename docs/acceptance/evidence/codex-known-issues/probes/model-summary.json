@@ -1,0 +1,17 @@
+{
+  "name": "model",
+  "pid": 1509,
+  "exitCode": 0,
+  "elapsed": 12.614609542069957,
+  "hookEvents": [
+    "SessionStart",
+    "UserPromptSubmit",
+    "SessionEnd"
+  ],
+  "stopPayloads": [],
+  "eventTypes": [
+    "task_started",
+    "item_completed",
+    "task_complete"
+  ]
+}

@@ -652,8 +652,32 @@ test.describe('Codex packaged acceptance — real CLI and explicit controlled fi
 
   test('known issues: a real Codex model error notifies once and marks the card error; startup upgrade is disabled', async () => {
     const dirs = await createIsolatedWorkspace('model-error', { copyAuth: false })
-    let pending: ServerResponse | undefined
-    const endpoint = createServer((_request, response) => { pending = response })
+    const pending: ServerResponse[] = []
+    let releaseFailures = false
+    const fail = (response: ServerResponse) => {
+      response.writeHead(404, { 'content-type': 'application/json' })
+      response.end(JSON.stringify({ error: { message: 'The model matou-probe-missing does not exist',
+        type: 'invalid_request_error', code: 'model_not_found' } }))
+    }
+    const requests: Array<{ method?: string; url?: string; bytes: number; ended: boolean; responded: boolean }> = []
+    const endpoint = createServer((request, response) => {
+      const observed = { method: request.method, url: request.url, bytes: 0, ended: false, responded: false }
+      requests.push(observed)
+      // Consume the entire context upload before replying. Otherwise the client's
+      // request body can block on the server's unread socket buffer.
+      request.on('data', (data: Buffer) => { observed.bytes += data.length })
+      request.on('end', () => {
+        observed.ended = true
+        if (request.method === 'POST' && request.url?.endsWith('/responses')) {
+          if (releaseFailures) fail(response)
+          else pending.push(response)
+        } else {
+          response.writeHead(200, { 'content-type': 'application/json' }); response.end('{"data":[]}')
+          observed.responded = true
+        }
+      })
+      response.on('finish', () => { observed.responded = true })
+    })
     await new Promise<void>(resolve => endpoint.listen(0, '127.0.0.1', resolve))
     const address = endpoint.address() as { port: number }
     const configPath = join(dirs.rootDir, 'codex-home/config.toml')
@@ -671,10 +695,11 @@ test.describe('Codex packaged acceptance — real CLI and explicit controlled fi
       const { sessionId: sid, surface, dagPage } = await launchCodex(h)
       await sendTerminalLine(surface, 'Reply only MODEL_PROBE_READY.')
       const peer = await createSiblingShellAndFocus(h.page, sid)
-      await expect.poll(() => Boolean(pending), { timeout: 20_000 }).toBe(true)
-      const body = JSON.stringify({ error: { message: 'The model matou-probe-missing does not exist',
-        type: 'invalid_request_error', code: 'model_not_found' } })
-      pending!.writeHead(404, { 'content-type': 'application/json' }); pending!.end(body)
+      await expect.poll(() => pending.length, { timeout: 20_000 }).toBeGreaterThan(0)
+      // Codex may submit a parallel internal request. Fail every request so
+      // no pending main turn is accidentally left behind the test fixture.
+      releaseFailures = true
+      for (const response of pending.splice(0)) fail(response)
       const providerId = await waitForProviderSessionId(h.dataDir, sid)
       await expect.poll(async () => (await rolloutEvents(h, providerId))
         .some(e => e.type === 'event_msg' && e.payload?.type === 'task_complete' && e.payload.error), { timeout: 20_000 }).toBe(true)
@@ -686,8 +711,9 @@ test.describe('Codex packaged acceptance — real CLI and explicit controlled fi
       await expect(center.locator('.notification-item')).toHaveCount(1)
       await expect(center.locator('.notification-item__title')).toHaveText('Codex')
       await expect(center).toContainText('matou-probe-missing does not exist')
-      await expect(surface.locator('.xterm-rows')).toContainText('unexpected status 404')
-      await expect(surface.locator('.xterm-rows')).not.toContainText('Update available')
+      const failedRows = paneForSession(h.page, sid).locator('.xterm-rows')
+      await expect(failedRows).toContainText('unexpected status 404')
+      await expect(failedRows).not.toContainText('Update available')
       await saveScreenshot(h.page, 'error-notification.png')
       await saveScreenshot(dagPage, 'error-dag.png')
       await saveProof('model-error-ui.json', { sid, peerId: peer.sessionId, providerId,
@@ -697,6 +723,7 @@ test.describe('Codex packaged acceptance — real CLI and explicit controlled fi
         notificationTitle: await center.locator('.notification-item__title').innerText(),
         startupUpgradePrompt: false, wrapperDisablesUpdates: false, configDisablesUpdates: false })
     } finally {
+      await saveProof('model-error-request-log.json', requests)
       await dispose(h)
       endpoint.closeAllConnections(); await new Promise<void>(resolve => endpoint.close(() => resolve()))
     }
