@@ -29,6 +29,39 @@ describe('ingestAgentNotification', () => {
     expect(playSound).not.toHaveBeenCalled()
   })
 
+  it('applies the existing cooldown, sound and focused-session rules to Codex notifications', () => {
+    let now = 20
+    const playSound = vi.fn()
+    const store = new AgentNotificationStore({ now: () => now, playSound })
+    const event = domainEvent()
+    event.eventId = 'codex-approval'
+    event.payload = {
+      targetSessionId: 'session-1', provider: 'codex', runId: 'codex-run',
+      event: {
+        eventType: 'permission', title: 'Codex', subtitle: 'Permission',
+        body: "Bash: python3 -c 'print(2)'", sound: true, cooldownKey: 'Notification'
+      }
+    }
+    expect(ingestAgentNotification(event, projection(), undefined, store)).toBe(true)
+    expect(store.snapshot().notifications[0]).toMatchObject({
+      title: 'Codex', eventType: 'permission', sessionId: 'session-1', sceneId: 'scene-1', read: false
+    })
+    expect(playSound).toHaveBeenCalledTimes(1)
+    now += 1
+    ingestAgentNotification({ ...event, eventId: 'codex-approval-repeat' }, projection(), undefined, store)
+    expect(store.snapshot().notifications).toHaveLength(1)
+    expect(playSound).toHaveBeenCalledTimes(1)
+
+    now += 5_000
+    const completed = { ...event, eventId: 'codex-completed', payload: {
+      targetSessionId: 'session-1', provider: 'codex', runId: 'codex-run',
+      event: { eventType: 'completed', title: 'Codex', body: 'Output: 2', sound: true, cooldownKey: 'Stop' }
+    } }
+    ingestAgentNotification(completed, projection(), 'session-1', store)
+    expect(store.snapshot().notifications[0]).toMatchObject({ title: 'Codex', eventType: 'completed', read: true })
+    expect(playSound).toHaveBeenCalledTimes(1)
+  })
+
   it('keeps an event with deleted hierarchy as a visible unknown-location entry', () => {
     const store = new AgentNotificationStore({ now: () => 20 })
     const event = domainEvent()

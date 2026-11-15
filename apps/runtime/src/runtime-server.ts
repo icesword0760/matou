@@ -2119,7 +2119,7 @@ export class RuntimeServer {
       const cwdTracker = new TerminalCwdTracker()
       const workStatusTracker = message.profile === 'shell'
         ? new TerminalWorkStatusTracker()
-        : message.profile === 'claude-code' || message.profile === 'antigravity'
+        : message.profile === 'claude-code' || message.profile === 'antigravity' || message.profile === 'codex'
           ? new TerminalWorkStatusTracker({ provider: message.profile })
           : undefined
       const permissionModeTracker = message.profile === 'claude-code'

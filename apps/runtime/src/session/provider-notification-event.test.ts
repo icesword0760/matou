@@ -3,6 +3,41 @@ import { describe, expect, it } from 'vitest'
 import { toProviderNotificationEvent } from './provider-notification-event'
 
 describe('toProviderNotificationEvent', () => {
+  it('uses the shared completion and approval notifications for the observed Codex payloads', () => {
+    expect(toProviderNotificationEvent({
+      hook_event_name: 'PermissionRequest', session_id: 'codex-main',
+      model: 'gpt-6-astra', permission_mode: 'default', tool_name: 'Bash',
+      tool_input: { command: "python3 -c 'print(2)'", description: 'Approve this harmless command?' }
+    }, 'codex')).toEqual({
+      eventType: 'permission', title: 'Codex', subtitle: 'Permission',
+      body: "Bash: python3 -c 'print(2)'", sound: true, cooldownKey: 'Notification'
+    })
+    expect(toProviderNotificationEvent({
+      hook_event_name: 'Stop', cwd: '/tmp/probe', stop_hook_active: false,
+      last_assistant_message: 'The command exited successfully.\nOutput: 2'
+    }, 'codex')).toEqual({
+      eventType: 'completed', title: 'Codex', subtitle: 'Completed in probe',
+      body: 'The command exited successfully. Output: 2', sound: true, cooldownKey: 'Stop'
+    })
+  })
+
+  it('does not mistake the observed failed Codex command for a failed model turn or rewrite its answer as success', () => {
+    expect(toProviderNotificationEvent({
+      hook_event_name: 'PostToolUse', tool_name: 'Bash',
+      tool_response: 'zsh:1: command not found: matou_probe_missing_command\n'
+    }, 'codex')).toBeNull()
+    // This is a normally completed model reply explaining a failed command.
+    // The real Stop contains no structured turn-error or cancellation marker.
+    expect(toProviderNotificationEvent({
+      hook_event_name: 'Stop', stop_hook_active: false,
+      last_assistant_message: 'Ran once. Exit code: `127`.\nCommand not found.'
+    }, 'codex')).toMatchObject({
+      eventType: 'completed', title: 'Codex', body: 'Ran once. Exit code: `127`. Command not found.'
+    })
+    expect(toProviderNotificationEvent({ hook_event_name: 'UserPromptSubmit' }, 'codex')).toBeNull()
+    expect(toProviderNotificationEvent({ hook_event_name: 'SessionEnd' }, 'codex')).toBeNull()
+  })
+
   it('turns Stop into the latest Claude answer and a Completed project subtitle', () => {
     expect(toProviderNotificationEvent({
       hook_event_name: 'Stop', cwd: '/Users/demo/projects/matou',

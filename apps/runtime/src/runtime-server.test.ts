@@ -3954,6 +3954,47 @@ sleep 30
     await waitUntil(() => terminalText(port).includes('__ORDERED_INPUT__'))
   })
 
+  it('updates a Codex card to interrupted from the observed TUI message and resumes on the next submission', async () => {
+    const executable = join(root, 'codex-interrupt-fixture.sh')
+    await writeFile(executable, [
+      '#!/bin/sh',
+      "printf 'CODEX_INTERRUPT_READY\\n'",
+      'while IFS= read -r line; do',
+      '  case "$line" in',
+      "    interrupt) printf '\\nConversation interrupted\\n' ;;",
+      "    next) printf 'CODEX_NEXT_ATTEMPT\\n' ;;",
+      '  esac',
+      'done',
+      ''
+    ].join('\n'))
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CODEX_COMMAND
+    process.env.MATOU_CODEX_COMMAND = executable
+    try {
+      registerCanvasSession(database, 'codex-interruption', 'codex')
+      port.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'codex-interruption', executionContextId: 'replay-context',
+        profile: 'codex', cols: 80, rows: 24
+      })
+      await waitUntil(() => terminalText(port).includes('CODEX_INTERRUPT_READY'))
+      port.receive({
+        type: 'terminal.input', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'codex-interruption', data: 'interrupt\r'
+      })
+      await waitUntil(() => workStatus('codex-interruption') === 'interrupted')
+      port.receive({
+        type: 'terminal.input', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'codex-interruption', data: 'next\r'
+      })
+      await waitUntil(() => terminalText(port).includes('CODEX_NEXT_ATTEMPT'))
+      expect(workStatus('codex-interruption')).toBe('running')
+      expect(port.sent.filter((message) => message.type === 'protocol.error')).toEqual([])
+    } finally {
+      restoreEnv('MATOU_CODEX_COMMAND', previousCommand)
+    }
+  })
+
   it('tracks real Shell commands as running, idle, error, and interrupted work', async () => {
     const previousShell = process.env.SHELL
     process.env.SHELL = '/bin/zsh'
