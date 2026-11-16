@@ -64,6 +64,9 @@
         "zip"
       ],
       "category": "public.app-category.developer-tools",
+      "type": "distribution",
+      "identity": "Lu'an Yidayi Electronic Commerce Co.,Ltd. (JAKX72KQ6X)",
+      "forceCodeSigning": true,
       "hardenedRuntime": true,
       "gatekeeperAssess": false,
       "entitlements": "build/entitlements.mac.plist",
