@@ -6,10 +6,13 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::history_view::{HistoryView, HistoryViewEvent, HistoryViewState};
 use gpui::{prelude::*, *};
 use matou_native_core::geometry::GeometryUpdate;
 use matou_native_core::hierarchy::{HierarchyResult, Scene, Task, Workspace as HierarchyWorkspace};
 use matou_native_core::workspace_paths::WorkspacePathState;
+use matou_native_runtime::history::{HistoryCursor, HistoryLine, HistorySearchOptions};
+use matou_native_runtime::history_worker::{HistoryReply, HistoryRequest};
 use serde_json::Value;
 
 use crate::{
@@ -121,6 +124,17 @@ const CONTROLS: &[&str] = &[
     "account",
 ];
 
+struct ArchivedMatches {
+    query: String,
+    options: matou_native_terminal::SearchOptions,
+    sequence: u64,
+    index: usize,
+    matches: Vec<HistoryLine>,
+    gap_count: usize,
+    has_more: bool,
+    show_summary: bool,
+}
+
 struct TerminalSearchState {
     input: Entity<RenameInput>,
     controls: [FocusHandle; 6],
@@ -131,9 +145,24 @@ struct TerminalSearchState {
     session_id: Option<String>,
     result: Option<matou_native_runtime::search::SearchResult>,
     error: Option<String>,
+    previous: bool,
+    archive: Option<ArchivedMatches>,
+    archive_pending: Option<u64>,
+    archive_count: Option<(usize, usize)>,
+    dismissed_sequence: Option<u64>,
+}
+
+struct HistoryContextRequest {
+    session_id: String,
+    sequence: u64,
+    cursor: HistoryCursor,
+    result_index: usize,
+    result_count: usize,
 }
 
 pub struct Workspace {
+    history_view: Option<Entity<HistoryView>>,
+    history_request: Option<HistoryContextRequest>,
     search: Option<TerminalSearchState>,
     commands: Sender<Command>,
     hierarchy: Option<HierarchyResult>,
@@ -217,6 +246,325 @@ pub struct Workspace {
 }
 
 impl Workspace {
+    fn apply_search_results(
+        &mut self,
+        session_id: String,
+        sequence: u64,
+        result: Result<matou_native_runtime::search::SearchResult, String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(search) = self.search.as_mut().filter(|search| {
+            search.open
+                && search.sequence == sequence
+                && search.session_id.as_ref() == Some(&session_id)
+        }) else {
+            return;
+        };
+        if self
+            .history_request
+            .as_ref()
+            .is_some_and(|request| request.session_id == session_id && request.sequence == sequence)
+        {
+            return;
+        }
+        search.archive_count = None;
+        match result {
+            Ok(result) => {
+                if let Some(terminal) = self.terminals.get(&session_id) {
+                    terminal.update(cx, |terminal, cx| {
+                        terminal.set_search(Some(result.clone()), cx)
+                    });
+                }
+                let live = !result.matches.is_empty() || search.query.is_empty();
+                search.result = Some(result);
+                search.error = None;
+                if live {
+                    search.archive = None;
+                    search.archive_pending = None;
+                    self.history_request = None;
+                } else if search.archive.as_ref().is_some_and(|archive| {
+                    archive.query == search.query
+                        && archive.options == search.options
+                        && !archive.matches.is_empty()
+                }) {
+                    let archive = search.archive.as_mut().unwrap();
+                    if archive.sequence != sequence {
+                        archive.index = if search.previous {
+                            (archive.index + archive.matches.len() - 1) % archive.matches.len()
+                        } else {
+                            (archive.index + 1) % archive.matches.len()
+                        };
+                        archive.sequence = sequence;
+                    }
+                    self.open_history_context(window, cx);
+                } else if search.archive_pending != Some(sequence) {
+                    search.archive_pending = Some(sequence);
+                    let options = HistorySearchOptions {
+                        case_sensitive: search.options.case_sensitive,
+                        regex: search.options.regex,
+                        whole_word: search.options.whole_word,
+                    };
+                    let query = search.query.clone();
+                    self.send(
+                        Command::History(HistoryRequest::Search {
+                            session_id,
+                            sequence,
+                            query,
+                            options,
+                        }),
+                        cx,
+                    );
+                }
+            }
+            Err(error) => {
+                search.result = None;
+                search.archive = None;
+                search.archive_pending = None;
+                self.history_request = None;
+                search.error = Some(
+                    if error.contains("invalid terminal search regular expression") {
+                        "正则表达式无效".into()
+                    } else {
+                        error
+                    },
+                );
+                if let Some(terminal) = self.terminals.get(&session_id) {
+                    terminal.update(cx, |terminal, cx| terminal.set_search(None, cx));
+                }
+            }
+        }
+        self.sync_terminal_input(window, cx);
+    }
+
+    fn open_history_context(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(search) = self.search.as_mut().filter(|search| search.open) else {
+            return;
+        };
+        let Some(archive) = &mut search.archive else {
+            return;
+        };
+        archive.show_summary = true;
+        search.archive_count = Some((archive.index, archive.matches.len()));
+        if search.dismissed_sequence == Some(search.sequence) {
+            return;
+        }
+        let Some(matched) = archive.matches.get(archive.index) else {
+            return;
+        };
+        let Some(session_id) = search.session_id.clone() else {
+            return;
+        };
+        let context = HistoryContextRequest {
+            session_id,
+            sequence: search.sequence,
+            cursor: matched.cursor,
+            result_index: archive.index,
+            result_count: archive.matches.len(),
+        };
+        let state = HistoryViewState::Loading {
+            result_index: context.result_index,
+            result_count: context.result_count,
+            gap_count: archive.gap_count,
+        };
+        if self.history_view.is_none() {
+            let view = cx.new(HistoryView::new);
+            self.subscriptions.push(cx.subscribe_in(
+                &view,
+                window,
+                |this, _, event, window, cx| match event {
+                    HistoryViewEvent::ReturnToLive => this.exit_history(window, cx),
+                },
+            ));
+            self.history_view = Some(view);
+        }
+        self.history_view
+            .as_ref()
+            .unwrap()
+            .update(cx, |view, cx| view.set_state(state, cx));
+        let command = HistoryRequest::Context {
+            session_id: context.session_id.clone(),
+            sequence: context.sequence,
+            cursor: context.cursor,
+        };
+        self.history_request = Some(context);
+        self.sync_terminal_input(window, cx);
+        self.send(Command::History(command), cx);
+    }
+
+    fn apply_history(&mut self, reply: HistoryReply, window: &mut Window, cx: &mut Context<Self>) {
+        match reply {
+            HistoryReply::Search {
+                session_id,
+                sequence,
+                result,
+            } => {
+                let Some(search) = self.search.as_mut().filter(|search| {
+                    search.open
+                        && search.sequence == sequence
+                        && search.session_id.as_ref() == Some(&session_id)
+                        && search.archive_pending == Some(sequence)
+                }) else {
+                    return;
+                };
+                search.archive_pending = None;
+                match result {
+                    Ok(result) => {
+                        let mut matches = result.matches;
+                        matches.reverse();
+                        let index = if search.previous {
+                            matches.len().saturating_sub(1)
+                        } else {
+                            0
+                        };
+                        search.archive = Some(ArchivedMatches {
+                            query: search.query.clone(),
+                            options: search.options,
+                            sequence,
+                            index,
+                            matches,
+                            gap_count: result.gaps.len(),
+                            has_more: result.has_more,
+                            show_summary: true,
+                        });
+                        self.open_history_context(window, cx);
+                    }
+                    Err(_) => {
+                        // Frozen archive RPC failures quietly return to the live view.
+                        self.history_request = None;
+                        if let Some(archive) = &mut search.archive {
+                            archive.show_summary = false;
+                        }
+                    }
+                }
+            }
+            HistoryReply::Context {
+                session_id,
+                sequence,
+                cursor,
+                result,
+            } => {
+                // A later query with zero matches leaves the current panel
+                // open, including any pending read for that panel.
+                let Some(context) = self.history_request.as_ref().filter(|request| {
+                    request.session_id == session_id
+                        && request.sequence == sequence
+                        && request.cursor == cursor
+                }) else {
+                    return;
+                };
+                match result {
+                    Ok(page)
+                        if page
+                            .anchor_index
+                            .and_then(|index| page.lines.get(index))
+                            .is_some_and(|line| line.cursor == cursor) =>
+                    {
+                        let state = HistoryViewState::Ready {
+                            result_index: context.result_index,
+                            result_count: context.result_count,
+                            page,
+                        };
+                        if let Some(view) = &self.history_view {
+                            view.update(cx, |view, cx| view.set_state(state, cx));
+                        }
+                    }
+                    _ => {
+                        self.history_request = None;
+                    }
+                }
+            }
+        }
+        self.sync_terminal_input(window, cx);
+        cx.notify();
+    }
+
+    fn exit_history(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.history_request = None;
+        if let Some(search) = self.search.as_mut() {
+            search.dismissed_sequence = Some(search.sequence);
+            if let Some(archive) = &mut search.archive {
+                archive.show_summary = false;
+            }
+        }
+        self.sync_terminal_input(window, cx);
+        if let Some(terminal) = self.focused.as_ref().and_then(|id| self.terminals.get(id)) {
+            window.focus(&terminal.read(cx).focus);
+        }
+        cx.notify();
+    }
+
+    fn archive_summary(&self, session_id: &str) -> Option<Div> {
+        let search = self
+            .search
+            .as_ref()
+            .filter(|search| search.open && search.session_id.as_deref() == Some(session_id))?;
+        let archive = search
+            .archive
+            .as_ref()
+            .filter(|a| a.show_summary && (!a.matches.is_empty() || a.gap_count > 0))?;
+        if self
+            .history_request
+            .as_ref()
+            .is_some_and(|request| request.session_id == session_id)
+        {
+            return None;
+        }
+        let text = archive
+            .matches
+            .get(archive.index)
+            .map_or("该范围存在不可读的历史片段", |line| {
+                line.text.as_str()
+            });
+        let meta = format!(
+            "{}/{}{}{}",
+            archive.index + 1,
+            archive.matches.len(),
+            if archive.has_more { "+" } else { "" },
+            if archive.gap_count > 0 {
+                format!(" · {} 处历史缺口", archive.gap_count)
+            } else {
+                String::new()
+            }
+        );
+        Some(
+            div()
+                .absolute()
+                .right(px(12.))
+                .bottom(px(10.))
+                .max_w(px(720.))
+                .left(px(12.))
+                .px(px(10.))
+                .py(px(7.))
+                .border_1()
+                .border_color(rgba(0x30384826))
+                .rounded(px(7.))
+                .bg(rgba(0xfffffff5))
+                .text_color(rgb(0x303848))
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .font_family("SFMono-Regular")
+                .text_size(px(11.))
+                .child(
+                    div()
+                        .flex_none()
+                        .text_color(rgb(0xff9a3d))
+                        .child("归档历史"),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .whitespace_nowrap()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .child(text.to_owned()),
+                )
+                .child(div().flex_none().text_color(rgb(0x8d95a7)).child(meta)),
+        )
+    }
+
     fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.focused.is_none() {
             return;
@@ -252,6 +600,11 @@ impl Workspace {
                 session_id: None,
                 result: None,
                 error: None,
+                previous: false,
+                archive: None,
+                archive_pending: None,
+                archive_count: None,
+                dismissed_sequence: None,
             });
         }
         let search = self.search.as_mut().unwrap();
@@ -277,10 +630,20 @@ impl Workspace {
                 }
             }
             search.result = None;
+            search.archive = None;
+            search.archive_pending = None;
+            self.history_request = None;
+        }
+        if search.query.is_empty() {
+            self.history_request = None;
         }
         search.session_id = Some(session_id.clone());
         search.sequence += 1;
+        search.previous = previous;
         search.error = None;
+        if let Some(archive) = &mut search.archive {
+            archive.show_summary = false;
+        }
         let request = matou_native_runtime::search::SearchRequest {
             sequence: search.sequence,
             query: search.query.clone(),
@@ -298,7 +661,11 @@ impl Workspace {
     }
 
     fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.history_request = None;
         if let Some(search) = self.search.as_mut() {
+            search.archive = None;
+            search.archive_pending = None;
+            search.archive_count = None;
             search.open = false;
             search.query.clear();
             search.sequence += 1;
@@ -313,6 +680,7 @@ impl Workspace {
                 }
             }
         }
+        self.sync_terminal_input(window, cx);
         if let Some(terminal) = self.focused.as_ref().and_then(|id| self.terminals.get(id)) {
             window.focus(&terminal.read(cx).focus);
         }
@@ -327,6 +695,10 @@ impl Workspace {
     ) -> bool {
         if self.dialog.is_some() {
             return false;
+        }
+        if stroke.key == "escape" && self.history_request.is_some() {
+            self.exit_history(window, cx);
+            return true;
         }
         let m = stroke.modifiers;
         let command = if cfg!(target_os = "macos") {
@@ -377,9 +749,19 @@ impl Workspace {
             error.clone()
         } else if search.input.read(cx).text.is_empty() {
             String::new()
+        } else if let Some((index, count)) = search.archive_count {
+            if count == 0 {
+                "0/0".into()
+            } else {
+                format!("{}/{}", index + 1, count)
+            }
         } else {
             search.result.as_ref().map_or("0/0".into(), |r| {
-                format!("{}/{}", r.result_index + 1, r.matches.len())
+                if r.matches.is_empty() {
+                    "0/0".into()
+                } else {
+                    format!("{}/{}", r.result_index + 1, r.matches.len())
+                }
             })
         };
         let mut bar = div()
@@ -488,6 +870,8 @@ impl Workspace {
             }
         });
         Self {
+            history_view: None,
+            history_request: None,
             search: None,
             commands,
             hierarchy: None,
@@ -1005,41 +1389,13 @@ impl Workspace {
                     cx.write_to_clipboard(ClipboardItem::new_string(text));
                 }
             }
+            Event::History(reply) => self.apply_history(reply, window, cx),
             Event::SearchResults {
                 session_id,
                 sequence,
                 result,
             } => {
-                if let Some(search) = self.search.as_mut().filter(|search| {
-                    search.open
-                        && search.sequence == sequence
-                        && search.session_id.as_ref() == Some(&session_id)
-                }) {
-                    match result {
-                        Ok(result) => {
-                            if let Some(terminal) = self.terminals.get(&session_id) {
-                                terminal.update(cx, |terminal, cx| {
-                                    terminal.set_search(Some(result.clone()), cx)
-                                });
-                            }
-                            search.result = Some(result);
-                            search.error = None;
-                        }
-                        Err(error) => {
-                            search.result = None;
-                            search.error = Some(
-                                if error.contains("invalid terminal search regular expression") {
-                                    "正则表达式无效".into()
-                                } else {
-                                    error
-                                },
-                            );
-                            if let Some(terminal) = self.terminals.get(&session_id) {
-                                terminal.update(cx, |terminal, cx| terminal.set_search(None, cx));
-                            }
-                        }
-                    }
-                }
+                self.apply_search_results(session_id, sequence, result, window, cx);
             }
             Event::Copied { request_id, text } => {
                 if request_id == self.copy_request_id && !text.is_empty() {
@@ -1547,7 +1903,12 @@ impl Workspace {
             window.blur();
         }
         for (id, terminal) in &self.terminals {
-            let disabled = disabled || self.recovery_blocked(id);
+            let disabled = disabled
+                || self.recovery_blocked(id)
+                || self
+                    .history_request
+                    .as_ref()
+                    .is_some_and(|request| request.session_id == *id);
             terminal.update(cx, |terminal, cx| {
                 terminal.set_input_disabled(disabled, cx);
             });
@@ -4288,7 +4649,22 @@ impl Render for Workspace {
                         .pl(px(14.))
                         .pr(px(28.))
                         .py(px(12.))
-                        .child(terminal.clone()),
+                        .relative()
+                        .child(terminal.clone())
+                        .when(
+                            self.history_request
+                                .as_ref()
+                                .is_some_and(|request| request.session_id == *id),
+                            |body| {
+                                body.child(
+                                    div()
+                                        .absolute()
+                                        .inset_0()
+                                        .child(self.history_view.as_ref().unwrap().clone()),
+                                )
+                            },
+                        )
+                        .children(self.archive_summary(id)),
                 )
             };
             #[cfg(debug_assertions)]

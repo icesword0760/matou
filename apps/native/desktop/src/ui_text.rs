@@ -1,6 +1,6 @@
+use std::{cell::RefCell, rc::Rc, sync::Arc};
+
 use gpui::{prelude::*, *};
-#[cfg(target_os = "macos")]
-use std::{cell::RefCell, rc::Rc};
 #[cfg(target_os = "macos")]
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -12,6 +12,7 @@ pub struct UiText {
     normal_line_height: bool,
     #[cfg(target_os = "macos")]
     pre_line: bool,
+    geometry: Option<TextGeometryHandle>,
 }
 
 pub fn ui_text(text: impl Into<SharedString>) -> UiText {
@@ -21,10 +22,16 @@ pub fn ui_text(text: impl Into<SharedString>) -> UiText {
         normal_line_height: false,
         #[cfg(target_os = "macos")]
         pre_line: false,
+        geometry: None,
     }
 }
 
 impl UiText {
+    pub(crate) fn track_geometry(mut self, geometry: TextGeometryHandle) -> Self {
+        self.geometry = Some(geometry);
+        self
+    }
+
     /// Use the font-dependent line height for a Mac single-line label.
     pub fn normal_line_height(self) -> Self {
         #[cfg(target_os = "macos")]
@@ -66,21 +73,113 @@ impl RenderOnce for UiText {
             if (fonts.style.white_space == WhiteSpace::Nowrap || fonts.style.line_clamp == Some(1))
                 && !self.text.contains('\n')
             {
-                return SingleLineText(Rc::new(SingleLineLabel {
-                    text: self.text,
-                    fonts,
-                    runs,
-                    normal_line_height: self.normal_line_height,
-                }))
+                return SingleLineText {
+                    label: Rc::new(SingleLineLabel {
+                        text: self.text,
+                        fonts,
+                        runs,
+                        normal_line_height: self.normal_line_height,
+                    }),
+                    geometry: self.geometry,
+                }
                 .into_any();
             }
-            StyledText::new(self.text).with_runs(runs).into_any()
+            into_text_element(StyledText::new(self.text).with_runs(runs), self.geometry)
         }
         #[cfg(not(target_os = "macos"))]
         {
             let _ = window;
-            StyledText::new(self.text)
+            into_text_element(StyledText::new(self.text), self.geometry)
         }
+    }
+}
+
+pub(crate) type TextGeometryHandle = Rc<RefCell<Option<TextGeometry>>>;
+
+pub(crate) struct TextGeometry {
+    pub(crate) bounds: Bounds<Pixels>,
+    pub(crate) layout: Arc<LineLayout>,
+}
+
+pub(crate) fn into_text_element(
+    text: StyledText,
+    geometry: Option<TextGeometryHandle>,
+) -> AnyElement {
+    match geometry {
+        Some(geometry) => TrackedStyledText { text, geometry }.into_any_element(),
+        None => text.into_any_element(),
+    }
+}
+
+struct TrackedStyledText {
+    text: StyledText,
+    geometry: TextGeometryHandle,
+}
+
+impl IntoElement for TrackedStyledText {
+    type Element = Self;
+
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl Element for TrackedStyledText {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        id: Option<&GlobalElementId>,
+        inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, ()) {
+        self.text.request_layout(id, inspector_id, window, cx)
+    }
+
+    fn prepaint(
+        &mut self,
+        id: Option<&GlobalElementId>,
+        inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        state: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.text
+            .prepaint(id, inspector_id, bounds, state, window, cx);
+        let geometry = self
+            .text
+            .layout()
+            .line_layout_for_index(0)
+            .map(|line| TextGeometry {
+                bounds,
+                layout: line.unwrapped_layout.clone(),
+            });
+        self.geometry.replace(geometry);
+    }
+
+    fn paint(
+        &mut self,
+        id: Option<&GlobalElementId>,
+        inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        state: &mut (),
+        prepaint: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.text
+            .paint(id, inspector_id, bounds, state, prepaint, window, cx);
     }
 }
 
@@ -290,7 +389,10 @@ struct MeasuredLine {
 }
 
 #[cfg(target_os = "macos")]
-struct SingleLineText(Rc<SingleLineLabel>);
+struct SingleLineText {
+    label: Rc<SingleLineLabel>,
+    geometry: Option<TextGeometryHandle>,
+}
 
 #[cfg(target_os = "macos")]
 impl IntoElement for SingleLineText {
@@ -324,7 +426,7 @@ impl Element for SingleLineText {
         let measured = Rc::new(RefCell::new(None));
         let layout_id = window.request_measured_layout(Style::default(), {
             let measured = measured.clone();
-            let label = self.0.clone();
+            let label = self.label.clone();
             move |known, available, window, _| {
                 let limit = known.width.or(match available.width {
                     AvailableSpace::Definite(width) => Some(width),
@@ -353,12 +455,17 @@ impl Element for SingleLineText {
         _: &mut App,
     ) -> Self::PrepaintState {
         let width = bounds.size.width;
-        if let Some(result) = measured.take()
-            && result.limit == Some(width)
-        {
-            return result;
+        let result = measured
+            .take()
+            .filter(|result| result.limit == Some(width))
+            .unwrap_or_else(|| self.label.measure(Some(width), window));
+        if let Some(geometry) = &self.geometry {
+            geometry.replace(result.line.as_ref().map(|line| TextGeometry {
+                bounds,
+                layout: line.unwrapped_layout.clone(),
+            }));
         }
-        self.0.measure(Some(width), window)
+        result
     }
 
     fn paint(
@@ -372,7 +479,7 @@ impl Element for SingleLineText {
         cx: &mut App,
     ) {
         if let Some(line) = &measured.line {
-            let align = self.0.fonts.style.text_align;
+            let align = self.label.fonts.style.text_align;
             let metrics = &measured.metrics;
             if let Err(error) = line.paint_background(
                 bounds.origin,
