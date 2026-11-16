@@ -2734,6 +2734,7 @@ name = "matou-native-runtime"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-channel 2.5.0",
  "encoding_rs",
  "matou-native-core",
  "matou-native-terminal",
@@ -2745,6 +2746,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "url",
+ "uuid",
 ]
 
 [[package]]
