@@ -282,7 +282,7 @@ impl Workspace {
                 if live {
                     search.archive = None;
                     search.archive_pending = None;
-                    self.history_request = None;
+                    self.dismiss_history_context(cx);
                 } else if search.archive.as_ref().is_some_and(|archive| {
                     archive.query == search.query
                         && archive.options == search.options
@@ -321,7 +321,6 @@ impl Workspace {
                 search.result = None;
                 search.archive = None;
                 search.archive_pending = None;
-                self.history_request = None;
                 search.error = Some(
                     if error.contains("invalid terminal search regular expression") {
                         "正则表达式无效".into()
@@ -329,6 +328,7 @@ impl Workspace {
                         error
                     },
                 );
+                self.dismiss_history_context(cx);
                 if let Some(terminal) = self.terminals.get(&session_id) {
                     terminal.update(cx, |terminal, cx| terminal.set_search(None, cx));
                 }
@@ -431,10 +431,10 @@ impl Workspace {
                     }
                     Err(_) => {
                         // Frozen archive RPC failures quietly return to the live view.
-                        self.history_request = None;
                         if let Some(archive) = &mut search.archive {
                             archive.show_summary = false;
                         }
+                        self.dismiss_history_context(cx);
                     }
                 }
             }
@@ -470,7 +470,7 @@ impl Workspace {
                         }
                     }
                     _ => {
-                        self.history_request = None;
+                        self.dismiss_history_context(cx);
                     }
                 }
             }
@@ -479,8 +479,15 @@ impl Workspace {
         cx.notify();
     }
 
-    fn exit_history(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn dismiss_history_context(&mut self, cx: &mut Context<Self>) {
         self.history_request = None;
+        if let Some(view) = &self.history_view {
+            view.update(cx, |view, _| view.stop_drag());
+        }
+    }
+
+    fn exit_history(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.dismiss_history_context(cx);
         if let Some(search) = self.search.as_mut() {
             search.dismissed_sequence = Some(search.sequence);
             if let Some(archive) = &mut search.archive {
@@ -614,12 +621,16 @@ impl Workspace {
     }
 
     fn run_search(&mut self, previous: bool, cx: &mut Context<Self>) {
+        let Some(session_id) = self.focused.clone() else {
+            if let Some(view) = &self.history_view {
+                view.update(cx, |view, _| view.stop_drag());
+            }
+            return;
+        };
         let Some(search) = self.search.as_mut().filter(|search| search.open) else {
             return;
         };
-        let Some(session_id) = self.focused.clone() else {
-            return;
-        };
+        let dismiss = search.session_id.as_ref() != Some(&session_id) || search.query.is_empty();
         if search.session_id.as_ref() != Some(&session_id) {
             if let Some(old) = search.session_id.take() {
                 let _ = self.commands.send(Command::ClearSearch {
@@ -632,10 +643,6 @@ impl Workspace {
             search.result = None;
             search.archive = None;
             search.archive_pending = None;
-            self.history_request = None;
-        }
-        if search.query.is_empty() {
-            self.history_request = None;
         }
         search.session_id = Some(session_id.clone());
         search.sequence += 1;
@@ -650,6 +657,9 @@ impl Workspace {
             options: search.options,
             previous,
         };
+        if dismiss {
+            self.dismiss_history_context(cx);
+        }
         self.send(
             Command::Search {
                 session_id,
@@ -661,7 +671,7 @@ impl Workspace {
     }
 
     fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.history_request = None;
+        self.dismiss_history_context(cx);
         if let Some(search) = self.search.as_mut() {
             search.archive = None;
             search.archive_pending = None;
@@ -1278,6 +1288,13 @@ impl Workspace {
                 }
             }
             Event::ScenesDisposed(ids) => {
+                if self
+                    .history_request
+                    .as_ref()
+                    .is_some_and(|request| ids.contains(&request.session_id))
+                {
+                    self.dismiss_history_context(cx);
+                }
                 for id in ids {
                     self.terminals.remove(&id);
                     self.recovery.remove(&id);
@@ -1894,6 +1911,15 @@ impl Workspace {
 
     fn sync_terminal_input(&self, window: &mut Window, cx: &mut Context<Self>) {
         let disabled = !self.active_path_valid();
+        if self.history_request.as_ref().is_some_and(|request| {
+            disabled
+                || self.recovery_blocked(&request.session_id)
+                || self.focused.as_ref() != Some(&request.session_id)
+        }) {
+            if let Some(view) = &self.history_view {
+                view.update(cx, |view, _| view.stop_drag());
+            }
+        }
         // A removed recovery button no longer owns focus in the source DOM.
         if self
             .workspace_controls
