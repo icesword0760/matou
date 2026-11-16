@@ -15,7 +15,7 @@ mod probe {
     use std::{cell::RefCell, rc::Rc};
 
     use gpui::{
-        AnyWindowHandle, AppContext as _, Application, MouseDownEvent, MouseMoveEvent,
+        AnyWindowHandle, AppContext as _, Application, Keystroke, MouseDownEvent, MouseMoveEvent,
         MouseUpEvent, ScrollDelta, WindowBounds, WindowHandle, WindowOptions,
     };
     use matou_native_desktop::assets::NativeAssets;
@@ -295,6 +295,134 @@ mod probe {
         println!(
             "The response to drag request {} arrives after padding release, updates the viewport to row {}, and leaves the hide/fade state intact.",
             drag.request_id, drag.row
+        );
+
+        verify_ime(window, cx, &events, bottom, &mut terminal, latest_raw)?;
+        Ok(())
+    }
+
+    fn verify_ime(
+        window: WindowHandle<TerminalSurface>,
+        cx: &mut App,
+        events: &RefCell<Vec<Observed>>,
+        bottom: Screen,
+        terminal: &mut Terminal,
+        scroll_pixels: f64,
+    ) -> anyhow::Result<()> {
+        let history = terminal.screen()?;
+        let modes = terminal.input_modes()?;
+        assert!(bottom.cursor_has_position);
+        assert!(!history.cursor_has_position);
+        let key = KeyDownEvent {
+            keystroke: Keystroke::parse("backspace")?,
+            is_held: false,
+        };
+
+        window.update(cx, |view, _, cx| {
+            view.set_screen(bottom.clone(), modes, None, view.scroll_request_id, cx);
+        })?;
+        draw(window, cx);
+        let caret = window.update(cx, |view, _, cx| {
+            let caret = view.caret.expect("painted live cursor");
+            assert!(caret.top() > view.grid.unwrap().bounds.top());
+            view.set_screen(history.clone(), modes, None, view.scroll_request_id, cx);
+            caret
+        })?;
+        draw(window, cx);
+        events.borrow_mut().clear();
+        window.update(cx, |view, window, cx| {
+            view.replace_and_mark_text_in_range(None, "a", Some(1..1), window, cx);
+            assert_eq!(view.marked_text_range(window, cx), Some(0..1));
+        })?;
+        assert_eq!(events.take(), [Observed::Lines(i32::MIN)]);
+        draw(window, cx);
+        window.update(cx, |view, window, cx| {
+            assert_eq!(view.caret, Some(caret));
+            let marked = view.bounds_for_range(0..1, caret, window, cx).unwrap();
+            assert_eq!(marked.origin, caret.origin);
+            // Model an acknowledged return to live, then another wheel scroll
+            // before the composition has finished.
+            view.set_screen(bottom.clone(), modes, None, view.scroll_request_id, cx);
+            view.set_screen(history.clone(), modes, None, view.scroll_request_id, cx);
+            view.handle_key(&key, cx);
+        })?;
+        assert_eq!(events.take(), [Observed::Lines(i32::MIN)]);
+        println!(
+            "Marking text and then typing during a second scrollback visit request only the live position; the last valid candidate anchor is preserved."
+        );
+
+        window.update(cx, |view, window, cx| {
+            view.unmark_text(window, cx);
+            assert_eq!(view.marked_text_range(window, cx), None);
+        })?;
+        assert!(events.take().is_empty());
+        println!("Cancelling preedit never writes to the terminal.");
+
+        terminal.scroll(-100)?;
+        terminal.feed(b"\x1b[4C");
+        let returned = terminal.screen()?;
+        assert_eq!(returned.scrollbar.offset, bottom.scrollbar.offset);
+        assert_ne!(returned.cursor_col, bottom.cursor_col);
+        window.update(cx, |view, window, cx| {
+            view.replace_and_mark_text_in_range(None, "ni", Some(2..2), window, cx);
+            view.set_screen(returned, modes, None, view.scroll_request_id, cx);
+        })?;
+        assert_eq!(events.take(), [Observed::Lines(i32::MIN)]);
+        draw(window, cx);
+        window.update(cx, |view, window, cx| {
+            let live_caret = view.caret.expect("repainted live cursor");
+            assert_eq!(live_caret.left(), caret.left() + view.metrics.width * 4.);
+            assert_eq!(live_caret.top(), caret.top());
+            assert!(view.composition.is_active());
+            let mark = view.bounds_for_range(0..2, live_caret, window, cx).unwrap();
+            assert_eq!(mark.origin, live_caret.origin);
+            view.replace_text_in_range(None, "你", window, cx);
+            view.unmark_text(window, cx);
+            assert!(!view.composition.is_active());
+        })?;
+        assert_eq!(events.take(), [Observed::Input("你".as_bytes().to_vec())]);
+        println!(
+            "After repainting the returned live cursor, committing preedit emits the chosen UTF-8 bytes exactly once."
+        );
+
+        let pending = window.update(cx, |view, window, cx| {
+            view.scroll_to_pixels(scroll_pixels, cx);
+            let pending = view
+                .scrollbar_position
+                .expect("an unacknowledged absolute scroll");
+            assert_eq!(
+                view.screen.as_ref().unwrap().scrollbar.offset,
+                bottom.scrollbar.offset
+            );
+            view.replace_and_mark_text_in_range(None, "a", Some(1..1), window, cx);
+            assert!(view.scrollbar_position.is_none());
+            view.unmark_text(window, cx);
+            pending
+        })?;
+        assert_eq!(
+            events.take(),
+            [
+                Observed::Absolute(pending.row, pending.request_id),
+                Observed::Lines(i32::MIN)
+            ]
+        );
+        println!(
+            "Preedit follows a pending history jump with a return-to-live command even while the displayed frame is already at the bottom."
+        );
+
+        window.update(cx, |view, window, cx| {
+            view.set_screen(history, modes, None, view.scroll_request_id, cx);
+            view.set_input_disabled(true, cx);
+            view.replace_and_mark_text_in_range(None, "a", Some(1..1), window, cx);
+            assert!(view.marked_text_range(window, cx).is_none());
+            view.handle_key(&key, cx);
+            view.replace_text_in_range(None, "字", window, cx);
+            assert!(!view.composition.is_active());
+            view.set_input_disabled(false, cx);
+        })?;
+        assert!(events.take().is_empty());
+        println!(
+            "Disabled input ignores marking, normal keys, and commits without scrolling or sending bytes."
         );
         Ok(())
     }
