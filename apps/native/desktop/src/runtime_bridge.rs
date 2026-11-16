@@ -28,6 +28,7 @@ use matou_native_core::{
 };
 use matou_native_runtime::{
     SessionEvent, SessionOptions,
+    history_worker::{HistoryReply, HistoryRequest, HistoryWorker},
     owner::{OwnerEvent, ShellOwner},
     search::{SearchRequest, SearchResult},
     worker::{SelectionCopy, WorkerCommand},
@@ -50,6 +51,7 @@ pub struct LaunchOptions {
 }
 
 pub enum Command {
+    History(HistoryRequest),
     Search {
         session_id: String,
         request: SearchRequest,
@@ -194,6 +196,7 @@ pub enum RecoveryState {
 }
 
 pub enum Event {
+    History(HistoryReply),
     SearchResults {
         session_id: String,
         sequence: u64,
@@ -344,6 +347,7 @@ fn run(
 ) -> Result<()> {
     std::fs::create_dir_all(&options.workspace)?;
     std::fs::create_dir_all(&options.shell_home)?;
+    let history = HistoryWorker::new(options.data_root.clone())?;
     let generation = id();
     let (mut connection, ownership) = match startup::open(&options.data_root, &generation)? {
         BootstrapResult::Writable {
@@ -913,6 +917,10 @@ fn run(
                         true,
                     )
                 }
+                Command::History(request) => {
+                    history.send(request)?;
+                    continue;
+                }
                 Command::Search {
                     session_id,
                     request,
@@ -1173,6 +1181,9 @@ fn run(
                     }
                 }
             }
+        }
+        while let Some(reply) = history.try_recv()? {
+            send.send_blocking(Event::History(reply))?;
         }
         searches.retain(|(session_id, sequence, receive)| {
             let result = match receive.try_recv() {

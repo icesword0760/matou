@@ -1,6 +1,7 @@
 pub mod derived;
 pub mod flow;
 pub mod history;
+pub mod history_worker;
 mod model;
 pub mod owner;
 pub mod search;

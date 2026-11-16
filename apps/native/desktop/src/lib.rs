@@ -15,3 +15,5 @@ pub mod sidebar_scrollbar;
 pub mod workspace_drag;
 
 pub mod ui_text;
+
+pub mod history_view;
