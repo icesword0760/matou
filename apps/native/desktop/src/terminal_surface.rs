@@ -337,15 +337,22 @@ impl TerminalSurface {
         if self.input_disabled || bytes.is_empty() {
             return;
         }
-        // A drag may already be queued while the last painted frame still
-        // shows the bottom. Keep the return-to-live command after that drag.
-        let pending_scroll = self.scrollbar_position.is_some();
         self.selection_drag = None;
-        self.scrollbar_position = None;
-        self.scrollbar_drag = None;
         self.stop_drag();
         self.reset_blink();
-        // Frozen CoreService scrollOnUserInput also applies to typing and paste.
+        self.scroll_on_input(cx);
+        cx.emit(SurfaceEvent::Input(bytes));
+        cx.notify();
+    }
+
+    fn scroll_on_input(&mut self, cx: &mut Context<Self>) {
+        if self.input_disabled {
+            return;
+        }
+        // An absolute scroll can be queued while the last frame still shows
+        // the bottom. Place the return-to-live command after it.
+        let pending_scroll = self.scrollbar_position.take().is_some();
+        self.scrollbar_drag = None;
         if pending_scroll
             || self
                 .screen
@@ -354,8 +361,6 @@ impl TerminalSurface {
         {
             cx.emit(SurfaceEvent::Scroll(i32::MIN));
         }
-        cx.emit(SurfaceEvent::Input(bytes));
-        cx.notify();
     }
 
     fn reset_blink(&mut self) {
@@ -386,6 +391,7 @@ impl TerminalSurface {
 
     fn handle_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
         if self.composition.is_active() {
+            self.scroll_on_input(cx);
             cx.stop_propagation();
             return;
         }
@@ -702,7 +708,7 @@ impl TerminalSurface {
             let light = self.theme.background == 0xfcfcfd;
             let mut color: gpui::Hsla = rgba(if light { 0x6872803d } else { 0xffffff38 }).into();
             color.a = (if light { 0.24 } else { 0.22 }) * self.scrollbar_opacity;
-            window.paint_quad(fill(thumb, color).corner_radii(px(999.)));
+            window.paint_quad(fill(thumb, color).corner_radii(px(1.5)));
         }
         // Wait once for the source's 500ms hide deadline rather than keeping
         // the display loop alive after the reveal animation has completed.
@@ -922,22 +928,30 @@ impl TerminalSurface {
             cols,
             rows,
         });
-        let caret = screen
+        let visible_caret = screen
             .filter(|screen| screen.cursor_has_position)
-            .map_or_else(
-                || metrics.cell(bounds.origin, 0, 0, 1),
-                |screen| {
-                    metrics.cell(
-                        bounds.origin,
-                        screen.cursor_col.min(cols.saturating_sub(1)),
-                        screen.cursor_row.min(rows.saturating_sub(1)),
-                        1,
-                    )
-                },
-            );
-        self.caret = Some(caret);
+            .map(|screen| {
+                metrics.cell(
+                    bounds.origin,
+                    screen.cursor_col.min(cols.saturating_sub(1)),
+                    screen.cursor_row.min(rows.saturating_sub(1)),
+                    1,
+                )
+            });
+        if let Some(caret) = visible_caret {
+            self.caret = Some(caret);
+        }
         if !self.input_disabled {
-            window.handle_input(&self.focus, ElementInputHandler::new(caret, entity), cx);
+            // Keep candidate positioning at the last valid cursor while the
+            // render frame is still catching up to the return to live output.
+            let input_bounds = self
+                .caret
+                .unwrap_or_else(|| metrics.cell(bounds.origin, 0, 0, 1));
+            window.handle_input(
+                &self.focus,
+                ElementInputHandler::new(input_bounds, entity),
+                cx,
+            );
         }
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
             if let Some(screen) = screen {
@@ -957,7 +971,10 @@ impl TerminalSurface {
                     cx,
                 );
             }
-            if focused && self.composition.is_active() {
+            if focused
+                && self.composition.is_active()
+                && let Some(caret) = visible_caret
+            {
                 self.paint_composition(caret, window, cx);
             }
         });
@@ -1382,6 +1399,9 @@ impl EntityInputHandler for TerminalSurface {
             return;
         }
         self.composition.replace(range, text, selected);
+        if self.composition.is_active() {
+            self.scroll_on_input(cx);
+        }
         cx.notify();
     }
 
