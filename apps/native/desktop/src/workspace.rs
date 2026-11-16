@@ -583,6 +583,20 @@ impl Workspace {
                 input.search_style = true;
                 input
             });
+            // Focusing the reference search input replaces the document's
+            // text selection. Window deactivation alone preserves that range.
+            let input_focus = input.read(cx).focus.clone();
+            self.subscriptions
+                .push(cx.on_focus(&input_focus, window, |this, _, cx| {
+                    if let Some(view) = &this.history_view {
+                        // Focus listeners run after paint. Notify after that draw
+                        // has ended so clearing the range schedules a new frame.
+                        let view = view.clone();
+                        cx.defer(move |cx| {
+                            view.update(cx, |view, cx| view.clear_selection(cx));
+                        });
+                    }
+                }));
             self.subscriptions.push(cx.subscribe_in(
                 &input,
                 window,

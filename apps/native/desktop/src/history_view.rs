@@ -341,6 +341,13 @@ impl HistoryView {
         self.drag = None;
     }
 
+    pub fn clear_selection(&mut self, cx: &mut Context<Self>) {
+        self.stop_drag();
+        if self.selection.take().is_some() {
+            cx.notify();
+        }
+    }
+
     fn extend_selection(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
         let Some(drag) = self.drag.as_mut() else {
             return;
@@ -451,7 +458,11 @@ impl HistoryView {
         Some(text)
     }
 
-    fn selectable_text(&self, index: usize) -> impl Iterator<Item = AnyElement> + use<> {
+    fn selectable_text(
+        &self,
+        index: usize,
+        selection_background: Rgba,
+    ) -> impl Iterator<Item = AnyElement> + use<> {
         let entry = &self.entries[index];
         let geometry = entry.geometry.clone();
         let continues = self
@@ -490,7 +501,7 @@ impl HistoryView {
                             point(layout.bounds.left() + a.min(b), layout.bounds.top()),
                             size((b - a).abs(), layout.bounds.size.height),
                         );
-                        window.paint_quad(fill(bounds, rgb(0xb5d5ff)));
+                        window.paint_quad(fill(bounds, selection_background));
                     },
                 )
                 .absolute()
@@ -508,7 +519,7 @@ impl HistoryView {
         highlight.into_iter().chain(std::iter::once(text))
     }
 
-    fn heading(&self, cx: &mut Context<Self>) -> Div {
+    fn heading(&self, selection_background: Rgba, cx: &mut Context<Self>) -> Div {
         let focus = self.focus.clone();
         let return_bounds = self.return_bounds.clone();
         let return_button = div()
@@ -539,7 +550,7 @@ impl HistoryView {
                     cx.emit(HistoryViewEvent::ReturnToLive);
                 }
             }))
-            .children(self.selectable_text(RETURN_LABEL))
+            .children(self.selectable_text(RETURN_LABEL, selection_background))
             .child(
                 canvas(
                     move |bounds, _, _| return_bounds.set(Some(bounds)),
@@ -581,7 +592,7 @@ impl HistoryView {
                             .relative()
                             .text_color(rgb(0x202735))
                             .font_weight(FontWeight::BOLD)
-                            .children(self.selectable_text(0)),
+                            .children(self.selectable_text(0, selection_background)),
                     )
                     .child(
                         div()
@@ -591,14 +602,23 @@ impl HistoryView {
                             .rounded(px(4.))
                             .text_color(rgb(0xc98a39))
                             .bg(rgba(0xc98a3921))
-                            .children(self.selectable_text(1)),
+                            .children(self.selectable_text(1, selection_background)),
                     )
-                    .child(div().relative().children(self.selectable_text(2))),
+                    .child(
+                        div()
+                            .relative()
+                            .children(self.selectable_text(2, selection_background)),
+                    ),
             )
             .child(return_button)
     }
 
-    fn body(&self, page: &HistoryPage, cx: &mut Context<Self>) -> Stateful<Div> {
+    fn body(
+        &self,
+        page: &HistoryPage,
+        selection_background: Rgba,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
         let view = cx.entity().downgrade();
         let before = page.has_more_before == Some(true);
         let line_start = self.body_entries.start + usize::from(before);
@@ -643,7 +663,7 @@ impl HistoryView {
                         .flex_none()
                         .min_w_0()
                         .cursor(CursorStyle::IBeam)
-                        .children(self.selectable_text(entry)),
+                        .children(self.selectable_text(entry, selection_background)),
                 )
                 .when(current && self.center_on_anchor, |row| {
                     row.child(
@@ -687,15 +707,15 @@ impl HistoryView {
             .overflow_scroll()
             .track_scroll(&self.scroll)
             .py(px(8.))
-            .children(before.then(|| self.boundary(self.body_entries.start)))
+            .children(before.then(|| self.boundary(self.body_entries.start, selection_background)))
             .children(rows)
             .children(
                 (page.has_more_after == Some(true))
-                    .then(|| self.boundary(self.body_entries.end - 1)),
+                    .then(|| self.boundary(self.body_entries.end - 1, selection_background)),
             )
     }
 
-    fn boundary(&self, index: usize) -> Div {
+    fn boundary(&self, index: usize, selection_background: Rgba) -> Div {
         div()
             .relative()
             .flex_none()
@@ -707,7 +727,7 @@ impl HistoryView {
             .italic()
             .whitespace_nowrap()
             .child(track_bounds(self.entries[index].bounds.clone()))
-            .children(self.selectable_text(index))
+            .children(self.selectable_text(index, selection_background))
     }
 }
 
@@ -900,26 +920,37 @@ impl Render for HistoryView {
         if self.state.is_none() {
             return view;
         }
-        let heading = self.heading(cx);
-        let body = match self.page() {
-            Some(page) => self.body(page, cx).into_any_element(),
-            None => div()
-                .relative()
-                .flex()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .text_color(rgb(0x8d95a7))
-                .child(track_bounds(
-                    self.entries[self.body_entries.start].bounds.clone(),
-                ))
-                .child(
-                    div()
-                        .relative()
-                        .children(self.selectable_text(self.body_entries.start)),
-                )
-                .into_any_element(),
+        let selection_background = rgb(0xb5d5ff);
+        #[cfg(target_os = "macos")]
+        let selection_background = if self.selection.is_some() {
+            crate::macos::history_selection_background(window.is_window_active()).unwrap_or_else(
+                |error| {
+                    eprintln!("Read history selection background: {error:#}");
+                    selection_background
+                },
+            )
+        } else {
+            selection_background
         };
+        let heading = self.heading(selection_background, cx);
+        let body =
+            match self.page() {
+                Some(page) => self.body(page, selection_background, cx).into_any_element(),
+                None => div()
+                    .relative()
+                    .flex()
+                    .flex_1()
+                    .items_center()
+                    .justify_center()
+                    .text_color(rgb(0x8d95a7))
+                    .child(track_bounds(
+                        self.entries[self.body_entries.start].bounds.clone(),
+                    ))
+                    .child(div().relative().children(
+                        self.selectable_text(self.body_entries.start, selection_background),
+                    ))
+                    .into_any_element(),
+            };
         view.child(heading).child(body).child(
             div()
                 .flex()
@@ -933,10 +964,11 @@ impl Render for HistoryView {
                 .bg(rgb(0xeef1f6))
                 .text_color(rgb(0x8d95a7))
                 .whitespace_nowrap()
-                .children(
-                    (self.body_entries.end..self.entries.len())
-                        .map(|index| div().relative().children(self.selectable_text(index))),
-                ),
+                .children((self.body_entries.end..self.entries.len()).map(|index| {
+                    div()
+                        .relative()
+                        .children(self.selectable_text(index, selection_background))
+                })),
         )
     }
 }

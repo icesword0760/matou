@@ -1,5 +1,8 @@
 //! Exercise the production drag handlers against a laid-out history view.
 #[cfg(target_os = "macos")]
+pub use matou_native_desktop::macos;
+
+#[cfg(target_os = "macos")]
 #[allow(dead_code)]
 mod ui_text {
     include!("../src/ui_text.rs");
