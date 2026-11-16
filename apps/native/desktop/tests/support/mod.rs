@@ -32,6 +32,13 @@ impl TestEvents {
     pub fn try_recv(&self) -> std::result::Result<Event, async_channel::TryRecvError> {
         loop {
             match self.events.try_recv()? {
+                BridgeEvent::TransportDiagnostic {
+                    generation,
+                    message,
+                } => {
+                    assert_eq!(generation, self.generation);
+                    return Ok(Event::Diagnostic(message));
+                }
                 BridgeEvent::Runtime { generation, event } => {
                     assert_eq!(
                         generation, self.generation,

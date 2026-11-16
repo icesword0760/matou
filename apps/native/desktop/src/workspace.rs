@@ -24,7 +24,7 @@ use crate::{
     },
     sidebar_scrollbar::{self, SidebarScrollbarState},
     tab_dialog_style as tabs_ui,
-    terminal_surface::{SurfaceEvent, TerminalSurface},
+    terminal_surface::{SurfaceEvent, SurfaceEventKind, TerminalSurface},
     ui_text::ui_text,
     workspace_drag::{self, WorkspaceDragSnapshot, WorkspaceDragTask},
 };
@@ -167,6 +167,11 @@ pub struct Workspace {
     search: Option<TerminalSearchState>,
     commands: RuntimeCommands,
     runtime_generation: u64,
+    transport_connected: bool,
+    domain_ready: bool,
+    session_frames: HashSet<String>,
+    search_after_restore: bool,
+    transport_fault: Option<(u64, String)>,
     hierarchy: Option<HierarchyResult>,
     scenes: Vec<Scene>,
     workspaces: Vec<HierarchyWorkspace>,
@@ -227,6 +232,7 @@ pub struct Workspace {
     card_geometry: Vec<(String, f64, f64)>,
     geometry: HashMap<String, GeometryUpdate>,
     geometry_dirty: HashSet<String>,
+    reconnect_geometry: HashSet<String>,
     restore_geometry: bool,
     column_capacity: Option<u32>,
     pending_geometry: Option<GeometryUpdate>,
@@ -371,11 +377,19 @@ impl Workspace {
         };
         if self.history_view.is_none() {
             let view = cx.new(HistoryView::new);
+            let generation = self.runtime_generation;
             self.subscriptions.push(cx.subscribe_in(
                 &view,
                 window,
-                |this, _, event, window, cx| match event {
-                    HistoryViewEvent::ReturnToLive => this.exit_history(window, cx),
+                move |this, _, event, window, cx| {
+                    if this.runtime_generation != generation
+                        || this.commands.connection().0 != generation
+                    {
+                        return;
+                    }
+                    match event {
+                        HistoryViewEvent::ReturnToLive => this.exit_history(window, cx),
+                    }
                 },
             ));
             self.history_view = Some(view);
@@ -637,6 +651,14 @@ impl Workspace {
     }
 
     fn run_search(&mut self, previous: bool, cx: &mut Context<Self>) {
+        if self
+            .focused
+            .as_ref()
+            .is_some_and(|id| self.recovery_blocked(id))
+        {
+            self.search_after_restore = self.search.as_ref().is_some_and(|search| search.open);
+            return;
+        }
         let Some(session_id) = self.focused.clone() else {
             if let Some(view) = &self.history_view {
                 view.update(cx, |view, _| view.stop_drag());
@@ -905,7 +927,12 @@ impl Workspace {
             history_view: None,
             history_request: None,
             search: None,
-            runtime_generation: commands.connection().0,
+            runtime_generation: 0,
+            transport_connected: false,
+            domain_ready: false,
+            session_frames: HashSet::new(),
+            search_after_restore: false,
+            transport_fault: None,
             commands,
             hierarchy: None,
             scenes: Vec::new(),
@@ -970,6 +997,7 @@ impl Workspace {
             card_geometry: Vec::new(),
             geometry: HashMap::new(),
             geometry_dirty: HashSet::new(),
+            reconnect_geometry: HashSet::new(),
             restore_geometry: false,
             column_capacity: None,
             pending_geometry: None,
@@ -1044,28 +1072,182 @@ impl Workspace {
         }
     }
 
+    fn retire_transport(&mut self, generation: u64, cx: &mut Context<Self>) {
+        self.runtime_generation = generation;
+        self.transport_connected = false;
+        self.domain_ready = false;
+        self.session_frames.clear();
+        self.recovery.clear();
+        self.recovery_controls.clear();
+        self.copy_request_id += 1;
+        self.resize_revisions.clear();
+        self.reconnect_geometry = self.geometry_dirty.clone();
+        self.geometry_timer += 1;
+        self.pending_geometry = None;
+        self.geometry_writes.clear();
+        self.last_geometry_write.clear();
+        self.pending_focus = None;
+        self.pending_close = None;
+        self.creating_workspace = false;
+        self.search_after_restore = self.search.as_ref().is_some_and(|search| search.open);
+        if let Some(search) = &mut self.search {
+            search.sequence += 1;
+            search.result = None;
+            search.error = None;
+            search.archive = None;
+            search.archive_pending = None;
+            search.archive_count = None;
+            search.dismissed_sequence = None;
+            search.session_id = None;
+        }
+        self.history_request = None;
+        if let Some(view) = self.history_view.take() {
+            view.update(cx, |view, cx| view.retire(cx));
+        }
+        for terminal in self.terminals.values() {
+            terminal.update(cx, |terminal, cx| {
+                terminal.begin_transport_generation(generation, cx)
+            });
+        }
+        cx.notify();
+    }
+    fn resend_terminal_sizes(&self, cx: &Context<Self>) {
+        // The new owner also needs sizes retained from previously visited tabs.
+        // A later Navigation may reuse that surface without a new paint size change.
+        for (id, terminal) in &self.terminals {
+            if let Some((cols, rows, cell_width_px, cell_height_px)) =
+                terminal.read(cx).target_dimensions()
+            {
+                let _ = self.commands.send_at(
+                    self.runtime_generation,
+                    Command::Resize {
+                        session_id: id.clone(),
+                        cols,
+                        rows,
+                        cell_width_px,
+                        cell_height_px,
+                    },
+                );
+            }
+        }
+    }
+    fn resume_search_after_frame(&mut self, cx: &mut Context<Self>) {
+        if self.search_after_restore
+            && self
+                .focused
+                .as_ref()
+                .is_some_and(|id| !self.recovery_blocked(id))
+        {
+            self.search_after_restore = false;
+            self.run_search(false, cx);
+        }
+    }
+    fn reconcile_transport_geometry(
+        &mut self,
+        authority: &[GeometryUpdate],
+        cx: &mut Context<Self>,
+    ) {
+        let desired = self
+            .reconnect_geometry
+            .iter()
+            .filter_map(|key| self.geometry.get(key).cloned())
+            .collect::<Vec<_>>();
+        for saved in authority {
+            if !self.geometry_dirty.contains(&saved.owner_key) {
+                self.geometry.insert(saved.owner_key.clone(), saved.clone());
+            }
+        }
+        for mut update in desired {
+            // Ready/Navigation supplies authority only for its active scene.
+            // An absent background/task projection is not a deletion signal.
+            let Some(scene) = self
+                .hierarchy
+                .as_ref()
+                .and_then(|h| h.scene.as_ref())
+                .filter(|scene| scene.id == update.scene_id)
+            else {
+                continue;
+            };
+            // This is the only owner produced by save_geometry; no new owner algorithm.
+            if update.owner_key != format!("session-group:{}:root", scene.id) {
+                continue;
+            }
+            if authority.iter().any(|saved| {
+                saved.owner_key == update.owner_key && saved.geometry == update.geometry
+            }) {
+                self.geometry_dirty.remove(&update.owner_key);
+                self.reconnect_geometry.remove(&update.owner_key);
+                continue;
+            }
+            update.layout_revision = if self
+                .hierarchy
+                .as_ref()
+                .and_then(|h| h.scene.as_ref())
+                .is_some_and(|s| s.id == update.scene_id)
+            {
+                self.graph["layoutRevision"]
+                    .as_f64()
+                    .unwrap_or(scene.layout_revision as f64)
+            } else {
+                scene.layout_revision as f64
+            };
+            update.now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as i64;
+            self.geometry
+                .insert(update.owner_key.clone(), update.clone());
+            self.reconnect_geometry.remove(&update.owner_key);
+            self.write_geometry(update, 0, cx);
+        }
+    }
+    fn close_invalid_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let invalid = self.dialog.as_ref().is_some_and(|dialog| match dialog {
+            TabDialog::RemoveWorkspace { workspace_id, .. } => {
+                !self.workspaces.iter().any(|w| &w.id == workspace_id)
+            }
+            TabDialog::RenameTask { task_id, .. } | TabDialog::DeleteTask { task_id, .. } => {
+                !self.tasks.iter().any(|t| &t.id == task_id)
+            }
+            TabDialog::Rename { scene_id, .. } | TabDialog::Close { scene_id, .. } => {
+                !self.scenes.iter().any(|s| &s.id == scene_id)
+            }
+        });
+        if invalid {
+            self.close_dialog(window, cx);
+        }
+    }
     fn apply(&mut self, envelope: BridgeEvent, window: &mut Window, cx: &mut Context<Self>) {
         if !self.commands.accepts(&envelope) {
             return;
         }
         let generation = envelope.generation();
+        if generation != self.runtime_generation {
+            self.retire_transport(generation, cx);
+        }
         let event = match envelope {
+            BridgeEvent::TransportDiagnostic { message, .. } => {
+                self.transport_fault = Some((generation, message));
+                return;
+            }
             BridgeEvent::Connection { phase, .. } => {
-                if matches!(phase, ConnectionPhase::Ready) {
-                    self.runtime_generation = generation;
+                self.transport_connected = matches!(phase, ConnectionPhase::Ready);
+                if !self.transport_connected {
+                    self.domain_ready = false;
+                    self.session_frames.clear();
+                    self.sync_terminal_input(window, cx);
                 }
                 cx.notify();
                 return;
             }
-            BridgeEvent::Runtime { event, .. } => {
-                if matches!(&event, Event::Ready { .. }) {
-                    self.runtime_generation = generation;
-                }
-                // The current owner emits sidebar/path projections before Ready.
-                // accepts() already rejected every superseded connection.
-                event
-            }
+            BridgeEvent::Runtime { event, .. } => event,
         };
+        let fresh_ready = matches!(&event, Event::Ready { .. });
+        if fresh_ready {
+            self.domain_ready = true;
+            self.transport_connected = true;
+            self.transport_fault = None;
+        }
         match event {
             Event::Workspaces(workspaces) => {
                 self.workspace_drag_motion
@@ -1227,9 +1409,9 @@ impl Workspace {
                 }
                 if scene_changed {
                     // A newly mounted source carousel starts at its current styles.
-                    for saved in geometry {
+                    for saved in &geometry {
                         if !self.geometry_dirty.contains(&saved.owner_key) {
-                            self.geometry.insert(saved.owner_key.clone(), saved);
+                            self.geometry.insert(saved.owner_key.clone(), saved.clone());
                         }
                     }
                     self.restore_geometry = true;
@@ -1296,6 +1478,16 @@ impl Workspace {
                 self.hierarchy = Some(hierarchy);
                 self.graph = graph;
                 self.refresh_terminals(cx);
+                if fresh_ready {
+                    self.session_frames.clear();
+                    self.recovery.clear();
+                    for id in &self.order {
+                        self.recovery.insert(id.clone(), RecoveryState::Restoring);
+                    }
+                    self.resend_terminal_sizes(cx);
+                    self.close_invalid_dialog(window, cx);
+                }
+                self.reconcile_transport_geometry(&geometry, cx);
                 self.sync_terminal_input(window, cx);
                 if scene_changed
                     && let Some(index) = self.scenes.iter().position(|scene| {
@@ -1350,6 +1542,7 @@ impl Workspace {
                     self.card_controls.remove(&id);
                     self.card_motion.remove(&id);
                     self.resize_revisions.remove(&id);
+                    self.session_frames.remove(&id);
                 }
             }
             Event::SceneClosePreview {
@@ -1398,14 +1591,16 @@ impl Workspace {
                 if desired && current_attempt.is_some() && error.is_none() {
                     self.geometry_dirty.remove(&update.owner_key);
                 } else if desired && let Some(attempt @ 0..=2) = current_attempt {
+                    let generation = self.runtime_generation;
                     let timer = cx.background_executor().timer(Duration::from_millis(120));
                     cx.spawn(async move |this, cx| {
                         timer.await;
                         let _ = this.update(cx, |this, cx| {
-                            if this
-                                .geometry_writes
-                                .get(&update.owner_key)
-                                .is_some_and(|(current, _)| *current == sequence)
+                            if this.runtime_generation == generation
+                                && this
+                                    .geometry_writes
+                                    .get(&update.owner_key)
+                                    .is_some_and(|(current, _)| *current == sequence)
                                 && this
                                     .geometry
                                     .get(&update.owner_key)
@@ -1475,10 +1670,27 @@ impl Workspace {
                 sequence,
                 scroll_request_id,
             } => {
-                if let Some(terminal) = self.terminals.get(&session_id) {
+                let was_usable = !self.recovery_blocked(&session_id);
+                if let Some(terminal) = self.terminals.get(&session_id).cloned() {
+                    let valid = self.domain_ready
+                        && screen.cols > 0
+                        && screen.rows > 0
+                        && screen.cells.len() == screen.cols * screen.rows
+                        && terminal.read(cx).target_dimensions().is_some_and(
+                            |(cols, rows, _, _)| {
+                                screen.cols == cols as usize && screen.rows == rows as usize
+                            },
+                        );
+                    if valid {
+                        self.session_frames.insert(session_id.clone());
+                    } else if !was_usable {
+                        self.session_frames.remove(&session_id);
+                    }
                     terminal.update(cx, |terminal, cx| {
                         terminal.set_screen(screen, modes, selection, scroll_request_id, cx)
                     });
+                    self.sync_terminal_input(window, cx);
+                    self.resume_search_after_frame(cx);
                     // The reference live-output callback restores only an unclaimed
                     // active terminal; dialogs and focused controls retain ownership.
                     if self.focused.as_ref() == Some(&session_id)
@@ -1499,6 +1711,15 @@ impl Workspace {
                 );
             }
             Event::Recovery { session_id, state } => {
+                if !matches!(&state, RecoveryState::Ready)
+                    || (self.recovery_blocked(&session_id)
+                        && !self
+                            .terminals
+                            .get(&session_id)
+                            .is_some_and(|t| t.read(cx).frame_matches_target()))
+                {
+                    self.session_frames.remove(&session_id);
+                }
                 if matches!(state, RecoveryState::Failed(_)) {
                     self.recovery_controls
                         .entry(session_id.clone())
@@ -1520,6 +1741,7 @@ impl Workspace {
                 }
                 self.recovery.insert(session_id, state);
                 self.sync_terminal_input(window, cx);
+                self.resume_search_after_frame(cx);
             }
             Event::StorageFault { message, .. } | Event::Diagnostic(message) => {
                 self.fault = Some(message)
@@ -1559,7 +1781,8 @@ impl Workspace {
             let disabled = !self.active_path_valid();
             let terminal = cx.new(|cx| {
                 let mut surface = TerminalSurface::new(cx);
-                surface.set_input_disabled(disabled, cx);
+                surface.begin_transport_generation(self.runtime_generation, cx);
+                surface.set_input_disabled(disabled || self.recovery_blocked(id), cx);
                 surface
             });
             self.card_controls
@@ -1567,90 +1790,130 @@ impl Workspace {
             let session_id = id.clone();
             self.subscriptions.push(cx.subscribe(
                 &terminal,
-                move |this, _, event: &SurfaceEvent, cx| match event {
-                    SurfaceEvent::Select(action) => this.send(
-                        Command::Select {
-                            session_id: session_id.clone(),
-                            action: *action,
-                        },
-                        cx,
-                    ),
-                    SurfaceEvent::Copy { interrupt_if_empty } => {
-                        this.copy_request_id += 1;
-                        this.send(
-                            Command::CopySelection {
-                                session_id: session_id.clone(),
-                                request_id: this.copy_request_id,
-                                interrupt_if_empty: *interrupt_if_empty,
-                            },
-                            cx,
-                        );
-                    }
-                    SurfaceEvent::Input(bytes) => this.send(
-                        Command::Input {
-                            session_id: session_id.clone(),
-                            bytes: bytes.clone(),
-                            defer_ordering: true,
-                        },
-                        cx,
-                    ),
-                    SurfaceEvent::ScrollSelection(lines) => this.send(
-                        Command::ScrollSelection {
-                            session_id: session_id.clone(),
-                            lines: *lines,
-                        },
-                        cx,
-                    ),
-                    SurfaceEvent::Scroll(lines) => this.send(
-                        Command::Scroll {
-                            session_id: session_id.clone(),
-                            lines: *lines,
-                        },
-                        cx,
-                    ),
-                    SurfaceEvent::ScrollTo { row, request_id } => this.send(
-                        Command::ScrollTo {
-                            session_id: session_id.clone(),
-                            row: *row,
-                            request_id: *request_id,
-                        },
-                        cx,
-                    ),
-                    SurfaceEvent::Resize {
-                        cols,
-                        rows,
-                        cell_width_px,
-                        cell_height_px,
-                    } => {
-                        let revision = this.resize_revisions.entry(session_id.clone()).or_default();
-                        *revision += 1;
-                        let revision = *revision;
-                        let id = session_id.clone();
-                        let geometry = (*cols, *rows, *cell_width_px, *cell_height_px);
-                        let timer = cx.background_executor().timer(Duration::from_millis(80));
-                        cx.spawn(async move |this, cx| {
-                            timer.await;
-                            let _ = this.update(cx, |this, cx| {
-                                if this.resize_revisions.get(&id) != Some(&revision) {
-                                    return;
-                                }
-                                this.send(
-                                    Command::Resize {
-                                        session_id: id,
-                                        cols: geometry.0,
-                                        rows: geometry.1,
-                                        cell_width_px: geometry.2,
-                                        cell_height_px: geometry.3,
-                                    },
-                                    cx,
-                                );
-                            });
-                        })
-                        .detach();
-                    }
+                move |this, _, event: &SurfaceEvent, cx| {
+                    this.handle_surface_event(&session_id, event, cx)
                 },
             ));
             self.terminals.insert(id.clone(), terminal);
+        }
+    }
+
+    fn handle_surface_event(
+        &mut self,
+        session_id: &str,
+        event: &SurfaceEvent,
+        cx: &mut Context<Self>,
+    ) {
+        if event.generation != self.runtime_generation
+            || !self.domain_ready
+            || self.commands.connection() != (event.generation, ConnectionPhase::Ready)
+        {
+            return;
+        }
+        if !matches!(event.kind, SurfaceEventKind::Resize { .. })
+            && self.recovery_blocked(session_id)
+        {
+            return;
+        }
+        let generation = event.generation;
+        let session_id = session_id.to_owned();
+        // Only an unqualified generation is protected by the first-frame gate.
+        // An ordinary resize of an already usable terminal never starts recovery.
+        if matches!(&event.kind, SurfaceEventKind::Resize { .. })
+            && self.recovery_blocked(&session_id)
+        {
+            self.session_frames.remove(&session_id);
+            if let Some(terminal) = self.terminals.get(&session_id) {
+                terminal.update(cx, |terminal, cx| {
+                    terminal.set_transport_available(false, cx);
+                    terminal.set_input_disabled(true, cx);
+                });
+            }
+        }
+        match &event.kind {
+            SurfaceEventKind::Select(action) => self.send(
+                Command::Select {
+                    session_id: session_id.clone(),
+                    action: *action,
+                },
+                cx,
+            ),
+            SurfaceEventKind::Copy { interrupt_if_empty } => {
+                self.copy_request_id += 1;
+                self.send(
+                    Command::CopySelection {
+                        session_id: session_id.clone(),
+                        request_id: self.copy_request_id,
+                        interrupt_if_empty: *interrupt_if_empty,
+                    },
+                    cx,
+                );
+            }
+            SurfaceEventKind::Input(bytes) => self.send(
+                Command::Input {
+                    session_id: session_id.clone(),
+                    bytes: bytes.clone(),
+                    defer_ordering: true,
+                },
+                cx,
+            ),
+            SurfaceEventKind::ScrollSelection(lines) => self.send(
+                Command::ScrollSelection {
+                    session_id: session_id.clone(),
+                    lines: *lines,
+                },
+                cx,
+            ),
+            SurfaceEventKind::Scroll(lines) => self.send(
+                Command::Scroll {
+                    session_id: session_id.clone(),
+                    lines: *lines,
+                },
+                cx,
+            ),
+            SurfaceEventKind::ScrollTo { row, request_id } => self.send(
+                Command::ScrollTo {
+                    session_id: session_id.clone(),
+                    row: *row,
+                    request_id: *request_id,
+                },
+                cx,
+            ),
+            SurfaceEventKind::Resize {
+                cols,
+                rows,
+                cell_width_px,
+                cell_height_px,
+            } => {
+                let revision = self.resize_revisions.entry(session_id.clone()).or_default();
+                *revision += 1;
+                let revision = *revision;
+                let id = session_id.clone();
+                let geometry = (*cols, *rows, *cell_width_px, *cell_height_px);
+                let timer = cx.background_executor().timer(Duration::from_millis(80));
+                cx.spawn(async move |this, cx| {
+                    timer.await;
+                    let _ = this.update(cx, |this, cx| {
+                        if this.runtime_generation != generation {
+                            return;
+                        }
+                        if this.resize_revisions.get(&id) != Some(&revision) {
+                            return;
+                        }
+                        this.send(
+                            Command::Resize {
+                                session_id: id,
+                                cols: geometry.0,
+                                rows: geometry.1,
+                                cell_width_px: geometry.2,
+                                cell_height_px: geometry.3,
+                            },
+                            cx,
+                        );
+                    });
+                })
+                .detach();
+            }
         }
     }
 
@@ -1767,6 +2030,7 @@ impl Workspace {
             return;
         }
         let generation = self.geometry_timer;
+        let transport_generation = self.runtime_generation;
         let delay = if continuous {
             (50. - elapsed).max(1.)
         } else {
@@ -1778,7 +2042,9 @@ impl Workspace {
         cx.spawn(async move |this, cx| {
             timer.await;
             let _ = this.update(cx, |this, cx| {
-                if this.geometry_timer == generation {
+                if this.runtime_generation == transport_generation
+                    && this.geometry_timer == generation
+                {
                     this.flush_geometry(cx);
                 }
             });
@@ -1993,15 +2259,17 @@ impl Workspace {
                     .as_ref()
                     .is_some_and(|request| request.session_id == *id);
             terminal.update(cx, |terminal, cx| {
+                terminal.set_transport_available(!self.recovery_blocked(id), cx);
                 terminal.set_input_disabled(disabled, cx);
             });
         }
     }
 
     fn recovery_blocked(&self, session_id: &str) -> bool {
-        self.recovery
-            .get(session_id)
-            .is_some_and(|state| !matches!(state, RecoveryState::Ready))
+        !self.domain_ready
+            || !self.transport_connected
+            || !self.session_frames.contains(session_id)
+            || !matches!(self.recovery.get(session_id), Some(RecoveryState::Ready))
     }
 
     fn workspace_invalid(&self, workspace_id: &str) -> bool {
@@ -2010,6 +2278,30 @@ impl Workspace {
             .any(|state| state.workspace_id == workspace_id && state.status == "invalid")
     }
 
+    fn finish_directory_choice(
+        &mut self,
+        generation: u64,
+        root_directory: String,
+        workspace_id: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.runtime_generation != generation || self.commands.connection().0 != generation {
+            return;
+        }
+        if let Some(workspace_id) = workspace_id {
+            self.send(
+                Command::RelinkWorkspace {
+                    workspace_id,
+                    root_directory,
+                },
+                cx,
+            );
+        } else {
+            self.creating_workspace = true;
+            self.send(Command::CreateWorkspace { root_directory }, cx);
+        }
+        cx.notify();
+    }
     fn choose_workspace_directory(&mut self, cx: &mut Context<Self>) {
         if self.creating_workspace {
             return;
@@ -2020,6 +2312,7 @@ impl Workspace {
             multiple: false,
             prompt: None,
         });
+        let generation = self.runtime_generation;
         cx.spawn(async move |this, cx| {
             let Ok(Ok(Some(mut paths))) = picker.await else {
                 return;
@@ -2029,9 +2322,7 @@ impl Workspace {
             };
             let root_directory = path.to_string_lossy().into_owned();
             let _ = this.update(cx, |this, cx| {
-                this.creating_workspace = true;
-                this.send(Command::CreateWorkspace { root_directory }, cx);
-                cx.notify();
+                this.finish_directory_choice(generation, root_directory, None, cx)
             });
         })
         .detach();
@@ -2044,6 +2335,7 @@ impl Workspace {
             multiple: false,
             prompt: None,
         });
+        let generation = self.runtime_generation;
         cx.spawn(async move |this, cx| {
             let Ok(Ok(Some(mut paths))) = picker.await else {
                 return;
@@ -2053,13 +2345,7 @@ impl Workspace {
             };
             let root_directory = path.to_string_lossy().into_owned();
             let _ = this.update(cx, |this, cx| {
-                this.send(
-                    Command::RelinkWorkspace {
-                        workspace_id,
-                        root_directory,
-                    },
-                    cx,
-                );
+                this.finish_directory_choice(generation, root_directory, Some(workspace_id), cx)
             });
         })
         .detach();

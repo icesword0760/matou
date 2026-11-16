@@ -96,6 +96,13 @@ pub struct HistoryView {
 impl EventEmitter<HistoryViewEvent> for HistoryView {}
 
 impl HistoryView {
+    pub fn retire(&mut self, cx: &mut Context<Self>) {
+        self.stop_drag();
+        self.selection = None;
+        self.state = None;
+        self.entries.clear();
+        cx.notify();
+    }
     pub fn new(cx: &mut Context<Self>) -> Self {
         let installed = cx.text_system().all_font_names();
         let font_family = ["SFMono-Regular", "Menlo", "Courier New"]

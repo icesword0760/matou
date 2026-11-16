@@ -31,11 +31,11 @@ mod probe {
     }
 
     fn observed(event: &SurfaceEvent) -> Observed {
-        match event {
-            SurfaceEvent::ScrollTo { row, request_id } => Observed::Absolute(*row, *request_id),
-            SurfaceEvent::Scroll(lines) => Observed::Lines(*lines),
-            SurfaceEvent::Input(bytes) => Observed::Input(bytes.clone()),
-            SurfaceEvent::Select(_) => Observed::Select,
+        match &event.kind {
+            SurfaceEventKind::ScrollTo { row, request_id } => Observed::Absolute(*row, *request_id),
+            SurfaceEventKind::Scroll(lines) => Observed::Lines(*lines),
+            SurfaceEventKind::Input(bytes) => Observed::Input(bytes.clone()),
+            SurfaceEventKind::Select(_) => Observed::Select,
             _ => Observed::Other,
         }
     }
@@ -306,6 +306,26 @@ mod probe {
             latest_raw,
         )?;
         verify_ime_drag(window, cx, &events, bottom, modes)?;
+        window.update(cx, |view, _, cx| {
+            let old_generation = view.transport_generation;
+            let dimensions = view
+                .last_dimensions
+                .expect("actual hidden paint dimensions");
+            let prior_offset = view.screen.as_ref().unwrap().scrollbar.offset;
+            view.begin_transport_generation(old_generation + 1, cx);
+            view.emit_resize_for_generation(old_generation, dimensions, cx);
+            assert_eq!(view.screen.as_ref().unwrap().scrollbar.offset, prior_offset);
+            assert!(view.last_dimensions == Some(dimensions));
+            assert!(view.scrollbar_drag.is_none() && view.scrollbar_position.is_none());
+            assert!(view.drag_scroll_timer.is_none() && view.scrollbar_hide_timer.is_none());
+            assert!(!view.composition.is_active() && view.caret.is_none());
+            view.set_transport_available(true, cx);
+            view.set_input_disabled(false, cx);
+        })?;
+        assert!(events.take().is_empty(), "retired resize emitted an event");
+        println!(
+            "Generation reset preserves the painted screen/target, retires interaction tasks and rejects an old deferred resize."
+        );
         Ok(())
     }
 
