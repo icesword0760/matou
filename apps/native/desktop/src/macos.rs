@@ -17,6 +17,27 @@ use gpui::{Rgba, Window, rgba};
 use objc::{class, msg_send, sel, sel_impl};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
+/// Hide this window without disposing its Workspace or hiding other app windows.
+pub fn hide_window(window: &Window) -> Result<()> {
+    let RawWindowHandle::AppKit(handle) = HasWindowHandle::window_handle(window)
+        .map_err(|error| anyhow::anyhow!("Read AppKit window handle: {error}"))?
+        .as_raw()
+    else {
+        bail!("Expected an AppKit window");
+    };
+    // GPUI invokes the close callback on the AppKit main thread, with the live
+    // NSView retained by the existing platform window.
+    unsafe {
+        let native_view = handle.ns_view.as_ptr() as id;
+        let native_window: id = msg_send![native_view, window];
+        if native_window == nil {
+            bail!("AppKit view has no window to hide");
+        }
+        let _: () = msg_send![native_window, orderOut:nil];
+    }
+    Ok(())
+}
+
 pub fn apply_sidebar_material(window: &Window) -> Result<()> {
     let RawWindowHandle::AppKit(handle) = HasWindowHandle::window_handle(window)
         .map_err(|error| anyhow::anyhow!("Read AppKit window handle: {error}"))?

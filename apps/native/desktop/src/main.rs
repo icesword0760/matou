@@ -1,3 +1,5 @@
+#[cfg(target_os = "macos")]
+use std::cell::Cell;
 use std::{cell::RefCell, path::PathBuf, rc::Rc};
 
 use anyhow::{Context, Result, bail};
@@ -16,7 +18,24 @@ fn main() -> Result<()> {
     let commands = runtime.borrow().commands.clone();
     let events = runtime.borrow().events.clone();
     let quit_runtime = runtime.clone();
-    Application::new().with_assets(NativeAssets).run(move |cx| {
+    let application = Application::new().with_assets(NativeAssets);
+    #[cfg(target_os = "macos")]
+    let main_window = Rc::new(Cell::new(None::<WindowHandle<Workspace>>));
+    #[cfg(target_os = "macos")]
+    application.on_reopen({
+        let main_window = main_window.clone();
+        move |cx| {
+            if let Some(window) = main_window.get() {
+                cx.activate(true);
+                if let Err(error) = window.update(cx, |_, window, _| window.activate_window()) {
+                    eprintln!("Reactivate native window: {error:#}");
+                }
+            }
+        }
+    });
+    application.run(move |cx| {
+        #[cfg(target_os = "macos")]
+        let quitting = Rc::new(Cell::new(false));
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
         cx.set_menus(vec![Menu {
@@ -42,12 +61,38 @@ fn main() -> Result<()> {
                 if let Err(error) = matou_native_desktop::macos::apply_sidebar_material(window) {
                     eprintln!("Apply native sidebar material: {error:#}");
                 }
-                cx.new(|cx| Workspace::new(commands, events, window, cx))
+                let workspace = cx.new(|cx| Workspace::new(commands, events, window, cx));
+                #[cfg(target_os = "macos")]
+                {
+                    let workspace = workspace.downgrade();
+                    let quitting = quitting.clone();
+                    window.on_window_should_close(cx, move |window, cx| {
+                        if quitting.get() {
+                            return true;
+                        }
+                        if let Err(error) = workspace.update(cx, |view, cx| view.flush_geometry(cx))
+                        {
+                            eprintln!("Flush native window geometry before hiding: {error:#}");
+                            return false;
+                        }
+                        if let Err(error) = matou_native_desktop::macos::hide_window(window) {
+                            eprintln!("Hide native window: {error:#}");
+                        }
+                        false
+                    });
+                }
+                workspace
             },
         ) {
             Ok(window) => {
+                #[cfg(target_os = "macos")]
+                main_window.set(Some(window));
                 cx.on_app_quit(move |cx| {
-                    let _ = window.update(cx, |view, _, cx| view.flush_geometry(cx));
+                    #[cfg(target_os = "macos")]
+                    quitting.set(true);
+                    if let Err(error) = window.update(cx, |view, _, cx| view.flush_geometry(cx)) {
+                        eprintln!("Flush native window geometry before quitting: {error:#}");
+                    }
                     if let Err(error) = quit_runtime.borrow_mut().shutdown() {
                         eprintln!("Close native runtime: {error:#}");
                     }
