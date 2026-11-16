@@ -1,6 +1,10 @@
 [workspace]
 members = ["core", "terminal", "runtime", "desktop"]
+exclude = ["vendor/gpui"]
 resolver = "2"
+
+[patch.crates-io]
+gpui = { path = "vendor/gpui" }
 
 [workspace.package]
 edition = "2024"

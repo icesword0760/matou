@@ -454,10 +454,13 @@ impl HistoryView {
     fn selectable_text(&self, index: usize) -> impl Iterator<Item = AnyElement> + use<> {
         let entry = &self.entries[index];
         let geometry = entry.geometry.clone();
+        let continues = self
+            .selection
+            .is_some_and(|selection| index < selection.ordered().end.row && index != RETURN_LABEL);
         let highlight = self
             .selection
             .and_then(|selection| selected_bytes(&selection.ordered(), index, entry.source.len()))
-            .filter(|range| !range.is_empty())
+            .filter(|range| !range.is_empty() || continues)
             .map(|range| {
                 let geometry = geometry.clone();
                 canvas(
@@ -468,7 +471,21 @@ impl HistoryView {
                             return;
                         };
                         let a = layout.layout.x_for_index(range.start);
-                        let b = layout.layout.x_for_index(range.end);
+                        let mut b = layout.layout.x_for_index(range.end);
+                        // Blink extends a selected block-ending line by its
+                        // primary font's space advance. The button is an
+                        // inline-block, whose final line has no extension.
+                        if continues {
+                            let style = window.text_style();
+                            let font = window.text_system().resolve_font(&style.font());
+                            let size = style.font_size.to_pixels(window.rem_size());
+                            match window.text_system().advance(font, size, ' ') {
+                                Ok(space) => b += space.width,
+                                Err(error) => {
+                                    eprintln!("Measure history selection break: {error:#}")
+                                }
+                            }
+                        }
                         let bounds = Bounds::new(
                             point(layout.bounds.left() + a.min(b), layout.bounds.top()),
                             size((b - a).abs(), layout.bounds.size.height),
