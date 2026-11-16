@@ -1,5 +1,7 @@
 #![cfg(target_os = "macos")]
 
+mod support;
+
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -30,7 +32,7 @@ fn coalesced_scroll_frames_identify_the_requests_already_applied() -> Result<()>
     let home = root.join("home");
     fs::create_dir_all(&home)?;
     fs::write(home.join(".zshrc"), format!("PROMPT='{PROMPT} '\n"))?;
-    let mut bridge = RuntimeBridge::start(LaunchOptions {
+    let mut bridge = support::start(LaunchOptions {
         data_root: root.join("data"),
         workspace: root.join("workspace"),
         shell_home: home,
@@ -104,7 +106,7 @@ fn verify_bridge(root: &Path) -> Result<()> {
         shell: PathBuf::from("/bin/zsh"),
     };
 
-    let mut bridge = RuntimeBridge::start(options.clone())?;
+    let mut bridge = support::start(options.clone())?;
     let session_id = wait_for_ready(&bridge)?;
     let initial = wait_for_frame(&bridge, &session_id, "initial prompt", |rows| {
         has_row(rows, PROMPT)
@@ -141,7 +143,7 @@ fn verify_bridge(root: &Path) -> Result<()> {
     ensure!(second > finished, "second command did not advance sequence");
     bridge.shutdown()?;
 
-    let mut reopened = RuntimeBridge::start(options)?;
+    let mut reopened = support::start(options)?;
     let reopened_id = wait_for_ready(&reopened)?;
     ensure!(reopened_id == session_id, "reopened a different session");
     wait_for_frame(

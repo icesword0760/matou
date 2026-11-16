@@ -1,5 +1,7 @@
 #![cfg(target_os = "macos")]
 
+mod support;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
@@ -36,7 +38,7 @@ fn verify_canvas(root: &Path) -> Result<()> {
         shell_home: home,
         shell: PathBuf::from("/bin/zsh"),
     };
-    let mut bridge = RuntimeBridge::start(options.clone())?;
+    let mut bridge = support::start(options.clone())?;
     let mut probe = Probe::new(&bridge);
     let initial = probe.ready("initial Ready")?;
     assert_eq!(initial.scenes, [initial.scene_id.as_str()]);
@@ -184,7 +186,7 @@ fn verify_canvas(root: &Path) -> Result<()> {
     }
     bridge.shutdown()?;
 
-    let mut reopened = RuntimeBridge::start(options)?;
+    let mut reopened = support::start(options)?;
     let mut probe = Probe::new(&reopened);
     let restored = probe.ready("Ready after reopen")?;
     assert_eq!(restored, active);
@@ -420,7 +422,7 @@ fn verify_tasks(root: &Path) -> Result<()> {
         shell_home: home,
         shell: PathBuf::from("/bin/zsh"),
     };
-    let mut bridge = RuntimeBridge::start(options.clone())?;
+    let mut bridge = support::start(options.clone())?;
     let mut probe = Probe::new(&bridge);
     let first = probe.ready("initial task")?;
     probe.frame(&first.session_id, "first task prompt", &[PROMPT])?;
@@ -560,7 +562,7 @@ fn verify_tasks(root: &Path) -> Result<()> {
         &["TASK_REPLACEMENT", PROMPT],
     )?;
     bridge.shutdown()?;
-    let mut reopened = RuntimeBridge::start(options)?;
+    let mut reopened = support::start(options)?;
     let mut probe = Probe::new(&reopened);
     assert_eq!(probe.ready("task reopened")?, replacement);
     assert_eq!(probe.tasks.len(), 1);
