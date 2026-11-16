@@ -263,7 +263,7 @@ describe('Google generic egress', () => {
   function googleSample(country = 'US', ip = '203.0.113.20'): EgressSample {
     return makeBaseSample({ hosts: { google: {
       api: { host: EGRESS_HOSTS.google.api, ip, country },
-      login: { host: EGRESS_HOSTS.google.login, error: 'invalid' }
+      login: { host: EGRESS_HOSTS.google.login, notApplicable: true }
     } } })
   }
 
@@ -273,11 +273,26 @@ describe('Google generic egress', () => {
     expect(result.families[0]).toMatchObject({ family: 'google', state: 'abnormal', violation: 'mainland' })
   })
 
-  it('does not lower Google or overall status for unknown login', () => {
-    const result = evaluateEgress(googleSample(), { mode: 'country', baselines: {} })
-    expect(result.state).toBe('ok')
-    expect(result.families[0]?.state).toBe('ok')
-    expect(result.checks).toContainEqual({ id: 'login-api-match', family: 'google', result: 'unknown' })
+  it.each([{ notApplicable: true as const }, { error: 'timeout' as const }, {}])(
+    'keeps Google and overall status ok with an unmeasured login and only two checks: %s', (login) => {
+      const sample = googleSample()
+      sample.hosts.google!.login = { host: EGRESS_HOSTS.google.login, ...login }
+      const result = evaluateEgress(sample, { mode: 'country', baselines: {} })
+      expect(result.state).toBe('ok')
+      expect(result.families[0]?.state).toBe('ok')
+      expect(result.checks.filter((check) => check.family === 'google')).toEqual([
+        { id: 'mainland', family: 'google', result: 'pass' },
+        { id: 'exit-rule', family: 'google', result: 'pass' }
+      ])
+    }
+  )
+
+  it('still reports unknown when the Google generic API probe fails', () => {
+    const sample = googleSample()
+    sample.hosts.google!.api = { host: EGRESS_HOSTS.google.api, error: 'timeout' }
+    const result = evaluateEgress(sample, { mode: 'country', baselines: {} })
+    expect(result.families[0]).toEqual({ family: 'google', state: 'unknown' })
+    expect(result.state).toBe('warning')
   })
 
   it.each(['country', 'ip'] as const)('enforces saved Google %s rule', (mode) => {
@@ -287,12 +302,35 @@ describe('Google generic egress', () => {
     expect(result.families[0]).toMatchObject({ state: 'abnormal', violation: 'rule' })
   })
 
-  it('only warns when Google login and api exits differ', () => {
+  it.each(['JP', 'CN'])('ignores Google login data even when its country is %s', (country) => {
     const sample = googleSample()
-    sample.hosts.google!.login = { host: EGRESS_HOSTS.google.login, ip: '203.0.113.21', country: 'JP' }
+    sample.hosts.google!.login = { host: EGRESS_HOSTS.google.login, ip: '203.0.113.21', country }
     const result = evaluateEgress(sample, { mode: 'country', baselines: {} })
-    expect(result.state).toBe('warning')
-    expect(result.families[0]).toMatchObject({ state: 'warning' })
+    expect(result.state).toBe('ok')
+    expect(result.families[0]).toMatchObject({ state: 'ok' })
     expect(result.families[0]?.violation).toBeUndefined()
   })
+})
+
+
+describe('provider login checks', () => {
+  it.each(['anthropic', 'openai', 'chatgpt-subscription'] as const)(
+    'preserves matching, mismatching, unknown and mainland login checks for %s', (family) => {
+      const hosts = EGRESS_HOSTS[family]
+      const sample = makeBaseSample({ hosts: { [family]: {
+        api: { host: hosts.api, ip: '203.0.113.20', country: 'US' },
+        login: { host: hosts.login, ip: '203.0.113.20', country: 'US' }
+      } } })
+      const evaluate = () => evaluateEgress(sample, { mode: 'country', baselines: {} })
+      const loginCheck = () => evaluate().checks.find((check) => check.id === 'login-api-match')
+      expect(loginCheck()?.result).toBe('pass')
+      sample.hosts[family]!.login.ip = '203.0.113.21'
+      expect(loginCheck()?.result).toBe('warn')
+      expect(evaluate().families[0]?.state).toBe('warning')
+      sample.hosts[family]!.login = { host: hosts.login, error: 'timeout' }
+      expect(loginCheck()?.result).toBe('unknown')
+      sample.hosts[family]!.login = { host: hosts.login, ip: '223.5.5.5', country: 'CN' }
+      expect(evaluate().families[0]).toMatchObject({ state: 'abnormal', violation: 'mainland' })
+    }
+  )
 })
