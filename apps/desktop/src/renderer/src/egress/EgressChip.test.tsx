@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { EgressStatusWire } from '@matou/contracts'
 import { LocaleProvider } from '../i18n/LocaleProvider'
@@ -16,6 +17,7 @@ import { EgressChip } from './EgressChip'
 afterEach(() => {
   cleanup()
   currentClient = null
+  Reflect.deleteProperty(window, 'matouDesktop')
 })
 
 function baseStatus(overrides: Partial<EgressStatusWire> = {}): EgressStatusWire {
@@ -192,17 +194,143 @@ describe('EgressChip', () => {
     expect(overriddenChip.getAttribute('data-tone')).toBe('danger-outline')
   })
 
-  it('renders nothing for shell/third-party cards or when RPC fails, and opens EgressPanel on click', async () => {
-    const { container: shellContainer } = await renderChip(baseStatus(), 'session-shell', 'zh-CN')
-    expect(shellContainer.firstChild).toBeNull()
-
-    cleanup()
-    const { container: errContainer } = await renderChip(new Error('offline'), 'session-claude', 'zh-CN')
-    expect(errContainer.firstChild).toBeNull()
-
-    cleanup()
+  it('still opens the existing panel for a monitored session', async () => {
     await renderChip(baseStatus(), 'session-claude', 'zh-CN')
     fireEvent.click(screen.getByRole('button', { name: '🇺🇸 美国 · 出口正常' }))
     expect(screen.getByRole('dialog', { name: '网络检查' })).toBeTruthy()
+  })
+})
+
+describe('EgressChip global entry', () => {
+  it.each(['session-shell', 'session-deepseek', 'session-glm', 'session-kimi'])('exposes network check for unmonitored %s', async (sessionId) => {
+    await renderChip(baseStatus(), sessionId)
+    const button = screen.getByRole('button', { name: '网络检查' })
+    expect(button.textContent).toBe('出口正常')
+    expect(button.getAttribute('data-tone')).toBe('ok')
+    expect(button.getAttribute('aria-expanded')).toBe('false')
+  })
+
+  it.each([
+    ['checking', '检查中…', 'neutral'],
+    ['ok', '出口正常', 'ok'],
+    ['warning', '1 项提醒', 'warn'],
+    ['abnormal', '出口异常', 'danger'],
+    ['unknown', '无法确认出口', 'warn']
+  ] as const)('renders global %s state', async (state, label, tone) => {
+    // Unknown values may arrive from an unavailable or newer runtime.
+    await renderChip(baseStatus({ state: state as EgressStatusWire['state'] }), 'session-shell')
+    const button = screen.getByRole('button', { name: '网络检查' })
+    expect(button.textContent).toBe(label)
+    expect(button.getAttribute('data-tone')).toBe(tone)
+  })
+
+  it('shows checking while the initial status request is pending', async () => {
+    currentClient = {
+      request: vi.fn(() => new Promise(() => {})),
+      subscribeEgressStatus: vi.fn(() => () => {})
+    } as unknown as RuntimeClient
+    render(<LocaleProvider initialLocale="zh-CN"><EgressChip sessionId="session-shell" /></LocaleProvider>)
+    expect(screen.getByRole('button', { name: '网络检查' }).textContent).toBe('检查中…')
+  })
+
+  it('counts paused sessions across every family', async () => {
+    const status = baseStatus({ state: 'abnormal' })
+    status.families[0]!.frozenSessionIds = ['session-claude', 'session-2']
+    status.families.push({ ...status.families[0]!, family: 'google', frozenSessionIds: ['session-google'] })
+    await renderChip(status, 'session-shell')
+    expect(screen.getByRole('button', { name: '网络检查' }).textContent).toBe('出口异常 · 已暂停 3 个会话')
+  })
+
+  it('counts warn and fail checks globally and ignores pass and unknown', async () => {
+    await renderChip(baseStatus({ state: 'warning', checks: [
+      { id: 'mainland', family: 'google', result: 'fail' },
+      { id: 'exit-rule', family: 'openai', result: 'warn' },
+      { id: 'time-zone', result: 'warn' },
+      { id: 'ipv6', result: 'unknown' },
+      { id: 'agent-proxy-path', result: 'pass' }
+    ] }), 'session-shell')
+    expect(screen.getByRole('button', { name: '网络检查' }).textContent).toBe('3 项提醒')
+  })
+
+  it('toggles the shared panel and closes with Escape or an outside click', async () => {
+    await renderChip(baseStatus(), 'session-shell')
+    const button = screen.getByRole('button', { name: '网络检查' })
+    fireEvent.click(button)
+    expect(screen.getByRole('dialog', { name: '网络检查' })).toBeTruthy()
+    expect(button.getAttribute('aria-expanded')).toBe('true')
+    fireEvent.pointerDown(button)
+    expect(screen.getByRole('dialog', { name: '网络检查' })).toBeTruthy()
+    fireEvent.click(button)
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(button.getAttribute('aria-expanded')).toBe('false')
+    fireEvent.click(button)
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(button.getAttribute('aria-expanded')).toBe('false')
+    fireEvent.click(button)
+    fireEvent.pointerDown(document.body)
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(button.getAttribute('aria-expanded')).toBe('false')
+  })
+
+  it('can be focused and opened with the keyboard', async () => {
+    await renderChip(baseStatus(), 'session-shell')
+    const user = userEvent.setup()
+    await user.tab()
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: '网络检查' }))
+    await user.keyboard('{Enter}')
+    expect(screen.getByRole('dialog', { name: '网络检查' })).toBeTruthy()
+    await user.keyboard('{Escape}')
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('keeps Mantle, client notices, Google diagnostics and global actions accessible', async () => {
+    Object.assign(window, { matouDesktop: {
+      safeBrowserStatus: vi.fn().mockResolvedValue({ installed: true, version: '148.0.7778.215' }),
+      runningDesktopClients: vi.fn().mockResolvedValue(['claude'])
+    } })
+    const status = baseStatus()
+    status.families[0]!.violation = 'rule'
+    status.families.push({ ...status.families[0]!, family: 'google' })
+    await renderChip(status, 'session-deepseek')
+    const request = vi.mocked(currentClient!.request)
+    fireEvent.click(screen.getByRole('button', { name: '网络检查' }))
+    expect(await screen.findByRole('region', { name: 'Mantle' })).toBeTruthy()
+    expect(await screen.findByText('检测到 Claude Desktop 正在运行，它的出口不在保护范围')).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'Google（通用出口检测）' })).toBeTruthy()
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: '重新检查' })))
+    expect(request).toHaveBeenCalledWith('egress.recheck', undefined)
+    await act(async () => fireEvent.click(screen.getByRole('radio', { name: '固定 IP' })))
+    expect(request).toHaveBeenCalledWith('egress.set-rule', { mode: 'ip' })
+    await act(async () => fireEvent.click(screen.getAllByRole('button', { name: '以当前出口为准' })[0]!))
+    expect(request).toHaveBeenCalledWith('egress.accept-current', { family: 'anthropic' })
+    await act(async () => fireEvent.click(screen.getByRole('checkbox', { name: /出口保护/ })))
+    expect(request).toHaveBeenCalledWith('egress.set-protection', { enabled: false })
+  })
+
+  it('updates the global label when the shared status changes', async () => {
+    let status = baseStatus()
+    let notify = () => {}
+    currentClient = {
+      getEgressStatusSnapshot: () => status,
+      subscribeEgressStatus: (listener: () => void) => { notify = listener; return () => {} }
+    } as unknown as RuntimeClient
+    const view = render(<LocaleProvider initialLocale="zh-CN"><EgressChip sessionId="session-shell" /></LocaleProvider>)
+    act(() => { status = baseStatus({ state: 'warning' }); notify() })
+    expect(screen.getByRole('button', { name: '网络检查' }).textContent).toBe('1 项提醒')
+    view.rerender(<LocaleProvider initialLocale="zh-CN"><EgressChip sessionId="session-claude" /></LocaleProvider>)
+    expect(screen.getByRole('button', { name: '🇺🇸 美国 · 出口正常' })).toBeTruthy()
+  })
+
+  it.each([null, {}])('does not crash without an egress client or bridge: %s', (client) => {
+    currentClient = client as RuntimeClient | null
+    const { container } = render(<LocaleProvider initialLocale="zh-CN"><EgressChip sessionId="session-shell" /></LocaleProvider>)
+    const button = container.querySelector('button')
+    expect(button === null || button.textContent === '无法确认出口').toBe(true)
+  })
+
+  it('uses the current locale for the global entry', async () => {
+    await renderChip(baseStatus(), 'session-shell', 'en')
+    expect(screen.getByRole('button', { name: 'Network check' }).textContent).toBe('Exit OK')
   })
 })
