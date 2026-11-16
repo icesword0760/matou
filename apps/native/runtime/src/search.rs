@@ -2,10 +2,11 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use matou_native_terminal::{SearchEngine, SearchMatch, SearchOptions, SelectionAction, Terminal};
+use serde::{Deserialize, Serialize};
 
 const REFRESH_DELAY: Duration = Duration::from_millis(200);
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchRequest {
     pub sequence: u64,
     pub query: String,
@@ -13,7 +14,7 @@ pub struct SearchRequest {
     pub previous: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SearchResult {
     pub sequence: u64,
     pub matches: Vec<SearchMatch>,
