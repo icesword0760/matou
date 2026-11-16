@@ -53,20 +53,37 @@ struct SelectionDrag {
     initial: Range<TextPoint>,
     unit: SelectionUnit,
     position: Option<Point<Pixels>>,
+    scroll_body: bool,
 }
 
+type BoundsHandle = Rc<Cell<Option<Bounds<Pixels>>>>;
+
 #[derive(Default)]
-struct RowGeometry {
-    bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
-    text: TextGeometryHandle,
+struct SelectableText {
+    source: String,
+    bounds: BoundsHandle,
+    geometry: TextGeometryHandle,
 }
+
+impl SelectableText {
+    fn new(source: impl Into<String>) -> Self {
+        Self {
+            source: source.into(),
+            ..Self::default()
+        }
+    }
+}
+
+const RETURN_LABEL: usize = 3;
 
 /// A read-only overlay. The live surface remains owned by the workspace.
 pub struct HistoryView {
     pub focus: FocusHandle,
     text_focus: FocusHandle,
     state: Option<HistoryViewState>,
-    rows: Vec<RowGeometry>,
+    entries: Vec<SelectableText>,
+    body_entries: Range<usize>,
+    return_bounds: BoundsHandle,
     selection: Option<TextSelection>,
     drag: Option<SelectionDrag>,
     drag_frame_pending: bool,
@@ -93,7 +110,9 @@ impl HistoryView {
             focus: cx.focus_handle().tab_stop(true),
             text_focus: cx.focus_handle(),
             state: None,
-            rows: Vec::new(),
+            entries: Vec::new(),
+            body_entries: 0..0,
+            return_bounds: BoundsHandle::default(),
             selection: None,
             drag: None,
             drag_frame_pending: false,
@@ -108,11 +127,55 @@ impl HistoryView {
         self.center_on_anchor =
             matches!(&state, HistoryViewState::Ready { page, .. } if page.anchor_index.is_some());
         self.scroll.set_offset(Point::default());
-        self.rows.clear();
-        if let HistoryViewState::Ready { page, .. } = &state {
-            self.rows
-                .resize_with(page.lines.len(), RowGeometry::default);
+        let (result_index, result_count, page, gap_count) = match &state {
+            HistoryViewState::Loading {
+                result_index,
+                result_count,
+                gap_count,
+            } => (*result_index, *result_count, None, *gap_count),
+            HistoryViewState::Ready {
+                result_index,
+                result_count,
+                page,
+            } => (*result_index, *result_count, Some(page), page.gaps.len()),
+        };
+
+        // Keep the same text order as the panel's block and flex children.
+        // The row numbers are rendered separately and never enter this list.
+        self.entries = vec![
+            SelectableText::new("历史记录"),
+            SelectableText::new("只读"),
+            SelectableText::new(format!("{}/{result_count}", result_index + 1)),
+            SelectableText::new("返回实时终端"),
+        ];
+        let body_start = self.entries.len();
+        if let Some(page) = page {
+            if page.has_more_before == Some(true) {
+                self.entries.push(SelectableText::new("上方还有更早记录"));
+            }
+            self.entries.extend(page.lines.iter().map(|line| {
+                SelectableText::new(if line.text.is_empty() {
+                    " "
+                } else {
+                    &line.text
+                })
+            }));
+            if page.has_more_after == Some(true) {
+                self.entries.push(SelectableText::new("下方还有更新记录"));
+            }
+        } else {
+            self.entries
+                .push(SelectableText::new("正在读取历史上下文…"));
         }
+        self.body_entries = body_start..self.entries.len();
+        self.entries
+            .push(SelectableText::new("命中行前后各最多 250 行"));
+        if gap_count > 0 {
+            self.entries
+                .push(SelectableText::new(format!("{gap_count} 处历史缺口")));
+        }
+        self.entries.push(SelectableText::new("Esc 返回"));
+        self.return_bounds.set(None);
         self.selection = None;
         self.stop_drag();
         self.state = Some(state);
@@ -126,34 +189,59 @@ impl HistoryView {
         }
     }
 
+    fn text_at_x(&self, entries: Range<usize>, x: Pixels) -> Option<usize> {
+        entries
+            .filter_map(|index| {
+                let layout = self.entries[index].geometry.borrow();
+                let bounds = layout.as_ref()?.bounds;
+                let distance = (bounds.left() - x).max(x - bounds.right()).max(px(0.));
+                Some((index, distance))
+            })
+            .min_by(|a, b| f32::from(a.1).total_cmp(&f32::from(b.1)))
+            .map(|(index, _)| index)
+    }
+
     fn point_at(
         &self,
         position: Point<Pixels>,
         unit: SelectionUnit,
         starting: bool,
     ) -> Option<TextPoint> {
-        let page = self.page()?;
-        let last = self.rows.len().checked_sub(1)?;
-        let row = self
-            .rows
-            .partition_point(|row| {
-                row.bounds
+        let scrolling = self.page().is_some();
+        let body = if scrolling {
+            self.scroll.bounds()
+        } else {
+            self.entries.get(self.body_entries.start)?.bounds.get()?
+        };
+        let row = if position.y < body.top() {
+            self.text_at_x(0..self.body_entries.start, position.x)?
+        } else if position.y >= body.bottom() {
+            self.text_at_x(self.body_entries.end..self.entries.len(), position.x)?
+        } else {
+            let entries = &self.entries[self.body_entries.clone()];
+            let last = entries.len().checked_sub(1)?;
+            let row = entries.partition_point(|entry| {
+                entry
+                    .bounds
                     .get()
                     .is_some_and(|bounds| position.y >= bounds.bottom())
-            })
-            .min(last);
-        let geometry = self.rows[row].text.borrow();
+            });
+            self.body_entries.start + row.min(last)
+        };
+        let entry = &self.entries[row];
+        let geometry = entry.geometry.borrow();
         let geometry = geometry.as_ref()?;
-        let row_bounds = self.rows[row].bounds.get()?;
-        if starting
-            && (position.x < geometry.bounds.left()
+        if starting && scrolling && self.body_entries.contains(&row) {
+            let row_bounds = entry.bounds.get()?;
+            if position.x < geometry.bounds.left()
                 || position.y < row_bounds.top()
-                || position.y >= row_bounds.bottom())
-        {
-            return None;
+                || position.y >= row_bounds.bottom()
+            {
+                return None;
+            }
         }
 
-        let source = &page.lines[row].text;
+        let source = &entry.source;
         let x = position.x - geometry.bounds.left();
         let byte = if x <= px(0.) {
             0
@@ -178,13 +266,7 @@ impl HistoryView {
     }
 
     fn unit_range(&self, point: TextPoint, unit: SelectionUnit) -> Range<TextPoint> {
-        let Some(text) = self
-            .page()
-            .and_then(|page| page.lines.get(point.row))
-            .map(|line| line.text.as_str())
-        else {
-            return point..point;
-        };
+        let text = &self.entries[point.row].source;
         let bytes = match unit {
             SelectionUnit::Character => point.byte..point.byte,
             SelectionUnit::Line => 0..text.len(),
@@ -211,6 +293,13 @@ impl HistoryView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self
+            .return_bounds
+            .get()
+            .is_some_and(|bounds| bounds.contains(&event.position))
+        {
+            return;
+        }
         let unit = if event.modifiers.shift {
             SelectionUnit::Character
         } else {
@@ -242,6 +331,7 @@ impl HistoryView {
             initial,
             unit,
             position: None,
+            scroll_body: self.page().is_some() && self.body_entries.contains(&point.row),
         });
         cx.stop_propagation();
         cx.notify();
@@ -281,7 +371,7 @@ impl HistoryView {
     }
 
     fn schedule_drag_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.drag_frame_pending || self.drag.as_ref().and_then(|drag| drag.position).is_none() {
+        if self.drag_frame_pending || self.drag_scroll_position().is_none() {
             return;
         }
         self.drag_frame_pending = true;
@@ -298,8 +388,12 @@ impl HistoryView {
         });
     }
 
+    fn drag_scroll_position(&self) -> Option<Point<Pixels>> {
+        self.drag.as_ref().filter(|drag| drag.scroll_body)?.position
+    }
+
     fn advance_drag_frame(&mut self, scale: f32, cx: &mut Context<Self>) {
-        let Some(position) = self.drag.as_ref().and_then(|drag| drag.position) else {
+        let Some(position) = self.drag_scroll_position() else {
             return;
         };
         let selection = self.selection;
@@ -339,7 +433,6 @@ impl HistoryView {
     }
 
     fn selected_text(&self) -> Option<String> {
-        let page = self.page()?;
         let selection = self.selection?.ordered();
         if selection.is_empty() {
             return None;
@@ -350,7 +443,7 @@ impl HistoryView {
             if row != selection.start.row {
                 text.push('\n');
             }
-            let line = &page.lines[row].text;
+            let line = &self.entries[row].source;
             if let Some(range) = selected_bytes(&selection, row, line.len()) {
                 text.push_str(&line[range]);
             }
@@ -358,8 +451,49 @@ impl HistoryView {
         Some(text)
     }
 
-    fn heading(&self, result_index: usize, result_count: usize, cx: &mut Context<Self>) -> Div {
+    fn selectable_text(&self, index: usize) -> impl Iterator<Item = AnyElement> + use<> {
+        let entry = &self.entries[index];
+        let geometry = entry.geometry.clone();
+        let highlight = self
+            .selection
+            .and_then(|selection| selected_bytes(&selection.ordered(), index, entry.source.len()))
+            .filter(|range| !range.is_empty())
+            .map(|range| {
+                let geometry = geometry.clone();
+                canvas(
+                    |_, _, _| (),
+                    move |_, _, window, _| {
+                        let layout = geometry.borrow();
+                        let Some(layout) = layout.as_ref() else {
+                            return;
+                        };
+                        let a = layout.layout.x_for_index(range.start);
+                        let b = layout.layout.x_for_index(range.end);
+                        let bounds = Bounds::new(
+                            point(layout.bounds.left() + a.min(b), layout.bounds.top()),
+                            size((b - a).abs(), layout.bounds.size.height),
+                        );
+                        window.paint_quad(fill(bounds, rgb(0xb5d5ff)));
+                    },
+                )
+                .absolute()
+                .inset_0()
+                .size_full()
+                .into_any_element()
+            });
+        let text = if entry.source.is_ascii() {
+            into_text_element(StyledText::new(entry.source.clone()), Some(geometry))
+        } else {
+            ui_text(entry.source.clone())
+                .track_geometry(geometry)
+                .into_any_element()
+        };
+        highlight.into_iter().chain(std::iter::once(text))
+    }
+
+    fn heading(&self, cx: &mut Context<Self>) -> Div {
         let focus = self.focus.clone();
+        let return_bounds = self.return_bounds.clone();
         let return_button = div()
             .id("history-return-to-live")
             .relative()
@@ -388,10 +522,10 @@ impl HistoryView {
                     cx.emit(HistoryViewEvent::ReturnToLive);
                 }
             }))
-            .child(ui_text("返回实时终端"))
+            .children(self.selectable_text(RETURN_LABEL))
             .child(
                 canvas(
-                    |_, _, _| (),
+                    move |bounds, _, _| return_bounds.set(Some(bounds)),
                     move |bounds, _, window, _| {
                         if focus.is_focused(window) {
                             window.paint_quad(
@@ -427,47 +561,33 @@ impl HistoryView {
                     .whitespace_nowrap()
                     .child(
                         div()
+                            .relative()
                             .text_color(rgb(0x202735))
                             .font_weight(FontWeight::BOLD)
-                            .child(ui_text("历史记录")),
+                            .children(self.selectable_text(0)),
                     )
                     .child(
                         div()
+                            .relative()
                             .px(px(6.))
                             .py(px(1.))
                             .rounded(px(4.))
                             .text_color(rgb(0xc98a39))
                             .bg(rgba(0xc98a3921))
-                            .child(ui_text("只读")),
+                            .children(self.selectable_text(1)),
                     )
-                    .child(format!("{}/{result_count}", result_index + 1)),
+                    .child(div().relative().children(self.selectable_text(2))),
             )
             .child(return_button)
     }
 
     fn body(&self, page: &HistoryPage, cx: &mut Context<Self>) -> Stateful<Div> {
         let view = cx.entity().downgrade();
-        let selection = self.selection.map(TextSelection::ordered);
-        let rows = page.lines.iter().enumerate().map(|(index, line)| {
+        let before = page.has_more_before == Some(true);
+        let line_start = self.body_entries.start + usize::from(before);
+        let rows = page.lines.iter().enumerate().map(|(index, _)| {
             let current = page.anchor_index == Some(index);
-            let text = if line.text.is_empty() {
-                " "
-            } else {
-                &line.text
-            };
-            let geometry = &self.rows[index];
-            let row_bounds = geometry.bounds.clone();
-            let layout = geometry.text.clone();
-            let selection = selection
-                .as_ref()
-                .and_then(|selection| selected_bytes(selection, index, line.text.len()));
-            let text = if text.is_ascii() {
-                into_text_element(StyledText::new(text.to_owned()), Some(layout.clone()))
-            } else {
-                ui_text(text.to_owned())
-                    .track_geometry(layout.clone())
-                    .into_any_element()
-            };
+            let entry = line_start + index;
             let view = view.clone();
             div()
                 .relative()
@@ -499,38 +619,14 @@ impl HistoryView {
                         .text_color(rgb(0x626b7c))
                         .child((index + 1).to_string()),
                 )
-                .child(
-                    canvas(
-                        move |bounds, _, _| row_bounds.set(Some(bounds)),
-                        move |_, _, window, _| {
-                            let Some(selection) =
-                                selection.filter(|selection| !selection.is_empty())
-                            else {
-                                return;
-                            };
-                            let layout = layout.borrow();
-                            let Some(geometry) = layout.as_ref() else {
-                                return;
-                            };
-                            let a = geometry.layout.x_for_index(selection.start);
-                            let b = geometry.layout.x_for_index(selection.end);
-                            let bounds = Bounds::new(
-                                point(geometry.bounds.left() + a.min(b), geometry.bounds.top()),
-                                size((b - a).abs(), geometry.bounds.size.height),
-                            );
-                            window.paint_quad(fill(bounds, rgb(0xb5d5ff)));
-                        },
-                    )
-                    .absolute()
-                    .inset_0()
-                    .size_full(),
-                )
+                .child(track_bounds(self.entries[entry].bounds.clone()))
                 .child(
                     div()
+                        .relative()
                         .flex_none()
                         .min_w_0()
                         .cursor(CursorStyle::IBeam)
-                        .child(text),
+                        .children(self.selectable_text(entry)),
                 )
                 .when(current && self.center_on_anchor, |row| {
                     row.child(
@@ -573,13 +669,28 @@ impl HistoryView {
             .min_h_0()
             .overflow_scroll()
             .track_scroll(&self.scroll)
-            .track_focus(&self.text_focus)
-            .on_key_down(cx.listener(Self::copy))
-            .on_mouse_down(MouseButton::Left, cx.listener(Self::begin_selection))
             .py(px(8.))
-            .children((page.has_more_before == Some(true)).then(|| boundary("上方还有更早记录")))
+            .children(before.then(|| self.boundary(self.body_entries.start)))
             .children(rows)
-            .children((page.has_more_after == Some(true)).then(|| boundary("下方还有更新记录")))
+            .children(
+                (page.has_more_after == Some(true))
+                    .then(|| self.boundary(self.body_entries.end - 1)),
+            )
+    }
+
+    fn boundary(&self, index: usize) -> Div {
+        div()
+            .relative()
+            .flex_none()
+            .min_w_full()
+            .pl(px(56.))
+            .pr(px(12.))
+            .py(px(4.))
+            .text_color(rgb(0x727b8e))
+            .italic()
+            .whitespace_nowrap()
+            .child(track_bounds(self.entries[index].bounds.clone()))
+            .children(self.selectable_text(index))
     }
 }
 
@@ -695,17 +806,11 @@ fn selected_bytes(selection: &Range<TextPoint>, row: usize, len: usize) -> Optio
     Some(start..end)
 }
 
-fn boundary(text: &'static str) -> Div {
-    div()
-        .flex_none()
-        .min_w_full()
-        .pl(px(56.))
-        .pr(px(12.))
-        .py(px(4.))
-        .text_color(rgb(0x727b8e))
-        .italic()
-        .whitespace_nowrap()
-        .child(ui_text(text))
+fn track_bounds(bounds: BoundsHandle) -> impl IntoElement {
+    canvas(move |rect, _, _| bounds.set(Some(rect)), |_, _, _, _| {})
+        .absolute()
+        .inset_0()
+        .size_full()
 }
 
 impl Render for HistoryView {
@@ -734,6 +839,9 @@ impl Render for HistoryView {
             .font_family(self.font_family.clone())
             .text_color(rgb(0x303848))
             .bg(rgb(0xf7f8fb))
+            .track_focus(&self.text_focus)
+            .on_mouse_down(MouseButton::Left, cx.listener(Self::begin_selection))
+            .on_key_down(cx.listener(Self::copy))
             .on_key_down(cx.listener(|_, event: &KeyDownEvent, _, cx| {
                 if event.keystroke.key == "escape" {
                     cx.stop_propagation();
@@ -772,31 +880,27 @@ impl Render for HistoryView {
                 .absolute()
                 .size_full(),
             );
-        let Some(state) = &self.state else {
+        if self.state.is_none() {
             return view;
-        };
-        let (result_index, result_count, gap_count, page) = match state {
-            HistoryViewState::Loading {
-                result_index,
-                result_count,
-                gap_count,
-            } => (*result_index, *result_count, *gap_count, None),
-            HistoryViewState::Ready {
-                result_index,
-                result_count,
-                page,
-            } => (*result_index, *result_count, page.gaps.len(), Some(page)),
-        };
-        let heading = self.heading(result_index, result_count, cx);
-        let body = match page {
+        }
+        let heading = self.heading(cx);
+        let body = match self.page() {
             Some(page) => self.body(page, cx).into_any_element(),
             None => div()
+                .relative()
                 .flex()
                 .flex_1()
                 .items_center()
                 .justify_center()
                 .text_color(rgb(0x8d95a7))
-                .child(ui_text("正在读取历史上下文…"))
+                .child(track_bounds(
+                    self.entries[self.body_entries.start].bounds.clone(),
+                ))
+                .child(
+                    div()
+                        .relative()
+                        .children(self.selectable_text(self.body_entries.start)),
+                )
                 .into_any_element(),
         };
         view.child(heading).child(body).child(
@@ -812,9 +916,10 @@ impl Render for HistoryView {
                 .bg(rgb(0xeef1f6))
                 .text_color(rgb(0x8d95a7))
                 .whitespace_nowrap()
-                .child(ui_text("命中行前后各最多 250 行"))
-                .children((gap_count > 0).then(|| ui_text(format!("{gap_count} 处历史缺口"))))
-                .child(ui_text("Esc 返回")),
+                .children(
+                    (self.body_entries.end..self.entries.len())
+                        .map(|index| div().relative().children(self.selectable_text(index))),
+                ),
         )
     }
 }

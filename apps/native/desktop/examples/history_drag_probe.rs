@@ -10,7 +10,7 @@ mod probe {
     include!("../src/history_view.rs");
 
     use matou_native_desktop::assets::NativeAssets;
-    use matou_native_runtime::history::{HistoryCursor, HistoryLine};
+    use matou_native_runtime::history::{HistoryCursor, HistoryGap, HistoryGapCode, HistoryLine};
 
     fn history(prefix: &str) -> HistoryViewState {
         HistoryViewState::Ready {
@@ -42,14 +42,18 @@ mod probe {
     }
 
     impl HistoryView {
-        fn begin_probe_drag(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-            let geometry = self.rows[0].text.borrow();
-            let layout = geometry
-                .as_ref()
-                .expect("first row's rendered text geometry");
-            let row = self.rows[0].bounds.get().expect("first row's bounds");
-            let position = point(layout.bounds.left() + px(0.25), row.center().y);
-            drop(geometry);
+        fn entry_point(&self, index: usize, end: bool) -> Point<Pixels> {
+            let geometry = self.entries[index].geometry.borrow();
+            let bounds = geometry.as_ref().expect("laid-out entry").bounds;
+            let x = if end {
+                bounds.right() + px(0.25)
+            } else {
+                bounds.left() + px(0.25)
+            };
+            point(x, bounds.center().y)
+        }
+
+        fn press(&mut self, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
             self.begin_selection(
                 &MouseDownEvent {
                     button: MouseButton::Left,
@@ -60,8 +64,13 @@ mod probe {
                 window,
                 cx,
             );
+        }
+
+        fn begin_probe_drag(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+            let first = self.body_entries.start;
+            self.press(self.entry_point(first, false), window, cx);
             let start = self.selection.expect("drag started").anchor;
-            assert_eq!((start.row, start.byte), (0, 0));
+            assert_eq!((start.row, start.byte), (first, 0));
             let viewport = self.scroll.bounds();
             assert!(self.scroll.max_offset().height > px(100.));
             let pointer = point(viewport.center().x, viewport.bottom() - px(1.));
@@ -71,9 +80,11 @@ mod probe {
         fn verify_copy_range(&self) -> (usize, usize) {
             let range = self.selection.expect("non-empty selection").ordered();
             let page = self.page().expect("visible history page");
+            let start = range.start.row - self.body_entries.start;
+            let end = range.end.row - self.body_entries.start;
             assert_eq!(range.start.byte, 0);
-            assert_eq!(range.end.byte, page.lines[range.end.row].text.len());
-            let expected = page.lines[range.start.row..=range.end.row]
+            assert_eq!(range.end.byte, page.lines[end].text.len());
+            let expected = page.lines[start..=end]
                 .iter()
                 .map(|line| line.text.as_str())
                 .collect::<Vec<_>>()
@@ -83,7 +94,7 @@ mod probe {
                 Some(expected.as_str()),
                 "copy must match the new Unicode rows byte for byte, with no line numbers"
             );
-            (range.start.row, range.end.row)
+            (start, end)
         }
     }
 
@@ -95,7 +106,11 @@ mod probe {
                 assert_eq!(view.scroll.offset(), Point::default());
                 (
                     view.verify_copy_range(),
-                    view.rows[0].bounds.get().unwrap().top(),
+                    view.entries[view.body_entries.start]
+                        .bounds
+                        .get()
+                        .unwrap()
+                        .top(),
                 )
             })
             .expect("begin drag on painted text");
@@ -120,7 +135,7 @@ mod probe {
                 assert_eq!(after.0, before.0, "keep the selection anchor");
                 assert!(after.1 > before.1, "drag selects rows exposed by scrolling");
                 assert!(scroll.y < px(0.));
-                assert!(view.rows[0].bounds.get().unwrap().top() < first_row_top);
+                assert!(view.entries[view.body_entries.start].bounds.get().unwrap().top() < first_row_top);
                 let copied = view.selected_text().unwrap();
                 println!(
                     "Hidden GPUI draws with synthetic inputs: archive rows {}–{} → {}–{}, Y offset 0 → {:?}, copied {} rows ({} UTF-8 bytes), first={:?}, last={:?}",
@@ -164,6 +179,73 @@ mod probe {
             .expect("verify page replacement stops an in-progress drag");
     }
 
+    fn verify_panel_selection(window: WindowHandle<HistoryView>, cx: &mut App) {
+        let mut state = history("跨区");
+        if let HistoryViewState::Ready { page, .. } = &mut state {
+            page.has_more_before = Some(true);
+            page.has_more_after = Some(true);
+            page.gaps.push(HistoryGap {
+                segment_index: 3,
+                code: HistoryGapCode::MissingSegment,
+                message: "synthetic history gap".into(),
+            });
+        }
+        window
+            .update(cx, |view, _, cx| view.set_state(state, cx))
+            .unwrap();
+        draw(window, cx);
+        window
+            .update(cx, |view, window, cx| {
+                let first_line = view.body_entries.start + 1;
+                let third_line = first_line + 2;
+                view.press(view.entry_point(third_line, false), window, cx);
+                assert!(view.drag.as_ref().expect("body drag started").scroll_body);
+                view.extend_selection(view.entry_point(view.entries.len() - 1, true), cx);
+                let lines = &view.page().unwrap().lines;
+                let mut expected: Vec<_> = lines[2..].iter().map(|line| line.text.as_str()).collect();
+                expected.extend([
+                    "下方还有更新记录",
+                    "命中行前后各最多 250 行",
+                    "1 处历史缺口",
+                    "Esc 返回",
+                ]);
+                let copied = view.selected_text().unwrap();
+                assert_eq!(copied, expected.join("\n"));
+                println!("Body → footer copies {} items through Esc 返回, with no line numbers.", copied.lines().count());
+                view.stop_drag();
+
+                view.press(view.entry_point(third_line, false), window, cx);
+                view.extend_selection(view.entry_point(0, false), cx);
+                let lines = &view.page().unwrap().lines;
+                let expected = [
+                    "历史记录",
+                    "只读",
+                    "1/1",
+                    "返回实时终端",
+                    "上方还有更早记录",
+                    &lines[0].text,
+                    &lines[1].text,
+                    "",
+                ].join("\n");
+                assert_eq!(view.selected_text().as_deref(), Some(expected.as_str()));
+                println!("Body → heading copies all title labels, the earlier-history hint, and the trailing newline.");
+                view.stop_drag();
+
+                view.press(view.return_bounds.get().unwrap().center(), window, cx);
+                assert!(view.drag.is_none(), "the return button can receive its own click");
+
+                view.press(view.entry_point(0, false), window, cx);
+                assert!(!view.drag.as_ref().expect("heading drag started").scroll_body);
+                let viewport = view.scroll.bounds();
+                view.extend_selection(point(viewport.center().x, viewport.bottom() - px(1.)), cx);
+                let before = view.scroll.offset();
+                view.advance_drag_frame(window.scale_factor(), cx);
+                assert_eq!(view.scroll.offset(), before);
+                println!("Starting on the heading selects into the body without autoscrolling it.");
+            })
+            .expect("verify selection spanning the history panel");
+    }
+
     pub fn run() {
         Application::new().with_assets(NativeAssets).run(|cx| {
             let window = cx
@@ -187,6 +269,7 @@ mod probe {
                 )
                 .expect("open hidden history drag probe");
             verify(window, cx);
+            verify_panel_selection(window, cx);
             cx.quit();
         });
     }
