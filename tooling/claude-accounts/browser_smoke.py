@@ -31,11 +31,11 @@ def main():
     children=[]
     try:
         with tempfile.TemporaryDirectory(prefix='matou-browser-isolation-') as tmp:
-            executable=find_browser()
+            executable, extra_args=find_browser()
             observed=[]
             for run in ('a','b'):
                 profile=Path(tmp)/run;profile.mkdir(mode=0o700)
-                children.append(start_browser(executable,profile,f'http://127.0.0.1:{server.server_port}/seed?run={run}'))
+                children.append(start_browser(executable,profile,f'http://127.0.0.1:{server.server_port}/seed?run={run}',extra_args))
                 seed=events.get(timeout=20);verify=events.get(timeout=20)
                 assert seed==(run,'seed',''),seed
                 assert verify==(run,'verify','matou_fixture='+run),verify

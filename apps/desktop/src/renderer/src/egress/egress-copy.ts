@@ -268,6 +268,8 @@ export function familyHeading(family: EgressFamily, zh: boolean): string {
       return zh ? 'Codex（OpenAI）' : 'Codex (OpenAI)'
     case 'chatgpt-subscription':
       return zh ? 'Claude（ChatGPT 订阅）' : 'Claude (ChatGPT subscription)'
+    case 'google':
+      return zh ? 'Google（通用出口检测）' : 'Google (generic exit)'
   }
 }
 

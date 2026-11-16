@@ -594,10 +594,9 @@ index 464d1df..0457880 100644
  	}
 diff --git a/internal/codextls/codextls.go b/internal/codextls/codextls.go
 new file mode 100644
-index 0000000..591dd5d
 --- /dev/null
 +++ b/internal/codextls/codextls.go
-@@ -0,0 +1,145 @@
+@@ -0,0 +1,143 @@
 +// Package codextls reproduces the TLS identity of the native Codex CLI for
 +// ChatGPT traffic.
 +//
@@ -619,14 +618,13 @@ index 0000000..591dd5d
 +	"fmt"
 +	"net"
 +	"net/http"
-+	"net/url"
 +	"strings"
 +	"time"
 +
 +	utls "github.com/refraction-networking/utls"
-+	log "github.com/sirupsen/logrus"
 +	"github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
 +	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
++	log "github.com/sirupsen/logrus"
 +	"golang.org/x/net/proxy"
 +)
 +
@@ -694,6 +692,11 @@ index 0000000..591dd5d
 +	}
 +
 +	transport := &http.Transport{
++		// Resolve proxy routing exactly once. A Transport.Proxy hook would let
++		// net/http perform CONNECT and its own target TLS, bypassing uTLS.
++		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
++			return dialContext(ctx, dialer, network, addr)
++		},
 +		// No ALPN, so the native client stays on HTTP/1.1; pooling is explicit.
 +		ForceAttemptHTTP2:   false,
 +		MaxIdleConnsPerHost: 2,
@@ -721,11 +724,6 @@ index 0000000..591dd5d
 +			return tlsConn, nil
 +		},
 +	}
-+	// Keep the conventional Proxy view for callers that inspect it. The dial
-+	// path above already routed through proxyutil for HTTP and SOCKS proxies.
-+	if parsed, errParse := url.Parse(proxyURL); proxyURL != "" && errParse == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") {
-+		transport.Proxy = http.ProxyURL(parsed)
-+	}
 +	return transport
 +}
 +
@@ -742,17 +740,24 @@ index 0000000..591dd5d
 +	}
 +	return context.WithTimeout(ctx, timeout)
 +}
-+
 diff --git a/internal/codextls/codextls_test.go b/internal/codextls/codextls_test.go
 new file mode 100644
-index 0000000..64ea3ee
 --- /dev/null
 +++ b/internal/codextls/codextls_test.go
-@@ -0,0 +1,42 @@
+@@ -0,0 +1,244 @@
 +package codextls
 +
 +import (
++	"bufio"
++	"context"
++	"encoding/binary"
++	"errors"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"reflect"
 +	"testing"
++	"time"
 +
 +	utls "github.com/refraction-networking/utls"
 +)
@@ -789,6 +794,199 @@ index 0000000..64ea3ee
 +	}
 +	if hasALPN || hasSupportedVersions || hasKeyShare {
 +		t.Fatal("native Codex ClientHello has no ALPN, supported_versions or key share")
++	}
++}
++
++// Capture the actual first target TLS record, after a real loopback CONNECT.
++// The peer closes after ClientHello; a successful remote handshake is not needed
++// to distinguish the native profile from net/http's default crypto/tls profile.
++func TestCodexClientHelloThroughHTTPConnect(t *testing.T) {
++	for _, authenticated := range []bool{false, true} {
++		t.Run(map[bool]string{false: "anonymous", true: "authenticated"}[authenticated], func(t *testing.T) {
++			type capture struct {
++				request *http.Request
++				record  []byte
++				err     error
++			}
++			captured := make(chan capture, 1)
++			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++				conn, rw, err := w.(http.Hijacker).Hijack()
++				if err != nil {
++					captured <- capture{err: err}
++					return
++				}
++				defer conn.Close()
++				_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
++				_, err = io.WriteString(conn, "HTTP/1.1 200 Connection Established\r\n\r\n")
++				if err != nil {
++					captured <- capture{err: err}
++					return
++				}
++				header := make([]byte, 5)
++				_, err = io.ReadFull(rw, header)
++				if err != nil {
++					captured <- capture{err: err}
++					return
++				}
++				body := make([]byte, int(binary.BigEndian.Uint16(header[3:])))
++				_, err = io.ReadFull(rw, body)
++				captured <- capture{r, append(header, body...), err}
++			}))
++			defer server.Close()
++			proxyURL := server.URL
++			if authenticated {
++				proxyURL = "http://audit:fixture@" + server.Listener.Addr().String()
++			}
++			tr := newRoundTripper(proxyURL, time.Second)
++			defer tr.CloseIdleConnections()
++			_, err := (&http.Client{Transport: tr, Timeout: 3 * time.Second}).Get("https://codex-target.test/capture")
++			if err == nil {
++				t.Fatal("capture peer closes before ServerHello; expected handshake error")
++			}
++			var got capture
++			select {
++			case got = <-captured:
++			case <-time.After(4 * time.Second):
++				t.Fatal("no target ClientHello captured")
++			}
++			if got.err != nil {
++				t.Fatal(got.err)
++			}
++			if got.request.Method != "CONNECT" || got.request.Host != "codex-target.test:443" {
++				t.Fatalf("proxy request = %s %s", got.request.Method, got.request.Host)
++			}
++			wantAuth := ""
++			if authenticated {
++				wantAuth = "Basic YXVkaXQ6Zml4dHVyZQ=="
++			}
++			if got.request.Header.Get("Proxy-Authorization") != wantAuth {
++				t.Fatal("CONNECT authentication changed")
++			}
++			record := got.record
++			if len(record) < 44 || record[0] != 22 || record[5] != 1 {
++				t.Fatalf("not a ClientHello record: %x", record)
++			}
++			body := record[5:]
++			i := 4 + 2 + 32
++			i += 1 + int(body[i])
++			n := int(binary.BigEndian.Uint16(body[i:]))
++			i += 2
++			var ciphers, extensions []uint16
++			for end := i + n; i < end; i += 2 {
++				ciphers = append(ciphers, binary.BigEndian.Uint16(body[i:]))
++			}
++			i += 1 + int(body[i])
++			n = int(binary.BigEndian.Uint16(body[i:]))
++			i += 2
++			for end := i + n; i < end; {
++				extensions = append(extensions, binary.BigEndian.Uint16(body[i:]))
++				i += 4 + int(binary.BigEndian.Uint16(body[i+2:]))
++			}
++			if !reflect.DeepEqual(ciphers, ClientHelloSpec().CipherSuites) {
++				t.Fatalf("target ciphers = %x, want native %x", ciphers, ClientHelloSpec().CipherSuites)
++			}
++			if want := []uint16{0, 10, 11, 13, 5, 18, 23}; !reflect.DeepEqual(extensions, want) {
++				t.Fatalf("target extensions = %v, want %v", extensions, want)
++			}
++			t.Logf("CONNECT %s: ciphers=%x extensions=%v", got.request.Host, ciphers, extensions)
++		})
++	}
++}
++
++func TestCodexHTTPConnectFailureDoesNotBypassProxy(t *testing.T) {
++	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { t.Error("request bypassed rejected proxy") }))
++	defer target.Close()
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusProxyAuthRequired) }))
++	defer server.Close()
++	tr := newRoundTripper(server.URL, time.Second)
++	defer tr.CloseIdleConnections()
++	_, err := (&http.Client{Transport: tr, Timeout: 2 * time.Second}).Get(target.URL)
++	if err == nil {
++		t.Fatal("rejected CONNECT must fail instead of dialing target directly")
++	}
++}
++
++func TestCodexHTTPConnectCancellation(t *testing.T) {
++	entered := make(chan struct{})
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		conn, rw, err := w.(http.Hijacker).Hijack()
++		if err != nil {
++			return
++		}
++		defer conn.Close()
++		_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
++		close(entered)
++		// No CONNECT response. Read returns once the canceled dial closes its socket.
++		_, _ = rw.ReadByte()
++	}))
++	defer server.Close()
++	tr := newRoundTripper(server.URL, time.Second)
++	defer tr.CloseIdleConnections()
++	ctx, cancel := context.WithCancel(context.Background())
++	defer cancel()
++	req, _ := http.NewRequestWithContext(ctx, "GET", "https://codex-target.test/capture", nil)
++	done := make(chan error, 1)
++	go func() { _, err := (&http.Client{Transport: tr}).Do(req); done <- err }()
++	select {
++	case <-entered:
++	case <-time.After(3 * time.Second):
++		t.Fatal("CONNECT did not start")
++	}
++	cancel()
++	select {
++	case err := <-done:
++		if !errors.Is(err, context.Canceled) {
++			t.Fatalf("cancellation = %v", err)
++		}
++	case <-time.After(3 * time.Second):
++		t.Fatal("canceled CONNECT did not return")
++	}
++}
++
++func TestCodexHTTPConnectPlainHTTPAndPooling(t *testing.T) {
++	// Plain HTTP must also use the resolved dialer after removing Transport.Proxy.
++	connects := make(chan string, 2)
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		conn, rw, err := w.(http.Hijacker).Hijack()
++		if err != nil {
++			return
++		}
++		defer conn.Close()
++		_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
++		connects <- r.Method + " " + r.Host
++		_, _ = rw.WriteString("HTTP/1.1 200 Connection Established\r\n\r\n")
++		_ = rw.Flush()
++		reader := bufio.NewReader(rw)
++		for i := 0; i < 2; i++ {
++			req, err := http.ReadRequest(reader)
++			if err != nil {
++				return
++			}
++			req.Body.Close()
++			_, _ = rw.WriteString("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
++			_ = rw.Flush()
++		}
++	}))
++	defer server.Close()
++	tr := newRoundTripper(server.URL, time.Second)
++	defer tr.CloseIdleConnections()
++	client := &http.Client{Transport: tr, Timeout: 3 * time.Second}
++	for i := 0; i < 2; i++ {
++		resp, err := client.Get("http://codex-target.test/capture")
++		if err != nil {
++			t.Fatal(err)
++		}
++		body, err := io.ReadAll(resp.Body)
++		resp.Body.Close()
++		if err != nil || string(body) != "ok" {
++			t.Fatalf("response=%q err=%v", body, err)
++		}
++	}
++	if len(connects) != 1 {
++		t.Fatalf("CONNECT count=%d, want one pooled tunnel", len(connects))
++	}
++	if got := <-connects; got != "CONNECT codex-target.test:80" {
++		t.Fatalf("proxy request=%q", got)
 +	}
 +}
 diff --git a/internal/misc/antigravity_version.go b/internal/misc/antigravity_version.go
@@ -1255,3 +1453,1228 @@ index 42cf15b..851f2b4 100644
 +	}
 +	return "anonymous"
 +}
+diff --git a/internal/translator/antigravity/claude/antigravity_claude_request.go b/internal/translator/antigravity/claude/antigravity_claude_request.go
+--- a/internal/translator/antigravity/claude/antigravity_claude_request.go
++++ b/internal/translator/antigravity/claude/antigravity_claude_request.go
+@@ -324,27 +324,24 @@
+
+-	// system instruction
+-	systemParts := make([][]byte, 0, 2)
+-	systemResult := ojson.GetBytesNoCopy(rawJSON, "system")
+-	if systemResult.IsArray() {
+-		systemResults := systemResult.Array()
+-		for i := 0; i < len(systemResults); i++ {
+-			systemPromptResult := systemResults[i]
+-			systemTypePromptResult := systemPromptResult.Get("type")
+-			if systemTypePromptResult.Type == ojson.String && systemTypePromptResult.String() == "text" {
+-				systemPrompt := systemPromptResult.Get("text").String()
+-				if util.IsClaudeCodeAttributionSystemText(systemPrompt) {
+-					continue
+-				}
+-				partJSON := []byte(`{}`)
+-				if systemPrompt != "" {
+-					partJSON, _ = ojson.SetBytes(partJSON, "text", systemPrompt)
+-				}
+-				systemParts = append(systemParts, partJSON)
+-			}
+-		}
+-	} else if systemResult.Type == ojson.String && !util.IsClaudeCodeAttributionSystemText(systemResult.String()) {
+-		partJSON := []byte(`{"text":""}`)
+-		partJSON, _ = ojson.SetBytes(partJSON, "text", systemResult.String())
+-		systemParts = append(systemParts, partJSON)
+-	}
++	// system instruction
++	systemParts := make([][]byte, 0, 2)
++	systemResult := ojson.GetBytesNoCopy(rawJSON, "system")
++	if systemResult.IsArray() {
++		for _, block := range systemResult.Array() {
++			if block.Get("type").String() != "text" {
++				continue
++			}
++			text := sanitizeAntigravitySystemText(block.Get("text").String())
++			if strings.TrimSpace(text) == "" {
++				continue
++			}
++			partJSON, _ := ojson.SetBytes([]byte(`{}`), "text", text)
++			systemParts = append(systemParts, partJSON)
++		}
++	} else if systemResult.Type == ojson.String {
++		text := sanitizeAntigravitySystemText(systemResult.String())
++		if strings.TrimSpace(text) != "" {
++			partJSON, _ := ojson.SetBytes([]byte(`{}`), "text", text)
++			systemParts = append(systemParts, partJSON)
++		}
++	}
+
+diff --git a/internal/translator/codex/claude/codex_claude_request.go b/internal/translator/codex/claude/codex_claude_request.go
+--- a/internal/translator/codex/claude/codex_claude_request.go
++++ b/internal/translator/codex/claude/codex_claude_request.go
+@@ -107 +107,2 @@
+-			if text == "" || util.IsClaudeCodeAttributionSystemText(text) {
++			text = util.StripLeadingClaudeCodeBillingLines(text)
++			if strings.TrimSpace(text) == "" {
+@@ -112 +113 @@
+-			content, _ = ojson.SetBytes(content, "text", text)
++			content, _ = ojson.SetBytes(content, "text", util.NeutralizeClaudeCodeSystemIdentity(text))
+diff --git a/internal/translator/subscription_prompt_test.go b/internal/translator/subscription_prompt_test.go
+new file mode 100644
+--- /dev/null
++++ b/internal/translator/subscription_prompt_test.go
+@@ -0,0 +1,303 @@
++package translator
++
++import (
++	"bytes"
++	"encoding/json"
++	"reflect"
++	"strings"
++	"testing"
++
++	"github.com/MoeForge/moego/ojson"
++	antigravityclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/antigravity/claude"
++	codexclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/codex/claude"
++)
++
++const subscriptionBilling = "\n\t x-anthropic-billing-header: cc_version=sample; cch=12345;"
++
++var subscriptionIdentities = []string{
++	"You are Claude Code, Anthropic's official CLI for Claude.",
++	"You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK.",
++	"You are a Claude agent, built on Anthropic's Claude Agent SDK.",
++}
++
++const subscriptionGuidance = "Read CLAUDE.md; use claude.ai; keep anthropic-version, x-anthropic-beta and Claude.\nx-anthropic-custom: keep this lowercase header."
++
++type subscriptionTranslation struct {
++	name, model, systemParts, userText, tool, schema string
++	convert                                          func(string, []byte, bool) ([]byte, error)
++}
++
++var subscriptionTranslations = []subscriptionTranslation{
++	{"antigravity", "claude-sonnet-4-5", "request.systemInstruction.parts", "request.contents.0.parts.0.text", "request.tools.0.functionDeclarations.0", "parametersJsonSchema", antigravityclaude.ConvertClaudeRequestToAntigravity},
++	{"codex", "codex-test", "input.0.content", "input.1.content.0.text", "tools.0", "parameters", codexclaude.ConvertClaudeRequestToCodex},
++}
++
++func subscriptionPayload(t *testing.T, system any) []byte {
++	t.Helper()
++	// Identity and billing strings deliberately also occur outside system.
++	protected := strings.Join(subscriptionIdentities, "\n") + subscriptionBilling
++	payload, err := json.Marshal(map[string]any{
++		"system":   system,
++		"messages": []any{map[string]any{"role": "user", "content": protected}},
++		"tools": []any{map[string]any{
++			"name": "Claude", "description": protected,
++			"input_schema": map[string]any{"type": "object", "properties": map[string]any{
++				"text": map[string]any{"type": "string", "description": protected},
++			}},
++		}},
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	return payload
++}
++
++func TestSubscriptionPromptTranslations(t *testing.T) {
++	for _, route := range subscriptionTranslations {
++		t.Run(route.name, func(t *testing.T) {
++			for _, shape := range []string{"array", "string"} {
++				t.Run(shape, func(t *testing.T) {
++					want := []string{"You are a coding assistant.", "You are a coding assistant.", "You are a coding agent.", subscriptionGuidance}
++					if route.name == "antigravity" {
++						for i := 0; i < 3; i++ {
++							want[i] = "You are Antigravity, an agentic AI coding assistant."
++						}
++					}
++					var system any
++					if shape == "array" {
++						parts := []any{map[string]any{"type": "text", "text": subscriptionBilling}}
++						for _, text := range append(append([]string{}, subscriptionIdentities...), subscriptionGuidance) {
++							parts = append(parts, map[string]any{"type": "text", "text": text, "cache_control": map[string]string{"type": "ephemeral"}})
++						}
++						system = parts
++					} else {
++						system = strings.Join(subscriptionIdentities, "\n") + "\n" + subscriptionGuidance
++						want = []string{strings.Join(want, "\n")}
++					}
++					input := subscriptionPayload(t, system)
++					original := bytes.Clone(input)
++					output, err := route.convert(route.model, input, false)
++					if err != nil {
++						t.Fatal(err)
++					}
++					var got []string
++					for _, part := range ojson.GetBytes(output, route.systemParts).Array() {
++						got = append(got, part.Get("text").String())
++					}
++					if !reflect.DeepEqual(got, want) {
++						t.Fatalf("system parts = %q, want %q", got, want)
++					}
++					protected := strings.Join(subscriptionIdentities, "\n") + subscriptionBilling
++					for _, path := range []string{route.userText, route.tool + ".description", route.tool + "." + route.schema + ".properties.text.description"} {
++						if got := ojson.GetBytes(output, path).String(); got != protected {
++							t.Errorf("protected %s changed: %q", path, got)
++						}
++					}
++					if got := ojson.GetBytes(output, route.tool+".name").String(); got != "Claude" {
++						t.Errorf("tool name changed: %q", got)
++					}
++					if route.name == "codex" {
++						if got := ojson.GetBytes(output, "input.0.role").String(); got != "developer" {
++							t.Errorf("system role changed: %q", got)
++						}
++						if got := ojson.GetBytes(output, "instructions"); got.Type != ojson.String || got.String() != "" {
++							t.Errorf("instructions must remain empty: %s", got.Raw)
++						}
++					}
++					if !bytes.Equal(input, original) {
++						t.Fatal("source payload mutated")
++					}
++					repeated, err := route.convert(route.model, input, false)
++					if err != nil || !bytes.Equal(repeated, output) {
++						t.Fatalf("identical input must produce a stable prompt: %v", err)
++					}
++				})
++			}
++		})
++	}
++}
++
++func TestSubscriptionPromptBillingOnlySystem(t *testing.T) {
++	for _, route := range subscriptionTranslations {
++		t.Run(route.name, func(t *testing.T) {
++			for _, system := range []any{subscriptionBilling, []any{map[string]string{"type": "text", "text": subscriptionBilling}}} {
++				output, err := route.convert(route.model, subscriptionPayload(t, system), false)
++				if err != nil {
++					t.Fatal(err)
++				}
++				if route.name == "antigravity" {
++					if ojson.GetBytes(output, "request.systemInstruction").Exists() {
++						t.Fatalf("billing-only system must be dropped: %s", output)
++					}
++				} else if got := ojson.GetBytes(output, "input.0.role").String(); got != "user" {
++					t.Fatalf("billing-only developer message must be dropped: %s", output)
++				}
++			}
++		})
++	}
++}
++
++func TestCodexBillingPrefixPreservesBodyAndLayout(t *testing.T) {
++	for _, shape := range []string{"string", "array"} {
++		t.Run(shape, func(t *testing.T) {
++			for _, newline := range []string{"\n", "\r\n", "\r"} {
++				body := "  Keep project rules." + newline + "Read CLAUDE.md." + newline + "x-anthropic-billing-header: this later line is guidance"
++				text := subscriptionBilling + newline + body
++				var system any = text
++				if shape == "array" {
++					system = []any{map[string]any{"type": "text", "text": text, "cache_control": map[string]string{"type": "ephemeral"}}, map[string]string{"type": "text", "text": "Second part."}}
++				}
++				input := subscriptionPayload(t, system)
++				output, err := codexclaude.ConvertClaudeRequestToCodex("codex-test", input, false)
++				if err != nil {
++					t.Fatal(err)
++				}
++				// Compare the complete request against translating the retained text: this
++				// covers role, part order, empty instructions, user text, tools and schemas.
++				var expectedSystem any = body
++				if shape == "array" {
++					expectedSystem = []any{map[string]any{"type": "text", "text": body, "cache_control": map[string]string{"type": "ephemeral"}}, map[string]string{"type": "text", "text": "Second part."}}
++				}
++				expected, err := codexclaude.ConvertClaudeRequestToCodex("codex-test", subscriptionPayload(t, expectedSystem), false)
++				if err != nil {
++					t.Fatal(err)
++				}
++				if !bytes.Equal(output, expected) {
++					t.Fatalf("billing prefix dropped body or changed layout:\ngot %s\nwant %s", output, expected)
++				}
++				if got := ojson.GetBytes(output, "input.0.content.0.text").String(); got != body {
++					t.Fatalf("body = %q, want %q", got, body)
++				}
++				t.Logf("%s: before billing + %q; after %q", shape, body, ojson.GetBytes(output, "input.0.content.0.text").String())
++			}
++		})
++	}
++}
++
++func TestCodexSystemIdentityProtectsCode(t *testing.T) {
++	for _, identity := range subscriptionIdentities {
++		for _, wrapper := range []string{"`%s`", "``%s``", "```text\n%s\n```", "```text\n%s", "`%s"} {
++			protected := strings.ReplaceAll(wrapper, "%s", identity)
++			text := identity + "\n" + protected + "\nRead CLAUDE.md."
++			wantIdentity := "You are a coding assistant."
++			if identity == subscriptionIdentities[2] {
++				wantIdentity = "You are a coding agent."
++			}
++			want := wantIdentity + "\n" + protected + "\nRead CLAUDE.md."
++			for _, system := range []any{text, []any{map[string]string{"type": "text", "text": text}}} {
++				output, err := codexclaude.ConvertClaudeRequestToCodex("codex-test", subscriptionPayload(t, system), false)
++				if err != nil {
++					t.Fatal(err)
++				}
++				if got := ojson.GetBytes(output, "input.0.content.0.text").String(); got != want {
++					t.Fatalf("code changed: got %q, want %q", got, want)
++				}
++			}
++		}
++	}
++}
++
++// Exercise both real translation entry points and both system shapes. Outside
++// prose remains sanitizable, while each complete code sample stays byte-exact.
++func TestSubscriptionPromptCodeRegions(t *testing.T) {
++	identity := subscriptionIdentities[0]
++	code := identity + "\n由腾讯开发，使用通义千问和深度求索。"
++	outside := identity + " 由腾讯开发\n"
++	for _, route := range subscriptionTranslations {
++		t.Run(route.name, func(t *testing.T) {
++			wantOutside := "You are a coding assistant. 由腾讯开发\n"
++			if route.name == "antigravity" {
++				wantOutside = "You are Antigravity, an agentic AI coding assistant. 由Google开发\n"
++			}
++			for _, tc := range []struct {
++				name, sample string
++				unclosed     bool
++			}{
++				{"audit literal backticks", "```python\nmarker = \"```\"\n" + code + "\n```", false},
++				{"ordinary fence", "```text\n" + code + "\n```", false},
++				{"longer closing fence", "````text\n```\n" + code + "\n`````", false},
++				{"indented fence", " \t```text\n" + code + "\n\t ```` \t", false},
++				{"closing fence at EOF", "```\n" + code + "\n```", true},
++				{"non standalone run", "```text\n``` extra\n" + code + "\n```", false},
++				{"embedded long run", "```text\nmarker = \"`````\"\n" + code + "\n```", false},
++				{"unclosed fence", "```text\nmarker = \"```\"\n" + code, true},
++				{"short closing run", "````text\n" + code + "\n```\n" + identity, true},
++				{"inline with literal backtick", "``literal ` " + identity + " 由腾讯开发``", false},
++				{"multiline inline", "`first line\n" + code + "\nlast line`", false},
++				{"multiline double inline", "``first ` line\n" + code + "\nlast ``` line``", false},
++				{"midline triple inline", "example ```first\n" + code + "\nlast```", false},
++				{"exact inline run", "``literal ``` " + identity + " 由腾讯开发``", false},
++				{"protected fence-like run", "``first\n```text\n" + code + "\nlast``", false},
++				{"ordinary inline", "`" + identity + " 由腾讯开发`", false},
++			} {
++				t.Run(tc.name, func(t *testing.T) {
++					for _, newline := range []string{"\n", "\r\n", "\r"} {
++						sample := strings.ReplaceAll(tc.sample, "\n", newline)
++						prefix := strings.ReplaceAll(outside, "\n", newline)
++						wantPrefix := strings.ReplaceAll(wantOutside, "\n", newline)
++						input, want := prefix+sample, wantPrefix+sample
++						if !tc.unclosed {
++							input += newline + prefix
++							want += newline + wantPrefix
++						}
++						for _, system := range []any{input, []any{map[string]string{"type": "text", "text": input}}} {
++							output, err := route.convert(route.model, subscriptionPayload(t, system), false)
++							if err != nil {
++								t.Fatal(err)
++							}
++							parts := ojson.GetBytes(output, route.systemParts).Array()
++							if len(parts) != 1 {
++								t.Fatalf("unexpected system parts: %s", output)
++							}
++							if got := parts[0].Get("text").String(); got != want {
++								t.Fatalf("code/prose boundary changed:\ngot  %q\nwant %q", got, want)
++							}
++						}
++					}
++				})
++			}
++		})
++	}
++}
++
++func TestSubscriptionPromptInlineFallback(t *testing.T) {
++	identity := subscriptionIdentities[0]
++	line := identity + " 由腾讯开发"
++	for _, route := range subscriptionTranslations {
++		t.Run(route.name, func(t *testing.T) {
++			clean := "You are a coding assistant. 由腾讯开发"
++			if route.name == "antigravity" {
++				clean = "You are Antigravity, an agentic AI coding assistant. 由Google开发"
++			}
++			for _, tc := range []struct{ name, input, want string }{
++				{"unclosed single", "`" + line + "\n" + line, "`" + line + "\n" + clean},
++				{"unclosed double", "``" + line + "\n" + line, "``" + line + "\n" + clean},
++				{"midline run is not a fence", "example ```" + line + "\n" + line, "example ```" + line + "\n" + clean},
++				{"200 lines inclusive", "`opening\n" + strings.Repeat("line\n", 198) + line + "`", "`opening\n" + strings.Repeat("line\n", 198) + line + "`"},
++				{"201 lines falls back", "`opening\n" + strings.Repeat("line\n", 199) + line + "`", "`opening\n" + strings.Repeat("line\n", 199) + clean + "`"},
++				{"different run cannot close", "``opening\n" + line + "```", "``opening\n" + clean + "```"},
++				{"fence after unmatched inline", "`opening\n```text\n" + line + "\n```\n" + line, "`opening\n```text\n" + line + "\n```\n" + clean},
++			} {
++				t.Run(tc.name, func(t *testing.T) {
++					for _, newline := range []string{"\n", "\r\n", "\r"} {
++						input := strings.ReplaceAll(tc.input, "\n", newline)
++						want := strings.ReplaceAll(tc.want, "\n", newline)
++						for _, system := range []any{input, []any{map[string]string{"type": "text", "text": input}}} {
++							output, err := route.convert(route.model, subscriptionPayload(t, system), false)
++							if err != nil {
++								t.Fatal(err)
++							}
++							parts := ojson.GetBytes(output, route.systemParts).Array()
++							if len(parts) != 1 {
++								t.Fatalf("unexpected system parts: %s", output)
++							}
++							if got := parts[0].Get("text").String(); got != want {
++								t.Fatalf("inline fallback changed:\ngot  %q\nwant %q", got, want)
++							}
++						}
++					}
++				})
++			}
++		})
++	}
++}
+diff --git a/internal/util/claude_system_identity.go b/internal/util/claude_system_identity.go
+new file mode 100644
+--- /dev/null
++++ b/internal/util/claude_system_identity.go
+@@ -0,0 +1,141 @@
++package util
++
++import (
++	"strings"
++	"unicode"
++)
++
++var claudeCodeSystemIdentityReplacer = strings.NewReplacer(
++	"You are Claude Code, Anthropic's official CLI for Claude.", "You are a coding assistant.",
++	"You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK.", "You are a coding assistant.",
++	"You are a Claude agent, built on Anthropic's Claude Agent SDK.", "You are a coding agent.",
++)
++
++// NeutralizeClaudeCodeSystemIdentity replaces only the three complete, case-sensitive
++// client identity sentences. Callers must restrict its use to system instructions.
++// All other bytes, including whitespace and project guidance, are preserved.
++func NeutralizeClaudeCodeSystemIdentity(text string) string {
++	return MapSystemTextProse(text, claudeCodeSystemIdentityReplacer.Replace)
++}
++
++// StripLeadingClaudeCodeBillingLines removes only leading billing lines, preserving
++// the rest of a system part byte-for-byte. It never scans or removes later prose.
++func StripLeadingClaudeCodeBillingLines(text string) string {
++	for IsClaudeCodeAttributionSystemText(text) {
++		line := strings.TrimLeftFunc(text, unicode.IsSpace)
++		end := strings.IndexAny(line, "\r\n")
++		if end < 0 {
++			return ""
++		}
++		next := end + 1
++		if line[end] == '\r' && next < len(line) && line[next] == '\n' {
++			next++
++		}
++		text = line[next:]
++	}
++	return text
++}
++
++// Backtick spans are copied verbatim, without placeholder strings. Fences
++// start at an indented line boundary and close only on a standalone run at least
++// as long as the opener. Inline spans close on an exact run within 200 lines;
++// if unmatched, only the rest of the opening line is protected.
++func SystemTextCodeMask(text string) []bool {
++	mask := make([]bool, len(text))
++	lineStart := 0
++	for i := 0; i < len(text); {
++		if text[i] != '`' {
++			if text[i] == '\r' || text[i] == '\n' {
++				lineStart = i + 1
++			}
++			i++
++			continue
++		}
++		width := 1
++		for i+width < len(text) && text[i+width] == '`' {
++			width++
++		}
++		end := len(text)
++		if width >= 3 && strings.TrimSpace(text[lineStart:i]) == "" {
++			// Skip the complete opening line, including its info string.
++			for search := i + width; search < len(text); {
++				newline := strings.IndexAny(text[search:], "\r\n")
++				if newline < 0 {
++					break
++				}
++				start := search + newline + 1
++				if text[start-1] == '\r' && start < len(text) && text[start] == '\n' {
++					start++
++				}
++				lineEnd := len(text)
++				if newline := strings.IndexAny(text[start:], "\r\n"); newline >= 0 {
++					lineEnd = start + newline
++				}
++				line := strings.TrimSpace(text[start:lineEnd])
++				if len(line) >= width && strings.Trim(line, "`") == "" {
++					end = lineEnd
++					break
++				}
++				search = lineEnd
++			}
++		} else {
++			// Preserve the existing conservative fallback for unmatched inline code.
++			if newline := strings.IndexAny(text[i+width:], "\r\n"); newline >= 0 {
++				end = i + width + newline
++			}
++			lines := 1
++			for search := i + width; search < len(text); {
++				if text[search] == '\r' || text[search] == '\n' {
++					lines++
++					if lines > 200 {
++						break
++					}
++					if text[search] == '\r' && search+1 < len(text) && text[search+1] == '\n' {
++						search++
++					}
++					search++
++					continue
++				}
++				if text[search] != '`' {
++					search++
++					continue
++				}
++				closeEnd := search + 1
++				for closeEnd < len(text) && text[closeEnd] == '`' {
++					closeEnd++
++				}
++				if closeEnd-search == width {
++					end = closeEnd
++					break
++				}
++				search = closeEnd
++			}
++		}
++		for j := i; j < end; j++ {
++			mask[j] = true
++		}
++		if newline := strings.LastIndexAny(text[i:end], "\r\n"); newline >= 0 {
++			lineStart = i + newline + 1
++		}
++		i = end
++	}
++	return mask
++}
++
++func MapSystemTextProse(text string, replace func(string) string) string {
++	mask := SystemTextCodeMask(text)
++	var out strings.Builder
++	for i := 0; i < len(text); {
++		end := i + 1
++		for end < len(text) && mask[end] == mask[i] {
++			end++
++		}
++		if mask[i] {
++			out.WriteString(text[i:end])
++		} else {
++			out.WriteString(replace(text[i:end]))
++		}
++		i = end
++	}
++	return out.String()
++}
+diff --git a/internal/util/claude_system_identity_test.go b/internal/util/claude_system_identity_test.go
+new file mode 100644
+--- /dev/null
++++ b/internal/util/claude_system_identity_test.go
+@@ -0,0 +1,56 @@
++package util
++
++import (
++	"strings"
++	"testing"
++)
++
++func TestNeutralizeClaudeCodeSystemIdentity(t *testing.T) {
++	tests := []struct{ name, input, want string }{
++		{"cli", "You are Claude Code, Anthropic's official CLI for Claude.", "You are a coding assistant."},
++		{"cli sdk", "You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK.", "You are a coding assistant."},
++		{"agent sdk", "You are a Claude agent, built on Anthropic's Claude Agent SDK.", "You are a coding agent."},
++		{"preserve surrounding bytes", "\tRules\nYou are Claude Code, Anthropic's official CLI for Claude.\nRead CLAUDE.md.  ", "\tRules\nYou are a coding assistant.\nRead CLAUDE.md.  "},
++	}
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			got := NeutralizeClaudeCodeSystemIdentity(tt.input)
++			if got != tt.want {
++				t.Fatalf("got %q, want %q", got, tt.want)
++			}
++			if again := NeutralizeClaudeCodeSystemIdentity(got); again != got {
++				t.Fatalf("replacement is not idempotent: %q", again)
++			}
++		})
++	}
++}
++
++func TestNeutralizeClaudeCodeSystemIdentityPreservesOtherText(t *testing.T) {
++	for _, text := range []string{
++		"", "CLAUDE.md claude.ai anthropic-version x-anthropic-beta x-anthropic-* Claude",
++		"x-anthropic-billing-header: cc_version=sample; cch=12345;",
++		"You are Claude Code, Anthropic's official CLI for Claude",
++		"You are Claude Code, Anthropic's official CLI for Claude, running within a different SDK.",
++		strings.ToLower("You are Claude Code, Anthropic's official CLI for Claude."),
++	} {
++		if got := NeutralizeClaudeCodeSystemIdentity(text); got != text {
++			t.Errorf("changed unrelated text: %q -> %q", text, got)
++		}
++	}
++}
++
++func TestStripLeadingClaudeCodeBillingLines(t *testing.T) {
++	for _, tc := range []struct{ input, want string }{
++		{"\n\t x-anthropic-billing-header: sample\r\nKeep.  ", "Keep.  "},
++		{"x-anthropic-billing-header: a\nx-anthropic-billing-header: b\nKeep.", "Keep."},
++		{"x-anthropic-billing-header: a", ""},
++		{"x-anthropic-billing-header: a\n  ", "  "},
++		{"Keep.\nx-anthropic-billing-header: guidance", "Keep.\nx-anthropic-billing-header: guidance"},
++		{"`x-anthropic-billing-header: sample`", "`x-anthropic-billing-header: sample`"},
++		{"```\nx-anthropic-billing-header: sample\n```", "```\nx-anthropic-billing-header: sample\n```"},
++	} {
++		if got := StripLeadingClaudeCodeBillingLines(tc.input); got != tc.want {
++			t.Errorf("%q => %q, want %q", tc.input, got, tc.want)
++		}
++	}
++}
+diff --git a/internal/translator/antigravity/claude/system_prompt_sanitizer.go b/internal/translator/antigravity/claude/system_prompt_sanitizer.go
+new file mode 100644
+--- /dev/null
++++ b/internal/translator/antigravity/claude/system_prompt_sanitizer.go
+@@ -0,0 +1,180 @@
++// Some behavior is based on antigravity-claude-proxy (MIT).
++// Copyright (c) 2024 Badri Narayanan S. See THIRD_PARTY_NOTICES.md in Matou.
++// This implementation is independently written; no Manager code or regex is used.
++package claude
++
++import (
++	"strings"
++	"unicode"
++	"unicode/utf8"
++
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
++)
++
++const antigravitySanitizedIdentity = "You are Antigravity, an agentic AI coding assistant."
++
++var antigravityIdentitySentences = strings.NewReplacer(
++	"You are Claude Code, Anthropic's official CLI for Claude.", antigravitySanitizedIdentity,
++	"You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK.", antigravitySanitizedIdentity,
++	"You are a Claude agent, built on Anthropic's Claude Agent SDK.", antigravitySanitizedIdentity,
++)
++
++var antigravityCompetitorNames = []string{
++	"OpenAI", "Anthropic", "DeepSeek", "Qwen", "ByteDance", "Tencent",
++	"Xiaomi", "Huawei", "Baidu", "Mistral", "Cohere",
++	"字节跳动", "腾讯", "小米", "华为", "通义千问", "百度", "深度求索",
++}
++
++var antigravityClientNames = []struct{ name, replacement string }{
++	{"Nous Research", "the assistant team"},
++	{"Hermes Agent", "the assistant"},
++	{"Hermes", "the assistant"},
++	{"Claude Code", "the assistant"},
++}
++
++// sanitizeAntigravitySystemText is called only while constructing system parts.
++// It never receives a request object, user content, tools, or schemas.
++func sanitizeAntigravitySystemText(text string) string {
++	text = stripAntigravityBillingLines(text)
++	text = util.MapSystemTextProse(text, antigravityIdentitySentences.Replace)
++	limit := antigravityBrandWindow(text)
++	// Keep offsets in the complete part, including protected code, so splitting
++	// prose at backticks cannot restart or extend the brand window.
++	mask := util.SystemTextCodeMask(text)
++	var out strings.Builder
++	for i := 0; i < len(text); {
++		if mask[i] {
++			out.WriteByte(text[i])
++			i++
++			continue
++		}
++		// Header identifiers are explicit exemptions even though '-' is a word
++		// boundary. Keep the complete x-anthropic-* token, including mixed case.
++		if antigravityWordStart(text, i) {
++			end := i
++			if antigravityEqualPrefix(text[i:], "anthropic-version") {
++				end += len("anthropic-version")
++			} else if antigravityEqualPrefix(text[i:], "x-anthropic-") {
++				end += len("x-anthropic-")
++				for end < len(text) && (antigravityWordRune(rune(text[end])) || text[end] == '-' || text[end] == '*') {
++					end++
++				}
++			}
++			if end > i {
++				out.WriteString(text[i:end])
++				i = end
++				continue
++			}
++		}
++		matched := false
++		if i < limit {
++			// Chinese names match inside prose; English names keep word boundaries.
++			for _, name := range antigravityCompetitorNames {
++				end := i + len(name)
++				if end <= limit && antigravityEqualPrefix(text[i:], name) && (name[0] >= utf8.RuneSelf || antigravityWholeWord(text, i, end)) && !antigravityProtected(mask, i, end) {
++					out.WriteString("Google")
++					i, matched = end, true
++					break
++				}
++			}
++		}
++		if !matched {
++			for _, rule := range antigravityClientNames {
++				end := i + len(rule.name)
++				if strings.HasPrefix(text[i:], rule.name) && antigravityWholeWord(text, i, end) && !antigravityProtected(mask, i, end) {
++					out.WriteString(rule.replacement)
++					i, matched = end, true
++					break
++				}
++			}
++		}
++		if !matched {
++			_, size := utf8.DecodeRuneInString(text[i:])
++			out.WriteString(text[i : i+size])
++			i += size
++		}
++	}
++	return out.String()
++}
++
++func stripAntigravityBillingLines(text string) string {
++	mask := util.SystemTextCodeMask(text)
++	var out strings.Builder
++	for start := 0; start < len(text); {
++		end := start
++		for end < len(text) && text[end] != '\n' && text[end] != '\r' {
++			end++
++		}
++		next := end
++		if next < len(text) && text[next] == '\r' {
++			next++
++		}
++		if next < len(text) && text[next] == '\n' {
++			next++
++		}
++		line := strings.TrimLeft(text[start:end], " \t")
++		if !antigravityEqualPrefix(line, "x-anthropic-billing-header:") || antigravityProtected(mask, start, end) {
++			out.WriteString(text[start:next])
++		}
++		start = next
++	}
++	return out.String()
++}
++
++// The window is measured after billing removal and exact identity replacement,
++// before any length-changing brand/client substitutions. Newlines are not sentences.
++func antigravityBrandWindow(text string) int {
++	chars, sentences := 0, 0
++	previousEnd := false
++	for i, r := range text {
++		if chars == 1500 {
++			return i
++		}
++		chars++
++		isEnd := strings.ContainsRune(".!?。！？", r)
++		if isEnd && !previousEnd {
++			sentences++
++			if sentences == 8 {
++				return i + utf8.RuneLen(r)
++			}
++		}
++		previousEnd = isEnd
++	}
++	return len(text)
++}
++
++func antigravityEqualPrefix(text, prefix string) bool {
++	return len(text) >= len(prefix) && strings.EqualFold(text[:len(prefix)], prefix)
++}
++
++func antigravityWordRune(r rune) bool {
++	return unicode.IsLetter(r) || unicode.IsDigit(r) || unicode.IsMark(r) || r == '_'
++}
++
++func antigravityWordStart(text string, start int) bool {
++	if start == 0 {
++		return true
++	}
++	r, _ := utf8.DecodeLastRuneInString(text[:start])
++	return !antigravityWordRune(r)
++}
++
++func antigravityWholeWord(text string, start, end int) bool {
++	if !antigravityWordStart(text, start) {
++		return false
++	}
++	if end == len(text) {
++		return true
++	}
++	r, _ := utf8.DecodeRuneInString(text[end:])
++	return !antigravityWordRune(r)
++}
++
++func antigravityProtected(mask []bool, start, end int) bool {
++	for _, protected := range mask[start:end] {
++		if protected {
++			return true
++		}
++	}
++	return false
++}
+diff --git a/internal/translator/antigravity/claude/system_prompt_sanitizer_test.go b/internal/translator/antigravity/claude/system_prompt_sanitizer_test.go
+new file mode 100644
+--- /dev/null
++++ b/internal/translator/antigravity/claude/system_prompt_sanitizer_test.go
+@@ -0,0 +1,231 @@
++// Some behavior is based on antigravity-claude-proxy (MIT).
++// Copyright (c) 2024 Badri Narayanan S. Tests independently written for Matou.
++package claude
++
++import (
++	"bytes"
++	"encoding/json"
++	"reflect"
++	"strings"
++	"testing"
++
++	"github.com/MoeForge/moego/ojson"
++)
++
++func TestAntigravitySanitizerBillingLines(t *testing.T) {
++	for _, tc := range []struct{ input, want string }{
++		{"x-anthropic-billing-header: sample", ""},
++		{" \tX-ANTHROPIC-BILLING-HEADER: sample\r\nKeep rules.  ", "Keep rules.  "},
++		{"Keep\nx-anthropic-billing-header: a\nMore\nx-anthropic-billing-header: b", "Keep\nMore\n"},
++		{"A\rx-anthropic-billing-header: a\rB", "A\rB"},
++		{"Mention x-anthropic-billing-header: keep", "Mention x-anthropic-billing-header: keep"},
++		{"x-anthropic-custom: cc_version=sample; cch=sample", "x-anthropic-custom: cc_version=sample; cch=sample"},
++		{"x-anthropic-billing-header: `OpenAI`", "x-anthropic-billing-header: `OpenAI`"},
++	} {
++		if got := sanitizeAntigravitySystemText(tc.input); got != tc.want {
++			t.Errorf("%q => %q, want %q", tc.input, got, tc.want)
++		}
++	}
++}
++
++func TestAntigravitySanitizerExactIdentities(t *testing.T) {
++	for _, sentence := range []string{
++		"You are Claude Code, Anthropic's official CLI for Claude.",
++		"You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK.",
++		"You are a Claude agent, built on Anthropic's Claude Agent SDK.",
++	} {
++		// Exact identity replacement is not restricted by the brand scan window.
++		prefix := strings.Repeat("Rule. ", 9)
++		input := prefix + sentence + "\nKeep CTF / security policy."
++		want := prefix + antigravitySanitizedIdentity + "\nKeep CTF / security policy."
++		if got := sanitizeAntigravitySystemText(input); got != want {
++			t.Errorf("identity => %q, want %q", got, want)
++		}
++	}
++	input := "you are claude code, anthropic's official CLI for Claude."
++	if got := sanitizeAntigravitySystemText(input); got != "you are claude code, Google's official CLI for Claude." {
++		t.Fatalf("case-sensitive identity matching changed: %q", got)
++	}
++}
++
++func TestAntigravitySanitizerBrandsAndWholeWords(t *testing.T) {
++	brands := []string{"OpenAI", "Anthropic", "DeepSeek", "Qwen", "ByteDance", "Tencent", "Xiaomi", "Huawei", "Baidu", "Mistral", "Cohere", "字节跳动", "腾讯", "小米", "华为", "通义千问", "百度", "深度求索"}
++	for _, name := range brands {
++		for _, variant := range []string{name, strings.ToLower(name), strings.ToUpper(name)} {
++			if got := sanitizeAntigravitySystemText("(" + variant + ")"); got != "(Google)" {
++				t.Errorf("brand %q => %q", variant, got)
++			}
++		}
++	}
++	input := "OpenAIClient preAnthropic DeepSeek2 Qwen_ apiOpenAI éOpenAI OpenAIé"
++	if got := sanitizeAntigravitySystemText(input); got != input {
++		t.Fatalf("embedded name changed: %q", got)
++	}
++}
++
++func TestAntigravitySanitizerWindow(t *testing.T) {
++	for _, tc := range []struct{ name, input, want string }{
++		{"eighth sentence", strings.Repeat("Rule. ", 7) + "OpenAI. Anthropic", strings.Repeat("Rule. ", 7) + "Google. Anthropic"},
++		{"Chinese sentences", strings.Repeat("规则。", 7) + "腾讯。百度", strings.Repeat("规则。", 7) + "Google。百度"},
++		{"punctuation", strings.Repeat("Rule!? ", 7) + "Mistral! Cohere", strings.Repeat("Rule!? ", 7) + "Google! Cohere"},
++		{"newlines", strings.Repeat("Rule\n", 9) + "Qwen", strings.Repeat("Rule\n", 9) + "Google"},
++		{"1500 inclusive", strings.Repeat("界", 1493) + " OpenAI", strings.Repeat("界", 1493) + " Google"},
++		{"1500 crossing", strings.Repeat("界", 1494) + " OpenAI", strings.Repeat("界", 1494) + " OpenAI"},
++		{"1500 outside", strings.Repeat("界", 1500) + " OpenAI", strings.Repeat("界", 1500) + " OpenAI"},
++		{"code consumes characters", "`" + strings.Repeat("x", 1498) + "` OpenAI", "`" + strings.Repeat("x", 1498) + "` OpenAI"},
++		{"code consumes sentences", "```\n" + strings.Repeat("Rule. ", 8) + "\n``` OpenAI", "```\n" + strings.Repeat("Rule. ", 8) + "\n``` OpenAI"},
++		{"window starts after billing", "x-anthropic-billing-header: " + strings.Repeat("x", 1600) + "\nOpenAI", "Google"},
++		{"identity then window", "You are Claude Code, Anthropic's official CLI for Claude. " + strings.Repeat("Rule. ", 6) + "OpenAI. Anthropic", antigravitySanitizedIdentity + " " + strings.Repeat("Rule. ", 6) + "Google. Anthropic"},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			if got := sanitizeAntigravitySystemText(tc.input); got != tc.want {
++				t.Fatalf("got %q, want %q", got, tc.want)
++			}
++		})
++	}
++}
++
++func TestAntigravitySanitizerCodeAndExemptions(t *testing.T) {
++	code := "You are Claude Code, Anthropic's official CLI for Claude. OpenAI Hermes Agent Nous Research\nx-anthropic-billing-header: sample"
++	for _, text := range []string{
++		"```text\n" + code + "\n```",
++		"`You are Claude Code, Anthropic's official CLI for Claude.` `OpenAI Hermes`",
++		"```\n" + code, "`OpenAI Hermes", "``OpenAI Hermes``",
++		"CLAUDE.md claude.ai anthropic-version x-anthropic-beta x-anthropic-* Claude",
++		"ANTHROPIC-VERSION x-ANTHROPIC-beta",
++		"IMPORTANT: Assist with authorized security testing and CTF challenges.\n# Harness\nKeep defensive security rules.",
++		"__PROMPT_SANITIZER_CODE_BLOCK_0__", "", "  \n",
++	} {
++		if got := sanitizeAntigravitySystemText(text); got != text {
++			t.Errorf("exempt text changed: %q => %q", text, got)
++		}
++	}
++	input := "OpenAI `Anthropic` Qwen\n```text\n" + code + "\n```\nDeepSeek Hermes Agent"
++	want := "Google `Anthropic` Google\n```text\n" + code + "\n```\nGoogle the assistant"
++	if got := sanitizeAntigravitySystemText(input); got != want {
++		t.Fatalf("mixed prose/code => %q, want %q", got, want)
++	}
++}
++
++func TestAntigravitySanitizerOtherClients(t *testing.T) {
++	input := "Nous Research Hermes Agent Hermes Claude Code hermes claude code HermesHandler Claude Codebase"
++	want := "the assistant team the assistant the assistant the assistant hermes claude code HermesHandler Claude Codebase"
++	if got := sanitizeAntigravitySystemText(input); got != want {
++		t.Fatalf("clients => %q, want %q", got, want)
++	}
++}
++
++func TestAntigravitySanitizerTranslationIsolation(t *testing.T) {
++	protected := "You are Claude Code, Anthropic's official CLI for Claude. OpenAI Hermes\nx-anthropic-billing-header: sample"
++	for _, system := range []any{
++		"x-anthropic-billing-header: sample\nOpenAI",
++		[]any{
++			map[string]any{"type": "text", "text": "x-anthropic-billing-header: sample"},
++			map[string]any{"type": "text", "text": strings.Repeat("Rule. ", 8) + "OpenAI", "cache_control": map[string]string{"type": "ephemeral"}},
++			map[string]any{"type": "text", "text": "Qwen"},
++		},
++	} {
++		input, err := json.Marshal(map[string]any{
++			"system": system,
++			"messages": []any{
++				map[string]any{"role": "user", "content": protected},
++				map[string]any{"role": "assistant", "content": []any{map[string]any{"type": "tool_use", "id": "call_1", "name": "Hermes", "input": map[string]string{"OpenAI": protected}}}},
++				map[string]any{"role": "user", "content": []any{map[string]any{"type": "tool_result", "tool_use_id": "call_1", "content": protected}}},
++			},
++			"tools": []any{map[string]any{"name": "Hermes", "description": protected, "input_schema": map[string]any{"type": "object", "properties": map[string]any{"OpenAI": map[string]any{"type": "string", "description": protected, "enum": []string{"Anthropic", "Hermes"}}}}}},
++		})
++		if err != nil {
++			t.Fatal(err)
++		}
++		original := bytes.Clone(input)
++		output, err := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5", input, false)
++		if err != nil {
++			t.Fatal(err)
++		}
++		if !bytes.Equal(input, original) {
++			t.Fatal("input mutated")
++		}
++		// Compare everything outside systemInstruction with the same translation
++		// given a safe system. This includes tool calls, results and schema values.
++		safe, _ := ojson.SetBytes(input, "system", "Safe rules")
++		baseline, err := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5", safe, false)
++		if err != nil {
++			t.Fatal(err)
++		}
++		withoutSystem, _ := ojson.DeleteBytes(output, "request.systemInstruction")
++		baselineWithoutSystem, _ := ojson.DeleteBytes(baseline, "request.systemInstruction")
++		var actualObject, baselineObject any
++		if err := json.Unmarshal(withoutSystem, &actualObject); err != nil {
++			t.Fatal(err)
++		}
++		if err := json.Unmarshal(baselineWithoutSystem, &baselineObject); err != nil {
++			t.Fatal(err)
++		}
++		if !reflect.DeepEqual(actualObject, baselineObject) {
++			t.Fatalf("non-system request changed:\n%s\n%s", withoutSystem, baselineWithoutSystem)
++		}
++		for _, path := range []string{"request.contents.0.parts.0.text", "request.tools.0.functionDeclarations.0.description"} {
++			if got := ojson.GetBytes(output, path).String(); got != protected {
++				t.Errorf("protected %s = %q", path, got)
++			}
++		}
++		parts := ojson.GetBytes(output, "request.systemInstruction.parts").Array()
++		if _, ok := system.(string); ok {
++			if len(parts) != 1 || parts[0].Get("text").String() != "Google" {
++				t.Fatalf("string system: %s", output)
++			}
++		} else if len(parts) != 2 || parts[0].Get("text").String() != strings.Repeat("Rule. ", 8)+"OpenAI" || parts[1].Get("text").String() != "Google" {
++			t.Fatalf("part window reset/drop failed: %s", output)
++		}
++		repeated, err := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5", input, false)
++		if err != nil || !bytes.Equal(repeated, output) {
++			t.Fatal("same input produced unstable output")
++		}
++	}
++}
++
++func TestAntigravitySanitizerChineseSubstrings(t *testing.T) {
++	for _, name := range []string{"字节跳动", "腾讯", "小米", "华为", "通义千问", "百度", "深度求索"} {
++		input := "由" + name + "开发，支持" + name + "服务。"
++		want := "由Google开发，支持Google服务。"
++		if got := sanitizeAntigravitySystemText(input); got != want {
++			t.Errorf("%q => %q, want %q", input, got, want)
++		}
++	}
++	for _, tc := range []struct{ name, input, want string }{
++		{"inline", "由腾讯开发 `由腾讯开发`", "由Google开发 `由腾讯开发`"},
++		{"fenced", "由腾讯开发\n```text\n由腾讯开发\n```", "由Google开发\n```text\n由腾讯开发\n```"},
++		{"unclosed fence", "```text\n由腾讯开发", "```text\n由腾讯开发"},
++		{"eighth", strings.Repeat("规则。", 7) + "由腾讯开发。由百度开发", strings.Repeat("规则。", 7) + "由Google开发。由百度开发"},
++		{"1500 inclusive", strings.Repeat("界", 1498) + "腾讯", strings.Repeat("界", 1498) + "Google"},
++		{"1500 crossing", strings.Repeat("界", 1499) + "腾讯", strings.Repeat("界", 1499) + "腾讯"},
++		{"1500 outside", strings.Repeat("界", 1500) + "由腾讯开发", strings.Repeat("界", 1500) + "由腾讯开发"},
++		{"code consumes window", "`" + strings.Repeat("界", 1498) + "`由腾讯开发", "`" + strings.Repeat("界", 1498) + "`由腾讯开发"},
++		{"code consumes sentences", "```\n" + strings.Repeat("规则。", 8) + "\n```由腾讯开发", "```\n" + strings.Repeat("规则。", 8) + "\n```由腾讯开发"},
++		{"English boundary", "OpenAIClient preAnthropic OpenAI Tencent", "OpenAIClient preAnthropic Google Google"},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			if got := sanitizeAntigravitySystemText(tc.input); got != tc.want {
++				t.Fatalf("got %q, want %q", got, tc.want)
++			}
++		})
++	}
++}
++
++func TestAntigravityChineseWindowPerSystemPart(t *testing.T) {
++	input, _ := json.Marshal(map[string]any{"system": []any{
++		map[string]string{"type": "text", "text": strings.Repeat("规则。", 8) + "由腾讯开发"},
++		map[string]string{"type": "text", "text": "由腾讯开发"},
++	}, "messages": []any{map[string]string{"role": "user", "content": "由腾讯开发"}}})
++	output, err := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5", input, false)
++	if err != nil {
++		t.Fatal(err)
++	}
++	parts := ojson.GetBytes(output, "request.systemInstruction.parts").Array()
++	if len(parts) != 2 || parts[0].Get("text").String() != strings.Repeat("规则。", 8)+"由腾讯开发" || parts[1].Get("text").String() != "由Google开发" {
++		t.Fatalf("part windows changed: %s", output)
++	}
++	if got := ojson.GetBytes(output, "request.contents.0.parts.0.text").String(); got != "由腾讯开发" {
++		t.Fatalf("user text changed: %q", got)
++	}
++}
+diff --git a/internal/runtime/executor/antigravity_translation_boundary_test.go b/internal/runtime/executor/antigravity_translation_boundary_test.go
+new file mode 100644
+--- /dev/null
++++ b/internal/runtime/executor/antigravity_translation_boundary_test.go
+@@ -0,0 +1,171 @@
++package executor
++
++import (
++	"context"
++	"fmt"
++	"io"
++	"net/http"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/MoeForge/moego/ojson"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
++	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
++	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
++	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
++)
++
++// Exercise the executor boundary: translation alone does not include thinking
++// normalization, provider caps, signature replay, or final HTTP serialization.
++// The transport is entirely in memory; no credentials or upstream are used.
++func antigravityTranslationBoundaryRequest(t *testing.T, model string, payload []byte, stream bool) []byte {
++	t.Helper()
++	var captured []byte
++	calls := 0
++	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
++		calls++
++		if !strings.HasSuffix(req.URL.Path, ":streamGenerateContent") && !strings.HasSuffix(req.URL.Path, ":generateContent") {
++			return nil, fmt.Errorf("unexpected upstream path: %s", req.URL.Path)
++		}
++		var err error
++		captured, err = io.ReadAll(req.Body)
++		if err != nil {
++			return nil, err
++		}
++		_ = req.Body.Close()
++		reply := `{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"OK"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}}}`
++		contentType := "application/json"
++		if strings.HasSuffix(req.URL.Path, ":streamGenerateContent") {
++			reply = "data: " + reply + "\n\n"
++			contentType = "text/event-stream"
++		}
++		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {contentType}}, Body: io.NopCloser(strings.NewReader(reply)), Request: req}, nil
++	}))
++	executor := NewAntigravityExecutor(&config.Config{})
++	auth := &cliproxyauth.Auth{ID: "translation-boundary", Provider: "antigravity", Metadata: map[string]any{
++		"access_token": "test-token", "project_id": "test-project", "expired": time.Now().Add(time.Hour).Format(time.RFC3339),
++	}}
++	req := cliproxyexecutor.Request{Model: model, Payload: payload}
++	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude, OriginalRequest: payload, Stream: stream}
++	if stream {
++		res, err := executor.ExecuteStream(ctx, auth, req, opts)
++		if err != nil {
++			t.Fatalf("ExecuteStream: %v", err)
++		}
++		for chunk := range res.Chunks {
++			if chunk.Err != nil {
++				t.Fatalf("stream chunk: %v", chunk.Err)
++			}
++		}
++	} else if _, err := executor.Execute(ctx, auth, req, opts); err != nil {
++		t.Fatalf("Execute: %v", err)
++	}
++	if calls != 1 || !ojson.ValidBytes(captured) {
++		t.Fatalf("expected one valid final HTTP request, calls=%d body=%s", calls, captured)
++	}
++	return captured
++}
++
++func TestAntigravityTranslationBoundaryBudget(t *testing.T) {
++	const model = "claude-sonnet-4-5"
++	// Capability fixture for a budget-capable Claude model. Production obtains
++	// these limits from its registry; no static model catalog is assumed here.
++	client := "translation-boundary-budget"
++	registry.GetGlobalRegistry().RegisterClient(client, "antigravity", []*registry.ModelInfo{{
++		ID: model, MaxCompletionTokens: 64000,
++		Thinking: &registry.ThinkingSupport{Min: 1024, Max: 32768, ZeroAllowed: true, DynamicAllowed: true},
++	}})
++	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(client) })
++	for _, stream := range []bool{false, true} {
++		for _, tc := range []struct {
++			name                             string
++			max, budget, wantMax, wantBudget int
++			wantThinking                     bool
++		}{
++			{"budget below max", 8192, 4096, 8192, 4096, true},
++			{"budget equal max", 4096, 4096, 4096, 4095, true},
++			{"budget above max", 4096, 8192, 4096, 4095, true},
++			{"max below minimum thinking", 1024, 8192, 1024, 0, false},
++			{"dynamic budget", 4096, -1, 4096, -1, true},
++			{"registry output cap", 128000, 8192, 64000, 8192, true},
++		} {
++			t.Run(fmt.Sprintf("%s/stream=%t", tc.name, stream), func(t *testing.T) {
++				payload := []byte(fmt.Sprintf(`{"model":%q,"max_tokens":%d,"thinking":{"type":"enabled","budget_tokens":%d},"messages":[{"role":"user","content":"Reply OK"}]}`, model, tc.max, tc.budget))
++				translated := sdktranslator.TranslateRequest(sdktranslator.FormatClaude, sdktranslator.FormatAntigravity, model, payload, stream)
++				// Demonstrate why separately inspecting the translator would
++				// incorrectly classify this as a missing protocol safeguard.
++				if got := ojson.GetBytes(translated, "request.generationConfig.thinkingConfig.thinkingBudget").Int(); got != int64(tc.budget) {
++					t.Fatalf("translator budget=%d, want original %d", got, tc.budget)
++				}
++				body := antigravityTranslationBoundaryRequest(t, model, payload, stream)
++				max := ojson.GetBytes(body, "request.generationConfig.maxOutputTokens").Int()
++				thinking := ojson.GetBytes(body, "request.generationConfig.thinkingConfig")
++				budget := thinking.Get("thinkingBudget").Int()
++				if max != int64(tc.wantMax) || thinking.Exists() != tc.wantThinking || (tc.wantThinking && budget != int64(tc.wantBudget)) {
++					t.Fatalf("unexpected final budget/max: %s", body)
++				}
++				if tc.wantThinking && budget > 0 && budget >= max {
++					t.Fatalf("positive budget must be below max: %s", body)
++				}
++				t.Logf("translator max/budget=%d/%d; final max=%d thinking=%s", tc.max, tc.budget, max, thinking.Raw)
++			})
++		}
++	}
++}
++
++func TestAntigravityTranslationBoundaryParallelMCP(t *testing.T) {
++	payload := []byte(`{
++        "max_tokens":4096,
++        "system":[{"type":"text","text":"x-anthropic-billing-header: sample"},{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude.\nKeep ` + "`OpenAI`" + ` unchanged."}],
++        "tools":[{"name":"mcp__docs__read","description":"Read a document","input_schema":{"type":"object","properties":{"title":{"type":"string"},"format":{"type":"string"}},"required":["title"]}}],
++        "messages":[
++            {"role":"user","content":"Read both documents"},
++            {"role":"assistant","content":[{"type":"tool_use","id":"call-1","name":"mcp__docs__read","input":{"title":"first","format":"raw"}},{"type":"tool_use","id":"call-2","name":"mcp__docs__read","input":{"title":"second","format":"raw"}}]},
++            {"role":"user","content":[{"type":"tool_result","tool_use_id":"call-2","content":"second failed","is_error":true},{"type":"tool_result","tool_use_id":"call-1","content":""}]}
++        ]}`)
++	for _, stream := range []bool{false, true} {
++		t.Run(fmt.Sprintf("stream=%t", stream), func(t *testing.T) {
++			body := antigravityTranslationBoundaryRequest(t, "claude-sonnet-4-5", payload, stream)
++			system := ojson.GetBytes(body, "request.systemInstruction")
++			if system.Get("parts.#").Int() != 1 || system.Get("parts.0.text").String() != "You are Antigravity, an agentic AI coding assistant.\nKeep `OpenAI` unchanged." {
++				t.Fatalf("system layout, sanitizer, or code exemption changed: %s", system.Raw)
++			}
++			if strings.Contains(string(body), "MCP XML") || strings.Contains(string(body), "SYSTEM_PROMPT_END") {
++				t.Fatalf("unexpected prompt injection: %s", body)
++			}
++			contents := ojson.GetBytes(body, "request.contents").Array()
++			var calls, results []ojson.Result
++			for _, content := range contents {
++				for _, part := range content.Get("parts").Array() {
++					if fc := part.Get("functionCall"); fc.Exists() {
++						calls = append(calls, fc)
++					}
++					if fr := part.Get("functionResponse"); fr.Exists() {
++						results = append(results, fr)
++					}
++				}
++			}
++			if len(calls) != 2 || len(results) != 2 {
++				t.Fatalf("parallel call/result lost: %s", body)
++			}
++			for i, title := range []string{"first", "second"} {
++				id := fmt.Sprintf("call-%d", i+1)
++				if calls[i].Get("id").String() != id || results[i].Get("id").String() != id || calls[i].Get("name").String() != "mcp__docs__read" || results[i].Get("name").String() != "mcp__docs__read" {
++					t.Fatalf("parallel identity/alignment lost: %s", body)
++				}
++				if calls[i].Get("args.title").String() != title || calls[i].Get("args.format").String() != "raw" {
++					t.Fatalf("schema cleaner mutated historical tool arguments: %s", body)
++				}
++			}
++			if result := results[0].Get("response.result"); !result.Exists() || result.String() != "" {
++				t.Fatalf("empty result must remain empty: %s", body)
++			}
++			if results[1].Get("response.error").String() != "second failed" {
++				t.Fatalf("error result lost: %s", body)
++			}
++			t.Logf("final request: %s", body)
++		})
++	}
++}
+diff --git a/internal/auth/codex/openai_auth_test.go b/internal/auth/codex/openai_auth_test.go
+--- a/internal/auth/codex/openai_auth_test.go
++++ b/internal/auth/codex/openai_auth_test.go
+@@ -6,0 +7 @@
++	"net/http/httptest"
+@@ -180,3 +181,13 @@
+-	cfg := &config.Config{SDKConfig: config.SDKConfig{ProxyURL: "http://global.example.com:8080"}}
+-	auth := NewCodexAuthWithProxyURL(cfg, "http://override.example.com:8081")
+-
++	global := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		t.Error("global proxy used despite credential override")
++		w.WriteHeader(http.StatusBadGateway)
++	}))
++	defer global.Close()
++	requests := make(chan string, 1)
++	override := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		requests <- r.Method + " " + r.Host
++		w.WriteHeader(http.StatusBadGateway)
++	}))
++	defer override.Close()
++	cfg := &config.Config{SDKConfig: config.SDKConfig{ProxyURL: global.URL}}
++	auth := NewCodexAuthWithProxyURL(cfg, override.URL)
+@@ -187,10 +198,17 @@
+-	req, errReq := http.NewRequest(http.MethodGet, "https://example.com", nil)
+-	if errReq != nil {
+-		t.Fatalf("new request: %v", errReq)
+-	}
+-	proxyURL, errProxy := transport.Proxy(req)
+-	if errProxy != nil {
+-		t.Fatalf("proxy func: %v", errProxy)
+-	}
+-	if proxyURL == nil || proxyURL.String() != "http://override.example.com:8081" {
+-		t.Fatalf("proxy URL = %v, want http://override.example.com:8081", proxyURL)
++	defer transport.CloseIdleConnections()
++	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
++	defer cancel()
++	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://codex-target.test/capture", nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if _, err = auth.httpClient.Do(req); err == nil {
++		t.Fatal("test proxy rejects CONNECT; expected error")
++	}
++	select {
++	case got := <-requests:
++		if got != "CONNECT codex-target.test:443" {
++			t.Fatalf("override request=%q", got)
++		}
++	default:
++		t.Fatal("override proxy did not receive CONNECT")

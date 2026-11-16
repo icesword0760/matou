@@ -117,6 +117,9 @@ export function buildClaudeLaunch(input: ClaudeLaunchInput): ClaudeLaunchResult 
   if (missing.length) return { ok: false, error: 'missing-role-model', roles: missing };
   const env: Record<string, string> = {
     ANTHROPIC_BASE_URL: input.routerUrl, ANTHROPIC_AUTH_TOKEN: input.clientKey, CLAUDE_CODE_AUTO_MODE_SERVER: '0',
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+    DISABLE_TELEMETRY: '1',
+    DISABLE_ERROR_REPORTING: '1',
   };
   const aliases: ModelAlias[] = [], unknown: string[] = [];
   for (const role of roles) {
