@@ -297,7 +297,130 @@ mod probe {
             drag.request_id, drag.row
         );
 
-        verify_ime(window, cx, &events, bottom, &mut terminal, latest_raw)?;
+        verify_ime(
+            window,
+            cx,
+            &events,
+            bottom.clone(),
+            &mut terminal,
+            latest_raw,
+        )?;
+        verify_ime_drag(window, cx, &events, bottom, modes)?;
+        Ok(())
+    }
+
+    fn verify_ime_drag(
+        window: WindowHandle<TerminalSurface>,
+        cx: &mut App,
+        events: &RefCell<Vec<Observed>>,
+        bottom: Screen,
+        modes: InputModes,
+    ) -> anyhow::Result<()> {
+        for release in [true, false] {
+            events.borrow_mut().clear();
+            let (pending, moved) = window.update(cx, |view, window, cx| {
+                view.set_screen(bottom.clone(), modes, None, view.scroll_request_id, cx);
+                view.reveal_scrollbar();
+                let bounds = view.scrollbar_bounds.expect("painted scrollbar bounds");
+                let metrics = view.scrollbar_metrics().unwrap();
+                let pointer = point(
+                    bounds.right() - px(2.5),
+                    bounds.top() + px((metrics.thumb_top + metrics.thumb_size / 2.) as f32),
+                );
+                assert!(view.scrollbar_down(
+                    &MouseDownEvent {
+                        button: MouseButton::Left,
+                        position: pointer,
+                        click_count: 1,
+                        ..Default::default()
+                    },
+                    cx,
+                ));
+                let capture = view.scrollbar_drag.expect("left-button thumb capture");
+                assert!(view.scrollbar_move(
+                    &MouseMoveEvent {
+                        position: point(pointer.x, pointer.y - px(24.)),
+                        pressed_button: Some(MouseButton::Left),
+                        ..Default::default()
+                    },
+                    cx,
+                ));
+                let pending = view.scrollbar_position.expect("queued absolute drag");
+                assert_eq!(
+                    view.screen.as_ref().unwrap().scrollbar.offset,
+                    bottom.scrollbar.offset
+                );
+                view.replace_and_mark_text_in_range(None, "ni", Some(2..2), window, cx);
+                assert_eq!(view.marked_text_range(window, cx), Some(0..2));
+                assert!(view.scrollbar_position.is_none());
+
+                // The return-to-live request must not rebase the held gesture.
+                let position = point(pointer.x, pointer.y - px(36.));
+                assert!(
+                    view.scrollbar_move(
+                        &MouseMoveEvent {
+                            position,
+                            pressed_button: Some(MouseButton::Left),
+                            ..Default::default()
+                        },
+                        cx,
+                    ),
+                    "preedit must retain capture for the next held scrollbar move"
+                );
+                let expected = capture
+                    .metrics
+                    .drag_position(f64::from(f32::from(position.y - capture.pointer.y)));
+                let moved = view.scrollbar_position.expect("continued absolute drag");
+                assert_position(view, expected, pending.request_id + 1);
+                assert!(moved.row < pending.row);
+                view.unmark_text(window, cx);
+                assert_eq!(view.marked_text_range(window, cx), None);
+
+                if release {
+                    assert!(view.scrollbar_up(
+                        &MouseUpEvent {
+                            button: MouseButton::Left,
+                            position,
+                            ..Default::default()
+                        },
+                        cx,
+                    ));
+                } else {
+                    assert!(!view.scrollbar_move(
+                        &MouseMoveEvent {
+                            position,
+                            pressed_button: None,
+                            ..Default::default()
+                        },
+                        cx,
+                    ));
+                }
+                assert!(view.scrollbar_drag.is_none());
+                assert!(!view.scrollbar_move(
+                    &MouseMoveEvent {
+                        position: point(pointer.x, pointer.y - px(48.)),
+                        pressed_button: Some(MouseButton::Left),
+                        ..Default::default()
+                    },
+                    cx,
+                ));
+                (pending, moved)
+            })?;
+            assert_eq!(
+                events.take(),
+                [
+                    Observed::Absolute(pending.row, pending.request_id),
+                    Observed::Lines(i32::MIN),
+                    Observed::Absolute(moved.row, moved.request_id),
+                ]
+            );
+            println!(
+                "Held preedit: queued row {} → return-to-live → original-origin row {}; {} stops further moves; cancellation sends no bytes.",
+                pending.row,
+                moved.row,
+                if release { "mouseup" } else { "button change" },
+            );
+        }
         Ok(())
     }
 

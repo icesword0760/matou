@@ -352,7 +352,6 @@ impl TerminalSurface {
         // An absolute scroll can be queued while the last frame still shows
         // the bottom. Place the return-to-live command after it.
         let pending_scroll = self.scrollbar_position.take().is_some();
-        self.scrollbar_drag = None;
         if pending_scroll
             || self
                 .screen
