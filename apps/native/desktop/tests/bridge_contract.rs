@@ -1,6 +1,7 @@
 #![cfg(target_os = "macos")]
 
 mod support;
+use support::TestBridge as RuntimeBridge;
 
 use std::{
     fs,
@@ -10,7 +11,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
-use matou_native_desktop::runtime_bridge::{Command, Event, LaunchOptions, RuntimeBridge};
+use matou_native_desktop::runtime_bridge::{Command, Event, LaunchOptions};
 use matou_native_terminal::Screen;
 use uuid::Uuid;
 

@@ -1,6 +1,7 @@
 #![cfg(target_os = "macos")]
 
 mod support;
+use support::TestBridge as RuntimeBridge;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -12,7 +13,7 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use matou_native_core::hierarchy::{HierarchyResult, Scene, Task};
-use matou_native_desktop::runtime_bridge::{Command, Event, LaunchOptions, RuntimeBridge};
+use matou_native_desktop::runtime_bridge::{Command, Event, LaunchOptions};
 use serde_json::Value;
 use uuid::Uuid;
 

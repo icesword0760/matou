@@ -1,6 +1,7 @@
 #![cfg(target_os = "macos")]
 
 mod support;
+use support::TestBridge as RuntimeBridge;
 
 use std::{
     collections::BTreeSet,
@@ -18,9 +19,7 @@ use matou_native_core::{
     startup::open_read_only,
     workspace_paths::WorkspacePathState,
 };
-use matou_native_desktop::runtime_bridge::{
-    Command, Event, LaunchOptions, RecoveryState, RuntimeBridge,
-};
+use matou_native_desktop::runtime_bridge::{Command, Event, LaunchOptions, RecoveryState};
 use uuid::Uuid;
 
 const PROMPT: &str = "MATOU_WORKSPACE_READY>";

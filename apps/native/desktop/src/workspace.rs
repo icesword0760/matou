@@ -2,7 +2,6 @@ use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
     rc::Rc,
-    sync::mpsc::Sender,
     time::{Duration, Instant},
 };
 
@@ -20,7 +19,9 @@ use crate::{
         Curve, Transition, centered_scroll, focus_scroll_step, fully_visible_scroll,
     },
     rename_input::{RenameInput, RenameInputEvent, trim_name},
-    runtime_bridge::{Command, Event, RecoveryState},
+    runtime_bridge::{
+        BridgeEvent, Command, ConnectionPhase, Event, RecoveryState, RuntimeCommands,
+    },
     sidebar_scrollbar::{self, SidebarScrollbarState},
     tab_dialog_style as tabs_ui,
     terminal_surface::{SurfaceEvent, TerminalSurface},
@@ -164,7 +165,8 @@ pub struct Workspace {
     history_view: Option<Entity<HistoryView>>,
     history_request: Option<HistoryContextRequest>,
     search: Option<TerminalSearchState>,
-    commands: Sender<Command>,
+    commands: RuntimeCommands,
+    runtime_generation: u64,
     hierarchy: Option<HierarchyResult>,
     scenes: Vec<Scene>,
     workspaces: Vec<HierarchyWorkspace>,
@@ -647,9 +649,12 @@ impl Workspace {
         let dismiss = search.session_id.as_ref() != Some(&session_id) || search.query.is_empty();
         if search.session_id.as_ref() != Some(&session_id) {
             if let Some(old) = search.session_id.take() {
-                let _ = self.commands.send(Command::ClearSearch {
-                    session_id: old.clone(),
-                });
+                let _ = self.commands.send_at(
+                    self.runtime_generation,
+                    Command::ClearSearch {
+                        session_id: old.clone(),
+                    },
+                );
                 if let Some(terminal) = self.terminals.get(&old) {
                     terminal.update(cx, |terminal, cx| terminal.set_search(None, cx));
                 }
@@ -696,9 +701,12 @@ impl Workspace {
             search.result = None;
             search.error = None;
             if let Some(session_id) = &search.session_id {
-                let _ = self.commands.send(Command::ClearSearch {
-                    session_id: session_id.clone(),
-                });
+                let _ = self.commands.send_at(
+                    self.runtime_generation,
+                    Command::ClearSearch {
+                        session_id: session_id.clone(),
+                    },
+                );
                 if let Some(terminal) = self.terminals.get(session_id) {
                     terminal.update(cx, |terminal, cx| terminal.set_search(None, cx));
                 }
@@ -870,8 +878,8 @@ impl Workspace {
     }
 
     pub fn new(
-        commands: Sender<Command>,
-        events: async_channel::Receiver<Event>,
+        commands: RuntimeCommands,
+        events: async_channel::Receiver<BridgeEvent>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -897,6 +905,7 @@ impl Workspace {
             history_view: None,
             history_request: None,
             search: None,
+            runtime_generation: commands.connection().0,
             commands,
             hierarchy: None,
             scenes: Vec::new(),
@@ -1024,14 +1033,39 @@ impl Workspace {
         {
             self.pending_focus = Some((scene_id.clone(), session_id.clone()));
         }
-        if self.commands.send(command).is_err() {
+        if self
+            .commands
+            .send_at(self.runtime_generation, command)
+            .is_err()
+        {
             self.pending_focus = None;
-            self.fault = Some("原生运行时已停止".into());
+            // Offline/reconnecting rejection is expected; do not stack a fault per key.
             cx.notify();
         }
     }
 
-    fn apply(&mut self, event: Event, window: &mut Window, cx: &mut Context<Self>) {
+    fn apply(&mut self, envelope: BridgeEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.commands.accepts(&envelope) {
+            return;
+        }
+        let generation = envelope.generation();
+        let event = match envelope {
+            BridgeEvent::Connection { phase, .. } => {
+                if matches!(phase, ConnectionPhase::Ready) {
+                    self.runtime_generation = generation;
+                }
+                cx.notify();
+                return;
+            }
+            BridgeEvent::Runtime { event, .. } => {
+                if matches!(&event, Event::Ready { .. }) {
+                    self.runtime_generation = generation;
+                }
+                // The current owner emits sidebar/path projections before Ready.
+                // accepts() already rejected every superseded connection.
+                event
+            }
+        };
         match event {
             Event::Workspaces(workspaces) => {
                 self.workspace_drag_motion
@@ -1456,12 +1490,12 @@ impl Workspace {
                         window.focus(&terminal.read(cx).focus);
                     }
                 }
-                self.send(
+                let _ = self.commands.send_at(
+                    generation,
                     Command::Applied {
                         session_id,
                         sequence,
                     },
-                    cx,
                 );
             }
             Event::Recovery { session_id, state } => {
@@ -1491,7 +1525,7 @@ impl Workspace {
                 self.fault = Some(message)
             }
             Event::StorageRecovered { .. } => self.fault = None,
-            Event::Closed => {}
+            Event::StartupBlocked(_) | Event::Closed => {}
         }
         cx.notify();
     }
