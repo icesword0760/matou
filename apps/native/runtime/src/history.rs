@@ -69,7 +69,7 @@ pub struct HistoryPageInput {
     pub after_lines: Option<f64>,
 }
 
-#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct HistorySearchOptions {
     pub case_sensitive: bool,

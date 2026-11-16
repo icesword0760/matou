@@ -1,8 +1,8 @@
 #[cfg(target_os = "macos")]
 use std::cell::Cell;
-use std::{cell::RefCell, path::PathBuf, rc::Rc};
+use std::{cell::RefCell, rc::Rc};
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use gpui::*;
 use matou_native_desktop::{
     assets::NativeAssets,
@@ -111,43 +111,5 @@ fn main() -> Result<()> {
 }
 
 fn options() -> Result<LaunchOptions> {
-    let mut data_root = None;
-    let mut workspace = None;
-    let mut shell_home = None;
-    let mut shell = PathBuf::from(if cfg!(windows) {
-        "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
-    } else {
-        "/bin/zsh"
-    });
-    let mut args = std::env::args_os().skip(1);
-    while let Some(flag) = args.next() {
-        let value = args
-            .next()
-            .context("native acceptance launcher requires a path after each flag")?;
-        let path = PathBuf::from(value);
-        match flag.to_str() {
-            Some("--data-root") => data_root = Some(path),
-            Some("--workspace") => workspace = Some(path),
-            Some("--shell-home") => shell_home = Some(path),
-            Some("--shell") => shell = path,
-            _ => bail!("Unknown native launcher option: {}", flag.to_string_lossy()),
-        }
-    }
-    let options = LaunchOptions {
-        data_root: data_root.context("Pass --data-root with an isolated native data directory")?,
-        workspace: workspace.context("Pass --workspace with an isolated working directory")?,
-        shell_home: shell_home.context("Pass --shell-home with an isolated Shell home")?,
-        shell,
-    };
-    for path in [
-        &options.data_root,
-        &options.workspace,
-        &options.shell_home,
-        &options.shell,
-    ] {
-        if !path.is_absolute() {
-            bail!("Native launcher paths must be absolute: {}", path.display());
-        }
-    }
-    Ok(options)
+    LaunchOptions::from_args(std::env::args_os().skip(1))
 }

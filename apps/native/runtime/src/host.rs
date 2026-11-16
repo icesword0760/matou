@@ -37,6 +37,7 @@ use matou_native_core::{
 use matou_native_terminal::{
     GridSelection, InputModes, Screen, SelectionAction, TerminalOptions, Theme,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -50,6 +51,52 @@ pub struct LaunchOptions {
     pub shell: PathBuf,
 }
 
+impl LaunchOptions {
+    pub fn from_args(args: impl IntoIterator<Item = OsString>) -> Result<Self> {
+        let mut data_root = None;
+        let mut workspace = None;
+        let mut shell_home = None;
+        let mut shell = PathBuf::from(if cfg!(windows) {
+            "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
+        } else {
+            "/bin/zsh"
+        });
+        let mut args = args.into_iter();
+        while let Some(flag) = args.next() {
+            let value = args
+                .next()
+                .context("native acceptance launcher requires a path after each flag")?;
+            let path = PathBuf::from(value);
+            match flag.to_str() {
+                Some("--data-root") => data_root = Some(path),
+                Some("--workspace") => workspace = Some(path),
+                Some("--shell-home") => shell_home = Some(path),
+                Some("--shell") => shell = path,
+                _ => bail!("Unknown native launcher option: {}", flag.to_string_lossy()),
+            }
+        }
+        let options = LaunchOptions {
+            data_root: data_root
+                .context("Pass --data-root with an isolated native data directory")?,
+            workspace: workspace.context("Pass --workspace with an isolated working directory")?,
+            shell_home: shell_home.context("Pass --shell-home with an isolated Shell home")?,
+            shell,
+        };
+        for path in [
+            &options.data_root,
+            &options.workspace,
+            &options.shell_home,
+            &options.shell,
+        ] {
+            if !path.is_absolute() {
+                bail!("Native launcher paths must be absolute: {}", path.display());
+            }
+        }
+        Ok(options)
+    }
+}
+
+#[derive(Serialize, Deserialize)]
 pub enum Command {
     History(HistoryRequest),
     Search {
@@ -186,6 +233,7 @@ pub enum Command {
     },
     Refresh,
     #[cfg(all(test, target_os = "macos"))]
+    #[serde(skip)]
     TestPause {
         paused: Sender<()>,
         resume: Receiver<()>,
@@ -193,13 +241,14 @@ pub enum Command {
     Shutdown,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RecoveryState {
     Restoring,
     Ready,
     Failed(String),
 }
 
+#[derive(Serialize, Deserialize)]
 pub enum Event {
     History(HistoryReply),
     SearchResults {

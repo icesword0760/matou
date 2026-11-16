@@ -1,12 +1,13 @@
 use std::ops::Range;
 
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 
 use crate::{HistoryCell, Terminal};
 
 const WORD_SEPARATORS: &str = " ()[]{}',\"`";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct GridPoint {
     pub row: usize,
     pub col: isize,
@@ -14,7 +15,7 @@ pub struct GridPoint {
 
 /// Selection over absolute buffer rows, either linear or rectangular.
 /// Columns are half-open, including on each row of a rectangular selection.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GridSelection {
     pub anchor: GridPoint,
     pub end: GridPoint,
@@ -96,7 +97,7 @@ impl GridSelection {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SelectionMode {
     Character,
     Word,
@@ -105,7 +106,7 @@ pub enum SelectionMode {
 }
 
 /// Pointer operations use absolute rows of the active terminal buffer.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Serialize, Deserialize)]
 pub enum SelectionAction {
     Select {
         row: usize,

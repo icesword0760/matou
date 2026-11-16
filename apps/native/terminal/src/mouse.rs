@@ -1,3 +1,5 @@
+use serde::{Deserialize, Serialize};
+
 const BUTTON_NONE: u8 = 3;
 const BUTTON_WHEEL: u8 = 4;
 const ACTION_UP: u8 = 0;
@@ -6,7 +8,7 @@ const ACTION_LEFT: u8 = 2;
 const ACTION_RIGHT: u8 = 3;
 const ACTION_MOVE: u8 = 32;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MouseProtocol {
     #[default]
     None,
@@ -16,7 +18,7 @@ pub enum MouseProtocol {
     Any,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MouseEncoding {
     #[default]
     Default,

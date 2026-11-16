@@ -5,12 +5,14 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
+use serde::{Deserialize, Serialize};
 
 use crate::history::{
     HistoryCursor, HistoryPage, HistoryPageInput, HistorySearchInput, HistorySearchOptions,
     HistorySearchResult, JournalHistoryReader,
 };
 
+#[derive(Serialize, Deserialize)]
 pub enum HistoryRequest {
     Search {
         session_id: String,
@@ -25,7 +27,7 @@ pub enum HistoryRequest {
     },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub enum HistoryReply {
     Search {
         session_id: String,

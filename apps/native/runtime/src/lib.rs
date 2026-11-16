@@ -5,6 +5,7 @@ pub mod history_worker;
 pub mod host;
 mod model;
 pub mod owner;
+pub mod protocol;
 pub mod search;
 pub mod session;
 pub mod worker;

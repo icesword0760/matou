@@ -18,7 +18,7 @@ pub enum CursorStyle {
     BlockHollow,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Theme {
     pub foreground: u32,
     pub background: u32,
@@ -79,7 +79,7 @@ impl Default for Theme {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Cell {
     /// Invisible text remains available to selection, search, and copy.
     pub text: String,
@@ -103,7 +103,7 @@ pub struct Cell {
     pub underline_color: Color,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RowMetadata {
     pub wrap: bool,
     pub wrap_continuation: bool,
@@ -124,14 +124,14 @@ pub struct HistoryRow {
     pub metadata: RowMetadata,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Scrollbar {
     pub offset: u64,
     pub total: u64,
     pub len: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Screen {
     pub cols: usize,
     pub rows: usize,
@@ -147,17 +147,39 @@ pub struct Screen {
     pub foreground: u32,
     pub background: u32,
     pub cursor_color: Option<u32>,
+    #[serde(with = "palette_serde")]
     pub palette: [u32; 256],
     pub history_lines: usize,
     pub scrollbar: Scrollbar,
     pub alternate: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InputModes {
     pub application_cursor_keys: bool,
     pub bracketed_paste: bool,
     pub mouse_protocol: crate::MouseProtocol,
     pub mouse_encoding: crate::MouseEncoding,
     pub input_epoch: usize,
+}
+
+mod palette_serde {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(
+        palette: &[u32; 256],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        palette.as_slice().serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<[u32; 256], D::Error> {
+        let palette = Vec::<u32>::deserialize(deserializer)?;
+        palette.try_into().map_err(|palette: Vec<u32>| {
+            <D::Error as serde::de::Error>::invalid_length(
+                palette.len(),
+                &"exactly 256 palette entries",
+            )
+        })
+    }
 }
