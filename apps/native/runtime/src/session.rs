@@ -555,6 +555,19 @@ impl Session {
         self.display_terminal.scroll(lines)
     }
 
+    /// Position the viewport by its first retained row, as of command execution.
+    pub fn scroll_to(&mut self, row: u64) -> Result<()> {
+        let screen = self.display_terminal.screen()?;
+        let last = screen.scrollbar.total.saturating_sub(screen.rows as u64);
+        let mut lines = i128::from(screen.scrollbar.offset) - i128::from(row.min(last));
+        while lines != 0 {
+            let step = lines.clamp(i128::from(i32::MIN), i128::from(i32::MAX)) as i32;
+            self.display_terminal.scroll(step)?;
+            lines -= i128::from(step);
+        }
+        Ok(())
+    }
+
     pub fn scroll_selection(&mut self, lines: i32) -> Result<()> {
         self.display_terminal
             .selection_action(SelectionAction::Scroll { lines })

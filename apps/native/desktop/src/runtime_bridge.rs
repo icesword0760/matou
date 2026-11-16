@@ -88,6 +88,11 @@ pub enum Command {
         session_id: String,
         lines: i32,
     },
+    ScrollTo {
+        session_id: String,
+        row: u64,
+        request_id: u64,
+    },
     Theme {
         session_id: String,
         theme: Theme,
@@ -262,6 +267,8 @@ pub enum Event {
         selection: Option<GridSelection>,
         modes: InputModes,
         sequence: u64,
+        /// All absolute scroll requests up to this id preceded the view read.
+        scroll_request_id: u64,
     },
     StorageFault {
         session_id: String,
@@ -321,6 +328,7 @@ impl Drop for RuntimeBridge {
 struct PendingView {
     receive: Receiver<Result<(Screen, InputModes, Option<GridSelection>)>>,
     sequence: u64,
+    scroll_request_id: u64,
 }
 
 struct RecoveryRetry {
@@ -454,6 +462,7 @@ fn run(
     let mut dirty = HashSet::<String>::new();
     let mut sequence = HashMap::<String, u64>::new();
     let mut views = HashMap::<String, PendingView>::new();
+    let mut scroll_requests = HashMap::<String, u64>::new();
     let mut awaiting_ui = HashMap::<String, u64>::new();
     let mut operations = Vec::<WorkerOperation>::new();
     let mut searches = Vec::<(String, u64, Receiver<Result<SearchResult>>)>::new();
@@ -546,6 +555,7 @@ fn run(
                     sessions.remove(&id);
                     dirty.remove(&id);
                     sequence.remove(&id);
+                    scroll_requests.remove(&id);
                     views.remove(&id);
                     awaiting_ui.remove(&id);
                     recovering.insert(id, state.workspace_id.clone());
@@ -739,6 +749,7 @@ fn run(
                                 sessions.remove(id);
                                 dirty.remove(id);
                                 sequence.remove(id);
+                                scroll_requests.remove(id);
                                 views.remove(id);
                                 awaiting_ui.remove(id);
                                 terminal_layouts.remove(id);
@@ -978,6 +989,17 @@ fn run(
                         continue;
                     }
                     (session_id, WorkerCommand::Scroll { lines, reply }, true)
+                }
+                Command::ScrollTo {
+                    session_id,
+                    row,
+                    request_id,
+                } => {
+                    if !sessions.contains(&session_id) {
+                        continue;
+                    }
+                    scroll_requests.insert(session_id.clone(), request_id);
+                    (session_id, WorkerCommand::ScrollTo { row, reply }, true)
                 }
                 Command::Theme { session_id, theme } => {
                     let live = sessions.contains(&session_id);
@@ -1267,6 +1289,7 @@ fn run(
                     selection,
                     modes,
                     sequence: pending.sequence,
+                    scroll_request_id: pending.scroll_request_id,
                 });
                 false
             }
@@ -1291,6 +1314,7 @@ fn run(
                 PendingView {
                     receive,
                     sequence: sequence.get(&session_id).copied().unwrap_or(0),
+                    scroll_request_id: scroll_requests.get(&session_id).copied().unwrap_or(0),
                 },
             );
             dirty.remove(&session_id);

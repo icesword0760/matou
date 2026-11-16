@@ -1,11 +1,14 @@
-use std::{ops::Range, time::Duration};
+use std::{
+    ops::Range,
+    time::{Duration, Instant},
+};
 
 use gpui::{
     App, Bounds, ContentMask, Context, CursorStyle as PointerStyle, DispatchPhase,
     ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Font, FontStyle,
     FontWeight, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, ParentElement, Pixels,
-    Point, Render, ScrollWheelEvent, ShapedLine, SharedString, Styled, Task, TextRun,
-    UTF16Selection, Window, canvas, div, fill, font, point, px, rgb, size,
+    Point, Render, ScrollWheelEvent, ShapedLine, SharedString, StatefulInteractiveElement, Styled,
+    Task, TextRun, UTF16Selection, Window, canvas, div, fill, font, point, px, rgb, rgba, size,
 };
 use matou_native_terminal::{
     Cell, Color, CursorStyle, GridSelection, InputModes, MouseEncoding, MouseEvent, MouseProtocol,
@@ -16,6 +19,7 @@ use crate::terminal_input::{
     Composition, byte_from_utf16, encode_paste, selection_scroll_amount, terminal_key,
     utf16_from_byte,
 };
+use crate::terminal_scrollbar::ScrollbarMetrics;
 
 const FONT_SIZE: Pixels = px(11.);
 const BLINK_INTERVAL: Duration = Duration::from_millis(500);
@@ -35,6 +39,11 @@ pub enum SurfaceEvent {
     },
     /// Positive lines move into scrollback.
     Scroll(i32),
+    /// Absolute first visible history row; applied by the worker in FIFO order.
+    ScrollTo {
+        row: u64,
+        request_id: u64,
+    },
     ScrollSelection(i32),
 }
 
@@ -55,7 +64,9 @@ struct Metrics {
 impl Metrics {
     fn dimensions(self, bounds: Bounds<Pixels>, scale: f32) -> Dimensions {
         Dimensions {
-            cols: f32::from(bounds.size.width / self.width).floor().max(2.) as u16,
+            cols: ((f32::from(bounds.size.width).floor() - 14.) / f32::from(self.width))
+                .floor()
+                .max(2.) as u16,
             rows: f32::from(bounds.size.height / self.height).floor().max(1.) as u16,
             cell_width_px: (f32::from(self.width) * scale).round().max(1.) as u32,
             cell_height_px: (f32::from(self.height) * scale).round().max(1.) as u32,
@@ -78,6 +89,34 @@ struct VisibleGrid {
     bounds: Bounds<Pixels>,
     cols: usize,
     rows: usize,
+}
+
+#[derive(Clone, Copy)]
+struct ScrollbarDrag {
+    metrics: ScrollbarMetrics,
+    pointer: Point<Pixels>,
+}
+
+#[derive(Clone, Copy)]
+struct ScrollbarPosition {
+    pixels: f64,
+    row: u64,
+    request_id: u64,
+}
+
+struct ScrollbarFade {
+    start: Instant,
+    from: f32,
+    target: f32,
+    duration: Duration,
+}
+
+impl ScrollbarFade {
+    fn opacity(&self, now: Instant) -> f32 {
+        let progress =
+            (now.duration_since(self.start).as_secs_f32() / self.duration.as_secs_f32()).min(1.);
+        self.from + (self.target - self.from) * progress
+    }
 }
 
 pub struct TerminalSurface {
@@ -104,6 +143,18 @@ pub struct TerminalSurface {
     blink: Option<Task<()>>,
     blink_visible: bool,
     input_disabled: bool,
+    scrollbar_bounds: Option<Bounds<Pixels>>,
+    scrollbar_position: Option<ScrollbarPosition>,
+    scrollbar_drag: Option<ScrollbarDrag>,
+    surface_hovered: bool,
+    scrollport_hovered: bool,
+    scrollbar_fade: Option<ScrollbarFade>,
+    scrollbar_opacity: f32,
+    scrollbar_revealed: bool,
+    scrollbar_hide_at: Option<Instant>,
+    scrollbar_hide_timer: Option<Task<()>>,
+    scrollbar_frame_pending: bool,
+    scroll_request_id: u64,
 }
 
 impl EventEmitter<SurfaceEvent> for TerminalSurface {}
@@ -114,6 +165,11 @@ impl TerminalSurface {
         result: Option<matou_native_runtime::search::SearchResult>,
         cx: &mut Context<Self>,
     ) {
+        if result.as_ref().map(|search| search.sequence)
+            != self.search.as_ref().map(|search| search.sequence)
+        {
+            self.scrollbar_position = None;
+        }
         self.search = result;
         cx.notify();
     }
@@ -171,6 +227,18 @@ impl TerminalSurface {
             blink: None,
             blink_visible: true,
             input_disabled: false,
+            scrollbar_bounds: None,
+            scrollbar_position: None,
+            scrollbar_drag: None,
+            surface_hovered: false,
+            scrollport_hovered: false,
+            scrollbar_fade: None,
+            scrollbar_opacity: 0.,
+            scrollbar_revealed: false,
+            scrollbar_hide_at: None,
+            scrollbar_hide_timer: None,
+            scrollbar_frame_pending: false,
+            scroll_request_id: 0,
         }
     }
 
@@ -191,10 +259,14 @@ impl TerminalSurface {
         screen: Screen,
         modes: InputModes,
         selection: Option<GridSelection>,
+        scroll_request_id: u64,
         cx: &mut Context<Self>,
     ) {
+        self.scroll_request_id = self.scroll_request_id.max(scroll_request_id);
         let modes_changed = self.modes != modes;
         if self.modes.input_epoch != modes.input_epoch {
+            self.scrollbar_drag = None;
+            self.scrollbar_position = None;
             self.mouse_reporter = MouseReporter::default();
             self.mouse_wheel = MouseWheel::default();
             self.mouse_buttons = 0;
@@ -207,10 +279,30 @@ impl TerminalSurface {
             }
         }
         self.modes = modes;
+        let extent_changed = self.screen.as_ref().is_some_and(|old| {
+            old.rows != screen.rows || old.scrollbar.total != screen.scrollbar.total
+        });
+        let absolute_scroll_reply = !extent_changed
+            && self
+                .scrollbar_position
+                .as_ref()
+                .is_some_and(|position| scroll_request_id <= position.request_id);
+        let clear_position = self.scrollbar_position.as_ref().is_some_and(|position| {
+            extent_changed
+                || (scroll_request_id >= position.request_id
+                    && screen.scrollbar.offset != position.row)
+        });
+        if clear_position {
+            self.scrollbar_position = None;
+        }
         if !modes_changed && self.screen.as_ref() == Some(&screen) && self.selection == selection {
+            if clear_position {
+                cx.notify();
+            }
             return;
         }
         if let Some(old) = &self.screen {
+            let scrollbar_changed = old.scrollbar != screen.scrollbar;
             let cursor_changed = old.cursor_col != screen.cursor_col
                 || old.cursor_row != screen.cursor_row
                 || old.cursor_visible != screen.cursor_visible
@@ -218,6 +310,15 @@ impl TerminalSurface {
                 || old.cursor_blinking != screen.cursor_blinking;
             if cursor_changed {
                 self.reset_blink();
+            }
+            // The absolute scroll already revealed the bar when it was requested.
+            // A late frame must not reverse the fade after an outside release.
+            if scrollbar_changed
+                && (!absolute_scroll_reply
+                    || self.scrollport_hovered
+                    || self.scrollbar_drag.is_some())
+            {
+                self.reveal_scrollbar();
             }
         }
         self.screen = Some(screen);
@@ -236,14 +337,20 @@ impl TerminalSurface {
         if self.input_disabled || bytes.is_empty() {
             return;
         }
+        // A drag may already be queued while the last painted frame still
+        // shows the bottom. Keep the return-to-live command after that drag.
+        let pending_scroll = self.scrollbar_position.is_some();
         self.selection_drag = None;
+        self.scrollbar_position = None;
+        self.scrollbar_drag = None;
         self.stop_drag();
         self.reset_blink();
         // Frozen CoreService scrollOnUserInput also applies to typing and paste.
-        if self
-            .screen
-            .as_ref()
-            .is_some_and(|s| s.scrollbar.offset + (s.rows as u64) < s.scrollbar.total)
+        if pending_scroll
+            || self
+                .screen
+                .as_ref()
+                .is_some_and(|s| s.scrollbar.offset + (s.rows as u64) < s.scrollbar.total)
         {
             cx.emit(SurfaceEvent::Scroll(i32::MIN));
         }
@@ -358,6 +465,259 @@ impl TerminalSurface {
         self.selecting = false;
         self.drag_scroll_amount = 0;
         self.drag_scroll_timer = None;
+    }
+
+    fn scrollbar_metrics(&self) -> Option<ScrollbarMetrics> {
+        let bounds = self.scrollbar_bounds?;
+        let screen = self.screen.as_ref()?;
+        ScrollbarMetrics::new(
+            f64::from(f32::from(bounds.size.height)),
+            screen.scrollbar.total as f64 * f64::from(f32::from(self.metrics.height)),
+            self.scrollbar_position.map_or(
+                screen.scrollbar.offset as f64 * f64::from(f32::from(self.metrics.height)),
+                |position| position.pixels,
+            ),
+        )
+    }
+
+    fn fade_scrollbar(&mut self, revealed: bool) {
+        if self.scrollbar_revealed == revealed {
+            return;
+        }
+        let now = Instant::now();
+        let from = self
+            .scrollbar_fade
+            .as_ref()
+            .map_or(self.scrollbar_opacity, |fade| fade.opacity(now));
+        let target = if revealed { 1. } else { 0. };
+        self.scrollbar_revealed = revealed;
+        self.scrollbar_opacity = from;
+        self.scrollbar_fade = ((target - from).abs() > f32::EPSILON).then(|| ScrollbarFade {
+            start: now,
+            from,
+            target,
+            duration: Duration::from_secs_f32(
+                (if revealed { 0.1 } else { 0.8 }) * (target - from).abs(),
+            ),
+        });
+    }
+
+    fn reveal_scrollbar(&mut self) {
+        self.fade_scrollbar(true);
+        self.scrollbar_hide_at = (!self.scrollport_hovered && self.scrollbar_drag.is_none())
+            .then(|| Instant::now() + Duration::from_millis(500));
+    }
+
+    fn hide_scrollbar(&mut self) {
+        if !self.scrollport_hovered && self.scrollbar_drag.is_none() {
+            self.scrollbar_hide_at = None;
+            self.scrollbar_hide_timer = None;
+            self.fade_scrollbar(false);
+        }
+    }
+
+    fn schedule_scrollbar_hide(&mut self, cx: &mut Context<Self>) {
+        if !self.surface_hovered || self.scrollbar_hide_timer.is_some() {
+            return;
+        }
+        let Some(deadline) = self.scrollbar_hide_at else {
+            return;
+        };
+        let timer = cx
+            .background_executor()
+            .timer(deadline.saturating_duration_since(Instant::now()));
+        self.scrollbar_hide_timer = Some(cx.spawn(async move |this, cx| {
+            timer.await;
+            let _ = this.update(cx, |this, cx| {
+                this.scrollbar_hide_timer = None;
+                if this
+                    .scrollbar_hide_at
+                    .is_some_and(|deadline| Instant::now() >= deadline)
+                {
+                    this.hide_scrollbar();
+                    cx.notify();
+                } else {
+                    // A later scroll moved the same one-shot deadline.
+                    this.schedule_scrollbar_hide(cx);
+                }
+            });
+        }));
+    }
+
+    fn scroll_to_pixels(&mut self, position: f64, cx: &mut Context<Self>) {
+        let row = (position / f64::from(f32::from(self.metrics.height)))
+            .round()
+            .max(0.) as u64;
+        self.scroll_request_id += 1;
+        self.scrollbar_position = Some(ScrollbarPosition {
+            pixels: position,
+            row,
+            request_id: self.scroll_request_id,
+        });
+        cx.emit(SurfaceEvent::ScrollTo {
+            row,
+            request_id: self.scroll_request_id,
+        });
+        self.reveal_scrollbar();
+        cx.notify();
+    }
+
+    fn scrollbar_down(&mut self, event: &gpui::MouseDownEvent, cx: &mut Context<Self>) -> bool {
+        let Some(bounds) = self.scrollbar_bounds else {
+            return false;
+        };
+        let track = Bounds::new(
+            point(bounds.right() - px(5.), bounds.top()),
+            size(px(5.), bounds.size.height),
+        );
+        let Some(metrics) = self.scrollbar_metrics() else {
+            return false;
+        };
+        if !self.scrollbar_revealed || !track.contains(&event.position) {
+            return false;
+        }
+        let offset = f64::from(f32::from(event.position.y - bounds.top()));
+        let on_thumb = event.position.x >= track.left() + px(1.)
+            && event.position.x < track.right() - px(1.)
+            && offset >= metrics.thumb_top
+            && offset < metrics.thumb_top + metrics.thumb_size;
+        if !on_thumb {
+            self.scroll_to_pixels(metrics.track_position(offset), cx);
+        }
+        if event.button == MouseButton::Left {
+            self.stop_drag();
+            self.scrollbar_drag = Some(ScrollbarDrag {
+                metrics: self.scrollbar_metrics().unwrap(),
+                pointer: event.position,
+            });
+            self.reveal_scrollbar();
+        }
+        cx.stop_propagation();
+        true
+    }
+
+    pub(crate) fn scrollbar_hit(&self, position: Point<Pixels>) -> bool {
+        self.scrollbar_revealed
+            && self.scrollbar_metrics().is_some()
+            && self.scrollbar_bounds.is_some_and(|bounds| {
+                Bounds::new(
+                    point(bounds.right() - px(5.), bounds.top()),
+                    size(px(5.), bounds.size.height),
+                )
+                .contains(&position)
+            })
+    }
+
+    fn scrollbar_move(&mut self, event: &gpui::MouseMoveEvent, cx: &mut Context<Self>) -> bool {
+        let hovered = self
+            .scrollbar_bounds
+            .is_some_and(|bounds| bounds.contains(&event.position));
+        if let Some(drag) = self.scrollbar_drag {
+            self.scrollport_hovered = hovered;
+            if event.pressed_button != Some(MouseButton::Left) {
+                self.scrollbar_drag = None;
+                self.hide_scrollbar();
+                cx.notify();
+                return false;
+            }
+            let position = if cfg!(target_os = "windows")
+                && (event.position.x - drag.pointer.x).abs() > px(140.)
+            {
+                drag.metrics.position
+            } else {
+                drag.metrics
+                    .drag_position(f64::from(f32::from(event.position.y - drag.pointer.y)))
+            };
+            self.scroll_to_pixels(position, cx);
+            cx.stop_propagation();
+            return true;
+        }
+        if self.scrollport_hovered != hovered {
+            self.scrollport_hovered = hovered;
+            if hovered {
+                self.reveal_scrollbar();
+            } else {
+                self.hide_scrollbar();
+            }
+            cx.notify();
+        }
+        false
+    }
+
+    fn scrollbar_up(&mut self, event: &gpui::MouseUpEvent, cx: &mut Context<Self>) -> bool {
+        if event.button != MouseButton::Left || self.scrollbar_drag.take().is_none() {
+            return false;
+        }
+        self.scrollport_hovered = self
+            .scrollbar_bounds
+            .is_some_and(|bounds| bounds.contains(&event.position));
+        self.hide_scrollbar();
+        cx.notify();
+        cx.stop_propagation();
+        true
+    }
+
+    fn paint_scrollbar(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        rows: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.scrollbar_bounds = Some(Bounds::new(
+            bounds.origin,
+            size(bounds.size.width, self.metrics.height * rows as f32),
+        ));
+        if self.scrollbar_metrics().is_none() {
+            self.scrollbar_fade = None;
+            self.scrollbar_opacity = 0.;
+            self.scrollbar_revealed = false;
+            self.scrollbar_hide_at = None;
+            self.scrollbar_hide_timer = None;
+            return;
+        }
+        let now = Instant::now();
+        if self
+            .scrollbar_hide_at
+            .is_some_and(|deadline| now >= deadline)
+        {
+            self.hide_scrollbar();
+        }
+        if let Some(fade) = &self.scrollbar_fade {
+            self.scrollbar_opacity = fade.opacity(now);
+            if now.duration_since(fade.start) >= fade.duration {
+                self.scrollbar_fade = None;
+            }
+        }
+        if self.surface_hovered
+            && let Some(metrics) = self.scrollbar_metrics()
+        {
+            let thumb = Bounds::new(
+                point(
+                    bounds.right() - px(4.),
+                    bounds.top() + px(metrics.thumb_top as f32),
+                ),
+                size(px(3.), px(metrics.thumb_size as f32)),
+            );
+            let light = self.theme.background == 0xfcfcfd;
+            let mut color: gpui::Hsla = rgba(if light { 0x6872803d } else { 0xffffff38 }).into();
+            color.a = (if light { 0.24 } else { 0.22 }) * self.scrollbar_opacity;
+            window.paint_quad(fill(thumb, color).corner_radii(px(999.)));
+        }
+        // Wait once for the source's 500ms hide deadline rather than keeping
+        // the display loop alive after the reveal animation has completed.
+        self.schedule_scrollbar_hide(cx);
+        // Background terminals remain transparent and do not animate.
+        if self.surface_hovered && self.scrollbar_fade.is_some() && !self.scrollbar_frame_pending {
+            self.scrollbar_frame_pending = true;
+            let entity = cx.entity().downgrade();
+            window.on_next_frame(move |_, cx| {
+                let _ = entity.update(cx, |this, cx| {
+                    this.scrollbar_frame_pending = false;
+                    cx.notify();
+                });
+            });
+        }
     }
 
     fn schedule_drag_scroll(&mut self, cx: &mut Context<Self>) {
@@ -512,6 +872,7 @@ impl TerminalSurface {
         self.wheel_lines += delta;
         let lines = self.wheel_lines.trunc() as i32;
         if lines != 0 {
+            self.scrollbar_position = None;
             self.wheel_lines -= lines as f32;
             cx.emit(SurfaceEvent::Scroll(lines));
         }
@@ -523,7 +884,7 @@ impl TerminalSurface {
         entity: Entity<Self>,
         bounds: Bounds<Pixels>,
         window: &mut Window,
-        cx: &mut App,
+        cx: &mut Context<Self>,
     ) {
         let metrics = self.metrics;
         let dimensions = metrics.dimensions(bounds, window.scale_factor());
@@ -599,6 +960,9 @@ impl TerminalSurface {
             if focused && self.composition.is_active() {
                 self.paint_composition(caret, window, cx);
             }
+        });
+        window.with_content_mask(Some(ContentMask { bounds }), |window| {
+            self.paint_scrollbar(bounds, rows, window, cx);
         });
     }
 
@@ -767,6 +1131,7 @@ impl Render for TerminalSurface {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if !window.is_window_active() {
             self.stop_drag();
+            self.scrollbar_drag = None;
         }
         self.schedule_blink(
             self.focus.is_focused(window) && window.is_window_active(),
@@ -774,7 +1139,11 @@ impl Render for TerminalSurface {
         );
         let surface = cx.entity();
         div()
+            .id("terminal-surface")
             .size_full()
+            .relative()
+            .px(px(14.))
+            .py(px(12.))
             .overflow_hidden()
             .cursor(if self.modes.mouse_protocol == MouseProtocol::None {
                 PointerStyle::IBeam
@@ -782,10 +1151,21 @@ impl Render for TerminalSurface {
                 PointerStyle::Arrow
             })
             .track_focus(&self.focus)
+            .on_hover(cx.listener(|this, hovered, _, cx| {
+                this.surface_hovered = *hovered;
+                if !hovered {
+                    this.scrollport_hovered = false;
+                    this.hide_scrollbar();
+                }
+                cx.notify();
+            }))
             .on_key_down(cx.listener(|this, event, _, cx| this.handle_key(event, cx)))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
+                    if this.scrollbar_down(event, cx) {
+                        return;
+                    }
                     this.focus.focus(window);
                     this.reset_blink();
                     if this.mouse_down(event, cx) {
@@ -841,6 +1221,9 @@ impl Render for TerminalSurface {
             .on_mouse_down(
                 MouseButton::Middle,
                 cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
+                    if this.scrollbar_down(event, cx) {
+                        return;
+                    }
                     this.focus.focus(window);
                     this.mouse_down(event, cx);
                 }),
@@ -848,6 +1231,9 @@ impl Render for TerminalSurface {
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
+                    if this.scrollbar_down(event, cx) {
+                        return;
+                    }
                     this.focus.focus(window);
                     this.mouse_down(event, cx);
                 }),
@@ -864,6 +1250,9 @@ impl Render for TerminalSurface {
                         window.on_mouse_event(move |event: &gpui::MouseMoveEvent, phase, _, cx| {
                             if phase == DispatchPhase::Capture {
                                 let _ = moving.update(cx, |this, cx| {
+                                    if this.scrollbar_move(event, cx) {
+                                        return;
+                                    }
                                     let button = event.pressed_button.and_then(Self::mouse_button);
                                     let reporting_drag = button.is_some_and(|button| {
                                         this.mouse_buttons & (1 << button) != 0
@@ -891,6 +1280,9 @@ impl Render for TerminalSurface {
                         window.on_mouse_event(move |event: &gpui::MouseUpEvent, phase, _, cx| {
                             if phase == DispatchPhase::Capture {
                                 let _ = released.update(cx, |this, cx| {
+                                    if this.scrollbar_up(event, cx) {
+                                        return;
+                                    }
                                     if let Some(button) = Self::mouse_button(event.button) {
                                         if this.mouse_buttons & (1 << button) != 0 {
                                             this.report_mouse(
@@ -912,6 +1304,16 @@ impl Render for TerminalSurface {
                     },
                 )
                 .size_full(),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .right(px(14.))
+                    .top(px(12.))
+                    .w(px(5.))
+                    .h(self.metrics.height
+                        * self.screen.as_ref().map_or(0, |screen| screen.rows) as f32)
+                    .cursor(PointerStyle::Arrow),
             )
     }
 }

@@ -24,6 +24,75 @@ fn frames_continue_after_acknowledgment_and_completed_output_survives_reopen() -
     Ok(())
 }
 
+#[test]
+fn coalesced_scroll_frames_identify_the_requests_already_applied() -> Result<()> {
+    let root = std::env::temp_dir().join(format!("matou-native-scroll-bridge-{}", Uuid::new_v4()));
+    let home = root.join("home");
+    fs::create_dir_all(&home)?;
+    fs::write(home.join(".zshrc"), format!("PROMPT='{PROMPT} '\n"))?;
+    let mut bridge = RuntimeBridge::start(LaunchOptions {
+        data_root: root.join("data"),
+        workspace: root.join("workspace"),
+        shell_home: home,
+        shell: PathBuf::from("/bin/zsh"),
+    })?;
+    let session_id = wait_for_ready(&bridge)?;
+    wait_for_frame(&bridge, &session_id, "initial scroll prompt", |rows| {
+        has_row(rows, PROMPT)
+    })?;
+    input(
+        &bridge,
+        &session_id,
+        "printf 'BRIDGE_SCROLL_%03d\\n' {0..99}; printf 'SCROLL_%s\\n' DONE; read scroll_hold",
+    )?;
+    wait_for_frame(&bridge, &session_id, "scrollable history", |rows| {
+        has_row(rows, "SCROLL_DONE")
+    })?;
+    for command in [
+        Command::ScrollTo {
+            session_id: session_id.clone(),
+            row: 30,
+            request_id: 1,
+        },
+        Command::ScrollTo {
+            session_id: session_id.clone(),
+            row: 0,
+            request_id: 2,
+        },
+        Command::Scroll {
+            session_id: session_id.clone(),
+            lines: -5,
+        },
+    ] {
+        bridge.commands.send(command)?;
+    }
+    wait_for_event(&bridge, |event| {
+        if let Event::Frame {
+            session_id: id,
+            sequence,
+            screen,
+            scroll_request_id,
+            ..
+        } = event
+        {
+            bridge.commands.send(Command::Applied {
+                session_id: id,
+                sequence,
+            })?;
+            if scroll_request_id == 2 && screen.scrollbar.offset == 5 {
+                return Ok(Some(()));
+            }
+        }
+        Ok(None)
+    })?
+    .context(
+        "coalesced frame did not preserve the latest scroll request and following wheel position",
+    )?;
+    bridge.shutdown()?;
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
 fn verify_bridge(root: &Path) -> Result<()> {
     let home = root.join("home");
     fs::create_dir_all(&home)?;
