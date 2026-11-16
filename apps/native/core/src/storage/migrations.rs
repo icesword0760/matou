@@ -3,6 +3,21 @@ use rusqlite::{Connection, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+#[derive(Debug)]
+pub struct MigrationChecksumMismatch {
+    pub version: i64,
+}
+impl std::fmt::Display for MigrationChecksumMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "checksum mismatch for applied migration {}",
+            self.version
+        )
+    }
+}
+impl std::error::Error for MigrationChecksumMismatch {}
+
 const CATALOG: &str = include_str!("../../schema/migrations.json");
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
@@ -100,7 +115,7 @@ pub fn migrate_with_backup(
             .map(|index| &migrations[index])
             .filter(|migration| migration.accepts_checksum(checksum));
         let Some(migration) = migration else {
-            bail!("checksum mismatch for applied migration {version}");
+            return Err(MigrationChecksumMismatch { version: *version }.into());
         };
         if migration.name != *name || migration.checksum != *checksum {
             history_updates.push(migration);

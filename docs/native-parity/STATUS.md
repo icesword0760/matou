@@ -1,5 +1,13 @@
 # Native parity execution state
 
+## Current checkpoint — 2026-11-17, N02aw
+
+- Branch `codex/native-parity`, checkpoint `1cb0c3c`; full Mac+Windows goal remains incomplete. No merge/push/production installation. Untracked original HANDOFF preserved.
+- Running isolated Mac app now genuinely uses a separate Rust runtime: GUI93161 → runtime93165 → Shell93206/93209, reference29669 untouched. Latest binding `native/evidence/lifecycle-08-result.json`; recheck PIDs before use. Same-data normal quit/reopen, hidden output and completed-marker recovery demonstrated; automatic crash recovery, backup, multiwindow and full acceptance remain open.
+- This continuation accepted only specific slices: fresh archive empty-row copy, single Mac window hide/reopen, and basic desktop-child operation. Held-preedit capture fix has production-handler regression, but genuine OS IME and complete drag/fade/pixel evidence remain open; current CUA lacks some required compound gesture/hover primitives.
+- Gates15–17 supervisor node1 implemented and root-reviewed, awaiting dependent GUI reset/appearance node2; `lifecycle-10/11/12-review.md` distinguish initial implementation, review fixes and test-race correction. Current package/data were not used for kill tests and must not be refreshed yet. No active executor writes at the gate17 handback. Root owns STATUS/MATRIX; detailed GUI reset/recovery presentation is a dependent next node, not silently included or waived.
+
+
 ## Resume verification — 2026-11-16
 
 - Rechecked workspace `matou-native-parity`, branch `codex/native-parity`, HEAD `f0245f8`. At entry only `docs/native-parity/HANDOFF-2026-11-16.md` was untracked; preserved. Root AGENTS.md read; the full-product objective overrides its older external-reference CLI-only comparison scope.
@@ -62,6 +70,16 @@
 
 - Gate13 demonstrated real dual-process GUI operation; root reviewed report/restored screenshot, independently verified final GUI93161→runtime93165→Shell93206/93209 and both bundle hashes/strict nested signature. Initial run GUI61461/runtime61467 owned the data lease and PTYs; window99837 stayed hidden while7,059,097 new journal output bytes completed, then same-window/same-child/Shell reopened and accepted Chinese paste. NormalQuit ended all four processes/released lease; same-data relaunch restored this completed DONE/Chinese marker with fresh PTYs. `lifecycle-08-review.md` and result/build/monitor records bind exact boundaries. Only this Mac cross-process closure is accepted, not full lifecycle/UI/performance parity.
 - Current isolated package hashes: desktop `e2f5e4248f3e13fb5397e0930a6f1a32a5633098217f2765ca14a1cf47050cf7`, runtime `01cc1669b0d05c1c66e948922e290b44028e9f0b17db2faac6a303c8f9b3b07b`. Adhoc isolated test identity only, not production signing/permissions acceptance. ReferencePID29669 unchanged. Gate13 finished; no pending executor writes until next gate.
+
+### N02ax / L03a — crash supervision and connection generations (in progress)
+
+- Root reviewed targeted frozen and native source after `lifecycle-09-review.md`. Approved node1: stable typed RuntimeCommands/send_at(g), independent attempt queues, parent BridgeEvent generation envelope, original100/500/1000/2000/5000ms cancellable backoff, realReady-only admission/reset, actual oldchild wait before replacement, no input/CRUD replay. Explicit stop bypasses business gate and cancels waits. Runtime PID method becomes current-attempt identity, not fixed launch identity.
+- Preserve typed initialization blocking from actual ReadOnly/RecoveryRequired results; narrow applied-migration checksum error may gain typed identity with unchanged display and algorithm. No parent stderr parsing, blanket retry, UI recovery-page claim or data reset. Explicit retry only for blocked; unknown crashes follow frozen backoff.
+- One executor owns bridge + necessary Workspace/main type/generation/ACK plumbing, host blocked-event classification, narrow migrations error identity, affected test helpers and supervisor contracts. Node1 does not complete deferred Surface/resize/geometry/search reset or card recovery appearance. **Do not refresh/run GUI from this intermediate node.** CurrentGUI93161/runtime93165/data remain untouched. Fault injection only on newly created temp-test child PIDs verified by ownership/path.
+- Node2 must close precise GUI producer/reset gaps before actual recovery acceptance. Full reset/source table and remaining visual evidence boundary in lifecycle-09-review.md. No new whole-window reconnect banner; preserve frozen main workspace and existing card recovery entry. No vendor timeout changes, new dependencies, externalCLI protocol changes or clean-exit backup implementation in node1.
+
+- Gates15–17 review outcome: supervisor node1 implements typed startup blocking, realchild restart, per-attempt queues and dual-direction generation checks. Root found/fixed normalQuit dropping accepted FIFO work, blanket spawn blocking, and active shutdown errors swallowed; realDB regression failed before correction and passed after. A root rerun then found a test-only file-exists/write race; precise-content wait now replaces existence-only wait within the same deadline. Prior0-test wrong filter was not counted; root's2supervisor integration cases passed, corrected singlecase passed; executor's final6unit cases pass together. `lifecycle-10/11/12-review.md` and result/logs preserve failures and final bindings. No production behavior was changed to satisfy the test race.
+- Node1 remains intermediate: delayed Surface/resize/geometry/picker producers, same-generation visual-ready gates and recovery overlay still require node2. Current ordinary app is deliberately still checkpoint1cb0c3c; no newGUI automatic recovery claim. Core change is only typed checksum error identity with unchanged display/algorithm.
 
 ## Live handoff — N02aq, 2026-11-16
 

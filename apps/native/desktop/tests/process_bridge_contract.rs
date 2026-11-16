@@ -1,5 +1,6 @@
 #![cfg(target_os = "macos")]
 mod support;
+use support::TestBridge as RuntimeBridge;
 
 use std::{
     fs,
@@ -10,7 +11,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail, ensure};
-use matou_native_desktop::runtime_bridge::{Command, Event, LaunchOptions, RuntimeBridge};
+use matou_native_desktop::runtime_bridge::{Command, Event, LaunchOptions};
 use uuid::Uuid;
 
 const TIMEOUT: Duration = Duration::from_secs(8);
@@ -189,19 +190,39 @@ fn real_host_failure_never_reports_ready_and_closes_once_after_actual_exit() -> 
         match next(&bridge, deadline)? {
             Event::Ready { .. } => bail!("spawn/Hello incorrectly became Ready"),
             Event::Diagnostic(_) => diagnostic = true,
-            Event::Closed => break,
+            Event::StartupBlocked(_) => break,
             _ => {}
         }
     }
+    // StartupBlocked from the child precedes its real exit/wait. This scenario
+    // asserts closing the settled blocked supervisor, not an active failed attempt.
+    while !matches!(
+        bridge.connection().1,
+        matou_native_desktop::runtime_bridge::ConnectionPhase::Blocked(_)
+    ) {
+        ensure!(
+            Instant::now() < deadline,
+            "parent never reached blocked after child wait"
+        );
+        thread::sleep(Duration::from_millis(4));
+    }
+    // Blocked is not terminal Closed: stop remains an independent lifecycle action.
+    bridge.shutdown()?;
+    let mut closed = 0;
+    while let Ok(event) = bridge.events.try_recv() {
+        ensure!(
+            !matches!(event, Event::Ready { .. }),
+            "blocked startup emitted Ready"
+        );
+        if matches!(event, Event::Diagnostic(_)) {
+            diagnostic = true;
+        }
+        if matches!(event, Event::Closed) {
+            closed += 1;
+        }
+    }
     ensure!(diagnostic, "failed runtime emitted no Diagnostic");
-    ensure!(
-        bridge.shutdown().is_err(),
-        "failed child became successful shutdown"
-    );
-    ensure!(
-        bridge.events.try_recv().is_err(),
-        "events after terminal Closed"
-    );
+    ensure!(closed == 1, "terminal Closed count={closed}");
     gone(child)?;
     fs::remove_dir_all(root)?;
     Ok(())

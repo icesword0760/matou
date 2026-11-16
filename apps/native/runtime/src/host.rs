@@ -248,8 +248,23 @@ pub enum RecoveryState {
     Failed(String),
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StartupBlockKind {
+    ReadOnly,
+    RecoveryRequired,
+    MigrationChecksum,
+    Configuration,
+    Protocol,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StartupBlock {
+    pub kind: StartupBlockKind,
+    pub message: String,
+}
+
 #[derive(Serialize, Deserialize)]
 pub enum Event {
+    StartupBlocked(StartupBlock),
     History(HistoryReply),
     SearchResults {
         session_id: String,
@@ -402,24 +417,69 @@ fn run(
     incoming: Receiver<Command>,
     send: &async_channel::Sender<Event>,
 ) -> Result<()> {
-    std::fs::create_dir_all(&options.workspace)?;
-    std::fs::create_dir_all(&options.shell_home)?;
-    let history = HistoryWorker::new(options.data_root.clone())?;
-    let generation = id();
-    let (mut connection, ownership) = match startup::open(&options.data_root, &generation)? {
+    let initialization = (|| -> Result<_> {
+        std::fs::create_dir_all(&options.workspace)?;
+        std::fs::create_dir_all(&options.shell_home)?;
+        let history = HistoryWorker::new(options.data_root.clone())?;
+        let generation = id();
+        Ok((history, startup::open(&options.data_root, &generation)?))
+    })();
+    let (history, bootstrap) = match initialization {
+        Ok(value) => value,
+        Err(error) => {
+            let kind = if error
+                .downcast_ref::<matou_native_core::storage::MigrationChecksumMismatch>()
+                .is_some()
+            {
+                Some(StartupBlockKind::MigrationChecksum)
+            } else if error.downcast_ref::<std::io::Error>().is_some_and(|e| {
+                matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound
+                        | std::io::ErrorKind::PermissionDenied
+                        | std::io::ErrorKind::NotADirectory
+                        | std::io::ErrorKind::AlreadyExists
+                )
+            }) {
+                Some(StartupBlockKind::Configuration)
+            } else {
+                None
+            };
+            if let Some(kind) = kind {
+                let _ = send.send_blocking(Event::StartupBlocked(StartupBlock {
+                    kind,
+                    message: format!("{error:#}"),
+                }));
+            }
+            return Err(error);
+        }
+    };
+    let (mut connection, ownership) = match bootstrap {
         BootstrapResult::Writable {
             connection,
             ownership,
             ..
         } => (connection, ownership),
         BootstrapResult::ReadOnly { reason, .. } => {
-            bail!("Native startup requires the recovery interface: {reason:?}")
+            let message = format!("Native startup requires the recovery interface: {reason:?}");
+            let _ = send.send_blocking(Event::StartupBlocked(StartupBlock {
+                kind: StartupBlockKind::ReadOnly,
+                message: message.clone(),
+            }));
+            bail!(message)
         }
-        BootstrapResult::RecoveryRequired(recovery) => bail!(
-            "Database recovery required: {} ({})",
-            recovery.reason,
-            recovery.durable_database_path.display()
-        ),
+        BootstrapResult::RecoveryRequired(recovery) => {
+            let message = format!(
+                "Database recovery required: {} ({})",
+                recovery.reason,
+                recovery.durable_database_path.display()
+            );
+            let _ = send.send_blocking(Event::StartupBlocked(StartupBlock {
+                kind: StartupBlockKind::RecoveryRequired,
+                message: message.clone(),
+            }));
+            bail!(message)
+        }
     };
     let window_id = "main-window-1";
     let input = BootstrapWindowInput {

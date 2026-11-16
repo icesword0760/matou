@@ -1,6 +1,7 @@
 #![cfg(target_os = "macos")]
 
 mod support;
+use support::TestBridge as RuntimeBridge;
 
 use std::{
     fs,
@@ -16,7 +17,7 @@ use matou_native_core::{
     sessions::{SessionRun, list_runs},
     startup::open_read_only,
 };
-use matou_native_desktop::runtime_bridge::{Command, Event, LaunchOptions, RuntimeBridge};
+use matou_native_desktop::runtime_bridge::{Command, Event, LaunchOptions};
 use uuid::Uuid;
 
 const WAIT: Duration = Duration::from_secs(8);
