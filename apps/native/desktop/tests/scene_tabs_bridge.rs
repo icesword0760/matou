@@ -1,5 +1,7 @@
 #![cfg(target_os = "macos")]
 
+mod support;
+
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -39,7 +41,7 @@ fn verify_tabs(root: &Path) -> Result<()> {
         shell: PathBuf::from("/bin/zsh"),
     };
     let database = options.data_root.join("matou.sqlite");
-    let mut bridge = RuntimeBridge::start(options.clone())?;
+    let mut bridge = support::start(options.clone())?;
     let (initial, _) = wait_ready(&bridge)?;
     let original = initial.scene.context("original scene")?.id;
     let task_id = initial.task.context("active task")?.id;
@@ -223,7 +225,7 @@ fn verify_tabs(root: &Path) -> Result<()> {
     assert_eq!(closed_run.signal, Some(9));
     bridge.shutdown()?;
 
-    let mut reopened = RuntimeBridge::start(options)?;
+    let mut reopened = support::start(options)?;
     let (restored, still_open) = wait_ready(&reopened)?;
     assert_eq!(restored.scene.context("restored canvas")?.id, kept_scene);
     assert_eq!(restored.session.context("restored Shell")?.id, kept_session);

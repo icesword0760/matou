@@ -1,5 +1,7 @@
 #![cfg(target_os = "macos")]
 
+mod support;
+
 use std::{
     collections::BTreeSet,
     fs,
@@ -55,7 +57,7 @@ fn verify_workspace_retry(root: &Path) -> Result<()> {
     let project = root.join("project");
     let missing = root.join("missing");
     fs::create_dir_all(&project)?;
-    let mut bridge = RuntimeBridge::start(options.clone())?;
+    let mut bridge = support::start(options.clone())?;
     let mut probe = Probe::new(&bridge);
     let default = probe.ready()?.workspace.context("default workspace")?.id;
     let added = probe.navigate(Command::CreateWorkspace {
@@ -68,7 +70,7 @@ fn verify_workspace_retry(root: &Path) -> Result<()> {
     fs::rename(&project, &missing)?;
 
     let database = options.data_root.join("matou.sqlite");
-    let mut bridge = RuntimeBridge::start(options)?;
+    let mut bridge = support::start(options)?;
     let mut probe = Probe::new(&bridge);
     let reopened = probe.ready()?.session.context("reopened session")?.id;
     assert_eq!(reopened, session_id);
@@ -146,7 +148,7 @@ fn verify_workspaces(root: &Path) -> Result<()> {
     fs::create_dir_all(&project)?;
     symlink(&project, &selected)?;
 
-    let mut bridge = RuntimeBridge::start(options.clone())?;
+    let mut bridge = support::start(options.clone())?;
     let mut probe = Probe::new(&bridge);
     let default = probe.ready()?;
     let default_id = default.workspace.context("default workspace")?.id;
@@ -431,7 +433,7 @@ fn verify_workspaces(root: &Path) -> Result<()> {
     drop(db);
     bridge.shutdown()?;
 
-    let mut bridge = RuntimeBridge::start(options)?;
+    let mut bridge = support::start(options)?;
     let mut probe = Probe::new(&bridge);
     let restored = probe.ready()?;
     assert_eq!(
