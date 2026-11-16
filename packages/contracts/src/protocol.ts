@@ -213,6 +213,8 @@ export const RPC_METHODS = [
   'claude-sessions.load',
   'provider-config.models',
   'provider-config.snapshot',
+  'dispatch-config.snapshot',
+  'dispatch-config.save',
   'provider-config.upsert',
   'provider-config.delete',
   'provider-config.activate',

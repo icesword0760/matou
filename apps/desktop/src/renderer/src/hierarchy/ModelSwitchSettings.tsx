@@ -19,6 +19,7 @@ import { subscriptionQuotaText, subscriptionQuotaTitle } from './subscription-se
 import { ProviderSetupDialog } from './ProviderSetupDialog'
 import { ClaudeTimeZoneSettings } from './ClaudeTimeZoneSettings'
 import { AgentModelSettings } from './AgentModelSettings'
+import { DispatchSettings } from './DispatchSettings'
 import { formatContextWindowBadge, providerRoleModelIds } from './context-window-ui'
 import { useLocale, useMessages } from '../i18n/LocaleProvider'
 
@@ -334,6 +335,7 @@ export function ModelSwitchSettings({ client, onClose }: {
           </div>
           <p className="model-settings__impact"><span>ⓘ</span><span><b>{m.impactTitle(APP_DISPLAY_NAME)}</b> {m.impactBody}</span></p>
           <AgentModelSettings client={client} providerRevision={snapshot?.revision} activeProviderId={activeId} />
+          <DispatchSettings client={client} />
         </>)}
       </main>
     </div>

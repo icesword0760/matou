@@ -18,3 +18,5 @@ export * from './claude-accounts'
 export * from './egress'
 
 export * from './agent-model-settings'
+
+export * from './dispatch-config'

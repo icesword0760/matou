@@ -3,6 +3,8 @@ import { act, cleanup, render, screen, waitFor, within } from '@testing-library/
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import { DISPATCH_DEFAULTS } from '@matou/contracts'
+
 import type {
   ProviderActivationFailure,
   ProviderConfigView,
@@ -20,6 +22,7 @@ describe('ModelSwitchSettings', () => {
 
     expect((await screen.findAllByText('Anthropic 官方')).length).toBeGreaterThan(0)
     expect(screen.queryByRole('heading', { name: '设置' })).toBeNull()
+    expect(await screen.findByRole('heading', { name: '派活' })).toBeTruthy()
     expect(screen.queryByRole('tab', { name: 'Codex' })).toBeNull()
     expect(screen.queryByText('OpenAI 官方')).toBeNull()
     expect(screen.queryByText('PackyCode')).toBeNull()
@@ -186,6 +189,7 @@ describe('ModelSwitchSettings', () => {
     const settingsRead = new Promise<unknown>(resolve => { resolveSettingsRead = resolve })
     const client: ProviderConfigClient = {
       request: vi.fn((method, payload) => {
+        if (method === 'dispatch-config.snapshot') return Promise.resolve({ exists: false, path: '/test/.claude/agent-foreman/config.json', defaults: { ...DISPATCH_DEFAULTS } })
         if (method === 'provider-config.snapshot') return Promise.resolve(initialSnapshot)
         if (method === 'provider-config.subscription.settings-read') return settingsRead
         if (method === 'provider-config.subscription.settings-close') return Promise.resolve({})
@@ -409,6 +413,7 @@ function fakeClient(
   }
   return {
     request: vi.fn(async (method: string, payload: unknown) => {
+      if (method === 'dispatch-config.snapshot') return { exists: false, path: '/test/.claude/agent-foreman/config.json', defaults: { ...DISPATCH_DEFAULTS } }
       if (method === 'provider-config.snapshot') return state
       if (method === 'provider-config.activate') {
         const input = payload as { cli: 'claude-code' | 'codex'; providerId: string }

@@ -49,6 +49,7 @@ import { AntigravitySessionCatalog, defaultAntigravityRoot } from '../session/an
 import { SessionGitStateRepository } from '../session/session-git-state-repository'
 import type { WorktreeSetupStep } from '../worktrees/worktree-service'
 import { ProviderConfigStore } from '../provider-config/provider-config-store'
+import { DispatchConfig, DispatchConfigValidationError } from './dispatch-config'
 import { AgentModelSettings } from '../session/agent-model-settings'
 import { ClaudeSettings, isClaudeTimeZone } from '../session/claude-settings'
 
@@ -176,6 +177,15 @@ export class RuntimeRpcRouter {
   }
 
   async #dispatch(method: RpcMethod, payload: unknown): Promise<unknown> {
+    if (method === 'dispatch-config.snapshot') return new DispatchConfig().snapshot()
+    if (method === 'dispatch-config.save') {
+      try {
+        return await new DispatchConfig().save(record(payload).defaults)
+      } catch (error) {
+        if (error instanceof DispatchConfigValidationError) throw new RpcFault('INVALID_REQUEST', error.message)
+        throw error
+      }
+    }
     if (method === 'agent-model-settings.get') return new AgentModelSettings(this.#database, this.#providerConfigs).snapshot()
     if (method === 'agent-model-settings.set') return new AgentModelSettings(this.#database, this.#providerConfigs).set(payload)
     if (method === 'claude-settings.get') return new ClaudeSettings(this.#database).snapshot()

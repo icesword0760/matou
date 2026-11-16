@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { RuntimeRpcRouter } from './runtime-rpc-router'
 import { NotificationProjection } from '../product/experience-foundation'
@@ -27,6 +27,21 @@ beforeEach(async () => {
 afterEach(() => database.close())
 
 describe('RuntimeRpcRouter', () => {
+  it('reads and saves global dispatch defaults through RPC in an isolated HOME', async () => {
+    vi.stubEnv('HOME', testRoot)
+    try {
+      const before = await router.handle('dispatch-config.snapshot', {}) as { defaults: Record<string, unknown> }
+      expect(before).toMatchObject({ exists: false, path: join(testRoot, '.claude/agent-foreman/config.json') })
+      const defaults = { ...before.defaults, agent: 'agy', model: 'hydrogen', retries: 0 }
+      const saved = await router.handle('dispatch-config.save', { defaults })
+      expect(saved).toMatchObject({ exists: true, defaults })
+      expect(await router.handle('dispatch-config.snapshot', {})).toEqual(saved)
+      await expect(router.handle('dispatch-config.save', { defaults: { ...defaults, idleMin: 0 } }))
+        .rejects.toMatchObject({ code: 'INVALID_REQUEST', message: expect.stringContaining('idleMin') })
+      expect(await router.handle('dispatch-config.snapshot', {})).toEqual(saved)
+    } finally { vi.unstubAllEnvs() }
+  })
+
   it('reads, creates and saves the current Session CLAUDE.md file', async () => {
     const workspaceRoot = join(testRoot, 'instructions-workspace')
     await mkdir(workspaceRoot)
