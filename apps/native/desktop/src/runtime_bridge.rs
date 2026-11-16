@@ -1,4 +1,4 @@
-//! Desktop facade over a supervised private runtime child. No in-process fallback.
+// Desktop facade over a supervised private runtime child. No in-process fallback.
 use anyhow::{Context, Result, anyhow, bail, ensure};
 pub use matou_native_runtime::host::{
     Command, Event, LaunchOptions, RecoveryState, StartupBlock, StartupBlockKind,
@@ -26,6 +26,10 @@ pub enum ConnectionPhase {
     Stopped,
 }
 pub enum BridgeEvent {
+    TransportDiagnostic {
+        generation: u64,
+        message: String,
+    },
     Connection {
         generation: u64,
         phase: ConnectionPhase,
@@ -38,7 +42,9 @@ pub enum BridgeEvent {
 impl BridgeEvent {
     pub fn generation(&self) -> u64 {
         match self {
-            Self::Connection { generation, .. } | Self::Runtime { generation, .. } => *generation,
+            Self::Connection { generation, .. }
+            | Self::Runtime { generation, .. }
+            | Self::TransportDiagnostic { generation, .. } => *generation,
         }
     }
 }
@@ -431,9 +437,9 @@ fn run_child(
                     Ok(())
                 });
             }
-            let _ = events.send_blocking(BridgeEvent::Runtime {
+            let _ = events.send_blocking(BridgeEvent::TransportDiagnostic {
                 generation,
-                event: Event::Diagnostic(message.clone()),
+                message: message.clone(),
             });
             return Ok(AttemptOutcome {
                 ready: false,
@@ -592,9 +598,9 @@ fn run_child(
         )
     });
     if let Some(error) = &error {
-        let _ = events.send_blocking(BridgeEvent::Runtime {
+        let _ = events.send_blocking(BridgeEvent::TransportDiagnostic {
             generation,
-            event: Event::Diagnostic(format!("{error:#}")),
+            message: format!("{error:#}"),
         });
     }
     if waited.is_err() {

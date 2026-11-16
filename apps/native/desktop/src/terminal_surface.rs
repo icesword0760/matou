@@ -25,7 +25,11 @@ const FONT_SIZE: Pixels = px(11.);
 const BLINK_INTERVAL: Duration = Duration::from_millis(500);
 const FAMILIES: &[&str] = &["SF Mono", "Monaco", "Menlo", "Consolas", "Courier New"];
 
-pub enum SurfaceEvent {
+pub struct SurfaceEvent {
+    pub generation: u64,
+    pub kind: SurfaceEventKind,
+}
+pub enum SurfaceEventKind {
     Input(Vec<u8>),
     Select(SelectionAction),
     Copy {
@@ -120,6 +124,8 @@ impl ScrollbarFade {
 }
 
 pub struct TerminalSurface {
+    transport_generation: u64,
+    transport_suspended: bool,
     search: Option<matou_native_runtime::search::SearchResult>,
     pub focus: FocusHandle,
     font: Font,
@@ -160,6 +166,86 @@ pub struct TerminalSurface {
 impl EventEmitter<SurfaceEvent> for TerminalSurface {}
 
 impl TerminalSurface {
+    fn emit(&self, kind: SurfaceEventKind, cx: &mut Context<Self>) {
+        if self.transport_suspended && !matches!(kind, SurfaceEventKind::Resize { .. }) {
+            return;
+        }
+        cx.emit(SurfaceEvent {
+            generation: self.transport_generation,
+            kind,
+        });
+    }
+    pub fn begin_transport_generation(&mut self, generation: u64, cx: &mut Context<Self>) {
+        if self.transport_generation == generation {
+            return;
+        }
+        self.transport_generation = generation;
+        self.transport_suspended = true;
+        self.set_input_disabled(true, cx);
+        self.search = None;
+        self.composition.clear();
+        self.caret = None;
+        self.grid = None;
+        self.stop_drag();
+        self.selection_drag = None;
+        self.mouse_reporter = MouseReporter::default();
+        self.mouse_wheel = MouseWheel::default();
+        self.mouse_buttons = 0;
+        self.wheel_lines = 0.;
+        self.reset_blink();
+        self.scrollbar_position = None;
+        self.scrollbar_drag = None;
+        self.scroll_request_id = 0;
+        self.scrollbar_bounds = None;
+        self.scrollbar_hide_timer = None;
+        self.scrollbar_hide_at = None;
+        self.scrollbar_fade = None;
+        self.scrollbar_frame_pending = false;
+        self.scrollbar_revealed = false;
+        self.scrollbar_opacity = 0.;
+        self.surface_hovered = false;
+        self.scrollport_hovered = false;
+        cx.notify();
+    }
+    pub fn set_transport_available(&mut self, available: bool, cx: &mut Context<Self>) {
+        if self.transport_suspended != !available {
+            self.transport_suspended = !available;
+            cx.notify();
+        }
+    }
+    fn emit_resize_for_generation(
+        &self,
+        generation: u64,
+        dimensions: Dimensions,
+        cx: &mut Context<Self>,
+    ) {
+        if self.transport_generation != generation {
+            return;
+        }
+        self.emit(
+            SurfaceEventKind::Resize {
+                cols: dimensions.cols,
+                rows: dimensions.rows,
+                cell_width_px: dimensions.cell_width_px,
+                cell_height_px: dimensions.cell_height_px,
+            },
+            cx,
+        );
+    }
+    pub fn frame_matches_target(&self) -> bool {
+        self.screen.as_ref().is_some_and(|s| {
+            s.cols > 0
+                && s.rows > 0
+                && s.cells.len() == s.cols * s.rows
+                && self
+                    .last_dimensions
+                    .is_some_and(|d| s.cols == d.cols as usize && s.rows == d.rows as usize)
+        })
+    }
+    pub fn target_dimensions(&self) -> Option<(u16, u16, u32, u32)> {
+        self.last_dimensions
+            .map(|d| (d.cols, d.rows, d.cell_width_px, d.cell_height_px))
+    }
     pub fn set_search(
         &mut self,
         result: Option<matou_native_runtime::search::SearchResult>,
@@ -195,6 +281,8 @@ impl TerminalSurface {
         // Adding it makes rows shorter than the glyphs and overlaps text.
         let height = text.ascent(id, FONT_SIZE) - text.descent(id, FONT_SIZE);
         Self {
+            transport_generation: 0,
+            transport_suspended: false,
             search: None,
             focus: cx.focus_handle().tab_stop(true),
             font: face,
@@ -341,7 +429,7 @@ impl TerminalSurface {
         self.stop_drag();
         self.reset_blink();
         self.scroll_on_input(cx);
-        cx.emit(SurfaceEvent::Input(bytes));
+        self.emit(SurfaceEventKind::Input(bytes), cx);
         cx.notify();
     }
 
@@ -358,7 +446,7 @@ impl TerminalSurface {
                 .as_ref()
                 .is_some_and(|s| s.scrollbar.offset + (s.rows as u64) < s.scrollbar.total)
         {
-            cx.emit(SurfaceEvent::Scroll(i32::MIN));
+            self.emit(SurfaceEventKind::Scroll(i32::MIN), cx);
         }
     }
 
@@ -369,6 +457,7 @@ impl TerminalSurface {
 
     fn schedule_blink(&mut self, focused: bool, cx: &mut Context<Self>) {
         let blink = focused
+            && !self.transport_suspended
             && self.screen.as_ref().is_some_and(|screen| {
                 screen.cursor_visible && screen.cursor_has_position && screen.cursor_blinking
                     || screen.cells.iter().any(|cell| cell.blink)
@@ -377,9 +466,13 @@ impl TerminalSurface {
             self.reset_blink();
         } else if self.blink.is_none() {
             let timer = cx.background_executor().timer(BLINK_INTERVAL);
+            let generation = self.transport_generation;
             self.blink = Some(cx.spawn(async move |this, cx| {
                 timer.await;
                 let _ = this.update(cx, |this, cx| {
+                    if this.transport_generation != generation {
+                        return;
+                    }
                     this.blink = None;
                     this.blink_visible = !this.blink_visible;
                     cx.notify();
@@ -399,9 +492,12 @@ impl TerminalSurface {
         let mac = cfg!(target_os = "macos");
         let copy_mod = if mac { mods.platform } else { mods.control };
         if key == "c" && copy_mod && !mods.alt && !mods.shift {
-            cx.emit(SurfaceEvent::Copy {
-                interrupt_if_empty: !mac && !self.input_disabled,
-            });
+            self.emit(
+                SurfaceEventKind::Copy {
+                    interrupt_if_empty: !mac && !self.input_disabled,
+                },
+                cx,
+            );
             cx.stop_propagation();
             return;
         }
@@ -457,7 +553,7 @@ impl TerminalSurface {
                     below: self.drag_scroll_amount < 0,
                 }
             };
-            cx.emit(SurfaceEvent::Select(action));
+            self.emit(SurfaceEventKind::Select(action), cx);
         }
     }
 
@@ -531,9 +627,13 @@ impl TerminalSurface {
         let timer = cx
             .background_executor()
             .timer(deadline.saturating_duration_since(Instant::now()));
+        let generation = self.transport_generation;
         self.scrollbar_hide_timer = Some(cx.spawn(async move |this, cx| {
             timer.await;
             let _ = this.update(cx, |this, cx| {
+                if this.transport_generation != generation {
+                    return;
+                }
                 this.scrollbar_hide_timer = None;
                 if this
                     .scrollbar_hide_at
@@ -559,10 +659,13 @@ impl TerminalSurface {
             row,
             request_id: self.scroll_request_id,
         });
-        cx.emit(SurfaceEvent::ScrollTo {
-            row,
-            request_id: self.scroll_request_id,
-        });
+        self.emit(
+            SurfaceEventKind::ScrollTo {
+                row,
+                request_id: self.scroll_request_id,
+            },
+            cx,
+        );
         self.reveal_scrollbar();
         cx.notify();
     }
@@ -716,8 +819,12 @@ impl TerminalSurface {
         if self.surface_hovered && self.scrollbar_fade.is_some() && !self.scrollbar_frame_pending {
             self.scrollbar_frame_pending = true;
             let entity = cx.entity().downgrade();
+            let generation = self.transport_generation;
             window.on_next_frame(move |_, cx| {
                 let _ = entity.update(cx, |this, cx| {
+                    if this.transport_generation != generation {
+                        return;
+                    }
                     this.scrollbar_frame_pending = false;
                     cx.notify();
                 });
@@ -730,13 +837,20 @@ impl TerminalSurface {
             return;
         }
         let timer = cx.background_executor().timer(Duration::from_millis(50));
+        let generation = self.transport_generation;
         self.drag_scroll_timer = Some(cx.spawn(async move |this, cx| {
             timer.await;
             let _ = this.update(cx, |this, cx| {
+                if this.transport_generation != generation {
+                    return;
+                }
                 this.drag_scroll_timer = None;
                 if this.selecting {
                     if this.drag_scroll_amount != 0 {
-                        cx.emit(SurfaceEvent::ScrollSelection(this.drag_scroll_amount));
+                        this.emit(
+                            SurfaceEventKind::ScrollSelection(this.drag_scroll_amount),
+                            cx,
+                        );
                     }
                     this.schedule_drag_scroll(cx);
                 }
@@ -879,7 +993,7 @@ impl TerminalSurface {
         if lines != 0 {
             self.scrollbar_position = None;
             self.wheel_lines -= lines as f32;
-            cx.emit(SurfaceEvent::Scroll(lines));
+            self.emit(SurfaceEventKind::Scroll(lines), cx);
         }
         cx.stop_propagation();
     }
@@ -898,14 +1012,10 @@ impl TerminalSurface {
             && self.last_dimensions.replace(dimensions) != Some(dimensions)
         {
             let surface = entity.downgrade();
+            let generation = self.transport_generation;
             window.defer(cx, move |_, cx| {
-                let _ = surface.update(cx, |_, cx| {
-                    cx.emit(SurfaceEvent::Resize {
-                        cols: dimensions.cols,
-                        rows: dimensions.rows,
-                        cell_width_px: dimensions.cell_width_px,
-                        cell_height_px: dimensions.cell_height_px,
-                    });
+                let _ = surface.update(cx, |this, cx| {
+                    this.emit_resize_for_generation(generation, dimensions, cx);
                 });
             });
         }
@@ -1154,6 +1264,7 @@ impl Render for TerminalSurface {
             cx,
         );
         let surface = cx.entity();
+        let generation = self.transport_generation;
         div()
             .id("terminal-surface")
             .size_full()
@@ -1167,7 +1278,10 @@ impl Render for TerminalSurface {
                 PointerStyle::Arrow
             })
             .track_focus(&self.focus)
-            .on_hover(cx.listener(|this, hovered, _, cx| {
+            .on_hover(cx.listener(move |this, hovered, _, cx| {
+                if this.transport_generation != generation || this.transport_suspended {
+                    return;
+                }
                 this.surface_hovered = *hovered;
                 if !hovered {
                     this.scrollport_hovered = false;
@@ -1175,10 +1289,17 @@ impl Render for TerminalSurface {
                 }
                 cx.notify();
             }))
-            .on_key_down(cx.listener(|this, event, _, cx| this.handle_key(event, cx)))
+            .on_key_down(cx.listener(move |this, event, _, cx| {
+                if this.transport_generation == generation && !this.transport_suspended {
+                    this.handle_key(event, cx);
+                }
+            }))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
+                cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
+                    if this.transport_generation != generation || this.transport_suspended {
+                        return;
+                    }
                     if this.scrollbar_down(event, cx) {
                         return;
                     }
@@ -1193,10 +1314,13 @@ impl Render for TerminalSurface {
                             this.selecting = true;
                             this.drag_scroll_amount = 0;
                             this.schedule_drag_scroll(cx);
-                            cx.emit(SurfaceEvent::Select(SelectionAction::IncrementalClick {
-                                row,
-                                x,
-                            }));
+                            this.emit(
+                                SurfaceEventKind::Select(SelectionAction::IncrementalClick {
+                                    row,
+                                    x,
+                                }),
+                                cx,
+                            );
                         }
                         cx.notify();
                         return;
@@ -1221,22 +1345,24 @@ impl Render for TerminalSurface {
                         this.selecting = true;
                         this.drag_scroll_amount = 0;
                         this.schedule_drag_scroll(cx);
-                        cx.emit(SurfaceEvent::Select(SelectionAction::Begin {
-                            mode,
-                            row,
-                            x,
-                        }));
+                        this.emit(
+                            SurfaceEventKind::Select(SelectionAction::Begin { mode, row, x }),
+                            cx,
+                        );
                     } else {
                         this.selection_drag = None;
                         this.stop_drag();
-                        cx.emit(SurfaceEvent::Select(SelectionAction::Clear));
+                        this.emit(SurfaceEventKind::Select(SelectionAction::Clear), cx);
                     }
                     cx.notify();
                 }),
             )
             .on_mouse_down(
                 MouseButton::Middle,
-                cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
+                cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
+                    if this.transport_generation != generation || this.transport_suspended {
+                        return;
+                    }
                     if this.scrollbar_down(event, cx) {
                         return;
                     }
@@ -1246,7 +1372,10 @@ impl Render for TerminalSurface {
             )
             .on_mouse_down(
                 MouseButton::Right,
-                cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
+                cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
+                    if this.transport_generation != generation || this.transport_suspended {
+                        return;
+                    }
                     if this.scrollbar_down(event, cx) {
                         return;
                     }
@@ -1254,18 +1383,30 @@ impl Render for TerminalSurface {
                     this.mouse_down(event, cx);
                 }),
             )
-            .on_scroll_wheel(cx.listener(|this, event, _, cx| this.on_scroll(event, cx)))
+            .on_scroll_wheel(cx.listener(move |this, event, _, cx| {
+                if this.transport_generation == generation && !this.transport_suspended {
+                    this.on_scroll(event, cx);
+                }
+            }))
             .child(
                 canvas(
                     |_, _, _| {},
                     move |bounds, (), window, cx| {
                         surface.update(cx, |this, cx| {
+                            if this.transport_generation != generation {
+                                return;
+                            }
                             this.paint(surface.clone(), bounds, window, cx)
                         });
                         let moving = surface.downgrade();
                         window.on_mouse_event(move |event: &gpui::MouseMoveEvent, phase, _, cx| {
                             if phase == DispatchPhase::Capture {
                                 let _ = moving.update(cx, |this, cx| {
+                                    if this.transport_generation != generation
+                                        || this.transport_suspended
+                                    {
+                                        return;
+                                    }
                                     if this.scrollbar_move(event, cx) {
                                         return;
                                     }
@@ -1296,6 +1437,11 @@ impl Render for TerminalSurface {
                         window.on_mouse_event(move |event: &gpui::MouseUpEvent, phase, _, cx| {
                             if phase == DispatchPhase::Capture {
                                 let _ = released.update(cx, |this, cx| {
+                                    if this.transport_generation != generation
+                                        || this.transport_suspended
+                                    {
+                                        return;
+                                    }
                                     if this.scrollbar_up(event, cx) {
                                         return;
                                     }

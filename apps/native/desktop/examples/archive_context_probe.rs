@@ -1,9 +1,21 @@
 //! Exercise the production archive handlers with a deterministic reply order.
 
 #[cfg(target_os = "macos")]
-pub use matou_native_desktop::{
-    assets, macos, rename_input, runtime_bridge, tab_dialog_style, terminal_surface, workspace_drag,
-};
+pub use matou_native_desktop::{assets, macos, rename_input, tab_dialog_style, workspace_drag};
+
+#[cfg(target_os = "macos")]
+#[path = "../src/terminal_input.rs"]
+mod terminal_input;
+#[cfg(target_os = "macos")]
+#[path = "../src/terminal_scrollbar.rs"]
+mod terminal_scrollbar;
+#[cfg(target_os = "macos")]
+#[path = "../src/terminal_surface.rs"]
+mod terminal_surface;
+
+#[cfg(target_os = "macos")]
+#[path = "support/runtime_probe.rs"]
+mod runtime_bridge;
 
 #[cfg(target_os = "macos")]
 #[path = "../src/carousel_motion.rs"]
@@ -47,10 +59,15 @@ mod workspace {
     impl Workspace {
         pub(super) fn verify_archive_replies(
             &mut self,
-            commands: &Receiver<Command>,
+            commands: &crate::runtime_bridge::ProbeReceiver,
             window: &mut Window,
             cx: &mut Context<Self>,
         ) {
+            self.runtime_generation = 1;
+            self.domain_ready = true;
+            self.transport_connected = true;
+            self.session_frames.insert(SESSION.into());
+            self.recovery.insert(SESSION.into(), RecoveryState::Ready);
             self.focused = Some(SESSION.into());
             self.open_search(window, cx);
             assert!(matches!(
@@ -158,7 +175,7 @@ mod workspace {
             &mut self,
             query: &str,
             previous: bool,
-            commands: &Receiver<Command>,
+            commands: &crate::runtime_bridge::ProbeReceiver,
             window: &mut Window,
             cx: &mut Context<Self>,
         ) -> u64 {
@@ -175,7 +192,7 @@ mod workspace {
             &mut self,
             query: &str,
             previous: bool,
-            commands: &Receiver<Command>,
+            commands: &crate::runtime_bridge::ProbeReceiver,
             window: &mut Window,
             cx: &mut Context<Self>,
         ) -> u64 {
@@ -209,7 +226,7 @@ mod workspace {
             &mut self,
             sequence: u64,
             matches: Vec<HistoryLine>,
-            commands: &Receiver<Command>,
+            commands: &crate::runtime_bridge::ProbeReceiver,
             window: &mut Window,
             cx: &mut Context<Self>,
         ) -> Option<HistoryCursor> {
@@ -251,7 +268,10 @@ mod workspace {
         }
     }
 
-    fn requested_context(commands: &Receiver<Command>, sequence: u64) -> Option<HistoryCursor> {
+    fn requested_context(
+        commands: &crate::runtime_bridge::ProbeReceiver,
+        sequence: u64,
+    ) -> Option<HistoryCursor> {
         match commands.try_recv() {
             Ok(Command::History(HistoryRequest::Context {
                 session_id,
@@ -305,7 +325,7 @@ fn main() {
     gpui::Application::new()
         .with_assets(assets::NativeAssets)
         .run(|cx| {
-            let (send, commands) = std::sync::mpsc::channel();
+            let (send, commands) = runtime_bridge::probe_channel();
             let (_events, incoming) = async_channel::bounded(1);
             let window = cx
                 .open_window(
