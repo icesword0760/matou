@@ -36,11 +36,9 @@ beforeEach(() => {
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks() })
 
 describe('RuntimeHost', () => {
-  it.each(['codex', 'antigravity'] as const)('opens %s subscription sign-in in the safe browser without opening the system browser', async provider => {
-    const openExternal = vi.fn(async () => {})
-    const safeBrowser = { openPersistent: vi.fn(async () => {}) }
-    const timezone = vi.fn(() => 'Asia/Tokyo')
-    const host = new RuntimeHost('/runtime/index.cjs', undefined, { openExternal, safeBrowser, safeBrowserTimeZone: timezone })
+  it.each(['codex', 'antigravity'] as const)('routes validated %s subscription sign-in through openWebLink', async provider => {
+    const openWebLink = vi.fn(async () => {})
+    const host = new RuntimeHost('/runtime/index.cjs', undefined, { openWebLink })
     const starting = host.start()
     const child = electron.children[0] as MockUtilityProcess
     child.emit('spawn')
@@ -50,30 +48,29 @@ describe('RuntimeHost', () => {
       : 'https://accounts.google.com/o/oauth2/v2/auth?redirect_uri=http%3A%2F%2Flocalhost%3A51121%2Foauth-callback'
     child.emit('message', { type: 'runtime.model-router-request', requestId: 'safe-auth', action: 'open-authorization', provider, url })
     await vi.advanceTimersByTimeAsync(0)
-    expect(safeBrowser.openPersistent).toHaveBeenCalledExactlyOnceWith(url, 'Asia/Tokyo')
-    expect(openExternal).not.toHaveBeenCalled()
+    expect(openWebLink).toHaveBeenCalledExactlyOnceWith(url, { source: 'sign-in' })
     expect(child.postMessage).toHaveBeenCalledWith({ type: 'runtime.model-router-result', requestId: 'safe-auth', ok: true })
-    child.emit('message', { type: 'runtime.model-router-request', requestId: 'bad-auth', action: 'open-authorization', provider, url: 'https://example.invalid/login' })
-    await vi.advanceTimersByTimeAsync(0)
-    expect(safeBrowser.openPersistent).toHaveBeenCalledOnce()
-    expect(openExternal).not.toHaveBeenCalled()
+    for (const badUrl of ['https://example.invalid/login', url.replace('redirect_uri=', 'invalid_redirect=')]) {
+      child.emit('message', { type: 'runtime.model-router-request', requestId: 'bad-auth', action: 'open-authorization', provider, url: badUrl })
+      await vi.advanceTimersByTimeAsync(0)
+      expect(openWebLink).toHaveBeenCalledOnce()
+      expect(child.postMessage).toHaveBeenCalledWith({ type: 'runtime.model-router-result', requestId: 'bad-auth', ok: false })
+    }
     const stopping = host.stop(); child.emit('exit', 0); await stopping
   })
 
-  it.each(['safe-browser-missing', 'launch-failed'])('silently falls back once to the system browser on %s', async code => {
-    const openExternal = vi.fn(async () => {})
-    const safeBrowser = { openPersistent: vi.fn().mockRejectedValue(Object.assign(new Error('private URL must never be logged'), { code })) }
+  it('reports unified opener failure without retrying or logging private authorization URLs', async () => {
+    const openWebLink = vi.fn().mockRejectedValue(new Error('private URL must never be logged'))
     const log = vi.spyOn(console, 'log'), warn = vi.spyOn(console, 'warn'), error = vi.spyOn(console, 'error')
-    const host = new RuntimeHost('/runtime/index.cjs', undefined, { openExternal, safeBrowser })
+    const host = new RuntimeHost('/runtime/index.cjs', undefined, { openWebLink })
     const starting = host.start()
     const child = electron.children[0] as MockUtilityProcess
     child.emit('spawn'); await starting
     const url = 'https://auth.openai.com/oauth/authorize?redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback'
-    child.emit('message', { type: 'runtime.model-router-request', requestId: 'fallback-auth', action: 'open-authorization', provider: 'codex', url })
+    child.emit('message', { type: 'runtime.model-router-request', requestId: 'failed-auth', action: 'open-authorization', provider: 'codex', url })
     await vi.advanceTimersByTimeAsync(0)
-    expect(safeBrowser.openPersistent).toHaveBeenCalledExactlyOnceWith(url, 'Asia/Singapore')
-    expect(openExternal).toHaveBeenCalledExactlyOnceWith(url)
-    expect(child.postMessage).toHaveBeenCalledWith({ type: 'runtime.model-router-result', requestId: 'fallback-auth', ok: true })
+    expect(openWebLink).toHaveBeenCalledExactlyOnceWith(url, { source: 'sign-in' })
+    expect(child.postMessage).toHaveBeenCalledWith({ type: 'runtime.model-router-result', requestId: 'failed-auth', ok: false })
     expect(log).not.toHaveBeenCalled(); expect(warn).not.toHaveBeenCalled(); expect(error).not.toHaveBeenCalled()
     const stopping = host.stop(); child.emit('exit', 0); await stopping
   })
@@ -100,8 +97,8 @@ describe('RuntimeHost', () => {
     await stopping
   })
   it('opens subscription authorization only from the current runtime and only on the fixed service allowlist', async () => {
-    const openExternal = vi.fn(async () => {})
-    const host = new RuntimeHost('/runtime/index.cjs', undefined, { openExternal })
+    const openWebLink = vi.fn(async () => {})
+    const host = new RuntimeHost('/runtime/index.cjs', undefined, { openWebLink })
     const starting = host.start()
     const child = electron.children[0] as MockUtilityProcess
     child.emit('spawn')
@@ -110,13 +107,13 @@ describe('RuntimeHost', () => {
     const request = { type: 'runtime.model-router-request', requestId: 'auth-1', action: 'open-authorization', provider: 'codex', url }
     child.emit('message', request)
     await vi.advanceTimersByTimeAsync(0)
-    expect(openExternal).toHaveBeenCalledWith(url)
+    expect(openWebLink).toHaveBeenCalledWith(url, { source: 'sign-in' })
     expect(child.postMessage).toHaveBeenCalledWith({ type: 'runtime.model-router-result', requestId: 'auth-1', ok: true })
     child.emit('message', { ...request, requestId: 'auth-2', url: url.replace('auth.openai.com', 'auth.openai.com.evil.test') })
     await vi.advanceTimersByTimeAsync(0)
-    expect(openExternal).toHaveBeenCalledOnce()
+    expect(openWebLink).toHaveBeenCalledOnce()
     expect(child.postMessage).toHaveBeenCalledWith({ type: 'runtime.model-router-result', requestId: 'auth-2', ok: false })
-    openExternal.mockRejectedValueOnce(new Error('browser unavailable'))
+    openWebLink.mockRejectedValueOnce(new Error('browser unavailable'))
     child.emit('message', { ...request, requestId: 'auth-failed' })
     await vi.advanceTimersByTimeAsync(0)
     expect(child.postMessage).toHaveBeenCalledWith({ type: 'runtime.model-router-result', requestId: 'auth-failed', ok: false })
@@ -125,7 +122,7 @@ describe('RuntimeHost', () => {
     await stopping
     child.emit('message', { ...request, requestId: 'stale-auth' })
     await vi.advanceTimersByTimeAsync(0)
-    expect(openExternal).toHaveBeenCalledTimes(2)
+    expect(openWebLink).toHaveBeenCalledTimes(2)
   })
   it('passes the private control asset root and bundled executable to the Runtime', async () => {
     const host = new RuntimeHost('/runtime/index.cjs', '/runtime/control-assets')

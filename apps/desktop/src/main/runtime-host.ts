@@ -1,5 +1,5 @@
 import { isSubscriptionAuthorizationUrl } from '../../../runtime/src/model-router/authorization-url'
-import type { SafeBrowserController } from './safe-browser'
+import type { openWebLink } from './web-links'
 import type { ClaudeAccountRuntimeAction, ClaudeAccountSession, ClaudeAccountRuntimeResult } from '@matou/contracts'
 import { randomUUID } from 'node:crypto'
 
@@ -98,9 +98,7 @@ interface PendingScaleMetrics {
 
 export interface RuntimeHostOptions {
   modelRouterBinary?: string
-  openExternal?(url: string): Promise<void>
-  safeBrowser?: Pick<SafeBrowserController, 'openPersistent'>
-  safeBrowserTimeZone?: () => string
+  openWebLink?: typeof openWebLink
   /** Getter so a locale change applies without reconstructing the host. */
   messages?: () => MainMessages
   /** Getter for the current locale, forwarded to the forked Runtime as `MATOU_LOCALE`. */
@@ -108,9 +106,7 @@ export interface RuntimeHostOptions {
 }
 
 export class RuntimeHost {
-  readonly #openExternal: ((url: string) => Promise<void>) | undefined
-  readonly #safeBrowser: RuntimeHostOptions['safeBrowser']
-  readonly #safeBrowserTimeZone: () => string
+  readonly #openWebLink: RuntimeHostOptions['openWebLink']
   readonly #modelRouterBinary: string
   #routerCleanup: Promise<void> | undefined
   readonly #runtimeEntry: string
@@ -146,9 +142,7 @@ export class RuntimeHost {
     controlAssetRoot = join(dirname(runtimeEntry), 'control-assets'),
     options: RuntimeHostOptions = {}
   ) {
-    this.#openExternal = options.openExternal
-    this.#safeBrowser = options.safeBrowser
-    this.#safeBrowserTimeZone = options.safeBrowserTimeZone ?? (() => 'Asia/Singapore')
+    this.#openWebLink = options.openWebLink
     this.#runtimeEntry = runtimeEntry
     this.#modelRouterBinary = options.modelRouterBinary ?? resolve(dirname(runtimeEntry), '../../../.cache/model-router/8.0.69', `darwin-${process.arch}`, 'model-router')
     this.#controlAssetRoot = controlAssetRoot
@@ -275,14 +269,8 @@ export class RuntimeHost {
         const operation = request.action === 'open-authorization'
           ? Promise.resolve().then(async () => {
               if ((request.provider !== 'codex' && request.provider !== 'antigravity') || typeof request.url !== 'string' ||
-                  !isSubscriptionAuthorizationUrl(request.provider, request.url) || !this.#openExternal) throw new Error('Sign-in authorization URL is not allowed')
-              try {
-                if (this.#safeBrowser) {
-                  await this.#safeBrowser.openPersistent(request.url, this.#safeBrowserTimeZone())
-                  return
-                }
-              } catch { /* Any browser startup failure uses the existing system-browser path. */ }
-              await this.#openExternal(request.url)
+                  !isSubscriptionAuthorizationUrl(request.provider, request.url) || !this.#openWebLink) throw new Error('Sign-in authorization URL is not allowed')
+              await this.#openWebLink(request.url, { source: 'sign-in' })
             })
           : request.action === 'start' ? routerOwner.start() : routerOwner.stop()
         void operation.then(() => {
