@@ -83,6 +83,10 @@ pub enum WorkerCommand {
         lines: i32,
         reply: Sender<Result<()>>,
     },
+    ScrollTo {
+        row: u64,
+        reply: Sender<Result<()>>,
+    },
     ScrollSelection {
         lines: i32,
         reply: Sender<Result<()>>,
@@ -339,6 +343,9 @@ fn run(
                 }
                 WorkerCommand::Scroll { lines, reply } => {
                     let _ = reply.send(session.scroll(lines));
+                }
+                WorkerCommand::ScrollTo { row, reply } => {
+                    let _ = reply.send(session.scroll_to(row));
                 }
                 WorkerCommand::ScrollSelection { lines, reply } => {
                     let _ = reply.send(session.scroll_selection(lines));

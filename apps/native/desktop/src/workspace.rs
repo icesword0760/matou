@@ -1439,10 +1439,11 @@ impl Workspace {
                 selection,
                 modes,
                 sequence,
+                scroll_request_id,
             } => {
                 if let Some(terminal) = self.terminals.get(&session_id) {
                     terminal.update(cx, |terminal, cx| {
-                        terminal.set_screen(screen, modes, selection, cx)
+                        terminal.set_screen(screen, modes, selection, scroll_request_id, cx)
                     });
                     // The reference live-output callback restores only an unclaimed
                     // active terminal; dialogs and focused controls retain ownership.
@@ -1570,6 +1571,14 @@ impl Workspace {
                         Command::Scroll {
                             session_id: session_id.clone(),
                             lines: *lines,
+                        },
+                        cx,
+                    ),
+                    SurfaceEvent::ScrollTo { row, request_id } => this.send(
+                        Command::ScrollTo {
+                            session_id: session_id.clone(),
+                            row: *row,
+                            request_id: *request_id,
                         },
                         cx,
                     ),
@@ -4441,6 +4450,13 @@ impl Render for Workspace {
                 .and_then(|node| node["title"].as_str())
                 .unwrap_or("Shell");
             let focus = terminal.read(cx).focus.clone();
+            let scrollbar_terminal = terminal.clone();
+            let scrollbar_session = id.clone();
+            let scrollbar_scene = self
+                .hierarchy
+                .as_ref()
+                .and_then(|h| h.scene.as_ref())
+                .map(|s| s.id.clone());
             let session_id = id.clone();
             let hover_id = id.clone();
             let scene_id = self
@@ -4485,6 +4501,34 @@ impl Render for Workspace {
                         this.hover_card(Some(hover_id.clone()), cx);
                     }
                 }))
+                .capture_any_mouse_down(cx.listener(
+                    move |this, event: &MouseDownEvent, window, cx| {
+                        // The original card activates in pointer capture, before
+                        // the scrollbar consumes its drag and preserves focus.
+                        if scrollbar_terminal.read(cx).scrollbar_hit(event.position)
+                            && this.geometry_focus() != Some(scrollbar_session.as_str())
+                        {
+                            this.hover_baseline = None;
+                            this.hover_restore_at = None;
+                            this.hover_follow_until = None;
+                            this.capture_geometry(
+                                Some(scrollbar_session.clone()),
+                                false,
+                                window,
+                                cx,
+                            );
+                            if let Some(scene_id) = &scrollbar_scene {
+                                this.send(
+                                    Command::FocusSession {
+                                        scene_id: scene_id.clone(),
+                                        session_id: scrollbar_session.clone(),
+                                    },
+                                    cx,
+                                );
+                            }
+                        }
+                    },
+                ))
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _, window, cx| {
@@ -4686,9 +4730,6 @@ impl Render for Workspace {
                     div()
                         .flex_1()
                         .min_h_0()
-                        .pl(px(14.))
-                        .pr(px(28.))
-                        .py(px(12.))
                         .relative()
                         .child(terminal.clone())
                         .when(
