@@ -1,4 +1,4 @@
-export const EGRESS_FAMILIES = ['anthropic', 'openai', 'chatgpt-subscription'] as const
+export const EGRESS_FAMILIES = ['anthropic', 'openai', 'chatgpt-subscription', 'google'] as const
 export type EgressFamily = (typeof EGRESS_FAMILIES)[number]
 export type EgressCheckId =
   | 'mainland'

@@ -64,7 +64,7 @@ function ConnectedEgressPanel({
   )
 }
 
-/** Compact HUD exit-status chip for official Claude and Codex cards; hidden for shell/third-party cards. */
+/** Compact HUD exit-status chip for monitored agent cards; hidden for shell/third-party cards. */
 export function EgressChip({ sessionId }: EgressChipProps) {
   const zh = useLocale() === 'zh-CN'
   const selector = useCallback(

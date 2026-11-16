@@ -22,9 +22,9 @@ it('defaults to automatic, previews the non-mainland zone, and saves explicit ch
   expect(select.options[1]?.textContent).toBe('跟随系统 (Asia/Shanghai)')
   expect(screen.getByText(/· Asia\/Singapore$/)).toBeTruthy()
   expect(
-    screen.getByText('自动：本机是大陆时区时，Claude Code 和 Codex 使用同为东八区的新加坡时区（出口在台湾时用台北），时间读数不变。')
+    screen.getByText('自动：本机是大陆时区时，Claude Code、Codex 和 Antigravity 使用同为东八区的新加坡时区（出口在台湾时用台北），时间读数不变。')
   ).toBeTruthy()
-  expect(screen.getByText(/仅影响码头启动的 Claude Code、Codex 及其子进程/)).toBeTruthy()
+  expect(screen.getByText(/仅影响码头启动的 Claude Code、Codex、Antigravity 及其子进程/)).toBeTruthy()
 
   const user = userEvent.setup()
   await user.selectOptions(select, 'America/Los_Angeles')
@@ -59,10 +59,10 @@ it('renders English copy for automatic mode and scope notice', async () => {
   expect(select.options[1]?.textContent).toBe('Follow system (Asia/Shanghai)')
   expect(
     screen.getByText(
-      'Automatic: when this Mac uses a mainland China time zone, Claude Code and Codex use another UTC+8 zone (Singapore, or Taipei when your exit is in Taiwan), so clock times stay the same.'
+      'Automatic: when this Mac uses a mainland China time zone, Claude Code, Codex and Antigravity use another UTC+8 zone (Singapore, or Taipei when your exit is in Taiwan), so clock times stay the same.'
     )
   ).toBeTruthy()
-  expect(screen.getByText(/Applies only to Claude Code, Codex and their child processes launched by Matou\./)).toBeTruthy()
+  expect(screen.getByText(/Applies only to Claude Code, Codex, Antigravity and their child processes launched by Matou\./)).toBeTruthy()
 })
 
 it('keeps the draft and retry available when saving fails', async () => {

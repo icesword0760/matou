@@ -1,0 +1,356 @@
+<title>Matou 登录浏览器接入稿</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<style>
+  :root {
+    --page-bg: #eef1f6;
+    --page-fg: #1d2634;
+    --page-muted: #5f6f86;
+    --page-line: #d5dce7;
+    --page-card: #ffffff;
+    --new: #287cdd;
+    --new-bg: #e8f1fc;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --page-bg: #10141a;
+      --page-fg: #e4e9f1;
+      --page-muted: #93a1b5;
+      --page-line: #2a3341;
+      --page-card: #171d25;
+      --new: #6cb0ff;
+      --new-bg: #1a2a3d;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --page-bg: #10141a;
+    --page-fg: #e4e9f1;
+    --page-muted: #93a1b5;
+    --page-line: #2a3341;
+    --page-card: #171d25;
+    --new: #6cb0ff;
+    --new-bg: #1a2a3d;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--page-bg);
+    color: var(--page-fg);
+    font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    padding: 32px max(16px, env(safe-area-inset-right, 0px)) 48px max(16px, env(safe-area-inset-left, 0px));
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; display: flex; flex-direction: column; gap: 28px; }
+  header h1 { margin: 0; font-size: 24px; font-weight: 700; letter-spacing: -0.01em; text-wrap: balance; }
+  header p { margin: 6px 0 0; color: var(--page-muted); max-width: 720px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 8px 18px; margin-top: 14px; color: var(--page-muted); font-size: 12px; }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .legend i { width: 8px; height: 8px; border-radius: 50%; background: var(--new); display: inline-block; }
+  .stage { display: flex; flex-wrap: wrap; gap: 24px; align-items: flex-start; }
+  .panel-wrap { display: flex; flex-direction: column; gap: 10px; min-width: 0; flex: 1 1 440px; max-width: 460px; }
+  .caption { margin: 0; font-size: 12px; color: var(--page-muted); display: flex; align-items: center; gap: 8px; }
+  .caption b { color: var(--page-fg); font-weight: 600; }
+  .tag { font-size: 10px; font-weight: 600; letter-spacing: .02em; color: var(--new); background: var(--new-bg); border-radius: 999px; padding: 1px 7px; }
+
+  /* ---- Matou egress panel, copied from egress.css ---- */
+  .egress-panel {
+    --eg-bg: #fff;
+    --eg-surface: #f7f9fc;
+    --eg-border: #d9e3f1;
+    --eg-text: #283446;
+    --eg-muted: #687b96;
+    --eg-accent: #287cdd;
+    --eg-pass: #1f883d;
+    --eg-warn: #9a6700;
+    --eg-warn-bg: #fff8e8;
+    --eg-danger: #c53929;
+    --eg-danger-bg: #fff2f0;
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    background: var(--eg-bg);
+    color: var(--eg-text);
+    border: 1px solid var(--eg-border);
+    border-radius: 12px;
+    box-shadow: 0 16px 42px #263d6126, 0 3px 10px #263d610c;
+    font: 12px/1.5 -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    text-align: left;
+    overflow: hidden;
+  }
+  .egress-panel.is-dark {
+    --eg-bg: #1e242d;
+    --eg-surface: #252c37;
+    --eg-border: #364152;
+    --eg-text: #e1e6ed;
+    --eg-muted: #9aa9be;
+    --eg-accent: #58a6ff;
+    --eg-pass: #3fb950;
+    --eg-warn: #d29922;
+    --eg-warn-bg: rgba(210, 153, 34, .12);
+    --eg-danger: #f47067;
+    --eg-danger-bg: rgba(228, 93, 85, .14);
+    box-shadow: 0 16px 42px #00000066;
+  }
+  .egress-panel__header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 16px; border-bottom: 1px solid var(--eg-border); }
+  .egress-panel__heading { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+  .egress-panel__heading h2 { margin: 0; font-size: 15px; font-weight: 650; }
+  .egress-panel__checked-at { font-size: 11px; color: var(--eg-muted); white-space: nowrap; }
+  .egress-panel__header-actions { display: flex; align-items: center; gap: 6px; }
+  .egress-panel__close { width: 26px; height: 26px; border: 0; border-radius: 6px; background: transparent; color: var(--eg-muted); font-size: 18px; line-height: 1; }
+  .egress-btn { padding: 4px 10px; border: 1px solid var(--eg-border); border-radius: 6px; background: var(--eg-surface); color: var(--eg-text); font: inherit; font-size: 11px; font-weight: 500; white-space: nowrap; }
+  .egress-panel__scroll { padding: 12px 16px; display: flex; flex-direction: column; gap: 14px; }
+  .egress-section__header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+  .egress-section__header h3 { margin: 0; font-size: 11px; font-weight: 650; color: var(--eg-muted); letter-spacing: .02em; display: flex; align-items: center; gap: 8px; }
+  .egress-check-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+  .egress-check { display: flex; align-items: flex-start; gap: 9px; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--eg-border); background: var(--eg-surface); }
+  .egress-check.is-warn { background: var(--eg-warn-bg); border-color: rgba(210, 153, 34, .35); }
+  .egress-check__badge { width: 17px; height: 17px; border-radius: 50%; display: grid; place-items: center; font-size: 10px; font-weight: 700; flex: none; margin-top: 1px; }
+  .egress-check__badge.is-pass { color: var(--eg-pass); background: rgba(63, 185, 80, .14); }
+  .egress-check__badge.is-warn, .egress-check__badge.is-unknown { color: var(--eg-warn); background: rgba(210, 153, 34, .18); }
+  .egress-check__title { font-weight: 600; font-size: 12px; }
+  .egress-check__detail { margin-top: 2px; font-size: 11px; color: var(--eg-muted); line-height: 1.45; }
+  .egress-check.is-warn .egress-check__detail { color: var(--eg-warn); }
+  .egress-controls { padding-top: 10px; border-top: 1px solid var(--eg-border); display: flex; flex-direction: column; gap: 10px; }
+  .egress-rule-fieldset { margin: 0; padding: 0; border: 0; }
+  .egress-rule-fieldset legend { font-size: 11px; font-weight: 650; color: var(--eg-muted); margin-bottom: 6px; }
+  .egress-rule-options { display: flex; flex-wrap: wrap; gap: 14px; }
+  .egress-radio, .egress-toggle { display: inline-flex; align-items: flex-start; gap: 7px; font-size: 12px; line-height: 1.4; }
+  .egress-radio input, .egress-toggle input { margin-top: 2px; accent-color: var(--eg-accent); }
+  .egress-reference { padding-top: 10px; border-top: 1px solid var(--eg-border); }
+  .egress-reference__title { font-size: 11px; font-weight: 650; color: var(--eg-muted); margin-bottom: 6px; }
+  .egress-reference__links { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 5px; }
+  .egress-link-btn { padding: 3px 8px; border: 1px solid var(--eg-border); border-radius: 6px; background: transparent; color: var(--eg-accent); font: inherit; font-size: 11px; font-weight: 500; }
+  .egress-reference__note { margin: 0; font-size: 11px; color: var(--eg-muted); }
+  .egress-panel__footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 16px; border-top: 1px solid var(--eg-border); background: var(--eg-surface); }
+  .egress-panel__sampling-note { font-size: 10px; color: var(--eg-muted); line-height: 1.4; max-width: 300px; }
+
+  /* ---- new blocks ---- */
+  .client-notice { display: flex; flex-direction: column; gap: 6px; }
+  .client-notice p { margin: 0; display: flex; align-items: flex-start; gap: 8px; padding: 7px 10px; border-radius: 8px; background: var(--eg-warn-bg); border: 1px solid rgba(210, 153, 34, .35); color: var(--eg-warn); font-size: 11px; line-height: 1.45; }
+  .client-notice span { flex: none; font-weight: 700; }
+  .login-browser-card { padding-top: 10px; border-top: 1px solid var(--eg-border); display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .login-browser-card__main { min-width: 0; }
+  .login-browser-card__title { font-size: 11px; font-weight: 650; color: var(--eg-muted); display: flex; align-items: center; gap: 8px; }
+  .login-browser-card__state { font-size: 12px; font-weight: 600; margin-top: 2px; }
+  .login-browser-card__hint { font-size: 11px; color: var(--eg-muted); margin-top: 2px; }
+  .login-browser-card__action { flex: none; }
+
+  .hud-strip { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; padding: 14px 16px; border-radius: 10px; background: #1e242d; border: 1px solid #364152; color: #e1e6ed; font: 12px/1.5 -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+  .hud-strip__label { color: #9aa9be; font-size: 11px; }
+  .egress-chip { display: inline-flex; align-items: center; gap: 5px; padding: 2px 7px; border: 1px solid transparent; border-radius: 5px; font-size: 10px; line-height: 1.4; white-space: nowrap; }
+  .egress-chip__dot { width: 5px; height: 5px; border-radius: 50%; background: #22c55e; }
+  .egress-chip.is-ok { color: #8b949e; }
+  .egress-chip.is-warn { color: #d29922; background: rgba(210, 153, 34, .12); }
+  .egress-chip.is-warn .egress-chip__dot { background: #d29922; }
+
+  .note { border: 1px solid var(--page-line); background: var(--page-card); border-radius: 10px; padding: 14px 16px; color: var(--page-muted); font-size: 13px; }
+  .note b { color: var(--page-fg); }
+  @media (max-width: 560px) {
+    .panel-wrap { flex: 1 1 100%; max-width: none; }
+  }
+</style>
+
+<div class="wrap">
+  <header>
+    <h1>Matou 登录浏览器接入稿</h1>
+    <p>网络检查面板新增的三块内容：Google 出口检测、桌面客户端提醒、Mantle 入口。下面分别是已安装、未安装和深色主题三种状态。</p>
+    <div class="legend">
+      <span><i></i>蓝色标记 = 本次新增</span>
+      <span>其余部分的样式和文案沿用现有面板</span>
+    </div>
+  </header>
+
+  <section class="stage">
+    <div class="panel-wrap">
+      <p class="caption"><b>已安装</b><span class="tag">新增块</span></p>
+      <div class="egress-panel">
+        <div class="egress-panel__header">
+          <div class="egress-panel__heading">
+            <h2>网络检查</h2>
+            <span class="egress-panel__checked-at">检测于 11:42</span>
+          </div>
+          <div class="egress-panel__header-actions">
+            <button class="egress-btn">重新检查</button>
+            <span class="egress-panel__close">×</span>
+          </div>
+        </div>
+        <div class="egress-panel__scroll">
+          <section>
+            <div class="egress-section__header"><h3>Anthropic</h3></div>
+            <ul class="egress-check-list">
+              <li class="egress-check"><span class="egress-check__badge is-pass">✓</span><div><div class="egress-check__title">出口正常</div><div class="egress-check__detail">美国 · 203.0.113.x</div></div></li>
+              <li class="egress-check is-warn"><span class="egress-check__badge is-warn">!</span><div><div class="egress-check__title">登录与 API 出口不同</div><div class="egress-check__detail">登录页与 API 使用了不同的节点</div></div></li>
+            </ul>
+          </section>
+
+          <section>
+            <div class="egress-section__header"><h3>OpenAI</h3></div>
+            <ul class="egress-check-list">
+              <li class="egress-check"><span class="egress-check__badge is-pass">✓</span><div><div class="egress-check__title">出口正常</div><div class="egress-check__detail">美国 · 203.0.113.x</div></div></li>
+            </ul>
+          </section>
+
+          <section>
+            <div class="egress-section__header"><h3>Claude（ChatGPT 订阅）</h3></div>
+            <ul class="egress-check-list">
+              <li class="egress-check"><span class="egress-check__badge is-pass">✓</span><div><div class="egress-check__title">出口正常</div><div class="egress-check__detail">美国 · 203.0.113.x</div></div></li>
+            </ul>
+          </section>
+
+          <section>
+            <div class="egress-section__header">
+              <h3>Google（通用出口检测）<span class="tag">新增</span></h3>
+            </div>
+            <ul class="egress-check-list">
+              <li class="egress-check"><span class="egress-check__badge is-pass">✓</span><div><div class="egress-check__title">通用出口正常</div><div class="egress-check__detail">美国 · 203.0.113.x</div></div></li>
+              <li class="egress-check"><span class="egress-check__badge is-unknown">?</span><div><div class="egress-check__title">登录页出口无法确认</div><div class="egress-check__detail">Google 不提供出口查询，使用通用出口作为参考</div></div></li>
+            </ul>
+          </section>
+
+          <section>
+            <div class="egress-section__header"><h3>本机</h3></div>
+            <ul class="egress-check-list">
+              <li class="egress-check"><span class="egress-check__badge is-pass">✓</span><div><div class="egress-check__title">系统代理</div><div class="egress-check__detail">未启用，流量走 TUN</div></div></li>
+              <li class="egress-check"><span class="egress-check__badge is-pass">✓</span><div><div class="egress-check__title">系统时区</div><div class="egress-check__detail">Asia/Singapore</div></div></li>
+            </ul>
+          </section>
+
+          <div class="client-notice">
+            <p><span>!</span>检测到 Claude Desktop 正在运行，它的出口不在保护范围</p>
+            <p><span>!</span>检测到 ChatGPT 桌面版正在运行，它的出口不在保护范围</p>
+          </div>
+
+          <section class="egress-controls">
+            <fieldset class="egress-rule-fieldset">
+              <legend>出口规则</legend>
+              <div class="egress-rule-options">
+                <label class="egress-radio"><input type="radio" checked><span>同一国家即可</span></label>
+                <label class="egress-radio"><input type="radio"><span>固定 IP</span></label>
+              </div>
+            </fieldset>
+            <label class="egress-toggle"><input type="checkbox" checked><span>出口保护：出口异常时暂停 Claude / Codex 会话</span></label>
+          </section>
+
+          <section class="login-browser-card">
+            <div class="login-browser-card__main">
+              <div class="login-browser-card__title">Mantle<span class="tag">新增</span></div>
+              <div class="login-browser-card__state">已安装 · v0.1.0</div>
+              <div class="login-browser-card__hint">登录 Claude / ChatGPT / Antigravity 时使用</div>
+            </div>
+            <button class="egress-btn login-browser-card__action">打开</button>
+          </section>
+
+          <section class="egress-reference">
+            <div class="egress-reference__title">参考检查（不影响状态）</div>
+            <div class="egress-reference__links">
+              <button class="egress-link-btn">IP 质量 ↗</button>
+              <button class="egress-link-btn">浏览器环境 ↗</button>
+            </div>
+            <p class="egress-reference__note">点击后才访问第三方站点，站点会收到你的出口 IP。</p>
+          </section>
+        </div>
+        <div class="egress-panel__footer">
+          <span class="egress-panel__sampling-note">检测为每分钟抽查；Google 线路使用通用出口检测，不能保证 Google 实际看到的出口。</span>
+          <button class="egress-btn">复制报告</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel-wrap">
+      <p class="caption"><b>未安装</b><span class="tag">新增块</span></p>
+      <div class="egress-panel">
+        <div class="egress-panel__header">
+          <div class="egress-panel__heading">
+            <h2>网络检查</h2>
+            <span class="egress-panel__checked-at">检测于 11:42</span>
+          </div>
+          <div class="egress-panel__header-actions">
+            <button class="egress-btn">重新检查</button>
+            <span class="egress-panel__close">×</span>
+          </div>
+        </div>
+        <div class="egress-panel__scroll">
+          <section>
+            <div class="egress-section__header"><h3>Google（通用出口检测）<span class="tag">新增</span></h3></div>
+            <ul class="egress-check-list">
+              <li class="egress-check"><span class="egress-check__badge is-pass">✓</span><div><div class="egress-check__title">通用出口正常</div><div class="egress-check__detail">美国 · 203.0.113.x</div></div></li>
+            </ul>
+          </section>
+
+          <div class="client-notice">
+            <p><span>!</span>检测到 Claude Desktop 正在运行，它的出口不在保护范围</p>
+          </div>
+
+          <section class="login-browser-card">
+            <div class="login-browser-card__main">
+              <div class="login-browser-card__title">Mantle<span class="tag">新增</span></div>
+              <div class="login-browser-card__state">未安装</div>
+              <div class="login-browser-card__hint">登录 Claude / ChatGPT / Antigravity 时使用</div>
+            </div>
+            <button class="egress-btn login-browser-card__action">获取安装包</button>
+          </section>
+
+          <section class="egress-reference">
+            <div class="egress-reference__title">参考检查（不影响状态）</div>
+            <div class="egress-reference__links">
+              <button class="egress-link-btn">IP 质量 ↗</button>
+              <button class="egress-link-btn">浏览器环境 ↗</button>
+            </div>
+          </section>
+        </div>
+        <div class="egress-panel__footer">
+          <span class="egress-panel__sampling-note">未安装 Mantle 时，登录仍使用系统浏览器。</span>
+          <button class="egress-btn">复制报告</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="egress-panel is-dark" style="max-width: 460px;">
+    <div class="egress-panel__header">
+      <div class="egress-panel__heading">
+        <h2>网络检查</h2>
+        <span class="egress-panel__checked-at">深色主题</span>
+      </div>
+      <div class="egress-panel__header-actions">
+        <button class="egress-btn">重新检查</button>
+        <span class="egress-panel__close">×</span>
+      </div>
+    </div>
+    <div class="egress-panel__scroll">
+      <section>
+        <div class="egress-section__header"><h3>Google（通用出口检测）<span class="tag" style="color:#6cb0ff;background:#1a2a3d;">新增</span></h3></div>
+        <ul class="egress-check-list">
+          <li class="egress-check"><span class="egress-check__badge is-pass">✓</span><div><div class="egress-check__title">通用出口正常</div><div class="egress-check__detail">美国 · 203.0.113.x</div></div></li>
+        </ul>
+      </section>
+      <div class="client-notice">
+        <p><span>!</span>检测到 Claude Desktop 正在运行，它的出口不在保护范围</p>
+      </div>
+      <section class="login-browser-card">
+        <div class="login-browser-card__main">
+          <div class="login-browser-card__title">Mantle</div>
+          <div class="login-browser-card__state">已安装 · v0.1.0</div>
+          <div class="login-browser-card__hint">登录 Claude / ChatGPT / Antigravity 时使用</div>
+        </div>
+        <button class="egress-btn login-browser-card__action">打开</button>
+      </section>
+    </div>
+  </section>
+
+  <section>
+    <p class="caption" style="margin-bottom: 8px;"><b>HUD 标签</b>　Antigravity 会话的终端顶部</p>
+    <div class="hud-strip">
+      <span class="hud-strip__label">Claude Code</span>
+      <span class="egress-chip is-ok"><i class="egress-chip__dot"></i>🇺🇸 美国 · 出口正常</span>
+      <span class="hud-strip__label">Antigravity</span>
+      <span class="egress-chip is-ok"><i class="egress-chip__dot"></i>🇺🇸 美国 · 出口正常</span>
+      <span class="hud-strip__label">出口异常时</span>
+      <span class="egress-chip is-warn"><i class="egress-chip__dot"></i>出口异常 · 已暂停 1 个会话</span>
+    </div>
+  </section>
+
+  <div class="note">
+    <b>需要确认的点：</b>新增块的位置是否合适、Google 的“通用出口”说法是否清楚、客户端提醒是否太吵。确认后我按这个稿子实现。
+  </div>
+</div>

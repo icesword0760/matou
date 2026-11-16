@@ -60,6 +60,242 @@ function openReferenceUrl(url: string): void {
   void window.matouDesktop?.openExternal?.(url)
 }
 
+type DesktopClient = 'claude' | 'chatgpt'
+
+interface SafeBrowserStatus {
+  installed: boolean
+  version: string | null
+}
+
+const DESKTOP_CLIENT_POLL_MS = 5000
+const UPDATE_FEEDBACK_MS = 3000
+const DESKTOP_CLIENT_ORDER: readonly DesktopClient[] = ['claude', 'chatgpt']
+
+function runBridgeAction(action: (() => Promise<void>) | undefined): void {
+  if (!action) return
+  try {
+    void action().catch(() => {})
+  } catch {
+    // The desktop host can disappear mid-click; the card stays a passive status entry.
+  }
+}
+
+type UpdateFeedback =
+  | { kind: 'latest' }
+  | { kind: 'failed' }
+  | { kind: 'available'; latest: string }
+
+function updateFeedbackText(feedback: UpdateFeedback, zh: boolean): string {
+  switch (feedback.kind) {
+    case 'latest':
+      return zh ? '已是最新' : 'Up to date'
+    case 'failed':
+      return zh ? '检查失败' : 'Check failed'
+    case 'available':
+      return zh ? `有新版本 · v${feedback.latest}` : `New version · v${feedback.latest}`
+  }
+}
+
+function SafeBrowserCard({ zh }: { zh: boolean }) {
+  const [status, setStatus] = useState<SafeBrowserStatus | null>(null)
+  const [checkingUpdate, setCheckingUpdate] = useState(false)
+  const [feedback, setFeedback] = useState<UpdateFeedback | null>(null)
+  const feedbackTimer = useRef<number | undefined>(undefined)
+  const mountedRef = useRef(true)
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      if (feedbackTimer.current !== undefined) window.clearTimeout(feedbackTimer.current)
+    }
+  }, [])
+
+  useEffect(() => {
+    let active = true
+    const readStatus = window.matouDesktop?.safeBrowserStatus
+    if (!readStatus) {
+      setStatus({ installed: false, version: null })
+      return
+    }
+    void readStatus()
+      .then((value) => {
+        if (active) setStatus(value)
+      })
+      .catch(() => {
+        if (active) setStatus({ installed: false, version: null })
+      })
+    return () => {
+      active = false
+    }
+  }, [])
+
+  const showFeedback = (next: UpdateFeedback) => {
+    if (feedbackTimer.current !== undefined) window.clearTimeout(feedbackTimer.current)
+    setFeedback(next)
+    feedbackTimer.current = window.setTimeout(() => {
+      feedbackTimer.current = undefined
+      setFeedback(null)
+    }, UPDATE_FEEDBACK_MS)
+  }
+
+  const handleCheckUpdate = () => {
+    if (checkingUpdate) return
+    if (feedbackTimer.current !== undefined) {
+      window.clearTimeout(feedbackTimer.current)
+      feedbackTimer.current = undefined
+    }
+    setFeedback(null)
+    setCheckingUpdate(true)
+    const check = window.matouDesktop?.safeBrowserCheckUpdate
+    let request: Promise<{ latest: string | null; failed: boolean }>
+    try {
+      request = check ? check() : Promise.reject(new Error('unavailable'))
+    } catch {
+      request = Promise.reject(new Error('unavailable'))
+    }
+    void request
+      .then((result) => {
+        if (!mountedRef.current) return
+        if (!result || result.failed) {
+          showFeedback({ kind: 'failed' })
+        } else if (result.latest) {
+          showFeedback({ kind: 'available', latest: result.latest })
+        } else {
+          showFeedback({ kind: 'latest' })
+        }
+      })
+      .catch(() => {
+        if (mountedRef.current) showFeedback({ kind: 'failed' })
+      })
+      .finally(() => {
+        if (mountedRef.current) setCheckingUpdate(false)
+      })
+  }
+
+  const handleOpen = () => {
+    runBridgeAction(window.matouDesktop?.safeBrowserOpen)
+  }
+
+  const handleGetInstaller = () => {
+    runBridgeAction(window.matouDesktop?.openSafeBrowserReleases)
+  }
+
+  const installed = status?.installed === true
+  if (!status) return null
+
+  const stateText = installed
+    ? status.version
+      ? zh
+        ? `已安装 · ${status.version}`
+        : `Installed · ${status.version}`
+      : zh
+        ? '已安装'
+        : 'Installed'
+    : zh
+      ? '未安装'
+      : 'Not installed'
+
+  return (
+    <section className="egress-safe-browser" aria-label="Mantle">
+      <div className="egress-safe-browser__main">
+        <div className="egress-safe-browser__title">Mantle</div>
+        <div className="egress-safe-browser__state">{stateText}</div>
+        <div className="egress-safe-browser__hint" role={feedback ? 'status' : undefined}>
+          {feedback
+            ? updateFeedbackText(feedback, zh)
+            : zh
+              ? '登录 Claude / ChatGPT / Antigravity 时使用'
+              : 'Used when signing in to Claude / ChatGPT / Antigravity'}
+        </div>
+      </div>
+      <div className="egress-safe-browser__actions">
+        {installed ? (
+          <>
+            <button
+              type="button"
+              className="egress-btn"
+              disabled={checkingUpdate}
+              onClick={handleCheckUpdate}
+            >
+              {zh ? '检查更新' : 'Check for updates'}
+            </button>
+            <button type="button" className="egress-btn" onClick={handleOpen}>
+              {zh ? '打开' : 'Open'}
+            </button>
+          </>
+        ) : (
+          <button type="button" className="egress-btn" onClick={handleGetInstaller}>
+            {zh ? '获取安装包' : 'Get installer'}
+          </button>
+        )}
+      </div>
+    </section>
+  )
+}
+
+function DesktopClientNotices({ zh }: { zh: boolean }) {
+  const [clients, setClients] = useState<readonly DesktopClient[]>([])
+
+  useEffect(() => {
+    let active = true
+    let timer: number | undefined
+    let inFlight = false
+    const detect = window.matouDesktop?.runningDesktopClients
+    if (!detect) return
+
+    const poll = () => {
+      if (!active || inFlight) return
+      inFlight = true
+      void detect()
+        .then((found) => {
+          if (!active) return
+          const valid = Array.isArray(found)
+            ? found.filter((client): client is DesktopClient => DESKTOP_CLIENT_ORDER.includes(client))
+            : []
+          setClients(valid)
+        })
+        .catch(() => {
+          if (active) setClients([])
+        })
+        .finally(() => {
+          inFlight = false
+        })
+    }
+    poll()
+    timer = window.setInterval(poll, DESKTOP_CLIENT_POLL_MS)
+
+    return () => {
+      active = false
+      if (timer !== undefined) window.clearInterval(timer)
+    }
+  }, [])
+
+  const visible = DESKTOP_CLIENT_ORDER.filter((client) => clients.includes(client))
+  if (visible.length === 0) return null
+
+  return (
+    <div className="egress-client-notices" role="status">
+      {visible.map((client) => (
+        <p className="egress-client-notice" key={client}>
+          <span className="egress-client-notice__mark" aria-hidden="true">
+            !
+          </span>
+          <span>
+            {client === 'claude'
+              ? zh
+                ? '检测到 Claude Desktop 正在运行，它的出口不在保护范围'
+                : 'Claude Desktop is running; its exit is not protected.'
+              : zh
+                ? '检测到 ChatGPT 桌面版正在运行，它的出口不在保护范围'
+                : 'ChatGPT desktop is running; its exit is not protected.'}
+          </span>
+        </p>
+      ))}
+    </div>
+  )
+}
+
 function CheckRow({
   check,
   zh,
@@ -236,6 +472,8 @@ export function EgressPanel({
           </section>
         )}
 
+        <DesktopClientNotices zh={zh} />
+
         <section className="egress-controls">
           <fieldset className="egress-rule-fieldset">
             <legend>{zh ? '出口规则' : 'Exit rule'}</legend>
@@ -263,11 +501,13 @@ export function EgressPanel({
             />
             <span>
               {zh
-                ? '出口保护：出口异常时暂停 Claude / Codex 会话'
-                : 'Exit protection: pause Claude / Codex sessions when the exit is wrong'}
+                ? '出口保护：出口异常时暂停 Claude / Codex / Antigravity 会话'
+                : 'Exit protection: pause Claude / Codex / Antigravity sessions when the exit is wrong'}
             </span>
           </label>
         </section>
+
+        <SafeBrowserCard zh={zh} />
 
         <section className="egress-reference">
           <div className="egress-reference__title">
@@ -300,8 +540,8 @@ export function EgressPanel({
       <footer className="egress-panel__footer">
         <span className="egress-panel__sampling-note">
           {zh
-            ? '检测为每分钟抽查，无法保证每条连接都使用同一出口。'
-            : 'Checks are sampled every minute and cannot guarantee every connection uses the same exit.'}
+            ? '检测为每分钟抽查，无法保证每条连接都使用同一出口。Google 线路使用通用出口检测，不能保证 Google 实际看到的出口。'
+            : 'Checks are sampled every minute and cannot guarantee every connection uses the same exit. Google uses a generic exit check, which cannot guarantee the exit Google actually sees.'}
         </span>
         <div className="egress-panel__copy-wrap">
           {copied && (

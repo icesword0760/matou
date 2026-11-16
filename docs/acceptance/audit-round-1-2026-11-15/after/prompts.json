@@ -1,0 +1,575 @@
+[
+  {
+    "antigravity": {
+      "model": "claude-sonnet-4-5",
+      "request": {
+        "contents": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "text": "hello"
+              }
+            ]
+          }
+        ],
+        "systemInstruction": {
+          "role": "user",
+          "parts": [
+            {
+              "text": "Keep project rules.\nRead CLAUDE.md."
+            }
+          ]
+        },
+        "safetySettings": [
+          {
+            "category": "HARM_CATEGORY_HARASSMENT",
+            "threshold": "OFF"
+          },
+          {
+            "category": "HARM_CATEGORY_HATE_SPEECH",
+            "threshold": "OFF"
+          },
+          {
+            "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+            "threshold": "OFF"
+          },
+          {
+            "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+            "threshold": "OFF"
+          },
+          {
+            "category": "HARM_CATEGORY_CIVIC_INTEGRITY",
+            "threshold": "BLOCK_NONE"
+          }
+        ]
+      }
+    },
+    "codex": {
+      "model": "codex-test",
+      "instructions": "",
+      "input": [
+        {
+          "type": "message",
+          "role": "developer",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "Keep project rules.\nRead CLAUDE.md."
+            }
+          ]
+        },
+        {
+          "type": "message",
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "hello"
+            }
+          ]
+        }
+      ],
+      "parallel_tool_calls": true,
+      "reasoning": {
+        "effort": "medium"
+      },
+      "stream": true,
+      "store": false,
+      "include": [
+        "reasoning.encrypted_content"
+      ]
+    },
+    "finding": "D1",
+    "input": {
+      "messages": [
+        {
+          "content": "hello",
+          "role": "user"
+        }
+      ],
+      "system": "x-anthropic-billing-header: sample\nKeep project rules.\nRead CLAUDE.md."
+    },
+    "shape": "string"
+  },
+  {
+    "antigravity": {
+      "model": "claude-sonnet-4-5",
+      "request": {
+        "contents": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "text": "hello"
+              }
+            ]
+          }
+        ],
+        "systemInstruction": {
+          "role": "user",
+          "parts": [
+            {
+              "text": "Keep project rules.\nRead CLAUDE.md."
+            }
+          ]
+        },
+        "safetySettings": [
+          {
+            "category": "HARM_CATEGORY_HARASSMENT",
+            "threshold": "OFF"
+          },
+          {
+            "category": "HARM_CATEGORY_HATE_SPEECH",
+            "threshold": "OFF"
+          },
+          {
+            "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+            "threshold": "OFF"
+          },
+          {
+            "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+            "threshold": "OFF"
+          },
+          {
+            "category": "HARM_CATEGORY_CIVIC_INTEGRITY",
+            "threshold": "BLOCK_NONE"
+          }
+        ]
+      }
+    },
+    "codex": {
+      "model": "codex-test",
+      "instructions": "",
+      "input": [
+        {
+          "type": "message",
+          "role": "developer",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "Keep project rules.\nRead CLAUDE.md."
+            }
+          ]
+        },
+        {
+          "type": "message",
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "hello"
+            }
+          ]
+        }
+      ],
+      "parallel_tool_calls": true,
+      "reasoning": {
+        "effort": "medium"
+      },
+      "stream": true,
+      "store": false,
+      "include": [
+        "reasoning.encrypted_content"
+      ]
+    },
+    "finding": "D1",
+    "input": {
+      "messages": [
+        {
+          "content": "hello",
+          "role": "user"
+        }
+      ],
+      "system": [
+        {
+          "text": "x-anthropic-billing-header: sample\nKeep project rules.\nRead CLAUDE.md.",
+          "type": "text"
+        }
+      ]
+    },
+    "shape": "array"
+  },
+  {
+    "antigravity": {
+      "model": "claude-sonnet-4-5",
+      "request": {
+        "contents": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "text": "hello"
+              }
+            ]
+          }
+        ],
+        "systemInstruction": {
+          "role": "user",
+          "parts": [
+            {
+              "text": "You are Antigravity, an agentic AI coding assistant.\n`You are Claude Code, Anthropic's official CLI for Claude.`\n```text\nYou are Claude Code, Anthropic's official CLI for Claude.\n```"
+            }
+          ]
+        },
+        "safetySettings": [
+          {
+            "category": "HARM_CATEGORY_HARASSMENT",
+            "threshold": "OFF"
+          },
+          {
+            "category": "HARM_CATEGORY_HATE_SPEECH",
+            "threshold": "OFF"
+          },
+          {
+            "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+            "threshold": "OFF"
+          },
+          {
+            "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+            "threshold": "OFF"
+          },
+          {
+            "category": "HARM_CATEGORY_CIVIC_INTEGRITY",
+            "threshold": "BLOCK_NONE"
+          }
+        ]
+      }
+    },
+    "codex": {
+      "model": "codex-test",
+      "instructions": "",
+      "input": [
+        {
+          "type": "message",
+          "role": "developer",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "You are a coding assistant.\n`You are Claude Code, Anthropic's official CLI for Claude.`\n```text\nYou are Claude Code, Anthropic's official CLI for Claude.\n```"
+            }
+          ]
+        },
+        {
+          "type": "message",
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "hello"
+            }
+          ]
+        }
+      ],
+      "parallel_tool_calls": true,
+      "reasoning": {
+        "effort": "medium"
+      },
+      "stream": true,
+      "store": false,
+      "include": [
+        "reasoning.encrypted_content"
+      ]
+    },
+    "finding": "D4",
+    "input": {
+      "messages": [
+        {
+          "content": "hello",
+          "role": "user"
+        }
+      ],
+      "system": "You are Claude Code, Anthropic's official CLI for Claude.\n`You are Claude Code, Anthropic's official CLI for Claude.`\n```text\nYou are Claude Code, Anthropic's official CLI for Claude.\n```"
+    },
+    "shape": "string"
+  },
+  {
+    "antigravity": {
+      "model": "claude-sonnet-4-5",
+      "request": {
+        "contents": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "text": "hello"
+              }
+            ]
+          }
+        ],
+        "systemInstruction": {
+          "role": "user",
+          "parts": [
+            {
+              "text": "You are Antigravity, an agentic AI coding assistant.\n`You are Claude Code, Anthropic's official CLI for Claude.`\n```text\nYou are Claude Code, Anthropic's official CLI for Claude.\n```"
+            }
+          ]
+        },
+        "safetySettings": [
+          {
+            "category": "HARM_CATEGORY_HARASSMENT",
+            "threshold": "OFF"
+          },
+          {
+            "category": "HARM_CATEGORY_HATE_SPEECH",
+            "threshold": "OFF"
+          },
+          {
+            "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+            "threshold": "OFF"
+          },
+          {
+            "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+            "threshold": "OFF"
+          },
+          {
+            "category": "HARM_CATEGORY_CIVIC_INTEGRITY",
+            "threshold": "BLOCK_NONE"
+          }
+        ]
+      }
+    },
+    "codex": {
+      "model": "codex-test",
+      "instructions": "",
+      "input": [
+        {
+          "type": "message",
+          "role": "developer",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "You are a coding assistant.\n`You are Claude Code, Anthropic's official CLI for Claude.`\n```text\nYou are Claude Code, Anthropic's official CLI for Claude.\n```"
+            }
+          ]
+        },
+        {
+          "type": "message",
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "hello"
+            }
+          ]
+        }
+      ],
+      "parallel_tool_calls": true,
+      "reasoning": {
+        "effort": "medium"
+      },
+      "stream": true,
+      "store": false,
+      "include": [
+        "reasoning.encrypted_content"
+      ]
+    },
+    "finding": "D4",
+    "input": {
+      "messages": [
+        {
+          "content": "hello",
+          "role": "user"
+        }
+      ],
+      "system": [
+        {
+          "text": "You are Claude Code, Anthropic's official CLI for Claude.\n`You are Claude Code, Anthropic's official CLI for Claude.`\n```text\nYou are Claude Code, Anthropic's official CLI for Claude.\n```",
+          "type": "text"
+        }
+      ]
+    },
+    "shape": "array"
+  },
+  {
+    "antigravity": {
+      "model": "claude-sonnet-4-5",
+      "request": {
+        "contents": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "text": "hello"
+              }
+            ]
+          }
+        ],
+        "systemInstruction": {
+          "role": "user",
+          "parts": [
+            {
+              "text": "由Google开发，支持Google手机、Google技术与Google。\n`腾讯`\n```text\n由百度开发\n```\nOpenAIClient"
+            }
+          ]
+        },
+        "safetySettings": [
+          {
+            "category": "HARM_CATEGORY_HARASSMENT",
+            "threshold": "OFF"
+          },
+          {
+            "category": "HARM_CATEGORY_HATE_SPEECH",
+            "threshold": "OFF"
+          },
+          {
+            "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+            "threshold": "OFF"
+          },
+          {
+            "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+            "threshold": "OFF"
+          },
+          {
+            "category": "HARM_CATEGORY_CIVIC_INTEGRITY",
+            "threshold": "BLOCK_NONE"
+          }
+        ]
+      }
+    },
+    "codex": {
+      "model": "codex-test",
+      "instructions": "",
+      "input": [
+        {
+          "type": "message",
+          "role": "developer",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "由腾讯开发，支持小米手机、华为技术与字节跳动。\n`腾讯`\n```text\n由百度开发\n```\nOpenAIClient"
+            }
+          ]
+        },
+        {
+          "type": "message",
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "hello"
+            }
+          ]
+        }
+      ],
+      "parallel_tool_calls": true,
+      "reasoning": {
+        "effort": "medium"
+      },
+      "stream": true,
+      "store": false,
+      "include": [
+        "reasoning.encrypted_content"
+      ]
+    },
+    "finding": "D6a",
+    "input": {
+      "messages": [
+        {
+          "content": "hello",
+          "role": "user"
+        }
+      ],
+      "system": "由腾讯开发，支持小米手机、华为技术与字节跳动。\n`腾讯`\n```text\n由百度开发\n```\nOpenAIClient"
+    },
+    "shape": "string"
+  },
+  {
+    "antigravity": {
+      "model": "claude-sonnet-4-5",
+      "request": {
+        "contents": [
+          {
+            "role": "user",
+            "parts": [
+              {
+                "text": "hello"
+              }
+            ]
+          }
+        ],
+        "systemInstruction": {
+          "role": "user",
+          "parts": [
+            {
+              "text": "由Google开发，支持Google手机、Google技术与Google。\n`腾讯`\n```text\n由百度开发\n```\nOpenAIClient"
+            }
+          ]
+        },
+        "safetySettings": [
+          {
+            "category": "HARM_CATEGORY_HARASSMENT",
+            "threshold": "OFF"
+          },
+          {
+            "category": "HARM_CATEGORY_HATE_SPEECH",
+            "threshold": "OFF"
+          },
+          {
+            "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+            "threshold": "OFF"
+          },
+          {
+            "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+            "threshold": "OFF"
+          },
+          {
+            "category": "HARM_CATEGORY_CIVIC_INTEGRITY",
+            "threshold": "BLOCK_NONE"
+          }
+        ]
+      }
+    },
+    "codex": {
+      "model": "codex-test",
+      "instructions": "",
+      "input": [
+        {
+          "type": "message",
+          "role": "developer",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "由腾讯开发，支持小米手机、华为技术与字节跳动。\n`腾讯`\n```text\n由百度开发\n```\nOpenAIClient"
+            }
+          ]
+        },
+        {
+          "type": "message",
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "hello"
+            }
+          ]
+        }
+      ],
+      "parallel_tool_calls": true,
+      "reasoning": {
+        "effort": "medium"
+      },
+      "stream": true,
+      "store": false,
+      "include": [
+        "reasoning.encrypted_content"
+      ]
+    },
+    "finding": "D6a",
+    "input": {
+      "messages": [
+        {
+          "content": "hello",
+          "role": "user"
+        }
+      ],
+      "system": [
+        {
+          "text": "由腾讯开发，支持小米手机、华为技术与字节跳动。\n`腾讯`\n```text\n由百度开发\n```\nOpenAIClient",
+          "type": "text"
+        }
+      ]
+    },
+    "shape": "array"
+  }
+]

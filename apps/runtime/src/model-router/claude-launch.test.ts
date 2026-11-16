@@ -34,6 +34,15 @@ describe('Claude subscription launch projection', () => {
     expect(result.env.CLAUDE_CODE_SUBAGENT_MODEL).toBeUndefined();
     expect(source).toEqual(before);
   });
+  it.each(['chatgpt', 'antigravity'] as const)('disables nonessential traffic, telemetry and error reporting for %s subscription processes', subscription => {
+    const result = value(buildClaudeLaunch({ ...input(), subscription, accountPrefix: `matou-${subscription}` }));
+    expect(result.env).toMatchObject({
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+      DISABLE_TELEMETRY: '1',
+      DISABLE_ERROR_REPORTING: '1',
+    });
+    expect(result.settings.env).toEqual({ ANTHROPIC_API_KEY: '', CLAUDE_CODE_OAUTH_TOKEN: '', CLAUDE_CODE_DISABLE_1M_CONTEXT: '1' });
+  });
   it('uses role-specific fallback order and reports missing models', () => {
     const fallback = { id: 'default' }, small = { id: 'small' }, own = { id: 'own' };
     expect(resolveRoleModels({ default: fallback, smallFast: small })).toEqual({ opus: fallback, sonnet: fallback, haiku: small });

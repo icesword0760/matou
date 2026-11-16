@@ -58,7 +58,7 @@ describe('ModelSwitchSettings', () => {
     expect(client.request).toHaveBeenCalledWith('provider-config.activate', {
       cli: 'claude-code', providerId: 'team-claude'
     })
-    expect(await screen.findByText('已切换为 Team Gateway；1 个 Claude Code 会话已更新，1 个会话暂缓并保持原配置')).toBeTruthy()
+    expect(await screen.findByText('已切换为 Team Gateway；1 个 Claude Code 会话已更新，1 个会话等待就绪后自动切换')).toBeTruthy()
   })
 
   it('does not re-apply the active provider after save-only', async () => {
@@ -275,7 +275,7 @@ describe('ModelSwitchSettings', () => {
     })
   })
 
-  it('reports Sessions that keep their old provider while activation is deferred', async () => {
+  it('reports that deferred Sessions switch automatically when ready', async () => {
     const client = fakeClient([
       { sessionId: 'session-updated', status: 'updated' },
       {
@@ -293,7 +293,7 @@ describe('ModelSwitchSettings', () => {
     await userEvent.setup().click(screen.getByRole('button', { name: '切换到 Team Gateway' }))
 
     expect(await screen.findByText(
-      '已切换为 Team Gateway；1 个 Claude Code 会话已更新，2 个会话暂缓并保持原配置'
+      '已切换为 Team Gateway；1 个 Claude Code 会话已更新，2 个会话等待就绪后自动切换'
     )).toBeTruthy()
     await userEvent.setup().click(screen.getByRole('button', { name: /查看会话/ }))
     expect(screen.getByText('会话存储待恢复')).toBeTruthy()

@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import {
   PROTOCOL_VERSION, parseRendererMessage,
-  type HostNavigationRequestWire, type HostNavigationResultWire, type ProviderActivationFailure
+  type EgressStatusWire, type HostNavigationRequestWire, type HostNavigationResultWire, type ProviderActivationFailure
 } from '@matou/contracts'
 
 import { RuntimeClient, type RuntimeClientPort } from './RuntimeClient'
@@ -899,6 +899,38 @@ describe('RuntimeClient', () => {
     expect(second).toEqual([expect.objectContaining({
       type: 'protocol.error', code: 'WORKSPACE_PATH_INVALID', sessionId: 'session-2'
     })])
+  })
+
+  it('reports the first nonempty egress country on existing snapshot and push notifications without extra RPC or notifications', async () => {
+    const report = vi.fn()
+    vi.stubGlobal('window', { matouDesktop: { reportEgressCountry: report } })
+    const port = new FakePort(), client = new RuntimeClient(port)
+    try {
+      port.deliver({ type: 'protocol.ready', protocolVersion: PROTOCOL_VERSION })
+      const listener = vi.fn()
+      client.subscribeEgressStatus(listener)
+      await Promise.resolve()
+      const request = port.sent.find(message => message.type === 'rpc.request')
+      const familyDefaults = { state: 'ok' as const, hosts: [], overridden: false, frozenSessionIds: [], recovering: false }
+      const status: EgressStatusWire = {
+        state: 'ok', protectionEnabled: true, ruleMode: 'country', checkedAt: 1,
+        families: [
+          { ...familyDefaults, family: 'anthropic', exit: { ip: '127.0.0.1', country: '' } },
+          { ...familyDefaults, family: 'openai', exit: { ip: '127.0.0.1', country: ' JP ' } },
+          { ...familyDefaults, family: 'chatgpt-subscription', exit: { ip: '127.0.0.1', country: 'US' } }
+        ], checks: [], sessionFamilies: {}
+      }
+      port.deliver({ type: 'rpc.response', protocolVersion: PROTOCOL_VERSION, requestId: request.requestId, result: status })
+      await vi.waitFor(() => expect(report).toHaveBeenCalledExactlyOnceWith('JP'))
+      expect(listener).toHaveBeenCalledOnce()
+      port.deliver({ type: 'egress.status', protocolVersion: PROTOCOL_VERSION, status: { ...status, families: [] } })
+      expect(report).toHaveBeenLastCalledWith(undefined)
+      expect(listener).toHaveBeenCalledTimes(2)
+      client.updateEgressStatus({ ...status, families: [{ ...status.families[0]!, exit: { ip: '127.0.0.1', country: 'DE' } }] })
+      expect(report).toHaveBeenLastCalledWith('DE')
+      expect(listener).toHaveBeenCalledTimes(3)
+      expect(port.sent.filter(message => message.type === 'rpc.request')).toHaveLength(1)
+    } finally { client.dispose(); vi.unstubAllGlobals() }
   })
 
   it('coalesces initial egress.status RPC, caches pushes, and clears cache on replacePort', async () => {
