@@ -59,6 +59,7 @@ actions and controls, full packaging and platform acceptance remain open.
 ## Run the current Mac slice
 
 ```sh
+python3 apps/native/scripts/prepare-gpui.py
 cargo build --locked --manifest-path apps/native/Cargo.toml -p matou-native-desktop
 python3 tooling/native-parity/launch-native.py --binary apps/native/target/debug/matou-native-desktop
 ```
@@ -67,6 +68,15 @@ The launcher creates `artifacts/native-parity/native/MatouNative.app`, signs it
 ad-hoc, and reuses its own recorded temporary environment on later launches.
 Quit that app before refreshing the bundle. It does not replace the installed
 Matou. A custom `CARGO_TARGET_DIR` requires passing its actual binary path.
+
+`prepare-gpui.py` verifies the pinned GPUI 0.2.2 archive and applies the checked-in
+macOS font patch in an ignored source directory. This supplies the frozen
+renderer's synthetic italic for explicitly selected fonts without an italic
+face, including the Chinese history boundary hints. Existing italic faces and
+emoji fallback keep their original rendering. Font advances stay unchanged.
+The upstream license remains in the prepared source. Run the preparation step
+on a new checkout before either platform's Cargo build; the patch's runtime
+changes are macOS-only.
 
 ## Check the implemented contracts
 

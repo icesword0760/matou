@@ -1,0 +1,265 @@
+diff --git a/src/platform/mac/text_system.rs b/src/platform/mac/text_system.rs
+--- a/src/platform/mac/text_system.rs
++++ b/src/platform/mac/text_system.rs
+@@ -18,6 +18,7 @@
+     color_space::CGColorSpace,
+     context::{CGContext, CGTextDrawingMode},
+     display::CGPoint,
++    geometry::CGAffineTransform,
+ };
+ use core_text::{
+     font::CTFont,
+@@ -43,12 +44,13 @@
+     vector::{Vector2F, Vector2I},
+ };
+ use smallvec::SmallVec;
+-use std::{borrow::Cow, char, convert::TryFrom, sync::Arc};
++use std::{borrow::Cow, char, convert::TryFrom, ops::Range, sync::Arc};
+ 
+ use super::open_type::apply_features_and_fallbacks;
+ 
+ #[allow(non_upper_case_globals)]
+ const kCGImageAlphaOnly: u32 = 7;
++const SYNTHETIC_ITALIC_SHEAR: f32 = 0.25;
+ 
+ pub(crate) struct MacTextSystem(RwLock<MacTextSystemState>);
+ 
+@@ -67,6 +69,8 @@
+     font_ids_by_postscript_name: HashMap<String, FontId>,
+     font_ids_by_font_key: HashMap<FontKey, SmallVec<[FontId; 4]>>,
+     postscript_names_by_font_id: HashMap<FontId, String>,
++    synthetic_italic_aliases: HashMap<FontId, FontId>,
++    synthetic_italic_bases: HashMap<FontId, FontId>,
+     /// UTF-16 indices of ZWNJS
+     zwnjs_scratch_space: Vec<usize>,
+ }
+@@ -81,6 +85,8 @@
+             font_ids_by_postscript_name: HashMap::default(),
+             font_ids_by_font_key: HashMap::default(),
+             postscript_names_by_font_id: HashMap::default(),
++            synthetic_italic_aliases: HashMap::default(),
++            synthetic_italic_bases: HashMap::default(),
+             zwnjs_scratch_space: Vec::new(),
+         }))
+     }
+@@ -147,6 +153,14 @@
+             )?;
+ 
+             let font_id = candidates[ix];
++            let font_id = if font.style != FontStyle::Normal
++                && candidate_properties[ix].style == FontkitStyle::Normal
++                && !lock.is_emoji(font_id)
++            {
++                lock.synthetic_italic_id(font_id)
++            } else {
++                font_id
++            };
+             lock.font_selections.insert(font.clone(), font_id);
+             Ok(font_id)
+         }
+@@ -319,6 +333,19 @@
+         }
+     }
+ 
++    fn synthetic_italic_id(&mut self, base: FontId) -> FontId {
++        if let Some(&alias) = self.synthetic_italic_aliases.get(&base) {
++            return alias;
++        }
++        // Use an independent raster/cache key without replacing the physical
++        // font returned by the PostScript-name lookup during CoreText shaping.
++        let alias = FontId(self.fonts.len());
++        self.fonts.push(self.fonts[base.0].clone());
++        self.synthetic_italic_aliases.insert(base, alias);
++        self.synthetic_italic_bases.insert(alias, base);
++        alias
++    }
++
+     fn is_emoji(&self, font_id: FontId) -> bool {
+         self.postscript_names_by_font_id
+             .get(&font_id)
+@@ -329,12 +356,18 @@
+ 
+     fn raster_bounds(&self, params: &RenderGlyphParams) -> Result<Bounds<DevicePixels>> {
+         let font = &self.fonts[params.font_id.0];
+-        let scale = Transform2F::from_scale(params.scale_factor);
++        let transform = if self.synthetic_italic_bases.contains_key(&params.font_id) {
++            // Font Kit calculates raster bounds in screen coordinates (Y down).
++            Transform2F::row_major(1., -SYNTHETIC_ITALIC_SHEAR, 0., 1., 0., 0.)
++                .scale(params.scale_factor)
++        } else {
++            Transform2F::from_scale(params.scale_factor)
++        };
+         Ok(font
+             .raster_bounds(
+                 params.glyph_id.0,
+                 params.font_size.into(),
+-                scale,
++                transform,
+                 HintingOptions::None,
+                 font_kit::canvas::RasterizationOptions::GrayscaleAa,
+             )?
+@@ -399,6 +432,24 @@
+             let subpixel_shift = params
+                 .subpixel_variant
+                 .map(|v| v as f32 / SUBPIXEL_VARIANTS_X as f32);
++            let mut origin = CGPoint::new(
++                (subpixel_shift.x / params.scale_factor) as CGFloat,
++                (subpixel_shift.y / params.scale_factor) as CGFloat,
++            );
++            if self.synthetic_italic_bases.contains_key(&params.font_id) {
++                // Keep the subpixel shift outside the shear. Core Graphics draws
++                // with Y up, so the shear uses the opposite sign to the bounds.
++                cx.translate(origin.x, origin.y);
++                cx.concat_ctm(CGAffineTransform::new(
++                    1.,
++                    0.,
++                    SYNTHETIC_ITALIC_SHEAR as CGFloat,
++                    1.,
++                    0.,
++                    0.,
++                ));
++                origin = CGPoint::new(0., 0.);
++            }
+             cx.set_text_drawing_mode(CGTextDrawingMode::CGTextFill);
+             cx.set_gray_fill_color(0.0, 1.0);
+             cx.set_allows_antialiasing(true);
+@@ -412,10 +463,7 @@
+                 .clone_with_font_size(f32::from(params.font_size) as CGFloat)
+                 .draw_glyphs(
+                     &[params.glyph_id.0 as CGGlyph],
+-                    &[CGPoint::new(
+-                        (subpixel_shift.x / params.scale_factor) as CGFloat,
+-                        (subpixel_shift.y / params.scale_factor) as CGFloat,
+-                    )],
++                    &[origin],
+                     cx,
+                 );
+ 
+@@ -440,23 +488,36 @@
+         let mut string = CFMutableAttributedString::new();
+         let mut max_ascent = 0.0f32;
+         let mut max_descent = 0.0f32;
++        let mut synthetic_runs = SmallVec::<[(Range<usize>, FontId, FontId); 4]>::new();
+ 
+         {
+             let mut ix_converter = StringIndexConverter::new(&text);
+             let mut last_font_run = None;
+             for run in font_runs {
+                 let text = &text[ix_converter.utf8_ix..][..run.len];
+-                // if the fonts are the same, we need to disconnect the text with a ZWNJ
+-                // to prevent core text from forming ligatures between them
+-                let needs_zwnj = last_font_run.replace(run.font_id) == Some(run.font_id);
++                let base = self
++                    .synthetic_italic_bases
++                    .get(&run.font_id)
++                    .copied()
++                    .unwrap_or(run.font_id);
++                let previous = last_font_run.replace((base, run.font_id));
+ 
+                 let utf16_start = string.char_len(); // insert at end of string
+                 ix_converter.advance_to_utf8_ix(ix_converter.utf8_ix + run.len);
+ 
+                 // note: replace_str may silently ignore codepoints it dislikes (e.g., BOM at start of string)
+                 string.replace_str(&CFString::new(text), CFRange::init(utf16_start, 0));
+-                if needs_zwnj {
+-                    let zwnjs_pos = string.char_len();
++                if let Some((previous_base, previous_id)) = previous
++                    && previous_base == base
++                {
++                    // Keep the ordinary run path. If the requested style
++                    // changes on the same physical face, break ligatures at
++                    // the boundary CoreText would otherwise shape across.
++                    let zwnjs_pos = if previous_id == run.font_id {
++                        string.char_len()
++                    } else {
++                        utf16_start
++                    };
+                     self.zwnjs_scratch_space.push(zwnjs_pos as usize);
+                     string.replace_str(
+                         &CFString::from_static_string(ZWNJ_STR),
+@@ -464,6 +525,15 @@
+                     );
+                 }
+                 let utf16_end = string.char_len();
++                if base != run.font_id {
++                    // Record the range in the attributed string, whose indices
++                    // include inserted ZWNJs and any codepoints CoreText skipped.
++                    synthetic_runs.push((
++                        utf16_start as usize..utf16_end as usize,
++                        base,
++                        run.font_id,
++                    ));
++                }
+ 
+                 let cf_range = CFRange::init(utf16_start, utf16_end - utf16_start);
+                 let font = &self.fonts[run.font_id.0];
+@@ -495,39 +565,51 @@
+                     .downcast::<CTFont>()
+                     .unwrap()
+             };
+-            let font_id = self.id_for_native_font(font);
+-
+-            let mut glyphs = match runs.last_mut() {
+-                Some(run) if run.font_id == font_id => &mut run.glyphs,
+-                _ => {
+-                    runs.push(ShapedRun {
+-                        font_id,
+-                        glyphs: Vec::with_capacity(run.glyph_count().try_into().unwrap_or(0)),
+-                    });
+-                    &mut runs.last_mut().unwrap().glyphs
+-                }
++            let physical_id = self.id_for_native_font(font);
++            let capacity = if synthetic_runs.is_empty() {
++                run.glyph_count().try_into().unwrap_or(0)
++            } else {
++                0
+             };
++
+             for ((&glyph_id, position), &glyph_utf16_ix) in run
+                 .glyphs()
+                 .iter()
+                 .zip(run.positions().iter())
+                 .zip(run.string_indices().iter())
+             {
+-                let mut glyph_utf16_ix = usize::try_from(glyph_utf16_ix).unwrap();
+-                let r = self
+-                    .zwnjs_scratch_space
+-                    .binary_search_by(|&it| it.cmp(&glyph_utf16_ix));
+-                match r {
++                let attributed_ix = usize::try_from(glyph_utf16_ix).unwrap();
++                let glyph_utf16_ix = match self.zwnjs_scratch_space.binary_search(&attributed_ix) {
+                     // this glyph is a ZWNJ, skip it
+                     Ok(_) => continue,
+                     // adjust the index to account for the ZWNJs we've inserted
+-                    Err(idx) => glyph_utf16_ix -= idx * ZWNJ_SIZE_16,
+-                }
++                    Err(idx) => attributed_ix - idx * ZWNJ_SIZE_16,
++                };
+                 if ix_converter.utf16_ix > glyph_utf16_ix {
+                     // We cannot reuse current index converter, as it can only seek forward. Restart the search.
+                     ix_converter = StringIndexConverter::new(text);
+                 }
+                 ix_converter.advance_to_utf16_ix(glyph_utf16_ix);
++                let synthetic_index =
++                    synthetic_runs.partition_point(|(range, _, _)| range.end <= attributed_ix);
++                let font_id = synthetic_runs
++                    .get(synthetic_index)
++                    .filter(|(range, base, _)| {
++                        range.contains(&attributed_ix)
++                            && self.postscript_names_by_font_id[base]
++                                == self.postscript_names_by_font_id[&physical_id]
++                    })
++                    .map_or(physical_id, |(_, _, alias)| *alias);
++                let glyphs = match runs.last_mut() {
++                    Some(run) if run.font_id == font_id => &mut run.glyphs,
++                    _ => {
++                        runs.push(ShapedRun {
++                            font_id,
++                            glyphs: Vec::with_capacity(capacity),
++                        });
++                        &mut runs.last_mut().unwrap().glyphs
++                    }
++                };
+                 glyphs.push(ShapedGlyph {
+                     id: GlyphId(glyph_id as u32),
+                     position: point(position.x as f32, position.y as f32).map(px),

@@ -37,3 +37,4 @@ server.pid
 /artifacts/native-parity/
 /apps/native/target/
 /apps/native/terminal/vendor/
+/apps/native/vendor/
