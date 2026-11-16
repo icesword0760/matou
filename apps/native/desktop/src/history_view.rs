@@ -30,7 +30,7 @@ struct TextPoint {
     byte: usize,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 struct TextSelection {
     anchor: TextPoint,
     head: TextPoint,
@@ -52,6 +52,7 @@ enum SelectionUnit {
 struct SelectionDrag {
     initial: Range<TextPoint>,
     unit: SelectionUnit,
+    position: Option<Point<Pixels>>,
 }
 
 #[derive(Default)]
@@ -68,6 +69,8 @@ pub struct HistoryView {
     rows: Vec<RowGeometry>,
     selection: Option<TextSelection>,
     drag: Option<SelectionDrag>,
+    drag_frame_pending: bool,
+    interaction_subscriptions: Option<[Subscription; 2]>,
     scroll: ScrollHandle,
     center_on_anchor: bool,
     font_family: SharedString,
@@ -93,6 +96,8 @@ impl HistoryView {
             rows: Vec::new(),
             selection: None,
             drag: None,
+            drag_frame_pending: false,
+            interaction_subscriptions: None,
             scroll: ScrollHandle::new(),
             center_on_anchor: false,
             font_family: font_family.into(),
@@ -109,7 +114,7 @@ impl HistoryView {
                 .resize_with(page.lines.len(), RowGeometry::default);
         }
         self.selection = None;
-        self.drag = None;
+        self.stop_drag();
         self.state = Some(state);
         cx.notify();
     }
@@ -233,14 +238,32 @@ impl HistoryView {
             });
             range
         };
-        self.drag = Some(SelectionDrag { initial, unit });
+        self.drag = Some(SelectionDrag {
+            initial,
+            unit,
+            position: None,
+        });
         cx.stop_propagation();
         cx.notify();
     }
 
-    fn extend_selection(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+    pub fn stop_drag(&mut self) {
+        self.drag = None;
+    }
+
+    fn extend_selection(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(drag) = self.drag.as_mut() else {
+            return;
+        };
+        drag.position = Some(position);
+        self.update_selection(position);
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    fn update_selection(&mut self, position: Point<Pixels>) {
         let Some(drag) = &self.drag else { return };
-        let Some(point) = self.point_at(event.position, drag.unit, false) else {
+        let Some(point) = self.point_at(position, drag.unit, false) else {
             return;
         };
         let range = self.unit_range(point, drag.unit);
@@ -255,8 +278,48 @@ impl HistoryView {
                 head: drag.initial.end.max(range.end),
             }
         });
-        cx.stop_propagation();
-        cx.notify();
+    }
+
+    fn schedule_drag_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.drag_frame_pending || self.drag.as_ref().and_then(|drag| drag.position).is_none() {
+            return;
+        }
+        self.drag_frame_pending = true;
+        let view = cx.entity().downgrade();
+        window.on_next_frame(move |window, cx| {
+            let _ = view.update(cx, |this, cx| {
+                this.drag_frame_pending = false;
+                if !window.is_window_active() || !this.text_focus.is_focused(window) {
+                    this.stop_drag();
+                    return;
+                }
+                this.advance_drag_frame(window.scale_factor(), cx);
+            });
+        });
+    }
+
+    fn advance_drag_frame(&mut self, scale: f32, cx: &mut Context<Self>) {
+        let Some(position) = self.drag.as_ref().and_then(|drag| drag.position) else {
+            return;
+        };
+        let selection = self.selection;
+        // Chromium updates the selection from the last painted layout
+        // before scrolling; the following frame then sees the new rows.
+        self.update_selection(position);
+        let offset = self.scroll.offset();
+        let next = history_drag_offset(
+            self.scroll.bounds(),
+            position,
+            offset,
+            self.scroll.max_offset(),
+            scale,
+        );
+        if next != offset {
+            self.scroll.set_offset(next);
+        }
+        if next != offset || selection != self.selection {
+            cx.notify();
+        }
     }
 
     fn copy(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -513,19 +576,105 @@ impl HistoryView {
             .track_focus(&self.text_focus)
             .on_key_down(cx.listener(Self::copy))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::begin_selection))
-            .on_mouse_move(cx.listener(Self::extend_selection))
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _, _, _| this.drag = None),
-            )
-            .on_mouse_up_out(
-                MouseButton::Left,
-                cx.listener(|this, _, _, _| this.drag = None),
-            )
             .py(px(8.))
             .children((page.has_more_before == Some(true)).then(|| boundary("上方还有更早记录")))
             .children(rows)
             .children((page.has_more_after == Some(true)).then(|| boundary("下方还有更新记录")))
+    }
+}
+
+// Frozen Chromium 150's ordinary DOM selection scrolls a 1-device-pixel
+// target to the nearest edge each frame. The 20px belt is in Blink space,
+// so it is 10 logical pixels on the reference 2x display. This deliberately
+// differs from the terminal grid's 50ms, line-based drag scrolling.
+fn history_drag_offset(
+    viewport: Bounds<Pixels>,
+    position: Point<Pixels>,
+    offset: Point<Pixels>,
+    maximum: Size<Pixels>,
+    scale: f32,
+) -> Point<Pixels> {
+    fn axis(
+        start: Pixels,
+        size: Pixels,
+        pointer: Pixels,
+        offset: Pixels,
+        maximum: Pixels,
+        scale: f32,
+    ) -> Pixels {
+        // Blink layout geometry and scroll-origin conversions use 1/64px.
+        let start = (f32::from(start) * scale * 64.).trunc() / 64.;
+        let size = (f32::from(size) * scale * 64.).trunc() / 64.;
+        let mut pointer = (f32::from(pointer) * scale).floor();
+        if pointer < start.floor() + 20. {
+            pointer -= 20.;
+        } else if pointer > (start + size).ceil() - 20. {
+            pointer += 20.;
+        }
+        let current = -f32::from(offset) * scale;
+        let visible_start = (current * 64.).round() / 64.;
+        let target = pointer - start + (current * 64.).floor() / 64.;
+        let next = if target < visible_start {
+            target
+        } else if target + 1. > visible_start + size {
+            target + 1. - size
+        } else {
+            current
+        };
+        // gfx rounds halves toward positive infinity, then clamps in device pixels.
+        px(-(next + 0.5)
+            .floor()
+            .clamp(0., (f32::from(maximum) * scale).trunc())
+            / scale)
+    }
+    point(
+        axis(
+            viewport.left(),
+            viewport.size.width,
+            position.x,
+            offset.x,
+            maximum.width,
+            scale,
+        ),
+        axis(
+            viewport.top(),
+            viewport.size.height,
+            position.y,
+            offset.y,
+            maximum.height,
+            scale,
+        ),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::history_drag_offset;
+    use gpui::{Bounds, point, px, size};
+
+    #[test]
+    fn history_drag_scroll_matches_frozen_chromium() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../fixtures/history-autoscroll.json")).unwrap();
+        for case in fixture["cases"].as_array().unwrap() {
+            let n = |field: &str, index: usize| px(case[field][index].as_f64().unwrap() as f32);
+            let actual = history_drag_offset(
+                Bounds::new(
+                    point(n("viewport", 0), n("viewport", 1)),
+                    size(n("viewport", 2), n("viewport", 3)),
+                ),
+                point(n("pointer", 0), n("pointer", 1)),
+                point(n("offset", 0), n("offset", 1)),
+                size(n("maximum", 0), n("maximum", 1)),
+                case["scale"].as_f64().unwrap() as f32,
+            );
+            assert_eq!(
+                actual,
+                point(n("next", 0), n("next", 1)),
+                "{}",
+                case["name"]
+            );
+        }
     }
 }
 
@@ -560,7 +709,18 @@ fn boundary(text: &'static str) -> Div {
 }
 
 impl Render for HistoryView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.interaction_subscriptions.is_none() {
+            self.interaction_subscriptions = Some([
+                cx.observe_window_activation(window, |this, window, _| {
+                    if !window.is_window_active() {
+                        this.stop_drag();
+                    }
+                }),
+                cx.on_blur(&self.text_focus, window, |this, _, _| this.stop_drag()),
+            ]);
+        }
+        let entity = cx.entity().downgrade();
         let view = div()
             .id("terminal-history-context")
             .size_full()
@@ -579,7 +739,39 @@ impl Render for HistoryView {
                     cx.stop_propagation();
                     cx.emit(HistoryViewEvent::ReturnToLive);
                 }
-            }));
+            }))
+            .child(
+                canvas(
+                    |_, _, _| (),
+                    move |_, _, window, cx| {
+                        let moving = entity.clone();
+                        window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
+                            if phase == DispatchPhase::Capture {
+                                let _ = moving.update(cx, |this, cx| {
+                                    if event.pressed_button == Some(MouseButton::Left)
+                                        && window.is_window_active()
+                                        && this.text_focus.is_focused(window)
+                                    {
+                                        this.extend_selection(event.position, cx);
+                                    } else {
+                                        this.stop_drag();
+                                    }
+                                });
+                            }
+                        });
+                        let released = entity.clone();
+                        window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
+                            if phase == DispatchPhase::Capture && event.button == MouseButton::Left
+                            {
+                                let _ = released.update(cx, |this, _| this.stop_drag());
+                            }
+                        });
+                        let _ = entity.update(cx, |this, cx| this.schedule_drag_frame(window, cx));
+                    },
+                )
+                .absolute()
+                .size_full(),
+            );
         let Some(state) = &self.state else {
             return view;
         };
