@@ -5,6 +5,7 @@ import { Transform } from 'node:stream'
 import { HttpsProxyAgent } from 'https-proxy-agent'
 import { SocksProxyAgent } from 'socks-proxy-agent'
 import { resolveProxyForUrl } from '../egress/proxy-route'
+import { convertDeepSeekInlineTools, DeepSeekInlineToolCompatibilityError, isDeepSeekMessagesDestination } from './deepseek-inline-tools'
 
 const MAX_REQUEST_BYTES = 64 * 1024 * 1024
 const HOP_BY_HOP_HEADERS = [
@@ -62,6 +63,8 @@ export async function startClaudeRequestGateway(options: GatewayOptions): Promis
       if (controller.signal.aborted) return
       if (error instanceof RequestTooLarge) {
         sendError(response, 413, 'Claude request exceeds the gateway size limit.')
+      } else if (error instanceof DeepSeekInlineToolCompatibilityError) {
+        sendError(response, 400, error.message)
       } else {
         sendError(response, 502, 'Claude request gateway could not reach the upstream service.')
       }
@@ -111,9 +114,10 @@ async function forwardRequest(
   let body: Buffer | undefined
   let override: GatewayOverride | undefined
   let rewritten = false
+  let message: Record<string, unknown> | undefined
   if (request.method === 'POST' && ['/v1/messages', '/v1/messages/count_tokens'].includes(route.path)) {
     body = await readBody(request)
-    const message = parseMessage(body)
+    message = parseMessage(body)
     if (message && typeof message.model === 'string') {
       const marker = request.headers['x-claude-code-compaction']
       override = await resolveOverride({
@@ -133,6 +137,13 @@ async function forwardRequest(
   const destination = new URL(target)
   destination.pathname = target.pathname.replace(/\/+$/, '') + route.path
   if (route.query) destination.search += destination.search ? `&${route.query}` : `?${route.query}`
+  if (message && isDeepSeekMessagesDestination(destination)) {
+    const converted = convertDeepSeekInlineTools(message)
+    if (converted !== message) {
+      body = Buffer.from(JSON.stringify(converted))
+      rewritten = true
+    }
+  }
 
   const headers = endToEndHeaders(request.headers)
   delete headers.host

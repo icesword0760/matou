@@ -1,0 +1,15 @@
+{
+  "status": 200,
+  "models": [
+    "deepseek-flash",
+    "deepseek-flash"
+  ],
+  "effort": "high (gateway override)",
+  "toolCalls": [
+    "current_probe"
+  ],
+  "reply": [
+    "TOOL_CHECK_OK"
+  ],
+  "boundary": "Two actual DeepSeek API turns through production gateway; 29 actual session tool definitions plus synthetic add/remove/re-add history, top-level custom and stale tool reference; tool execution simulated, no user content"
+}

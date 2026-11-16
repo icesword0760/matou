@@ -10,6 +10,7 @@ import type { SubscriptionAccounts } from '../model-router/subscription-accounts
 import type { RouterLease } from '../model-router/manager'
 import { nativeClaudeModels } from './native-model-catalog'
 import type { GatewayOverride } from './claude-request-gateway'
+import { isDeepSeekMessagesDestination } from './deepseek-inline-tools'
 
 const exec = promisify(execFile)
 export interface ClaudeModelRoutingOptions {
@@ -96,7 +97,15 @@ async function officialHeaders(env: NodeJS.ProcessEnv): Promise<Record<string, s
 }
 
 export function modelRoutingEnabled(preferences: AgentModelPreferences, provider?: ProviderConfigView): boolean {
-  return preferences.compaction.mode === 'custom' || Object.values(provider?.effortMapping ?? {}).some(value => value !== 'follow') || Boolean(provider?.reasoningEffort && provider.reasoningEffort !== 'follow')
+  let deepSeek = false
+  if (provider?.endpoint) {
+    try {
+      const destination = new URL(provider.endpoint)
+      destination.pathname = destination.pathname.replace(/\/+$/, '') + '/v1/messages'
+      deepSeek = isDeepSeekMessagesDestination(destination)
+    } catch { /* Invalid provider endpoints are handled during launch. */ }
+  }
+  return deepSeek || preferences.compaction.mode === 'custom' || Object.values(provider?.effortMapping ?? {}).some(value => value !== 'follow') || Boolean(provider?.reasoningEffort && provider.reasoningEffort !== 'follow')
 }
 export function restoredProviderModel(bound: string | undefined, selected: string | undefined, provider: ProviderConfigView | undefined, preferences: AgentModelPreferences): string | undefined {
   const apiRole = /^matou-api\/(opus|sonnet|haiku)$/.exec(bound ?? '')?.[1] as 'opus' | 'sonnet' | 'haiku' | undefined

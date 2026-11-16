@@ -906,7 +906,7 @@ sleep 30
       expect((await readFile(join(root, 'control-claude-session.args'), 'utf8')).trim().split('\n'))
         .toEqual([
           '--plugin-dir', join(controlAssetRoot, 'providers', 'claude-plugin'),
-          '--model', 'claude-code-persisted', '--resume', 'provider-claude-code',
+          '--model', 'claude-control-model', '--resume', 'provider-claude-code',
           '--dangerously-skip-permissions'
         ])
       expect((await readFile(join(root, 'control-codex-session.args'), 'utf8')).trim().split('\n'))
@@ -923,7 +923,7 @@ sleep 30
         {
           id: 'binding-claude-code',
           metadata: {
-            permissionMode: 'bypassPermissions', model: 'claude-code-persisted',
+            permissionMode: 'bypassPermissions', model: 'claude-control-model',
             providerConfigId: providerSnapshot.activeProviderIds['claude-code']
           }
         },
@@ -1452,34 +1452,7 @@ sleep 30
           model: { id: 'claude-fresh-a' }, cwd: root
         })
       })).status).toBe(200)
-      await waitUntil(() => repository.getResumeBinding(
-        'provider-config-fresh-identity', 'claude-code'
-      ) !== undefined)
-      expect(repository.getResumeBinding(
-        'provider-config-fresh-identity', 'claude-code'
-      )).toMatchObject({
-        providerSessionId: 'fresh-provider-identity',
-        metadata: expect.objectContaining({
-          providerConfigId: providerA.id, model: 'claude-fresh-a'
-        })
-      })
-      expect(sessions.providerIdentityConfirmed(firstSession.runId!)).toBe(true)
-
-      freshPort.receive({
-        type: 'rpc.request', protocolVersion: PROTOCOL_VERSION,
-        requestId: 'provider-config-fresh-activate-after-identity',
-        method: 'provider-config.activate', capability: 'renderer',
-        deadlineAt: Date.now() + 2_000,
-        payload: { cli: 'claude-code', providerId: providerB.id }
-      })
-      await waitUntil(() => freshPort.findRpcResponse(
-        'provider-config-fresh-activate-after-identity'
-      ) !== undefined)
-      expect((freshPort.findRpcResponse('provider-config-fresh-activate-after-identity') as {
-        result: { sessionTransitions: unknown[] }
-      }).result.sessionTransitions).toContainEqual({
-        sessionId: 'provider-config-fresh-identity', status: 'updated'
-      })
+      await waitUntil(() => Boolean(sessions.get('provider-config-fresh-identity')) && sessions.get('provider-config-fresh-identity')!.pid !== firstPid)
       expect(sessions.get('provider-config-fresh-identity')?.pid).not.toBe(firstPid)
       expect(repository.getResumeBinding(
         'provider-config-fresh-identity', 'claude-code'
@@ -1618,6 +1591,12 @@ sleep 30
       expect(hud.snapshot('provider-config-write-failure')).toMatchObject({
         model: 'claude-write-a', contextPercent: 37, taskStatus: 'running'
       })
+      updateSpy.mockRestore()
+      await sessions.drainProviderActivations()
+      await waitUntil(() => Boolean(sessions.get('provider-config-write-failure')) && sessions.get('provider-config-write-failure')!.pid !== firstPid)
+      expect(providerBindingMetadata('binding-provider-config-write-failure')).toMatchObject({
+        providerConfigId: providerB.id, model: 'claude-write-b', permissionMode: 'plan'
+      })
     } finally {
       updateSpy?.mockRestore()
       await sessions.shutdownAll()
@@ -1627,7 +1606,7 @@ sleep 30
     }
   })
 
-  it('restores a Session with its bound provider configuration and model after global defaults change', async () => {
+  it('restores an unopened Claude Session with the current global provider while preserving history identity', async () => {
     const executable = join(root, 'provider-bound-restore.sh')
     const log = join(root, 'provider-bound-restore-invocations.txt')
     await writeFile(executable, [
@@ -1681,8 +1660,8 @@ sleep 30
       await waitUntilAsync(async () => Boolean((await readFile(log, 'utf8').catch(() => '')).trim()))
 
       expect((await readFile(log, 'utf8')).trim()).toBe(
-        '--model session-frozen-model --resume provider-context-bound ' +
-        '--dangerously-skip-permissions|https://bound.example|KEY_A'
+        '--model later-provider-model --resume provider-context-bound ' +
+        '--dangerously-skip-permissions|https://later.example|KEY_B'
       )
     } finally {
       restorePort.receive({
@@ -1691,6 +1670,176 @@ sleep 30
       })
       await settle()
       restoreServer.close()
+      restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
+    }
+  })
+
+  it('keeps matched provider sessions running on repeat activation and restarts only for changed launch settings', async () => {
+    const executable = join(root, 'provider-idempotent.sh')
+    await writeFile(executable, '#!/bin/sh\nsleep 30\n')
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    const providerConfigs = new ProviderConfigStore(root)
+    const provider = await providerConfigs.upsert({ cli: 'claude-code', name: 'Matching provider', endpoint: 'https://matching.example', model: 'claude-match', apiKey: 'KEY_A' })
+    await providerConfigs.activate('claude-code', provider.id)
+    registerSession(database, 'provider-matched', 'claude-code')
+    database.run(`INSERT INTO provider_bindings (id, session_id, provider, provider_session_id, resume_state, metadata_json, created_at, updated_at, validated_at)
+      VALUES ('binding-provider-matched', 'provider-matched', 'claude-code', 'matched-history', 'available', ?, 1, 1, 1)`,
+    JSON.stringify({ providerConfigId: provider.id, model: 'claude-native-choice', permissionMode: 'default' }))
+    const sessions = createTestSessionRegistry()
+    const matchPort = new MockPort()
+    const matchServer = new RuntimeServer(matchPort, root, database, new RuntimeRpcRouter(database, undefined, { providerConfigs }), undefined, sessions, undefined, undefined, { providerConfigs })
+    matchPort.receive({ type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'matching' })
+    const activate = async (id: string) => {
+      matchPort.receive({ type: 'rpc.request', protocolVersion: PROTOCOL_VERSION, requestId: id, method: 'provider-config.activate', capability: 'renderer', deadlineAt: Date.now() + 2000, payload: { cli: 'claude-code', providerId: provider.id } })
+      await waitUntil(() => matchPort.findRpcResponse(id) !== undefined)
+    }
+    try {
+      await matchServer.startOrResumeSession({ sessionId: 'provider-matched', executionContextId: 'replay-context', profile: 'claude-code', cols: 80, rows: 24 })
+      const initial = sessions.get('provider-matched')!
+      matchServer.providerIdentityRecorded('provider-matched', initial.runId!)
+      await activate('matching-first')
+      await activate('matching-repeat')
+      expect(sessions.get('provider-matched')).toBe(initial)
+      expect(providerBindingMetadata('binding-provider-matched').model).toBe('claude-native-choice')
+      await providerConfigs.upsert({ id: provider.id, cli: 'claude-code', name: 'Display name only', endpoint: provider.endpoint, model: provider.model })
+      await activate('matching-display-change')
+      expect(sessions.get('provider-matched')).toBe(initial)
+      await providerConfigs.upsert({ id: provider.id, cli: 'claude-code', name: provider.name, endpoint: provider.endpoint, model: provider.model, apiKey: 'KEY_B', reasoningEffort: 'high' })
+      expect(sessions.get('provider-matched')).toBe(initial)
+      await activate('matching-effective-change')
+      expect(sessions.get('provider-matched')?.pid).not.toBe(initial.pid)
+      expect(providerBindingMetadata('binding-provider-matched')).toMatchObject({ providerConfigId: provider.id, model: provider.model })
+      expect(database.get<{ provider_session_id: string }>("SELECT provider_session_id FROM provider_bindings WHERE id = 'binding-provider-matched'")?.provider_session_id).toBe('matched-history')
+    } finally {
+      matchServer.close()
+      await sessions.shutdownAll()
+      restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
+    }
+  })
+
+  it('reapplies changed provider settings to dormant sessions while ordinary resume preserves native model choices', async () => {
+    const executable = join(root, 'provider-dormant-reactivate.sh')
+    const log = join(root, 'provider-dormant-reactivate.txt')
+    await writeFile(executable, `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(log)}\nsleep 30\n`)
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    const providerConfigs = new ProviderConfigStore(root)
+    const provider = await providerConfigs.upsert({ cli: 'claude-code', name: 'Dormant same provider', endpoint: 'https://dormant.example', model: 'claude-global-fixed', apiKey: 'KEY' })
+    await providerConfigs.activate('claude-code', provider.id)
+    registerSession(database, 'provider-dormant', 'claude-code')
+    database.run(`INSERT INTO provider_bindings (id, session_id, provider, provider_session_id, resume_state, metadata_json, created_at, updated_at, validated_at)
+      VALUES ('binding-provider-dormant', 'provider-dormant', 'claude-code', 'dormant-history', 'available', ?, 1, 1, 1)`,
+    JSON.stringify({ providerConfigId: provider.id, model: 'claude-native-choice', permissionMode: 'plan' }))
+    let sessions = createTestSessionRegistry()
+    const dormantPort = new MockPort()
+    const dormantServer = new RuntimeServer(dormantPort, root, database, new RuntimeRpcRouter(database, undefined, { providerConfigs }), undefined, sessions, undefined, undefined, { providerConfigs })
+    dormantPort.receive({ type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'dormant' })
+    const descriptor = { sessionId: 'provider-dormant', executionContextId: 'replay-context', profile: 'claude-code' as const, cols: 80, rows: 24 }
+    let restoredServer: RuntimeServer | undefined
+    try {
+      await dormantServer.startOrResumeSession(descriptor)
+      await waitUntilAsync(async () => (await readFile(log, 'utf8').catch(() => '')).includes('claude-native-choice'))
+      dormantPort.receive({ type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION, sessionId: descriptor.sessionId })
+      await waitUntil(() => !sessions.has(descriptor.sessionId))
+      await providerConfigs.upsert({ id: provider.id, cli: 'claude-code', name: provider.name, endpoint: provider.endpoint, model: 'claude-global-updated' })
+      dormantPort.receive({ type: 'rpc.request', protocolVersion: PROTOCOL_VERSION, requestId: 'dormant-reactivate', method: 'provider-config.activate', capability: 'renderer', deadlineAt: Date.now() + 2000, payload: { cli: 'claude-code', providerId: provider.id } })
+      await waitUntil(() => dormantPort.findRpcResponse('dormant-reactivate') !== undefined)
+      await sessions.shutdownAll()
+      dormantServer.close()
+      sessions = createTestSessionRegistry()
+      restoredServer = new RuntimeServer(new MockPort(), root, database, undefined, undefined, sessions, undefined, undefined, { providerConfigs: new ProviderConfigStore(root) })
+      await restoredServer.startOrResumeSession(descriptor)
+      await waitUntilAsync(async () => (await readFile(log, 'utf8').catch(() => '')).trim().split('\n').length === 2)
+      expect((await readFile(log, 'utf8')).trim().split('\n')[1]).toContain('--model claude-global-updated --resume dormant-history --permission-mode plan')
+      expect(providerBindingMetadata('binding-provider-dormant')).toMatchObject({ providerConfigId: provider.id, model: 'claude-global-updated' })
+      expect(database.get<{ provider_session_id: string }>("SELECT provider_session_id FROM provider_bindings WHERE id = 'binding-provider-dormant'")?.provider_session_id).toBe('dormant-history')
+    } finally {
+      await sessions.shutdownAll()
+      dormantServer.close()
+      restoredServer?.close()
+      restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
+    }
+  })
+
+  it('resets a removed provider model to the official default without losing the resume identity', async () => {
+    const executable = join(root, 'provider-official-default.sh')
+    const log = join(root, 'provider-official-default.txt')
+    await writeFile(executable, `#!/bin/sh\nprintf '%s\\n' "$*" > ${JSON.stringify(log)}\nsleep 30\n`)
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    const providerConfigs = new ProviderConfigStore(root)
+    registerSession(database, 'removed-provider-session', 'claude-code')
+    database.run(`INSERT INTO provider_bindings (id, session_id, provider, provider_session_id, resume_state, metadata_json, created_at, updated_at, validated_at)
+      VALUES ('binding-removed-provider', 'removed-provider-session', 'claude-code', 'preserved-identity', 'available', ?, 1, 1, 1)`,
+    JSON.stringify({ providerConfigId: 'deleted-provider', model: 'deepseek-flash', permissionMode: 'default' }))
+    const sessions = createTestSessionRegistry()
+    const restorePort = new MockPort()
+    const restoreServer = new RuntimeServer(restorePort, root, database, undefined, undefined, sessions, undefined, undefined, { providerConfigs })
+    try {
+      await restoreServer.startOrResumeSession({ sessionId: 'removed-provider-session', executionContextId: 'replay-context', profile: 'claude-code', cols: 80, rows: 24 })
+      await waitUntilAsync(async () => (await readFile(log, 'utf8').catch(() => '')).includes('--model default --resume preserved-identity'))
+      expect(providerBindingMetadata('binding-removed-provider')).toMatchObject({ providerConfigId: 'anthropic-official', model: 'default' })
+    } finally {
+      await sessions.shutdownAll()
+      restoreServer.close()
+      restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
+    }
+  })
+
+  it('automatically applies a provider activated while the first Claude spawn is still preparing', async () => {
+    const executable = join(root, 'provider-first-spawn-race.sh')
+    const log = join(root, 'provider-first-spawn-race.txt')
+    await writeFile(executable, `#!/bin/sh\nprintf '%s|%s\\n' "$*" "$ANTHROPIC_BASE_URL" >> ${JSON.stringify(log)}\nsleep 30\n`)
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    const providerConfigs = new ProviderConfigStore(root)
+    const first = await providerConfigs.upsert({ cli: 'claude-code', name: 'Preparing A', endpoint: 'https://preparing-a.example', model: 'claude-preparing-a', apiKey: 'A' })
+    const latest = await providerConfigs.upsert({ cli: 'claude-code', name: 'Preparing B', endpoint: 'https://preparing-b.example', model: 'claude-preparing-b', apiKey: 'B' })
+    await providerConfigs.activate('claude-code', first.id)
+    registerSession(database, 'provider-preparing', 'claude-code')
+    database.run(`INSERT INTO provider_bindings (id, session_id, provider, provider_session_id, resume_state, metadata_json, created_at, updated_at, validated_at)
+      VALUES ('binding-provider-preparing', 'provider-preparing', 'claude-code', 'preparing-history', 'available', ?, 1, 1, 1)`,
+    JSON.stringify({ providerConfigId: first.id, model: first.model, permissionMode: 'default' }))
+    const sessions = createTestSessionRegistry()
+    const racePort = new MockPort()
+    const raceServer = new RuntimeServer(racePort, root, database, new RuntimeRpcRouter(database, undefined, { providerConfigs }), undefined, sessions, undefined, undefined, { providerConfigs })
+    racePort.receive({ type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'preparing' })
+    const originalSelection = providerConfigs.launchSelection.bind(providerConfigs)
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    let preparing = false
+    const selection = vi.spyOn(providerConfigs, 'launchSelection').mockImplementationOnce(async (...args) => {
+      const selected = await originalSelection(...args)
+      preparing = true
+      await gate
+      return selected
+    })
+    const launch = raceServer.startOrResumeSession({ sessionId: 'provider-preparing', executionContextId: 'replay-context', profile: 'claude-code', cols: 80, rows: 24 })
+    try {
+      await waitUntil(() => preparing)
+      racePort.receive({ type: 'rpc.request', protocolVersion: PROTOCOL_VERSION, requestId: 'preparing-activate', method: 'provider-config.activate', capability: 'renderer', deadlineAt: Date.now() + 2000, payload: { cli: 'claude-code', providerId: latest.id } })
+      await waitUntil(() => racePort.findRpcResponse('preparing-activate') !== undefined)
+      release()
+      await launch
+      await waitUntilAsync(async () => (await readFile(log, 'utf8').catch(() => '')).includes('--model claude-preparing-a --resume preparing-history|https://preparing-a.example'))
+      const initial = sessions.get('provider-preparing')!
+      raceServer.providerIdentityRecorded('provider-preparing', initial.runId!)
+      await waitUntil(() => Boolean(sessions.get('provider-preparing')) && sessions.get('provider-preparing')!.pid !== initial.pid)
+      await sessions.runExclusive('provider-preparing', async () => undefined)
+      expect(providerBindingMetadata('binding-provider-preparing')).toMatchObject({ providerConfigId: latest.id, model: latest.model })
+      await waitUntilAsync(async () => (await readFile(log, 'utf8').catch(() => '')).trim().split('\n').length === 2)
+      expect((await readFile(log, 'utf8')).trim().split('\n')[1]).toContain('--model claude-preparing-b --resume preparing-history|https://preparing-b.example')
+    } finally {
+      release()
+      await launch
+      selection.mockRestore()
+      raceServer.close()
+      await sessions.shutdownAll()
       restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
     }
   })
@@ -2083,7 +2232,7 @@ sleep 30
         payload: { cli: 'claude-code', providerId }
       })
       await waitUntil(() => providerPort.findRpcResponse('provider-config-storage-activate') !== undefined)
-      await waitUntil(() => sessions.get('provider-config-healthy')?.pid !== healthyPid)
+      await waitUntil(() => Boolean(sessions.get('provider-config-healthy')) && sessions.get('provider-config-healthy')!.pid !== healthyPid)
 
       const activation = providerPort.findRpcResponse('provider-config-storage-activate') as {
         result: { sessionTransitions: unknown[] }
@@ -2103,6 +2252,10 @@ sleep 30
       })
       expect(sessions.get('provider-config-faulted')?.pid).toBe(faultedPid)
       expect(sessions.get('provider-config-healthy')?.pid).not.toBe(healthyPid)
+      writable = true
+      providerPort.receive({ type: 'terminal.storage-retry', protocolVersion: PROTOCOL_VERSION, sessionId: 'provider-config-faulted' })
+      await waitUntil(() => Boolean(sessions.get('provider-config-faulted')) && sessions.get('provider-config-faulted')!.pid !== faultedPid)
+      expect(providerBindingMetadata('binding-provider-config-faulted')).toMatchObject({ providerConfigId: providerId, model: 'claude-team' })
     } finally {
       writable = true
       await sessions.shutdownAll()
@@ -2126,6 +2279,10 @@ sleep 30
     const providerB = await providerConfigs.upsert({
       cli: 'claude-code', name: 'Pending identity provider B',
       endpoint: 'https://pending-b.example/', model: 'claude-pending-b', apiKey: 'KEY_B'
+    })
+    const providerC = await providerConfigs.upsert({
+      cli: 'claude-code', name: 'Pending identity provider C',
+      endpoint: 'https://pending-c.example/', model: 'claude-pending-c', apiKey: 'KEY_C'
     })
     await providerConfigs.activate('claude-code', providerA.id)
     registerSession(database, 'provider-config-pending-identity', 'claude-code')
@@ -2178,6 +2335,11 @@ sleep 30
       })
       expect(providerBindingMetadata('binding-provider-config-pending-identity')).toEqual(bindingBefore)
       expect(sessions.get('provider-config-pending-identity')?.pid).toBe(originalPid)
+      pendingPort.receive({ type: 'rpc.request', protocolVersion: PROTOCOL_VERSION, requestId: 'provider-config-pending-activate-last', method: 'provider-config.activate', capability: 'renderer', deadlineAt: Date.now() + 2000, payload: { cli: 'claude-code', providerId: providerC.id } })
+      await waitUntil(() => pendingPort.findRpcResponse('provider-config-pending-activate-last') !== undefined)
+      pendingServer.providerIdentityRecorded('provider-config-pending-identity', sessions.get('provider-config-pending-identity')!.runId!)
+      await waitUntil(() => Boolean(sessions.get('provider-config-pending-identity')) && sessions.get('provider-config-pending-identity')!.pid !== originalPid)
+      expect(providerBindingMetadata('binding-provider-config-pending-identity')).toMatchObject({ providerConfigId: providerC.id, model: 'claude-pending-c' })
     } finally {
       await sessions.shutdownAll()
       pendingServer.close()
@@ -5811,7 +5973,7 @@ sleep 30
         sessionId: 'provider-live-permission', provider: 'claude-code',
         permissionMode: 'bypassPermissions', respawn: true, now: 3
       }))
-      await waitUntil(() => sessions.get('provider-live-permission')?.pid !== firstPid)
+      await waitUntil(() => Boolean(sessions.get('provider-live-permission')) && sessions.get('provider-live-permission')!.pid !== firstPid)
       await waitUntil(() => livePort.findRpcResponse('permission-bypass-live') !== undefined)
       await waitUntilAsync(async () => (await readFile(argumentFile, 'utf8').catch(() => '')).includes('--dangerously-skip-permissions'))
 
@@ -6046,7 +6208,7 @@ sleep 30
     }
   })
 
-  it('restores a successful Session model change instead of a later global default', async () => {
+  it('restores a Session after a process restart with the latest global provider instead of its previous native model', async () => {
     server.close()
     const executable = join(root, 'session-model-restart.sh')
     const launchLog = join(root, 'session-model-restart-launches.txt')
@@ -6140,12 +6302,12 @@ sleep 30
         .trim().split('\n').length === 2)
 
       expect((await readFile(launchLog, 'utf8')).trim().split('\n')[1]).toBe(
-        '--model claude-sonnet-4-6 --resume provider-model-restart|' +
-        'https://restart-a.example|KEY_A'
+        '--model claude-haiku-c --resume provider-model-restart|' +
+        'https://restart-c.example|KEY_C'
       )
       expect(restoredPort.last('terminal.hud')).toMatchObject({
         hud: {
-          modelStrategy: 'claude-sonnet-4-6', model: 'claude-sonnet-4-6',
+          modelStrategy: 'opusplan', model: 'claude-haiku-c',
           permissionMode: 'default'
         }
       })
@@ -6314,7 +6476,7 @@ sleep 30
         permissionMode: 'bypassPermissions', respawn: true, now: 2
       }))
       await waitUntil(() => ownerPort.findRpcResponse('cross-window-owner-bypass') !== undefined)
-      await waitUntil(() => sessions.get('provider-cross-window')?.pid !== beforeOwnerRespawn)
+      await waitUntil(() => Boolean(sessions.get('provider-cross-window')) && sessions.get('provider-cross-window')!.pid !== beforeOwnerRespawn)
       const firstPendingPid = sessions.get('provider-cross-window')!.pid
 
       secondaryPort.receive(rpc('cross-window-secondary-plan', 'session.set-permission-mode', {
@@ -6339,7 +6501,7 @@ sleep 30
         permissionMode: 'bypassPermissions', respawn: true, now: 5
       }))
       await waitUntil(() => ownerPort.findRpcResponse('cross-window-owner-bypass-again') !== undefined)
-      await waitUntil(() => sessions.get('provider-cross-window')?.pid !== afterSecondaryPermissionPid)
+      await waitUntil(() => Boolean(sessions.get('provider-cross-window')) && sessions.get('provider-cross-window')!.pid !== afterSecondaryPermissionPid)
       const secondPendingPid = sessions.get('provider-cross-window')!.pid
       const secondPendingRunId = sessions.get('provider-cross-window')!.runId!
 
@@ -6366,7 +6528,10 @@ sleep 30
       })
       await waitUntil(() => secondaryPort.last('terminal.spawned')?.pid === secondPendingPid)
       secondaryServer.providerIdentityRecorded('provider-cross-window', secondPendingRunId)
+      await waitUntil(() => Boolean(sessions.get('provider-cross-window')) && sessions.get('provider-cross-window')!.pid !== secondPendingPid)
+      secondaryServer.providerIdentityRecorded('provider-cross-window', sessions.get('provider-cross-window')!.runId!)
       expect(sessions.providerIdentityPending('provider-cross-window')).toBe(false)
+      await sessions.runExclusive('provider-cross-window', async () => undefined)
 
       const takeoverSession = sessions.get('provider-cross-window')!
       const beforeTakeoverOutput = secondaryPort.sent.length
@@ -6432,7 +6597,7 @@ sleep 30
       }))
 
       await waitUntil(() => freshPort.findRpcResponse('fresh-permission-bypass') !== undefined)
-      await waitUntil(() => sessions.get('provider-fresh-permission')?.pid !== firstPid)
+      await waitUntil(() => Boolean(sessions.get('provider-fresh-permission')) && sessions.get('provider-fresh-permission')!.pid !== firstPid)
       await waitUntilAsync(async () => (await readFile(argumentFile, 'utf8').catch(() => '')).length > 0)
       expect((await readFile(argumentFile, 'utf8')).trim().split('\n')).toEqual([
         '--dangerously-skip-permissions'
@@ -7225,6 +7390,7 @@ sleep 30
       interactivePort, root, database, undefined, undefined, sessions, undefined, undefined,
       { providerResumeTimeoutMs: 2_000 }
     )
+    let recovery: Promise<void> | undefined
     try {
       registerSession(database, 'provider-interactive-session', 'claude-code')
       database.run(
@@ -7239,11 +7405,12 @@ sleep 30
         clientId: 'provider-interactive-renderer'
       })
       let recoverySettled = false
-      const recovery = interactiveServer.ensureSessionRunning({
+      recovery = interactiveServer.ensureSessionRunning({
         sessionId: 'provider-interactive-session', sceneId: 'scene-provider-interactive',
         executionContextId: 'replay-context', profile: 'claude-code',
         priority: 'active-session', enqueueSequence: 1
       }).then(() => { recoverySettled = true })
+      void recovery.catch(() => undefined)
       await waitUntil(() => sessions.has('provider-interactive-session'))
       await waitUntil(() => recoverySettled, 500)
       await recovery
@@ -7273,6 +7440,7 @@ sleep 30
       })
       await settle()
       interactiveServer.close()
+      await recovery?.catch(() => undefined)
       restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
     }
   })
