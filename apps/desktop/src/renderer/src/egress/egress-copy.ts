@@ -64,6 +64,32 @@ export function familyWarnCount(
   ).length
 }
 
+/** Summarize all exit families for sessions without a monitored provider. */
+export function globalChipCopy(status: EgressStatusWire | undefined, zh: boolean): ChipCopy {
+  if (!status || status.state === 'checking') {
+    return { label: zh ? '检查中…' : 'Checking…', tone: 'neutral' }
+  }
+  switch (status.state) {
+    case 'abnormal': {
+      const paused = status.families.reduce((total, family) => total + family.frozenSessionIds.length, 0)
+      return {
+        label: paused > 0
+          ? zh ? `出口异常 · 已暂停 ${paused} 个会话` : `Exit problem · ${paused} session(s) paused`
+          : zh ? '出口异常' : 'Exit problem',
+        tone: 'danger'
+      }
+    }
+    case 'warning': {
+      const count = Math.max(1, status.checks.filter((check) => check.result === 'warn' || check.result === 'fail').length)
+      return { label: zh ? `${count} 项提醒` : `${count} warning(s)`, tone: 'warn' }
+    }
+    case 'ok':
+      return { label: zh ? '出口正常' : 'Exit OK', tone: 'ok' }
+    default:
+      return { label: zh ? '无法确认出口' : 'Exit unconfirmed', tone: 'warn' }
+  }
+}
+
 /** Compute the exact HUD chip label and visual tone for a provider family. */
 export function chipCopy(
   statusState: EgressStatusWire['state'],

@@ -2,7 +2,8 @@ import { useCallback, useRef, useState, type RefObject } from 'react'
 import { createPortal } from 'react-dom'
 import type { EgressStatusWire } from '@matou/contracts'
 import { useLocale } from '../i18n/LocaleProvider'
-import { chipCopy, type ChipCopy } from './egress-copy'
+import { useRuntimeClient } from '../runtime/RuntimeProvider'
+import { chipCopy, globalChipCopy, type ChipCopy } from './egress-copy'
 import { EgressPanel } from './EgressPanel'
 import {
   findEgressFamily,
@@ -17,29 +18,46 @@ export interface EgressChipProps {
   readonly sessionId: string
 }
 
+interface ChipSelection {
+  readonly copy: ChipCopy
+  /** True for the always-available network-check entry, false for a monitored family. */
+  readonly isGlobal: boolean
+}
+
 function selectChipCopy(
   status: EgressStatusWire | undefined,
   sessionId: string,
   zh: boolean
-): ChipCopy | null {
-  if (!status) return null
+): ChipSelection {
   const family = sessionEgressFamily(status, sessionId)
-  if (!family) return null
+  if (!status || !family) {
+    return { copy: globalChipCopy(status, zh), isGlobal: true }
+  }
   const familyState = findEgressFamily(status, family)
-  return chipCopy(
-    status.state,
-    family,
-    familyState,
-    status.checks,
-    status.checkedAt,
-    zh
-  )
+  return {
+    copy: chipCopy(
+      status.state,
+      family,
+      familyState,
+      status.checks,
+      status.checkedAt,
+      zh
+    ),
+    isGlobal: false
+  }
 }
 
-function equalChipCopy(a: ChipCopy | null, b: ChipCopy | null): boolean {
+function equalChipCopy(
+  a: ChipSelection | null,
+  b: ChipSelection | null
+): boolean {
   if (a === b) return true
   if (!a || !b) return false
-  return a.label === b.label && a.tone === b.tone
+  return (
+    a.isGlobal === b.isGlobal &&
+    a.copy.label === b.copy.label &&
+    a.copy.tone === b.copy.tone
+  )
 }
 
 function ConnectedEgressPanel({
@@ -64,20 +82,26 @@ function ConnectedEgressPanel({
   )
 }
 
-/** Compact HUD exit-status chip for monitored agent cards; hidden for shell/third-party cards. */
+/** Compact HUD exit-status chip for every session; monitored cards show family copy, others a global network-check entry. */
 export function EgressChip({ sessionId }: EgressChipProps) {
+  const client = useRuntimeClient()
   const zh = useLocale() === 'zh-CN'
   const selector = useCallback(
     (status: EgressStatusWire | undefined) => selectChipCopy(status, sessionId, zh),
     [sessionId, zh]
   )
-  const copy = useEgressSelector(selector, equalChipCopy)
+  const selection = useEgressSelector(selector, equalChipCopy)
   // Keep actions ref stable without pulling full status updates.
   useEgressActions()
   const [open, setOpen] = useState(false)
   const triggerRef = useRef<HTMLButtonElement>(null)
 
-  if (!copy) return null
+  // Hosts without an egress bridge cannot serve the panel, so leave the HUD empty there.
+  const hasEgressBridge = typeof client?.subscribeEgressStatus === 'function'
+
+  if (!hasEgressBridge) return null
+
+  const { copy, isGlobal } = selection
 
   return (
     <>
@@ -86,6 +110,7 @@ export function EgressChip({ sessionId }: EgressChipProps) {
         type="button"
         className={`status-field egress-chip is-${copy.tone} is-clickable${open ? ' is-open' : ''}`}
         data-tone={copy.tone}
+        aria-label={isGlobal ? (zh ? '网络检查' : 'Network check') : undefined}
         aria-expanded={open}
         aria-haspopup="dialog"
         onClick={() => setOpen((current) => !current)}
