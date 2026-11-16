@@ -38,6 +38,25 @@ pub fn hide_window(window: &Window) -> Result<()> {
     Ok(())
 }
 
+/// AppKit visibility, independent of key-window activation.
+pub fn is_window_visible(window: &Window) -> Result<bool> {
+    let RawWindowHandle::AppKit(handle) = HasWindowHandle::window_handle(window)
+        .map_err(|error| anyhow::anyhow!("Read AppKit window handle: {error}"))?
+        .as_raw()
+    else {
+        bail!("Expected an AppKit window");
+    };
+    unsafe {
+        let native_view = handle.ns_view.as_ptr() as id;
+        let native_window: id = msg_send![native_view, window];
+        if native_window == nil {
+            bail!("AppKit view has no window");
+        }
+        let visible: cocoa::base::BOOL = msg_send![native_window, isVisible];
+        Ok(visible == cocoa::base::YES)
+    }
+}
+
 pub fn apply_sidebar_material(window: &Window) -> Result<()> {
     let RawWindowHandle::AppKit(handle) = HasWindowHandle::window_handle(window)
         .map_err(|error| anyhow::anyhow!("Read AppKit window handle: {error}"))?

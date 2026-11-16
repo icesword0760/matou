@@ -18,3 +18,10 @@ pub mod workspace_drag;
 pub mod ui_text;
 
 pub mod history_view;
+
+pub mod recovery_water;
+
+#[cfg(target_os = "macos")]
+pub mod recovery_water_macos;
+
+pub mod recovery_water_view;
