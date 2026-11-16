@@ -2,7 +2,7 @@ import type { AgentModelPreferences, ProviderConfigView } from '@matou/contracts
 import type { PreparedSubscriptionLaunch, SubscriptionAccounts } from '../model-router/subscription-accounts'
 import type { ProviderConfigStore } from '../provider-config/provider-config-store'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { claudeModelRouting, roleEffort, restoredProviderModel } from './claude-model-routing'
+import { claudeModelRouting, modelRoutingEnabled, roleEffort, restoredProviderModel } from './claude-model-routing'
 
 const credentialAccess = vi.hoisted(() => ({
   execFile: vi.fn(),
@@ -46,6 +46,19 @@ function preferences(compaction: AgentModelPreferences['compaction']): AgentMode
 beforeEach(() => vi.clearAllMocks())
 
 describe('Claude model routing', () => {
+  it('enables official DeepSeek request compatibility even when effort follows the provider', async () => {
+    const prefs = preferences({ mode: 'follow', effort: 'follow' })
+    const provider = { ...source, endpoint: 'https://api.deepseek.com/anthropic/', effortMapping: {}, reasoningEffort: 'follow' as const }
+    expect(modelRoutingEnabled(prefs, provider)).toBe(true)
+    expect(restoredProviderModel('matou-api/sonnet', 'default', provider, prefs)).toBe('matou-api/sonnet')
+    for (const endpoint of ['https://api.deepseek.com.example/anthropic', 'https://other.example/anthropic', 'https://api.deepseek.com', 'invalid']) {
+      expect(modelRoutingEnabled(prefs, { ...provider, endpoint })).toBe(false)
+    }
+    const { store } = storeFor(target)
+    const routing = claudeModelRouting({ provider, preferences: prefs, store }, {})
+    expect(await routing.resolveOverride({ compaction: false, model: 'deepseek-flash' })).toBeUndefined()
+    routing.close()
+  })
   it('uses explicit API model mappings and subscription role aliases', () => {
     expect(roleEffort(source, 'claude-sonnet-model[1M]')).toBe('max')
     expect(roleEffort(source, 'mapped-sonnet')).toBe('low')

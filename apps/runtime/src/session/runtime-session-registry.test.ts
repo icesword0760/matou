@@ -3,6 +3,81 @@ import { describe, expect, it, vi } from 'vitest'
 import { RuntimeSessionRegistry } from './runtime-session-registry'
 
 describe('RuntimeSessionRegistry', () => {
+  it('tracks a launch digest only for its current run', () => {
+    const registry = new RuntimeSessionRegistry()
+    registry.set(session('digest').value)
+    registry.recordProviderLaunchDigest('digest', 'stale', 'ignored')
+    expect(registry.providerLaunchDigest('digest')).toBeUndefined()
+    registry.recordProviderLaunchDigest('digest', 'run-digest', 'current')
+    expect(registry.providerLaunchDigest('digest')).toBe('current')
+    registry.delete('digest')
+    expect(registry.providerLaunchDigest('digest')).toBeUndefined()
+  })
+
+  it('retries pending provider activation with bounded concurrency and keeps newer work', async () => {
+    const registry = new RuntimeSessionRegistry()
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    let active = 0
+    let maximum = 0
+    const attempts: string[] = []
+    for (let index = 0; index < 6; index++) {
+      registry.queueProviderActivation(String(index), async () => {
+        active++
+        maximum = Math.max(maximum, active)
+        await gate
+        active--
+        attempts.push(String(index))
+        return true
+      })
+    }
+    const draining = registry.drainProviderActivations()
+    await Promise.resolve()
+    expect(maximum).toBe(4)
+    await registry.drainProviderActivations()
+    expect(maximum).toBe(4)
+    release()
+    await draining
+    expect(attempts).toHaveLength(6)
+    let retry = 0
+    registry.queueProviderActivation('pending', async () => ++retry > 1)
+    await registry.drainProviderActivations()
+    await registry.drainProviderActivations()
+    expect(retry).toBe(2)
+    await registry.drainProviderActivations()
+    expect(retry).toBe(2)
+    registry.clearProviderActivations()
+  })
+
+  it('does not retry cancelled provider transitions or lose replacements queued while a retry runs', async () => {
+    const registry = new RuntimeSessionRegistry()
+    const removed = vi.fn(async () => true)
+    registry.queueProviderActivation('gone', removed)
+    registry.cancelProviderActivation('gone')
+    await registry.drainProviderActivations()
+    expect(removed).not.toHaveBeenCalled()
+    const newer = vi.fn(async () => true)
+    registry.queueProviderActivation('same', async () => {
+      registry.queueProviderActivation('same', newer)
+      return true
+    })
+    await registry.drainProviderActivations()
+    await registry.drainProviderActivations()
+    expect(newer).toHaveBeenCalledOnce()
+    registry.clearProviderActivations()
+  })
+
+  it('invalidates an in-flight activation when its Session or Runtime is disposed', async () => {
+    const registry = new RuntimeSessionRegistry()
+    const version = registry.providerActivationVersion('disposed')
+    registry.queueProviderActivation('disposed', async () => false)
+    registry.cancelProviderActivation('disposed')
+    expect(registry.providerActivationVersion('disposed')).not.toBe(version)
+    const afterCancel = registry.providerActivationVersion('disposed')
+    registry.clearProviderActivations()
+    expect(registry.providerActivationVersion('disposed')).not.toBe(afterCancel)
+  })
+
   it('reports the Runtime-authoritative number of live PTYs', () => {
     const registry = new RuntimeSessionRegistry()
     registry.set(session('first').value)

@@ -50,6 +50,28 @@ async function openProviderPicker(user: ReturnType<typeof userEvent.setup>, loca
 }
 
 describe('subscription settings', () => {
+  it('shows switching only on the target card while other providers are disabled', async () => {
+    const gateway: ProviderConfigView = { id: 'gateway', cli: 'claude-code', name: 'DeepSeek fixture', endpoint: 'https://example.invalid', model: 'deepseek-flash', hasApiKey: true }
+    const client = fakeClient([gateway, subscription(), { ...subscription(), id: 'second', name: 'Second account' }])
+    const base = client.request.getMockImplementation()!
+    let finish!: () => void
+    const gate = new Promise<void>(resolve => { finish = resolve })
+    client.request.mockImplementation(async (method, payload) => {
+      if (method === 'provider-config.activate') await gate
+      return base(method, payload)
+    })
+    render(<ModelSwitchSettings client={client} onClose={vi.fn()} />)
+    await userEvent.setup().click(await screen.findByRole('button', { name: '切换到 DeepSeek fixture' }))
+    expect(screen.getAllByText('切换中…')).toHaveLength(1)
+    for (const name of ['ChatGPT · a@b.com', 'Second account']) {
+      const button = screen.getByRole('button', { name: `切换到 ${name}` }) as HTMLButtonElement
+      expect(button.disabled).toBe(true)
+      expect(button.textContent).toBe('切换')
+    }
+    await act(async () => { finish(); await gate })
+    await screen.findByText('默认供应商已切换')
+  })
+
   it('adds subscription groups only to Claude Code, then signs in and saves with real model choices', async () => {
     const client = fakeClient(), user = userEvent.setup()
     render(<ModelSwitchSettings client={client} onClose={vi.fn()} />)

@@ -10,7 +10,8 @@ import {
 export const EGRESS_HOSTS: Record<EgressFamily, { api: string; login: string }> = {
   anthropic: { api: 'api.anthropic.com', login: 'claude.ai' },
   openai: { api: 'api.openai.com', login: 'chatgpt.com' },
-  'chatgpt-subscription': { api: 'chatgpt.com', login: 'auth.openai.com' }
+  'chatgpt-subscription': { api: 'chatgpt.com', login: 'auth.openai.com' },
+  google: { api: 'www.cloudflare.com', login: 'accounts.google.com' }
 }
 
 export interface EgressSample {

@@ -5,11 +5,12 @@ import { PROTOCOL_VERSION, RPC_METHODS, type RuntimeMessage } from './protocol'
 
 describe('egress contracts', () => {
   it('validates supported egress families with isEgressFamily', () => {
-    expect(EGRESS_FAMILIES).toEqual(['anthropic', 'openai', 'chatgpt-subscription'])
+    expect(EGRESS_FAMILIES).toEqual(['anthropic', 'openai', 'chatgpt-subscription', 'google'])
     expect(isEgressFamily('anthropic')).toBe(true)
     expect(isEgressFamily('openai')).toBe(true)
     expect(isEgressFamily('chatgpt-subscription')).toBe(true)
-    expect(isEgressFamily('google')).toBe(false)
+    expect(isEgressFamily('google')).toBe(true)
+    expect(isEgressFamily('unsupported')).toBe(false)
     expect(isEgressFamily(undefined)).toBe(false)
   })
 

@@ -74,6 +74,22 @@ async function renderChip(
 }
 
 describe('EgressChip', () => {
+  it('renders the shared HUD exit label for a registered Google session and opens its panel', async () => {
+    const status = baseStatus()
+    status.families[0]!.family = 'google'
+    status.checks = [
+      { id: 'mainland', family: 'google', result: 'pass' },
+      { id: 'exit-rule', family: 'google', result: 'pass' },
+      { id: 'login-api-match', family: 'google', result: 'unknown' }
+    ]
+    status.sessionFamilies = { 'session-antigravity': 'google' }
+    await renderChip(status, 'session-antigravity')
+    const chip = await screen.findByRole('button', { name: '🇺🇸 美国 · 出口正常' })
+    expect(chip.getAttribute('data-tone')).toBe('ok')
+    fireEvent.click(chip)
+    expect(await screen.findByRole('heading', { name: 'Google（通用出口检测）' })).toBeTruthy()
+  })
+
   it('renders checking copy before the first check completes', async () => {
     await renderChip(
       baseStatus({ state: 'checking', families: [] }),

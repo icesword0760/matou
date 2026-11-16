@@ -312,7 +312,7 @@ export function ModelSwitchSettings({ client, onClose }: {
               if (provider.kind === 'subscription' && provider.subscription) {
                 const cached = accounts[provider.id]
                 const details = { ...cached, account: { ...cached?.account, ...provider.subscription.account }, models: cached?.models ?? provider.subscription.modelMetadata }
-                return <SubscriptionProviderCard key={provider.id} provider={provider} details={details} quotaText={subscriptionQuotaText(provider.subscription.provider, cached, zh)} quotaTitle={subscriptionQuotaTitle(cached, zh)} windowBadge={windowBadge} current={current} switching={Boolean(switching)} subscriptionSupported={subscriptionSupported}
+                return <SubscriptionProviderCard key={provider.id} provider={provider} details={details} quotaText={subscriptionQuotaText(provider.subscription.provider, cached, zh)} quotaTitle={subscriptionQuotaTitle(cached, zh)} windowBadge={windowBadge} current={current} switching={Boolean(switching)} activating={switching === provider.id} subscriptionSupported={subscriptionSupported}
                   onEdit={() => { loginDetails.current = undefined; openEditor({ existing: provider, subscriptionProvider: provider.subscription!.provider }) }}
                   onSignIn={() => signIn(provider)}
                   onActivate={() => { void activate(provider).catch(() => {}) }}

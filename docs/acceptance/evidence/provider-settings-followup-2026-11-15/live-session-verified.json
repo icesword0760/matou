@@ -1,0 +1,108 @@
+{
+  "sessionsAfterRestart": [
+    {
+      "sessionId": "f1998f47-d14b-4a14-8ffa-5259d9031b91",
+      "title": "matou多Agent支持改造",
+      "model": "deepseek-flash",
+      "effort": "high",
+      "resumePreserved": true
+    },
+    {
+      "sessionId": "9a932d51-e22e-47d3-90ee-8ade103267e4",
+      "title": "Claude Code 多模型切换",
+      "model": "deepseek-flash",
+      "effort": "high",
+      "resumePreserved": true
+    },
+    {
+      "sessionId": "17e18685-1ec1-40d2-b6fc-241520f01526",
+      "title": "Claude-Cage 与 matou 集成方案",
+      "model": "deepseek-flash",
+      "effort": "high",
+      "resumePreserved": true
+    },
+    {
+      "sessionId": "fe30db44-f562-452a-a5ba-7921c3cd21bb",
+      "title": "Codex CLI 体验优化",
+      "model": "deepseek-flash",
+      "effort": "high",
+      "resumePreserved": true
+    },
+    {
+      "sessionId": "63561d9e-b6b7-4b8b-b4e9-d79b12eff5a4",
+      "title": "main 最新代码本机应用替换",
+      "model": "deepseek-flash",
+      "effort": "high",
+      "resumePreserved": true
+    },
+    {
+      "sessionId": "21d8fdfa-2b66-4746-a20c-845a3097f0d2",
+      "title": "使用界面设计思路",
+      "model": "deepseek-flash",
+      "effort": "high",
+      "resumePreserved": true
+    },
+    {
+      "sessionId": "630308c0-1a19-435f-b3b0-7bd7ea29258f",
+      "title": "项目App图标设计",
+      "model": "deepseek-flash",
+      "effort": "high",
+      "resumePreserved": true
+    },
+    {
+      "sessionId": "7b9343ee-0cb7-4bac-a41e-40d874da6045",
+      "title": "沉浸模式房间建模",
+      "model": "deepseek-flash",
+      "effort": "high",
+      "resumePreserved": true
+    },
+    {
+      "sessionId": "8d8cd814-f074-4b77-8a84-0ff8725b2060",
+      "title": "跨Agent共享项目记忆",
+      "model": "deepseek-flash",
+      "effort": "high",
+      "resumePreserved": true
+    },
+    {
+      "sessionId": "258eb35a-59a2-420d-813d-8b040887863e",
+      "title": "SLE工程文件片段与编排对应",
+      "model": "deepseek-flash",
+      "effort": "high",
+      "resumePreserved": true
+    },
+    {
+      "sessionId": "49165556-5bae-4556-b9bf-fc04731e1d0a",
+      "title": "用户反馈截图",
+      "model": "deepseek-flash",
+      "effort": "high",
+      "resumePreserved": true
+    },
+    {
+      "sessionId": "6ce09e3f-a609-4079-91f5-64efad923881",
+      "title": "音乐交互与运行逻辑",
+      "model": "deepseek-flash",
+      "effort": "high",
+      "resumePreserved": true
+    },
+    {
+      "sessionId": "cdb7ca4e-0bea-4181-83f3-af5b6e27cbdd",
+      "title": "图片中的报错",
+      "model": "deepseek-flash",
+      "effort": "high",
+      "resumePreserved": true
+    }
+  ],
+  "allResumedSessionsFlashHigh": true,
+  "realOldConversation": {
+    "resumeId": "846b579b-d027-4fc5-84b9-93ae11f9bf86",
+    "responseModels": [
+      "deepseek-flash"
+    ],
+    "text": [
+      "配置检查通过"
+    ],
+    "toolCalls": 0
+  },
+  "hudObserved": "deepseek-flash (1M context)",
+  "deferredBoundary": "3 starting windows have no provider binding; not forcibly migrated"
+}

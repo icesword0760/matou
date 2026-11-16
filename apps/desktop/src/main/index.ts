@@ -33,6 +33,8 @@ import { resolveAppUpdateInstallMode } from './app-update-install-mode'
 import { LocaleStore } from './locale-store'
 import { mainMessages } from './messages'
 import { RuntimeHost } from './runtime-host'
+import { registerSafeBrowserIpc } from './safe-browser-ipc'
+import { SafeBrowserController, reportSafeBrowserCountry, safeBrowserAccountEnv, safeBrowserTimeZone } from './safe-browser'
 import { resolvePackagedApplication } from './app-environment'
 import { applyApplicationBrand } from './application-brand'
 import { resolveDefaultWorkspacePath } from './default-workspace-policy'
@@ -115,6 +117,9 @@ if (process.env.ELECTRON_USER_DATA_DIR) {
 } else {
   app.setPath('userData', join(app.getPath('appData'), APP_STORAGE_DIRECTORY_NAME))
 }
+
+const safeBrowser = new SafeBrowserController()
+registerSafeBrowserIpc(safeBrowser, browserWindows)
 
 const localeStore = new LocaleStore({
   file: join(app.getPath('userData'), 'locale.json'),
@@ -451,6 +456,8 @@ if (primaryInstance) app.whenReady().then(async () => {
   runtimeHost = new RuntimeHost(resolveRuntimeEntry(), undefined, {
     ...(isPackagedApplication ? { modelRouterBinary: join(process.resourcesPath, 'model-router', 'model-router') } : {}),
     openExternal: url => shell.openExternal(url),
+    safeBrowser,
+    safeBrowserTimeZone,
     messages,
     locale: () => localeStore.current()
   })
@@ -463,7 +470,7 @@ if (primaryInstance) app.whenReady().then(async () => {
   powerMonitor.on('suspend', () => claudeAccounts?.suspendUsage(true))
   powerMonitor.on('resume', () => claudeAccounts?.suspendUsage(false))
   claudeAccounts = new ClaudeAccountsManager(
-    new ClaudeSwapEngine(accountLaunch),
+    new ClaudeSwapEngine(accountLaunch, () => safeBrowserAccountEnv(safeBrowser)),
     new AccountPreferenceStore(join(accountRoot, 'preferences.json')),
     { request: async (action, sessionId, runId) => {
       try { return await runtimeHost!.accountRequest(action, sessionId, runId) }
@@ -581,6 +588,9 @@ ipcMain.handle(DESKTOP_CHANNELS.openExternal, async (_event, url: unknown) => {
   if (!isAllowedExternalUrl(url)) return false
   await shell.openExternal(url)
   return true
+})
+ipcMain.on(DESKTOP_CHANNELS.reportEgressCountry, (_event, country: unknown) => {
+  reportSafeBrowserCountry(country)
 })
 ipcMain.handle(DESKTOP_CHANNELS.writeClipboardText, (_event, text: string) => {
   clipboard.writeText(text)

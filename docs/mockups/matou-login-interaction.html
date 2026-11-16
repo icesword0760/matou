@@ -1,0 +1,224 @@
+<title>Matou 登录交互稿</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<style>
+  :root {
+    --bg: #eef1f6;
+    --fg: #1d2634;
+    --muted: #5f6f86;
+    --line: #d5dce7;
+    --card: #ffffff;
+    --new: #287cdd;
+    --new-bg: #e8f1fc;
+    --warn: #9a6700;
+    --warn-bg: #fff8e8;
+    --term: #171c24;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0f1319; --fg: #e4e9f1; --muted: #93a1b5; --line: #2a3341; --card: #171d25;
+      --new: #6cb0ff; --new-bg: #1a2a3d; --warn: #d29922; --warn-bg: #2a2317; color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0f1319; --fg: #e4e9f1; --muted: #93a1b5; --line: #2a3341; --card: #171d25;
+    --new: #6cb0ff; --new-bg: #1a2a3d; --warn: #d29922; --warn-bg: #2a2317; color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; padding: 32px max(16px, env(safe-area-inset-right, 0px)) 48px max(16px, env(safe-area-inset-left, 0px)); }
+  .wrap { max-width: 1080px; margin: 0 auto; display: flex; flex-direction: column; gap: 30px; }
+  header h1 { margin: 0; font-size: 24px; font-weight: 700; letter-spacing: -.01em; text-wrap: balance; }
+  header p { margin: 6px 0 0; color: var(--muted); max-width: 760px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 8px 18px; margin-top: 14px; color: var(--muted); font-size: 12px; }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .legend i { width: 8px; height: 8px; border-radius: 50%; background: var(--new); display: inline-block; }
+  .tag { font-size: 10px; font-weight: 600; color: var(--new); background: var(--new-bg); border-radius: 999px; padding: 1px 7px; }
+  .section { display: flex; flex-direction: column; gap: 10px; }
+  .section h2 { margin: 0; font-size: 14px; font-weight: 650; display: flex; align-items: center; gap: 8px; }
+  .section p.hint { margin: 0; color: var(--muted); font-size: 12px; }
+  .row { display: flex; flex-wrap: wrap; gap: 24px; align-items: flex-start; }
+  .col { flex: 1 1 440px; min-width: 0; display: flex; flex-direction: column; gap: 10px; }
+  .caption { margin: 0; font-size: 12px; color: var(--muted); }
+
+  /* terminal context */
+  .terminal { position: relative; background: var(--term); border: 1px solid #2a3341; border-radius: 12px; padding: 14px 16px 56px; min-height: 320px; color: #c9d4e3; font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; overflow: hidden; }
+  .terminal__bar { display: flex; gap: 8px; align-items: center; color: #8b98a9; font-size: 11px; }
+  .terminal__line { margin-top: 10px; color: #8fa0b6; }
+  .terminal__prompt { color: #7ee0a8; }
+  .hud { position: absolute; left: 14px; right: 14px; bottom: 10px; display: flex; align-items: center; gap: 12px; padding: 7px 9px; border: 1px solid #2a3341; border-radius: 8px; background: #1e242d; font: 11px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  .hud__label { color: #9aa9be; }
+  .chip { display: inline-flex; align-items: center; gap: 5px; padding: 2px 7px; border-radius: 5px; font-size: 10px; color: #8b949e; }
+  .chip i { width: 5px; height: 5px; border-radius: 50%; background: #22c55e; }
+  .hud__spacer { flex: 1; }
+
+  /* account popover */
+  .ca-panel { --ca-text: #34445b; --ca-muted: #7186a3; width: min(410px, 100%); background: #fff; color: var(--ca-text); border: 1px solid #d9e3f1; border-radius: 12px; box-shadow: 0 16px 42px #263d6126, 0 3px 10px #263d610c; font: 12px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; overflow: hidden; }
+  .ca-header { display: flex; align-items: center; gap: 10px; padding: 15px 18px 8px; }
+  .ca-header h2 { margin: 0; font-size: 14px; font-weight: 650; flex: 1; }
+  .ca-close { border: 0; background: transparent; color: #8694a7; font-size: 18px; }
+  .ca-body { padding: 4px 18px 18px; display: flex; flex-direction: column; gap: 12px; }
+  .ca-body p { margin: 0; color: var(--ca-muted); }
+  .ca-steps { display: flex; gap: 14px; color: #6b7f9b; font-size: 11px; }
+  .ca-steps span { display: inline-flex; align-items: center; gap: 6px; }
+  .ca-steps b { width: 18px; height: 18px; border-radius: 50%; background: #edf3fb; color: #4a7ec4; display: grid; place-items: center; font-size: 10px; }
+  .ca-primary { width: 100%; padding: 9px 12px; border: 0; border-radius: 8px; background: #317bdb; color: #fff; font: inherit; font-weight: 600; }
+  .ca-note { padding: 9px 10px; border-radius: 8px; background: var(--warn-bg); color: var(--warn); border: 1px solid #ebd6af; font-size: 11px; }
+  .ca-note a { color: #2679d8; text-decoration: none; font-weight: 600; }
+  .ca-secondary { width: 100%; padding: 8px 12px; border: 1px solid #d9e3f1; border-radius: 8px; background: #f7f9fc; color: #34445b; font: inherit; }
+
+  /* provider dialog */
+  .provider { width: min(520px, 100%); background: #fff; color: #344257; border: 1px solid #e0e6ee; border-radius: 15px; box-shadow: 0 18px 70px rgb(26 48 75 / .19); font-size: 14px; overflow: hidden; }
+  .provider__header { display: flex; align-items: center; gap: 12px; padding: 24px 26px 20px; border-bottom: 1px solid #edf0f4; }
+  .provider__header > div { flex: 1; }
+  .provider__header h2 { margin: 0; font-size: 21px; line-height: 1.35; letter-spacing: -.35px; }
+  .provider__header p { margin: 5px 0 0; font-size: 12px; color: #7c899c; }
+  .provider__body { padding: 22px 26px 26px; display: flex; flex-direction: column; gap: 14px; }
+  .provider__body p { margin: 0; color: #65758b; font-size: 13px; }
+  .provider-selected { display: flex; align-items: center; gap: 12px; padding: 13px; border-radius: 10px; background: #f2f5f9; }
+  .provider-selected__icon { width: 38px; height: 38px; border-radius: 9px; background: #26303a; color: #fff; display: grid; place-items: center; font-weight: 650; }
+  .provider-selected strong { display: block; font-size: 13px; }
+  .provider-selected small { display: block; margin-top: 4px; font-size: 11px; color: #8190a4; }
+  .provider-primary { width: 100%; padding: 10px 14px; border: 0; border-radius: 9px; background: #3988e9; color: #fff; font: inherit; font-weight: 600; }
+  .provider-note { padding: 10px 12px; border-radius: 9px; background: var(--warn-bg); border: 1px solid #ebd6af; color: var(--warn); font-size: 12px; }
+  .provider-note a { color: #2679d8; font-weight: 600; text-decoration: none; }
+
+  /* egress card */
+  .egress-card { background: #fff; border: 1px solid #d9e3f1; border-radius: 12px; padding: 14px 16px; display: flex; align-items: center; justify-content: space-between; gap: 14px; box-shadow: 0 8px 24px #263d6114; color: #283446; font: 12px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  .egress-card__title { font-size: 11px; font-weight: 650; color: #687b96; }
+  .egress-card__state { font-size: 12px; font-weight: 600; margin-top: 3px; }
+  .egress-card__hint { font-size: 11px; color: #687b96; margin-top: 2px; }
+  .egress-card button { padding: 4px 10px; border: 1px solid #d9e3f1; border-radius: 6px; background: #f7f9fc; color: #283446; font: inherit; font-size: 11px; font-weight: 500; }
+  .note { border: 1px solid var(--line); background: var(--card); border-radius: 10px; padding: 14px 16px; color: var(--muted); font-size: 13px; }
+  .note b { color: var(--fg); }
+  @media (max-width: 560px) { .col { flex: 1 1 100%; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <h1>Matou 登录交互稿</h1>
+    <p>不新增登录入口：把 Matou 里现有的「添加账户」和「在浏览器中登录」直接改走 Mantle。用户看到的只是文案和按钮的细微变化，以及未安装时的回退提示。</p>
+    <div class="legend">
+      <span><i></i>蓝色标记 = 本次改动</span>
+      <span>其余为 Matou 现有界面</span>
+    </div>
+  </header>
+
+  <section class="section">
+    <h2>1. Claude 账户：添加 / 重新登录 <span class="tag">改动</span></h2>
+    <p class="hint">入口不变，还是 HUD 里的账户按钮。改的是说明文案和主按钮。</p>
+    <div class="row">
+      <div class="col">
+        <p class="caption">已安装 Mantle</p>
+        <div class="terminal">
+          <div class="terminal__bar"><span>●</span><span>Claude Code</span><span class="hud__spacer"></span><span>会话 3</span></div>
+          <div class="terminal__line"><span class="terminal__prompt">❯</span> claude</div>
+          <div class="terminal__line">正在处理你的请求…</div>
+          <div class="hud">
+            <span class="hud__label">Claude Code</span>
+            <span class="chip"><i></i>🇺🇸 美国 · 出口正常</span>
+            <span class="hud__spacer"></span>
+            <span class="hud__label">账户</span>
+          </div>
+        </div>
+        <div class="ca-panel">
+          <div class="ca-header"><h2>添加 Claude 账户</h2><span class="ca-close">×</span></div>
+          <div class="ca-body">
+            <p>将用<strong>Mantle</strong>打开一次性窗口，不沿用原浏览器的登录。请在 Claude 官方页面登录要添加的账户。</p>
+            <div class="ca-steps"><span><b>1</b>安全窗口登录</span><span><b>2</b>核对并保存</span></div>
+            <button class="ca-primary">打开 Mantle</button>
+            <button class="ca-secondary">取消</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="col">
+        <p class="caption">未安装 Mantle（回退，不阻断）</p>
+        <div class="ca-panel">
+          <div class="ca-header"><h2>添加 Claude 账户</h2><span class="ca-close">×</span></div>
+          <div class="ca-body">
+            <p>将打开一个独立的临时隐私窗口，不沿用原浏览器的登录。请在 Claude 官方页面登录要添加的账户。</p>
+            <div class="ca-note">未安装<strong>Mantle</strong>，这次会用 Chrome 打开。<a href="#">获取安装包</a></div>
+            <div class="ca-steps"><span><b>1</b>独立窗口登录</span><span><b>2</b>核对并保存</span></div>
+            <button class="ca-primary">打开 Chrome</button>
+            <button class="ca-secondary">取消</button>
+          </div>
+        </div>
+        <p class="caption" style="margin-top:6px;">安装后文案会自动变回「打开 Mantle」，不需要重新配置。</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <h2>2. 订阅登录：OpenAI / Antigravity <span class="tag">改动</span></h2>
+    <p class="hint">弹窗结构和按钮位置不变，只改说明和按钮文字。</p>
+    <div class="row">
+      <div class="col">
+        <p class="caption">已安装</p>
+        <div class="provider">
+          <div class="provider__header">
+            <div><h2>添加供应商</h2><p>登录后会自动读取可用模型</p></div>
+            <span class="ca-close">×</span>
+          </div>
+          <div class="provider__body">
+            <div class="provider-selected">
+              <span class="provider-selected__icon">O</span>
+              <div><strong>OpenAI</strong><small>ChatGPT 订阅账号</small></div>
+            </div>
+            <p>将在<strong>Mantle</strong>中打开 OpenAI 登录页，完成后自动返回 Matou。</p>
+            <button class="provider-primary">在 Mantle 中登录</button>
+          </div>
+        </div>
+      </div>
+      <div class="col">
+        <p class="caption">未安装</p>
+        <div class="provider">
+          <div class="provider__header">
+            <div><h2>添加供应商</h2><p>登录后会自动读取可用模型</p></div>
+            <span class="ca-close">×</span>
+          </div>
+          <div class="provider__body">
+            <div class="provider-selected">
+              <span class="provider-selected__icon" style="background:#4285f4;">G</span>
+              <div><strong>Antigravity</strong><small>Google 账号</small></div>
+            </div>
+            <div class="provider-note">未安装<strong>Mantle</strong>，这次会用系统浏览器打开。<a href="#">获取安装包</a></div>
+            <button class="provider-primary">在浏览器中登录</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <h2>3. 网络检查面板：安装状态与提醒 <span class="tag">新增</span></h2>
+    <p class="hint">这里只做状态、安装入口和客户端提醒，不重复放登录按钮。</p>
+    <div class="row">
+      <div class="col">
+        <div class="egress-card">
+          <div>
+            <div class="egress-card__title">Mantle</div>
+            <div class="egress-card__state">已安装 · 148.0.7778.215</div>
+            <div class="egress-card__hint">登录 Claude / ChatGPT / Antigravity 时使用</div>
+          </div>
+          <button>检查更新</button>
+        </div>
+        <div class="ca-note" style="margin-top:10px;">! 检测到 Claude Desktop 正在运行，它的出口不在保护范围</div>
+        <div class="ca-note">! 检测到 ChatGPT 桌面版正在运行，它的出口不在保护范围</div>
+      </div>
+      <div class="col">
+        <div class="egress-card">
+          <div>
+            <div class="egress-card__title">Mantle</div>
+            <div class="egress-card__state">未安装</div>
+            <div class="egress-card__hint">安装后，登录会自动用它打开</div>
+          </div>
+          <button>获取安装包</button>
+        </div>
+        <p class="caption" style="margin-top:10px;">未安装时所有登录仍可用，只是回退到系统浏览器或 Chrome。</p>
+      </div>
+    </div>
+  </section>
+
+  <div class="note">
+    <b>需要确认：</b>登录入口不新增、只改道现有按钮，是否符合你的预期；未安装时的黄色回退提示是否合适；网络检查里的卡片是否保留“检查更新”而不是“打开”。
+  </div>
+</div>

@@ -99,6 +99,7 @@ async function sampleFullFromFixture(
     fixture && isPlainObject(fixture['chatgpt-subscription'])
       ? fixture['chatgpt-subscription']
       : undefined
+  const googleRaw = fixture && isPlainObject(fixture.google) ? fixture.google : undefined
   const browserLogin =
     fixture && fixture.browserLogin !== null && fixture.browserLogin !== undefined
       ? parseFixtureHostSample(EGRESS_HOSTS.anthropic.login, fixture.browserLogin)
@@ -114,6 +115,14 @@ async function sampleFullFromFixture(
         api: parseFixtureHostSample(EGRESS_HOSTS.openai.api, openaiRaw?.api),
         login: parseFixtureHostSample(EGRESS_HOSTS.openai.login, openaiRaw?.login)
       },
+      ...(googleRaw
+        ? {
+            google: {
+              api: parseFixtureHostSample(EGRESS_HOSTS.google.api, googleRaw.api),
+              login: parseFixtureHostSample(EGRESS_HOSTS.google.login, googleRaw.login)
+            }
+          }
+        : {}),
       ...(chatgptRaw
         ? {
             'chatgpt-subscription': {
@@ -207,9 +216,10 @@ export function createEgressSampler(input: EgressSamplerInput): EgressSampler {
         ? checkIpv6Directly()
         : Promise.resolve(false)
 
-      const [anthropicEnv, openaiEnv, routerEnabled] = await Promise.all([
+      const [anthropicEnv, openaiEnv, googleEnv, routerEnabled] = await Promise.all([
         agentProxyEnvironment('anthropic', input.baseEnv, settingsPath),
         agentProxyEnvironment('openai', input.baseEnv, settingsPath),
+        agentProxyEnvironment('google', input.baseEnv, settingsPath),
         isRouterFamilyEnabled()
       ])
 
@@ -243,6 +253,8 @@ export function createEgressSampler(input: EgressSamplerInput): EgressSampler {
         anthropicLogin,
         openaiApi,
         openaiLogin,
+        googleApi,
+        googleLogin,
         chatgptPair,
         browserResult,
         ipv6Bypass
@@ -251,6 +263,8 @@ export function createEgressSampler(input: EgressSamplerInput): EgressSampler {
         probeHost(EGRESS_HOSTS.anthropic.login, anthropicEnv),
         probeHost(EGRESS_HOSTS.openai.api, openaiEnv),
         probeHost(EGRESS_HOSTS.openai.login, openaiEnv),
+        probeHost(EGRESS_HOSTS.google.api, googleEnv),
+        probeHost(EGRESS_HOSTS.google.login, googleEnv),
         chatgptPromise,
         readSysProxy().then(async (systemProxy) => ({
           systemProxy,
@@ -265,6 +279,7 @@ export function createEgressSampler(input: EgressSamplerInput): EgressSampler {
         hosts: {
           anthropic: { api: anthropicApi, login: anthropicLogin },
           openai: { api: openaiApi, login: openaiLogin },
+          google: { api: googleApi, login: googleLogin },
           ...(chatgptPair ? { 'chatgpt-subscription': chatgptPair } : {})
         },
         ...(browserResult.browserLogin ? { browserLogin: browserResult.browserLogin } : {}),

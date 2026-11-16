@@ -85,7 +85,7 @@ Matou 没有全局底部状态栏，出口状态显示在每张官方 agent 卡�
 
 **按服务商分别判断：** Anthropic 和 OpenAI 各自评估、各自冻结。只有 Claude 的出口出问题时，只冻结 Claude 会话，Codex 照常工作，反之亦然。用户把两家放在不同节点上属于正常配置。
 
-Antigravity 的服务商域名（Google）没有 trace 入口，接入后按通用出口判断。Google 请求的出口以 K1 的通用出口为准，并在详情里注明这一点。待第二期接管代理后，该差异自然消失。
+Antigravity 的服务商域名（Google）没有 trace 入口，接入后按通用出口判断。通用出口仅作近似，不能保证 Google 实际看到的出口，详见第 10 节。
 
 ### 5.3 检查时机
 
@@ -109,7 +109,7 @@ Antigravity 的服务商域名（Google）没有 trace 入口，接入后按通�
 - **冻结范围：** 所有窗口里「访问官方服务」的 agent 会话，包括：
   - 使用官方账号登录的 Claude Code（未经服务商面板切到第三方服务商）
   - Codex
-  - Antigravity（接入完成后）
+  - Antigravity（原生 profile，见第 10 节）
 - **不冻结的会话：** Shell 卡片、使用第三方服务商的 Claude Code 会话。
 - **触发条件：** 仅在关键检查被**确认**失败时冻结（拿到了明确的大陆 IP 或违规的 IP）。检测服务超时、全部探测失败时进入「提醒」，显示「无法确认出口」，不冻结。
 - **用户看到什么：**
@@ -190,15 +190,28 @@ Antigravity 的服务商域名（Google）没有 trace 入口，接入后按通�
 - TUN 是否开启的判断方式（例如 utun 网卡 + 默认路由），只用于 W1 的文案，不影响冻结。
 - Windows 上的冻结方案。
 - 系统浏览器隐私窗口能否使用新加坡时区（Chrome、Safari 分别实测）。
-- **Antigravity 接入后补一个任务（不自动生效）：** 新增 `google` 服务商类别。Google 没有 trace 入口，改为经 agy 的同一路径探测通用出口（Cloudflare trace），面板注明「无法直接确认 Google 看到的出口，Clash 若把 Google 域名单独分流，可能检测不到」。同时实测 agy 及其子进程是否遵守代理变量和 `TZ`。
+- **Antigravity 原生会话（已在第 10 节补充）：** `google` 类别使用通用出口近似，限制已写入面板。真实 agy 及其子进程是否完整遵守代理变量和 `TZ` 仍待实测。
 
 ## 9. 订阅账号会话（2026-11-13 用户决定：方案 B）
 
 「订阅账号接入 Claude Code」让 Claude Code 通过本机模型路由使用 ChatGPT 或 Antigravity 订阅。这类会话的请求由路由转发给 ChatGPT 或 Google，封号风险落在这些账号上；Claude Code 写进请求内容的本地时区也会被转发过去。
 
 - **ChatGPT 订阅会话：** 归入新的服务商类别「ChatGPT 订阅」。探测 `chatgpt.com`（API）和 `auth.openai.com`（登录），已实测这两处都返回 trace。探测走**路由实际使用的代理**：路由按登录 shell 代理 → macOS 系统代理 → 直连的顺序选择，与 agent 会话的环境变量可能不同，所以不能复用 Codex 的「OpenAI」类别。冻结、自动恢复、越过、出口规则的行为与其他类别相同。
-- **Antigravity 订阅会话：** 只隐藏大陆时区，不冻结。Google 没有 trace 入口，等 Google 类别接入（第 8 节）后再加。
+- **Antigravity 订阅会话：** 只隐藏大陆时区，不冻结。该订阅分支本次保持不变；第 10 节 Google 检测仅覆盖原生 antigravity profile。
 - **时区：** 两种订阅会话都按「官方会话」处理（自动隐藏大陆时区）。ChatGPT 订阅会话按该类别的出口国家选择东八区时区，Antigravity 订阅会话默认新加坡。
 - **不打扰未使用者：** 只有配置了 ChatGPT 订阅时才探测和显示「ChatGPT 订阅」这一组；未配置时不发请求、不出现在面板、不影响整体状态。
 - **修正：** 合入前，订阅会话在判定服务商时还没注入路由地址，被误判为 Anthropic 官方会话（会跟着 Anthropic 线路冻结）。本节实现后改为按订阅类型归类。
 - **界面文案：** 面板分组标题 `Claude（ChatGPT 订阅）` / `Claude (ChatGPT subscription)`；HUD 标签、横幅、通知沿用现有文案。
+
+
+## 10. Antigravity 原生会话的 Google 通用出口检测（2026-11-15）
+
+`antigravity` profile 启动的原生 agent 会话纳入 `google` 类别，显示现有 HUD 出口标签。面板中 Google 组位于 Claude（ChatGPT 订阅）之后、本机之前，标题为「Google（通用出口检测）」/「Google (generic exit)」。检查详情保留通用文案，登录出口无法确认时只显示未知，不降低整体正常状态。
+
+Google 没有可用的 Cloudflare trace 出口接口。全量检测的 `api` 使用 `www.cloudflare.com/cdn-cgi/trace` 取得通用出口，`login` 尝试 `accounts.google.com/cdn-cgi/trace`，无有效 trace 时记为未知。轻量检测仅对活跃 Google 会话请求通用 api trace；沿用每分钟轻量采样、网络变化全量复检、冻结后 15 秒复检及通过后 5 秒二次确认的现有节奏。
+
+通用 api 出口为 `CN` 时按 mainland 异常处理；与已保存的国家或 IP 规则不符时按 rule 异常处理。登录与 api 的已知海外出口不一致仅提醒，登录 unknown 不触发暂停。只暂停该类别的会话，恢复后自动继续，新会话在异常期间出生即冻结；沿用现有越过、关闭保护及会话时区策略，不改系统时区。
+
+近似边界：通用探测只能说明探测请求的出口，Google 域名可能被用户代理分流到不同线路，不能证明 Google 实际看到的 IP、国家或每条连接的路径。面板采样说明固定补充「Google 线路使用通用出口检测，不能保证 Google 实际看到的出口。」。本次不增加检测频率，不引入额外 LLM 请求、依赖或存储结构。
+
+本节只扩展原生 `antigravity` profile。Claude Code / Codex 官方及第三方分支不变；Claude Code 使用 Antigravity 订阅时仍按第 9 节只隐藏时区，不登记 Google 冻结。

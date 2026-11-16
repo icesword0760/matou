@@ -1,0 +1,38 @@
+{
+  "model": "claude-sonnet-4-5",
+  "system": [
+    {
+      "type": "text",
+      "text": "x-anthropic-billing-header: standalone"
+    },
+    {
+      "type": "text",
+      "text": "x-anthropic-billing-header: cc_version=sample; cch=12345;\nYou are Claude Code, Anthropic's official CLI for Claude.\nOpenAI helps with this task.\n```text\nx-anthropic-billing-header: keep this code\nYou are Claude Code, Anthropic's official CLI for Claude.\nAnthropic Hermes Agent\n```\n`Qwen Claude Code`\nKeep rule 1.\nKeep rule 2.\nKeep rule 3.\nKeep rule 4.\nKeep rule 5.\nDeepSeek remains outside the first eight sentences.\nCLAUDE.md claude.ai anthropic-version x-anthropic-beta Claude\nIMPORTANT: Assist with authorized security testing and CTF challenges."
+    },
+    {
+      "type": "text",
+      "text": "Nous Research Hermes Agent Claude Code"
+    }
+  ],
+  "messages": [
+    {
+      "role": "user",
+      "content": "OpenAI Hermes Agent\nx-anthropic-billing-header: keep outside system"
+    }
+  ],
+  "tools": [
+    {
+      "name": "Hermes",
+      "description": "OpenAI Hermes Agent\nx-anthropic-billing-header: keep outside system",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "OpenAI": {
+            "type": "string",
+            "description": "OpenAI Hermes Agent\nx-anthropic-billing-header: keep outside system"
+          }
+        }
+      }
+    }
+  ]
+}

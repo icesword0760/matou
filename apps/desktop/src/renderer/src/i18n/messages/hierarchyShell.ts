@@ -181,11 +181,11 @@ export const hierarchyShellZhCN = {
     switchAction: '切换',
     impactTitle: (app: string) => `切换会影响所有 ${app} 窗口。`,
     impactBody:
-      '符合条件的 Claude Code 会话自动更新，暂缓会话保持原配置；各供应商的上下文窗口可在「编辑」中独立设置。',
+      '所有 Claude Code 会话跟随全局供应商；暂缓会话就绪后自动切换，旧会话再次打开时也会应用，历史保留。上下文窗口可在「编辑」中设置。',
     serviceConnecting: '供应商配置服务正在连接，请稍后重试',
     loadFailed: '供应商配置载入失败',
     switchedDeferred: (provider: string, updated: number, deferred: number) =>
-      `已切换为 ${provider}；${updated} 个 Claude Code 会话已更新，${deferred} 个会话暂缓并保持原配置`,
+      `已切换为 ${provider}；${updated} 个 Claude Code 会话已更新，${deferred} 个会话等待就绪后自动切换`,
     switchedUpdated: (provider: string, updated: number) =>
       `已切换为 ${provider}；${updated} 个 Claude Code 会话已更新`,
     switchedClaude: (provider: string) => `已切换为 ${provider}；Claude Code 新会话直接生效`,
@@ -403,11 +403,11 @@ export const hierarchyShellEn: CatalogShape<typeof hierarchyShellZhCN> = {
     switchAction: 'Switch',
     impactTitle: (app: string) => `Switching affects every ${app} window.`,
     impactBody:
-      'Eligible Claude Code sessions update automatically and deferred sessions keep the previous configuration. Each provider’s context window can be configured in Edit.',
+      'All Claude Code sessions follow the global provider. Deferred sessions switch when ready, and reopened sessions apply it while preserving history. Configure context windows in Edit.',
     serviceConnecting: 'The provider configuration service is connecting. Try again shortly.',
     loadFailed: 'Could not load the provider configuration',
     switchedDeferred: (provider: string, updated: number, deferred: number) =>
-      `Switched to ${provider}; ${updated} Claude Code ${updated === 1 ? 'session' : 'sessions'} updated, ${deferred} deferred with the previous configuration`,
+      `Switched to ${provider}; ${updated} Claude Code ${updated === 1 ? 'session' : 'sessions'} updated, ${deferred} will switch automatically when ready`,
     switchedUpdated: (provider: string, updated: number) =>
       `Switched to ${provider}; ${updated} Claude Code ${updated === 1 ? 'session' : 'sessions'} updated`,
     switchedClaude: (provider: string) => `Switched to ${provider}; new Claude Code sessions use it directly`,

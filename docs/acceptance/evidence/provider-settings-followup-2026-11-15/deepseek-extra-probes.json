@@ -1,0 +1,25 @@
+[
+  {
+    "case": "nested-reference-True",
+    "status": 200,
+    "reply": [
+      "OK"
+    ]
+  },
+  {
+    "case": "nested-reference-False",
+    "status": 400,
+    "error": {
+      "type": "invalid_request_error",
+      "message": "messages.2.content.0: tool reference 'retired_probe' not found in available tools (request_id: d030434f-3274-4d02-af3c-5b9feae991f4)"
+    }
+  },
+  {
+    "case": "top-level-custom",
+    "status": 422,
+    "error": {
+      "type": "invalid_request_error",
+      "message": "Failed to deserialize the JSON body into the target type: tools[0]: unknown variant `custom`, expected one of `web_search_20250305`, `web_search_20260209`, `deepseek_web_search`, `deepseek_read_url` at line 1 column 260 (request_id: 56f1cff5-1363-43e2-8980-c00878ef110a)"
+    }
+  }
+]

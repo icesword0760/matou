@@ -7,7 +7,7 @@ import { useLocale, useMessages } from '../i18n/LocaleProvider'
  * card body at a stable minimum height so the quota line (read once when the
  * settings pane opens) never moves the actions when it arrives.
  */
-export function SubscriptionProviderCard({ provider, details, quotaText, quotaTitle, windowBadge, current, switching, subscriptionSupported = true, onEdit, onSignIn, onActivate, onUseOfficial }: {
+export function SubscriptionProviderCard({ provider, details, quotaText, quotaTitle, windowBadge, current, switching, activating = false, subscriptionSupported = true, onEdit, onSignIn, onActivate, onUseOfficial }: {
   provider: ProviderConfigView
   details?: SubscriptionAccountDetails | undefined
   quotaText: string
@@ -15,6 +15,7 @@ export function SubscriptionProviderCard({ provider, details, quotaText, quotaTi
   windowBadge?: string | undefined
   current: boolean
   switching: boolean
+  activating?: boolean
   subscriptionSupported?: boolean
   onEdit(): void
   onSignIn(): void
@@ -57,7 +58,7 @@ export function SubscriptionProviderCard({ provider, details, quotaText, quotaTi
         disabled={switching || !subscriptionSupported || (current && !needsSignIn)}
         aria-label={needsSignIn ? t(`重新登录 ${provider.name}`, `Sign in again for ${provider.name}`) : current ? m.currentConfigurationOf(provider.name) : m.switchTo(provider.name)}
         onClick={needsSignIn ? onSignIn : onActivate}>
-        {needsSignIn ? t('重新登录', 'Sign in again') : switching ? t('切换中…', 'Switching…') : current ? t('默认使用', 'Default') : m.switchAction}
+        {needsSignIn ? t('重新登录', 'Sign in again') : activating ? t('切换中…', 'Switching…') : current ? t('默认使用', 'Default') : m.switchAction}
       </button>
     </div>
   </article>

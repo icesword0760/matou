@@ -22,7 +22,7 @@ export const EGRESS_WAKE_DRIFT_THRESHOLD_MS = 15_000
 export const EGRESS_FROZEN_RECHECK_INTERVAL_MS = 15_000
 export const EGRESS_RECOVERY_CONFIRM_DELAY_MS = 5_000
 
-const CHECKING_FAMILIES: readonly EgressFamily[] = ['anthropic', 'openai']
+const CHECKING_FAMILIES: readonly EgressFamily[] = ['anthropic', 'openai', 'google']
 
 type RecoveryPhase = 'idle' | 'rechecking' | 'confirming'
 
@@ -69,6 +69,7 @@ export function egressFamilyForLaunch(
       ? 'openai'
       : undefined
   }
+  if (profile === 'antigravity') return 'google'
   return undefined
 }
 

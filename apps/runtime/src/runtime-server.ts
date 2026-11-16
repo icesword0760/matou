@@ -4,7 +4,7 @@ import type { SubscriptionLoginStartInput, SubscriptionModelsReadInput, Subscrip
 import { ExternalAgentStatusMonitor } from './session/external-agent-status'
 import { AntigravityPluginInstaller } from './agents/antigravity-plugin-installer'
 import type { ClaudeAccountSession, ClaudeAccountRuntimeAction } from '@matou/contracts'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { constants, watch, mkdirSync, rmSync, type FSWatcher } from 'node:fs'
 import { access, readFile, readlink, stat } from 'node:fs/promises'
@@ -357,6 +357,7 @@ export class RuntimeServer {
   readonly #cwdTimers = new Map<string, ReturnType<typeof setTimeout>>()
   readonly #providerResumeTimers = new Map<string, ReturnType<typeof setTimeout>>()
   readonly #providerLaunchRunIds = new Map<string, string>()
+  readonly #providerActivationRuns = new Map<string, { runId: string; token: string }>()
   readonly #providerIdentityMismatches = new Map<string, ProviderIdentityMismatch>()
   readonly #providerRecoveryWaiters = new Map<string, Set<ProviderRecoveryWaiter>>()
   readonly #spawnDescriptors = new Map<string, TerminalSpawnMessage>()
@@ -615,6 +616,7 @@ export class RuntimeServer {
   }
 
   publishRecovery(snapshot: readonly RecoveryJobSnapshot[]): void {
+    if (snapshot.some(job => job.state === 'ready')) void this.#sessions.drainProviderActivations()
     if (this.#closed || !this.#handshakeComplete) return
     for (const job of snapshot) {
       this.#port.postMessage({
@@ -630,6 +632,7 @@ export class RuntimeServer {
   }
 
   publishRecoverySnapshot(snapshot: readonly RecoveryJobSnapshot[]): void {
+    if (snapshot.some(job => job.state === 'ready')) void this.#sessions.drainProviderActivations()
     if (this.#closed || !this.#handshakeComplete) return
     this.#port.postMessage({
       type: 'session.recovery-snapshot',
@@ -668,9 +671,16 @@ export class RuntimeServer {
     const launchMatches = this.#providerLaunchRunIds.get(sessionId) === runId ||
       this.#sessions.get(sessionId)?.runId === runId
     if (!launchMatches) return
+    const activation = this.#providerActivationRuns.get(sessionId)
+    if (activation?.runId === runId && this.#sessions.get(sessionId)?.runId === runId &&
+        this.#sessionRepository.getProviderSettingsBinding(sessionId, 'claude-code')) {
+      this.#writeProviderActivationToken(`provider.claude.applied.${sessionId}`, activation.token)
+      this.#providerActivationRuns.delete(sessionId)
+    }
     const pendingFork = this.#pendingAntigravityForkRuns.get(sessionId)
     if (pendingFork?.runId === runId) this.#pendingAntigravityForkRuns.delete(sessionId)
     this.#confirmProviderDerivedOutput(sessionId, runId)
+    void this.#sessions.drainProviderActivations()
     if (this.#providerResumeTimers.has(sessionId)) {
       this.#clearProviderResumeTimer(sessionId)
       this.#providerLaunchRunIds.delete(sessionId)
@@ -732,6 +742,7 @@ export class RuntimeServer {
     const disposalErrors: unknown[] = []
     for (const recovery of recoveryCoordinators) recovery.cancel(unique)
     for (const sessionId of unique) {
+      this.#sessions.cancelProviderActivation(sessionId)
       await this.#sessions.runExclusive(sessionId, async () => {
         try {
           await this.#disposeProviderHooks(sessionId)
@@ -785,12 +796,14 @@ export class RuntimeServer {
     this.#subscriptionUnsubscribe?.()
     this.#portClosed = true
     RuntimeServer.#instances.delete(this)
+    if (![...RuntimeServer.#instances].some(server => server.#sessions === this.#sessions)) this.#sessions.clearProviderActivations()
     for (const timer of this.#cwdTimers.values()) clearTimeout(timer)
     this.#cwdTimers.clear()
     for (const timer of this.#providerResumeTimers.values()) clearTimeout(timer)
     this.#providerResumeTimers.clear()
     this.#closeAllHudFileWatchers()
     this.#providerLaunchRunIds.clear()
+    this.#providerActivationRuns.clear()
     this.#pendingAntigravityForkRuns.clear()
     this.#providerIdentityMismatches.clear()
     this.#rejectAllProviderRecoveries(
@@ -811,6 +824,7 @@ export class RuntimeServer {
     this.#unregisterNavigationWindow()
     this.#portClosed = true
     RuntimeServer.#instances.delete(this)
+    if (![...RuntimeServer.#instances].some(server => server.#sessions === this.#sessions)) this.#sessions.clearProviderActivations()
     this.#subscriptions.clear()
     this.#rejectAllProviderRecoveries(
       new Error('Runtime connection closed during provider recovery')
@@ -888,6 +902,7 @@ export class RuntimeServer {
         if (!session) break
         try {
           await session.retryDurability()
+          void this.#sessions.drainProviderActivations()
         } catch {
           // PtySession publishes the authoritative scoped fault again. Keep
           // this connection and every other Session live while the user fixes
@@ -1314,6 +1329,8 @@ export class RuntimeServer {
         const providerId = typeof input?.providerId === 'string' ? input.providerId : undefined
         let sessionTransitions: ProviderSessionActivationTransition[] = []
         if (cli === 'claude-code' && providerId) {
+          const selection = await this.#providerConfigs.launchSelection(cli)
+          this.#writeProviderActivationToken('provider.claude.activation', await this.#providerLaunchDigest(selection))
           sessionTransitions = await RuntimeServer.#restartProviderSessions(
             this.#sessions,
             cli,
@@ -2132,16 +2149,25 @@ export class RuntimeServer {
         forkLaunch?.permissionMode ??
         permissionModeFromMetadata(providerSettingsBinding?.metadata) ??
         permissionModeFromMetadata(resumeBinding?.metadata)
+      const activationToken = message.profile === 'claude-code' ? this.#readProviderActivationToken('provider.claude.activation') : undefined
       const providerSelection = getAgentManifest(message.profile)?.capabilities.providerConfig
         ? await this.#providerConfigs.launchSelection(
             message.profile as ProviderCli,
-            boundProviderSettings.providerConfigId
+            message.profile === 'claude-code' ? undefined : boundProviderSettings.providerConfigId
           )
         : undefined
+      const appliedActivation = message.profile === 'claude-code' ? this.#readProviderActivationToken(`provider.claude.applied.${message.sessionId}`) : undefined
+      const followsGlobalModel = message.profile === 'claude-code' && (
+        boundProviderSettings.providerConfigId !== providerSelection?.providerConfigId ||
+        activationToken !== undefined && appliedActivation !== activationToken
+      )
       if (providerSelection?.subscription && !this.#subscriptionAccounts) throw new SubscriptionLaunchError('Subscription launch service is unavailable')
       const modelSettings = new AgentModelSettings(this.#database, this.#providerConfigs)
       const providerView = providerSelection ? (await this.#providerConfigs.snapshot()).providers[message.profile as ProviderCli]?.find(p => p.id === providerSelection.providerConfigId) : undefined
-      const providerModel = restoredProviderModel(boundProviderSettings.model, providerSelection?.model, providerView, modelSettings.preferences())
+      const launchDigest = message.profile === 'claude-code' && providerSelection ? await this.#providerLaunchDigest(providerSelection) : undefined
+      const providerModel = followsGlobalModel && !providerSelection?.model && boundProviderSettings.model !== undefined
+        ? 'default'
+        : restoredProviderModel(followsGlobalModel ? undefined : boundProviderSettings.model, providerSelection?.model, providerView, modelSettings.preferences())
       const providerLaunch = providerSelection === undefined
         ? { env: {} as Record<string, string> }
         : {
@@ -2233,6 +2259,7 @@ export class RuntimeServer {
       }
       if (providerSettingsBinding && providerSelection && (
         boundProviderSettings.providerConfigId !== providerSelection.providerConfigId ||
+        followsGlobalModel ||
         boundProviderSettings.model === undefined ||
         permissionModeFromMetadata(providerSettingsBinding.metadata) === undefined
       )) {
@@ -2738,6 +2765,14 @@ export class RuntimeServer {
         )
       } else if (resumeMonitor && resumeBinding) {
         this.#scheduleProviderResumeTimeout(message, session, resumeBinding.id, resumeMonitor)
+      }
+      if (message.profile === 'claude-code') {
+        if (launchDigest !== undefined) this.#sessions.recordProviderLaunchDigest(message.sessionId, runId, launchDigest)
+        if (launchDigest !== undefined) {
+          if (providerSettingsBinding) this.#writeProviderActivationToken(`provider.claude.applied.${message.sessionId}`, launchDigest)
+          else this.#providerActivationRuns.set(message.sessionId, { runId, token: launchDigest })
+        }
+        if (this.#readProviderActivationToken('provider.claude.activation') !== activationToken) this.#queueProviderActivation(message.sessionId)
       }
     } catch (error) {
       if (hookRunId) this.#control?.tokens.revokeRun(hookRunId)
@@ -3330,6 +3365,7 @@ export class RuntimeServer {
   }
 
   async #disposeSession(sessionId: string): Promise<void> {
+    this.#sessions.cancelProviderActivation(sessionId)
     this.#clearProviderResumeTimer(sessionId)
     const cwdTimer = this.#cwdTimers.get(sessionId)
     if (cwdTimer) clearTimeout(cwdTimer)
@@ -4055,6 +4091,7 @@ export class RuntimeServer {
         transitions[index] = owner
           ? await owner.server.#activateProviderForSession(sessionId, owner.descriptor, selection, peers)
           : { sessionId, status: 'deferred', reason: 'restart-unavailable' }
+        if (transitions[index]?.status === 'deferred' && owner) owner.server.#queueProviderActivation(sessionId)
       }
     }
     const workerCount = Math.min(MAX_CONCURRENT_PROVIDER_RESTARTS, liveSessionIds.length)
@@ -4062,13 +4099,85 @@ export class RuntimeServer {
     return transitions
   }
 
+  #readProviderActivationToken(key: string): string | undefined {
+    const row = this.#database.get<{ value_json: string }>('SELECT value_json FROM preferences WHERE key = ?', key)
+    if (!row) return undefined
+    try { const token: unknown = JSON.parse(row.value_json); return typeof token === 'string' ? token : undefined }
+    catch { return undefined }
+  }
+
+  #writeProviderActivationToken(key: string, token: string): void {
+    this.#database.run(
+      `INSERT INTO preferences (key, value_json, updated_at) VALUES (?, ?, ?)
+       ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at`,
+      key, JSON.stringify(token), Date.now()
+    )
+  }
+
+  async #providerLaunchDigest(selection: ProviderLaunchSelection): Promise<string> {
+    const snapshot = await this.#providerConfigs.snapshot()
+    const preferences = new AgentModelSettings(this.#database, this.#providerConfigs).preferences()
+    const providerFields = (providerId: string) => {
+      const provider = snapshot.providers['claude-code'].find(value => value.id === providerId)
+      return provider && {
+        modelMapping: provider.modelMapping,
+        effortMapping: provider.effortMapping,
+        reasoningEffort: provider.reasoningEffort,
+        contextWindow: preferences.contextWindows[providerId],
+        // Catalog labels, quota and account status are display data, not launch settings.
+        modelLimits: (provider.subscription?.modelMetadata ?? provider.modelMetadata)?.map(model => ({
+          id: model.id, resolvedModel: 'resolvedModel' in model ? model.resolvedModel : undefined,
+          contextWindow: model.contextWindow, maxContextWindow: model.maxContextWindow, maxOutputTokens: model.maxOutputTokens
+        })),
+        subscription: provider.subscription?.provider
+      }
+    }
+    const compact = preferences.compaction
+    let compaction: unknown = compact
+    if (compact.mode === 'custom' && compact.providerId) {
+      const target = await this.#providerConfigs.launchSelection('claude-code', compact.providerId)
+      compaction = { settings: compact, target: { id: target.providerConfigId, model: target.model, env: target.env }, provider: providerFields(compact.providerId) }
+    }
+    const canonical = (value: unknown): unknown => {
+      if (Array.isArray(value)) return value.map(canonical)
+      if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, entry]) => [key, canonical(entry)]))
+      return value
+    }
+    // Only the digest is persisted; provider credentials never leave this process.
+    return createHash('sha256').update(JSON.stringify(canonical({
+      providerId: selection.providerConfigId, model: selection.model, env: selection.env,
+      provider: providerFields(selection.providerConfigId), compaction
+    }))).digest('hex')
+  }
+
+  #queueProviderActivation(sessionId: string): void {
+    if (!RuntimeServer.#instances.has(this) || this.#closed) return
+    const sessions = this.#sessions
+    sessions.queueProviderActivation(sessionId, async () => {
+      const peers = [...RuntimeServer.#instances].filter(server => server.#sessions === sessions)
+      const session = sessions.get(sessionId)
+      if (!session || session.profile !== 'claude-code') return true
+      const owner = peers.filter(server => server.#spawnDescriptors.get(sessionId)?.profile === 'claude-code')
+        .sort((left, right) => (right.#spawnDescriptors.get(sessionId)?.spawnRevision ?? 0) - (left.#spawnDescriptors.get(sessionId)?.spawnRevision ?? 0))[0]
+      if (!owner) return peers.length === 0
+      const token = owner.#readProviderActivationToken('provider.claude.activation')
+      const transition = await owner.#activateProviderForSession(sessionId, owner.#spawnDescriptors.get(sessionId)!, undefined, peers)
+      return transition.status === 'updated' && owner.#readProviderActivationToken('provider.claude.activation') === token
+    })
+  }
+
   async #activateProviderForSession(
     sessionId: string,
     descriptor: TerminalSpawnMessage,
-    selection: ProviderLaunchSelection,
+    _selection: ProviderLaunchSelection | undefined,
     peers: RuntimeServer[]
   ): Promise<ProviderSessionActivationTransition> {
     return this.#sessions.runExclusive(sessionId, async () => {
+      if (this.#closed || !RuntimeServer.#instances.has(this) || !this.#sessions.has(sessionId)) return { sessionId, status: 'deferred', reason: 'session-not-running' }
+      const activationVersion = this.#sessions.providerActivationVersion(sessionId)
+      // Resolve inside the Session lock: a newer global activation supersedes queued work.
+      const activationToken = this.#readProviderActivationToken('provider.claude.activation')
+      const selection = await this.#providerConfigs.launchSelection('claude-code')
       const session = this.#sessions.get(sessionId)
       const binding = session?.profile === descriptor.profile && descriptor.profile !== 'shell'
         ? this.#sessionRepository.getResumeBinding(
@@ -4077,9 +4186,15 @@ export class RuntimeServer {
           )
         : undefined
       const previousSettings = providerLaunchSettingsFromMetadata(binding?.metadata)
-      const launchModel = !selection.subscription && !selection.model && previousSettings.model?.startsWith('matou-')
-        ? 'default'
-        : selection.model
+      const desiredDigest = await this.#providerLaunchDigest(selection)
+      if (this.#sessions.providerLaunchDigest(sessionId) === desiredDigest) {
+        try {
+          if (activationToken !== undefined) this.#writeProviderActivationToken(`provider.claude.applied.${sessionId}`, activationToken)
+        } catch {
+          return { sessionId, status: 'deferred', reason: 'binding-update-failed' }
+        }
+        return { sessionId, status: 'updated' }
+      }
       const deferredReason = this.#providerActivationDeferredReason(
         sessionId,
         descriptor.profile,
@@ -4133,11 +4248,20 @@ export class RuntimeServer {
         this.#unregisterSession(sessionId, active)
         active.dispose({ notifyExit: false })
         await active.whenClosed()
+        if (this.#closed || !RuntimeServer.#instances.has(this) ||
+            this.#sessions.providerActivationVersion(sessionId) !== activationVersion) {
+          return { sessionId, status: 'deferred', reason: 'session-not-running' }
+        }
 
         // This reset belongs only to the provider transition. Persisting
         // "default" would suppress a later native /model choice on every resume.
-        await this.#spawn(descriptor, undefined, undefined, wasAttached, launchModel)
+        await this.#spawn(descriptor, undefined, undefined, wasAttached)
         const replacement = this.#sessions.get(sessionId)
+        if (this.#closed || !RuntimeServer.#instances.has(this) ||
+            this.#sessions.providerActivationVersion(sessionId) !== activationVersion) {
+          if (replacement && replacement !== active) await this.#disposeSession(sessionId)
+          return { sessionId, status: 'deferred', reason: 'session-not-running' }
+        }
         if (!replacement || replacement === active || replacement.profile !== descriptor.profile) {
           throw new Error('provider Session restart did not produce a matching process')
         }
@@ -4148,32 +4272,23 @@ export class RuntimeServer {
         if (this.#sessions.get(sessionId) !== replacement) {
           throw new Error('provider Session replacement exited during startup')
         }
-        this.#hud.updateProviderModel(sessionId, selection.model)
+        const appliedToken = this.#readProviderActivationToken(`provider.claude.applied.${sessionId}`)
+        if (this.#readProviderActivationToken('provider.claude.activation') !== appliedToken) {
+          this.#queueProviderActivation(sessionId)
+          return { sessionId, status: 'deferred', reason: 'restart-unavailable' }
+        }
+        const actualSettings = providerLaunchSettingsFromMetadata(this.#sessionRepository.getProviderSettingsBinding(sessionId, 'claude-code')?.metadata)
+        this.#hud.updateProviderModel(sessionId, actualSettings.model ?? '')
         RuntimeServer.#publishAttachedSessionHud(sessionId)
+        if (this.#readProviderActivationToken('provider.claude.activation') !== activationToken) this.#queueProviderActivation(sessionId)
         return { sessionId, status: 'updated' }
       } catch (error) {
         if (!bindingUpdated) {
           console.error(`[provider-config.activate] ${errorMessage(error)}`)
           return { sessionId, status: 'deferred', reason: 'binding-update-failed' }
         }
-        try {
-          this.#sessionRepository.updateProviderLaunchSettings({
-            commandId: `provider-config-rollback-${sessionId}-${randomUUID()}`,
-            commandType: 'provider-binding.launch-settings',
-            requestHash: `${sessionId}:${previousSettings.providerConfigId}:${previousSettings.model}`
-          }, {
-            bindingId: currentBinding.id,
-            providerConfigId: previousSettings.providerConfigId!,
-            model: previousSettings.model ?? '',
-            permissionMode: previousPermission,
-            now: Date.now()
-          })
-          if (!this.#sessions.has(sessionId)) {
-            await this.#spawn(descriptor, undefined, undefined, wasAttached)
-          }
-        } catch (rollbackError) {
-          console.error(`[provider-config.rollback] ${errorMessage(rollbackError)}`)
-        }
+        // Keep the requested binding durable. A later restore must not silently
+        // fall back to the previous provider after a failed replacement launch.
         console.error(`[provider-config.activate] ${errorMessage(error)}`)
         return { sessionId, status: 'deferred', reason: 'restart-unavailable' }
       }

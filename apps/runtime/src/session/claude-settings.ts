@@ -63,7 +63,7 @@ export class ClaudeSettings {
 
   environment(profile: string, options?: ClaudeEnvironmentOptions): Record<string, string> {
     const manifest = getAgentManifest(profile)
-    if (!manifest || !manifest.capabilities.providerConfig) return {}
+    if (!manifest || (!manifest.capabilities.providerConfig && profile !== 'antigravity')) return {}
     const { timeZone, systemTimeZone } = this.snapshot()
     const official = options?.official ?? true
     if (!official) {
