@@ -25,16 +25,16 @@ import {
 } from 'electron'
 import electronUpdater from 'electron-updater'
 
-import { PROVIDER_PRESETS, isLocale, isLocalePreference, type LocalePreference } from '@matou/contracts'
+import { isLocale, isLocalePreference, type LocalePreference } from '@matou/contracts'
 
 import { AppUpdateManager } from './app-update-manager'
-import { isAllowedExternalUrl } from './external-url-policy'
+import { openWebLink, registerWebLinkIpc } from './web-links'
 import { resolveAppUpdateInstallMode } from './app-update-install-mode'
 import { LocaleStore } from './locale-store'
 import { mainMessages } from './messages'
 import { RuntimeHost } from './runtime-host'
 import { registerSafeBrowserIpc } from './safe-browser-ipc'
-import { SafeBrowserController, reportSafeBrowserCountry, safeBrowserAccountEnv, safeBrowserTimeZone } from './safe-browser'
+import { SafeBrowserController, reportSafeBrowserCountry, safeBrowserAccountEnv } from './safe-browser'
 import { resolvePackagedApplication } from './app-environment'
 import { applyApplicationBrand } from './application-brand'
 import { resolveDefaultWorkspacePath } from './default-workspace-policy'
@@ -120,6 +120,7 @@ if (process.env.ELECTRON_USER_DATA_DIR) {
 
 const safeBrowser = new SafeBrowserController()
 registerSafeBrowserIpc(safeBrowser, browserWindows)
+registerWebLinkIpc(safeBrowser, browserWindows)
 
 const localeStore = new LocaleStore({
   file: join(app.getPath('userData'), 'locale.json'),
@@ -455,9 +456,7 @@ if (primaryInstance) app.whenReady().then(async () => {
   })
   runtimeHost = new RuntimeHost(resolveRuntimeEntry(), undefined, {
     ...(isPackagedApplication ? { modelRouterBinary: join(process.resourcesPath, 'model-router', 'model-router') } : {}),
-    openExternal: url => shell.openExternal(url),
-    safeBrowser,
-    safeBrowserTimeZone,
+    openWebLink,
     messages,
     locale: () => localeStore.current()
   })
@@ -578,17 +577,6 @@ ipcMain.on(DESKTOP_CHANNELS.terminalCopyFocus, (event, focused: boolean) => {
   setTerminalCopyFocus(event.sender, focused === true)
 })
 
-ipcMain.handle(DESKTOP_CHANNELS.openProviderKeyPage, async (_event, cli: unknown, presetId: unknown) => {
-  if (cli !== 'claude-code' && cli !== 'codex') throw new Error('Invalid CLI')
-  const preset = PROVIDER_PRESETS[cli].find(p => p.id === presetId)
-  if (!preset) throw new Error('Unknown provider preset')
-  await shell.openExternal(preset.keyUrl)
-})
-ipcMain.handle(DESKTOP_CHANNELS.openExternal, async (_event, url: unknown) => {
-  if (!isAllowedExternalUrl(url)) return false
-  await shell.openExternal(url)
-  return true
-})
 ipcMain.on(DESKTOP_CHANNELS.reportEgressCountry, (_event, country: unknown) => {
   reportSafeBrowserCountry(country)
 })
