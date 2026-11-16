@@ -119,7 +119,7 @@ async function sampleFullFromFixture(
         ? {
             google: {
               api: parseFixtureHostSample(EGRESS_HOSTS.google.api, googleRaw.api),
-              login: parseFixtureHostSample(EGRESS_HOSTS.google.login, googleRaw.login)
+              login: { host: EGRESS_HOSTS.google.login, notApplicable: true }
             }
           }
         : {}),
@@ -254,7 +254,6 @@ export function createEgressSampler(input: EgressSamplerInput): EgressSampler {
         openaiApi,
         openaiLogin,
         googleApi,
-        googleLogin,
         chatgptPair,
         browserResult,
         ipv6Bypass
@@ -264,7 +263,6 @@ export function createEgressSampler(input: EgressSamplerInput): EgressSampler {
         probeHost(EGRESS_HOSTS.openai.api, openaiEnv),
         probeHost(EGRESS_HOSTS.openai.login, openaiEnv),
         probeHost(EGRESS_HOSTS.google.api, googleEnv),
-        probeHost(EGRESS_HOSTS.google.login, googleEnv),
         chatgptPromise,
         readSysProxy().then(async (systemProxy) => ({
           systemProxy,
@@ -279,7 +277,7 @@ export function createEgressSampler(input: EgressSamplerInput): EgressSampler {
         hosts: {
           anthropic: { api: anthropicApi, login: anthropicLogin },
           openai: { api: openaiApi, login: openaiLogin },
-          google: { api: googleApi, login: googleLogin },
+          google: { api: googleApi, login: { host: EGRESS_HOSTS.google.login, notApplicable: true } },
           ...(chatgptPair ? { 'chatgpt-subscription': chatgptPair } : {})
         },
         ...(browserResult.browserLogin ? { browserLogin: browserResult.browserLogin } : {}),

@@ -19,6 +19,8 @@ export interface EgressExit {
 
 export interface EgressHostSample {
   host: string
+  /** This host is intentionally not probed, rather than a failed request. */
+  notApplicable?: true
   ip?: string
   country?: string
   error?: EgressHostError

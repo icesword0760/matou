@@ -70,7 +70,7 @@ describe('agentProxyEnvironment', () => {
 })
 
 describe('createEgressSampler', () => {
-  it('probes all six provider hosts concurrently and adds browserLogin when system proxy is enabled', async () => {
+  it('probes the five applicable provider hosts concurrently and adds browserLogin when system proxy is enabled', async () => {
     const settingsPath = join(root, 'settings.json')
     await writeFile(settingsPath, JSON.stringify({
       env: {
@@ -113,7 +113,6 @@ describe('createEgressSampler', () => {
       { host: 'api.openai.com', proxyUrl: undefined },
       { host: 'chatgpt.com', proxyUrl: undefined },
       { host: 'www.cloudflare.com', proxyUrl: undefined },
-      { host: 'accounts.google.com', proxyUrl: undefined },
       { host: 'claude.ai', proxyUrl: 'http://127.0.0.1:9090' }
     ])
     expect(sample).toEqual({
@@ -128,7 +127,7 @@ describe('createEgressSampler', () => {
         },
         google: {
           api: { host: 'www.cloudflare.com', ip: '198.51.100.20', country: 'SG' },
-          login: { host: 'accounts.google.com', ip: '198.51.100.20', country: 'SG' }
+          login: { host: 'accounts.google.com', notApplicable: true }
         }
       },
       browserLogin: { host: 'claude.ai', ip: '198.51.100.99', country: 'JP' },
@@ -164,7 +163,7 @@ describe('createEgressSampler', () => {
 
     const sample = await sampler.sampleFull()
 
-    expect(probeTrace).toHaveBeenCalledTimes(6)
+    expect(probeTrace).toHaveBeenCalledTimes(5)
     expect(sample.browserLogin).toBeUndefined()
     expect(sample.systemProxyEnabled).toBe(false)
     expect(sample.agentHasProxyEnv).toBe(false)
@@ -246,7 +245,7 @@ describe('createEgressSampler', () => {
       const full = await sampler.sampleFull()
       const light = await sampler.sampleLight('anthropic')
 
-      expect(probeTrace).toHaveBeenCalledTimes(7)
+      expect(probeTrace).toHaveBeenCalledTimes(6)
       expect(full.hosts.anthropic?.api).toEqual({ host: 'api.anthropic.com', ip: '169.128.10.1', country: 'US' })
       expect(light).toEqual({ host: 'api.anthropic.com', ip: '169.128.10.1', country: 'US' })
     }
@@ -441,8 +440,7 @@ describe('createEgressSampler', () => {
       'claude.ai',
       'api.openai.com',
       'chatgpt.com',
-      'www.cloudflare.com',
-      'accounts.google.com'
+      'www.cloudflare.com'
     ])
     expect(probeCalls.some((c) => c.host === 'auth.openai.com')).toBe(false)
     expect(sample.hosts['chatgpt-subscription']).toBeUndefined()
@@ -450,7 +448,7 @@ describe('createEgressSampler', () => {
     const lightDisabled = await sampler.sampleLight('chatgpt-subscription')
     expect(lightDisabled).toEqual({ host: 'chatgpt.com', error: 'unreachable' })
     expect(resolveRouterProxy).not.toHaveBeenCalled()
-    expect(probeCalls).toHaveLength(6)
+    expect(probeCalls).toHaveLength(5)
   })
 
   it('probes chatgpt-subscription hosts via resolveRouterProxy proxyUrl when enabled and ignores openai baseEnv proxy', async () => {
@@ -593,6 +591,37 @@ function ipv6Info(address: string, internal: boolean): NetworkInterfaceInfo {
 
 
 describe('Google sampling', () => {
+  it('full sample never requests the Google login trace and retains other login requests', async () => {
+    const { probeTrace: realProbeTrace } = await import('./trace-probe')
+    const request = vi.fn(async (_url: string) => 'ip=203.0.113.20\nloc=US\n')
+    const sampler = createEgressSampler({
+      baseEnv: {},
+      claudeUserSettingsPath: join(root, 'missing.json'),
+      agentTimeZoneMainland: () => false,
+      routerFamilyEnabled: async () => true,
+      resolveRouterProxy: async () => ({ source: 'direct' }),
+      probeTrace: (host, proxy) => realProbeTrace(host, proxy, { request }),
+      readSystemProxy: async () => undefined,
+      networkInterfaces: () => ({})
+    })
+
+    const sample = await sampler.sampleFull()
+    const urls = request.mock.calls.map(([url]) => url)
+    expect(urls).not.toContain('https://accounts.google.com/cdn-cgi/trace')
+    expect(urls.sort()).toEqual([
+      'https://api.anthropic.com/cdn-cgi/trace',
+      'https://claude.ai/cdn-cgi/trace',
+      'https://api.openai.com/cdn-cgi/trace',
+      'https://chatgpt.com/cdn-cgi/trace',
+      'https://chatgpt.com/cdn-cgi/trace',
+      'https://auth.openai.com/cdn-cgi/trace',
+      'https://www.cloudflare.com/cdn-cgi/trace'
+    ].sort())
+    expect(sample.hosts.google?.login).toEqual({
+      host: 'accounts.google.com', notApplicable: true
+    })
+  })
+
   it('light sample requests only the generic api trace through the agent proxy', async () => {
     const { probeTrace: realProbeTrace } = await import('./trace-probe')
     const request = vi.fn(async () => 'ip=203.0.113.20\nloc=US\n')
@@ -609,23 +638,25 @@ describe('Google sampling', () => {
     ]])
   })
 
-  it('reads Google api and unknown login from the existing e2e fixture', async () => {
-    const fixturePath = join(root, 'google-fixture.json')
-    await writeFile(fixturePath, JSON.stringify({ google: {
-      api: { ip: '223.5.5.5', country: 'CN' }, login: { error: 'invalid' }
-    } }))
-    const probeTrace = vi.fn()
-    const sampler = createEgressSampler({
-      baseEnv: { MATOU_E2E: '1', MATOU_E2E_EGRESS_FIXTURE: fixturePath },
-      agentTimeZoneMainland: () => false, probeTrace
-    })
-    expect((await sampler.sampleFull()).hosts.google).toEqual({
-      api: { host: 'www.cloudflare.com', ip: '223.5.5.5', country: 'CN' },
-      login: { host: 'accounts.google.com', error: 'invalid' }
-    })
-    expect(await sampler.sampleLight('google')).toEqual({
-      host: 'www.cloudflare.com', ip: '223.5.5.5', country: 'CN'
-    })
-    expect(probeTrace).not.toHaveBeenCalled()
-  })
+  it.each([undefined, { error: 'timeout' }, { ip: '223.5.5.5', country: 'CN' }])(
+    'reads Google api but ignores fixture login data: %s', async (login) => {
+      const fixturePath = join(root, 'google-fixture.json')
+      await writeFile(fixturePath, JSON.stringify({ google: {
+        api: { ip: '223.5.5.5', country: 'CN' }, login
+      } }))
+      const probeTrace = vi.fn()
+      const sampler = createEgressSampler({
+        baseEnv: { MATOU_E2E: '1', MATOU_E2E_EGRESS_FIXTURE: fixturePath },
+        agentTimeZoneMainland: () => false, probeTrace
+      })
+      expect((await sampler.sampleFull()).hosts.google).toEqual({
+        api: { host: 'www.cloudflare.com', ip: '223.5.5.5', country: 'CN' },
+        login: { host: 'accounts.google.com', notApplicable: true }
+      })
+      expect(await sampler.sampleLight('google')).toEqual({
+        host: 'www.cloudflare.com', ip: '223.5.5.5', country: 'CN'
+      })
+      expect(probeTrace).not.toHaveBeenCalled()
+    }
+  )
 })

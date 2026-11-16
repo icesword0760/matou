@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { EgressStatusWire } from '@matou/contracts'
@@ -81,8 +81,7 @@ describe('EgressChip', () => {
     status.families[0]!.family = 'google'
     status.checks = [
       { id: 'mainland', family: 'google', result: 'pass' },
-      { id: 'exit-rule', family: 'google', result: 'pass' },
-      { id: 'login-api-match', family: 'google', result: 'unknown' }
+      { id: 'exit-rule', family: 'google', result: 'pass' }
     ]
     status.sessionFamilies = { 'session-antigravity': 'google' }
     await renderChip(status, 'session-antigravity')
@@ -90,6 +89,13 @@ describe('EgressChip', () => {
     expect(chip.getAttribute('data-tone')).toBe('ok')
     fireEvent.click(chip)
     expect(await screen.findByRole('heading', { name: 'Google（通用出口检测）' })).toBeTruthy()
+    const google = screen.getByRole('region', { name: 'Google（通用出口检测）' })
+    expect(within(google).getAllByRole('listitem')).toHaveLength(2)
+    expect(google.textContent).toContain('出口不在中国大陆')
+    expect(google.textContent).toContain('出口符合出口规则')
+    expect(google.textContent).not.toContain('登录与 API 同一出口')
+    expect(google.textContent).not.toContain('无法确认')
+    expect(screen.getByText(/Google 线路使用通用出口检测，不能保证 Google 实际看到的出口/)).toBeTruthy()
   })
 
   it('renders checking copy before the first check completes', async () => {

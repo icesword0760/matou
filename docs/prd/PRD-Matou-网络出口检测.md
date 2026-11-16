@@ -206,11 +206,11 @@ Antigravity 的服务商域名（Google）没有 trace 入口，接入后按通�
 
 ## 10. Antigravity 原生会话的 Google 通用出口检测（2026-11-15）
 
-`antigravity` profile 启动的原生 agent 会话纳入 `google` 类别，显示现有 HUD 出口标签。面板中 Google 组位于 Claude（ChatGPT 订阅）之后、本机之前，标题为「Google（通用出口检测）」/「Google (generic exit)」。检查详情保留通用文案，登录出口无法确认时只显示未知，不降低整体正常状态。
+`antigravity` profile 启动的原生 agent 会话纳入 `google` 类别，显示现有 HUD 出口标签。面板中 Google 组位于 Claude（ChatGPT 订阅）之后、本机之前，标题为「Google（通用出口检测）」/「Google (generic exit)」。检查详情只保留「出口不在中国大陆」和「出口符合出口规则」两项，不生成「登录与 API 同一出口」或「不适用」占位行。
 
-Google 没有可用的 Cloudflare trace 出口接口。全量检测的 `api` 使用 `www.cloudflare.com/cdn-cgi/trace` 取得通用出口，`login` 尝试 `accounts.google.com/cdn-cgi/trace`，无有效 trace 时记为未知。轻量检测仅对活跃 Google 会话请求通用 api trace；沿用每分钟轻量采样、网络变化全量复检、冻结后 15 秒复检及通过后 5 秒二次确认的现有节奏。
+Google 没有公开出口接口。全量检测的 `api` 使用 `www.cloudflare.com/cdn-cgi/trace` 取得通用出口近似；登录出口不检测，不请求 `accounts.google.com/cdn-cgi/trace`，采样标记为 `notApplicable: true`（主动跳过，不是请求失败），fixture 也不读取 Google 登录样本。Google 组状态只由通用 API 出口判定，不受缺少登录样本影响。轻量检测仅对活跃 Google 会话请求通用 api trace；沿用每分钟轻量采样、网络变化全量复检、冻结后 15 秒复检及通过后 5 秒二次确认的现有节奏。
 
-通用 api 出口为 `CN` 时按 mainland 异常处理；与已保存的国家或 IP 规则不符时按 rule 异常处理。登录与 api 的已知海外出口不一致仅提醒，登录 unknown 不触发暂停。只暂停该类别的会话，恢复后自动继续，新会话在异常期间出生即冻结；沿用现有越过、关闭保护及会话时区策略，不改系统时区。
+通用 api 出口为 `CN` 时按 mainland 异常处理；与已保存的国家或 IP 规则不符时按 rule 异常处理。登录出口不参与判定。只暂停该类别的会话，恢复后自动继续，新会话在异常期间出生即冻结；沿用现有越过、关闭保护及会话时区策略，不改系统时区。
 
 近似边界：通用探测只能说明探测请求的出口，Google 域名可能被用户代理分流到不同线路，不能证明 Google 实际看到的 IP、国家或每条连接的路径。面板采样说明固定补充「Google 线路使用通用出口检测，不能保证 Google 实际看到的出口。」。本次不增加检测频率，不引入额外 LLM 请求、依赖或存储结构。
 

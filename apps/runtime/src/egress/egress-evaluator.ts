@@ -83,11 +83,12 @@ function evaluateFamily(
   rule: EgressRule
 ): { evaluation: FamilyEvaluation; familyChecks: EgressCheckWire[] } {
   const { api, login } = pair
-  const exit = resolveExit(api, login)
+  const applicableLogin = family === 'google' ? undefined : login
+  const exit = resolveExit(api, applicableLogin)
 
-  const mainlandCheck = evaluateMainland(family, api, login)
+  const mainlandCheck = evaluateMainland(family, api, applicableLogin)
   const exitRuleCheck = evaluateExitRule(family, api, rule)
-  const loginApiMatchCheck = evaluateLoginApiMatch(family, api, login)
+  const loginApiMatchCheck = family === 'google' ? undefined : evaluateLoginApiMatch(family, api, login)
 
   let violation: 'mainland' | 'rule' | undefined
   let state: FamilyEvaluation['state']
@@ -100,7 +101,7 @@ function evaluateFamily(
     state = 'abnormal'
   } else if (mainlandCheck.result === 'unknown' || exitRuleCheck.result === 'unknown') {
     state = 'unknown'
-  } else if (loginApiMatchCheck.result === 'warn') {
+  } else if (loginApiMatchCheck?.result === 'warn') {
     state = 'warning'
   } else {
     state = 'ok'
@@ -112,13 +113,13 @@ function evaluateFamily(
 
   return {
     evaluation,
-    familyChecks: [mainlandCheck, exitRuleCheck, loginApiMatchCheck]
+    familyChecks: [mainlandCheck, exitRuleCheck, ...(loginApiMatchCheck ? [loginApiMatchCheck] : [])]
   }
 }
 
-function resolveExit(api: EgressHostSample, login: EgressHostSample): EgressExit | undefined {
+function resolveExit(api: EgressHostSample, login?: EgressHostSample): EgressExit | undefined {
   if (hasResolvedExit(api)) return { ip: api.ip, country: api.country }
-  if (hasResolvedExit(login)) return { ip: login.ip, country: login.country }
+  if (login && hasResolvedExit(login)) return { ip: login.ip, country: login.country }
   return undefined
 }
 
@@ -131,18 +132,18 @@ function hasResolvedExit(
 function evaluateMainland(
   family: EgressFamily,
   api: EgressHostSample,
-  login: EgressHostSample
+  login?: EgressHostSample
 ): EgressCheckWire {
   const cnHost = api.country === 'CN'
     ? api.host
-    : login.country === 'CN'
+    : login?.country === 'CN'
       ? login.host
       : undefined
   if (cnHost) {
     return { id: 'mainland', family, result: 'fail', facts: { host: cnHost } }
   }
 
-  if (!hasResolvedExit(api) && !hasResolvedExit(login)) {
+  if (!hasResolvedExit(api) && !(login && hasResolvedExit(login))) {
     return { id: 'mainland', family, result: 'unknown' }
   }
 
