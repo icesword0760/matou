@@ -239,10 +239,10 @@ describe('EgressChip global entry', () => {
     expect(screen.getByRole('button', { name: '网络检查' }).textContent).toBe('检查中…')
   })
 
-  it('counts paused sessions across every family', async () => {
+  it('counts unique paused sessions across every family', async () => {
     const status = baseStatus({ state: 'abnormal' })
     status.families[0]!.frozenSessionIds = ['session-claude', 'session-2']
-    status.families.push({ ...status.families[0]!, family: 'google', frozenSessionIds: ['session-google'] })
+    status.families.push({ ...status.families[0]!, family: 'google', frozenSessionIds: ['session-google', 'session-claude'] })
     await renderChip(status, 'session-shell')
     expect(screen.getByRole('button', { name: '网络检查' }).textContent).toBe('出口异常 · 已暂停 3 个会话')
   })

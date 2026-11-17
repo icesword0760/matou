@@ -103,7 +103,7 @@ export function egressPlanForLaunch(
 /** Monitors provider network exits and coordinates per-provider session freezing and auto-resume. */
 export class EgressMonitor {
   readonly #deps: EgressMonitorDependencies
-  readonly #sessionFamilies = new Map<string, EgressFamily>()
+  readonly #sessionFamilies = new Map<string, ReadonlySet<EgressFamily>>()
   readonly #frozenSessions = new Set<string>()
   readonly #overrides = new Map<EgressFamily, string>()
   readonly #lastResolvedIp = new Map<EgressFamily, string>()
@@ -146,17 +146,16 @@ export class EgressMonitor {
     this.#cancelTimers()
   }
 
-  registerSession(sessionId: string, family: EgressFamily): { bornFrozen: boolean } {
-    this.#sessionFamilies.set(sessionId, family)
-    const bornFrozen =
-      this.#deps.settings.protectionEnabled() &&
-      this.#isFamilyAbnormal(family) &&
-      !this.#overrides.has(family)
+  registerSession(sessionId: string, family: EgressFamily | readonly EgressFamily[]): { bornFrozen: boolean } {
+    const families = new Set(typeof family === 'string' ? [family] : family)
+    this.#sessionFamilies.set(sessionId, families)
+    const bornFrozen = this.#deps.settings.protectionEnabled() &&
+      [...families].some(f => this.#isFamilyAbnormal(f) && !this.#overrides.has(f))
 
     if (bornFrozen) {
       this.#frozenSessions.add(sessionId)
-      if (this.#recoveryPhase.get(family) === 'idle') {
-        this.#recoveryPhase.set(family, 'rechecking')
+      for (const f of families) {
+        if (this.#recoveryPhase.get(f) === 'idle') this.#recoveryPhase.set(f, 'rechecking')
       }
       if (!this.#stopped) {
         this.#syncRecoveryTimer()
@@ -193,7 +192,11 @@ export class EgressMonitor {
   status(): EgressStatusWire {
     const rule = this.#deps.settings.rule()
     const protectionEnabled = this.#deps.settings.protectionEnabled()
-    const sessionFamilies = Object.fromEntries(this.#sessionFamilies)
+    const sessionFamilySets = Object.fromEntries([...this.#sessionFamilies].map(([id, families]) => [id, [...families]]))
+    const sessionFamilies = Object.fromEntries([...this.#sessionFamilies].flatMap(([id, families]) => {
+      const first = [...families][0]
+      return first ? [[id, first]] : []
+    }))
 
     if (!this.#lastEvaluation || !this.#lastSample) {
       const families: EgressFamilyWire[] = CHECKING_FAMILIES.map((family) => {
@@ -215,7 +218,8 @@ export class EgressMonitor {
         checks: [],
         ruleMode: rule.mode,
         protectionEnabled,
-        sessionFamilies
+        sessionFamilies,
+        sessionFamilySets
       }
     }
 
@@ -245,6 +249,7 @@ export class EgressMonitor {
       ruleMode: rule.mode,
       protectionEnabled,
       sessionFamilies,
+      sessionFamilySets,
       ...(this.#checkedAt === undefined ? {} : { checkedAt: this.#checkedAt }),
       ...(this.#lastTransition === undefined ? {} : { lastTransition: this.#lastTransition })
     }
@@ -286,8 +291,8 @@ export class EgressMonitor {
   async setProtection(enabled: boolean): Promise<EgressStatusWire> {
     this.#deps.settings.setProtection(enabled)
     if (!enabled) {
+      await this.#thawSessions([...this.#frozenSessions])
       for (const family of EGRESS_FAMILIES) {
-        await this.#thawSessions(this.#frozenSessionsForFamily(family))
         this.#recoveryPhase.set(family, 'idle')
       }
     } else if (this.#lastSample) {
@@ -308,7 +313,7 @@ export class EgressMonitor {
       throw new Error(`Cannot override ${family} without a resolved exit IP`)
     }
     this.#overrides.set(family, exitIp)
-    await this.#thawSessions(this.#frozenSessionsForFamily(family))
+    await this.#thawSessions(this.#frozenSessionsForFamily(family).filter(id => this.#sessionCanThaw(id)))
     this.#recoveryPhase.set(family, 'idle')
     if (!this.#stopped) {
       this.#syncRecoveryTimer()
@@ -378,16 +383,20 @@ export class EgressMonitor {
 
     this.#lastEvaluation = evaluation
 
+    // Update every override before considering any thaw. Recovery of A must not
+    // use B's previous sample or exemption while B is now abnormal.
+    for (const familyEval of evaluation.families) this.#updateOverrideState(familyEval)
+    const ready = new Set(evaluation.families.filter(f => this.#overrides.has(f.family) ||
+      ((f.state === 'ok' || f.state === 'warning') && (options.immediateThaw || this.#recoveryPhase.get(f.family) === 'confirming'))).map(f => f.family))
     for (const familyEval of evaluation.families) {
-      this.#updateOverrideState(familyEval)
-      await this.#reconcileFamily(familyEval, now, options.immediateThaw)
+      await this.#reconcileFamily(familyEval, now, options.immediateThaw, ready)
     }
 
     for (const family of EGRESS_FAMILIES) {
       if (evaluation.families.some((entry) => entry.family === family)) continue
       const frozen = this.#frozenSessionsForFamily(family)
       if (frozen.length > 0) {
-        await this.#thawSessions(frozen)
+        await this.#thawSessions(frozen.filter(id => this.#sessionFamilies.get(id)?.size === 1))
       }
       this.#recoveryPhase.set(family, 'idle')
     }
@@ -410,7 +419,8 @@ export class EgressMonitor {
   async #reconcileFamily(
     familyEval: FamilyEvaluation,
     now: number,
-    immediateThaw: boolean
+    immediateThaw: boolean,
+    ready: ReadonlySet<EgressFamily>
   ): Promise<void> {
     const family = familyEval.family
     const protectionEnabled = this.#deps.settings.protectionEnabled()
@@ -454,8 +464,8 @@ export class EgressMonitor {
 
     const phase = this.#recoveryPhase.get(family)
     if (immediateThaw || phase === 'confirming') {
-      const thawedCount = await this.#thawSessions(frozen)
-      this.#recoveryPhase.set(family, 'idle')
+      const thawedCount = await this.#thawSessions(frozen.filter(id => this.#sessionCanThaw(id, ready)))
+      this.#recoveryPhase.set(family, this.#frozenSessionsForFamily(family).length ? 'confirming' : 'idle')
       if (thawedCount > 0) {
         this.#lastTransition = {
           id: randomUUID(),
@@ -506,6 +516,21 @@ export class EgressMonitor {
     return thawedCount
   }
 
+  /** Send-time guard reuses the current sample; it never initiates a probe. */
+  assertTargetAllowed(family?: EgressFamily): void {
+    if (family && this.#deps.settings.protectionEnabled() && this.#isFamilyAbnormal(family) && !this.#overrides.has(family)) {
+      throw new Error('出口异常，已暂停。请在网络检查中恢复出口或明确豁免后重试。 Network egress protection is active.')
+    }
+  }
+
+  #sessionCanThaw(sessionId: string, ready?: ReadonlySet<EgressFamily>): boolean {
+    return [...(this.#sessionFamilies.get(sessionId) ?? [])].every(family => {
+      if (this.#overrides.has(family)) return true
+      const state = this.#lastEvaluation?.families.find(f => f.family === family)?.state
+      return (state === 'ok' || state === 'warning') && (!ready || ready.has(family))
+    })
+  }
+
   #isFamilyAbnormal(family: EgressFamily): boolean {
     return this.#lastEvaluation?.families.find((f) => f.family === family)?.state === 'abnormal'
   }
@@ -513,7 +538,7 @@ export class EgressMonitor {
   #registeredSessionsForFamily(family: EgressFamily): string[] {
     const ids: string[] = []
     for (const [sessionId, sessionFamily] of this.#sessionFamilies) {
-      if (sessionFamily === family) ids.push(sessionId)
+      if (sessionFamily.has(family)) ids.push(sessionId)
     }
     return ids
   }
@@ -521,7 +546,7 @@ export class EgressMonitor {
   #frozenSessionsForFamily(family: EgressFamily): string[] {
     const ids: string[] = []
     for (const sessionId of this.#frozenSessions) {
-      if (this.#sessionFamilies.get(sessionId) === family) ids.push(sessionId)
+      if (this.#sessionFamilies.get(sessionId)?.has(family)) ids.push(sessionId)
     }
     return ids
   }
@@ -539,7 +564,7 @@ export class EgressMonitor {
   }
 
   #lightSampleFamilies(): EgressFamily[] {
-    const active = new Set<EgressFamily>(this.#sessionFamilies.values())
+    const active = new Set<EgressFamily>([...this.#sessionFamilies.values()].flatMap(f => [...f]))
     return active.size > 0 ? EGRESS_FAMILIES.filter((family) => active.has(family)) : ['anthropic']
   }
 

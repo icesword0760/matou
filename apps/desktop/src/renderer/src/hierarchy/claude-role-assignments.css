@@ -1,0 +1,45 @@
+.model-allocation { display: grid; gap: 14px; margin-top: 22px; padding-top: 20px; border-top: 1px solid var(--workspace-line); color: var(--workspace-text); }
+.model-allocation__section { display: grid; gap: 10px; }
+.model-allocation__header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.model-allocation__header > div { display: grid; gap: 4px; }
+.model-allocation h2 { margin: 0; color: var(--workspace-text); font-size: 13px; font-weight: 680; }
+.model-allocation p { margin: 0; color: var(--workspace-muted); font-size: 11px; line-height: 1.65; }
+.model-allocation__card { padding: 2px 14px 0; border: 1px solid var(--workspace-line); border-radius: 10px; background: var(--workspace-panel-muted); }
+.model-allocation__head, .model-allocation__row { display: grid; grid-template-columns: 76px minmax(0,1.05fr) minmax(0,1fr); gap: 4px 16px; align-items: start; }
+.model-allocation__head { padding: 10px 0 8px; border-bottom: 1px solid var(--workspace-line); color: var(--workspace-muted); font-size: 10px; font-weight: 650; }
+.model-allocation__row { padding: 12px 0; border-bottom: 1px solid var(--workspace-line); }
+.model-allocation__row:last-of-type { border-bottom: 0; }
+.model-allocation__role { padding-top: 9px; font-size: 12px; font-weight: 650; line-height: 1.4; }
+.model-allocation__field { display: grid; gap: 5px; min-width: 0; }
+.model-allocation__field select, .model-allocation__field input { width: 100%; min-height: 34px; padding: 6px 9px; border: 1px solid var(--workspace-line-strong); border-radius: 7px; color: inherit; background: var(--workspace-panel); font: inherit; font-size: 12px; }
+.model-allocation__field input:focus-visible, .model-allocation__field select:focus-visible, .model-allocation__actions button:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: 2px; }
+.model-allocation__field select:disabled { opacity: .55; }
+.model-allocation__account { color: var(--workspace-muted); font-size: 10px; line-height: 1.5; overflow-wrap: anywhere; }
+.model-allocation__target { grid-column: 2 / -1; font-size: 10px; line-height: 1.55; }
+.model-allocation__error { grid-column: 2 / -1; color: #b34d47 !important; font-size: 11px; line-height: 1.55; }
+.model-allocation__privacy { padding: 0 2px; }
+.model-allocation__actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding: 2px 0 14px; }
+.model-allocation__actions button { min-height: 32px; padding: 0 14px; border: 1px solid var(--workspace-line-strong); border-radius: 7px; color: var(--workspace-text); background: var(--workspace-panel); font-size: 11px; font-weight: 650; cursor: pointer; }
+.model-allocation__actions button:hover:not(:disabled):not([aria-disabled="true"]) { border-color: var(--workspace-accent); color: var(--workspace-accent); }
+.model-allocation__actions button.primary { border-color: var(--workspace-accent); color: #fff; background: var(--workspace-accent); }
+.model-allocation__actions button.primary:hover:not(:disabled):not([aria-disabled="true"]) { color: #fff; filter: brightness(.98); }
+.model-allocation__actions button:disabled, .model-allocation__actions button[aria-disabled="true"] { opacity: .5; cursor: default; }
+.model-allocation__status { display: inline-flex; align-items: center; padding: 3px 9px; border-radius: 999px; background: rgba(34,150,90,.12); color: #16794b; font-size: 11px; font-weight: 600; line-height: 1.5; }
+.model-allocation__row.is-invalid, .model-allocation__row[aria-invalid="true"] { background: color-mix(in srgb, var(--provider-inline-error-bg) 48%, transparent); }
+.model-allocation__row.is-invalid .model-allocation__role, .model-allocation__row[aria-invalid="true"] .model-allocation__role { color: #a13d39; }
+.model-allocation__row.is-invalid select, .model-allocation__row[aria-invalid="true"] select { border-color: #b34d47; }
+.model-allocation select[aria-invalid="true"] { border-color: #b34d47; background: var(--provider-inline-error-bg); }
+.model-allocation__row.is-invalid .model-allocation__error, .model-allocation__row[aria-invalid="true"] .model-allocation__error { display: block; }
+
+@media (max-width: 640px) {
+  .model-allocation__head { display: none; }
+  .model-allocation__row { grid-template-columns: 1fr; gap: 9px; padding: 14px 0; }
+  .model-allocation__role { padding-top: 0; }
+  .model-allocation__field::before { content: attr(data-label); color: var(--workspace-muted); font-size: 10px; font-weight: 650; }
+  .model-allocation__target, .model-allocation__error { grid-column: 1 / -1; }
+}
+
+
+.model-allocation__field input { box-sizing: border-box; min-width: 0; }
+
+.model-allocation__section > .model-allocation__error { grid-column: 1 / -1; }

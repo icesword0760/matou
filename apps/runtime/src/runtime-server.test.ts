@@ -1,3 +1,7 @@
+import { createServer } from 'node:http'
+import * as officialRoleAccount from './session/claude-official-account'
+import * as nativeRoleCatalog from './session/native-model-catalog'
+import { AgentModelSettings } from './session/agent-model-settings'
 import { EventEmitter } from 'node:events'
 import { execFile } from 'node:child_process'
 import { chmod, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises'
@@ -8156,6 +8160,61 @@ describe('RuntimeServer egress monitoring', () => {
     }
   }
 
+  it.each([true,false])('Task3 registers actual families with a third-party default and blocks custom compaction (role assigned: %s)', async roleAssigned => {
+    vi.spyOn(nativeRoleCatalog,'nativeClaudeModels').mockResolvedValue([{id:'default',resolvedModel:'claude-sonnet-fixture'},{id:'sonnet',resolvedModel:'claude-sonnet-fixture'},{id:'opus',resolvedModel:'claude-opus-fixture'}])
+    vi.spyOn(officialRoleAccount,'officialHeaders').mockResolvedValue({authorization:'Bearer fixture'})
+    vi.spyOn(officialRoleAccount,'captureOfficialClaudeAccount').mockResolvedValue({kind:'oauth',baseUrl:'https://api.anthropic.com',identity:'fixture-account',readHeaders:async()=>({identity:'fixture-account',headers:{authorization:'Bearer fixture'}})})
+    const requests: string[]=[]
+    const upstream=createServer(async(req,res)=>{const chunks=[];for await(const c of req)chunks.push(c);requests.push(JSON.parse(Buffer.concat(chunks).toString()).model);res.end('{"input_tokens":1}')})
+    await new Promise<void>(r=>upstream.listen(0,'127.0.0.1',r))
+    const endpoint=`http://127.0.0.1:${(upstream.address() as {port:number}).port}`
+    const providers=new ProviderConfigStore(root)
+    const api=await providers.upsert({cli:'claude-code',name:'Third party',endpoint,apiKey:'third-key',model:'sonnet',modelMapping:{opus:'same',sonnet:'same',haiku:'same'}})
+    await providers.activate('claude-code',api.id)
+    const official=(await providers.snapshot()).providers['claude-code'].find(p=>p.builtIn)!
+    const sub=await providers.adoptSubscription({name:'ChatGPT fixture',modelMapping:{opus:'gpt',sonnet:'gpt',haiku:'gpt'},subscription:{provider:'codex',credentialRef:{name:'fixture.json'},account:{status:'ready'},modelMetadata:[{id:'gpt'}]}})
+    let leases=0
+    const accounts={onChange:()=>()=>{},prepareModelTarget:async()=>{leases++;return{accountIdentity:'fixture-account',assertActive:()=>{},lease:{release:()=>{leases--}},baseUrl:endpoint,headers:{authorization:'Bearer sub-key'},model:'matou-chatgpt/gpt',metadata:{id:'gpt'}}}} as unknown as SubscriptionAccounts
+    const models=new AgentModelSettings(database,providers)
+    if(roleAssigned) await models.patchAssignments({assignments:{opus:{providerId:sub.id,model:'gpt'}}})
+    await models.set({contextWindows:{},compaction:{mode:'custom',providerId:official.id,model:'opus',effort:'follow'}})
+    const sample=okSample();sample.hosts['chatgpt-subscription']={api:{host:EGRESS_HOSTS['chatgpt-subscription'].api,ip:'203.0.113.51',country:'US'},login:{host:EGRESS_HOSTS['chatgpt-subscription'].login,ip:'203.0.113.51',country:'US'}}
+    const h=createHarness(sample,{providerConfigs:providers,subscriptionAccounts:accounts})
+    await h.monitor.recheck()
+    const previous=process.env.MATOU_CLAUDE_COMMAND,previousTz=process.env.TZ,capture=join(root,'task3-egress.json'),executable=join(root,'task3-egress.cjs')
+    await writeFile(executable,`#!/usr/bin/env node
+require('fs').writeFileSync(${JSON.stringify(capture)},JSON.stringify({base:process.env.ANTHROPIC_BASE_URL,tz:process.env.TZ}));console.log('READY');setInterval(()=>{},1000)
+`);await chmod(executable,0o755);process.env.MATOU_CLAUDE_COMMAND=executable;process.env.TZ='Asia/Shanghai'
+    registerSession(database,'task3-egress','claude-code')
+    try {
+      h.testPort.receive({type:'terminal.spawn',protocolVersion:PROTOCOL_VERSION,sessionId:'task3-egress',executionContextId:'replay-context',profile:'claude-code',cols:80,rows:24})
+      await waitUntil(()=>h.sessions.has('task3-egress'),5000)
+      await waitUntilAsync(async()=>{try{return Boolean(JSON.parse(await readFile(capture,'utf8')).base)}catch{return false}},5000)
+      const launched=JSON.parse(await readFile(capture,'utf8'))
+      expect(launched.tz).not.toBe('Asia/Shanghai')
+      expect(h.monitor.status().sessionFamilySets?.['task3-egress']).toEqual(roleAssigned ? ['chatgpt-subscription','anthropic'] : ['anthropic'])
+      const send=(model:string,path='/v1/messages',compact=false)=>fetch(launched.base+path,{method:'POST',headers:compact?{'x-claude-code-compaction':'manual'}:{},body:JSON.stringify({model,messages:[]})})
+      const mainModel=roleAssigned?'matou-role/opus':'matou-api/opus'
+      expect((await send(mainModel)).status).toBe(200);expect(requests).toEqual([roleAssigned?'matou-chatgpt/gpt':'same'])
+      const bad=structuredClone(sample)
+      for(const family of ['anthropic','chatgpt-subscription'] as const){bad.hosts[family]!.api.country='CN';bad.hosts[family]!.login.country='CN'}
+      h.setSample(bad);await h.monitor.recheck()
+      expect(h.sessions.get('task3-egress')!.egressFrozen).toBe(true)
+      const protectedRequests=roleAssigned ? [['/v1/messages',false],['/v1/messages/count_tokens',false],['/v1/messages',true]] as const : [['/v1/messages',true]] as const
+      for(const [path,compact] of protectedRequests){
+        const denied=await send(mainModel,path,compact);expect(denied.status).toBe(502);expect(await denied.text()).toMatch(/出口异常.*网络检查/)
+      }
+      expect(requests).toHaveLength(1)
+      await h.monitor.override('chatgpt-subscription');expect(h.sessions.get('task3-egress')!.egressFrozen).toBe(true)
+      await models.patchAssignments({assignments:{opus:{providerId:api.id,model:'same'}}})
+      expect(h.monitor.status().sessionFamilySets?.['task3-egress']).toEqual(roleAssigned ? ['chatgpt-subscription','anthropic'] : ['anthropic'])
+      await h.monitor.setProtection(false);expect(h.sessions.get('task3-egress')!.egressFrozen).toBe(false)
+      expect((await send(mainModel,'/v1/messages/count_tokens')).status).toBe(200);expect(requests).toHaveLength(2)
+      await h.sessions.shutdownAll();expect(leases).toBe(0)
+      expect(h.monitor.status().sessionFamilySets?.['task3-egress']).toBeUndefined()
+    } finally {restoreEnv('MATOU_CLAUDE_COMMAND',previous);restoreEnv('TZ',previousTz);h.cleanup();await h.sessions.shutdownAll();upstream.closeAllConnections();await new Promise<void>(r=>upstream.close(()=>r()));vi.restoreAllMocks()}
+  })
+
   it('registers native antigravity with Google protection, exit TZ and actual PTY freeze', async () => {
     const sample = okSample()
     sample.hosts.google = {
@@ -9287,3 +9346,84 @@ if (process.argv.includes('--dump-config')) {
     }
   }, 15_000
 )
+
+it('Task2 role launch keeps a live PID and target snapshot across saves, then captures changes on the next process', async () => {
+  vi.spyOn(nativeRoleCatalog, 'nativeClaudeModels').mockResolvedValue([{ id: 'default', resolvedModel: 'claude-sonnet-fixture' }, { id: 'sonnet', resolvedModel: 'claude-sonnet-fixture' }])
+  const requests: Array<{ path: string; key?: string; model: string }> = []
+  const upstream = createServer(async (req, res) => { const chunks = []; for await (const c of req) chunks.push(c); const body = JSON.parse(Buffer.concat(chunks).toString()); requests.push({ path: req.url!, key: String(req.headers['x-api-key'] ?? ''), model: body.model }); res.end('{"input_tokens":1}') })
+  await new Promise<void>(r => upstream.listen(0, '127.0.0.1', r))
+  const endpoint = `http://127.0.0.1:${(upstream.address() as {port:number}).port}`
+  const previous = process.env.MATOU_CLAUDE_COMMAND
+  const capture = join(root, 'role-capture.json'), executable = join(root, 'role-fixture.cjs')
+  await writeFile(executable, `#!/usr/bin/env node
+const fs=require('fs');const args=process.argv.slice(2);fs.writeFileSync(${JSON.stringify(capture)},JSON.stringify({pid:process.pid,args}));console.log('READY');
+require('readline').createInterface({input:process.stdin}).on('line',async line=>{try{const data=JSON.parse(line);await fetch(process.env.ANTHROPIC_BASE_URL+data.path,{method:'POST',headers:{'x-api-key':process.env.ANTHROPIC_API_KEY||'source'},body:JSON.stringify({model:process.env.ANTHROPIC_DEFAULT_OPUS_MODEL||'same',max_tokens:1000,messages:[]})});console.log('DONE')}catch(e){console.log('FIXTURE_ERROR')}})
+`); await chmod(executable, 0o755); process.env.MATOU_CLAUDE_COMMAND = executable
+  const registry = createTestSessionRegistry(), providers = new ProviderConfigStore(root)
+  const a = await providers.upsert({ cli: 'claude-code', name: 'A', endpoint, apiKey: 'a', model: 'sonnet', modelMapping: {opus:'same',sonnet:'same',haiku:'same'} })
+  const b = await providers.upsert({ cli: 'claude-code', name: 'B', endpoint, apiKey: 'b', model: 'same' })
+  await providers.activate('claude-code', a.id)
+  const settings = new AgentModelSettings(database, providers)
+  await settings.patchAssignments({ assignments: { opus: { providerId: b.id, model: 'same' } } })
+  server.close(); port = new MockPort(); server = new RuntimeServer(port,root,database,undefined,undefined,registry,undefined,undefined,{providerConfigs:providers})
+  port.receive({type:'protocol.hello',protocolVersion:PROTOCOL_VERSION,clientId:'role-fixture'})
+  registerSession(database,'role-live','claude-code')
+  const spawn = {type:'terminal.spawn',protocolVersion:PROTOCOL_VERSION,sessionId:'role-live',executionContextId:'replay-context',profile:'claude-code',cols:80,rows:24}
+  try {
+    port.receive(spawn); await waitUntil(()=>registry.has('role-live'),5000)
+    await waitUntilAsync(async()=>{try{return JSON.parse(await readFile(capture,'utf8')).pid===registry.get('role-live')!.pid}catch{return false}},5000)
+    const first = registry.get('role-live')!, firstPid = first.pid
+    expect(JSON.parse(await readFile(capture,'utf8')).args).toContain('matou-role/sonnet')
+    first.write(JSON.stringify({path:'/v1/messages'})+'\n');await waitUntil(()=>requests.length===1,5000)
+    expect(requests[0]).toMatchObject({key:'b',model:'same'})
+    await providers.upsert({id:b.id,cli:'claude-code',name:'B',endpoint,apiKey:'changed-b',model:'same'})
+    port.receive({...rpc('role-patch','agent-model-settings.patch-assignments',{}),payload:{assignments:{opus:{providerId:a.id,model:'same'}}}})
+    await waitUntil(()=>port.sent.some(m=>m.type==='rpc.response'&&m.requestId==='role-patch'),5000)
+    port.receive(spawn); await settle()
+    expect(registry.get('role-live')!.pid).toBe(firstPid)
+    first.write(JSON.stringify({path:'/v1/messages/count_tokens'})+'\n');await waitUntil(()=>requests.length===2,5000)
+    expect(requests[1]).toMatchObject({key:'b',model:'same'})
+    await registry.shutdownAll()
+    database.run(`INSERT INTO provider_bindings (id,session_id,provider,provider_session_id,resume_state,restore_state,metadata_json,created_at,updated_at,validated_at) VALUES ('role-resume','role-live','claude-code','native-role-fixture','available','none',?,1,1,1)`,JSON.stringify({providerConfigId:a.id,model:'matou-role/sonnet'}))
+    port.receive(spawn);await waitUntil(()=>registry.has('role-live')&&registry.get('role-live')!.pid!==firstPid,5000)
+    await waitUntilAsync(async()=>{try{return JSON.parse(await readFile(capture,'utf8')).pid===registry.get('role-live')!.pid}catch{return false}},5000)
+    registry.get('role-live')!.write(JSON.stringify({path:'/v1/messages'})+'\n');await waitUntil(()=>requests.length===3,5000)
+    expect(requests[2]).toMatchObject({key:'a',model:'same'})
+    expect(JSON.parse(await readFile(capture,'utf8')).args).toEqual(expect.arrayContaining(['--resume','native-role-fixture','matou-role/sonnet']))
+  } finally { restoreEnv('MATOU_CLAUDE_COMMAND',previous);await registry.shutdownAll();upstream.closeAllConnections();await new Promise<void>(r=>upstream.close(()=>r()));vi.restoreAllMocks() }
+})
+
+
+it('Task3 starts all assigned targets without an unused official login and rejects late unbound source selection', async () => {
+  vi.spyOn(nativeRoleCatalog,'nativeClaudeModels').mockResolvedValue([{id:'default',resolvedModel:'claude-sonnet-fixture'},{id:'sonnet',resolvedModel:'claude-sonnet-fixture'}])
+  const captureAccount=vi.spyOn(officialRoleAccount,'captureOfficialClaudeAccount').mockRejectedValue(Error('fixture not logged in'))
+  const requests: string[]=[]
+  const upstream=createServer(async(req,res)=>{const chunks=[];for await(const c of req)chunks.push(c);requests.push(JSON.parse(Buffer.concat(chunks).toString()).model);res.end('{"ok":true}')})
+  await new Promise<void>(r=>upstream.listen(0,'127.0.0.1',r))
+  const endpoint=`http://127.0.0.1:${(upstream.address() as {port:number}).port}`
+  const previous=process.env.MATOU_CLAUDE_COMMAND, executable=join(root,'task3-all.cjs'),capture=join(root,'task3-all.json')
+  await writeFile(executable,`#!/usr/bin/env node
+require('fs').writeFileSync(${JSON.stringify(capture)},JSON.stringify({base:process.env.ANTHROPIC_BASE_URL,key:process.env.ANTHROPIC_API_KEY,args:process.argv.slice(2)}));console.log('READY');setInterval(()=>{},1000)
+`);await chmod(executable,0o755);process.env.MATOU_CLAUDE_COMMAND=executable
+  const registry=createTestSessionRegistry(), providers=new ProviderConfigStore(root)
+  const a=await providers.upsert({cli:'claude-code',name:'Assigned',endpoint,apiKey:'fixture-a',model:'same'})
+  const target={providerId:a.id,model:'same'}
+  const assignedModels=new AgentModelSettings(database,providers)
+  await assignedModels.patchAssignments({assignments:{opus:target,sonnet:target,haiku:target}})
+  await assignedModels.set({contextWindows:{},compaction:{mode:'custom',providerId:a.id,model:'same',effort:'follow'}})
+  server.close();port=new MockPort();server=new RuntimeServer(port,root,database,undefined,undefined,registry,undefined,undefined,{providerConfigs:providers})
+  port.receive({type:'protocol.hello',protocolVersion:PROTOCOL_VERSION,clientId:'task3'})
+  registerSession(database,'task3-all','claude-code')
+  try {
+    port.receive({type:'terminal.spawn',protocolVersion:PROTOCOL_VERSION,sessionId:'task3-all',executionContextId:'replay-context',profile:'claude-code',cols:80,rows:24})
+    await waitUntil(()=>registry.has('task3-all'),5000)
+    await waitUntilAsync(async()=>{try{return Boolean(JSON.parse(await readFile(capture,'utf8')).base)}catch{return false}},5000)
+    const launched=JSON.parse(await readFile(capture,'utf8'))
+    expect(launched.key).toBeTruthy();expect(launched.args).toContain('matou-role/sonnet');expect(captureAccount).not.toHaveBeenCalled()
+    const send=(model:string)=>fetch(launched.base+'/v1/messages',{method:'POST',body:JSON.stringify({model,messages:[]})})
+    expect((await send('matou-role/opus')).status).toBe(200)
+    expect(requests).toEqual(['same'])
+    const denied=await send('literal-source-custom');expect(denied.status).toBe(502);expect(await denied.text()).toMatch(/not bound at startup/)
+    expect(requests).toEqual(['same']);expect(captureAccount).not.toHaveBeenCalled()
+  } finally {restoreEnv('MATOU_CLAUDE_COMMAND',previous);await registry.shutdownAll();upstream.closeAllConnections();await new Promise<void>(r=>upstream.close(()=>r()));vi.restoreAllMocks()}
+})

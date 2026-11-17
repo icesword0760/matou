@@ -211,15 +211,15 @@ export class PtySession {
   }
 
   static async create(options: PtySessionOptions): Promise<PtySession> {
-    const journal = await SegmentJournal.open(options.dataRoot, options.sessionId, options.journalOptions)
+    const journal = await SegmentJournal.open(options.dataRoot, options.sessionId, options.journalOptions).catch(error => { options.modelRouting?.releaseTargets?.(); throw error })
     const profile = options.profile ?? 'shell'
     let subscriptionLease: RouterLease | undefined
     let terminal: pty.IPty | undefined
-    let closeRouting: (() => void) | undefined
+    let closeRouting: (() => void) | undefined = options.modelRouting?.releaseTargets
     let recoveredScreen: Awaited<ReturnType<typeof recoverTerminalScreen>> | undefined
     try {
       let subscriptionLaunch: ClaudeLaunch | undefined
-      if (options.subscription) {
+      if (options.subscription && !options.modelRouting?.roleSnapshot) {
         if (profile !== 'claude-code' || !options.settingsPath) throw new SubscriptionLaunchError('A subscription requires the per-session Claude settings file')
         const prepared = await options.subscription.accounts.prepareLaunch(options.subscription.providerConfigId)
         subscriptionLease = prepared.lease
@@ -338,7 +338,18 @@ export class PtySession {
       if (profile === 'claude-code') Object.assign(finalEnvironment, contextEnv)
       if (profile === 'claude-code' && options.modelRouting && modelRoutingEnabled(options.modelRouting.preferences, options.modelRouting.provider)) {
         const roleEnvironment: Record<string, string> = {}
-        if (!options.modelRouting.provider?.subscription) {
+        const snapshot = options.modelRouting.roleSnapshot
+        if (snapshot) {
+          for (const role of ['opus', 'sonnet', 'haiku'] as const) {
+            const key = `ANTHROPIC_DEFAULT_${role.toUpperCase()}_MODEL`
+            roleEnvironment[key] = `matou-role/${role}`
+            roleEnvironment[`${key}_NAME`] = snapshot.roles[role].catalogModel
+          }
+          for (const suffix of ['', '_NAME']) roleEnvironment[`ANTHROPIC_DEFAULT_FABLE_MODEL${suffix}`] = roleEnvironment[`ANTHROPIC_DEFAULT_OPUS_MODEL${suffix}`]!
+          for (const key of Object.keys(finalEnvironment)) if (/^ANTHROPIC_DEFAULT_|^CLAUDE_CODE_.*SUBAGENT.*MODEL$|^ANTHROPIC_(?:MODEL|SMALL_FAST_MODEL)$/.test(key)) delete finalEnvironment[key]
+          for (const key of ['CLAUDE_CODE_DISABLE_1M_CONTEXT', 'CLAUDE_CODE_MAX_OUTPUT_TOKENS', 'CLAUDE_CODE_MAX_CONTEXT_TOKENS', 'CLAUDE_CODE_AUTO_COMPACT_WINDOW', 'CLAUDE_AUTOCOMPACT_PCT_OVERRIDE', 'CLAUDE_CODE_SUBAGENT_MODEL', 'CLAUDE_CODE_FORCE_SUBAGENT_MODEL']) delete finalEnvironment[key]
+          Object.assign(finalEnvironment, contextEnv)
+        } else if (!options.modelRouting.provider?.subscription) {
           // Keep role identity when two API role selectors point to the same model.
           for (const role of ['opus', 'sonnet', 'haiku'] as const) {
             const upstream = options.modelRouting.provider?.modelMapping?.[role]
@@ -351,7 +362,7 @@ export class PtySession {
         const routing = claudeModelRouting(options.modelRouting, finalEnvironment)
         const gateway = await startClaudeRequestGateway({
           upstreamUrl: finalEnvironment.ANTHROPIC_BASE_URL || 'https://api.anthropic.com',
-          env: finalEnvironment, resolveOverride: routing.resolveOverride
+          env: finalEnvironment, resolveOverride: routing.resolveOverride, ...(options.modelRouting.assertTargetAllowed ? { assertTargetAllowed: options.modelRouting.assertTargetAllowed } : {})
         }).catch(error => { routing.close(); throw error })
         closeRouting = () => { routing.close(); void gateway.close() }
         const gatewayEnv = { ...roleEnvironment, ANTHROPIC_BASE_URL: gateway.baseUrl, CLAUDE_CODE_GATEWAY_HINT_HEADERS: '1',
@@ -362,6 +373,15 @@ export class PtySession {
         const previous = index >= 0 ? command.args[index + 1] : undefined
         const isFile = previous && !previous.trim().startsWith('{')
         const settings = previous ? JSON.parse(isFile ? await readFile(previous, 'utf8') : previous) : {}
+        if (snapshot) {
+          settings.env = { ...settings.env }
+          for (const key of Object.keys(settings.env)) if (/^ANTHROPIC_DEFAULT_|^CLAUDE_CODE_.*SUBAGENT.*MODEL$|^ANTHROPIC_(?:MODEL|SMALL_FAST_MODEL)$/.test(key)) delete settings.env[key]
+          for (const key of ['CLAUDE_CODE_DISABLE_1M_CONTEXT', 'CLAUDE_CODE_MAX_OUTPUT_TOKENS', 'CLAUDE_CODE_MAX_CONTEXT_TOKENS', 'CLAUDE_CODE_AUTO_COMPACT_WINDOW', 'CLAUDE_AUTOCOMPACT_PCT_OVERRIDE', 'CLAUDE_CODE_SUBAGENT_MODEL', 'CLAUDE_CODE_FORCE_SUBAGENT_MODEL']) delete settings.env[key]
+          Object.assign(settings.env, contextEnv)
+          if (!contextWindow) delete settings.autoCompactWindow
+          settings.modelPicker = { replaceBuiltInOptions: true, options: (['opus', 'sonnet', 'haiku'] as const).map(role => ({ model: role, label: `${role[0]!.toUpperCase()}${role.slice(1)} · ${snapshot.roles[role].catalogModel}`, description: snapshot.roles[role].providerId })) }
+          settings.modelOverrides = { ...settings.modelOverrides, ...Object.fromEntries(['claude-fable-5', 'claude-fable-5-2', 'claude-fable-5-5'].map(id => [id, 'matou-role/opus-fallback'])) }
+        }
         const merged = JSON.stringify({ ...settings, env: { ...settings.env, ...gatewayEnv } }, null, 2)
         if (isFile) await writeFile(previous!, merged, { mode: 0o600 })
         else if (index >= 0) command.args[index + 1] = merged
@@ -372,6 +392,7 @@ export class PtySession {
           console.error(`[terminal.screen-recovery] ${options.sessionId}: ${error instanceof Error ? error.message : String(error)}`)
         })
       }
+      if (options.modelRouting?.roleSnapshot && options.modelRouting.isClosed?.()) throw new Error('Session closed during model launch')
       terminal = pty.spawn(command.file, command.args, {
         name: 'xterm-256color',
         cols: options.cols,

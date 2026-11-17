@@ -71,7 +71,7 @@ export function globalChipCopy(status: EgressStatusWire | undefined, zh: boolean
   }
   switch (status.state) {
     case 'abnormal': {
-      const paused = status.families.reduce((total, family) => total + family.frozenSessionIds.length, 0)
+      const paused = new Set(status.families.flatMap(family => family.frozenSessionIds)).size
       return {
         label: paused > 0
           ? zh ? `出口异常 · 已暂停 ${paused} 个会话` : `Exit problem · ${paused} session(s) paused`

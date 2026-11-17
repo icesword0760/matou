@@ -228,6 +228,7 @@ export const RPC_METHODS = [
   'provider-config.subscription.risk-confirm',
   'agent-model-settings.get',
   'agent-model-settings.set',
+  'agent-model-settings.patch-assignments',
   'claude-settings.get',
   'claude-settings.set',
   'egress.status',
