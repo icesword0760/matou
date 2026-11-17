@@ -31,6 +31,7 @@ __pycache__/
 
 # Local tool caches and dev server pid files
 .impeccable/
+.magic-brush/
 server.pid
 
 # Short macOS socket aliases for isolated packaged acceptance
