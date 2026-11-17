@@ -52,6 +52,8 @@ export interface EgressStatusWire {
   ruleMode: 'country' | 'ip'
   protectionEnabled: boolean
   sessionFamilies: Record<string, EgressFamily>
+  /** Complete membership for multi-target sessions; older runtimes omit it. */
+  sessionFamilySets?: Record<string, EgressFamily[]>
   checkedAt?: number
   lastTransition?: {
     id: string

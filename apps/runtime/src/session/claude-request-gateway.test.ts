@@ -257,7 +257,7 @@ describe('Claude request gateway', () => {
     expect(upstream.requests.map((request) => request.body)).toEqual([body, body])
   })
 
-  it('only remaps the model for count_tokens, even with a compaction marker', async () => {
+  it('routes count_tokens to its exact target without generation overrides, even with a compaction marker', async () => {
     const primary = await captureRequests(), secondary = await captureRequests()
     const calls: boolean[] = []
     const gateway = await start(primary.url, ({ compaction }) => {
@@ -267,9 +267,9 @@ describe('Claude request gateway', () => {
     const body = { model: 'matou-api/sonnet', output_config: { effort: 'high' }, messages: [] }
     const response = await fetch(gateway.baseUrl + '/v1/messages/count_tokens', { method: 'POST', headers: { authorization: 'Bearer source', 'x-claude-code-compaction': 'manual' }, body: JSON.stringify(body) })
     expect(response.status).toBe(200)
-    expect(calls).toEqual([false]); expect(secondary.requests).toHaveLength(0)
-    expect(primary.requests[0]!.headers.authorization).toBe('Bearer source')
-    expect(JSON.parse(primary.requests[0]!.body)).toEqual({ ...body, model: 'actual-model' })
+    expect(calls).toEqual([false]); expect(primary.requests).toHaveLength(0)
+    expect(secondary.requests[0]!.headers.authorization).toBe('Bearer secondary')
+    expect(JSON.parse(secondary.requests[0]!.body)).toEqual({ ...body, model: 'actual-model' })
   })
 
   it('keeps SSE data streaming and passes through upstream HTTP errors', async () => {
@@ -375,4 +375,15 @@ describe('Claude request gateway', () => {
     await afterShutdown
     await expect(fetch(gateway.baseUrl + '/v1/models')).rejects.toThrow()
   })
+})
+
+it.each(['/v1/messages', '/v1/messages/count_tokens'])('replaces credentials even for same-origin tenant routing: %s', async path => {
+  const upstream = await captureRequests()
+  const gateway = await start(upstream.url + '/source', () => ({ baseUrl: upstream.url + '/target', headers: { 'x-api-key': 'target-fixture' }, model: 'exact' }))
+  const response = await fetch(gateway.baseUrl + path, { method: 'POST', headers: { authorization: 'Bearer source', 'x-api-key': 'source', cookie: 'source-cookie' }, body: JSON.stringify({ model: 'matou-role/opus', messages: [] }) })
+  expect(response.status).toBe(200)
+  expect(upstream.requests[0]!.url).toBe('/target' + path)
+  expect(upstream.requests[0]!.headers).toMatchObject({ 'x-api-key': 'target-fixture' })
+  expect(upstream.requests[0]!.headers.authorization).toBeUndefined()
+  expect(upstream.requests[0]!.headers.cookie).toBeUndefined()
 })

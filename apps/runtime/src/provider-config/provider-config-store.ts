@@ -253,6 +253,15 @@ export class ProviderConfigStore {
     }
   }
 
+  /** One runtime-only read captures public metadata and API keys together. */
+  async captureClaudeRouting(): Promise<{ providers: ProviderConfigSnapshot; apiConnections: Record<string, { kind: 'api'; baseUrl: string; headers: Record<string, string> }> }> {
+    const state = await this.#read()
+    const apiConnections = Object.fromEntries(state.providers['claude-code'].filter(p => !p.subscription).map(p => [p.id, {
+      kind: 'api' as const, baseUrl: p.endpoint.replace(/\/$/, ''), headers: p.apiKey ? { 'x-api-key': p.apiKey } : {}
+    }]))
+    return { providers: publicSnapshot(state), apiConnections }
+  }
+
   async launchSelection(
     cli: ProviderCli,
     providerConfigId?: string

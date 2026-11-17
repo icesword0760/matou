@@ -1,3 +1,5 @@
+import { CLI_DEFAULT_MODEL } from '@matou/contracts'
+import { claudeRoleLaunchDigest, prepareClaudeRoleLaunch, type PreparedClaudeRoleLaunch } from './session/claude-role-launch'
 import { SubscriptionLaunchError, SubscriptionPlatformError, type PreparedSubscriptionLaunch, type SubscriptionAccounts, type SubscriptionConnection } from './model-router/subscription-accounts'
 import { mapSubscriptionLoginFailure, sanitizeProviderReason } from './model-router/errors'
 import type { SubscriptionLoginStartInput, SubscriptionModelsReadInput, SubscriptionProviderConfigInput } from '@matou/contracts'
@@ -64,6 +66,7 @@ import {
   type HostNavigationRegistration
 } from './control/host-navigation-broker'
 import { RpcFault, RuntimeRpcRouter } from './rpc/runtime-rpc-router'
+import { GatewayRoutingError } from './session/claude-request-gateway'
 import { egressPlanForLaunch, type EgressMonitor } from './egress/egress-monitor'
 import { PtySession, SessionEgressFrozenError } from './session/pty-session'
 import { restoredProviderModel, roleEffort } from './session/claude-model-routing'
@@ -2133,6 +2136,7 @@ export class RuntimeServer {
     if (persistOrdinaryShellHistory && attachView) {
       this.#publishShellHistory(message.sessionId)
     }
+    let preparedRoleLaunch: PreparedClaudeRoleLaunch | undefined
     let providerProcessStarted = false
     let hookRegistration: ProviderHookRegistration | undefined
     let hookRunId: string | undefined
@@ -2156,38 +2160,52 @@ export class RuntimeServer {
         forkLaunch?.permissionMode ??
         permissionModeFromMetadata(providerSettingsBinding?.metadata) ??
         permissionModeFromMetadata(resumeBinding?.metadata)
+      const modelSettings = new AgentModelSettings(this.#database, this.#providerConfigs)
+      const modelPreferences = modelSettings.preferences()
       const activationToken = message.profile === 'claude-code' ? this.#readProviderActivationToken('provider.claude.activation') : undefined
-      const providerSelection = getAgentManifest(message.profile)?.capabilities.providerConfig
-        ? await this.#providerConfigs.launchSelection(
-            message.profile as ProviderCli,
-            message.profile === 'claude-code' ? undefined : boundProviderSettings.providerConfigId
-          )
-        : undefined
+      if (message.profile === 'claude-code') {
+        preparedRoleLaunch = await prepareClaudeRoleLaunch({ preferences: modelPreferences, store: this.#providerConfigs, env: { ...process.env }, ...(this.#subscriptionAccounts ? { accounts: this.#subscriptionAccounts } : {}), isClosed: () => this.#closed })
+      }
+      const sourceId = preparedRoleLaunch?.providers.activeProviderIds['claude-code']
+      const providerSelection = preparedRoleLaunch
+        ? { providerConfigId: sourceId!, model: preparedRoleLaunch.sourceModel === CLI_DEFAULT_MODEL ? '' : preparedRoleLaunch.sourceModel, env: preparedRoleLaunch.sourceEnvironment }
+        : getAgentManifest(message.profile)?.capabilities.providerConfig
+          ? await this.#providerConfigs.launchSelection(message.profile as ProviderCli, message.profile === 'claude-code' ? undefined : boundProviderSettings.providerConfigId)
+          : undefined
       const appliedActivation = message.profile === 'claude-code' ? this.#readProviderActivationToken(`provider.claude.applied.${message.sessionId}`) : undefined
       const followsGlobalModel = message.profile === 'claude-code' && (
         boundProviderSettings.providerConfigId !== providerSelection?.providerConfigId ||
         activationToken !== undefined && appliedActivation !== activationToken
       )
       if (providerSelection?.subscription && !this.#subscriptionAccounts) throw new SubscriptionLaunchError('Subscription launch service is unavailable')
-      const modelSettings = new AgentModelSettings(this.#database, this.#providerConfigs)
-      const providerView = providerSelection ? (await this.#providerConfigs.snapshot()).providers[message.profile as ProviderCli]?.find(p => p.id === providerSelection.providerConfigId) : undefined
-      const launchDigest = message.profile === 'claude-code' && providerSelection ? await this.#providerLaunchDigest(providerSelection) : undefined
+      const providerView = preparedRoleLaunch
+        ? preparedRoleLaunch.providers.providers['claude-code'].find(p => p.id === sourceId)
+        : providerSelection ? (await this.#providerConfigs.snapshot()).providers[message.profile as ProviderCli]?.find(p => p.id === providerSelection.providerConfigId) : undefined
+      const launchDigest = message.profile === 'claude-code' && providerSelection ? preparedRoleLaunch?.digest ?? await this.#providerLaunchDigest(providerSelection) : undefined
       const providerModel = followsGlobalModel && !providerSelection?.model && boundProviderSettings.model !== undefined
         ? 'default'
-        : restoredProviderModel(followsGlobalModel ? undefined : boundProviderSettings.model, providerSelection?.model, providerView, modelSettings.preferences())
+        : restoredProviderModel(followsGlobalModel ? undefined : boundProviderSettings.model, providerSelection?.model, providerView, modelPreferences)
       const providerLaunch = providerSelection === undefined
         ? { env: {} as Record<string, string> }
         : {
             ...(providerModel ? { model: providerModel } : {}),
             env: providerSelection.env
           }
-      const egressPlan = egressPlanForLaunch(
+      const legacyEgressPlan = egressPlanForLaunch(
         message.profile,
         providerLaunch.env,
-        providerSelection?.subscription?.subscription.provider
+        preparedRoleLaunch ? providerView?.subscription?.provider : providerSelection?.subscription?.subscription.provider
       )
-      const egressFamily = egressPlan.family
-      const egressCountry = egressPlan.exitFamily ? this.#egress?.exitCountry(egressPlan.exitFamily) : undefined
+      const legacyCompactionProvider = !preparedRoleLaunch && message.profile === 'claude-code' && modelPreferences.compaction.mode === 'custom'
+        ? (await this.#providerConfigs.snapshot()).providers['claude-code'].find(p => p.id === modelPreferences.compaction.providerId) : undefined
+      const legacyCompactionPlan = legacyCompactionProvider ? egressPlanForLaunch('claude-code', { ANTHROPIC_BASE_URL: legacyCompactionProvider.endpoint }, legacyCompactionProvider.subscription?.provider) : undefined
+      const egressFamilies = preparedRoleLaunch ? preparedRoleLaunch.snapshot.officialFamilies : [...new Set([legacyEgressPlan.family, legacyCompactionPlan?.family].filter((f): f is import('@matou/contracts').EgressFamily => f !== undefined))]
+      const hideTimeZone = preparedRoleLaunch
+        ? [...Object.values(preparedRoleLaunch.snapshot.roles), ...(preparedRoleLaunch.snapshot.compactionTarget ? [preparedRoleLaunch.snapshot.compactionTarget] : [])].some(t => t.hideTimeZone)
+        : legacyEgressPlan.hideTimeZone || legacyCompactionPlan?.hideTimeZone === true
+      // Multi-target sessions use the existing hidden-zone policy, never the
+      // default third-party provider's apparent exit country.
+      const egressCountry = preparedRoleLaunch ? undefined : legacyEgressPlan.exitFamily ? this.#egress?.exitCountry(legacyEgressPlan.exitFamily) : undefined
       if (!this.#hud.snapshot(message.sessionId)) {
         this.#hud.spawn({
           sessionId: message.sessionId,
@@ -2423,7 +2441,7 @@ export class RuntimeServer {
         this.#workStatusTrackers.set(message.sessionId, workStatusTracker)
       }
       if (message.profile !== 'shell') this.#hud.providerStarted(message.sessionId)
-      const contextWindow = ['claude-code', 'codex'].includes(message.profile) ? await modelSettings.launchWindow(providerView, launchModelOverride ?? providerLaunch.model) : undefined
+      const contextWindow = preparedRoleLaunch ? preparedRoleLaunch.contextWindow : ['claude-code', 'codex'].includes(message.profile) ? await modelSettings.launchWindow(providerView, launchModelOverride ?? providerLaunch.model, modelPreferences) : undefined
       const firstRunGrid = message.profile === 'shell' ? undefined : this.#database.get<{ cols: number; rows: number }>(
         'SELECT cols, rows FROM session_runs WHERE session_id = ? ORDER BY ordinal ASC LIMIT 1',
         message.sessionId
@@ -2436,6 +2454,7 @@ export class RuntimeServer {
         if (spawnPublished) this.#sendToPort(frame)
         else pendingSpawnMessages.push(frame)
       }
+      const launchModel = preparedRoleLaunch ? preparedRoleLaunch.resolveMainModel(launchModelOverride ?? providerLaunch.model) : launchModelOverride ?? providerLaunch.model
       const session = await PtySession.create({
         sessionId: message.sessionId,
         executionContextId: message.executionContextId,
@@ -2456,9 +2475,13 @@ export class RuntimeServer {
           }
         }),
         contextWindow: contextWindow ?? null,
-        ...((message.profile === 'claude-code' ? roleEffort(providerView, providerModel ?? 'default') : providerView?.reasoningEffort) ? { reasoningEffort: (message.profile === 'claude-code' ? roleEffort(providerView, providerModel ?? 'default') : providerView?.reasoningEffort)! } : {}),
+        ...(!preparedRoleLaunch && (message.profile === 'claude-code' ? roleEffort(providerView, providerModel ?? 'default') : providerView?.reasoningEffort) ? { reasoningEffort: (message.profile === 'claude-code' ? roleEffort(providerView, providerModel ?? 'default') : providerView?.reasoningEffort)! } : {}),
         ...(message.profile === 'claude-code' ? { modelRouting: {
-          preferences: modelSettings.preferences(), ...(providerView ? { provider: providerView } : {}), store: this.#providerConfigs,
+          ...(this.#egress ? { assertTargetAllowed: (family?: import('@matou/contracts').EgressFamily) => {
+            try { this.#egress!.assertTargetAllowed(preparedRoleLaunch ? family : family ?? legacyEgressPlan.family) }
+            catch { throw new GatewayRoutingError('出口异常，已暂停。请在网络检查中恢复出口或明确豁免后重试。 Network egress protection is active.') }
+          } } : {}),
+          preferences: modelPreferences, ...(preparedRoleLaunch ? { roleSnapshot: preparedRoleLaunch.snapshot, ...(preparedRoleLaunch.sourceConnection ? { sourceConnection: preparedRoleLaunch.sourceConnection } : {}), releaseTargets: preparedRoleLaunch.close, isClosed: () => this.#closed } : {}), ...(providerView ? { provider: providerView } : {}), store: this.#providerConfigs,
           ...(this.#subscriptionAccounts ? { accounts: this.#subscriptionAccounts } : {})
         } } : {}),
         ...(providerSessionId === undefined ? {} : { providerSessionId }),
@@ -2472,7 +2495,7 @@ export class RuntimeServer {
         ...(this.#controlAssetRoot === undefined ? {} : {
           controlAssetRoot: this.#controlAssetRoot
         }),
-        ...((launchModelOverride ?? providerLaunch.model) === undefined ? {} : { model: launchModelOverride ?? providerLaunch.model }),
+        ...(launchModel === undefined ? {} : { model: launchModel }),
         ...(providerSelection?.subscription && this.#subscriptionAccounts ? { subscription: { accounts: this.#subscriptionAccounts, providerConfigId: providerSelection.providerConfigId } } : {}),
         ...(runId === undefined ? {} : { runId }),
         env: {
@@ -2480,7 +2503,7 @@ export class RuntimeServer {
           ...controlEnvironment,
           ...new ClaudeSettings(this.#database).environment(message.profile, {
             ...(egressCountry === undefined ? {} : { exitCountry: egressCountry }),
-            official: egressPlan.hideTimeZone
+            official: hideTimeZone
           }),
           ...((message.profile === 'antigravity' || message.profile === 'dsh') && hookRegistration ? {
             MATOU_PROVIDER_HOOK_URL: hookRegistration.hookUrl,
@@ -2680,6 +2703,7 @@ export class RuntimeServer {
           if (forkFailure) return false
         }
       })
+      if (preparedRoleLaunch && this.#closed) { session.dispose({ notifyExit: false }); await session.whenClosed(); throw new Error('Session closed during model launch') }
       providerProcessStarted = message.profile !== 'shell'
       if (runId) {
         try {
@@ -2716,8 +2740,8 @@ export class RuntimeServer {
           slashSent: false
         })
       }
-      if (egressFamily && this.#egress) {
-        const { bornFrozen } = this.#egress.registerSession(message.sessionId, egressFamily)
+      if (egressFamilies.length && this.#egress) {
+        const { bornFrozen } = this.#egress.registerSession(message.sessionId, egressFamilies.length === 1 ? egressFamilies[0]! : egressFamilies)
         if (bornFrozen) {
           await session.setEgressFrozen(true)
         }
@@ -2785,6 +2809,7 @@ export class RuntimeServer {
         if (this.#readProviderActivationToken('provider.claude.activation') !== activationToken) this.#queueProviderActivation(message.sessionId)
       }
     } catch (error) {
+      preparedRoleLaunch?.close()
       if (hookRunId) this.#control?.tokens.revokeRun(hookRunId)
       this.#rejectProviderDerivedOutput(message.sessionId)
       await this.#disposeProviderHook(message.sessionId, hookRunId, hookRegistration)
@@ -4127,6 +4152,7 @@ export class RuntimeServer {
   async #providerLaunchDigest(selection: ProviderLaunchSelection): Promise<string> {
     const snapshot = await this.#providerConfigs.snapshot()
     const preferences = new AgentModelSettings(this.#database, this.#providerConfigs).preferences()
+    if (Object.keys(preferences.claudeRoleAssignments ?? {}).length) return claudeRoleLaunchDigest(preferences, await this.#providerConfigs.captureClaudeRouting())
     const providerFields = (providerId: string) => {
       const provider = snapshot.providers['claude-code'].find(value => value.id === providerId)
       return provider && {

@@ -1,6 +1,7 @@
-import { CLI_DEFAULT_MODEL, type AgentModelPreferences, type AgentModelSettingsSnapshot, type ContextWindowMode, type ModelContextChoice, type ProviderConfigView, type ProviderModelMetadata } from '@matou/contracts'
+import { CLI_DEFAULT_MODEL, type ClaudeRoleAssignments, type AgentModelPreferences, type AgentModelSettingsSnapshot, type ContextWindowMode, type ModelContextChoice, type ProviderConfigView, type ProviderModelMetadata } from '@matou/contracts'
 import type { RuntimeDatabase } from '../storage/database'
 import type { ProviderConfigStore } from '../provider-config/provider-config-store'
+import { assignedModelMetadata, validateClaudeRoleAssignments, defaultClaudeRoleModel, CLAUDE_MODEL_ROLES } from './claude-role-assignments'
 import { nativeClaudeModels, nativeCodexModels, nativeCodexDefaultModel } from './native-model-catalog'
 
 const KEY = 'agent.modelPreferences'
@@ -25,10 +26,11 @@ function availableModels(provider: ProviderConfigView, native: ProviderModelMeta
   return [...byId.values()]
 }
 
-function modelChoice(model: ProviderModelMetadata): ModelContextChoice {
+function modelChoice(model: ProviderModelMetadata & { resolvedModel?: string }): ModelContextChoice {
   return {
     id: model.id,
     name: model.displayName ?? model.id,
+    ...(model.resolvedModel ? { resolvedModel: model.resolvedModel } : {}),
     ...(model.contextWindow ? { defaultTokens: model.contextWindow } : {}),
     ...(model.maxContextWindow ? { maximumTokens: model.maxContextWindow } : {}),
     fixedTokens: 512_000,
@@ -53,19 +55,42 @@ export class AgentModelSettings {
     return { preferences, providers }
   }
   async set(value: unknown): Promise<AgentModelSettingsSnapshot> {
-    const preferences = validate(value)
+    const preferences = validate(value && typeof value === 'object' ? { ...value, claudeRoleAssignments: undefined } : value)
     if (preferences.compaction.mode === 'custom') {
       const snapshot = await this.snapshot(), target = snapshot.providers.find(p => p.id === preferences.compaction.providerId && p.compactionAvailable)
       if (!target) throw new Error('Compaction provider is unavailable')
       const model = target.models.find(m => m.id === preferences.compaction.model)
       if (model?.supportedEfforts && preferences.compaction.effort !== 'follow' && !model.supportedEfforts.includes(preferences.compaction.effort)) throw new Error('Unsupported compaction reasoning effort')
     }
-    this.database.run(`INSERT INTO preferences (key, value_json, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at`, KEY, JSON.stringify(preferences), Date.now())
+    // Read after asynchronous validation. Legacy writers never own assignments.
+    const latest = this.preferences()
+    delete preferences.claudeRoleAssignments
+    if (latest.claudeRoleAssignments !== undefined) preferences.claudeRoleAssignments = latest.claudeRoleAssignments
+    this.persist(preferences)
     return this.snapshot()
   }
-  async launchWindow(provider: ProviderConfigView | undefined, model?: string): Promise<number | undefined> {
+  async patchAssignments(input: { assignments: ClaudeRoleAssignments }): Promise<AgentModelSettingsSnapshot> {
+    const assignments = validateClaudeRoleAssignments(input?.assignments)
+    const [snapshot, native] = await Promise.all([this.providers.snapshot(), nativeClaudeModels()])
+    if (Object.keys(assignments).length) for (const role of CLAUDE_MODEL_ROLES) {
+      const target = assignments[role]
+      const provider = snapshot.providers['claude-code'].find(p => p.id === (target?.providerId ?? snapshot.activeProviderIds['claude-code']))
+      if (!provider) throw new Error(`${role}: Assignment provider is unavailable`)
+      const model = target?.model ?? defaultClaudeRoleModel(provider, role, native)
+      if (!provider.subscription && !usesNativeModelCatalog(provider) && !provider.hasApiKey) throw new Error(`${role} · ${provider.name}: API key is unavailable`)
+      try { assignedModelMetadata(provider, model, native) }
+      catch (error) { throw new Error(`${role} · ${provider.name}: ${error instanceof Error ? error.message : 'Assignment target is unavailable'}`) }
+    }
+    // No await between this fresh read and write: preserve concurrent old set().
+    this.persist({ ...this.preferences(), claudeRoleAssignments: assignments })
+    return this.snapshot()
+  }
+  private persist(preferences: AgentModelPreferences): void {
+    this.database.run(`INSERT INTO preferences (key, value_json, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at`, KEY, JSON.stringify(preferences), Date.now())
+  }
+  async launchWindow(provider: ProviderConfigView | undefined, model?: string, preferences = this.preferences()): Promise<number | undefined> {
     if (!provider) return undefined
-    const mode = this.preferences().contextWindows[provider.id] ?? initialContextMode(provider)
+    const mode = preferences.contextWindows[provider.id] ?? initialContextMode(provider)
     // Most launches need no catalog probe. Fixed is a requested client budget.
     if (mode === '512k') return 512_000
     if (mode === 'default' && !provider.subscription) return undefined
@@ -92,7 +117,7 @@ function validate(value: unknown): AgentModelPreferences {
   if (!v || !v.contextWindows || typeof v.contextWindows !== 'object' || Array.isArray(v.contextWindows) || Object.entries(v.contextWindows).some(([id, mode]) => !id || id.length > 256 || !['default', '512k', 'maximum'].includes(mode)) || !v.compaction || !['follow', 'custom'].includes(v.compaction.mode) || !['follow', 'low', 'medium', 'high', 'xhigh', 'max'].includes(v.compaction.effort)) throw new Error('Invalid model preferences')
   const { providerId, model } = v.compaction
   if (v.compaction.mode === 'custom' && (typeof providerId !== 'string' || !providerId.trim() || typeof model !== 'string' || !model.trim() || model.length > 240 || /[\x00-\x1f]/.test(model))) throw new Error('Choose a compaction provider and model')
-  return { contextWindows: { ...v.contextWindows }, compaction: { mode: v.compaction.mode, effort: v.compaction.effort, ...(typeof providerId === 'string' ? { providerId } : {}), ...(typeof model === 'string' ? { model: model.trim() } : {}) } }
+  return { ...(v.claudeRoleAssignments === undefined ? {} : { claudeRoleAssignments: validateClaudeRoleAssignments(v.claudeRoleAssignments) }), contextWindows: { ...v.contextWindows }, compaction: { mode: v.compaction.mode, effort: v.compaction.effort, ...(typeof providerId === 'string' ? { providerId } : {}), ...(typeof model === 'string' ? { model: model.trim() } : {}) } }
 }
 
 /** Preserve the pre-setting GPT budget as an initial choice, independently per provider. */

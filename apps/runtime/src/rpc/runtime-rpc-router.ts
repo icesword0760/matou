@@ -5,7 +5,7 @@ import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 
 import { REMOVE_NODE_SCOPES, type RpcMethod } from '@matou/contracts'
-import type { ProviderModelsInput, ProviderCli, ProviderConfigInput } from '@matou/contracts'
+import type { ClaudeRoleAssignments, ProviderModelsInput, ProviderCli, ProviderConfigInput } from '@matou/contracts'
 import {
   AGENT_PERMISSION_MODES,
   getAgentManifest,
@@ -188,6 +188,7 @@ export class RuntimeRpcRouter {
     }
     if (method === 'agent-model-settings.get') return new AgentModelSettings(this.#database, this.#providerConfigs).snapshot()
     if (method === 'agent-model-settings.set') return new AgentModelSettings(this.#database, this.#providerConfigs).set(payload)
+    if (method === 'agent-model-settings.patch-assignments') return new AgentModelSettings(this.#database, this.#providerConfigs).patchAssignments(record(payload) as unknown as { assignments: ClaudeRoleAssignments })
     if (method === 'claude-settings.get') return new ClaudeSettings(this.#database).snapshot()
     if (method === 'claude-settings.set') {
       const { timeZone } = record(payload)

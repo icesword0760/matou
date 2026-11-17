@@ -125,7 +125,7 @@ describe('Claude model routing', () => {
     expect(await routing.resolveOverride(ordinary)).toEqual({ effort: 'max' })
     expect(snapshot).not.toHaveBeenCalled()
     expect(await routing.resolveOverride(compact)).toEqual({
-      baseUrl: connection.baseUrl, headers: { authorization: 'Bearer target-router-key' },
+      family: 'chatgpt-subscription', baseUrl: connection.baseUrl, headers: { authorization: 'Bearer target-router-key' },
       model: 'matou-chatgpt/summarizer', maxOutputTokens: 4096, effort: 'max', thinking: 'adaptive'
     })
     await routing.resolveOverride(compact)

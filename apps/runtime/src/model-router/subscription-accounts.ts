@@ -9,12 +9,14 @@ import type {
   SubscriptionLoginView, SubscriptionModelsReadInput, SubscriptionModel, SubscriptionProvider,
   SubscriptionProviderConfigInput, SubscriptionSettingsSnapshot, ProviderActivationFailure
 } from '@matou/contracts'
-import { ProviderConfigStore } from '../provider-config/provider-config-store'
+import { ProviderConfigStore, type StoredSubscriptionProvider } from '../provider-config/provider-config-store'
 import { ModelRouterManager, type RouterLease } from './manager'
 import { RouterManagementClient, type RouterCredential } from './management-client'
 import { OAuthLoopbackFlow, type OAuthOutcome } from './oauth'
 import { ANTIGRAVITY_CLIENT_USER_AGENT, credentialCarriesAntigravityIdentity } from './antigravity-client'
 import { CODEX_CLIENT_HEADERS, credentialCarriesCodexIdentity } from './codex-client'
+import { SubscriptionAccountBindingError } from './subscription-account-binding'
+import { validateClaudeTargetId } from '../session/claude-role-assignments'
 import { buildClaudeLaunch, toClientModelId, FABLE_FALLBACK_ALIAS, type ClaudeLaunchInput, type ModelAlias } from './claude-launch'
 import {
   parseCredentialSummary, parseChatGptPlan, readChatGptUsage, readChatGptModels,
@@ -25,6 +27,17 @@ import { mapAccountStatus, mapSubscriptionLaunchFailure, mapSubscriptionLoginFai
 export interface PreparedSubscriptionLaunch {
   lease: RouterLease
   input: Omit<ClaudeLaunchInput, 'inheritedEnvNames'>
+}
+/** Runtime-only connection; never expose through settings RPC. */
+export interface PreparedSubscriptionModelTarget {
+  lease: RouterLease
+  baseUrl: string
+  headers: Record<string, string>
+  model: string
+  metadata: SubscriptionModel
+  readonly accountIdentity: string
+  readonly targetSignal: AbortSignal
+  assertActive(): void
 }
 /** A platform requirement is final for this runtime, not a router retry. */
 export class SubscriptionPlatformError extends Error {
@@ -43,6 +56,13 @@ export class SubscriptionLaunchError extends Error {
     super(message[locale])
     this.providerFailure = { status: kind === 'needs-sign-in' ? 'needs-sign-in' : 'router-start-failed', message, recovery: kind === 'needs-sign-in' ? 'sign-in' : 'retry', ...(detail ? { reason: detail[locale], reasonLocalized: detail } : {}) }
     console.error(`[subscription.prepare] ${kind}: ${sanitizeProviderReason(diagnostic) ?? 'No diagnostic detail'}`)
+  }
+}
+
+/** Stable runtime diagnostic: an unreadable directory is not proof of deletion. */
+export class SubscriptionModelTargetError extends SubscriptionLaunchError {
+  constructor(readonly targetFailure: 'catalog-model-missing' | 'registered-model-missing' | 'directory-unavailable') {
+    super(`Subscription target: ${targetFailure}`, targetFailure === 'directory-unavailable' ? 'router-start-failed' : 'models-not-ready')
   }
 }
 
@@ -111,6 +131,7 @@ export class SubscriptionAccounts {
   #startup: Promise<void> | undefined
   #closed = false
   #routerUnavailable = false
+  readonly #targetBindings = new Map<string, Set<() => void>>()
   readonly #changeListeners = new Set<() => void>()
   readonly #unsubscribeRouter: () => void
   constructor(options: Options) {
@@ -135,7 +156,81 @@ export class SubscriptionAccounts {
    * No provider model/quota request is made here.
    */
   async prepareLaunch(providerConfigId: string, scope = 'subscription-session'): Promise<PreparedSubscriptionLaunch> {
+    return this.#prepareSubscription(providerConfigId, scope, async (row, lease, client) => {
+      const provider = row.subscription.provider
+      const aliases = aliasesFor(provider, row.modelMapping, row.subscription.modelMetadata)
+      // Rewriting an identical prefix/config still wakes the engine watcher.
+      // Activation and final spawn both prepare; keep the second pass read-only
+      // when the first one has already registered this exact configuration.
+      const [registered, registeredModels] = await Promise.all([client.aliases(provider), client.models(row.subscription.credentialRef.name)])
+      if (!sameAliases(registered, aliases)) await client.setAliases(provider, aliases)
+      // v8's credential list omits prefix. The published model IDs are the
+      // authoritative proof that this credential has adopted its prefix.
+      const modelsReady = hasAliases(registeredModels, prefixFor(provider), aliases)
+      if (!modelsReady) await client.setPrefix(row.subscription.credentialRef.name, prefixFor(provider))
+      if (!modelsReady || !sameAliases(registered, aliases)) await waitForAliases(client, row.subscription.credentialRef.name, prefixFor(provider), aliases)
+      const models = Object.fromEntries(roles.map(role => [role, row.subscription.modelMetadata.find(model => model.id === row.modelMapping[role])])) as ClaudeLaunchInput['models']
+      const input: PreparedSubscriptionLaunch['input'] = {
+        subscription: provider === 'codex' ? 'chatgpt' : 'antigravity',
+        accountPrefix: prefixFor(provider) as ClaudeLaunchInput['accountPrefix'],
+        routerUrl: lease.connection.baseUrl, clientKey: lease.connection.clientKey,
+        models, mainRole: 'opus', providerName: row.name
+      }
+      const projected = buildClaudeLaunch(input)
+      if (!projected.ok) throw new SubscriptionLaunchError(`Subscription launch configuration: ${projected.error}`, projected.error === 'unsupported-context-window' ? 'unsupported-context-window' : 'router-start-failed')
+      this.#options.manager.rememberModelAliases(provider, aliases)
+      return { lease, input }
+    })
+  }
+
+  async prepareModelTarget(providerConfigId: string, model: string, scope = 'subscription-model-target'): Promise<PreparedSubscriptionModelTarget> {
+    model = validateClaudeTargetId(model, 240)
+    return this.#prepareSubscription(providerConfigId, scope, async (row, lease, client, file) => {
+      const metadata = row.subscription.modelMetadata.find(item => item.id === model)
+      if (!metadata) throw new SubscriptionModelTargetError('catalog-model-missing')
+      const routedModel = `${prefixFor(row.subscription.provider)}/${model}`
+      let registered: Array<Record<string, unknown>>
+      try { registered = await client.models(row.subscription.credentialRef.name) }
+      catch { throw new SubscriptionModelTargetError('directory-unavailable') }
+      if (!registered.some(item => item.id === routedModel) && registered.some(item => item.id === model)) {
+        // A never-activated account can still publish raw IDs. Adopt only its
+        // existing prefix; role aliases remain untouched for other processes.
+        await client.setPrefix(row.subscription.credentialRef.name, prefixFor(row.subscription.provider))
+        const deadline = Date.now() + 8_000
+        do {
+          if (this.#closed) throw new Error('Subscription accounts are closed')
+          try { registered = await client.models(row.subscription.credentialRef.name) }
+          catch { throw new SubscriptionModelTargetError('directory-unavailable') }
+          if (registered.some(item => item.id === routedModel)) break
+          await delay(50)
+        } while (Date.now() < deadline)
+      }
+      if (!registered.some(item => item.id === routedModel)) throw new SubscriptionModelTargetError('registered-model-missing')
+      if (this.#closed) throw new Error('Subscription accounts are closed')
+      const controller = new AbortController()
+      const name = row.subscription.credentialRef.name
+      const bindings = this.#targetBindings.get(name) ?? new Set<() => void>()
+      this.#targetBindings.set(name, bindings)
+      let released = false
+      const targetLease: RouterLease = { ...lease, release: () => {
+        if (released) return
+        released = true
+        bindings.delete(targetLease.release)
+        if (this.#targetBindings.get(name) === bindings && !bindings.size) this.#targetBindings.delete(name)
+        controller.abort(new SubscriptionAccountBindingError())
+        lease.release()
+      } }
+      bindings.add(targetLease.release)
+      return { lease: targetLease, accountIdentity: JSON.stringify([name, file.auth_index]), targetSignal: controller.signal,
+        assertActive: () => { if (controller.signal.aborted) throw new SubscriptionAccountBindingError() },
+        baseUrl: lease.connection.baseUrl, headers: { authorization: `Bearer ${lease.connection.clientKey}` }, model: routedModel, metadata: structuredClone(metadata) }
+    })
+  }
+
+  /** Both launch modes use the same exact-account adoption and lease lifetime. */
+  async #prepareSubscription<T>(providerConfigId: string, scope: string, project: (row: StoredSubscriptionProvider, lease: RouterLease, client: RouterManagementClient, file: RouterCredential) => Promise<T>): Promise<T> {
     this.#assertSupported()
+    providerConfigId = validateClaudeTargetId(providerConfigId, 256)
     let lease: RouterLease | undefined
     try {
       await this.initialize()
@@ -147,7 +242,10 @@ export class SubscriptionAccounts {
         lease = await this.#options.manager.acquire(scope)
         const client = new RouterManagementClient(lease.connection)
         const file = (await client.credentials()).find(file => file.name === row.subscription.credentialRef.name && file.provider === provider)
-        if (!file || credentialNeedsSignIn(file)) {
+        const summary = file ? parseCredentialSummary(file) : undefined
+        const identityChanged = file && ((row.subscription.credentialRef.authIndex && row.subscription.credentialRef.authIndex !== file.auth_index) ||
+          (row.subscription.account.email && summary?.ok && summary.value.email && row.subscription.account.email !== summary.value.email))
+        if (!file || identityChanged || credentialNeedsSignIn(file)) {
           this.#markNeedsSignIn(row.subscription.credentialRef.name, row.subscription.account)
           throw new SubscriptionLaunchError('Subscription credential is missing or no longer valid', 'needs-sign-in')
         }
@@ -167,38 +265,25 @@ export class SubscriptionAccounts {
           }
           throw error
         }
-        const aliases = aliasesFor(provider, row.modelMapping, row.subscription.modelMetadata)
-        // Rewriting an identical prefix/config still wakes the engine watcher.
-        // Activation and final spawn both prepare; keep the second pass read-only
-        // when the first one has already registered this exact configuration.
-        const [registered, registeredModels] = await Promise.all([client.aliases(provider), client.models(file.name)])
-        if (!sameAliases(registered, aliases)) await client.setAliases(provider, aliases)
-        // v8's credential list omits prefix. The published model IDs are the
-        // authoritative proof that this credential has adopted its prefix.
-        const modelsReady = hasAliases(registeredModels, prefixFor(provider), aliases)
-        if (!modelsReady) await client.setPrefix(file.name, prefixFor(provider))
-        if (!modelsReady || !sameAliases(registered, aliases)) await waitForAliases(client, file.name, prefixFor(provider), aliases)
-        const models = Object.fromEntries(roles.map(role => [role, row.subscription.modelMetadata.find(model => model.id === row.modelMapping[role])])) as ClaudeLaunchInput['models']
-        const input: PreparedSubscriptionLaunch['input'] = {
-          subscription: provider === 'codex' ? 'chatgpt' : 'antigravity',
-          accountPrefix: prefixFor(provider) as ClaudeLaunchInput['accountPrefix'],
-          routerUrl: lease.connection.baseUrl, clientKey: lease.connection.clientKey,
-          models, mainRole: 'opus', providerName: row.name
-        }
-        const projected = buildClaudeLaunch(input)
-        if (!projected.ok) throw new SubscriptionLaunchError(`Subscription launch configuration: ${projected.error}`, projected.error === 'unsupported-context-window' ? 'unsupported-context-window' : 'router-start-failed')
-        this.#options.manager.rememberModelAliases(provider, aliases)
+        const result = await project(row, lease, client, file)
+        // close() marks closed before waiting for this serial preparation.
+        if (this.#closed) throw new Error('Subscription accounts are closed')
         if (this.#credentialStatus.get(file.name)?.status === 'needs-sign-in') {
           this.#credentialStatus.set(file.name, { ...row.subscription.account, status: 'ready' })
           this.#notifyChanged()
         }
-        return { lease, input }
+        return result
       })
     } catch (error) {
       lease?.release()
       if (error instanceof SubscriptionLaunchError) throw error
       throw new SubscriptionLaunchError(error instanceof Error ? error.message : 'Subscription launch could not be prepared')
     }
+  }
+  #revokeTargets(name: string): void {
+    const bindings = this.#targetBindings.get(name)
+    this.#targetBindings.delete(name)
+    for (const release of bindings ?? []) release()
   }
   #markNeedsSignIn(name: string, account: SubscriptionAccountSummary): void {
     const { reason: _reason, ...summary } = account
@@ -514,10 +599,16 @@ export class SubscriptionAccounts {
         const aliases = aliasesFor(provider, selected, details.models)
         const oldAliases = await client.aliases(provider)
         const oldRef = previous?.subscription.credentialRef.name
-        const replacing = oldRef && oldRef !== file.name
+        const credentialNameChanged = oldRef && oldRef !== file.name
+        const identityChanged = oldRef && (oldRef !== file.name ||
+          (previous.subscription.credentialRef.authIndex && file.auth_index && previous.subscription.credentialRef.authIndex !== file.auth_index) ||
+          (previous.subscription.account.email && details.account.email && previous.subscription.account.email !== details.account.email))
         let committed = false
         try {
-          if (replacing) await client.setDisabled(oldRef, true)
+          // Invalidate before any shared routing mutation. Rollback must never
+          // revive these captured connections; preparation rechecks identity.
+          if (identityChanged) this.#revokeTargets(oldRef)
+          if (credentialNameChanged) await client.setDisabled(oldRef, true)
           await client.setAliases(provider, aliases)
           await client.setPrefix(file.name, prefixFor(provider))
           await client.setDisabled(file.name, false)
@@ -535,12 +626,12 @@ export class SubscriptionAccounts {
           this.#rememberDetails(file.name, credentialFingerprint(file), details)
           this.#credentialStatus.set(file.name, details.account)
           if (attempt) { attempt.view.status = 'saved'; attempt.lease.release() }
-          if (replacing) await client.deleteCredential(oldRef).catch(() => undefined)
+          if (credentialNameChanged) await client.deleteCredential(oldRef).catch(() => undefined)
           return result
         } catch (error) {
           if (!committed) {
             await client.setAliases(provider, oldAliases).catch(() => undefined)
-            if (replacing) await client.setDisabled(oldRef, false).catch(() => undefined)
+            if (credentialNameChanged) await client.setDisabled(oldRef, false).catch(() => undefined)
             if (!oldRef || oldRef !== file.name) { await client.setDisabled(file.name, true).catch(() => undefined); await client.setPrefix(file.name, '').catch(() => undefined) }
           }
           throw error
@@ -560,6 +651,7 @@ export class SubscriptionAccounts {
       const client = new RouterManagementClient(lease.connection)
       try {
         const credentialExists = (await client.credentials()).some(file => file.name === saved.subscription.credentialRef.name)
+        this.#revokeTargets(saved.subscription.credentialRef.name)
         if (credentialExists) await client.setDisabled(saved.subscription.credentialRef.name, true)
         let result: ProviderConfigSnapshot
         try { result = await this.#options.store.delete(cli, providerId) }
@@ -730,6 +822,7 @@ export class SubscriptionAccounts {
   }
   async close(): Promise<void> {
     this.#closed = true
+    for (const name of this.#targetBindings.keys()) this.#revokeTargets(name)
     this.#unsubscribeRouter()
     this.#changeListeners.clear()
     for (const owner of this.#owners.values()) owner.closed = true

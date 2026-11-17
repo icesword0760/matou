@@ -1,0 +1,42 @@
+{
+  "checkedAt": "2026-11-17T03:43:35.855156+08:00",
+  "launch": {
+    "launcherPid": 9248,
+    "electronPid": 9436,
+    "startedAt": "2026-11-16T19:42:20.369Z",
+    "repo": "/Users/icesword/Documents/AIProjects/matou/.claude/worktrees/model-provider-routing",
+    "physicalDataRoot": "/Users/icesword/Documents/AIProjects/matou/.claude/worktrees/model-provider-routing/.cache/final-app/data",
+    "dataAlias": "/private/tmp/matou-routing-final-8e97o7aj/d",
+    "electronUserData": "/Users/icesword/Documents/AIProjects/matou/.claude/worktrees/model-provider-routing/.cache/final-app/userData",
+    "debugUrl": "http://127.0.0.1:51806",
+    "appPath": "/Users/icesword/Documents/AIProjects/matou/.claude/worktrees/model-provider-routing/apps/desktop",
+    "localUpstreams": [
+      "http://127.0.0.1:51803",
+      "http://127.0.0.1:51804",
+      "http://127.0.0.1:51805"
+    ],
+    "fakeCli": "/Users/icesword/Documents/AIProjects/matou/.claude/worktrees/model-provider-routing/.cache/final-app/fake-cli.cjs",
+    "network": "sandbox denies non-loopback outbound and keychain access",
+    "accountBridge": "development Python engine absent; no account engine launches"
+  },
+  "aliasRealpath": "/Users/icesword/Documents/AIProjects/matou/.claude/worktrees/model-provider-routing/.cache/final-app/data",
+  "json/version": {
+    "Browser": "Chrome/150.0.7871.224",
+    "Protocol-Version": "1.3",
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) 码头/0.2.19 Chrome/150.0.7871.224 Electron/43.4.1 Safari/537.36",
+    "V8-Version": "15.0.245.28",
+    "WebKit-Version": "537.36 (@ef3872ea1f8a83ae3857e2e9954f8f241a48aedf)",
+    "webSocketDebuggerUrl": "ws://127.0.0.1:51806/devtools/browser/cfb7a450-33e2-4db9-942b-ce5138644738"
+  },
+  "json/list": [
+    {
+      "description": "",
+      "devtoolsFrontendUrl": "/devtools/inspector.html?ws=127.0.0.1:51806/devtools/page/5756E24CF8D98433CC4C84969F8B3FA0",
+      "id": "5756E24CF8D98433CC4C84969F8B3FA0",
+      "title": "码头",
+      "type": "page",
+      "url": "file:///Users/icesword/Documents/AIProjects/matou/.claude/worktrees/model-provider-routing/apps/desktop/out/renderer/index.html?windowId=main-window-1&defaultRootDirectory=%2FUsers%2Ficesword%2FDocuments%2FAIProjects%2Fmatou%2F.claude%2Fworktrees%2Fmodel-provider-routing%2F.cache%2Ffinal-app%2Fworkspace&defaultName=workspace&e2e=1&terminalDiagnostics=0",
+      "webSocketDebuggerUrl": "ws://127.0.0.1:51806/devtools/page/5756E24CF8D98433CC4C84969F8B3FA0"
+    }
+  ]
+}

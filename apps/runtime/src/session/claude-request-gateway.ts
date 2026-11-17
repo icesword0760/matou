@@ -1,3 +1,4 @@
+import type { EgressFamily } from '@matou/contracts'
 import { randomBytes } from 'node:crypto'
 import http, { type IncomingHttpHeaders, type IncomingMessage, type ServerResponse } from 'node:http'
 import https from 'node:https'
@@ -14,11 +15,15 @@ const HOP_BY_HOP_HEADERS = [
 ]
 const AUTH_HEADER = /(^|[-_])(auth(?:entication|orization)?|oauth|(?:api|subscription|access)[-_]?key|token|secret|credentials?|signature)(?=$|[-_])/
 
+export class GatewayRoutingError extends Error {}
+
 export interface GatewayOverride {
+  family?: EgressFamily
+  targetSignal?: AbortSignal
   baseUrl?: string
   headers?: Record<string, string>
   model?: string
-  effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+  effort?: 'omit' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
   thinking?: 'adaptive' | 'omit'
   maxOutputTokens?: number
 }
@@ -26,7 +31,8 @@ export interface GatewayOverride {
 interface GatewayOptions {
   upstreamUrl: string
   env: NodeJS.ProcessEnv
-  resolveOverride: (input: { compaction: boolean; model: string }) =>
+  assertTargetAllowed?: (family?: EgressFamily) => void | Promise<void>
+  resolveOverride: (input: { compaction: boolean; model: string; kind?: 'message' | 'count_tokens' }) =>
     GatewayOverride | undefined | Promise<GatewayOverride | undefined>
 }
 
@@ -59,9 +65,11 @@ export async function startClaudeRequestGateway(options: GatewayOptions): Promis
       active.delete(controller)
       if (!response.writableFinished || !request.complete) controller.abort()
     })
-    void forwardRequest(request, response, controller, prefix, upstream, options.resolveOverride, getAgent).catch((error: unknown) => {
+    void forwardRequest(request, response, controller, prefix, upstream, options.resolveOverride, getAgent, options.assertTargetAllowed).catch((error: unknown) => {
       if (controller.signal.aborted) return
-      if (error instanceof RequestTooLarge) {
+      if (error instanceof GatewayRoutingError) {
+        sendError(response, 502, error.message)
+      } else if (error instanceof RequestTooLarge) {
         sendError(response, 413, 'Claude request exceeds the gateway size limit.')
       } else if (error instanceof DeepSeekInlineToolCompatibilityError) {
         sendError(response, 400, error.message)
@@ -102,7 +110,8 @@ async function forwardRequest(
   prefix: string,
   upstream: URL,
   resolveOverride: GatewayOptions['resolveOverride'],
-  getAgent: (destination: URL) => http.Agent
+  getAgent: (destination: URL) => http.Agent,
+  assertTargetAllowed?: GatewayOptions['assertTargetAllowed']
 ): Promise<void> {
   const route = readRoute(request.url, prefix)
   if (!route) {
@@ -122,9 +131,12 @@ async function forwardRequest(
       const marker = request.headers['x-claude-code-compaction']
       override = await resolveOverride({
         compaction: route.path === '/v1/messages' && (marker === 'manual' || marker === 'auto'),
-        model: message.model
+        model: message.model, kind: route.path === '/v1/messages/count_tokens' ? 'count_tokens' : 'message'
       })
-      if (route.path === '/v1/messages/count_tokens') override = override?.model ? { model: override.model } : undefined
+      if (route.path === '/v1/messages/count_tokens' && override) {
+        const { baseUrl, headers, model, family, targetSignal } = override
+        override = { ...(targetSignal ? { targetSignal } : {}), ...(baseUrl === undefined ? {} : { baseUrl }), ...(headers === undefined ? {} : { headers }), ...(model === undefined ? {} : { model }), ...(family === undefined ? {} : { family }) }
+      }
       if (override && rewriteMessage(message, override)) {
         body = Buffer.from(JSON.stringify(message))
         rewritten = true
@@ -132,6 +144,19 @@ async function forwardRequest(
     }
   }
   if (controller.signal.aborted) return
+  const targetSignal = override?.targetSignal
+  if (targetSignal) {
+    const revoked = () => {
+      const reason = targetSignal.reason
+      sendError(response, 502, reason instanceof Error ? reason.message : 'Subscription account changed. Restart this session.')
+      controller.abort()
+    }
+    if (targetSignal.aborted) { revoked(); return }
+    targetSignal.addEventListener('abort', revoked, { once: true })
+    const cleanup = () => targetSignal.removeEventListener('abort', revoked)
+    response.once('close', cleanup)
+    controller.signal.addEventListener('abort', cleanup, { once: true })
+  }
 
   const target = override?.baseUrl === undefined ? upstream : parseUpstream(override.baseUrl)
   const destination = new URL(target)
@@ -166,6 +191,8 @@ async function forwardRequest(
     delete headers.digest
   }
 
+  await assertTargetAllowed?.(override?.family)
+  if (controller.signal.aborted) return
   const transport = destination.protocol === 'https:' ? https : http
   const outgoing = transport.request(destination, {
     method: request.method,
@@ -279,7 +306,11 @@ function rewriteMessage(message: Record<string, unknown>, override: GatewayOverr
   const cap = override.maxOutputTokens
   const capped = cap !== undefined && typeof message.max_tokens === 'number' && message.max_tokens > cap
   if (override.model !== undefined) message.model = override.model
-  if (override.effort) {
+  if (override.effort === 'omit') {
+    const config = { ...object(message.output_config) }; delete config.effort
+    if (Object.keys(config).length) message.output_config = config
+    else delete message.output_config
+  } else if (override.effort) {
     message.output_config = { ...object(message.output_config), effort: override.effort }
   }
   if (override.thinking === 'adaptive') message.thinking = { type: 'adaptive' }

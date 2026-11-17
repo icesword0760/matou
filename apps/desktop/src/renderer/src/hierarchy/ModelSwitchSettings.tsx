@@ -18,6 +18,7 @@ import { SubscriptionProviderCard } from './SubscriptionProviderCard'
 import { subscriptionQuotaText, subscriptionQuotaTitle } from './subscription-settings'
 import { ProviderSetupDialog } from './ProviderSetupDialog'
 import { ClaudeTimeZoneSettings } from './ClaudeTimeZoneSettings'
+import { ClaudeRoleAssignments } from './ClaudeRoleAssignments'
 import { AgentModelSettings } from './AgentModelSettings'
 import { DispatchSettings } from './DispatchSettings'
 import { formatContextWindowBadge, providerRoleModelIds } from './context-window-ui'
@@ -43,6 +44,8 @@ export function ModelSwitchSettings({ client, onClose }: {
   const [category, setCategory] = useState<SettingsCategory>('claude')
   const [snapshot, setSnapshot] = useState<ProviderConfigSnapshot>()
   const [agentSettings, setAgentSettings] = useState<AgentModelSettingsSnapshot>()
+  const [agentSettingsError, setAgentSettingsError] = useState('')
+  const agentSettingsRead = useRef(0)
   const [loading, setLoading] = useState(true)
   const [failure, setFailure] = useState('')
   const [notice, setNotice] = useState<{ kind: 'success' | 'error' | 'info'; text: string; retry?: ProviderConfigView; recovery?: ProviderActivationFailure['recovery'] }>()
@@ -73,10 +76,12 @@ export function ModelSwitchSettings({ client, onClose }: {
 
   const refreshAgentSettings = useCallback(async () => {
     if (!client) return
+    const read = ++agentSettingsRead.current
     try {
       const result = await client.request('agent-model-settings.get', {})
-      if (isAgentModelSettingsSnapshot(result)) setAgentSettings(result)
-    } catch { /* Provider list stays usable even if context metadata cannot be loaded. */ }
+      if (!isAgentModelSettingsSnapshot(result)) throw new Error('Invalid settings snapshot')
+      if(read===agentSettingsRead.current){setAgentSettings(result);setAgentSettingsError('')}
+    } catch { if(read===agentSettingsRead.current)setAgentSettingsError(messages().hierarchyShell.modelSettings.loadFailed) }
   }, [client])
 
   const refresh = useCallback(async () => {
@@ -334,6 +339,7 @@ export function ModelSwitchSettings({ client, onClose }: {
             })}
           </div>
           <p className="model-settings__impact"><span>ⓘ</span><span><b>{m.impactTitle(APP_DISPLAY_NAME)}</b> {m.impactBody}</span></p>
+          <ClaudeRoleAssignments client={client} providers={providers} activeProviderId={activeId} accounts={accounts} snapshot={agentSettings} loadError={failure || agentSettingsError} onRetry={()=>{void refresh();void refreshAgentSettings()}} onSaved={value=>{agentSettingsRead.current++;setAgentSettings(value);setAgentSettingsError('')}} />
           <AgentModelSettings client={client} providerRevision={snapshot?.revision} activeProviderId={activeId} />
           <DispatchSettings client={client} />
         </>)}

@@ -50,7 +50,7 @@ describe('ModelSwitchSettings', () => {
     const user = userEvent.setup()
     render(<ModelSwitchSettings client={client} onClose={vi.fn()} />)
     await screen.findAllByText('Team Gateway')
-    const currentCard = screen.getByText('Team Gateway').closest('article')!
+    const currentCard = screen.getByText('Team Gateway', { selector: '.model-provider__name strong' }).closest('article')!
     await user.click(within(currentCard).getByRole('button', { name: '编辑' }))
     const dialog = screen.getByRole('dialog', { name: '编辑供应商' })
     await user.click(within(dialog).getByRole('button', { name: '保存并切换' }))
@@ -77,7 +77,7 @@ describe('ModelSwitchSettings', () => {
     const user = userEvent.setup()
     render(<ModelSwitchSettings client={client} onClose={vi.fn()} />)
     await screen.findAllByText('Team Gateway')
-    const currentCard = screen.getByText('Team Gateway').closest('article')!
+    const currentCard = screen.getByText('Team Gateway', { selector: '.model-provider__name strong' }).closest('article')!
     await user.click(within(currentCard).getByRole('button', { name: '编辑' }))
     const dialog = screen.getByRole('dialog', { name: '编辑供应商' })
     await user.click(within(dialog).getByRole('button', { name: '保存' }))
@@ -104,7 +104,7 @@ describe('ModelSwitchSettings', () => {
     const user = userEvent.setup()
     render(<ModelSwitchSettings client={client} onClose={vi.fn()} />)
     await screen.findAllByText('Team Gateway')
-    const currentCard = screen.getByText('Team Gateway').closest('article')!
+    const currentCard = screen.getByText('Team Gateway', { selector: '.model-provider__name strong' }).closest('article')!
     await user.click(within(currentCard).getByRole('button', { name: '编辑' }))
     const dialog = screen.getByRole('dialog', { name: '编辑供应商' })
     await user.click(within(dialog).getByRole('button', { name: '保存并切换' }))
@@ -145,7 +145,7 @@ describe('ModelSwitchSettings', () => {
     expect(screen.getByText('默认窗口')).toBeTruthy()
 
     const user = userEvent.setup()
-    const teamCard = screen.getByText('Team Gateway').closest('article')!
+    const teamCard = screen.getByText('Team Gateway', { selector: '.model-provider__name strong' }).closest('article')!
     await user.click(within(teamCard).getByRole('button', { name: '编辑' }))
     const dialog = screen.getByRole('dialog', { name: '编辑供应商' })
     await user.click(within(dialog).getByRole('radio', { name: /512K/ }))
@@ -232,7 +232,7 @@ describe('ModelSwitchSettings', () => {
     await screen.findAllByText('Anthropic 官方')
 
     const user = userEvent.setup()
-    const teamCard = screen.getByText('Team Gateway').closest('article')!
+    const teamCard = screen.getByText('Team Gateway', { selector: '.model-provider__name strong' }).closest('article')!
     await user.click(within(teamCard).getByRole('button', { name: '编辑' }))
     const dialog = screen.getByRole('dialog', { name: '编辑供应商' })
     expect(within(dialog).getByRole('radio', { name: /默认窗口/ })).toHaveProperty('checked', true)
@@ -387,6 +387,20 @@ describe('ModelSwitchSettings', () => {
   })
 })
 
+it('retries allocation metadata without repeating the existing subscription settings reader', async () => {
+  const original=fakeClient();let failed=true
+  const request=vi.fn<ProviderConfigClient['request']>(async(method,payload)=>{
+    if(method==='agent-model-settings.get' && failed)throw Error('fixture read failed')
+    return original.request(method,payload)
+  })
+  render(<ModelSwitchSettings client={{request}} onClose={vi.fn()}/> )
+  const region=(await screen.findByRole('heading',{name:'模型分配'})).closest('.model-allocation') as HTMLElement
+  await within(region).findByRole('alert')
+  failed=false;await userEvent.setup().click(within(region).getByRole('button',{name:'重试'}))
+  await waitFor(()=>expect(within(region).queryByRole('alert')).toBeNull())
+  expect(request.mock.calls.filter(([method])=>method==='provider-config.subscription.settings-read')).toHaveLength(1)
+})
+
 function fakeClient(
   sessionTransitions: ProviderSessionActivationTransition[] = [],
   activeProviderId: 'anthropic' | 'team-claude' = 'anthropic'
@@ -413,6 +427,7 @@ function fakeClient(
   }
   return {
     request: vi.fn(async (method: string, payload: unknown) => {
+      if (method === 'agent-model-settings.get') return { preferences: { contextWindows: {}, compaction: { mode: 'follow', effort: 'follow' } }, providers: [] }
       if (method === 'dispatch-config.snapshot') return { exists: false, path: '/test/.claude/agent-foreman/config.json', defaults: { ...DISPATCH_DEFAULTS } }
       if (method === 'provider-config.snapshot') return state
       if (method === 'provider-config.activate') {
