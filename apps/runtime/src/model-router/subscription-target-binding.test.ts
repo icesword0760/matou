@@ -1,6 +1,7 @@
 import { EventEmitter, getEventListeners } from 'node:events'
 import { createServer } from 'node:http'
 import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, it, vi } from 'vitest'
 import { SubscriptionAccounts } from './subscription-accounts'
@@ -15,7 +16,7 @@ const cleanup: Array<() => Promise<unknown>> = []
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); vi.restoreAllMocks() })
 const mapping = { opus: 'model', sonnet: 'model', haiku: 'model' }
 async function fixture() {
- const root = await mkdtemp(join(process.cwd(), '../../.cache/task1-tmp/binding-')); cleanup.push(() => rm(root, { recursive: true, force: true }))
+ const root = await mkdtemp(join(tmpdir(), 'matou-binding-')); cleanup.push(() => rm(root, { recursive: true, force: true }))
  const store = new ProviderConfigStore(root)
  const models = [{ id: 'model', contextWindow: 200000 }]
  const saved = await store.adoptSubscription({ name: 'Fixture', modelMapping: mapping, subscription: { provider: 'codex', credentialRef: { name: 'a.json', authIndex: 'a' }, account: { status: 'ready', email: 'a@example.invalid' }, modelMetadata: models } })
