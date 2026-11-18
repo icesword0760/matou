@@ -1,6 +1,6 @@
 {
   "name": "@matou/desktop",
-  "version": "0.2.22",
+  "version": "0.2.23",
   "productName": "码头",
   "private": true,
   "type": "module",
