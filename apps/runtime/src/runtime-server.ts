@@ -1,5 +1,5 @@
 import { CLI_DEFAULT_MODEL } from '@matou/contracts'
-import { claudeRoleLaunchDigest, prepareClaudeRoleLaunch, type PreparedClaudeRoleLaunch } from './session/claude-role-launch'
+import { claudeRequestRole, claudeRoleLaunchDigest, prepareClaudeRoleLaunch, type PreparedClaudeRoleLaunch } from './session/claude-role-launch'
 import { SubscriptionLaunchError, SubscriptionPlatformError, type PreparedSubscriptionLaunch, type SubscriptionAccounts, type SubscriptionConnection } from './model-router/subscription-accounts'
 import { mapSubscriptionLoginFailure, sanitizeProviderReason } from './model-router/errors'
 import type { SubscriptionLoginStartInput, SubscriptionModelsReadInput, SubscriptionProviderConfigInput } from '@matou/contracts'
@@ -2512,6 +2512,10 @@ export class RuntimeServer {
         else pendingSpawnMessages.push(frame)
       }
       const launchModel = preparedRoleLaunch ? preparedRoleLaunch.resolveMainModel(launchModelOverride ?? providerLaunch.model) : launchModelOverride ?? providerLaunch.model
+      const launchRole = preparedRoleLaunch && launchModel ? claudeRequestRole(launchModel, preparedRoleLaunch.snapshot.nativeRoleModels) : undefined
+      const launchReasoningEffort = preparedRoleLaunch
+        ? (launchRole ? preparedRoleLaunch.snapshot.roles[launchRole].effort : roleEffort(providerView, launchModel ?? 'default'))
+        : (message.profile === 'claude-code' ? roleEffort(providerView, providerModel ?? 'default') : providerView?.reasoningEffort)
       const session = await PtySession.create({
         sessionId: message.sessionId,
         executionContextId: message.executionContextId,
@@ -2532,7 +2536,7 @@ export class RuntimeServer {
           }
         }),
         contextWindow: contextWindow ?? null,
-        ...(!preparedRoleLaunch && (message.profile === 'claude-code' ? roleEffort(providerView, providerModel ?? 'default') : providerView?.reasoningEffort) ? { reasoningEffort: (message.profile === 'claude-code' ? roleEffort(providerView, providerModel ?? 'default') : providerView?.reasoningEffort)! } : {}),
+        ...(launchReasoningEffort && launchReasoningEffort !== 'follow' ? { reasoningEffort: launchReasoningEffort } : {}),
         ...(message.profile === 'claude-code' ? { modelRouting: {
           ...(this.#egress ? { assertTargetAllowed: (family?: import('@matou/contracts').EgressFamily) => {
             try { this.#egress!.assertTargetAllowed(preparedRoleLaunch ? family : family ?? legacyEgressPlan.family) }

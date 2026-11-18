@@ -171,3 +171,26 @@ it('includes an official search target in protection families and releases its e
  expect(accounts.prepareModelTarget).toHaveBeenCalledExactlyOnceWith(sub.id,'gpt','role-session')
  prepared.close();prepared.close();expect(release).toHaveBeenCalledOnce()
 })
+
+it('maps an API source startup model to its configured role tier so role assignment and effort apply', async () => {
+ const f = await fixture()
+ const ds = await f.store.upsert({
+  cli: 'claude-code', name: 'DeepSeek', endpoint: 'https://api.deepseek.com/anthropic',
+  apiKey: 'ds-key', model: 'deepseek-flash',
+  modelMapping: { opus: 'deepseek-flash', sonnet: 'deepseek-flash', haiku: 'deepseek-flash' },
+  effortMapping: { opus: 'max' }
+ })
+ await f.store.activate('claude-code', ds.id)
+ const preferences = {
+  ...f.preferences,
+  claudeRoleAssignments: {
+   opus: { providerId: ds.id, model: 'deepseek-flash', effort: 'high' as const },
+   sonnet: { providerId: ds.id, model: 'deepseek-flash', effort: 'high' as const },
+   haiku: { providerId: ds.id, model: 'deepseek-flash', effort: 'low' as const }
+  }
+ }
+ const prepared = (await prepareClaudeRoleLaunch({ ...f, preferences, env: {} }))!
+ expect(prepared.resolveMainModel(prepared.sourceModel)).toBe('matou-role/opus')
+ expect(prepared.snapshot.roles.opus.effort).toBe('high')
+ prepared.close()
+})

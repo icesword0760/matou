@@ -124,3 +124,18 @@ it('preserves an API model literally named default instead of interpreting it as
   const snapshot = routing.resolveClaudeRoleSnapshot(input)!
   expect(snapshot.roles.haiku.model).toBe('default')
 })
+
+it('uses per-assignment effort over provider effortMapping and supports webSearch effort', () => {
+  const input = fixture()
+  input.preferences.claudeRoleAssignments = {
+    opus: { providerId: 'b', model: 'same', effort: 'high' },
+    sonnet: { providerId: 'b', model: 'same', effort: 'follow' }
+  }
+  input.providers.providers['claude-code'][2]!.effortMapping = { opus: 'max', sonnet: 'high' }
+  input.preferences.claudeWebSearch = { providerId: 'a', model: 'same', effort: 'low' }
+  const snapshot = routing.resolveClaudeRoleSnapshot(input)!
+  expect(snapshot.roles.opus.effort).toBe('high')
+  expect(snapshot.roles.sonnet.effort).toBe('follow')
+  expect(snapshot.webSearchTarget?.effort).toBe('low')
+  expect(() => routing.validateClaudeModelTarget({ providerId: 'a', model: 'same', effort: 'turbo' })).toThrow(/effort/i)
+})

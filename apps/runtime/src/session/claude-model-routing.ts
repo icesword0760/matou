@@ -73,7 +73,8 @@ export function claudeModelRouting(options: ClaudeModelRoutingOptions, env: Node
             if (source.kind === 'subscription') source.assertActive()
             const headers = source.kind === 'oauth' ? (await source.readHeaders()).headers : { ...source.headers }
             const family = source.kind === 'oauth' || new URL(source.baseUrl).hostname === 'api.anthropic.com' ? 'anthropic' as const : source.kind === 'subscription' && options.provider?.subscription?.provider === 'codex' ? 'chatgpt-subscription' as const : undefined
-            return { ...(source.kind === 'api' ? {} : { authentication: authentication(claudeRequestRole(input.model, snapshot.nativeRoleModels) ?? 'main')! }), baseUrl: source.baseUrl, headers, model: input.model, ...(source.kind === 'subscription' ? { routerTarget: true, ...(source.targetSignal ? { targetSignal: source.targetSignal } : {}) } : {}), ...(family ? { family } : {}) }
+            const sourceEffort = input.kind === 'count_tokens' ? undefined : roleEffort(options.provider, input.model)
+            return { ...(source.kind === 'api' ? {} : { authentication: authentication(claudeRequestRole(input.model, snapshot.nativeRoleModels) ?? 'main')! }), baseUrl: source.baseUrl, headers, model: input.model, ...(source.kind === 'subscription' ? { routerTarget: true, ...(source.targetSignal ? { targetSignal: source.targetSignal } : {}) } : {}), ...(family ? { family } : {}), ...(sourceEffort && sourceEffort !== 'follow' ? { effort: sourceEffort } : {}) }
           } catch (error) { throw new GatewayRoutingError(error instanceof SubscriptionAccountBindingError ? error.message : 'Original supplier account identity is unavailable') }
         }
         const targetLabel = search ? 'webSearch' : role ?? (custom ? 'compaction' : 'main')

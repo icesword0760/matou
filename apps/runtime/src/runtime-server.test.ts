@@ -9497,3 +9497,69 @@ require('fs').writeFileSync(${JSON.stringify(capture)},JSON.stringify({base:proc
     expect(requests).toEqual(['same']);expect(captureAccount).not.toHaveBeenCalled()
   } finally {restoreEnv('MATOU_CLAUDE_COMMAND',previous);await registry.shutdownAll();upstream.closeAllConnections();await new Promise<void>(r=>upstream.close(()=>r()));vi.restoreAllMocks()}
 })
+
+it('passes main role --effort to Claude CLI and routes mapped API startup models with assigned effort', async () => {
+  vi.spyOn(nativeRoleCatalog, 'nativeClaudeModels').mockResolvedValue([
+    { id: 'default', resolvedModel: 'claude-sonnet-fixture' },
+    { id: 'opus', resolvedModel: 'claude-opus-fixture' },
+    { id: 'sonnet', resolvedModel: 'claude-sonnet-fixture' },
+    { id: 'haiku', resolvedModel: 'claude-haiku-fixture' }
+  ])
+  const bodies: any[] = []
+  const upstream = createServer(async (req, res) => {
+    const chunks: Buffer[] = []
+    for await (const c of req) chunks.push(c)
+    bodies.push(JSON.parse(Buffer.concat(chunks).toString()))
+    res.end('{"ok":true}')
+  })
+  await new Promise<void>(r => upstream.listen(0, '127.0.0.1', r))
+  const endpoint = `http://127.0.0.1:${(upstream.address() as { port: number }).port}`
+  const previous = process.env.MATOU_CLAUDE_COMMAND, executable = join(root, 'role-effort-cli.cjs'), capture = join(root, 'role-effort-capture.json')
+  await writeFile(executable, `#!/usr/bin/env node
+require('fs').writeFileSync(${JSON.stringify(capture)},JSON.stringify({base:process.env.ANTHROPIC_BASE_URL,args:process.argv.slice(2)}));console.log('READY');setInterval(()=>{},1000)
+`)
+  await chmod(executable, 0o755)
+  process.env.MATOU_CLAUDE_COMMAND = executable
+  const registry = createTestSessionRegistry(), providers = new ProviderConfigStore(root)
+  const ds = await providers.upsert({
+    cli: 'claude-code', name: 'DeepSeek', endpoint, apiKey: 'ds-key', model: 'deepseek-flash',
+    modelMapping: { opus: 'deepseek-flash', sonnet: 'deepseek-flash', haiku: 'deepseek-flash' },
+    modelMetadata: [{ id: 'deepseek-flash', supportedEfforts: ['low', 'high', 'max'] }],
+    effortMapping: { opus: 'max' }
+  })
+  await providers.activate('claude-code', ds.id)
+  const assignedModels = new AgentModelSettings(database, providers)
+  await assignedModels.patchAssignments({
+    assignments: {
+      opus: { providerId: ds.id, model: 'deepseek-flash', effort: 'high' },
+      sonnet: { providerId: ds.id, model: 'deepseek-flash', effort: 'high' },
+      haiku: { providerId: ds.id, model: 'deepseek-flash', effort: 'low' }
+    }
+  })
+  server.close(); port = new MockPort()
+  server = new RuntimeServer(port, root, database, undefined, undefined, registry, undefined, undefined, { providerConfigs: providers })
+  port.receive({ type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'effort-test' })
+  registerSession(database, 'role-effort-session', 'claude-code')
+  try {
+    port.receive({ type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION, sessionId: 'role-effort-session', executionContextId: 'replay-context', profile: 'claude-code', cols: 80, rows: 24 })
+    await waitUntil(() => registry.has('role-effort-session'), 5000)
+    await waitUntilAsync(async () => { try { return Boolean(JSON.parse(await readFile(capture, 'utf8')).base) } catch { return false } }, 5000)
+    const launched = JSON.parse(await readFile(capture, 'utf8'))
+    expect(launched.args).toContain('--model')
+    expect(launched.args[launched.args.indexOf('--model') + 1]).toBe('matou-role/opus')
+    expect(launched.args).toContain('--effort')
+    expect(launched.args[launched.args.indexOf('--effort') + 1]).toBe('high')
+    const response = await fetch(launched.base + '/v1/messages', {
+      method: 'POST',
+      body: JSON.stringify({ model: 'matou-role/opus', output_config: { effort: 'xhigh' }, messages: [] })
+    })
+    expect(response.status).toBe(200)
+    expect(bodies[0]).toMatchObject({ model: 'deepseek-flash', output_config: { effort: 'high' } })
+  } finally {
+    restoreEnv('MATOU_CLAUDE_COMMAND', previous)
+    await registry.shutdownAll()
+    upstream.closeAllConnections()
+    await new Promise<void>(r => upstream.close(() => r()))
+    vi.restoreAllMocks()
+  }
+})

@@ -5,7 +5,7 @@
 .model-allocation h2 { margin: 0; color: var(--workspace-text); font-size: 13px; font-weight: 680; }
 .model-allocation p { margin: 0; color: var(--workspace-muted); font-size: 11px; line-height: 1.65; }
 .model-allocation__card { padding: 2px 14px 0; border: 1px solid var(--workspace-line); border-radius: 10px; background: var(--workspace-panel-muted); }
-.model-allocation__head, .model-allocation__row { display: grid; grid-template-columns: 76px minmax(0,1.05fr) minmax(0,1fr); gap: 4px 16px; align-items: start; }
+.model-allocation__head, .model-allocation__row { display: grid; grid-template-columns: 76px minmax(0,1.05fr) minmax(0,1fr) minmax(108px,.48fr); gap: 4px 14px; align-items: start; }
 .model-allocation__head { padding: 10px 0 8px; border-bottom: 1px solid var(--workspace-line); color: var(--workspace-muted); font-size: 10px; font-weight: 650; }
 .model-allocation__row { padding: 12px 0; border-bottom: 1px solid var(--workspace-line); }
 .model-allocation__row:last-of-type { border-bottom: 0; }

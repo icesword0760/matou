@@ -1,4 +1,4 @@
-import type { AgentModelSettingsSnapshot, ClaudeModelRole, ProviderConfigView, SubscriptionAccountDetails } from '@matou/contracts'
+import type { AgentModelSettingsSnapshot, ClaudeModelRole, ProviderConfigView, ReasoningEffort, SubscriptionAccountDetails } from '@matou/contracts'
 
 export const CLAUDE_ROLES = ['opus', 'sonnet', 'haiku'] as const
 export function allocationModels(provider: ProviderConfigView | undefined, snapshot?: AgentModelSettingsSnapshot) {
@@ -6,6 +6,41 @@ export function allocationModels(provider: ProviderConfigView | undefined, snaps
   const authoritative = provider.subscription?.modelMetadata ?? provider.modelMetadata
   return authoritative !== undefined ? authoritative.map(m => ({ id: m.id, name: m.displayName ?? m.id }))
     : snapshot?.providers.find(p => p.id === provider.id)?.models ?? []
+}
+export function allocationModelSupportedEfforts(provider: ProviderConfigView | undefined, modelId: string, snapshot?: AgentModelSettingsSnapshot): Exclude<ReasoningEffort, 'follow'>[] | undefined {
+  if (!provider || !modelId.trim()) return undefined
+  const authoritative = provider.subscription?.modelMetadata ?? provider.modelMetadata
+  if (authoritative !== undefined) return authoritative.find(m => m.id === modelId)?.supportedEfforts
+  return snapshot?.providers.find(p => p.id === provider.id)?.models.find(m => m.id === modelId)?.supportedEfforts
+}
+export function allocationDefaultEfforts(provider: ProviderConfigView | undefined, modelId: string): Exclude<ReasoningEffort, 'follow'>[] {
+  const label = `${provider?.id ?? ''} ${provider?.name ?? ''} ${modelId}`
+  if (provider?.subscription) {
+    return provider.subscription.provider !== 'codex' && !/\b(gpt|codex|o[1-9])\b/i.test(label) && /claude|opus|sonnet|haiku/i.test(label)
+      ? ['low', 'medium', 'high', 'xhigh', 'max']
+      : ['low', 'medium', 'high', 'xhigh']
+  }
+  if (/\b(gpt|codex|o[1-9])\b/i.test(label)) return ['low', 'medium', 'high', 'xhigh']
+  return ['low', 'medium', 'high', 'xhigh', 'max']
+}
+export function allocationEffortChoices(provider: ProviderConfigView | undefined, modelId: string, current: ReasoningEffort, snapshot?: AgentModelSettingsSnapshot): ReasoningEffort[] {
+  const supported = allocationModelSupportedEfforts(provider, modelId, snapshot)
+  const choices: ReasoningEffort[] = ['follow', ...(supported ? [...new Set(supported)] : allocationDefaultEfforts(provider, modelId))]
+  if (current !== 'follow' && !choices.includes(current)) choices.push(current)
+  return choices
+}
+export function allocationEffortSupported(provider: ProviderConfigView | undefined, modelId: string, effort: ReasoningEffort, snapshot?: AgentModelSettingsSnapshot): boolean {
+  if (effort === 'follow') return true
+  const supported = allocationModelSupportedEfforts(provider, modelId, snapshot)
+  return supported ? supported.includes(effort) : allocationDefaultEfforts(provider, modelId).includes(effort)
+}
+export function allocationEffortName(effort: ReasoningEffort, zh: boolean): string {
+  if (effort === 'follow') return zh ? '跟随会话' : 'Follow session'
+  if (effort === 'low') return zh ? '低' : 'Low'
+  if (effort === 'medium') return zh ? '中' : 'Medium'
+  if (effort === 'high') return zh ? '高' : 'High'
+  if (effort === 'xhigh') return zh ? '极高' : 'XHigh'
+  return zh ? '最大' : 'Max'
 }
 export function defaultAllocationModel(role: ClaudeModelRole, provider: ProviderConfigView | undefined, providers: readonly ProviderConfigView[], snapshot?: AgentModelSettingsSnapshot) {
   if (!provider) return undefined

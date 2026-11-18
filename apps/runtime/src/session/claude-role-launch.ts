@@ -129,6 +129,8 @@ export async function prepareClaudeRoleLaunch(options: {
         if (!normalized || normalized === 'default' || normalized === CLI_DEFAULT_MODEL) {
           role = defaultModel ? claudeRequestRole(defaultModel, snapshot.nativeRoleModels) : undefined
           if (!role) throw new Error('Default Claude model role identity is unavailable')
+        } else if (!role && !sourceProvider?.subscription && normalized === sourceProvider?.model?.replace(/\[1m\]$/i, '')) {
+          role = CLAUDE_MODEL_ROLES.find(candidate => sourceProvider.modelMapping?.[candidate]?.replace(/\[1m\]$/i, '') === normalized)
         }
         if (!role && !sourceConnection) throw new Error('Original supplier source connection is unavailable; choose a configured role')
         return role ? `matou-role/${role}` : model!

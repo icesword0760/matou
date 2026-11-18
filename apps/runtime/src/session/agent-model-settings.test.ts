@@ -274,3 +274,24 @@ it('permits manual search models only for API providers without an authoritative
  await settings.patchAssignments({assignments:{},webSearch:undefined} as never)
  expect(settings.preferences().claudeWebSearch).toBeUndefined()
 })
+
+it('validates and persists per-assignment reasoning effort for roles and web search', async () => {
+ const deepseek = await store.upsert({
+  cli: 'claude-code', name: 'DeepSeek', endpoint: 'https://api.deepseek.com/anthropic',
+  apiKey: 'fixture', model: 'deepseek-flash',
+  modelMetadata: [{ id: 'deepseek-flash', displayName: 'DeepSeek-V4.1-Flash', supportedEfforts: ['low', 'high', 'max'] }]
+ })
+ await expect(settings.patchAssignments({
+  assignments: { opus: { providerId: deepseek.id, model: 'deepseek-flash', effort: 'medium' } }
+ })).rejects.toThrow(/effort/i)
+ await expect(settings.patchAssignments({
+  assignments: { opus: { providerId: deepseek.id, model: 'deepseek-flash', effort: 'high' } },
+  webSearch: { providerId: deepseek.id, model: 'deepseek-flash', effort: 'xhigh' }
+ })).rejects.toThrow(/effort/i)
+ const snapshot = await settings.patchAssignments({
+  assignments: { opus: { providerId: deepseek.id, model: 'deepseek-flash', effort: 'high' } },
+  webSearch: { providerId: deepseek.id, model: 'deepseek-flash', effort: 'low' }
+ })
+ expect(snapshot.preferences.claudeRoleAssignments?.opus).toEqual({ providerId: deepseek.id, model: 'deepseek-flash', effort: 'high' })
+ expect(snapshot.preferences.claudeWebSearch).toEqual({ providerId: deepseek.id, model: 'deepseek-flash', effort: 'low' })
+})

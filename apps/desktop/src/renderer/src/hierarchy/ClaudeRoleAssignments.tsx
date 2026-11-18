@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
-import type { AgentModelSettingsSnapshot, ClaudeModelRole, ClaudeModelTarget, ClaudeRoleAssignments as Assignments, ProviderConfigView, SubscriptionAccountDetails } from '@matou/contracts'
+import type { AgentModelSettingsSnapshot, ClaudeModelRole, ClaudeModelTarget, ClaudeRoleAssignments as Assignments, ProviderConfigView, ReasoningEffort, SubscriptionAccountDetails } from '@matou/contracts'
 import type { ProviderConfigClient } from './ModelSwitchSettings'
 import { useLocale } from '../i18n/LocaleProvider'
-import { allocationModels, allocationProblem, CLAUDE_ROLES, defaultAllocationModel } from './claude-role-assignment-options'
+import { allocationEffortChoices, allocationEffortName, allocationEffortSupported, allocationModels, allocationProblem, CLAUDE_ROLES, defaultAllocationModel } from './claude-role-assignment-options'
 import './claude-role-assignments.css'
 
 type AllocationDraft = Assignments & { webSearch?: ClaudeModelTarget }
@@ -49,7 +49,11 @@ export function ClaudeRoleAssignments({ client, providers, activeProviderId, sna
     const provider = providers.find(p => p.id === (assigned?.providerId ?? (role === 'webSearch' ? undefined : activeProviderId)))
     const model = assigned?.model ?? (role === 'webSearch' ? '' : defaultAllocationModel(role, provider, providers, snapshot)?.id ?? '')
     const problem = allocationProblem(provider, model, snapshot, accounts)
-    return !assigned && problem === 'empty' ? 'catalog' : problem
+    if (!assigned && problem === 'empty') return 'catalog'
+    if (problem) return problem
+    const inheritedEffort = (role !== 'webSearch' ? provider?.effortMapping?.[role] : undefined) ?? provider?.reasoningEffort ?? 'follow'
+    const effort = assigned ? (assigned.effort ?? inheritedEffort) : inheritedEffort
+    return allocationEffortSupported(provider, model, effort, snapshot) ? undefined : 'effort'
   })
   const dirty = draft !== undefined && key(draft) !== key(baseline.current)
   const unavailable = !client || !snapshot || !draft || !providers.length || Boolean(loadError)
@@ -72,7 +76,8 @@ export function ClaudeRoleAssignments({ client, providers, activeProviderId, sna
     empty:t('请选择或输入模型。','Choose or enter a model.'),
     model:t('模型已不可用；原选择已保留，请重新选择。','Model is unavailable. Your selection was kept; choose another model.'),
     catalog:t('模型目录暂不可用，请重试。','Model directory is unavailable. Please retry.'),
-    invalid:t('模型 ID 无效，请检查输入。','Invalid model ID. Please check your input.')
+    invalid:t('模型 ID 无效，请检查输入。','Invalid model ID. Please check your input.'),
+    effort:t('当前模型不支持所选推理强度；原选择已保留，请重新选择。','The selected reasoning effort is not supported by this model. Its value was kept; choose another effort.')
   }[code ?? ''])
   return <section className="model-allocation" aria-label={t('模型分配','Model assignments')} aria-busy={saving}>
     <section className="model-allocation__section" aria-labelledby="model-allocation-heading">
@@ -81,13 +86,17 @@ export function ClaudeRoleAssignments({ client, providers, activeProviderId, sna
       {!snapshot && !loadError && client && <p role="status">{t('正在读取模型分配…','Loading model assignments…')}</p>}
       {snapshot && !providers.length && <p role="alert">{t('没有可用供应商，请先添加供应商。','No providers are available. Add a provider first.')}</p>}
       <div className="model-allocation__card">
-        <div className="model-allocation__head" aria-hidden="true"><span>{t('档位','Tier')}</span><span>{t('供应商 / 账号','Provider / account')}</span><span>{t('模型','Model')}</span></div>
+        <div className="model-allocation__head" aria-hidden="true"><span>{t('档位','Tier')}</span><span>{t('供应商 / 账号','Provider / account')}</span><span>{t('模型','Model')}</span><span>{t('推理强度','Reasoning effort')}</span></div>
         {rows.map((role,index) => {
           const search = role === 'webSearch'
           const title = search ? t('网页搜索','Web search') : role[0]!.toUpperCase()+role.slice(1), assigned=draft?.[role]
           const provider=providers.find(p=>p.id===(assigned?.providerId ?? (search ? undefined : activeProviderId)))
           const models=allocationModels(provider,snapshot), selected=assigned?.model ?? ''
           const defaultModel=role === 'webSearch' ? undefined : defaultAllocationModel(role,provider,providers,snapshot)
+          const effectiveModel = assigned ? selected : (defaultModel?.id ?? '')
+          const inheritedEffort = (!search ? provider?.effortMapping?.[role] : undefined) ?? provider?.reasoningEffort ?? 'follow'
+          const effort = assigned ? (assigned.effort ?? inheritedEffort) : inheritedEffort
+          const effortChoices = allocationEffortChoices(provider, effectiveModel, effort, snapshot)
           const problem=problems[index]
           const manualAllowed=provider && !provider.subscription && !provider.builtIn && provider.modelMetadata===undefined
           const manualActive=Boolean(manualAllowed && (manual[role] || selected && !models.some(m=>m.id===selected)))
@@ -106,7 +115,7 @@ export function ClaudeRoleAssignments({ client, providers, activeProviderId, sna
               <span className="model-allocation__account">{assigned ? accountText : search ? '' : `${provider?.name ?? t('默认供应商不可用','Default provider unavailable')} · ${t('默认供应商','Default provider')}`}{account?.status==='needs-sign-in' && provider?.subscription && <button type="button" className="provider-link model-allocation__relogin" disabled={signingIn || saving} aria-busy={signingIn} onClick={()=>onSignIn(provider)}>{signingIn ? t('登录中…','Signing in…') : t('重新登录','Sign in again')}</button>}</span>
             </div>
             <div className="model-allocation__field" data-label={t('模型','Model')}>
-              <select id={`${role}-model`} aria-label={`${title} ${t('模型','model')}`} aria-invalid={Boolean(problem)} aria-describedby={`${role}-target${problem?` ${role}-error`:''}`} disabled={!assigned || !provider || unavailable || saving} value={!assigned?'':manualActive?'__manual__':selected} onChange={e=>{const value=e.target.value;setManual(current=>({...current,[role]:value==='__manual__'}));if(value!=='__manual__')change(role,{providerId:assigned!.providerId,model:value})}}>
+              <select id={`${role}-model`} aria-label={`${title} ${t('模型','model')}`} aria-invalid={Boolean(problem && problem !== 'effort')} aria-describedby={`${role}-target${problem?` ${role}-error`:''}`} disabled={!assigned || !provider || unavailable || saving} value={!assigned?'':manualActive?'__manual__':selected} onChange={e=>{const value=e.target.value;setManual(current=>({...current,[role]:value==='__manual__'}));if(value!=='__manual__')change(role,{...assigned!,model:value})}}>
                 {!assigned ? <option value="">{search ? t('未指定','Unassigned') : defaultModel?.name ?? t(`${title} 原生默认档位（目录暂不可用）`,`${title} native default (directory unavailable)`)}</option> : <>
                   <option value="">{t('请选择模型','Choose a model')}</option>
                   {unavailableModel && !manualActive && <option value={selected}>{selected} · {t('不可用','Unavailable')}</option>}
@@ -114,9 +123,17 @@ export function ClaudeRoleAssignments({ client, providers, activeProviderId, sna
                   {manualAllowed && <option value="__manual__">{t('手动填写模型 ID…','Enter a model ID…')}</option>}
                 </>}
               </select>
-              {manualActive && <input aria-label={`${title} ${t('模型 ID','model ID')}`} value={selected} disabled={saving} onChange={e=>change(role,{providerId:assigned!.providerId,model:e.target.value})}/>}
+              {manualActive && <input aria-label={`${title} ${t('模型 ID','model ID')}`} value={selected} disabled={saving} onChange={e=>change(role,{...assigned!,model:e.target.value})}/>}
             </div>
-            <p className="model-allocation__target" id={`${role}-target`}>{search && !assigned ? t('未指定：搜索请求使用当前档位供应商','Unassigned: search requests use the current tier provider') : <>{assigned?t('当前目标：','Current target: '):t('最终：','Effective target: ')}{provider?.name ?? assigned?.providerId ?? '—'} · {assigned ? models.find(m=>m.id===selected)?.name ?? selected : defaultModel?.name ?? t('原生默认档位待确认','Native default tier pending')}</>}</p>
+            <div className="model-allocation__field" data-label={t('推理强度','Reasoning effort')}>
+              <select id={`${role}-effort`} aria-label={`${title} ${t('推理强度','reasoning effort')}`} aria-invalid={problem === 'effort'} aria-describedby={`${role}-target${problem?` ${role}-error`:''}`} disabled={!assigned || !provider || unavailable || saving} value={!assigned ? '' : effort} onChange={e=>{const nextEffort=e.target.value as ReasoningEffort;const nextTarget:ClaudeModelTarget={...assigned!,effort:nextEffort};if(nextEffort==='follow' && inheritedEffort==='follow')delete nextTarget.effort;change(role,nextTarget)}}>
+                {!assigned ? <option value="">{search ? t('未指定','Unassigned') : allocationEffortName(inheritedEffort, zh)}</option> : effortChoices.map(option => {
+                  const supported = allocationEffortSupported(provider, effectiveModel, option, snapshot)
+                  return <option key={option} value={option}>{allocationEffortName(option, zh)}{option === effort && !supported ? ` ${t('（不支持）','(unsupported)')}` : ''}</option>
+                })}
+              </select>
+            </div>
+            <p className="model-allocation__target" id={`${role}-target`}>{search && !assigned ? t('未指定：搜索请求使用当前档位供应商','Unassigned: search requests use the current tier provider') : <>{assigned?t('当前目标：','Current target: '):t('最终：','Effective target: ')}{provider?.name ?? assigned?.providerId ?? '—'} · {assigned ? models.find(m=>m.id===selected)?.name ?? selected : defaultModel?.name ?? t('原生默认档位待确认','Native default tier pending')}{effort !== 'follow' ? ` · ${allocationEffortName(effort, zh)}` : ''}</>}</p>
             {problem && <p className="model-allocation__error" id={`${role}-error`} role="alert">{!assigned && `${t('沿用默认：','Default target: ')}${provider?.name ?? '—'} · ${defaultModel?.id || title}。`}{problemCopy(problem)}{!assigned && t('请为此档位重新选择供应商和模型。','Choose another provider and model for this tier.')}{problem==='catalog' && <button type="button" onClick={onRetry}>{t('重试','Retry')}</button>}</p>}
           </div>
         })}

@@ -285,3 +285,51 @@ it('offers inline relogin for inherited tiers even when no explicit assignment i
  expect(screen.queryByRole('alert')).toBeNull()
  expect(screen.getByRole('button',{name:'保存分配'})).toHaveProperty('disabled',true)
 })
+
+it('selects, persists and validates per-row reasoning effort including DeepSeek and web search', async () => {
+ const deepseek: ProviderConfigView = {
+  id: 'deepseek', cli: 'claude-code', name: 'DeepSeek', endpoint: 'https://api.deepseek.com/anthropic',
+  model: 'deepseek-flash', hasApiKey: true, effortMapping: { opus: 'max' },
+  modelMetadata: [
+   { id: 'deepseek-flash', displayName: 'DeepSeek-V4.1-Flash', supportedEfforts: ['low', 'high', 'max'] },
+   { id: 'deepseek-lite', displayName: 'DeepSeek-Lite', supportedEfforts: ['low'] }
+  ]
+ }
+ const f = fixture()
+ f.providers = [official, deepseek]
+ const result: AgentModelSettingsSnapshot = {
+  ...f.snapshot,
+  preferences: {
+   ...f.snapshot.preferences,
+   claudeRoleAssignments: { opus: { providerId: 'deepseek', model: 'deepseek-flash', effort: 'high' } },
+   claudeWebSearch: { providerId: 'deepseek', model: 'deepseek-flash', effort: 'low' }
+  }
+ }
+ f.client.request.mockResolvedValue(result)
+ render(<ClaudeRoleAssignments {...f} />)
+ const user = userEvent.setup()
+ expect(screen.getByLabelText('Opus 推理强度')).toHaveProperty('disabled', true)
+ await user.selectOptions(screen.getByLabelText('Opus 供应商'), 'deepseek')
+ await user.selectOptions(screen.getByLabelText('Opus 模型'), 'deepseek-flash')
+ const opusEffort = screen.getByLabelText('Opus 推理强度') as HTMLSelectElement
+ expect(opusEffort.value).toBe('max')
+ expect([...opusEffort.options].map(o => o.value)).toEqual(['follow', 'low', 'high', 'max'])
+ await user.selectOptions(opusEffort, 'high')
+ expect(screen.getByText(/当前目标：DeepSeek · DeepSeek-V4.1-Flash · 高/)).toBeTruthy()
+ // Switching to a model that does not support 'high' keeps 'high' and blocks saving until corrected.
+ await user.selectOptions(screen.getByLabelText('Opus 模型'), 'deepseek-lite')
+ expect(opusEffort.value).toBe('high')
+ expect(opusEffort.getAttribute('aria-invalid')).toBe('true')
+ expect(screen.getByRole('alert').textContent).toContain('当前模型不支持所选推理强度')
+ expect(screen.getByRole('button', { name: '保存分配' })).toHaveProperty('disabled', true)
+ await user.selectOptions(screen.getByLabelText('Opus 模型'), 'deepseek-flash')
+ expect(screen.queryByRole('alert')).toBeNull()
+ await user.selectOptions(screen.getByLabelText('网页搜索 供应商'), 'deepseek')
+ await user.selectOptions(screen.getByLabelText('网页搜索 模型'), 'deepseek-flash')
+ await user.selectOptions(screen.getByLabelText('网页搜索 推理强度'), 'low')
+ await user.click(screen.getByRole('button', { name: '保存分配' }))
+ expect(f.client.request).toHaveBeenCalledWith('agent-model-settings.patch-assignments', {
+  assignments: { opus: { providerId: 'deepseek', model: 'deepseek-flash', effort: 'high' } },
+  webSearch: { providerId: 'deepseek', model: 'deepseek-flash', effort: 'low' }
+ })
+})

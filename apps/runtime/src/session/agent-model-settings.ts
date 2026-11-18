@@ -77,21 +77,25 @@ export class AgentModelSettings {
     const updatesSearch = Object.prototype.hasOwnProperty.call(input, 'webSearch')
     const webSearch = input.webSearch == null ? undefined : validateClaudeModelTarget(input.webSearch)
     const [snapshot, native] = await Promise.all([this.accounts ? this.accounts.snapshot() : this.providers.snapshot(), nativeClaudeModels()])
+    const verifyTarget = (label: string, provider: ProviderConfigView | undefined, model: string, effort?: AgentModelPreferences['compaction']['effort']) => {
+      if (!provider) throw new Error(`${label}: Assignment provider is unavailable`)
+      if (!provider.subscription && !usesNativeModelCatalog(provider) && !provider.hasApiKey) throw new Error(`${label} · ${provider.name}: API key is unavailable`)
+      let metadata: ProviderModelMetadata | undefined
+      try { metadata = assignedModelMetadata(provider, model, native) }
+      catch (error) { throw new Error(`${label} · ${provider.name}: ${error instanceof Error ? error.message : 'Assignment target is unavailable'}`) }
+      if (effort && effort !== 'follow' && metadata?.supportedEfforts && !metadata.supportedEfforts.includes(effort)) {
+        throw new Error(`${label} · ${provider.name}: Unsupported reasoning effort`)
+      }
+    }
     if (Object.keys(assignments).length) for (const role of CLAUDE_MODEL_ROLES) {
       const target = assignments[role]
       const provider = snapshot.providers['claude-code'].find(p => p.id === (target?.providerId ?? snapshot.activeProviderIds['claude-code']))
-      if (!provider) throw new Error(`${role}: Assignment provider is unavailable`)
-      const model = target?.model ?? defaultClaudeRoleModel(provider, role, native)
-      if (!provider.subscription && !usesNativeModelCatalog(provider) && !provider.hasApiKey) throw new Error(`${role} · ${provider.name}: API key is unavailable`)
-      try { assignedModelMetadata(provider, model, native) }
-      catch (error) { throw new Error(`${role} · ${provider.name}: ${error instanceof Error ? error.message : 'Assignment target is unavailable'}`) }
+      const model = target?.model ?? (provider ? defaultClaudeRoleModel(provider, role, native) : '')
+      verifyTarget(role, provider, model, target?.effort)
     }
     if (webSearch) {
       const provider = snapshot.providers['claude-code'].find(p => p.id === webSearch.providerId)
-      if (!provider) throw new Error('网页搜索: Assignment provider is unavailable')
-      if (!provider.subscription && !usesNativeModelCatalog(provider) && !provider.hasApiKey) throw new Error(`网页搜索 · ${provider.name}: API key is unavailable`)
-      try { assignedModelMetadata(provider, webSearch.model, native) }
-      catch (error) { throw new Error(`网页搜索 · ${provider.name}: ${error instanceof Error ? error.message : 'Assignment target is unavailable'}`) }
+      verifyTarget('网页搜索', provider, webSearch.model, webSearch.effort)
     }
     // No await between this fresh read and write: preserve concurrent old set().
     const latest = { ...this.preferences(), claudeRoleAssignments: assignments }

@@ -1,6 +1,7 @@
 import { type AgentModelPreferences, type ClaudeModelRole, type ClaudeModelTarget, type ClaudeRoleAssignments, type EgressFamily, type ProviderConfigSnapshot, type ProviderConfigView, type ProviderModelMetadata, type ReasoningEffort, type SubscriptionModel, type SubscriptionProvider } from '@matou/contracts'
 
 export const CLAUDE_MODEL_ROLES = ['opus', 'sonnet', 'haiku'] as const
+const EFFORT_LEVELS = new Set<ReasoningEffort>(['follow', 'low', 'medium', 'high', 'xhigh', 'max'])
 export function validateClaudeTargetId(value: unknown, maximum: number): string {
   if (typeof value !== 'string' || !value.trim() || value.length > maximum || /[\x00-\x1f\x7f]/.test(value)) throw new Error('Invalid Claude target ID')
   return value.trim()
@@ -8,7 +9,14 @@ export function validateClaudeTargetId(value: unknown, maximum: number): string 
 export function validateClaudeModelTarget(value: unknown): ClaudeModelTarget {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid Claude model target')
   const row = value as Record<string, unknown>
-  return { providerId: validateClaudeTargetId(row.providerId, 256), model: validateClaudeTargetId(row.model, 240) }
+  if (row.effort !== undefined && (typeof row.effort !== 'string' || !EFFORT_LEVELS.has(row.effort as ReasoningEffort))) {
+    throw new Error('Invalid Claude reasoning effort')
+  }
+  return {
+    providerId: validateClaudeTargetId(row.providerId, 256),
+    model: validateClaudeTargetId(row.model, 240),
+    ...(row.effort !== undefined ? { effort: row.effort as ReasoningEffort } : {})
+  }
 }
 export function validateClaudeRoleAssignments(value: unknown): ClaudeRoleAssignments {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid Claude role assignments')
@@ -103,14 +111,14 @@ export function resolveClaudeRoleSnapshot(input: ClaudeRoleSnapshotInput): Resol
     if (!provider) throw new Error('Assignment provider is unavailable')
     return provider
   }
-  const resolve = (provider: ProviderConfigView, model: string, role?: ClaudeModelRole, label = role ?? 'compaction'): ResolvedClaudeRoleTarget => {
+  const resolve = (provider: ProviderConfigView, model: string, role?: ClaudeModelRole, label = role ?? 'compaction', assignedEffort?: ReasoningEffort): ResolvedClaudeRoleTarget => {
     model = validateClaudeTargetId(model, 240)
     let metadata: ProviderModelMetadata | undefined
     try { metadata = assignedModelMetadata(provider, model, nativeModels) }
     catch { throw new Error(`${label} · ${provider.name}: assignment model or account is unavailable; configure this role's model`) }
     const connection = input.connections[provider.id]
     if (!connection) throw new Error('Assignment target connection is unavailable')
-    const effort = (role ? provider.effortMapping?.[role] : undefined) ?? provider.reasoningEffort
+    const effort = assignedEffort ?? (role ? provider.effortMapping?.[role] : undefined) ?? provider.reasoningEffort
     const common = { providerId: provider.id, providerName: provider.name, catalogModel: model, ...(effort ? { effort } : {}) }
     if (provider.subscription) {
       if (connection.kind !== 'subscription') throw new Error('Subscription target connection is unavailable')
@@ -140,14 +148,14 @@ export function resolveClaudeRoleSnapshot(input: ClaudeRoleSnapshotInput): Resol
     const assignment = assignments[role]
     const provider = findProvider(assignment?.providerId ?? input.providers.activeProviderIds['claude-code'])
     const model = assignment?.model ?? defaultClaudeRoleModel(provider, role, nativeModels)
-    roles[role] = resolve(provider, model, role)
+    roles[role] = resolve(provider, model, role, role, assignment?.effort)
   }
   const compact = preferences.compaction
   if (compact.mode === 'custom' && (!compact.providerId || !compact.model)) throw new Error('Compaction target is unavailable')
   const compactionTarget = compact.mode === 'custom' && compact.providerId && compact.model
     ? resolve(findProvider(compact.providerId), compact.model) : undefined
   const search = preferences.claudeWebSearch
-  const webSearchTarget = search ? resolve(findProvider(search.providerId), search.model, undefined, '网页搜索') : undefined
+  const webSearchTarget = search ? resolve(findProvider(search.providerId), search.model, undefined, '网页搜索', search.effort) : undefined
   const officialFamilies = [...new Set([...Object.values(roles), ...(webSearchTarget ? [webSearchTarget] : []), ...(compactionTarget ? [compactionTarget] : [])].flatMap(t => t.family ? [t.family] : []))]
   const nativeRoleModels = Object.fromEntries(CLAUDE_MODEL_ROLES.flatMap(role => {
     const model = nativeModels.find(m => m.id === role)?.resolvedModel

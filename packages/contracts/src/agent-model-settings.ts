@@ -1,8 +1,12 @@
 export type ContextWindowMode = 'default' | '512k' | 'maximum'
 export type CompactionEffort = 'follow' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 export type ClaudeModelRole = 'opus' | 'sonnet' | 'haiku'
-export type ClaudeRoleAssignments = Partial<Record<ClaudeModelRole, { providerId: string; model: string }>>
-export interface ClaudeModelTarget { providerId: string; model: string }
+export interface ClaudeModelTarget {
+  providerId: string
+  model: string
+  effort?: CompactionEffort
+}
+export type ClaudeRoleAssignments = Partial<Record<ClaudeModelRole, ClaudeModelTarget>>
 export interface ClaudeAssignmentsPatch {
   assignments: ClaudeRoleAssignments
   /** Absent preserves the search target for legacy clients; null clears it. */
