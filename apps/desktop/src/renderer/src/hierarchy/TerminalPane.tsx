@@ -537,6 +537,7 @@ export function TerminalPane(props: {
     {recoveryState === 'deferred' && !environmentUnavailable && visible &&
       <DeferredRecoveryCard
         session={session}
+        taskName={taskName}
         cwd={cwd}
         agentDisplayName={agentDisplayName}
         agentShortName={agentShortName}

@@ -313,7 +313,7 @@ export class RuntimeRpcRouter {
       const result = await this.#sessionCatalog(provider).list({
         cwd: this.#sessionCwd(sessionId),
         titleForSession: (providerSessionId) =>
-          this.#providerConversationUsage(providerSessionId, sessionId, provider).loadedSessionTitle,
+          this.#providerConversationUsage(providerSessionId, sessionId, provider).overrideTitle,
         query: optionalString(input.query),
         searchScope: input.searchScope === 'metadata' ? 'metadata' : 'all',
         offset: optionalInteger(input.offset, 0, 'offset', 0),
@@ -321,11 +321,13 @@ export class RuntimeRpcRouter {
       })
       const sessions = result.sessions
         .map((session) => {
-          const usage = this.#providerConversationUsage(session.providerSessionId, sessionId, provider)
+          const { overrideTitle, ...usage } = this.#providerConversationUsage(
+            session.providerSessionId, sessionId, provider
+          )
           return {
             ...session,
             ...usage,
-            ...(usage.loadedSessionTitle ? { title: usage.loadedSessionTitle } : {})
+            ...(overrideTitle ? { title: overrideTitle } : {})
           }
         })
       return { ...result, ...(provider !== 'claude-code' ? { provider } : {}), sessions }
@@ -354,11 +356,12 @@ export class RuntimeRpcRouter {
         }),
         limit: optionalInteger(input.limit, 200)
       })
-      const usage = this.#providerConversationUsage(providerSessionId, sessionId, provider)
+      const { overrideTitle, ...usage } = this.#providerConversationUsage(providerSessionId, sessionId, provider)
       return {
         ...detail,
         ...usage,
-        ...(usage.loadedSessionTitle ? { title: usage.loadedSessionTitle } : {})
+        transcriptTitle: detail.title,
+        ...(overrideTitle ? { title: overrideTitle } : {})
       }
     }
     if (method === 'claude-sessions.search') {
@@ -1062,18 +1065,20 @@ export class RuntimeRpcRouter {
     availability: 'available' | 'loaded-here' | 'loaded-elsewhere'
     loadedSessionId?: string
     loadedSessionTitle?: string
+    overrideTitle?: string
   } {
     const { workspaceId } = this.#sessionOwner(targetSessionId)
     const bindings = this.#database.all<{
       session_id: string
       title: string
+      title_source: string | null
       kind: SessionKind
       archived_at: number | null
       task_archived_at: number | null
       resume_state: string
       invalidated_at: number | null
     }>(
-      `SELECT binding.session_id, owner.title, owner.kind, owner.archived_at,
+      `SELECT binding.session_id, owner.title, owner.title_source, owner.kind, owner.archived_at,
               tasks.archived_at AS task_archived_at,
               binding.resume_state, binding.invalidated_at
        FROM provider_bindings AS binding
@@ -1095,10 +1100,12 @@ export class RuntimeRpcRouter {
       ['unknown', 'available', 'resuming', 'resumed'].includes(binding.resume_state))
     const binding = bindings.find(({ session_id }) => session_id === targetSessionId) ?? bindings[0]
     if (!binding) return { availability: 'available' }
+    const overrideTitle = binding.title_source !== 'default' ? binding.title : undefined
     return {
       availability: binding.session_id === targetSessionId ? 'loaded-here' : 'loaded-elsewhere',
       loadedSessionId: binding.session_id,
-      loadedSessionTitle: binding.title
+      loadedSessionTitle: binding.title,
+      ...(overrideTitle ? { overrideTitle } : {})
     }
   }
 

@@ -526,6 +526,79 @@ describe('ProviderHookServer', () => {
     expect(titleEvents).toHaveLength(1)
   })
 
+  it('watches active turns on UserPromptSubmit, falls back to clean user prompt after Stop timeout, and upgrades if ai-title arrives later', async () => {
+    await hooks.stop()
+    const titleEvents: Array<{ sessionId: string; providerSessionId: string; title: string }> = []
+    hooks = new ProviderHookServer(root, sessions, {
+      titleWatchWindowMs: 40,
+      onTitleObserved: (event) => {
+        titleEvents.push({
+          sessionId: event.sessionId,
+          providerSessionId: event.providerSessionId,
+          title: event.title
+        })
+      }
+    })
+    await hooks.start()
+    const registration = await hooks.registerClaudeSession({
+      runId: 'run-fallback-title', sessionId: 'session-1'
+    })
+    const transcriptPath = join(root, 'provider-fallback-title.jsonl')
+    await writeFile(transcriptPath, [
+      JSON.stringify({
+        type: 'user',
+        sessionId: 'provider-fallback-title',
+        message: { role: 'user', content: '<local-command-caveat>ignore</local-command-caveat>' }
+      }),
+      JSON.stringify({
+        type: 'user',
+        sessionId: 'provider-fallback-title',
+        message: { role: 'user', content: '<command-name>/model</command-name><command-args></command-args>' }
+      }),
+      JSON.stringify({
+        type: 'user',
+        sessionId: 'provider-fallback-title',
+        message: { role: 'user', content: '排查为什么会话标题一直是 Claude' }
+      })
+    ].join('\n'))
+
+    const promptHook = await postHook(registration.hookUrl, {
+      hook_token: registration.hookToken,
+      hook_event_name: 'UserPromptSubmit',
+      session_id: 'provider-fallback-title',
+      transcript_path: transcriptPath
+    })
+    expect(promptHook.status).toBe(200)
+    expect(titleEvents).toHaveLength(0)
+
+    const stopHook = await postHook(registration.hookUrl, {
+      hook_token: registration.hookToken,
+      hook_event_name: 'Stop',
+      session_id: 'provider-fallback-title',
+      transcript_path: transcriptPath
+    })
+    expect(stopHook.status).toBe(200)
+    await waitFor(() => titleEvents.length === 1, 300)
+    expect(titleEvents[0]).toEqual({
+      sessionId: 'session-1',
+      providerSessionId: 'provider-fallback-title',
+      title: '排查为什么会话标题一直是 Claude'
+    })
+
+    await appendFile(transcriptPath, `\n${JSON.stringify({
+      type: 'ai-title', sessionId: 'provider-fallback-title', aiTitle: '修复默认会话标题回退'
+    })}`)
+    const nextHook = await postHook(registration.hookUrl, {
+      hook_token: registration.hookToken,
+      hook_event_name: 'UserPromptSubmit',
+      session_id: 'provider-fallback-title',
+      transcript_path: transcriptPath
+    })
+    expect(nextHook.status).toBe(200)
+    await waitFor(() => titleEvents.length === 2, 200)
+    expect(titleEvents[1]?.title).toBe('修复默认会话标题回退')
+  })
+
   it('projects real Agent Teams transcript activity into teammate observations', async () => {
     await hooks.stop()
     const observations: unknown[] = []

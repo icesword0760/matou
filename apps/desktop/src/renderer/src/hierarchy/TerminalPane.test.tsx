@@ -1069,7 +1069,7 @@ describe('Terminal pane', () => {
         sessionId: 'session-1',
         current: true,
         provider: 'claude-code',
-        limit: 30
+        limit: 200
       })
     })
     const card = screen.getByTestId('session-deferred-recovery')
@@ -1106,6 +1106,47 @@ describe('Terminal pane', () => {
     expect(card.textContent).toContain('自定义排查卡片')
     expect(card.textContent).toContain('原始自动汇总标题')
     expect(card.textContent).toContain('上次终端输出片段')
+  })
+
+  it('filters synthetic XML notifications and API errors while showing transcript and task titles on deferred cards', async () => {
+    const request = vi.fn().mockResolvedValue({
+      providerSessionId: 'claude-noisy-1',
+      title: 'Claude',
+      transcriptTitle: '请接手 Matou 原生迁移任务',
+      cwd: '/Users/icesword/Documents/AIProjects/matou',
+      updatedAt: Date.parse('2026-11-17T02:07:00.000Z'),
+      permissionMode: 'default',
+      eventCount: 6,
+      page: { startEventIndex: 1, endEventIndex: 6, total: 6, hasEarlier: false, hasLater: false },
+      events: [
+        { index: 1, kind: 'user', role: 'user', text: '<local-command-caveat>ignore</local-command-caveat>', matched: false },
+        { index: 2, kind: 'user', role: 'user', text: '<command-name>/model</command-name><command-args></command-args>', matched: false },
+        { index: 3, kind: 'user', role: 'user', text: '继续追踪像素对照差异', matched: false },
+        { index: 4, kind: 'assistant', role: 'assistant', text: 'Metal 候选也未通过五组严格对照。', matched: false },
+        { index: 5, kind: 'user', role: 'user', text: '<task-notification> <task-id>bmtn2fj0z</task-id>', matched: false },
+        { index: 6, kind: 'assistant', role: 'assistant', text: 'Prompt is too long · automatic compaction failed: API Error: Request rejected (429)', matched: false }
+      ]
+    })
+    mockEgressRuntimeClient = { request } as unknown as RuntimeClient
+    const props = fixture()
+
+    render(<TerminalPane {...props}
+      taskName="迁移原生"
+      session={{ ...props.session, title: 'Claude', titleSource: 'default' }}
+      latestLines={['Prompt is too long']}
+      recoveryState="deferred"
+      onRetryRecovery={vi.fn()} />)
+
+    await waitFor(() => {
+      const card = screen.getByTestId('session-deferred-recovery')
+      expect(card.textContent).toContain('请接手 Matou 原生迁移任务')
+      expect(card.textContent).toContain('迁移原生')
+      expect(card.textContent).toContain('继续追踪像素对照差异')
+      expect(card.textContent).toContain('Metal 候选也未通过五组严格对照。')
+      expect(card.textContent).not.toContain('task-notification')
+      expect(card.textContent).not.toContain('Prompt is too long')
+      expect(card.textContent).not.toContain('local-command-caveat')
+    })
   })
 })
 

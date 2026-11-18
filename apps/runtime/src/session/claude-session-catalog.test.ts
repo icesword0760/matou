@@ -440,6 +440,46 @@ describe('ClaudeSessionCatalog', () => {
       parseSpy.mockRestore()
     }
   })
+
+  it('skips synthetic command wrappers and extracts readable command-args or subsequent user prompts for titles', async () => {
+    await writeSession(workspace, 'goal-session', [
+      row('user', 'goal-session', workspace, '2026-11-17T01:00:00.000Z', {
+        role: 'user',
+        content: '<command-name>/goal</command-name>\n<command-message>goal</command-message>\n<command-args>请接手 Matou 原生迁移任务</command-args>'
+      }),
+      row('assistant', 'goal-session', workspace, '2026-11-17T01:00:05.000Z', {
+        role: 'assistant',
+        content: '我会先完整阅读交接文件。'
+      })
+    ])
+    await writeSession(workspace, 'model-switch-session', [
+      row('user', 'model-switch-session', workspace, '2026-11-18T09:20:33.000Z', {
+        role: 'user',
+        content: '<local-command-caveat>The command below was run directly in Claude Code.</local-command-caveat>'
+      }),
+      row('user', 'model-switch-session', workspace, '2026-11-18T09:20:33.100Z', {
+        role: 'user',
+        content: '<command-name>/model</command-name><command-args></command-args>'
+      }),
+      row('user', 'model-switch-session', workspace, '2026-11-18T09:20:33.200Z', {
+        role: 'user',
+        content: '<local-command-stdout>Set model to matou-role/haiku</local-command-stdout>'
+      }),
+      row('user', 'model-switch-session', workspace, '2026-11-18T09:20:38.900Z', {
+        role: 'user',
+        content: '你是谁'
+      }),
+      row('assistant', 'model-switch-session', workspace, '2026-11-18T09:20:45.000Z', {
+        role: 'assistant',
+        content: '我是 AI 助手。'
+      })
+    ])
+
+    const list = await catalog.list({ cwd: workspace, query: '' })
+    const byId = new Map(list.sessions.map((item) => [item.providerSessionId, item.title]))
+    expect(byId.get('goal-session')).toBe('请接手 Matou 原生迁移任务')
+    expect(byId.get('model-switch-session')).toBe('你是谁')
+  })
 })
 
 async function writeSession(cwd: string, id: string, rows: unknown[]): Promise<void> {

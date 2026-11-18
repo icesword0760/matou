@@ -1,6 +1,7 @@
 import { createReadStream } from 'node:fs'
 import { open, readdir, realpath, stat } from 'node:fs/promises'
 import { resolve } from 'node:path'
+import { createInterface } from 'node:readline'
 
 import type {
   ClaudeSessionDetail,
@@ -599,19 +600,90 @@ function excerpt(text: string, query: string): string {
   return `${start > 0 ? '…' : ''}${flat.slice(start, end)}${end < flat.length ? '…' : ''}`
 }
 
+const SYNTHETIC_XML_BLOCK_PATTERN =
+  /<(local-command-caveat|local-command-stdout|system-reminder|task-notification|teammate-message|agent-message)\b[^>]*>[\s\S]*?<\/\1>/gi
+const COMMAND_ARGS_PATTERN = /<command-args>([\s\S]*?)<\/command-args>/i
+const SYNTHETIC_LINE_PREFIXES = [
+  'Base directory for this skill:',
+  'Launching skill:',
+  'Stop hook feedback:',
+  'A session-scoped Stop hook is now active',
+  'Goal check-in:',
+  '[Request interrupted by user]',
+  '[Image: source:'
+]
+
+function cleanTitleTextBlock(text: string): string {
+  // Preserve zero-overhead fast path on huge non-XML payload chunks.
+  if (text.length > 32_768 && !text.startsWith('<') && !text.startsWith('[')) {
+    return text
+  }
+  const trimmed = text.trim()
+  if (!trimmed) return ''
+  if (SYNTHETIC_LINE_PREFIXES.some((prefix) => trimmed.startsWith(prefix))) {
+    return ''
+  }
+  if (trimmed.includes('<command-name>')) {
+    const args = trimmed.match(COMMAND_ARGS_PATTERN)?.[1]?.trim() ?? ''
+    if (!args) return ''
+    return cleanTitleTextBlock(args)
+  }
+  let cleaned = trimmed.includes('<')
+    ? trimmed.replace(SYNTHETIC_XML_BLOCK_PATTERN, ' ')
+    : trimmed
+  if (cleaned.startsWith('<local-command-') || cleaned.startsWith('<task-notification')) {
+    return ''
+  }
+  cleaned = cleaned.replace(/^(?:\[Image #\d+\]\s*)+/i, '').trim()
+  if (!cleaned || SYNTHETIC_LINE_PREFIXES.some((prefix) => cleaned.startsWith(prefix))) {
+    return ''
+  }
+  return cleaned
+}
+
 function compactTitle(content: unknown): string {
   const blocks = Array.isArray(content) ? content : [{ type: 'text', text: content }]
   let title = ''
   for (const block of blocks) {
     if (!isRecord(block) || block.type !== 'text' || typeof block.text !== 'string') continue
+    const cleaned = cleanTitleTextBlock(block.text)
+    if (!cleaned) continue
     // Any further text is irrelevant once the old 72-character limit is exceeded.
-    for (const [word] of block.text.matchAll(/\S{1,73}/g)) {
+    for (const [word] of cleaned.matchAll(/\S{1,73}/g)) {
       if (title) title += ' '
       title += word.slice(0, 73 - title.length)
       if (title.length === 73) return `${title.slice(0, 71)}…`
     }
   }
   return title
+}
+
+/** Extract a clean fallback title from the first real user prompt in a Claude transcript file. */
+export async function readClaudeFallbackTitle(
+  path: string,
+  providerSessionId?: string
+): Promise<string | undefined> {
+  const stream = createReadStream(path, { encoding: 'utf8' })
+  const lines = createInterface({ input: stream, crlfDelay: Infinity })
+  try {
+    for await (const line of lines) {
+      if (!line.trim()) continue
+      try {
+        const row = JSON.parse(line) as unknown
+        if (!isRecord(row) || row.type !== 'user') continue
+        if (providerSessionId && row.sessionId !== providerSessionId) continue
+        if (!isRecord(row.message) || row.message.role !== 'user') continue
+        const event = eventMetadata(row.message)
+        if (event?.kind !== 'user') continue
+        const title = compactTitle(row.message.content)
+        if (title) return title
+      } catch { /* Ignore partial or malformed transcript lines. */ }
+    }
+    return undefined
+  } finally {
+    lines.close()
+    stream.destroy()
+  }
 }
 
 function normalizeQuery(value: string): string {

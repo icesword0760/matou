@@ -20,7 +20,7 @@ import {
 } from './antigravity-session-catalog'
 import { CodexSessionCatalog, isCodexSessionId } from './codex-session-catalog'
 import { latestCodexAutoTitle } from './codex-session-title'
-import { latestClaudeAutoTitle } from './claude-session-catalog'
+import { latestClaudeAutoTitle, readClaudeFallbackTitle } from './claude-session-catalog'
 import { toProviderNotificationEvent, type ProviderNotificationEvent } from './provider-notification-event'
 
 import { DshProviderEvents, parseDshObservation } from './dsh-provider-events'
@@ -62,12 +62,14 @@ interface HookRegistrationRecord {
   }
   retirementTimer?: ReturnType<typeof setTimeout>
   observedTitle?: string
+  observedTitleKind?: 'ai' | 'fallback'
   titleWatch?: {
     providerSessionId: string
     transcriptPath: string
     watchers?: FSWatcher[]
     timeout: ReturnType<typeof setTimeout>
     debounce?: ReturnType<typeof setTimeout>
+    allowFallbackOnTimeout?: boolean
   }
 }
 
@@ -143,6 +145,7 @@ export interface ProviderHookServerOptions {
     provider: AgentProfileId
     parentProviderSessionId: string
   }) => void
+  titleWatchWindowMs?: number
 }
 
 export interface ProviderHookRegistration {
@@ -157,7 +160,7 @@ export interface ProviderHookRegistration {
 }
 
 const DEFAULT_RETIREMENT_GRACE_MS = 2_000
-const TITLE_WATCH_WINDOW_MS = 10_000
+const TITLE_WATCH_WINDOW_MS = 30_000
 const TITLE_WATCH_DEBOUNCE_MS = 25
 const ANTIGRAVITY_TITLE_DEBOUNCE_MS = 40
 
@@ -168,6 +171,7 @@ export class ProviderHookServer {
   readonly #codexRoot: string
   readonly #antigravityRoot: string
   readonly #defaultMtExecutablePath: string | undefined
+  readonly #titleWatchWindowMs: number
   readonly #registrations = new Map<string, HookRegistrationRecord>()
   readonly #currentRunId: NonNullable<ProviderHookServerOptions['currentRunId']>
   readonly #onNotification: (notification: ProviderHookNotification) => void
@@ -192,6 +196,7 @@ export class ProviderHookServer {
     this.#defaultMtExecutablePath = options.controlAssetRoot
       ? join(options.controlAssetRoot, 'bin', 'mt')
       : undefined
+    this.#titleWatchWindowMs = options.titleWatchWindowMs ?? TITLE_WATCH_WINDOW_MS
     this.#currentRunId = options.currentRunId ?? (() => undefined)
     this.#onNotification = options.onNotification ?? (() => {})
     this.#onWorkStatus = options.onWorkStatus ?? (() => {})
@@ -729,8 +734,17 @@ export class ProviderHookServer {
           const titleObserved = await this.#observeTitle(
             registration, providerSessionId, transcriptPath
           ).catch(() => false)
-          if (eventName === 'Stop' && !titleObserved) {
-            await this.#startTitleWatch(registration, providerSessionId, transcriptPath)
+          if (!titleObserved) {
+            if (eventName === 'Stop' || eventName === 'UserPromptSubmit') {
+              await this.#startTitleWatch(registration, providerSessionId, transcriptPath, {
+                allowFallbackOnTimeout: eventName === 'Stop'
+              })
+            } else if (eventName === 'SessionEnd') {
+              await this.#observeClaudeFallbackTitle(
+                registration, providerSessionId, transcriptPath
+              ).catch(() => false)
+              this.#stopTitleWatch(registration)
+            }
           }
         }
         const observations = await readAgentTeamObservations(transcriptPath, {
@@ -839,8 +853,24 @@ export class ProviderHookServer {
       return false
     }
     if (!title) return false
+    if (registration.provider !== 'codex') {
+      if (registration.observedTitle === title && registration.observedTitleKind === 'ai') {
+        this.#stopTitleWatch(registration)
+        return true
+      }
+      await this.#onTitleObserved({
+        runId: registration.runId,
+        sessionId: registration.sessionId,
+        provider: registration.provider,
+        providerSessionId,
+        title
+      })
+      registration.observedTitle = title
+      registration.observedTitleKind = 'ai'
+      this.#stopTitleWatch(registration)
+      return true
+    }
     if (registration.observedTitle === title) {
-      if (registration.provider !== 'codex') this.#stopTitleWatch(registration)
       return true
     }
     await this.#onTitleObserved({
@@ -851,21 +881,78 @@ export class ProviderHookServer {
       title
     })
     registration.observedTitle = title
-    if (registration.provider !== 'codex') this.#stopTitleWatch(registration)
     return true
+  }
+
+  async #observeClaudeFallbackTitle(
+    registration: HookRegistrationRecord,
+    providerSessionId: string,
+    transcriptPath: string
+  ): Promise<boolean> {
+    if (registration.provider !== 'claude-code' || registration.observedTitle) return false
+    if (!this.#acceptsSideEffects(registration)) return false
+    const title = await readClaudeFallbackTitle(transcriptPath, providerSessionId).catch(() => undefined)
+    if (!title || registration.observedTitle || !this.#acceptsSideEffects(registration)) return false
+    // Wait a final check in case ai-title arrived concurrently on the transcript tail.
+    const aiTitle = latestClaudeAutoTitle(
+      await readTranscriptTail(transcriptPath).catch(() => ''),
+      providerSessionId
+    )
+    if (aiTitle) {
+      return this.#observeTitle(registration, providerSessionId, transcriptPath)
+    }
+    await this.#onTitleObserved({
+      runId: registration.runId,
+      sessionId: registration.sessionId,
+      provider: registration.provider,
+      providerSessionId,
+      title
+    })
+    registration.observedTitle = title
+    registration.observedTitleKind = 'fallback'
+    return true
+  }
+
+  #scheduleTitleWatchTimeout(
+    registration: HookRegistrationRecord,
+    providerSessionId: string,
+    transcriptPath: string,
+    allowFallbackOnTimeout: boolean
+  ): ReturnType<typeof setTimeout> {
+    const timeout = setTimeout(() => {
+      const active = registration.titleWatch
+      const shouldFallback = allowFallbackOnTimeout && registration.provider === 'claude-code' && !registration.observedTitle
+      this.#stopTitleWatch(registration)
+      if (active && shouldFallback) {
+        void this.#observeClaudeFallbackTitle(registration, providerSessionId, transcriptPath).catch(() => {})
+      }
+    }, this.#titleWatchWindowMs)
+    timeout.unref?.()
+    return timeout
   }
 
   async #startTitleWatch(
     registration: HookRegistrationRecord,
     providerSessionId: string,
-    transcriptPath: string
+    transcriptPath: string,
+    options: { allowFallbackOnTimeout?: boolean } = {}
   ): Promise<void> {
     if (!this.#acceptsSideEffects(registration)) {
       this.#stopTitleWatch(registration)
       return
     }
+    const allowFallbackOnTimeout = options.allowFallbackOnTimeout ?? false
     const current = registration.titleWatch
-    if (current?.providerSessionId === providerSessionId && current.transcriptPath === transcriptPath) return
+    if (current?.providerSessionId === providerSessionId && current.transcriptPath === transcriptPath) {
+      if (allowFallbackOnTimeout || !current.allowFallbackOnTimeout) {
+        clearTimeout(current.timeout)
+        current.allowFallbackOnTimeout = current.allowFallbackOnTimeout || allowFallbackOnTimeout
+        current.timeout = this.#scheduleTitleWatchTimeout(
+          registration, providerSessionId, transcriptPath, current.allowFallbackOnTimeout
+        )
+      }
+      return
+    }
     this.#stopTitleWatch(registration)
 
     let watcher: FSWatcher
@@ -887,9 +974,16 @@ export class ProviderHookServer {
       return
     }
     watcher.on('error', () => this.#stopTitleWatch(registration))
-    const timeout = setTimeout(() => this.#stopTitleWatch(registration), TITLE_WATCH_WINDOW_MS)
-    timeout.unref?.()
-    registration.titleWatch = { providerSessionId, transcriptPath, watchers: [watcher], timeout }
+    const timeout = this.#scheduleTitleWatchTimeout(
+      registration, providerSessionId, transcriptPath, allowFallbackOnTimeout
+    )
+    registration.titleWatch = {
+      providerSessionId,
+      transcriptPath,
+      watchers: [watcher],
+      timeout,
+      allowFallbackOnTimeout
+    }
 
     // Close the gap between the first read and installing the file watcher.
     await this.#observeTitle(registration, providerSessionId, transcriptPath).catch(() => false)

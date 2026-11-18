@@ -13,9 +13,74 @@ interface PreviewItem {
   text: string
 }
 
-const PREVIEW_EVENT_LIMIT = 30
+const PREVIEW_EVENT_LIMIT = 200
 const MAX_PREVIEW_ITEMS = 4
 const MAX_PREVIEW_CHARS = 240
+
+const SYNTHETIC_XML_BLOCK_RE =
+  /<(local-command-caveat|local-command-stdout|system-reminder|task-notification|teammate-message|agent-message)\b[^>]*>[\s\S]*?<\/\1>/gi
+const UNCLOSED_SYNTHETIC_XML_RE =
+  /<(local-command-caveat|local-command-stdout|system-reminder|task-notification|teammate-message|agent-message)\b[\s\S]*/i
+const COMMAND_ARGS_RE = /<command-args>([\s\S]*?)<\/command-args>/i
+const SYNTHETIC_USER_PREFIXES = [
+  'Base directory for this skill:',
+  'Launching skill:',
+  'Stop hook feedback:',
+  'A session-scoped Stop hook is now active',
+  'Goal check-in:',
+  '[Request interrupted by user]',
+  '[Image: source:'
+]
+const SYNTHETIC_ASSISTANT_PREFIXES = [
+  'API Error:',
+  'Prompt is too long',
+  'automatic compaction failed:',
+  'All credentials for model ',
+  'No response requested.'
+]
+
+function sanitizePreviewText(kind: 'user' | 'assistant' | 'other', rawText: string): string {
+  const trimmed = rawText.trim()
+  if (!trimmed) return ''
+  if (kind === 'assistant') {
+    if (SYNTHETIC_ASSISTANT_PREFIXES.some((prefix) => trimmed.startsWith(prefix))) return ''
+    return trimmed
+  }
+  if (kind === 'user') {
+    if (SYNTHETIC_USER_PREFIXES.some((prefix) => trimmed.startsWith(prefix))) return ''
+    if (trimmed.includes('<command-name>')) {
+      const args = trimmed.match(COMMAND_ARGS_RE)?.[1]?.trim() ?? ''
+      return args ? sanitizePreviewText('user', args) : ''
+    }
+    const stripped = trimmed
+      .replace(SYNTHETIC_XML_BLOCK_RE, ' ')
+      .replace(UNCLOSED_SYNTHETIC_XML_RE, ' ')
+      .replace(/^(?:\[Image #\d+\]\s*)+/i, '')
+      .trim()
+    if (!stripped || SYNTHETIC_USER_PREFIXES.some((prefix) => stripped.startsWith(prefix))) return ''
+    return stripped
+  }
+  if (SYNTHETIC_ASSISTANT_PREFIXES.some((prefix) => trimmed.startsWith(prefix))) return ''
+  const stripped = trimmed
+    .replace(SYNTHETIC_XML_BLOCK_RE, ' ')
+    .replace(UNCLOSED_SYNTHETIC_XML_RE, ' ')
+    .trim()
+  return stripped
+}
+
+function isGenericAgentTitle(value: string | undefined, agentShortName: string): boolean {
+  const normalized = value?.trim().toLowerCase() ?? ''
+  if (!normalized) return true
+  const short = agentShortName.trim().toLowerCase()
+  return normalized === short ||
+    normalized === 'claude' ||
+    normalized === 'claude code' ||
+    normalized === 'antigravity' ||
+    normalized === 'codex' ||
+    normalized === 'shell' ||
+    normalized === '未命名会话' ||
+    normalized === '未命名 claude 会话'
+}
 
 function formatPreviewText(text: string): string {
   const normalized = text.trim().replace(/\s+/g, ' ')
@@ -49,12 +114,22 @@ function selectPreviewItems(
   m: ReturnType<typeof useMessages>['hierarchyTerminal']['pane']
 ): PreviewItem[] {
   const events = detail?.events ?? []
-  const dialogue = events.filter(event =>
-    (event.kind === 'user' || event.kind === 'assistant') && event.text.trim().length > 0
-  )
-  const chosen = dialogue.length > 0
-    ? dialogue.slice(-MAX_PREVIEW_ITEMS)
-    : events.filter(event => event.text.trim().length > 0).slice(-3)
+  const dialogue = events.flatMap((event) => {
+    if (event.kind !== 'user' && event.kind !== 'assistant') return []
+    const text = sanitizePreviewText(event.kind, event.text)
+    if (!text) return []
+    return [{ ...event, text }]
+  })
+  const fallbackEvents = dialogue.length > 0
+    ? dialogue
+    : events.flatMap((event) => {
+      const text = sanitizePreviewText('other', event.text)
+      if (!text) return []
+      return [{ ...event, text }]
+    })
+  const chosen = fallbackEvents.length > 0
+    ? fallbackEvents.slice(-MAX_PREVIEW_ITEMS)
+    : []
   if (chosen.length > 0) {
     return chosen.map(event => ({
       key: `event-${event.index}`,
@@ -64,7 +139,7 @@ function selectPreviewItems(
     }))
   }
   return latestLines
-    .map(line => formatPreviewText(line))
+    .map(line => formatPreviewText(sanitizePreviewText('other', line)))
     .filter(Boolean)
     .slice(-MAX_PREVIEW_ITEMS)
     .map((text, index) => ({
@@ -78,6 +153,7 @@ function selectPreviewItems(
 /** Deferred startup recovery card showing the saved session title and recent replies before launch. */
 export function DeferredRecoveryCard({
   session,
+  taskName,
   cwd,
   agentDisplayName,
   agentShortName,
@@ -88,6 +164,7 @@ export function DeferredRecoveryCard({
   onViewHistory
 }: {
   session: SessionView
+  taskName?: string | undefined
   cwd?: string | undefined
   agentDisplayName: string
   agentShortName: string
@@ -127,13 +204,31 @@ export function DeferredRecoveryCard({
     return () => { active = false }
   }, [isAgent, runtimeClient, session.id, session.kind])
 
-  const fallbackTitle = session.providerTitle?.trim() || detail?.title?.trim()
-  const displayTitle = session.titleSource === 'default' && fallbackTitle ? fallbackTitle : session.title
-  const secondaryTitle = session.providerTitle?.trim() && session.providerTitle.trim() !== displayTitle
-    ? session.providerTitle.trim()
-    : detail?.title?.trim() && detail.title.trim() !== displayTitle
-      ? detail.title.trim()
+  const cleanTranscriptTitle = detail?.transcriptTitle
+    ? sanitizePreviewText('user', detail.transcriptTitle)
+    : detail?.title
+      ? sanitizePreviewText('user', detail.title)
       : undefined
+  const usableTranscriptTitle = cleanTranscriptTitle && !isGenericAgentTitle(cleanTranscriptTitle, agentShortName)
+    ? cleanTranscriptTitle
+    : undefined
+  const cleanProviderTitle = session.providerTitle?.trim()
+  const fallbackTitle = cleanProviderTitle || usableTranscriptTitle
+  const useFallback = session.titleSource === 'default' ||
+    (session.titleSource === undefined && isGenericAgentTitle(session.title, agentShortName))
+  const displayTitle = useFallback && fallbackTitle
+    ? fallbackTitle
+    : useFallback && taskName?.trim() && isGenericAgentTitle(session.title, agentShortName)
+      ? taskName.trim()
+      : session.title
+  const cleanTaskLabel = taskName?.trim()
+  const secondaryTitle = cleanProviderTitle && cleanProviderTitle !== displayTitle
+    ? cleanProviderTitle
+    : usableTranscriptTitle && usableTranscriptTitle !== displayTitle
+      ? usableTranscriptTitle
+      : cleanTaskLabel && cleanTaskLabel !== displayTitle
+        ? cleanTaskLabel
+        : undefined
   const location = detail?.cwd?.trim() || cwd?.trim()
   const updatedLabel = formatUpdatedAt(detail?.updatedAt, locale)
   const previewItems = selectPreviewItems(detail, latestLines, agentShortName, m.pane)

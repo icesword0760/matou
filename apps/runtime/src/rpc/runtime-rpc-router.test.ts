@@ -342,6 +342,40 @@ describe('RuntimeRpcRouter', () => {
       `SELECT COUNT(*) AS total FROM provider_bindings
        WHERE provider = 'claude-code' AND provider_session_id = 'provider-occupied'`
     )?.total).toBe(2)
+
+    // When the owning card still uses its default placeholder title ('Claude'), keep
+    // the cleaned transcript title visible on list/detail while exposing transcriptTitle.
+    await router.handle('session.create', payload('default-title-owner', {
+      id: 'default-title-owner',
+      taskId: initial.session.taskId,
+      executionContextId: initial.session.executionContextId,
+      kind: 'claude-code',
+      title: 'Claude',
+      now: 5
+    }))
+    await writeFile(join(projectDirectory, 'provider-default.jsonl'), [
+      JSON.stringify({
+        type: 'user', sessionId: 'provider-default', cwd: workspaceRoot,
+        timestamp: '2026-11-17T02:00:00.000Z', permissionMode: 'default',
+        message: { role: 'user', content: '<command-name>/goal</command-name><command-args>迁移原生桌面端</command-args>' }
+      }),
+      JSON.stringify({
+        type: 'assistant', sessionId: 'provider-default', cwd: workspaceRoot,
+        timestamp: '2026-11-17T02:00:05.000Z', permissionMode: 'default',
+        message: { role: 'assistant', content: '已完成初始化核查。' }
+      })
+    ].join('\n'))
+    database.run(`INSERT INTO provider_bindings
+      (id,session_id,provider,provider_session_id,resume_state,validated_at,metadata_json,created_at,updated_at)
+      VALUES ('default-bound', 'default-title-owner', 'claude-code', 'provider-default', 'resumed', 6, '{}', 6, 6)`)
+    await expect(router.handle('claude-sessions.detail', {
+      sessionId: 'default-title-owner', current: true, limit: 30
+    })).resolves.toMatchObject({
+      providerSessionId: 'provider-default',
+      title: '迁移原生桌面端',
+      transcriptTitle: '迁移原生桌面端',
+      loadedSessionTitle: 'Claude'
+    })
   })
 
   it('lists, previews, searches, and loads Antigravity sessions via provider parameter', async () => {
