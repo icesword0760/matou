@@ -2890,3 +2890,286 @@ diff --git a/sdk/cliproxy/auth/conductor_cooldown.go b/sdk/cliproxy/auth/conduct
  		if override, ok := providerCoolingOverrideForAuth(auth, cfg); ok {
  			return override
  		}
+diff --git a/sdk/cliproxy/antigravity_models.go b/sdk/cliproxy/antigravity_models.go
+--- a/sdk/cliproxy/antigravity_models.go
++++ b/sdk/cliproxy/antigravity_models.go
+@@ -521,6 +521,7 @@ func (s *Service) antigravityModelsForHintsWithConfig(auth *coreauth.Auth, hints
+ 		excluded = strings.Split(value, ",")
+ 	}
+ 	models = applyExcludedModels(models, excluded)
++	models = appendAuthExtraModels(auth, "antigravity", models, excluded)
+ 	models = applyOAuthModelAliasForAuth(cfg, "antigravity", auth.AuthKind(), auth.Attributes, models)
+ 	models = s.appendPluginModels("antigravity", models, excluded)
+ 	models = applyOAuthSettingsForAuth(cfg, "antigravity", auth.AuthKind(), models)
+diff --git a/sdk/cliproxy/service_models.go b/sdk/cliproxy/service_models.go
+--- a/sdk/cliproxy/service_models.go
++++ b/sdk/cliproxy/service_models.go
+@@ -2,6 +2,7 @@ package cliproxy
+ 
+ import (
+ 	"context"
++	"encoding/json"
+ 	"strconv"
+ 	"strings"
+ 	"time"
+@@ -320,6 +321,7 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
+ 	if ctx.Err() != nil {
+ 		return true
+ 	}
++	models = appendAuthExtraModels(a, provider, models, excluded)
+ 	models = applyOAuthModelAliasForAuth(cfg, provider, authKind, a.Attributes, models)
+ 	if ctx.Err() != nil {
+ 		return true
+@@ -1339,9 +1341,191 @@ func applyOAuthModelAliasEntries(aliases []config.OAuthModelAlias, models []*Mod
+ 			out = append(out, model)
+ 		}
+ 	}
++
++	// Synthesize entries for aliases whose upstream model is newer than the
++	// compiled-in static catalog so newly released subscription models route.
++	var templateType, templateOwnedBy string
++	for _, model := range models {
++		if model != nil {
++			if templateType == "" {
++				templateType = model.Type
++			}
++			if templateOwnedBy == "" {
++				templateOwnedBy = model.OwnedBy
++			}
++			if templateType != "" && templateOwnedBy != "" {
++				break
++			}
++		}
++	}
++	matched := make(map[string]struct{}, len(models))
++	for _, model := range models {
++		if model != nil && strings.TrimSpace(model.ID) != "" {
++			matched[strings.ToLower(strings.TrimSpace(model.ID))] = struct{}{}
++		}
++	}
++	for _, entry := range aliases {
++		name := strings.TrimSpace(entry.Name)
++		mappedID := strings.TrimSpace(entry.Alias)
++		if name == "" || mappedID == "" || strings.EqualFold(name, mappedID) {
++			continue
++		}
++		nameKey := strings.ToLower(name)
++		if _, found := matched[nameKey]; found {
++			continue
++		}
++		if entry.Fork {
++			if _, exists := seen[nameKey]; !exists {
++				seen[nameKey] = struct{}{}
++				out = append(out, &ModelInfo{
++					ID:          name,
++					Type:        templateType,
++					OwnedBy:     templateOwnedBy,
++					DisplayName: name,
++					UserDefined: true,
++				})
++			}
++		}
++		aliasKey := strings.ToLower(mappedID)
++		if _, exists := seen[aliasKey]; exists {
++			continue
++		}
++		seen[aliasKey] = struct{}{}
++		displayName := strings.TrimSpace(entry.DisplayName)
++		if displayName == "" {
++			displayName = mappedID
++		}
++		out = append(out, &ModelInfo{
++			ID:              mappedID,
++			MetadataModelID: name,
++			Type:            templateType,
++			OwnedBy:         templateOwnedBy,
++			DisplayName:     displayName,
++			UserDefined:     true,
++		})
++	}
++	return out
++}
++
++func appendAuthExtraModels(auth *coreauth.Auth, provider string, models []*ModelInfo, excluded []string) []*ModelInfo {
++	if auth == nil || auth.Metadata == nil {
++		return models
++	}
++	raw, ok := auth.Metadata["extra_models"]
++	if !ok || raw == nil {
++		return models
++	}
++	entries, ok := raw.([]any)
++	if !ok || len(entries) == 0 {
++		return models
++	}
++	modelType := strings.ToLower(strings.TrimSpace(provider))
++	if modelType == "" {
++		modelType = strings.ToLower(strings.TrimSpace(auth.Provider))
++	}
++	ownedBy := modelType
++	for _, model := range models {
++		if model != nil {
++			if model.Type != "" {
++				modelType = model.Type
++			}
++			if model.OwnedBy != "" {
++				ownedBy = model.OwnedBy
++			}
++			break
++		}
++	}
++	seen := make(map[string]struct{}, len(models)+len(entries))
++	for _, model := range models {
++		if model != nil && strings.TrimSpace(model.ID) != "" {
++			seen[strings.ToLower(strings.TrimSpace(model.ID))] = struct{}{}
++		}
++	}
++	added := make([]*ModelInfo, 0, len(entries))
++	for _, item := range entries {
++		var id, displayName, itemOwnedBy string
++		var contextLength, maxCompletion int
++		var levels []string
++		switch v := item.(type) {
++		case string:
++			id = strings.TrimSpace(v)
++		case map[string]any:
++			if s, ok := v["id"].(string); ok {
++				id = strings.TrimSpace(s)
++			}
++			if s, ok := v["display_name"].(string); ok {
++				displayName = strings.TrimSpace(s)
++			}
++			if s, ok := v["owned_by"].(string); ok {
++				itemOwnedBy = strings.TrimSpace(s)
++			}
++			contextLength = extraModelInt(v["context_length"])
++			maxCompletion = extraModelInt(v["max_completion_tokens"])
++			if rawLevels, ok := v["thinking_levels"].([]any); ok {
++				for _, rl := range rawLevels {
++					if ls, ok := rl.(string); ok && strings.TrimSpace(ls) != "" {
++						levels = append(levels, strings.TrimSpace(ls))
++					}
++				}
++			}
++		}
++		if id == "" {
++			continue
++		}
++		key := strings.ToLower(id)
++		if _, exists := seen[key]; exists {
++			continue
++		}
++		seen[key] = struct{}{}
++		if displayName == "" {
++			displayName = id
++		}
++		if itemOwnedBy == "" {
++			itemOwnedBy = ownedBy
++		}
++		info := &ModelInfo{
++			ID:                  id,
++			Type:                modelType,
++			OwnedBy:             itemOwnedBy,
++			DisplayName:         displayName,
++			ContextLength:       contextLength,
++			MaxCompletionTokens: maxCompletion,
++			UserDefined:         true,
++		}
++		if len(levels) > 0 {
++			info.Thinking = &registry.ThinkingSupport{Levels: levels}
++		}
++		added = append(added, info)
++	}
++	if len(added) == 0 {
++		return models
++	}
++	added = applyExcludedModels(added, excluded)
++	if len(added) == 0 {
++		return models
++	}
++	out := make([]*ModelInfo, 0, len(models)+len(added))
++	out = append(out, models...)
++	out = append(out, added...)
+ 	return out
+ }
+ 
++func extraModelInt(v any) int {
++	switch n := v.(type) {
++	case int:
++		return n
++	case int64:
++		return int(n)
++	case float64:
++		return int(n)
++	case json.Number:
++		if iv, err := n.Int64(); err == nil {
++			return int(iv)
++		}
++	}
++	return 0
++}
++
+ func applyOAuthSettings(cfg *config.Config, provider, authKind string, models []*ModelInfo) []*ModelInfo {
+ 	return applyOAuthSettingsForAuth(cfg, provider, authKind, models)
+ }
+diff --git a/sdk/cliproxy/service_oauth_model_alias_test.go b/sdk/cliproxy/service_oauth_model_alias_test.go
+--- a/sdk/cliproxy/service_oauth_model_alias_test.go
++++ b/sdk/cliproxy/service_oauth_model_alias_test.go
+@@ -426,3 +426,57 @@ func TestApplyModelPrefixes_RewritesModelInfoNameForGeminiEndpoints(t *testing.T
+ 		t.Fatalf("forced gcp/gemini-4-argon Name = %q, want models/gcp/gemini-4-argon", forcedOut[0].Name)
+ 	}
+ }
++
++func TestApplyOAuthModelAlias_SynthesizesUnknownCatalogModel(t *testing.T) {
++	cfg := &config.Config{
++		OAuthModelAlias: map[string][]config.OAuthModelAlias{
++			"codex": {
++				{Name: "gpt-6.2-sol", Alias: "matou-opus", Fork: true},
++			},
++		},
++	}
++	models := []*ModelInfo{{ID: "gpt-6.1-sol", Type: "codex", OwnedBy: "openai"}}
++
++	out := applyOAuthModelAlias(cfg, "codex", "oauth", models)
++	byID := make(map[string]*ModelInfo, len(out))
++	for _, m := range out {
++		byID[m.ID] = m
++	}
++	if byID["gpt-6.2-sol"] == nil || !byID["gpt-6.2-sol"].UserDefined {
++		t.Fatalf("expected forked unknown model gpt-6.2-sol with UserDefined=true, got %+v", byID["gpt-6.2-sol"])
++	}
++	alias := byID["matou-opus"]
++	if alias == nil || alias.MetadataModelID != "gpt-6.2-sol" || !alias.UserDefined || alias.Type != "codex" {
++		t.Fatalf("expected synthesized alias matou-opus -> gpt-6.2-sol, got %+v", alias)
++	}
++}
++
++func TestAppendAuthExtraModels_RegistersAndRespectsExclusions(t *testing.T) {
++	auth := &coreauth.Auth{
++		Provider: "codex",
++		Metadata: map[string]any{
++			"extra_models": []any{
++				map[string]any{
++					"id":                    "gpt-6.2-astra",
++					"display_name":          "GPT-6.2-Astra",
++					"context_length":        json.Number("500000"),
++					"max_completion_tokens": json.Number("128000"),
++					"thinking_levels":       []any{"low", "medium", "high"},
++				},
++				"gpt-6.2-excluded",
++			},
++		},
++	}
++	base := []*ModelInfo{{ID: "gpt-6.1-sol", Type: "codex", OwnedBy: "openai"}}
++	out := appendAuthExtraModels(auth, "codex", base, []string{"gpt-6.2-excluded"})
++	if len(out) != 2 {
++		t.Fatalf("expected 2 models, got %d", len(out))
++	}
++	added := out[1]
++	if added.ID != "gpt-6.2-astra" || added.DisplayName != "GPT-6.2-Astra" || added.ContextLength != 500000 || added.MaxCompletionTokens != 128000 || !added.UserDefined {
++		t.Fatalf("unexpected extra model: %+v", added)
++	}
++	if added.Thinking == nil || len(added.Thinking.Levels) != 3 {
++		t.Fatalf("expected thinking levels, got %+v", added.Thinking)
++	}
++}

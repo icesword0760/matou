@@ -2,12 +2,21 @@ import { randomUUID } from 'node:crypto'
 import { createServer } from 'node:net'
 import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
+import { resolveAntigravityClientUserAgent } from './antigravity-client'
+import { resolveCodexClientIdentity, type CodexClientIdentity } from './codex-client'
 import { prepareRouterDirectory, ROUTER_VERSION, writeRouterConfig, type RouterKeys, type RouterModelAliases } from './config'
 import type { RouterProcessControl } from './process-owner'
 import { appendRouterLifecycleLog } from './lifecycle-log'
 import { resolveRouterProxy, type RouterProxyResolution } from './network-proxy'
 
-export interface RouterConnection { baseUrl: string; clientKey: string; managementKey: string; pid: number }
+export interface RouterConnection {
+  baseUrl: string
+  clientKey: string
+  managementKey: string
+  pid: number
+  codexClient?: CodexClientIdentity
+  antigravityUserAgent?: string
+}
 export interface RouterLease { connection: RouterConnection; release(): void }
 export interface RouterCredentialTarget { name: string; provider: 'codex' | 'antigravity'; authIndex?: string }
 export interface AdoptedRouterCredential { name: string; provider: 'codex' | 'antigravity'; authIndex: string; status: 'active' }
@@ -141,7 +150,11 @@ export class ModelRouterManager {
   async #start(): Promise<RouterConnection> {
     const { directory, keys } = await prepareRouterDirectory(this.#options.dataRoot)
     this.#logPath = join(directory, 'logs', 'lifecycle.log')
-    const { proxyUrl } = await (this.#options.resolveProxy ?? resolveRouterProxy)()
+    const [{ proxyUrl }, codexClient, antigravityUserAgent] = await Promise.all([
+      (this.#options.resolveProxy ?? resolveRouterProxy)(),
+      resolveCodexClientIdentity(),
+      resolveAntigravityClientUserAgent()
+    ])
     for (let attempt = 0; attempt < 3 && !this.#disposed; attempt++) {
       let port = attempt === 0 ? this.#lastPort : undefined
       this.#pid = undefined
@@ -150,12 +163,19 @@ export class ModelRouterManager {
       let startRequested = false
       try {
         port = await availableLoopbackPort(port)
-        await writeRouterConfig(directory, port, keys, proxyUrl, this.#modelAliases)
+        await writeRouterConfig(directory, port, keys, proxyUrl, this.#modelAliases, codexClient.userAgent)
         if (this.#disposed) break
         startRequested = true
         await this.#options.control.start()
         await this.#waitReady(port, keys)
-        const connection = { baseUrl: `http://127.0.0.1:${port}`, clientKey: keys.client, managementKey: keys.management, pid: this.#pid! }
+        const connection: RouterConnection = {
+          baseUrl: `http://127.0.0.1:${port}`,
+          clientKey: keys.client,
+          managementKey: keys.management,
+          pid: this.#pid!,
+          codexClient,
+          antigravityUserAgent
+        }
         this.#lastPort = port
         this.#connection = connection
         this.#log('started', { pid: connection.pid, port, restarts: this.#restarts })

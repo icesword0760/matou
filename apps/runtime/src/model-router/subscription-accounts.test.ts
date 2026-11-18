@@ -78,6 +78,29 @@ describe('manual subscription model refresh', () => {
     expect(f.release).toHaveBeenCalledOnce()
   })
 
+  it('keeps newly released account models absent from static router definitions and syncs extra_models', async () => {
+    const f = await refreshFixture()
+    const setExtraModels = vi.spyOn(RouterManagementClient.prototype, 'setExtraModels').mockResolvedValue(undefined)
+    f.apiCall.mockResolvedValueOnce({
+      status_code: 200,
+      body: JSON.stringify({
+        models: [
+          { slug: 'new', display_name: 'Known' },
+          { slug: 'gpt-6.2-sol', visibility: 'list', display_name: 'GPT-6.2-Sol', context_window: 500000, supported_reasoning_levels: [{ effort: 'high' }] },
+          { slug: 'gpt-reserve', visibility: 'hide' }
+        ]
+      })
+    })
+    const result = await f.refresh()
+    expect(result.details.models).toEqual([
+      { id: 'gpt-6.2-sol', displayName: 'GPT-6.2-Sol', ownedBy: 'Codex', contextWindow: 500000, supportedEfforts: ['high'] },
+      { id: 'new', displayName: 'New model', ownedBy: 'Codex' }
+    ])
+    expect(setExtraModels).toHaveBeenCalledWith('fixture.json', [
+      { id: 'gpt-6.2-sol', display_name: 'GPT-6.2-Sol', owned_by: 'Codex', context_length: 500000, thinking_levels: ['high'] }
+    ])
+  })
+
   it.each(['failed', 'empty'] as const)('keeps the previous directory when the upstream response is %s even if router definitions exist', async response => {
     const f = await refreshFixture()
     if (response === 'failed') f.apiCall.mockRejectedValueOnce(new Error('fixture failed'))

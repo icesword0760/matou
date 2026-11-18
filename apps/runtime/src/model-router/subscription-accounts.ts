@@ -127,6 +127,7 @@ export class SubscriptionAccounts {
   readonly #detailsAt = new Map<string, number>()
   readonly #detailsIdentity = new Map<string, string>()
   readonly #detailsTtlMs: number
+  readonly #syncedExtraModels = new Map<string, string>()
   readonly #credentialStatus = new Map<string, SubscriptionAccountSummary>()
   #queue: Promise<unknown> = Promise.resolve()
   #startup: Promise<void> | undefined
@@ -201,18 +202,26 @@ export class SubscriptionAccounts {
       let registered: Array<Record<string, unknown>>
       try { registered = await client.models(row.subscription.credentialRef.name) }
       catch { throw new SubscriptionModelTargetError('directory-unavailable') }
-      if (!registered.some(item => item.id === routedModel) && registered.some(item => item.id === model)) {
-        // A never-activated account can still publish raw IDs. Adopt only its
-        // existing prefix; role aliases remain untouched for other processes.
-        await client.setPrefix(row.subscription.credentialRef.name, prefixFor(row.subscription.provider))
-        const deadline = Date.now() + 8_000
-        do {
-          if (this.#closed) throw new Error('Subscription accounts are closed')
-          try { registered = await client.models(row.subscription.credentialRef.name) }
-          catch { throw new SubscriptionModelTargetError('directory-unavailable') }
-          if (registered.some(item => item.id === routedModel)) break
-          await delay(50)
-        } while (Date.now() < deadline)
+      if (!registered.some(item => item.id === routedModel)) {
+        let updated = false
+        if (registered.some(item => item.id === model)) {
+          // A never-activated account can still publish raw IDs. Adopt only its
+          // existing prefix; role aliases remain untouched for other processes.
+          await client.setPrefix(row.subscription.credentialRef.name, prefixFor(row.subscription.provider))
+          updated = true
+        } else if (row.subscription.modelMetadata.length > 0) {
+          updated = await this.#syncExtraModels(client, row.subscription.credentialRef.name, row.subscription.modelMetadata, [], row.subscription.provider)
+        }
+        if (updated) {
+          const deadline = Date.now() + 8_000
+          do {
+            if (this.#closed) throw new Error('Subscription accounts are closed')
+            try { registered = await client.models(row.subscription.credentialRef.name) }
+            catch { throw new SubscriptionModelTargetError('directory-unavailable') }
+            if (registered.some(item => item.id === routedModel)) break
+            await delay(50)
+          } while (Date.now() < deadline)
+        }
       }
       if (!registered.some(item => item.id === routedModel)) throw new SubscriptionModelTargetError('registered-model-missing')
       if (this.#closed) throw new Error('Subscription accounts are closed')
@@ -323,7 +332,8 @@ export class SubscriptionAccounts {
   async #ensureClientIdentity(client: RouterManagementClient, file: RouterCredential): Promise<void> {
     try {
       if (file.provider === 'antigravity') {
-        if (!await credentialCarriesAntigravityIdentity(this.#options.dataRoot, file)) await client.setUserAgent(file.name, ANTIGRAVITY_CLIENT_USER_AGENT)
+        const expectedAgent = client.connection?.antigravityUserAgent ?? ANTIGRAVITY_CLIENT_USER_AGENT
+        if (!await credentialCarriesAntigravityIdentity(this.#options.dataRoot, file, expectedAgent)) await client.setUserAgent(file.name, expectedAgent)
       } else if (file.provider === 'codex') {
         if (!await credentialCarriesCodexIdentity(this.#options.dataRoot, file)) await client.setHeaders(file.name, CODEX_CLIENT_HEADERS)
       }
@@ -836,6 +846,38 @@ export class SubscriptionAccounts {
       throw error
     } finally { lease.release() }
   }
+  async #syncExtraModels(
+    client: RouterManagementClient,
+    credentialName: string,
+    models: SubscriptionModel[],
+    registered: Array<Record<string, unknown>>,
+    provider: SubscriptionProvider
+  ): Promise<boolean> {
+    const prefix = `${prefixFor(provider)}/`
+    const known = new Set(
+      registered
+        .map(item => typeof item.id === 'string' ? (item.id.startsWith(prefix) ? item.id.slice(prefix.length) : item.id) : '')
+        .filter(Boolean)
+    )
+    const extra = models
+      .filter(model => !known.has(model.id))
+      .map(model => ({
+        id: model.id,
+        ...(model.displayName ? { display_name: model.displayName } : {}),
+        ...(model.ownedBy ? { owned_by: model.ownedBy } : {}),
+        ...(model.contextWindow ? { context_length: model.contextWindow } : {}),
+        ...(model.maxOutputTokens ? { max_completion_tokens: model.maxOutputTokens } : {}),
+        ...(model.supportedEfforts?.length ? { thinking_levels: model.supportedEfforts } : {})
+      }))
+    if (!extra.length) return false
+    const signature = JSON.stringify(extra)
+    if (this.#syncedExtraModels.get(credentialName) === signature) return false
+    try {
+      await client.setExtraModels(credentialName, extra)
+      this.#syncedExtraModels.set(credentialName, signature)
+      return true
+    } catch { /* Older routers or mocked tests without extra_models keep working for mapped aliases. */ return false }
+  }
   async #readModels(client: RouterManagementClient, file: RouterCredential, project?: string, requireAccountCatalog = false): Promise<SubscriptionModel[]> {
     const safe = <T>(operation: Promise<T>) => operation.catch(() => undefined)
     const [response, registered] = await Promise.all([
@@ -845,6 +887,7 @@ export class SubscriptionAccounts {
     const models = readChatGptModels(response)
     const available = availableModels(models.ok ? models.value : undefined, registered ?? [], file.provider)
     if (requireAccountCatalog && (!models.ok || available.length === 0)) throw new Error('Model list could not be read')
+    if (available.length) await this.#syncExtraModels(client, file.name, available, registered ?? [], file.provider)
     return available
   }
   async #readDetails(client: RouterManagementClient, file: RouterCredential, includeModels = true, cachedModels = this.#details.get(file.name)?.models): Promise<SubscriptionAccountDetails> {
@@ -903,6 +946,8 @@ export class SubscriptionAccounts {
           await client.deleteCredential(file.name).catch(() => undefined)
         } else {
           await client.setPrefix(file.name, prefixFor(row.subscription.provider))
+          const defs = await client.modelDefinitions(row.subscription.provider).catch(() => [])
+          await this.#syncExtraModels(client, file.name, row.subscription.modelMetadata, defs, row.subscription.provider)
           const models = aliases.get(row.id)
           if (models) await client.setAliases(row.subscription.provider, models)
           await client.setDisabled(file.name, false)
@@ -924,22 +969,27 @@ export class SubscriptionAccounts {
   }
 }
 
+const NON_CHAT_MODEL = /image|video|codex-auto-review|embedding|rerank|moderation|(?:^|[-_/])(?:tts|whisper|transcribe)(?:$|[-_/])/i
+
 function availableModels(models: SubscriptionModel[] | undefined, registered: Array<Record<string, unknown>>, provider: SubscriptionProvider): SubscriptionModel[] {
   const prefix = `${prefixFor(provider)}/`
   const parsed = parseChatGptModels({ models: registered.map(model => ({ ...model, id: typeof model.id === 'string' && model.id.startsWith(prefix) ? model.id.slice(prefix.length) : model.id })) })
-  if (!parsed.ok) return []
-  const definitions = new Map(parsed.value.filter(model => !/image|video|codex-auto-review|embedding|rerank|moderation|(?:^|[-_/])(?:tts|whisper|transcribe)(?:$|[-_/])/i.test(model.id)).map(model => [model.id, model]))
-  const candidates = models ?? [...definitions.values()]
-  return candidates.filter(model => definitions.has(model.id)).map(model => {
-    const definition = definitions.get(model.id)!
-    // Codex definitions are the routing engine's capability contract. The
-    // account endpoint may carry different limits and lengthy instructions.
-    const metadata = provider === 'codex' ? definition : model
-    const displayName = metadata.displayName ?? definition.displayName
-    const contextWindow = metadata.contextWindow ?? definition.contextWindow
-    const maxContextWindow = metadata.maxContextWindow ?? model.maxContextWindow ?? definition.maxContextWindow
-    const supportedEfforts = metadata.supportedEfforts ?? model.supportedEfforts ?? definition.supportedEfforts
-    const maxOutputTokens = metadata.maxOutputTokens ?? definition.maxOutputTokens
+  const definitions = new Map(
+    (parsed.ok ? parsed.value : [])
+      .filter(model => !NON_CHAT_MODEL.test(model.id))
+      .map(model => [model.id, model])
+  )
+  const candidates = (models ?? [...definitions.values()]).filter(model => !NON_CHAT_MODEL.test(model.id))
+  return candidates.map(model => {
+    const definition = definitions.get(model.id)
+    // Codex definitions are the routing engine's capability contract for known
+    // models. Newly discovered account models fall back to the live catalog.
+    const metadata = provider === 'codex' && definition ? definition : model
+    const displayName = metadata.displayName ?? definition?.displayName
+    const contextWindow = metadata.contextWindow ?? definition?.contextWindow
+    const maxContextWindow = metadata.maxContextWindow ?? model.maxContextWindow ?? definition?.maxContextWindow
+    const supportedEfforts = metadata.supportedEfforts ?? model.supportedEfforts ?? definition?.supportedEfforts
+    const maxOutputTokens = metadata.maxOutputTokens ?? definition?.maxOutputTokens
     return {
       id: model.id, ...(displayName ? { displayName } : {}),
       ...(metadata.ownedBy ? { ownedBy: provider === 'antigravity' && metadata.ownedBy === 'Codex' ? 'Antigravity' : metadata.ownedBy } : {}),

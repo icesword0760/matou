@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, it } from 'vitest'
-import { CODEX_CLIENT_HEADERS, CODEX_CLIENT_ORIGINATOR, CODEX_CLIENT_USER_AGENT, CODEX_CLIENT_VERSION, credentialCarriesCodexIdentity } from './codex-client'
+import { CODEX_CLIENT_HEADERS, CODEX_CLIENT_ORIGINATOR, CODEX_CLIENT_USER_AGENT, CODEX_CLIENT_VERSION, codexClientUserAgentForVersion, credentialCarriesCodexIdentity, resolveCodexClientIdentity } from './codex-client'
 
 const roots: string[] = []
 afterEach(async () => { while (roots.length) await rm(roots.pop()!, { recursive: true, force: true }) })
@@ -31,4 +31,19 @@ it('accepts only a credential that already carries the Codex headers', async () 
   await expect(credentialCarriesCodexIdentity(root, { name: 'codex.json' })).resolves.toBe(false)
   await writeFile(path, JSON.stringify({}))
   await expect(credentialCarriesCodexIdentity(root, { name: 'codex.json' })).resolves.toBe(false)
+})
+
+it('follows a newer local codex version and falls back to 0.162.1 when older or absent', async () => {
+  await expect(resolveCodexClientIdentity({ detectVersion: async () => '0.169.1' })).resolves.toEqual({
+    version: '0.169.1',
+    userAgent: codexClientUserAgentForVersion('0.169.1')
+  })
+  await expect(resolveCodexClientIdentity({ detectVersion: async () => '0.150.0' })).resolves.toEqual({
+    version: CODEX_CLIENT_VERSION,
+    userAgent: CODEX_CLIENT_USER_AGENT
+  })
+  await expect(resolveCodexClientIdentity({ detectVersion: async () => undefined })).resolves.toEqual({
+    version: CODEX_CLIENT_VERSION,
+    userAgent: CODEX_CLIENT_USER_AGENT
+  })
 })
