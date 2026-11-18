@@ -319,18 +319,17 @@ async function indexTranscript(
     const message = isRecord(row.message) ? row.message : undefined
     if (message && isPermissionMode(message.permissionMode)) permissionMode = message.permissionMode
     if (message && typeof message.model === 'string' && message.model.trim()) model = message.model
-    const event = message ? eventFromMessage(events.length + 1, message, timestamp) : undefined
+    if (!message) continue
+    const event = eventMetadata(message)
     if (!event) continue
     events.push({
-      index: event.index,
-      kind: event.kind,
-      ...(event.role ? { role: event.role } : {}),
-      ...(event.timestamp === undefined ? {} : { timestamp: event.timestamp }),
-      ...(event.toolName ? { toolName: event.toolName } : {}),
+      ...event,
+      index: events.length + 1,
+      ...(timestamp === undefined ? {} : { timestamp }),
       offset: line.offset,
       length: line.length
     })
-    if (!title && event.role === 'user' && event.kind === 'user') title = compactTitle(event.text)
+    if (!title && event.kind === 'user') title = compactTitle(message.content)
   }
   if (!cwd || events.length === 0) return undefined
   return {
@@ -349,29 +348,35 @@ async function indexTranscript(
 }
 
 async function* scanJsonLines(path: string): AsyncGenerator<JsonLine> {
-  let pending = Buffer.alloc(0)
-  let pendingOffset = 0
+  let pending: Buffer[] = []
+  let chunkOffset = 0
+  let lineOffset = 0
   for await (const value of createReadStream(path)) {
     const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value)
-    const buffer = pending.length > 0 ? Buffer.concat([pending, chunk]) : chunk
     let start = 0
-    for (let index = 0; index < buffer.length; index += 1) {
-      if (buffer[index] !== 0x0a) continue
-      const rawEnd = index > start && buffer[index - 1] === 0x0d ? index - 1 : index
-      yield {
-        offset: pendingOffset + start,
-        length: rawEnd - start,
-        source: buffer.subarray(start, rawEnd)
+    for (let end = chunk.indexOf(0x0a, start); end !== -1; end = chunk.indexOf(0x0a, start)) {
+      let source = chunk.subarray(start, end)
+      if (pending.length > 0) {
+        // Join a line spanning several chunks only after reaching its end.
+        pending.push(source)
+        source = Buffer.concat(pending, chunkOffset + end - lineOffset)
+        pending = []
       }
-      start = index + 1
+      yield jsonLine(source, lineOffset)
+      start = end + 1
+      lineOffset = chunkOffset + start
     }
-    pendingOffset += start
-    pending = start < buffer.length ? Buffer.from(buffer.subarray(start)) : Buffer.alloc(0)
+    if (start < chunk.length) pending.push(chunk.subarray(start))
+    chunkOffset += chunk.length
   }
   if (pending.length > 0) {
-    const rawEnd = pending.at(-1) === 0x0d ? pending.length - 1 : pending.length
-    yield { offset: pendingOffset, length: rawEnd, source: pending.subarray(0, rawEnd) }
+    yield jsonLine(Buffer.concat(pending, chunkOffset - lineOffset), lineOffset)
   }
+}
+
+function jsonLine(source: Buffer, offset: number): JsonLine {
+  if (source.at(-1) === 0x0d) source = source.subarray(0, -1)
+  return { offset, length: source.length, source }
 }
 
 function selectEventWindow(
@@ -443,6 +448,40 @@ function* indexedEventBatches(events: IndexedEvent[]): Generator<IndexedEvent[]>
     batch.push(event)
   }
   if (batch.length > 0) yield batch
+}
+
+function eventMetadata(
+  message: Record<string, unknown>
+): Pick<IndexedEvent, 'kind' | 'role' | 'toolName'> | undefined {
+  const role = message.role === 'user' || message.role === 'assistant' ? message.role : undefined
+  const content = message.content
+  let hasText = false
+  let toolName: string | undefined
+  if (typeof content === 'string') {
+    hasText = /\S/.test(content)
+  } else if (Array.isArray(content)) {
+    for (const item of content) {
+      if (!isRecord(item)) continue
+      if (item.type === 'text' && typeof item.text === 'string') {
+        hasText ||= /\S/.test(item.text)
+      } else if (item.type === 'tool_use' && typeof item.name === 'string') {
+        toolName ??= item.name
+        // The preview always includes the input, even when it is missing ("undefined").
+        hasText = true
+      } else if (item.type === 'tool_result') {
+        toolName ??= 'tool_result'
+        // Present JSON values serialize to non-empty text. A missing result is filtered out.
+        hasText ||= typeof item.content === 'string' ? /\S/.test(item.content) : item.content !== undefined
+      }
+      if (hasText && toolName !== undefined) break
+    }
+  }
+  if (!hasText) return undefined
+  return {
+    kind: toolName !== undefined ? 'tool' : role ?? 'system',
+    ...(role ? { role } : {}),
+    ...(toolName ? { toolName } : {})
+  }
 }
 
 function eventFromMessage(
@@ -538,9 +577,19 @@ function excerpt(text: string, query: string): string {
   return `${start > 0 ? '…' : ''}${flat.slice(start, end)}${end < flat.length ? '…' : ''}`
 }
 
-function compactTitle(value: string): string {
-  const compact = value.replace(/\s+/g, ' ').trim()
-  return compact.length > 72 ? `${compact.slice(0, 71)}…` : compact
+function compactTitle(content: unknown): string {
+  const blocks = Array.isArray(content) ? content : [{ type: 'text', text: content }]
+  let title = ''
+  for (const block of blocks) {
+    if (!isRecord(block) || block.type !== 'text' || typeof block.text !== 'string') continue
+    // Any further text is irrelevant once the old 72-character limit is exceeded.
+    for (const [word] of block.text.matchAll(/\S{1,73}/g)) {
+      if (title) title += ' '
+      title += word.slice(0, 73 - title.length)
+      if (title.length === 73) return `${title.slice(0, 71)}…`
+    }
+  }
+  return title
 }
 
 function normalizeQuery(value: string): string {

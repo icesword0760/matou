@@ -2,7 +2,7 @@ import { appendFile, mkdir, mkdtemp, realpath, writeFile } from 'node:fs/promise
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { ClaudeSessionCatalog, encodeClaudeProjectPath } from './claude-session-catalog'
 
@@ -122,6 +122,96 @@ describe('ClaudeSessionCatalog', () => {
     expect(metadata.sessions).toHaveLength(0)
     expect(content.hits).toHaveLength(1)
     expect(content.hits[0]?.eventIndex).toBe(2)
+  })
+
+  it('lists a 3 MiB tool result without serializing its body', async () => {
+    const largeResult = { catalogLargeToolResult: 'x'.repeat(3 * 1024 * 1024) }
+    const timestamp = '2026-08-30T10:02:00.000Z'
+    await writeSession(workspace, 'tool-only', [
+      row('user', 'tool-only', workspace, timestamp, {
+        role: 'user', content: [{ type: 'tool_result', content: largeResult }]
+      })
+    ])
+
+    const stringify = vi.spyOn(JSON, 'stringify')
+    try {
+      const result = await catalog.list({ cwd: workspace, query: '' })
+
+      expect(result.sessions).toEqual([expect.objectContaining({
+        providerSessionId: 'tool-only',
+        title: '未命名 Claude 会话',
+        updatedAt: Date.parse(timestamp),
+        eventCount: 1
+      })])
+      expect(stringify.mock.calls.some(([value]) => value?.catalogLargeToolResult === largeResult.catalogLargeToolResult))
+        .toBe(false)
+    } finally {
+      stringify.mockRestore()
+    }
+  })
+
+  it('keeps event kinds, tool names and offsets across empty, string and tool content', async () => {
+    const id = 'event-kinds'
+    const messages = [
+      { role: 'user', content: ' \t\n\u00a0' },
+      { role: 'user', content: [] },
+      { role: 'user', content: [{ type: 'text', text: '' }, { type: 'text', text: '\ufeff\n ' }] },
+      { role: 'user', content: [{ type: 'tool_result', content: ' \n\t' }, { type: 'tool_result' }] },
+      { role: 'user', content: '用户消息' },
+      { role: 'assistant', content: [{ type: 'text', text: '回复' }] },
+      { role: 'assistant', content: [{ type: 'tool_use', name: 'Read' }] },
+      { role: 'user', content: [{ type: 'tool_result', content: null }] },
+      { role: 'system', content: '系统消息' },
+      { role: 'assistant', content: [
+        { type: 'tool_result', content: ' ' }, { type: 'tool_use', name: 'Second', input: {} }
+      ] },
+      { role: 'assistant', content: [
+        { type: 'tool_use', name: '', input: {} }, { type: 'tool_use', name: 'Second', input: {} }
+      ] }
+    ]
+    const directory = join(root, 'projects', encodeClaudeProjectPath(workspace))
+    await mkdir(directory, { recursive: true })
+    const rows = messages.map((message, index) => JSON.stringify(row(message.role, id, workspace, index, message)))
+    const firstEvents = rows.slice(0, 5).join('\r\n')
+    // Split the CRLF after the first visible event across two stream chunks.
+    const padding = ' '.repeat(64 * 1024 - 1 - Buffer.byteLength(firstEvents))
+    await writeFile(join(directory, `${id}.jsonl`), `${firstEvents}${padding}\r\n${rows.slice(5).join('\r\n')}\r`)
+
+    const list = await catalog.list({ cwd: workspace, query: '' })
+    const detail = await catalog.detail({ cwd: workspace, providerSessionId: id, query: '' })
+
+    expect(list.sessions[0]).toMatchObject({ eventCount: 7, title: '用户消息', updatedAt: 10 })
+    expect(detail.events.map(({ index, kind, role, toolName, text }) => [index, kind, role, toolName, text])).toEqual([
+      [1, 'user', 'user', undefined, '用户消息'],
+      [2, 'assistant', 'assistant', undefined, '回复'],
+      [3, 'tool', 'assistant', 'Read', 'Read undefined'],
+      [4, 'tool', 'user', 'tool_result', 'null'],
+      [5, 'system', undefined, undefined, '系统消息'],
+      [6, 'tool', 'assistant', 'tool_result', 'Second {}'],
+      [7, 'tool', 'assistant', undefined, '{}\nSecond {}']
+    ])
+  })
+
+  it.each([
+    { blocks: ['\n 修复 \t', '', ' 通知\n中心 '], title: '修复 通知 中心' },
+    { blocks: ['x'.repeat(70), 'y'], title: `${'x'.repeat(70)} y` },
+    { blocks: ['x'.repeat(70), 'yz'], title: `${'x'.repeat(70)} …` },
+    { blocks: ['x'.repeat(3 * 1024 * 1024), '后续文本块'], title: `${'x'.repeat(71)}…` }
+  ])('uses only the first user text event for the title ($title)', async ({ blocks, title }) => {
+    const id = 'first-user-text'
+    await writeSession(workspace, id, [
+      row('user', id, workspace, 1, {
+        role: 'user', content: [{ type: 'text', text: '不作为标题' }, { type: 'tool_result', content: '已完成' }]
+      }),
+      row('user', id, workspace, 2, {
+        role: 'user', content: blocks.map((text) => ({ type: 'text', text }))
+      }),
+      row('user', id, workspace, 3, { role: 'user', content: '后续消息'.repeat(10_000) })
+    ])
+
+    const result = await catalog.list({ cwd: workspace, query: '' })
+
+    expect(result.sessions[0]).toMatchObject({ title, eventCount: 3 })
   })
 
   it('returns the latest event page while preserving the full event count', async () => {
