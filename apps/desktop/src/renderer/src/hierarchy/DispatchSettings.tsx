@@ -22,7 +22,8 @@ const CONFIG_PATH = '~/.claude/agent-foreman/config.json'
 type DispatchAgent = DispatchDefaults['agent']
 type DispatchEffort = DispatchDefaults['effort']
 type NumericField = 'idleMin' | 'maxMin' | 'askWaitMin' | 'retries'
-type RowKey = 'agent' | 'model' | 'effort' | NumericField | 'defaults'
+type ChoiceDraft = Pick<DispatchDefaults, 'agent' | 'model' | 'effort'>
+type NumberErrors = Partial<Record<NumericField, string>>
 type NumberDraft = Record<NumericField, string>
 type DispatchMessages = ReturnType<typeof useMessages>['hierarchyShell']['dispatchSettings']
 
@@ -32,15 +33,17 @@ const NUMBER_LIMITS: Record<NumericField, { min: number; max: number }> = {
   askWaitMin: { min: 1, max: 60 },
   retries: { min: 0, max: 5 }
 }
+const NUMBER_FIELDS = Object.keys(NUMBER_LIMITS) as NumericField[]
 
 export function DispatchSettings({ client }: { client: ProviderConfigClient | null }) {
   const m = useMessages().hierarchyShell.dispatchSettings
   const [snapshot, setSnapshot] = useState<DispatchConfigSnapshot>()
-  const [draft, setDraft] = useState<DispatchDefaults>()
+  const [draft, setDraft] = useState<ChoiceDraft>()
   const [numbers, setNumbers] = useState<NumberDraft>(() => toNumberDraft(DISPATCH_DEFAULTS))
   const [saving, setSaving] = useState(false)
   const [loadError, setLoadError] = useState('')
-  const [rowErrors, setRowErrors] = useState<Partial<Record<RowKey, string>>>({})
+  const [rowErrors, setRowErrors] = useState<NumberErrors>({})
+  const [saveError, setSaveError] = useState('')
   const [saved, setSaved] = useState(false)
   const [retry, setRetry] = useState(0)
   const snapshotRef = useRef<DispatchConfigSnapshot | undefined>(undefined)
@@ -55,6 +58,7 @@ export function DispatchSettings({ client }: { client: ProviderConfigClient | nu
   useEffect(() => {
     let active = true
     setLoadError('')
+    setSaveError('')
     setRowErrors({})
     setSaved(false)
     if (!client) {
@@ -84,127 +88,99 @@ export function DispatchSettings({ client }: { client: ProviderConfigClient | nu
   const applySnapshot = (next: DispatchConfigSnapshot) => {
     snapshotRef.current = next
     setSnapshot(next)
-    setDraft({ ...next.defaults })
+    const { agent, model, effort } = next.defaults
+    setDraft({ agent, model, effort })
     setNumbers(toNumberDraft(next.defaults))
   }
 
-  const persist = async (next: DispatchDefaults, row: RowKey) => {
-    if (!client || !snapshotRef.current || savingRef.current) return false
+  const savedDefaults = snapshot?.defaults
+  const numberValues = savedDefaults && NUMBER_FIELDS.map(field => (
+    readNumber(field, numbers[field], savedDefaults[field], m)
+  ))
+  const dirty = Boolean(savedDefaults && draft && numberValues && (
+    draft.agent !== savedDefaults.agent ||
+    draft.model !== savedDefaults.model ||
+    draft.effort !== savedDefaults.effort ||
+    NUMBER_FIELDS.some((field, index) => numberValues[index] !== savedDefaults[field])
+  ))
+  const canSave = dirty && !saving && Boolean(numberValues?.every(value => typeof value === 'number'))
+
+  const saveDraft = async (button: HTMLButtonElement) => {
+    const base = snapshotRef.current
+    if (!client || !base || !draft || !dirty || savingRef.current) return
+    const next: DispatchDefaults = { ...base.defaults, ...draft }
+    const errors: NumberErrors = {}
+    for (const field of NUMBER_FIELDS) {
+      const value = readNumber(field, numbers[field], base.defaults[field], m)
+      if (typeof value === 'number') next[field] = value
+      else errors[field] = value
+    }
+    const firstError = NUMBER_FIELDS.find(field => errors[field])
+    if (firstError) {
+      setRowErrors(errors)
+      button.closest('.dispatch-settings')?.querySelector<HTMLInputElement>(`#dispatch-${firstError}`)?.focus()
+      return
+    }
+
+    // Keep the focused button mounted and focusable while the write is pending.
+    button.focus({ preventScroll: true })
     savingRef.current = true
     setSaving(true)
-    setRowErrors({})
+    setSaveError('')
     setSaved(false)
     try {
-      const result = await client.request('dispatch-config.save', { defaults: { ...next } })
-      if (!aliveRef.current) return false
+      const result = await client.request('dispatch-config.save', { defaults: next })
+      if (!aliveRef.current || snapshotRef.current !== base) return
       if (!isDispatchSnapshot(result)) throw new Error(m.invalidSaveResponse)
       applySnapshot(result)
       setSaved(true)
-      return true
     } catch (error) {
-      if (!aliveRef.current) return false
-      const base = snapshotRef.current
-      if (base) {
-        setDraft({ ...base.defaults })
-        setNumbers(toNumberDraft(base.defaults))
+      if (aliveRef.current && snapshotRef.current === base) {
+        setSaveError(errorText(m.saveFailed, m.saveFailedDetail, error))
       }
-      setRowErrors({ [row]: errorText(m.saveFailed, m.saveFailedDetail, error) })
-      return false
     } finally {
       if (aliveRef.current) setSaving(false)
       savingRef.current = false
     }
   }
 
+  const markEdited = () => {
+    setSaved(false)
+    setSaveError('')
+  }
+
+  const changeChoice = (patch: Partial<ChoiceDraft>) => {
+    if (savingRef.current) return
+    setDraft(current => current && { ...current, ...patch })
+    markEdited()
+  }
+
   const chooseAgent = (agent: DispatchAgent) => {
-    if (!draft || savingRef.current || agent === draft.agent) return
-    // Keep the saved model untouched: an executor switch only saves the
-    // executor, and the model list picks up the saved value again later.
-    const next: DispatchDefaults = { ...draft, agent }
-    setDraft(next)
-    setSaved(false)
-    setRowErrors({})
-    void persist(next, 'agent')
-  }
-
-  const chooseModel = (model: string) => {
-    if (!draft || savingRef.current || model === draft.model) return
-    const next: DispatchDefaults = { ...draft, model }
-    setDraft(next)
-    setSaved(false)
-    setRowErrors({})
-    void persist(next, 'model')
-  }
-
-  const chooseEffort = (effort: DispatchEffort) => {
-    if (!draft || savingRef.current || effort === draft.effort) return
-    const next: DispatchDefaults = { ...draft, effort }
-    setDraft(next)
-    setSaved(false)
-    setRowErrors({})
-    void persist(next, 'effort')
+    if (!draft || !savedDefaults || agent === draft.agent) return
+    // The picker may display a fallback for the new executor. Keep the stored model.
+    changeChoice({ agent, model: savedDefaults.model })
   }
 
   const changeNumber = (field: NumericField, value: string) => {
+    if (savingRef.current) return
     setNumbers(current => ({ ...current, [field]: value }))
-    setSaved(false)
-    setRowErrors(current => {
-      if (!current[field]) return current
-      const next = { ...current }
-      delete next[field]
-      return next
-    })
+    setRowErrors(current => ({ ...current, [field]: '' }))
+    markEdited()
   }
 
   const commitNumber = (field: NumericField) => {
-    if (!draft || savingRef.current) return
-    const raw = numbers[field].trim()
-    const limits = NUMBER_LIMITS[field]
-    const integerField = field === 'retries'
-    if (!/^\d+(?:\.\d+)?$/u.test(raw)) {
-      setRowErrors(current => ({ ...current, [field]: integerField ? m.invalidInteger : m.invalidNumber }))
-      return
-    }
-    const value = Number(raw)
-    if (draft[field] === value) {
-      // A legal value already saved (even one outside the UI range) is not an
-      // edit: normalize the text and leave the file alone.
-      setNumbers(current => ({ ...current, [field]: String(value) }))
-      setRowErrors(current => {
-        if (!current[field]) return current
-        const next = { ...current }
-        delete next[field]
-        return next
-      })
-      return
-    }
-    if (integerField && !Number.isInteger(value)) {
-      setRowErrors(current => ({ ...current, [field]: m.invalidInteger }))
-      return
-    }
-    if (value < limits.min || value > limits.max) {
-      setRowErrors(current => ({
-        ...current,
-        [field]: integerField ? m.invalidIntegerRange(limits.min, limits.max) : m.invalidRange(limits.min, limits.max)
-      }))
-      return
-    }
-    const next: DispatchDefaults = { ...draft, [field]: value }
-    setDraft(next)
-    setNumbers(current => ({ ...current, [field]: String(value) }))
-    setSaved(false)
-    setRowErrors({})
-    void persist(next, field)
+    if (!savedDefaults || savingRef.current) return
+    const value = readNumber(field, numbers[field], savedDefaults[field], m)
+    setRowErrors(current => ({ ...current, [field]: typeof value === 'string' ? value : '' }))
   }
 
   const restoreDefaults = () => {
     if (!draft || savingRef.current) return
-    const next: DispatchDefaults = { ...DISPATCH_DEFAULTS }
-    setDraft(next)
-    setNumbers(toNumberDraft(next))
-    setSaved(false)
+    const { agent, model, effort } = DISPATCH_DEFAULTS
+    setDraft({ agent, model, effort })
+    setNumbers(toNumberDraft(DISPATCH_DEFAULTS))
     setRowErrors({})
-    void persist(next, 'defaults')
+    markEdited()
   }
 
   const busy = (!snapshot && !loadError) || saving
@@ -236,52 +212,52 @@ export function DispatchSettings({ client }: { client: ProviderConfigClient | nu
           <label className="dispatch-settings__row-label" htmlFor="dispatch-agent">{m.agent}</label>
           <div className="dispatch-settings__row-body">
             <select id="dispatch-agent" aria-label={m.agent} value={draft.agent} disabled={saving}
-              aria-describedby={rowErrors.agent ? 'dispatch-agent-error' : undefined}
               onChange={event => chooseAgent(event.target.value as DispatchAgent)}>
               <option value="codex">{m.agentCodex}</option>
               <option value="agy">{m.agentAntigravity}</option>
               <option value="dsh">{m.agentDsh}</option>
             </select>
           </div>
-          {rowErrors.agent && <p className="dispatch-settings__row-error" id="dispatch-agent-error" role="alert">{rowErrors.agent}</p>}
         </div>
 
         <div className="dispatch-settings__row">
           <label className="dispatch-settings__row-label" htmlFor="dispatch-model">{m.model}</label>
           <div className="dispatch-settings__row-body">
             {dsh
-              ? <input id="dispatch-model" className="dispatch-settings__readonly" aria-label={m.model} value={DSH_MODEL} readOnly aria-describedby="dispatch-model-hint" />
+              ? <input id="dispatch-model" className="dispatch-settings__readonly" aria-label={m.model} value={DSH_MODEL} readOnly disabled={saving} aria-describedby="dispatch-model-hint" />
               : <select id="dispatch-model" aria-label={m.model} value={shownModel} disabled={saving}
-                aria-describedby={modelHintId(unknownModel, rowErrors.model)}
-                onChange={event => chooseModel(event.target.value)}>
+                aria-describedby={unknownModel ? 'dispatch-model-hint' : undefined}
+                onChange={event => changeChoice({ model: event.target.value })}>
                 {modelOptions.map(model => <option key={model} value={model}>{modelLabel(model, m)}</option>)}
               </select>}
             {dsh && <p className="dispatch-settings__hint" id="dispatch-model-hint">{m.modelDshNote}</p>}
             {!dsh && unknownModel && <p className="dispatch-settings__hint" id="dispatch-model-hint">{m.modelUnknownNote}</p>}
           </div>
-          {rowErrors.model && <p className="dispatch-settings__row-error" id="dispatch-model-error" role="alert">{rowErrors.model}</p>}
         </div>
 
         <div className="dispatch-settings__row">
           <label className="dispatch-settings__row-label" htmlFor="dispatch-effort">{m.effort}</label>
           <div className="dispatch-settings__row-body">
             <select id="dispatch-effort" aria-label={m.effort} value={shownEffort} disabled={saving || orchestrator}
-              aria-describedby={effortHintId(dsh, dshEffortClamped, orchestrator, rowErrors.effort)}
-              onChange={event => chooseEffort(event.target.value as DispatchEffort)}>
+              aria-describedby={effortHintId(dsh, dshEffortClamped, orchestrator)}
+              onChange={event => changeChoice({ effort: event.target.value as DispatchEffort })}>
               {effortOptions.map(effort => <option key={effort} value={effort}>{effortLabel(effort, m)}</option>)}
             </select>
             {dsh && <p className="dispatch-settings__hint" id="dispatch-effort-hint">{m.effortDshNote}</p>}
             {dsh && dshEffortClamped && <p className="dispatch-settings__hint" id="dispatch-effort-clamp">{m.effortDshClamped(effortText(draft.effort))}</p>}
             {orchestrator && <p className="dispatch-settings__hint" id="dispatch-effort-hint">{m.effortOrchestratorNote}</p>}
           </div>
-          {rowErrors.effort && <p className="dispatch-settings__row-error" id="dispatch-effort-error" role="alert">{rowErrors.effort}</p>}
         </div>
 
         {numberFieldRows(m, numbers, rowErrors, saving, changeNumber, commitNumber)}
         <div className="dispatch-settings__actions">
           <button type="button" disabled={saving} onClick={restoreDefaults}>{m.restoreDefaults}</button>
-          {(saving || saved) && <span className="dispatch-settings__saved" role="status">{saving ? m.saving : m.saved}</span>}
-          {rowErrors.defaults && <p className="dispatch-settings__row-error" role="alert">{rowErrors.defaults}</p>}
+          <button type="button" className="primary" disabled={!dirty && !saving && !saved}
+            aria-disabled={!canSave} onClick={event => void saveDraft(event.currentTarget)}>
+            {saving ? m.saving : m.save}
+          </button>
+          {saved && <span className="dispatch-settings__saved" role="status">{m.saved}</span>}
+          {saveError && <p className="dispatch-settings__row-error" role="alert">{saveError}</p>}
         </div>
       </div>
 
@@ -298,7 +274,7 @@ export function DispatchSettings({ client }: { client: ProviderConfigClient | nu
 function numberFieldRows(
   m: DispatchMessages,
   numbers: NumberDraft,
-  rowErrors: Partial<Record<RowKey, string>>,
+  rowErrors: NumberErrors,
   saving: boolean,
   changeNumber: (field: NumericField, value: string) => void,
   commitNumber: (field: NumericField) => void
@@ -313,9 +289,7 @@ function numberFieldRows(
     <label className="dispatch-settings__row-label" htmlFor={`dispatch-${field.key}`}>{field.label}</label>
     <div className="dispatch-settings__row-body">
       <div className="dispatch-settings__number">
-        <input id={`dispatch-${field.key}`} type="number" inputMode={field.key === 'retries' ? 'numeric' : 'decimal'}
-          step={field.key === 'retries' ? 1 : 'any'}
-          min={NUMBER_LIMITS[field.key].min} max={NUMBER_LIMITS[field.key].max}
+        <input id={`dispatch-${field.key}`} type="text" inputMode={field.key === 'retries' ? 'numeric' : 'decimal'}
           aria-label={field.label} value={numbers[field.key]} disabled={saving}
           aria-invalid={Boolean(rowErrors[field.key])}
           aria-describedby={rowErrors[field.key] ? `dispatch-${field.key}-error` : undefined}
@@ -333,16 +307,26 @@ function numberFieldRows(
   </div>)
 }
 
-function modelHintId(unknownModel: boolean, error?: string) {
-  return [unknownModel ? 'dispatch-model-hint' : '', error ? 'dispatch-model-error' : ''].filter(Boolean).join(' ') || undefined
+function effortHintId(dsh: boolean, clamped: boolean, orchestrator: boolean) {
+  if (clamped) return 'dispatch-effort-hint dispatch-effort-clamp'
+  return dsh || orchestrator ? 'dispatch-effort-hint' : undefined
 }
 
-function effortHintId(dsh: boolean, clamped: boolean, orchestrator: boolean, error?: string) {
-  return [
-    dsh || orchestrator ? 'dispatch-effort-hint' : '',
-    clamped ? 'dispatch-effort-clamp' : '',
-    error ? 'dispatch-effort-error' : ''
-  ].filter(Boolean).join(' ') || undefined
+function readNumber(field: NumericField, text: string, saved: number, m: DispatchMessages): number | string {
+  const raw = text.trim()
+  const integerField = field === 'retries'
+  // Existing values can be outside the editor's limits or use scientific notation.
+  if (raw === String(saved)) return saved
+  if (!/^\d+(?:\.\d+)?$/u.test(raw)) return integerField ? m.invalidInteger : m.invalidNumber
+
+  const value = Number(raw)
+  if (value === saved) return saved
+  if (integerField && !Number.isInteger(value)) return m.invalidInteger
+  const { min, max } = NUMBER_LIMITS[field]
+  if (value < min || value > max) {
+    return integerField ? m.invalidIntegerRange(min, max) : m.invalidRange(min, max)
+  }
+  return value
 }
 
 function isDispatchSnapshot(value: unknown): value is DispatchConfigSnapshot {
