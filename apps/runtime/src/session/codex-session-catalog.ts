@@ -27,6 +27,7 @@ export class CodexSessionCatalog {
   readonly #root: string
   readonly #metadata = new Map<string, CodexMetadata>()
   readonly #indexes = new Map<string, CodexIndex>()
+  readonly #indexing = new Map<string, { size: number; mtimeMs: number; promise: Promise<CodexIndex> }>()
   readonly #searches = new Map<string, { fingerprint: string; hits: ClaudeSessionSearchHit[] }>()
   constructor(root = defaultCodexRoot()) { this.#root = resolve(root) }
 
@@ -154,6 +155,16 @@ export class CodexSessionCatalog {
   async #index(entry: CodexMetadata): Promise<CodexIndex> {
     const cached = this.#indexes.get(entry.path)
     if (cached?.size === entry.size && cached.mtimeMs === entry.mtimeMs) return cached
+    const inFlight = this.#indexing.get(entry.path)
+    if (inFlight?.size === entry.size && inFlight.mtimeMs === entry.mtimeMs) return inFlight.promise
+    const pending = this.#buildIndex(entry).finally(() => {
+      if (this.#indexing.get(entry.path)?.promise === pending) this.#indexing.delete(entry.path)
+    })
+    this.#indexing.set(entry.path, { size: entry.size, mtimeMs: entry.mtimeMs, promise: pending })
+    return pending
+  }
+
+  async #buildIndex(entry: CodexMetadata): Promise<CodexIndex> {
     const candidates: CodexEventRef[] = []
     const structuredIds = new Set<string>(); const structuredUsers = new Set<string>()
     const turns = new Map<string, { user: boolean; final: boolean; failed: boolean }>()

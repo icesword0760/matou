@@ -500,6 +500,50 @@ describe('SessionLoaderDialog', () => {
     expect(escape.defaultPrevented).toBe(true)
     expect(onCancel).toHaveBeenCalledTimes(1)
   })
+
+  it('does not abort an in-flight initial list load when metadataRevision updates repeatedly', async () => {
+    let resolveFirstLoad!: (value: ClaudeSessionListResult) => void
+    let callCount = 0
+    let currentTitle = '首次加载的会话'
+    const listSessions = vi.fn(() => {
+      callCount += 1
+      if (callCount === 1) {
+        return new Promise<ClaudeSessionListResult>((resolve) => {
+          resolveFirstLoad = resolve
+        })
+      }
+      return Promise.resolve(listResult([{ ...summary(), title: currentTitle }]))
+    })
+    const view = render(<SessionLoaderDialog targetTitle="Shell" targetRunning={false}
+      metadataRevision="rev-0" listSessions={listSessions} loadDetail={async () => ({
+        ...detail(), title: currentTitle
+      })} searchSession={emptySearch} onLoad={async () => undefined} onCancel={() => undefined} />)
+
+    await waitFor(() => expect(listSessions).toHaveBeenCalledTimes(1))
+    expect(screen.getByText('正在查找…')).toBeTruthy()
+
+    // Background binding/title updates arrive while the cold scan is still running.
+    currentTitle = '同步更新后的会话标题'
+    view.rerender(<SessionLoaderDialog targetTitle="Shell" targetRunning={false}
+      metadataRevision="rev-1" listSessions={listSessions} loadDetail={async () => ({
+        ...detail(), title: currentTitle
+      })} searchSession={emptySearch} onLoad={async () => undefined} onCancel={() => undefined} />)
+    view.rerender(<SessionLoaderDialog targetTitle="Shell" targetRunning={false}
+      metadataRevision="rev-2" listSessions={listSessions} loadDetail={async () => ({
+        ...detail(), title: currentTitle
+      })} searchSession={emptySearch} onLoad={async () => undefined} onCancel={() => undefined} />)
+
+    // The in-flight initial scan must not be restarted repeatedly.
+    expect(listSessions).toHaveBeenCalledTimes(1)
+
+    resolveFirstLoad(listResult([{ ...summary(), title: '首次加载的会话' }]))
+
+    // After the cold scan finishes, a single silent refresh reconciles the latest metadata
+    // without flashing the searching state again.
+    expect(await screen.findByRole('button', { name: '预览会话：同步更新后的会话标题' })).toBeTruthy()
+    expect(screen.queryByText('正在查找…')).toBeNull()
+    expect(listSessions).toHaveBeenCalledTimes(2)
+  })
 })
 
 function summary() {

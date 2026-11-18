@@ -410,6 +410,36 @@ describe('ClaudeSessionCatalog', () => {
       cwd: workspace, providerSessionId: 'titled-session'
     })).resolves.toBe('修复卡片标题同步')
   })
+
+  it('deduplicates concurrent cold scans of the same transcript file', async () => {
+    const rows = Array.from({ length: 20 }, (_, index) => row(
+      index % 2 === 0 ? 'user' : 'assistant',
+      'concurrent-session',
+      workspace,
+      `2026-08-30T10:${String(index).padStart(2, '0')}:00.000Z`,
+      { role: index % 2 === 0 ? 'user' : 'assistant', content: `消息内容 ${index}` }
+    ))
+    await writeSession(workspace, 'concurrent-session', rows)
+
+    const parseSpy = vi.spyOn(JSON, 'parse')
+    try {
+      const results = await Promise.all(
+        Array.from({ length: 5 }, () => catalog.list({
+          cwd: workspace, query: '', searchScope: 'metadata'
+        }))
+      )
+      for (const result of results) {
+        expect(result.sessions).toHaveLength(1)
+        expect(result.sessions[0]).toMatchObject({
+          providerSessionId: 'concurrent-session',
+          eventCount: 20
+        })
+      }
+      expect(parseSpy).toHaveBeenCalledTimes(20)
+    } finally {
+      parseSpy.mockRestore()
+    }
+  })
 })
 
 async function writeSession(cwd: string, id: string, rows: unknown[]): Promise<void> {

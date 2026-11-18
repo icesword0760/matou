@@ -394,19 +394,51 @@ function HierarchyProduct({
   const workspaceStageRef = useRef<HTMLElement>(null)
   const loaderSessionId = sessionLoader?.sessionId ?? ''
   const loaderSceneId = sessionLoader?.sceneId ?? ''
+  const loaderWorkspaceId = useMemo(() => {
+    if (!loaderSessionId) return ''
+    const targetSession = projection.sessions.find(({ id }) => id === loaderSessionId)
+    if (!targetSession) return ''
+    return projection.tasks.find(({ id }) => id === targetSession.taskId)?.workspaceId ?? ''
+  }, [loaderSessionId, projection.sessions, projection.tasks])
+  const loaderProjectionRef = useRef(projection)
+  loaderProjectionRef.current = projection
   const [loaderBindingRevision, setLoaderBindingRevision] = useState(0)
   useEffect(() => {
     if (!loaderSessionId || !client?.subscribeProjection) return
     return client.subscribeProjection((message) => {
-      if (message.type === 'events.batch' && message.events.some((event) =>
-        event.eventType.startsWith('provider-binding.'))) {
-        setLoaderBindingRevision((revision) => revision + 1)
-      }
+      if (message.type !== 'events.batch') return
+      const currentProjection = loaderProjectionRef.current
+      const relevant = message.events.some((event) => {
+        if (!event.eventType.startsWith('provider-binding.')) return false
+        if (!loaderWorkspaceId) return true
+        if (event.workspaceId) return event.workspaceId === loaderWorkspaceId
+        const payload = typeof event.payload === 'object' && event.payload !== null
+          ? event.payload as { binding?: { sessionId?: unknown } }
+          : undefined
+        const eventSessionId = event.sessionId ??
+          (typeof payload?.binding?.sessionId === 'string'
+            ? payload.binding.sessionId
+            : event.aggregateType === 'session' ? event.aggregateId : undefined)
+        if (!eventSessionId) return true
+        const ownerSession = currentProjection.sessions.find(({ id }) => id === eventSessionId)
+        if (!ownerSession) return true
+        const ownerWorkspaceId = currentProjection.tasks.find(({ id }) =>
+          id === ownerSession.taskId)?.workspaceId
+        return !ownerWorkspaceId || ownerWorkspaceId === loaderWorkspaceId
+      })
+      if (relevant) setLoaderBindingRevision((revision) => revision + 1)
     })
-  }, [client, loaderSessionId])
+  }, [client, loaderSessionId, loaderWorkspaceId])
+  const loaderWorkspaceTaskIds = useMemo(() => new Set(
+    loaderWorkspaceId
+      ? projection.tasks.filter(({ workspaceId }) => workspaceId === loaderWorkspaceId).map(({ id }) => id)
+      : projection.tasks.map(({ id }) => id)
+  ), [loaderWorkspaceId, projection.tasks])
   const loaderTitleRevision = useMemo(() => projection.sessions
+    .filter(({ taskId }) => loaderWorkspaceTaskIds.has(taskId))
     .map(({ id, title }) => `${id}\u0000${title}`)
-    .join('\u0001'), [projection.sessions])
+    .join('\u0001'), [loaderWorkspaceTaskIds, projection.sessions])
+  const loaderMetadataRevision = `${loaderBindingRevision}\u0000${loaderTitleRevision}`
   const listLoaderSessions = useCallback((
     query: string, searchScope?: 'metadata' | 'all', offset?: number, limit?: number,
     provider?: 'claude-code' | 'antigravity' | 'codex' | 'dsh'
@@ -415,7 +447,7 @@ function HierarchyProduct({
       sessions: [], total: 0, offset: 0, limit: limit ?? 50, nextOffset: 0, hasMore: false
     })
     return commands.listClaudeSessions(loaderSessionId, query, searchScope, offset, limit, provider)
-  }, [commands, loaderSessionId, loaderTitleRevision, loaderBindingRevision])
+  }, [commands, loaderSessionId])
   const loadLoaderDetail = useCallback((
     providerSessionId: string,
     options: {
@@ -427,7 +459,7 @@ function HierarchyProduct({
   ) => {
     if (!loaderSessionId) return Promise.reject(new Error(m.sessionLoaderClosed))
     return commands.getClaudeSessionDetail(loaderSessionId, providerSessionId, options)
-  }, [commands, loaderSessionId, loaderTitleRevision, loaderBindingRevision, m])
+  }, [commands, loaderSessionId, m])
   const loadCurrentLoaderDetail = useCallback(() => {
     if (!loaderSessionId || !client) return Promise.reject(new Error(m.sessionLoaderClosed))
     return client.request<ClaudeSessionDetail>('claude-sessions.detail', {
@@ -441,7 +473,7 @@ function HierarchyProduct({
   ) => {
     if (!loaderSessionId) return Promise.reject(new Error(m.sessionLoaderClosed))
     return commands.searchClaudeSession(loaderSessionId, providerSessionId, query, offset, limit, provider)
-  }, [commands, loaderSessionId, loaderTitleRevision, loaderBindingRevision, m])
+  }, [commands, loaderSessionId, m])
   const cancelSessionLoader = useCallback(() => {
     setSessionLoader(null)
     setTerminalFocusRequest((value) => value + 1)
@@ -1444,6 +1476,7 @@ function HierarchyProduct({
                   sessionLoader.title}
                 targetRunning={sessionLoader.running}
                 initialProvider={sessionLoader.provider}
+                metadataRevision={loaderMetadataRevision}
                 {...(workspaceStageRef.current ? { portalTarget: workspaceStageRef.current } : {})}
                 listSessions={listLoaderSessions}
                 loadDetail={loadLoaderDetail}

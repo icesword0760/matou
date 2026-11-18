@@ -12,7 +12,8 @@ import {
   type SessionRunProfile,
   type SessionRunStatus,
   type SessionStatus,
-  type SessionTitleSource
+  type SessionTitleSource,
+  type SessionWorkStatus
 } from '@matou/domain'
 
 const AGENT_SHORT_NAMES = listAgentManifests().map((manifest) => manifest.shortName)
@@ -863,6 +864,14 @@ export class SessionRepository {
   getSession(id: string): Session | undefined {
     const row = this.#database.get<SessionRow>('SELECT * FROM sessions WHERE id = ?', id)
     return row ? mapSession(row) : undefined
+  }
+
+  getSessionModeState(id: string): { kind: SessionKind; workStatus: SessionWorkStatus } | undefined {
+    const row = this.#database.get<{ kind: SessionKind; work_status: SessionWorkStatus }>(
+      'SELECT kind, work_status FROM sessions WHERE id = ? AND archived_at IS NULL',
+      id
+    )
+    return row ? { kind: row.kind, workStatus: row.work_status } : undefined
   }
 
 

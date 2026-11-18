@@ -640,10 +640,20 @@ export class ProviderHookServer {
           ...(registration.inheritedConversation ? { inheritedConversation: true, canFork: true } : {})
         }
         const previousMetadata = currentBinding?.metadata as Record<string, unknown> | undefined
-        // Statusline metrics refresh continuously, even for idle conversations.
-        // Confirm each new run once, then persist only identity/settings changes;
-        // HUD updates below still receive every payload and real hooks still run.
-        const needsIdentityUpdate = eventName !== 'unknown' ||
+        const currentModeState = this.#sessions.getSessionModeState?.(registration.sessionId)
+        const nonTransitionToolHook =
+          eventName === 'PostToolUse' ||
+          eventName === 'PostToolUseFailure' ||
+          (eventName === 'PreToolUse' && currentModeState?.workStatus === 'running')
+        const lifecycleRequiresUpdate = eventName !== 'unknown' && (
+          !nonTransitionToolHook ||
+          (currentModeState !== undefined && currentModeState.kind !== registration.provider)
+        )
+        // Statusline metrics and routine running tool hooks refresh continuously.
+        // Confirm each new run once, then persist only real lifecycle transitions
+        // or identity/settings changes; HUD and notification handlers still run below.
+        const needsIdentityUpdate = lifecycleRequiresUpdate ||
+          forkAuthority !== undefined ||
           registration.confirmedProviderSessionId !== providerSessionId || !isKnownIdentity ||
           currentBinding?.resumeState !== 'available' ||
           (currentBinding.restoreState !== undefined && currentBinding.restoreState !== 'none') ||

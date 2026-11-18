@@ -650,6 +650,47 @@ describe('ProviderHookServer', () => {
     expect(identityEvents).toHaveLength(6)
   })
 
+  it('suppresses redundant identity commits during routine tool hooks while already running', async () => {
+    const registration = await hooks.registerClaudeSession({
+      runId: 'run-tools', sessionId: 'session-1'
+    })
+    const payload = { session_id: 'provider-tools', cwd: root, model: { id: 'claude-opus-4-6' } }
+
+    await postHook(registration.hookUrl, { ...payload, hook_event_name: 'UserPromptSubmit' })
+    database.run(
+      `UPDATE sessions SET kind = 'claude-code', work_status = 'running' WHERE id = 'session-1'`
+    )
+    const eventCount = () => database.get<{ count: number }>('SELECT COUNT(*) AS count FROM domain_events')!.count
+    const commandCount = () => database.get<{ count: number }>('SELECT COUNT(*) AS count FROM command_deduplication')!.count
+    const before = [eventCount(), commandCount()]
+    const beforeIdentityCount = identityEvents.length
+
+    for (let step = 0; step < 10; step++) {
+      expect((await postHook(registration.hookUrl, {
+        ...payload, hook_event_name: 'PreToolUse', tool_name: 'Bash'
+      })).status).toBe(200)
+      expect((await postHook(registration.hookUrl, {
+        ...payload, hook_event_name: 'PostToolUse', tool_name: 'Bash'
+      })).status).toBe(200)
+      expect((await postHook(registration.hookUrl, {
+        ...payload, hook_event_name: 'PostToolUseFailure', tool_name: 'Bash'
+      })).status).toBe(200)
+    }
+
+    expect([eventCount(), commandCount()]).toEqual(before)
+    expect(identityEvents).toHaveLength(beforeIdentityCount)
+
+    // Resuming from needs-input via PreToolUse and completing via Stop still persist durably.
+    database.run(`UPDATE sessions SET work_status = 'needs-input' WHERE id = 'session-1'`)
+    await postHook(registration.hookUrl, {
+      ...payload, hook_event_name: 'PreToolUse', tool_name: 'Write'
+    })
+    expect(identityEvents).toHaveLength(beforeIdentityCount + 1)
+
+    await postHook(registration.hookUrl, { ...payload, hook_event_name: 'Stop' })
+    expect(identityEvents).toHaveLength(beforeIdentityCount + 2)
+  })
+
   it('rejects a different statusline identity while restoring one specific conversation', async () => {
     const mismatches: unknown[] = []
     const rejectedHudEvents: unknown[] = []

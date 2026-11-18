@@ -68,6 +68,11 @@ export class ClaudeSessionCatalog {
     size: number
     transcript: IndexedTranscript | undefined
   }>()
+  readonly #indexing = new Map<string, {
+    mtimeMs: number
+    size: number
+    promise: Promise<IndexedTranscript | undefined>
+  }>()
   readonly #searchCache = new Map<string, {
     mtimeMs: number
     size: number
@@ -255,12 +260,29 @@ export class ClaudeSessionCatalog {
       try {
         const metadata = await stat(path)
         const cached = this.#fileCache.get(path)
-        let transcript = cached?.mtimeMs === metadata.mtimeMs && cached.size === metadata.size
-          ? cached.transcript
-          : undefined
-        if (!cached || cached.mtimeMs !== metadata.mtimeMs || cached.size !== metadata.size) {
-          transcript = await indexTranscript(providerSessionId, path, metadata.mtimeMs, metadata.size)
-          this.#fileCache.set(path, { mtimeMs: metadata.mtimeMs, size: metadata.size, transcript })
+        let transcript: IndexedTranscript | undefined
+        if (cached && cached.mtimeMs === metadata.mtimeMs && cached.size === metadata.size) {
+          transcript = cached.transcript
+        } else {
+          const inFlight = this.#indexing.get(path)
+          let pending: Promise<IndexedTranscript | undefined>
+          if (inFlight && inFlight.mtimeMs === metadata.mtimeMs && inFlight.size === metadata.size) {
+            pending = inFlight.promise
+          } else {
+            pending = indexTranscript(providerSessionId, path, metadata.mtimeMs, metadata.size).then((indexed) => {
+              const latest = this.#fileCache.get(path)
+              if (!latest || latest.mtimeMs <= metadata.mtimeMs) {
+                this.#fileCache.set(path, { mtimeMs: metadata.mtimeMs, size: metadata.size, transcript: indexed })
+              }
+              return indexed
+            }).finally(() => {
+              if (this.#indexing.get(path)?.promise === pending) {
+                this.#indexing.delete(path)
+              }
+            })
+            this.#indexing.set(path, { mtimeMs: metadata.mtimeMs, size: metadata.size, promise: pending })
+          }
+          transcript = await pending
         }
         if (!transcript) return undefined
         const transcriptCwd = await canonicalPath(transcript.cwd)
