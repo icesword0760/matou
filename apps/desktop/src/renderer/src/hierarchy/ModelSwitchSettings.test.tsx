@@ -457,6 +457,12 @@ function searchSettingsClient(status: 'ready' | 'needs-sign-in' = 'ready') {
   if(method==='provider-config.snapshot')return structuredClone(state)
   if(method==='agent-model-settings.get')return structuredClone(agent)
   if(method==='provider-config.subscription.settings-read')return {snapshot:structuredClone(state),accounts:{[provider.id]:details},antigravityRiskAccepted:false}
+  if(method==='provider-config.subscription.models-refresh'){
+   details={...details,models:[{id:'gpt-search',displayName:'Search model'},{id:'gpt-new',displayName:'New model'}]}
+   state={...state,revision:state.revision+1,providers:{...state.providers,'claude-code':state.providers['claude-code'].map(p=>p.id===provider.id?{...p,subscription:{...p.subscription!,modelMetadata:details.models}}:p)}}
+   agent={...agent,providers:agent.providers.map(p=>p.id===provider.id?{...p,models:details.models.map(model=>({id:model.id,name:model.displayName ?? model.id,fixedTokens:512000}))}:p)}
+   return {snapshot:structuredClone(state),details:structuredClone(details)}
+  }
   if(method==='provider-config.subscription.login-start')return {attemptId:'fixture-login',provider:'codex',status:'ready',details:{...details,account:{...details.account,status:'ready'}}}
   if(method==='provider-config.upsert'){
    details={...details,account:{...details.account,status:'ready'}}
@@ -478,6 +484,30 @@ function searchSettingsClient(status: 'ready' | 'needs-sign-in' = 'ready') {
   listener()
  }}
 }
+it('refreshes model assignment options and keeps an unavailable existing choice selected',async()=>{
+ const client=searchSettingsClient(), user=userEvent.setup()
+ render(<ModelSwitchSettings client={client} onClose={vi.fn()}/>)
+ const model=await screen.findByLabelText('网页搜索 模型')
+ await waitFor(()=>expect(model).toHaveProperty('value','gpt'))
+ expect(within(model).queryByRole('option',{name:'New model'})).toBeNull()
+ await user.click(screen.getByRole('button',{name:'刷新模型'}))
+ expect(await screen.findByText('模型列表已更新（2 个模型）')).toBeTruthy()
+ expect(await within(model).findByRole('option',{name:'New model'})).toBeTruthy()
+ expect(within(model).getByRole('option',{name:'gpt · 不可用'})).toBeTruthy()
+ expect(model).toHaveProperty('value','gpt')
+ expect(model.getAttribute('aria-invalid')).toBe('true')
+ expect(client.request).not.toHaveBeenCalledWith('agent-model-settings.patch-assignments',expect.anything())
+ await user.selectOptions(model,'gpt-new')
+ expect(model.getAttribute('aria-invalid')).toBe('false')
+ const card=within(screen.getByText('Search ChatGPT',{selector:'.model-provider__name strong'}).closest('article')!)
+ expect(card.getByText('默认模型 · 不可用')).toBeTruthy()
+ await user.click(card.getByRole('button',{name:'编辑'}))
+ const editor=within(screen.getByRole('dialog'))
+ const mapping=editor.getByRole('combobox',{name:'Opus 模型'})
+ expect(mapping).toHaveProperty('value','gpt')
+ expect(mapping.getAttribute('aria-invalid')).toBe('true')
+ expect(within(mapping).getByRole('option',{name:'New model'})).toBeTruthy()
+})
 it('integrates a search-only edit, saves to the existing patch and reads null as unassigned',async()=>{
  const client=searchSettingsClient();const user=userEvent.setup()
  const view=render(<ModelSwitchSettings client={client} onClose={vi.fn()}/> )

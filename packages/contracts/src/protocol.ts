@@ -223,6 +223,7 @@ export const RPC_METHODS = [
   'provider-config.subscription.login-reopen',
   'provider-config.subscription.login-cancel',
   'provider-config.subscription.models-read',
+  'provider-config.subscription.models-refresh',
   'provider-config.subscription.settings-read',
   'provider-config.subscription.settings-close',
   'provider-config.subscription.risk-confirm',

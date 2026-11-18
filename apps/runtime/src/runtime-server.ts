@@ -1255,7 +1255,7 @@ export class RuntimeServer {
     }
   }
 
-  async #handleSubscriptionRpc(method: string, payload: unknown): Promise<unknown> {
+  async #handleSubscriptionRpc(method: string, payload: unknown, isCancelled: () => boolean): Promise<unknown> {
     const connection = this.#subscriptionConnection!, accounts = this.#subscriptionAccounts!
     const input = isRecord(payload) ? payload : {}
     if (method === 'provider-config.snapshot') return accounts.snapshot()
@@ -1271,6 +1271,10 @@ export class RuntimeServer {
     }
     if (method === 'provider-config.subscription.settings-read') return connection.settings()
     if (method === 'provider-config.subscription.models-read') return connection.models(input as unknown as SubscriptionModelsReadInput)
+    if (method === 'provider-config.subscription.models-refresh') {
+      if (typeof input.providerId !== 'string' || !input.providerId.trim()) throw new RpcFault('INVALID_REQUEST', 'Invalid subscription provider ID')
+      return connection.refreshModels(input.providerId, isCancelled)
+    }
     if (method === 'provider-config.subscription.settings-close') { await connection.closeSettings(); return { closed: true } }
     if (method === 'provider-config.subscription.risk-confirm') return connection.confirmRisk(input.accepted === true)
     throw new Error('Unknown subscription operation')
@@ -1331,7 +1335,7 @@ export class RuntimeServer {
             : this.#subscriptionConnection && this.#subscriptionAccounts && (message.method.startsWith('provider-config.subscription.') ||
                 message.method === 'provider-config.snapshot' || message.method === 'provider-config.delete' ||
                 (message.method === 'provider-config.upsert' && isRecord(message.payload) && isRecord(message.payload.provider) && message.payload.provider.kind === 'subscription'))
-              ? await this.#handleSubscriptionRpc(message.method, message.payload)
+              ? await this.#handleSubscriptionRpc(message.method, message.payload, () => this.#cancelledRequests.has(message.requestId) || Date.now() > message.deadlineAt)
               : await this.#router.handle(message.method, message.payload)
       if (message.method === 'provider-config.activate') {
         const input = isRecord(message.payload) ? message.payload : undefined
@@ -1386,12 +1390,13 @@ export class RuntimeServer {
       if (error instanceof SubscriptionPlatformError) {
         const locale = (message.payload as { locale?: string } | undefined)?.locale ?? process.env.MATOU_LOCALE
         this.#sendRpcError(message.requestId, 'INTERNAL_ERROR', error.messageLocalized[locale === 'en' ? 'en' : 'zh'], false, undefined, error.messageLocalized)
-      } else if ((message.method.startsWith('provider-config.subscription.login-') || message.method === 'provider-config.subscription.models-read') && !(error instanceof RpcFault)) {
-        const localized = message.method === 'provider-config.subscription.models-read'
+      } else if ((message.method.startsWith('provider-config.subscription.login-') || message.method === 'provider-config.subscription.models-read' ||
+          (message.method === 'provider-config.subscription.models-refresh' && !(error instanceof SubscriptionLaunchError))) && !(error instanceof RpcFault)) {
+        const localized = message.method.includes('.models-')
           ? { zh: '模型列表未能读取，请重试。', en: 'The model list could not be read. Try again.' }
           : mapSubscriptionLoginFailure(errorMessage(error))
         const locale = (message.payload as { locale?: string } | undefined)?.locale ?? process.env.MATOU_LOCALE
-        console.error(`[subscription.${message.method.endsWith('models-read') ? 'models' : 'login'}] ${sanitizeProviderReason(errorMessage(error)) ?? 'Request failed'}`)
+        console.error(`[subscription.${message.method.includes('.models-') ? 'models' : 'login'}] ${sanitizeProviderReason(errorMessage(error)) ?? 'Request failed'}`)
         this.#sendRpcError(message.requestId, 'INTERNAL_ERROR', localized[locale === 'en' ? 'en' : 'zh'], true, undefined, localized)
       } else if (error instanceof SubscriptionLaunchError) {
         this.#sendRpcError(message.requestId, 'INTERNAL_ERROR', error.message, error.providerFailure.recovery === 'retry', error.providerFailure)
