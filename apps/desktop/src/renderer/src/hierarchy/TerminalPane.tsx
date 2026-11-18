@@ -32,6 +32,7 @@ import { RenameDialog } from './RenameDialog'
 import { sessionDeleteFlow } from './terminal-close-flow'
 import { AppIcon } from '../ui/AppIcon'
 import { SessionRecoveryWater } from './SessionRecoveryWater'
+import { DeferredRecoveryCard } from './DeferredRecoveryCard'
 import { terminalLoadingPresentation } from './terminal-loading-state'
 import { foregroundTerminalModels } from '../terminal/terminal-model-cache'
 import { useMessages } from '../i18n/LocaleProvider'
@@ -534,19 +535,17 @@ export function TerminalPane(props: {
     {loadingPresentation && <SessionRecoveryWater sessionTitle={session.title}
       phase={loadingPresentation.phase} />}
     {recoveryState === 'deferred' && !environmentUnavailable && visible &&
-      <div className="session-recovery-overlay state-deferred" data-testid="session-deferred-recovery"
-        role="status" aria-label={m.pane.manualRecoveryFor(session.title)}
-        onPointerDown={event => event.stopPropagation()}>
-        <div className="session-recovery-overlay__content">
-          <strong>{m.pane.recoveryDeferred}</strong>
-          <p>{m.pane.recoveryDeferredBody}</p>
-          {onRetryRecovery && <button type="button" disabled={readOnly || storageBlocked}
-            aria-label={m.pane.manualRecoveryFor(session.title)}
-            onClick={event => { event.stopPropagation(); void onRetryRecovery(session.id) }}>
-            {m.pane.manualRecovery}
-          </button>}
-        </div>
-      </div>}
+      <DeferredRecoveryCard
+        session={session}
+        cwd={cwd}
+        agentDisplayName={agentDisplayName}
+        agentShortName={agentShortName}
+        latestLines={latestLines}
+        readOnly={readOnly}
+        storageBlocked={storageBlocked}
+        onRestore={onRetryRecovery}
+        onViewHistory={onViewHistory}
+      />}
     {recoveryState === 'failed' && forkState !== 'failed' && !storageFault &&
       !currentForkProgress && !environmentUnavailable &&
       <div className="session-recovery-overlay state-failed" data-testid="session-recovery-dialog"

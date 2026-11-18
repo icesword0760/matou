@@ -1030,6 +1030,83 @@ describe('Terminal pane', () => {
 
     client.dispose()
   })
+
+  it('shows the original session title, cwd and latest replies on a deferred card', async () => {
+    const request = vi.fn().mockResolvedValue({
+      provider: 'claude-code',
+      providerSessionId: 'claude-1',
+      title: '排查模型分配档位异常',
+      cwd: '/Users/icesword/Documents/AIProjects/matou',
+      updatedAt: Date.UTC(2026, 10, 18, 12, 15),
+      permissionMode: 'default',
+      eventCount: 12,
+      matchCount: 0,
+      hits: [],
+      availability: 'loaded-here',
+      page: { startEventIndex: 7, endEventIndex: 12, total: 12, hasEarlier: true, hasLater: false },
+      events: [
+        { index: 7, kind: 'user', role: 'user', text: '最早的问题', matched: false },
+        { index: 8, kind: 'assistant', role: 'assistant', text: '最初的回复', matched: false },
+        { index: 9, kind: 'tool', text: 'Read file.ts', toolName: 'Read', matched: false },
+        { index: 10, kind: 'user', role: 'user', text: 'DeepSeek 改成高档位', matched: false },
+        { index: 11, kind: 'assistant', role: 'assistant', text: '已加上档位选择并保存', matched: false },
+        { index: 12, kind: 'assistant', role: 'assistant', text: '单测全部通过', matched: false }
+      ]
+    })
+    mockEgressRuntimeClient = { request } as unknown as RuntimeClient
+    const props = fixture()
+    const viewHistory = vi.fn()
+
+    render(<TerminalPane {...props}
+      session={{ ...props.session, title: 'Claude · /Users/icesword...', titleSource: 'default' }}
+      cwd="/Users/icesword/Documents/AIProjects/matou"
+      recoveryState="deferred"
+      onRetryRecovery={vi.fn()}
+      onViewHistory={viewHistory} />)
+
+    await waitFor(() => {
+      expect(request).toHaveBeenCalledWith('claude-sessions.detail', {
+        sessionId: 'session-1',
+        current: true,
+        provider: 'claude-code',
+        limit: 30
+      })
+    })
+    const card = screen.getByTestId('session-deferred-recovery')
+    expect(card.textContent).toContain('排查模型分配档位异常')
+    expect(card.textContent).toContain('/Users/icesword/Documents/AIProjects/matou')
+    expect(card.textContent).toContain('DeepSeek 改成高档位')
+    expect(card.textContent).toContain('已加上档位选择并保存')
+    expect(card.textContent).toContain('单测全部通过')
+    expect(card.textContent).not.toContain('最早的问题')
+    expect(card.textContent).not.toContain('Read file.ts')
+
+    fireEvent.click(card.querySelector('.session-deferred-card__secondary')!)
+    expect(viewHistory).toHaveBeenCalledWith('session-1')
+  })
+
+  it('retains manual title with provider subtitle and tolerates unavailable detail on deferred cards', async () => {
+    const request = vi.fn().mockRejectedValue(new Error('not bound'))
+    mockEgressRuntimeClient = { request } as unknown as RuntimeClient
+    const props = fixture()
+
+    render(<TerminalPane {...props}
+      session={{
+        ...props.session,
+        title: '自定义排查卡片',
+        titleSource: 'manual',
+        providerTitle: '原始自动汇总标题'
+      }}
+      latestLines={['上次终端输出片段']}
+      recoveryState="deferred"
+      onRetryRecovery={vi.fn()} />)
+
+    await waitFor(() => expect(request).toHaveBeenCalled())
+    const card = screen.getByTestId('session-deferred-recovery')
+    expect(card.textContent).toContain('自定义排查卡片')
+    expect(card.textContent).toContain('原始自动汇总标题')
+    expect(card.textContent).toContain('上次终端输出片段')
+  })
 })
 
 function fixture() {

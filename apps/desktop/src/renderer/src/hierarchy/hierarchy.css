@@ -265,6 +265,29 @@ button { -webkit-app-region: no-drag; }
 .session-recovery-overlay.state-failed { background: rgba(25,14,15,.9); }
 .session-recovery-overlay.state-failed .session-recovery-overlay__content { border-color: rgba(228,93,85,.38); }
 .session-recovery-overlay.state-failed .session-recovery-overlay__content p { color: #d59692; }
+.session-recovery-overlay.state-deferred { top: 32px; padding: 16px; overflow: auto; }
+.session-deferred-card { width: min(460px,calc(100% - 16px)); align-items: stretch; gap: 8px; padding: 18px 20px; text-align: left; }
+.session-deferred-card__meta { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; font-size: 10px; }
+.session-deferred-card__badge { padding: 2px 7px; border-radius: 999px; color: #b7d2f7; background: rgba(125,161,209,.18); font-weight: 600; }
+.session-deferred-card__agent { color: #9ab0cc; font-weight: 600; }
+.session-deferred-card__time { margin-left: auto; color: #7f91a8; }
+.session-deferred-card__title { display: -webkit-box; overflow: hidden; color: #f0f6fc; font-size: 14px; font-weight: 650; line-height: 1.4; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.session-deferred-card__subtitle { overflow: hidden; color: #9ab0cc; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.session-deferred-card__cwd { overflow: hidden; color: #7f91a8; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.session-deferred-card__replies { display: grid; gap: 6px; margin-top: 2px; padding: 10px 12px; border: 1px solid rgba(125,161,209,.2); border-radius: 8px; background: rgba(13,17,23,.48); max-height: 220px; overflow-y: auto; }
+.session-deferred-card__replies-label { color: #8da2be; font-size: 10px; font-weight: 600; }
+.session-deferred-card__list { display: grid; gap: 7px; margin: 0; padding: 0; list-style: none; }
+.session-deferred-card__item { display: grid; grid-template-columns: auto minmax(0,1fr); gap: 8px; align-items: baseline; }
+.session-deferred-card__role { padding: 1px 6px; border-radius: 5px; color: #9fc4f6; background: rgba(121,184,255,.14); font-size: 10px; font-weight: 600; white-space: nowrap; }
+.session-deferred-card__item.is-user .session-deferred-card__role { color: #d5e6ff; background: rgba(92,156,237,.22); }
+.session-deferred-card__item.is-tool .session-deferred-card__role,
+.session-deferred-card__item.is-system .session-deferred-card__role { color: #9eb0c6; background: rgba(140,158,181,.16); }
+.session-deferred-card p.session-deferred-card__text { display: -webkit-box; overflow: hidden; color: #cbd7e6; font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.session-deferred-card__hint { font-size: 11px; }
+.session-deferred-card__note { margin-top: 2px; }
+.session-deferred-card__actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+.session-deferred-card__actions button.session-deferred-card__secondary { border-color: rgba(125,161,209,.3); color: #b7c8dd; background: transparent; font-size: 11px; }
+.session-deferred-card__actions button.session-deferred-card__primary { font-size: 12px; font-weight: 600; }
 .environment-card-overlay { position: absolute; z-index: 90; inset: 0; display: grid; place-items: center; padding: 24px; color: #dbe6f5; background: rgba(13,17,23,.78); backdrop-filter: blur(5px); }
 .environment-card-overlay__content { display: flex; width: min(420px,calc(100% - 24px)); box-sizing: border-box; flex-direction: column; align-items: center; padding: 22px; border: 1px solid rgba(125,161,209,.3); border-radius: 12px; background: rgba(24,31,41,.94); box-shadow: 0 16px 44px rgba(0,0,0,.34); gap: 9px; text-align: center; }
 .environment-card-overlay__content p { margin: 0; color: #93a2b7; font-size: 11px; line-height: 1.5; }
@@ -289,6 +312,20 @@ button { -webkit-app-region: no-drag; }
 .hierarchy-shell[data-theme="light"] .session-recovery-overlay__content { border-color: #c8d4e3; background: rgba(255,255,255,.98); box-shadow: 0 16px 44px rgba(31,45,61,.14); }
 .hierarchy-shell[data-theme="light"] .session-recovery-overlay__content p { color: #617086; }
 .hierarchy-shell[data-theme="light"] .session-recovery-overlay.state-failed { background: rgba(255,246,245,.94); }
+.hierarchy-shell[data-theme="light"] .session-deferred-card__badge { color: #365070; background: #eaf0f7; }
+.hierarchy-shell[data-theme="light"] .session-deferred-card__agent { color: #4c5d75; }
+.hierarchy-shell[data-theme="light"] .session-deferred-card__time,
+.hierarchy-shell[data-theme="light"] .session-deferred-card__cwd { color: #6e7f96; }
+.hierarchy-shell[data-theme="light"] .session-deferred-card__title { color: #1b2533; }
+.hierarchy-shell[data-theme="light"] .session-deferred-card__subtitle { color: #54647a; }
+.hierarchy-shell[data-theme="light"] .session-deferred-card__replies { border-color: #dce4ee; background: #f6f8fb; }
+.hierarchy-shell[data-theme="light"] .session-deferred-card__replies-label { color: #66778d; }
+.hierarchy-shell[data-theme="light"] .session-deferred-card__role { color: #24578a; background: #e4effb; }
+.hierarchy-shell[data-theme="light"] .session-deferred-card__item.is-user .session-deferred-card__role { color: #204d80; background: #dceaff; }
+.hierarchy-shell[data-theme="light"] .session-deferred-card__item.is-tool .session-deferred-card__role,
+.hierarchy-shell[data-theme="light"] .session-deferred-card__item.is-system .session-deferred-card__role { color: #55667c; background: #e8edf3; }
+.hierarchy-shell[data-theme="light"] .session-deferred-card p.session-deferred-card__text { color: #2b3748; }
+.hierarchy-shell[data-theme="light"] .session-deferred-card__actions button.session-deferred-card__secondary { border-color: #c7d3e2; color: #3d4d63; background: #fff; }
 @media (prefers-reduced-motion: reduce) { .pane-recovery-badge i { animation: none; } }
 .agent-team-member-summary { display: flex; flex: 1; flex-direction: column; gap: 16px; min-height: 0; padding: 28px; color: #d9dce2; background: var(--terminal-bg); }
 .agent-team-member-summary__heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
