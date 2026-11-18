@@ -4936,6 +4936,7 @@ function configuredCcLaunch(): Promise<InteractiveAgentLaunch | undefined> {
     if (alias === 'claude --dangerously-skip-permissions') {
       return { profile: 'claude-code' as const, permissionMode: 'bypassPermissions' as const }
     }
+    configuredCcLaunches.delete(key)
     return undefined
   })
   configuredCcLaunches.set(key, pending)
@@ -4988,7 +4989,7 @@ async function configuredShellAlias(name: string): Promise<string | undefined> {
   try {
     const { stdout } = await execFileAsync(shell, [
       '-ic', 'alias "$1"', 'matou-alias', name
-    ], { timeout: 10_000, maxBuffer: 64 * 1024 })
+    ], { timeout: 15_000, maxBuffer: 64 * 1024 })
     const prefix = `${name}=`
     const line = stdout.split('\n').map((value) => value.trim())
       .find((value) => value.startsWith(prefix) || value.startsWith(`alias ${prefix}`))

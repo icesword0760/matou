@@ -15,5 +15,6 @@ describe('shellIntegrationEnvironment', () => {
     expect(rc).toContain("printf '%s' \"$1\" | base64 | tr -d '\\n'")
     expect(rc).toContain("printf '\\033]633;E;%s\\007'")
     expect(rc.indexOf('633;E')).toBeLessThan(rc.indexOf('133;C'))
+    expect(rc).toContain('mt create session current --profile claude-code --permission-mode bypassPermissions --cwd "$PWD" --enter')
   })
 })

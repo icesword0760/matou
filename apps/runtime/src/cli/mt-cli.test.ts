@@ -120,6 +120,14 @@ describe('mt CLI', () => {
         canvas: { kind: 'current', entity: 'canvas' }, profile: 'codex',
         title: '会话甲', submissionKey: 'create-s'
       }
+    },
+    {
+      argv: ['create', 'session', '--canvas', 'current', '--profile', 'claude-code', '--cwd', '/tmp/work', '--permission-mode', 'bypassPermissions', '--enter', '--submission-key', 'create-cc', '--json'],
+      method: 'structure.create.session' as const,
+      params: {
+        canvas: { kind: 'current', entity: 'canvas' }, profile: 'claude-code',
+        cwd: '/tmp/work', permissionMode: 'bypassPermissions', enter: true, submissionKey: 'create-cc'
+      }
     }
   ])('parses $method with exact titles and revision-bearing targets', async ({ argv, method, params }) => {
     const fixture = ioFixture()
