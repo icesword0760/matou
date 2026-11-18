@@ -79,7 +79,7 @@ export function SubscriptionSetupView({
   const resolvedContextMode: ContextWindowMode = contextWindowMode ?? (provider === 'codex' ? '512k' : 'default')
   const saveDisabled = startDisabled || !modelsReady || ROLES.some(role => {
     const model = modelOptions.find(row => row.id === mapping[role])
-    return !effortSupported(provider, model, effortMapping[role])
+    return !model || !effortSupported(provider, model, effortMapping[role])
   })
   const effortSelectionUsesFallback = ROLES.some(role => {
     const model = modelOptions.find(row => row.id === mapping[role])
@@ -155,16 +155,17 @@ export function SubscriptionSetupView({
               const invalidEffort = !effortSupported(provider, model, effortMapping[role])
               return <div className="provider-mapping" key={role} role="group" aria-label={label}>
                 <span className="provider-mapping__role">{label}</span>
-                <select aria-label={`${label} ${t('模型', 'model')}`} value={known ? mapping[role] : ''}
+                <select aria-label={`${label} ${t('模型', 'model')}`} value={mapping[role]} aria-invalid={!known}
                   disabled={busy} onChange={e => onMapping(role, e.target.value)}>
-                  {!known && <option value="" disabled>—</option>}
+                  {!known && <option value={mapping[role]} disabled>{mapping[role] ? `${mapping[role]} · ${t('不可用', 'Unavailable')}` : '—'}</option>}
                   {modelOptions.map(model => <option key={model.id} value={model.id}>{model.displayName || model.id}</option>)}
                 </select>
                 <select aria-label={`${label} ${t('推理强度', 'reasoning effort')}`} value={effortMapping[role]}
                   disabled={busy} onChange={e => onEffort(role, e.target.value as ReasoningEffort)}>
                   {effortChoices(provider, model, effortMapping[role]).map(effort => <option key={effort} value={effort}>{effortName(effort, zh)}</option>)}
                 </select>
-                {invalidEffort && <p className="provider-mapping__error" role="alert">{t('该模型不支持当前推理强度。', 'This model does not support the selected reasoning effort.')}</p>}
+                {!known && mapping[role] && <p className="provider-mapping__error" role="alert">{t('模型已不可用；原选择已保留，请重新选择。', 'Model is unavailable. Your selection was kept; choose another model.')}</p>}
+                {known && invalidEffort && <p className="provider-mapping__error" role="alert">{t('该模型不支持当前推理强度。', 'This model does not support the selected reasoning effort.')}</p>}
               </div>
             })}
             {effortSelectionUsesFallback && <p className="provider-help">{t('推理强度选项为候选，实际可用性以供应商支持为准。', 'Reasoning effort options are candidates; actual availability depends on provider support.')}</p>}

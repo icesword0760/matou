@@ -23,6 +23,146 @@ async function until(check: () => boolean | Promise<boolean>, timeout = 10000) {
 const mapping = { opus: 'gpt-6.1-sol', sonnet: 'gpt-6.1-sol', haiku: 'gpt-6.1-sol' }
 const googleMapping = { opus: 'gemini-4-argon-high', sonnet: 'gemini-4-argon-high', haiku: 'gemini-4-argon-high' }
 
+describe('manual subscription model refresh', () => {
+  const modelMapping = { opus: 'previous', sonnet: 'previous', haiku: 'previous' }
+
+  async function refreshFixture(credentialPresent = true, detailsTtlMs = 300_000) {
+    const directory = join(output, 'manual-refresh')
+    await mkdir(directory, { recursive: true })
+    const dataRoot = await mkdtemp(join(directory, 'case-'))
+    const store = new ProviderConfigStore(dataRoot)
+    const credentialRef = { name: 'fixture.json', authIndex: 'fixture-index' }
+    const provider = await store.adoptSubscription({
+      name: 'Fixture subscription', modelMapping,
+      subscription: { provider: 'codex', credentialRef, account: { status: 'ready' }, modelMetadata: [{ id: 'previous' }] }
+    })
+    if (credentialPresent) {
+      const credentials = join(dataRoot, 'model-router/credentials')
+      await mkdir(credentials, { recursive: true })
+      await writeFile(join(credentials, credentialRef.name), '{}')
+    }
+    const release = vi.fn()
+    const acquire = vi.fn(async () => ({
+      connection: { baseUrl: 'http://127.0.0.1:1234', clientKey: 'fixture', managementKey: 'fixture', pid: 1 },
+      release
+    }))
+    const rememberModelAliases = vi.fn()
+    const manager = { acquire, openSettings: acquire, rememberModelAliases, onStateChange: () => () => {} } as unknown as ModelRouterManager
+    const accounts = new SubscriptionAccounts({ dataRoot, store, manager, detailsTtlMs, platform: 'linux', openAuthorizationUrl: vi.fn() })
+    disposals.push(() => accounts.close())
+    const credentials = vi.spyOn(RouterManagementClient.prototype, 'credentials').mockResolvedValue([
+      { name: credentialRef.name, id: 'fixture', auth_index: credentialRef.authIndex, provider: 'codex', status: 'active' }
+    ])
+    const apiCall = vi.spyOn(RouterManagementClient.prototype, 'apiCall').mockResolvedValue({
+      status_code: 200, body: JSON.stringify({ models: [{ id: 'new' }] })
+    })
+    vi.spyOn(RouterManagementClient.prototype, 'modelDefinitions').mockResolvedValue([{ id: 'new', display_name: 'New model' }])
+    vi.spyOn(RouterManagementClient.prototype, 'setPrefix').mockResolvedValue(undefined)
+    vi.spyOn(RouterManagementClient.prototype, 'setDisabled').mockResolvedValue(undefined)
+    const setAliases = vi.spyOn(RouterManagementClient.prototype, 'setAliases').mockResolvedValue(undefined)
+    const readProvider = async () => (await new ProviderConfigStore(dataRoot).snapshot())
+      .providers['claude-code'].find(row => row.id === provider.id)
+    const connection = accounts.bindConnection(new EventEmitter())
+    const refresh = (isCancelled?: () => boolean) => connection.refreshModels(provider.id, isCancelled)
+    return { provider, accounts, connection, acquire, apiCall, credentials, release, readProvider, refresh, rememberModelAliases, setAliases }
+  }
+
+  it('persists the fresh directory while keeping the existing mapping', async () => {
+    const f = await refreshFixture()
+    const result = await f.refresh()
+    const models = [{ id: 'new', displayName: 'New model', ownedBy: 'Codex' }]
+    expect(result.details).toEqual({ account: { status: 'ready' }, models })
+    expect(result.snapshot.providers['claude-code']).toContainEqual(await f.readProvider())
+    expect(await f.readProvider()).toMatchObject({ modelMapping, subscription: { modelMetadata: models } })
+    expect(f.apiCall).toHaveBeenCalledExactlyOnceWith('chatgpt-models', expect.objectContaining({ auth_index: 'fixture-index' }), undefined)
+    expect(f.release).toHaveBeenCalledOnce()
+  })
+
+  it.each(['failed', 'empty'] as const)('keeps the previous directory when the upstream response is %s even if router definitions exist', async response => {
+    const f = await refreshFixture()
+    if (response === 'failed') f.apiCall.mockRejectedValueOnce(new Error('fixture failed'))
+    else f.apiCall.mockResolvedValueOnce({ status_code: 200, body: '{"models":[]}' })
+    const before = await f.readProvider()
+    await expect(f.refresh()).rejects.toThrow('Model list')
+    expect(await f.readProvider()).toEqual(before)
+    expect(f.release).toHaveBeenCalledOnce()
+  })
+
+  it.each(['known-expiry', 'router-requires-sign-in', 'missing-credential'] as const)('requires sign-in and preserves the saved directory for %s', async mode => {
+    const f = await refreshFixture(mode !== 'missing-credential')
+    if (mode === 'known-expiry') await f.accounts.markNeedsSignIn(f.provider.id)
+    if (mode === 'router-requires-sign-in') f.credentials.mockResolvedValueOnce([
+      { name: 'fixture.json', id: 'fixture', auth_index: 'fixture-index', provider: 'codex', requires_sign_in: true }
+    ])
+    const before = await f.readProvider()
+    await expect(f.refresh()).rejects.toMatchObject({ providerFailure: { status: 'needs-sign-in' } })
+    expect(await f.readProvider()).toEqual(before)
+    expect((await f.accounts.snapshot()).providers['claude-code'].find(row => row.id === f.provider.id)?.subscription?.account.status).toBe('needs-sign-in')
+    expect(f.apiCall).not.toHaveBeenCalled()
+    if (mode !== 'router-requires-sign-in') expect(f.acquire).not.toHaveBeenCalled()
+  })
+
+  it('provides a router-specific failure and keeps the previous directory', async () => {
+    const f = await refreshFixture()
+    f.acquire.mockRejectedValueOnce(new Error('Model router is not running'))
+    const before = await f.readProvider()
+    await expect(f.refresh()).rejects.toMatchObject({ providerFailure: { status: 'router-start-failed' } })
+    expect(await f.readProvider()).toEqual(before)
+    expect(f.apiCall).not.toHaveBeenCalled()
+  })
+
+  it('does not persist a model list after the request deadline', async () => {
+    const f = await refreshFixture()
+    const before = await f.readProvider()
+    await expect(f.refresh(() => true)).rejects.toThrow('cancelled')
+    expect(await f.readProvider()).toEqual(before)
+  })
+
+  it('keeps the fresh directory when an earlier settings quota read finishes later', async () => {
+    const f = await refreshFixture()
+    let finishQuota!: () => void
+    const quota = new Promise<void>(resolve => { finishQuota = resolve })
+    const readModels = f.apiCall.getMockImplementation()!
+    f.apiCall.mockImplementation(async (...args) => {
+      if (args[0] !== 'chatgpt-usage') return readModels(...args)
+      await quota
+      return { status_code: 200, body: '{}' }
+    })
+    const settings = f.connection.settings()
+    try {
+      await vi.waitFor(() => expect(f.apiCall).toHaveBeenCalledWith('chatgpt-usage', expect.anything()))
+      const refreshed = await f.refresh()
+      finishQuota()
+      expect((await settings).accounts[f.provider.id]?.models).toEqual(refreshed.details.models)
+      expect((await f.readProvider())?.subscription?.modelMetadata).toEqual(refreshed.details.models)
+    } finally { finishQuota() }
+  })
+
+  it('can initialize with a preserved mapping that points to a retired model', async () => {
+    const f = await refreshFixture()
+    await f.refresh()
+    await f.accounts.initialize()
+    expect(f.rememberModelAliases).not.toHaveBeenCalled()
+    expect(f.setAliases).not.toHaveBeenCalled()
+    expect((await f.readProvider())?.modelMapping).toEqual(modelMapping)
+    expect((await f.connection.settings()).accounts[f.provider.id]?.models).toContainEqual(expect.objectContaining({ id: 'new' }))
+  })
+
+  it('does not extend the freshness of the existing quota cache', async () => {
+    const ttl = 300_000
+    const f = await refreshFixture(true, ttl)
+    let now = Date.now()
+    vi.spyOn(Date, 'now').mockImplementation(() => now)
+    await f.connection.settings()
+    await f.connection.closeSettings()
+
+    now += ttl
+    await f.refresh()
+    await f.connection.settings()
+    expect(f.apiCall.mock.calls.map(([probe]) => probe)).toEqual(['chatgpt-usage', 'chatgpt-models', 'chatgpt-usage'])
+  })
+})
+
 /** Accepted test boundary (#8): only successful OAuth exchange/result is
  * simulated. Official auth-url/callback handling, credential upload/adoption,
  * fields/status/models/aliases and api-call all execute in the pinned binary.
@@ -215,6 +355,24 @@ describe.runIf(process.env.MATOU_TEST_MODEL_ROUTER === '1')('subscription adopti
     const reopened = await f.connection.settings()
     expect(reopened.accounts[saved.id]?.quota?.[0]?.usedPercent).toBe(25)
     expect(f.probes).toHaveLength(reads)
+  }, 30000)
+  it('refreshes the saved catalog through the engine without opening OAuth or rereading quota', async () => {
+    const f = await fixture(), saved = await f.save(await f.login())
+    const previous = await f.connection.settings(), probeCount = f.probes.length
+    expect(previous.accounts[saved.id]?.models.map(model => model.id)).toEqual(['gpt-6.1-sol'])
+    f.setCatalog('large')
+    const updated = await f.connection.refreshModels(saved.id)
+    expect(updated.details.models.map(model => model.id)).toContain('gpt-6-astra')
+    expect(updated.details.quota).toEqual(previous.accounts[saved.id]?.quota)
+    expect(f.probes.slice(probeCount)).toEqual([expect.stringContaining('/codex/models')])
+    expect(f.opened).toHaveLength(1)
+    const row = (await f.store.snapshot()).providers['claude-code'].find(row => row.id === saved.id)
+    expect(row?.subscription?.modelMetadata).toEqual(updated.details.models)
+    expect((await f.connection.settings()).accounts[saved.id]?.models).toEqual(updated.details.models)
+
+    f.setCatalog('failed')
+    await expect(f.connection.refreshModels(saved.id)).rejects.toThrow('Model list could not be read')
+    expect(await f.store.snapshot()).toMatchObject({ revision: updated.snapshot.revision })
   }, 30000)
   it('completes start -> callback -> status ok -> aliases -> adoption -> nonsecret card snapshot, reads settings once and deletes its credential', async () => {
     const f = await fixture({ holdInitialStatus: true, detailsTtlMs: 0 }), attempt = await f.login(), saved = await f.save(attempt)

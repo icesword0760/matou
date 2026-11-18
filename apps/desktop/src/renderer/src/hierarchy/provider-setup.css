@@ -101,6 +101,8 @@
 .provider-result__icon { border-radius: 50%; width: 27px; height: 27px; flex: none; display: grid; place-items: center; color: #fff; background: #3284ed; }
 .provider-result.is-error { background: #fff2f1; border-color: #f1d3cf; }
 .provider-result.is-error .provider-result__icon { background: #bc5550; }
+.hierarchy-shell[data-theme="dark"] .provider-result { background: var(--workspace-accent-soft); border-color: var(--workspace-accent-line); }
+.hierarchy-shell[data-theme="dark"] .provider-result.is-error { background: color-mix(in srgb, #bc5550 20%, transparent); border-color: color-mix(in srgb, #bc5550 48%, transparent); }
 .provider-session-results { list-style: none; padding: 0; max-height: 200px; overflow: auto; }
 .provider-session-results li { display: flex; gap: 10px; justify-content: space-between; padding: 9px 0; border-top: 1px solid #d3e4f5; font-size: 11px; }
 .provider-session-results li span { overflow-wrap: anywhere; }
@@ -175,6 +177,9 @@
 .provider-settings .model-provider--subscription .model-provider__logo { margin-top: 1px; }
 .provider-settings .model-provider--subscription .model-provider__name strong { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; white-space: normal; }
 .provider-settings .model-provider--subscription .model-provider__actions { align-self: start; margin-top: 1px; }
+.provider-settings .model-provider--subscription .model-provider__actions button.model-provider__refresh { border-color: transparent; background: transparent; white-space: nowrap; }
+.provider-settings .model-provider__refresh:hover:not(:disabled) { text-decoration: underline; }
+.provider-settings .model-provider__refresh:disabled { pointer-events: none; }
 .provider-settings .model-provider__status { margin: 0; padding: 2px 5px; border-radius: 999px; color: var(--provider-inline-error-text); background: var(--provider-inline-error-bg); font-size: 8px; font-style: normal; font-weight: 500; line-height: 10px; white-space: nowrap; }
 .provider-settings .model-provider--subscription .model-provider__quota { font-size: 10px; font-variant-numeric: tabular-nums; }
 .provider-settings .model-provider--subscription .model-provider__reason { overflow: visible; white-space: normal; text-overflow: clip; font-size: 10px; line-height: 1.4; }
