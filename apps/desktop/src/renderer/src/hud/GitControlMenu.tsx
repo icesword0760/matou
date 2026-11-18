@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 
 import type {
-  GitCheckoutResult, GitRepositoryStatus, GitWorktreeSummary, RpcMethod
+  GitCheckoutResult, GitRepositoryStatus, GitWorktreeSummary, RpcMethod,
+  SessionEnvironmentIsolateResult, SessionEnvironmentTarget
 } from '@matou/contracts'
 
 import { ConfirmDialog } from '../hierarchy/ConfirmDialog'
@@ -29,6 +30,12 @@ export function GitControlMenu(props: {
   context?: GitControlContext
   dialogLabel?: string
   branchRowsAsButtons?: boolean
+  environmentKind?: SessionEnvironmentTarget
+  hasOwnedWorktree?: boolean
+  sharedWorkingDirectory?: boolean
+  sharedSessionCount?: number
+  onIsolationBusyChange?(busy: boolean): void
+  onIsolated?(branch: string): void
   onClose(): void
 }) {
   const messages = useMessages()
@@ -49,7 +56,9 @@ export function GitControlMenu(props: {
     kind: 'blocked-by-working-tree-changes'
   }>>()
   const [pendingCheckout, setPendingCheckout] = useState('')
+  const [sharedCheckout, setSharedCheckout] = useState('')
   const runningRef = useRef(false)
+  const isolatingRef = useRef(false)
 
   const request = async <T,>(method: RpcMethod, input: Record<string, unknown>): Promise<T> => {
     const commandId = crypto.randomUUID()
@@ -79,6 +88,11 @@ export function GitControlMenu(props: {
       if (event.key !== 'Escape') return
       event.preventDefault()
       event.stopPropagation()
+      if (isolatingRef.current) return
+      if (sharedCheckout) {
+        setSharedCheckout('')
+        return
+      }
       setWorktreeMenuPath('')
       if (view === 'branches') props.onClose()
       else if (view === 'create-worktree') setView('worktrees')
@@ -86,7 +100,7 @@ export function GitControlMenu(props: {
     }
     window.addEventListener('keydown', onEscape)
     return () => window.removeEventListener('keydown', onEscape)
-  }, [view, props.onClose])
+  }, [view, props.onClose, sharedCheckout])
 
   const run = async (label: string, action: () => Promise<GitRepositoryStatus | void>) => {
     if (runningRef.current) return
@@ -102,16 +116,54 @@ export function GitControlMenu(props: {
       setBusy('')
     }
   }
-  const checkout = async (branch: string) => run(m.switchingBranch, async () => {
-    const result = await request<GitCheckoutResult>('git.checkout', { cwd: props.cwd, branch })
-    if (result.kind === 'blocked-by-working-tree-changes') {
-      setBlocked(result)
-      return result.status
+  const checkoutBranch = (branch: string) =>
+    request<GitCheckoutResult>('git.checkout', { cwd: props.cwd, branch })
+  const requestCheckout = (branch: string, { skipPrompt = false } = {}) => {
+    if (runningRef.current || !status?.branches.some((entry) =>
+      entry.name === branch && !entry.current && !entry.checkedOutPath
+    )) return
+    if (!skipPrompt && props.environmentKind === 'local' && !props.hasOwnedWorktree &&
+        props.sharedWorkingDirectory && (props.sharedSessionCount ?? 0) > 1) {
+      setSharedCheckout(branch)
+      return
     }
-    setNotice(m.switchedToBranch(branch))
-    props.onClose()
-    return result.status
-  })
+    setSharedCheckout('')
+    void run(m.switchingBranch, async () => {
+      const result = await checkoutBranch(branch)
+      if (result.kind === 'blocked-by-working-tree-changes') {
+        setBlocked(result)
+        return result.status
+      }
+      setNotice(m.switchedToBranch(branch))
+      props.onClose()
+      return result.status
+    })
+  }
+  const isolate = (branch: string) => {
+    if (runningRef.current) return
+    setSharedCheckout('')
+    isolatingRef.current = true
+    props.onIsolationBusyChange?.(true)
+    void run(m.creatingIsolatedWorktree, async () => {
+      try {
+        const result = await request<SessionEnvironmentIsolateResult>('session.environment-isolate', {
+          sessionId: props.sessionId, branch
+        })
+        if (result.kind === 'rejected') {
+          setError(result.message || m.isolatedWorktreeFailed)
+          return result.status
+        }
+        props.onIsolated?.(result.status.currentBranch ?? branch)
+        props.onClose()
+        return result.status
+      } catch (reason) {
+        setError(reason instanceof Error && reason.message ? reason.message : m.isolatedWorktreeFailed)
+      }
+    }).finally(() => {
+      isolatingRef.current = false
+      props.onIsolationBusyChange?.(false)
+    })
+  }
   const commit = async (thenPush = false) => run(thenPush ? m.committingAndPushing : m.committing, async () => {
     if (!status) return
     let checkoutStillBlocked = false
@@ -125,7 +177,7 @@ export function GitControlMenu(props: {
     if (pendingCheckout) {
       const target = pendingCheckout
       setPendingCheckout('')
-      const result = await request<GitCheckoutResult>('git.checkout', { cwd: props.cwd, branch: target })
+      const result = await checkoutBranch(target)
       next = result.status
       if (result.kind === 'blocked-by-working-tree-changes') {
         checkoutStillBlocked = true
@@ -160,7 +212,7 @@ export function GitControlMenu(props: {
 
   return <>
     <div className="git-menu-overlay" onPointerDown={(event) => {
-      if (event.currentTarget === event.target) props.onClose()
+      if (!isolatingRef.current && event.currentTarget === event.target) props.onClose()
     }}>
       <section className="git-control-menu" role="dialog" aria-label={props.dialogLabel ?? m.gitControl}>
         {!status && !error && <div className="git-control-menu__empty">{m.readingRepository}</div>}
@@ -172,8 +224,8 @@ export function GitControlMenu(props: {
               onKeyDown={(event) => {
                 if (event.key === 'ArrowDown') { event.preventDefault(); selectBranchByKeyboard(1) }
                 if (event.key === 'ArrowUp') { event.preventDefault(); selectBranchByKeyboard(-1) }
-                if (event.key === 'Enter' && selectedBranch && !selectedBranch.current && !selectedBranch.checkedOutPath) {
-                  event.preventDefault(); void checkout(selectedBranch.name)
+                if (event.key === 'Enter' && selectedBranch) {
+                  event.preventDefault(); requestCheckout(selectedBranch.name)
                 }
               }}
               placeholder={m.searchBranchesPlaceholder} autoFocus />
@@ -185,13 +237,10 @@ export function GitControlMenu(props: {
             {branches.map((branch, index) => <button type="button"
               {...(props.branchRowsAsButtons ? {} : { role: 'option', 'aria-selected': branch.current })}
               className={`git-branch-row${branch.current ? ' is-current' : ''}${selectedBranchIndex === index ? ' is-keyboard' : ''}`}
-              key={branch.name} disabled={Boolean(busy)}
+              key={branch.name} disabled={Boolean(busy) || (!branch.current && Boolean(branch.checkedOutPath))}
               title={branch.checkedOutPath && !branch.current ? m.branchCheckedOutAt(branch.checkedOutPath) : undefined}
               onPointerMove={() => setSelectedBranchIndex(index)}
-              onClick={() => {
-                if (branch.current || branch.checkedOutPath) return
-                void checkout(branch.name)
-              }}>
+              onClick={() => requestCheckout(branch.name)}>
               <BranchIcon />
               <span className="git-branch-copy"><strong>{branch.name}</strong>
                 {branch.current && pendingFiles > 0 && <small>{m.uncommittedFiles(pendingFiles, pendingFiles.toLocaleString(locale))}</small>}
@@ -202,9 +251,9 @@ export function GitControlMenu(props: {
             {branches.length === 0 && <div className="git-list-empty">{m.noMatchingBranches}</div>}
           </div>
           <div className="git-picker-actions">
-            <button type="button" onClick={() => showView('create-branch')}><PlusIcon /><span>{m.createBranchAction}</span></button>
-            <button type="button" aria-label={`${m.manageWorktrees} ${additionalWorktreeCount}`} onClick={() => showView('worktrees')}><WorktreeIcon /><span>{m.manageWorktrees}</span>{additionalWorktreeCount > 0 && <small>{additionalWorktreeCount}</small>}</button>
-            <button type="button" aria-label={m.commitAndPushAction} onClick={() => showView('commit')}><CommitIcon /><span>{m.commitAndPushAction}</span>{pendingFiles > 0 && <small>{pendingFiles.toLocaleString(locale)}</small>}</button>
+            <button type="button" disabled={Boolean(busy)} onClick={() => showView('create-branch')}><PlusIcon /><span>{m.createBranchAction}</span></button>
+            <button type="button" disabled={Boolean(busy)} aria-label={`${m.manageWorktrees} ${additionalWorktreeCount}`} onClick={() => showView('worktrees')}><WorktreeIcon /><span>{m.manageWorktrees}</span>{additionalWorktreeCount > 0 && <small>{additionalWorktreeCount}</small>}</button>
+            <button type="button" disabled={Boolean(busy)} aria-label={m.commitAndPushAction} onClick={() => showView('commit')}><CommitIcon /><span>{m.commitAndPushAction}</span>{pendingFiles > 0 && <small>{pendingFiles.toLocaleString(locale)}</small>}</button>
           </div>
         </div>}
 
@@ -313,10 +362,21 @@ export function GitControlMenu(props: {
 
         {(busy || notice || error) && <footer className={`git-control-menu__feedback${error ? ' is-error' : ''}`} role="status">
           {error || busy || notice}
-          {!busy && <button onClick={() => { setError(''); setNotice(''); void refresh() }}>{m.refresh}</button>}
+          {!busy && <button onClick={() => void run(m.readingRepository, refresh)}>{m.refresh}</button>}
         </footer>}
       </section>
     </div>
+    {sharedCheckout && <ConfirmDialog
+      title={m.sharedCheckoutTitle}
+      body={<>
+        <p>{m.sharedCheckoutBody((props.sharedSessionCount ?? 1) - 1, compactPath(props.cwd), sharedCheckout)}</p>
+        <p>{m.sharedCheckoutIsolationBody}</p>
+        {pendingFiles > 0 && <p>{m.sharedCheckoutDirty(pendingFiles)}</p>}
+      </>}
+      confirmLabel={m.isolateAndCheckout}
+      secondaryAction={{ label: m.checkoutWholeDirectory, onSelect: () => requestCheckout(sharedCheckout, { skipPrompt: true }) }}
+      onCancel={() => setSharedCheckout('')}
+      onConfirm={() => isolate(sharedCheckout)} />}
     {blocked && <ConfirmDialog title={m.checkoutBlockedTitle}
       body={m.checkoutBlockedBody(blocked.conflictingPaths.length, blocked.targetBranch)}
       confirmLabel={m.writeCommitMessage} onCancel={() => setBlocked(undefined)} onConfirm={() => {

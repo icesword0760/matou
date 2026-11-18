@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { realpath } from 'node:fs/promises'
+import { access, realpath } from 'node:fs/promises'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 import { promisify } from 'node:util'
 
@@ -154,6 +154,35 @@ export class GitWorkspaceService {
       now: input.now
     })
     return this.status(repositoryRoot)
+  }
+
+  async createWorktreeForExistingBranch(
+    command: DomainCommandMetadata,
+    input: { workspaceId: string; repositoryRoot: string; branch: string; now: number }
+  ): Promise<{ id: string; path: string; branch: string; executionContextId: string }> {
+    const worktrees = this.#requireWorktrees()
+    const id = randomUUID()
+    const path = join(this.#requireDataRoot(), 'worktrees', input.workspaceId, id)
+    const branch = requiredBranch(input.branch)
+    try {
+      return await worktrees.create(command, {
+        ...input,
+        id, path, branch,
+        executionContextId: randomUUID(),
+        branchMode: 'checkout-existing',
+        baseRef: branch,
+        setupPolicy: []
+      })
+    } catch (error) {
+      // Only try to remove the new path. Leave any retained or failed
+      // checkout visible in Worktree management.
+      if (worktrees.get(id) && await access(path).then(() => true, () => false)) {
+        await worktrees.remove({
+          ...command, commandId: `${command.commandId}:cleanup`
+        }, id, input.now).catch(() => undefined)
+      }
+      throw error
+    }
   }
 
   async ensureWorktreeContext(

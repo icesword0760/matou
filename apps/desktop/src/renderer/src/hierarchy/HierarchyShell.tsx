@@ -1392,6 +1392,10 @@ function HierarchyProduct({
                         ? { environment: activeEnvironment }
                         : {})}
                       hasOwnedWorktree={activeGraphFocused?.hasOwnedWorktree === true}
+                      sharedWorkingDirectory={activeGraphFocused?.sharedWorkingDirectory === true}
+                      {...(activeGraphFocused?.sharedSessionCount === undefined ? {} : {
+                        sharedSessionCount: activeGraphFocused.sharedSessionCount
+                      })}
                       {...(activeGraphFocused?.git ? { git: activeGraphFocused.git } : {})}
                       environmentActions={environmentActions}
                       onPermissionMode={commands.setPermissionMode}

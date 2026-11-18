@@ -353,6 +353,8 @@ interface SessionGraphNodeBase {
   hasOwnedWorktree?: boolean
   git?: SessionGitState
   sharedWorkingDirectory?: boolean
+  /** Number of unarchived sessions in this Workspace using the same cwd. */
+  sharedSessionCount?: number
   worktree?: {
     branch: string
     path: string

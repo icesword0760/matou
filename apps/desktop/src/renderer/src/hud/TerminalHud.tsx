@@ -50,6 +50,8 @@ export function TerminalHud(props: {
   environment?: SessionEnvironment
   git?: SessionGitState
   hasOwnedWorktree?: boolean
+  sharedWorkingDirectory?: boolean
+  sharedSessionCount?: number
   environmentActions?: SessionEnvironmentActions
 }) {
   const { hud } = props
@@ -97,18 +99,27 @@ export function TerminalHud(props: {
   const [switching, setSwitching] = useState(false)
   const [switchError, setSwitchError] = useState('')
   const [gitOpen, setGitOpen] = useState(false)
+  const [gitIsolatingSessionId, setGitIsolatingSessionId] = useState<string>()
+  const [gitNotice, setGitNotice] = useState<{ sessionId: string; branch: string }>()
   const [environmentOpen, setEnvironmentOpen] = useState(false)
   const [instructionsOpen, setInstructionsOpen] = useState(false)
   const rootRef = useRef<HTMLDivElement>(null)
+  const sessionId = hud?.sessionId ?? props.sessionId
+  const gitIsolating = gitIsolatingSessionId !== undefined && gitIsolatingSessionId === sessionId
 
   useEffect(() => setPermissionMode(hud?.permissionMode ?? 'default'), [hud?.sessionId, hud?.permissionMode])
+  useEffect(() => {
+    if (!gitNotice) return
+    const timer = window.setTimeout(() => setGitNotice(undefined), 3500)
+    return () => window.clearTimeout(timer)
+  }, [gitNotice])
   useEffect(() => {
     if (!disabled) return
     setMenu(null)
     setConfirmTarget(null)
-    setGitOpen(false)
+    if (!gitIsolating) setGitOpen(false)
     setInstructionsOpen(false)
-  }, [disabled])
+  }, [disabled, gitIsolating])
   useEffect(() => {
     const closeOutside = (event: Event) => {
       const target = event.target
@@ -131,7 +142,6 @@ export function TerminalHud(props: {
     }
   }, [menu, environmentOpen])
 
-  const sessionId = hud?.sessionId ?? props.sessionId
   if (!sessionId || (!hud && !props.environment && !props.git)) return null
   const agents = hud ? agentDisplay(hud) : { count: 0, items: [] }
   const shortCwd = cwdShortName(hud?.cwd)
@@ -139,7 +149,7 @@ export function TerminalHud(props: {
     ? legacyGitState(hud)
     : props.git ?? (props.environment ? { state: 'unavailable' as const, dirty: false } : undefined)
   const gitDisplay = git ? gitStateLabel(git, m) : ''
-  const gitCwd = props.environment?.state === 'ready' ? props.environment.path : hud?.cwd
+  const gitCwd = props.environment?.state === 'ready' || gitIsolating ? props.environment?.path ?? hud?.cwd : hud?.cwd
   const permissionTitle = m.permissionSwitch(m.permission[permissionMode])
   const openPermissionMenu = (event: React.MouseEvent<HTMLElement>) => {
     if (disabled || switching || !props.onPermissionMode) return
@@ -268,6 +278,9 @@ export function TerminalHud(props: {
         }).finally(() => setSwitching(false))
       }} />, document.body)}
     {switchError && createPortal(<div className="terminal-toast is-error" role="status">{switchError}</div>, document.body)}
+    {gitNotice?.sessionId === sessionId && createPortal(
+      <div className="terminal-toast" role="status">{m.isolatedWorktreeSwitched(gitNotice.branch)}</div>, document.body
+    )}
     {environmentOpen && props.environment && props.environmentActions && createPortal(
       <EnvironmentControlMenu sessionId={sessionId} environment={props.environment}
         hasOwnedWorktree={props.hasOwnedWorktree === true} actions={props.environmentActions}
@@ -276,9 +289,16 @@ export function TerminalHud(props: {
           : {})}
         onClose={() => setEnvironmentOpen(false)} />, document.body
     )}
-    {gitOpen && !disabled && git?.state === 'ready' && gitClient && gitCwd && createPortal(<GitControlMenu client={gitClient}
+    {gitOpen && (gitIsolating || (!disabled && git?.state === 'ready')) && gitClient && gitCwd && createPortal(
+      <GitControlMenu key={sessionId} client={gitClient}
       cwd={gitCwd} sessionId={sessionId} {...(props.gitContext ? { context: props.gitContext } : {})}
+      {...(props.environment ? { environmentKind: props.environment.kind } : {})}
+      hasOwnedWorktree={props.hasOwnedWorktree === true}
+      sharedWorkingDirectory={props.sharedWorkingDirectory === true}
+      {...(props.sharedSessionCount === undefined ? {} : { sharedSessionCount: props.sharedSessionCount })}
       dialogLabel={m.gitMenu} branchRowsAsButtons
+      onIsolationBusyChange={(busy) => setGitIsolatingSessionId((id) => busy ? sessionId : id === sessionId ? undefined : id)}
+      onIsolated={(branch) => setGitNotice({ sessionId, branch })}
       onClose={() => setGitOpen(false)} />, document.body)}
     {instructionsOpen && gitClient && createPortal(<InstructionFileDialog client={gitClient}
       sessionId={sessionId} label={instructionButtonLabel ?? 'ClaudeMd'} readOnly={disabled} onClose={() => setInstructionsOpen(false)} />, document.body)}

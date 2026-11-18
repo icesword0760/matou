@@ -99,6 +99,7 @@ import type {
 import { SessionRepository, type ProviderPermissionMode } from './domain/session-repository'
 import { SessionEnvironmentRepository } from './session/session-environment-repository'
 import { SessionEnvironmentService } from './session/session-environment-service'
+import { GitWorkspaceService } from './git/git-workspace-service'
 import { DomainTransactionManager } from './storage/domain-transaction'
 import type { RuntimeDatabase } from './storage/database'
 import { StorageReadOnlyError } from './storage/database'
@@ -342,6 +343,7 @@ export class RuntimeServer {
   readonly #sessionRepository: SessionRepository
   readonly #forkIntents: SessionForkIntentRepository
   readonly #gitStates: SessionGitStateRepository
+  readonly #gitWorkspace: GitWorkspaceService
   readonly #environments: SessionEnvironmentRepository
   readonly #environmentService: SessionEnvironmentService
   readonly #worktreeHealth: WorktreeHealthService
@@ -448,6 +450,7 @@ export class RuntimeServer {
     this.#sessionRepository = new SessionRepository(database, new DomainTransactionManager(database))
     this.#forkIntents = new SessionForkIntentRepository(database)
     this.#gitStates = new SessionGitStateRepository(database)
+    this.#gitWorkspace = new GitWorkspaceService({ database, dataRoot })
     this.#environments = new SessionEnvironmentRepository(database)
     this.#worktreeHealth = new WorktreeHealthService()
     const worktrees = new WorktreeService(database, transactions, {
@@ -1534,8 +1537,57 @@ export class RuntimeServer {
         }
         return this.#environmentService.handoff({ sessionId, target: input.target, now })
       }
+      if (method === 'session.environment-isolate') {
+        if (typeof input.branch !== 'string' || !input.branch.trim()) {
+          throw new RpcFault('INVALID_REQUEST', 'branch is required')
+        }
+        const previous = this.#sessionRepository.getSession(sessionId)
+        const result = await this.#environmentService.isolate(this.#gitWorkspace, {
+          sessionId, branch: input.branch.trim(), now,
+          resumeSession: (id, target) => this.#resumeAfterEnvironmentTransition(id, target === 'worktree')
+        })
+        if (result.kind === 'switched') {
+          const contextId = result.environment.environment.kind === 'worktree'
+            ? result.environment.environment.worktreeExecutionContextId : undefined
+          if (contextId) await this.#gitStates.refresh(contextId).catch(() => undefined)
+          await RuntimeServer.#refreshAttachedSessionHud(sessionId)
+          if (previous) this.#publishIsolatedEnvironment(sessionId, previous.cwd, now)
+        }
+        return result
+      }
       throw new RpcFault('INVALID_REQUEST', `unsupported environment method ${method}`)
     })
+  }
+
+  #publishIsolatedEnvironment(sessionId: string, previousCwd: string, now: number): void {
+    const session = this.#sessionRepository.getSession(sessionId)
+    const workspaceId = this.#environments.getActiveWorkspaceId(sessionId)
+    if (!session || !workspaceId) return
+    const commandId = randomUUID()
+    this.#transactions.execute({
+      commandId, commandType: 'session.environment-isolated', requestHash: commandId
+    }, ({ tx, emit }) => {
+      const scenes = tx.all<{ scene_id: string }>(
+        `SELECT DISTINCT membership.scene_id
+         FROM session_canvas_memberships AS membership
+         JOIN sessions ON sessions.id = membership.session_id
+         JOIN tasks ON tasks.id = sessions.task_id
+         WHERE tasks.workspace_id = ? AND sessions.archived_at IS NULL
+           AND (sessions.id = ? OR sessions.cwd = ?)`,
+        workspaceId, sessionId, previousCwd
+      )
+      for (const { scene_id: sceneId } of scenes) {
+        emit({
+          eventId: `${commandId}:${sceneId}`,
+          eventType: 'session.environment-isolated',
+          aggregateType: 'session', aggregateId: sessionId, sessionId, workspaceId,
+          occurredAt: now,
+          payload: { session, graph: projectSceneGraphFrom(tx, sceneId) }
+        })
+      }
+      return null
+    })
+    RuntimeServer.#flushSemanticEventsForAll()
   }
 
   async #replay(message: Extract<RendererMessage, { type: 'terminal.replay-request' }>): Promise<void> {
@@ -3599,7 +3651,7 @@ export class RuntimeServer {
     this.publishSessionHud(sessionId)
   }
 
-  async #resumeAfterEnvironmentTransition(sessionId: string): Promise<void> {
+  async #resumeAfterEnvironmentTransition(sessionId: string, requireStarted = false): Promise<void> {
     const descriptor = this.#environmentResumeDescriptors.get(sessionId)
     if (!descriptor) return
     const authority = this.#database.get<{
@@ -3616,6 +3668,9 @@ export class RuntimeServer {
       profile: authority.kind === 'agent-team-member' ? 'claude-code' : authority.kind,
       spawnRevision: (descriptor.spawnRevision ?? 0) + 1
     })
+    if (requireStarted && this.#sessions.get(sessionId)?.executionContextId !== authority.execution_context_id) {
+      throw new Error(runtimeMessages().git.worktreeRestartFailed)
+    }
     this.#environmentResumeDescriptors.delete(sessionId)
   }
 
@@ -4665,7 +4720,8 @@ function isSessionEnvironmentRpc(method: RpcMethod): boolean {
   return method === 'session.environment-open' ||
     method === 'session.environment-restore' ||
     method === 'session.environment-locate' ||
-    method === 'session.environment-handoff'
+    method === 'session.environment-handoff' ||
+    method === 'session.environment-isolate'
 }
 
 type EgressRpcMethod = Extract<
