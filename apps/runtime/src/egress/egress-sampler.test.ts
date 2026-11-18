@@ -634,7 +634,7 @@ describe('Google sampling', () => {
       host: 'www.cloudflare.com', ip: '203.0.113.20', country: 'US'
     })
     expect(request.mock.calls).toEqual([[
-      'https://www.cloudflare.com/cdn-cgi/trace', 'http://127.0.0.1:7890', 5000
+      'https://www.cloudflare.com/cdn-cgi/trace', 'http://127.0.0.1:7890', 10_000
     ]])
   })
 

@@ -322,4 +322,33 @@ describe('EgressPanel', () => {
     )
     expect(screen.getByRole('heading', { name: 'Claude (ChatGPT subscription)' })).toBeTruthy()
   })
+
+  it('distinguishes unreachable, invalid, timeout with host, and slow passing checks', () => {
+    const base = buildSampleStatus()
+    const status = buildSampleStatus({
+      families: [{ ...base.families[0]!, state: 'unknown' }],
+      checks: [
+        { id: 'mainland', family: 'anthropic', result: 'unknown', facts: { error: 'unreachable', host: 'api.anthropic.com' } },
+        { id: 'exit-rule', family: 'anthropic', result: 'unknown', facts: { error: 'invalid', host: 'api.anthropic.com' } },
+        { id: 'login-api-match', family: 'anthropic', result: 'unknown', facts: { error: 'timeout', host: 'chatgpt.com' } },
+        { id: 'exit-rule', family: 'openai', result: 'pass', facts: { slowHost: 'chatgpt.com' } }
+      ]
+    })
+    render(
+      <LocaleProvider initialLocale="zh-CN">
+        <EgressPanel
+          status={status}
+          onClose={vi.fn()}
+          onRecheck={vi.fn()}
+          onSetRule={vi.fn()}
+          onAcceptCurrent={vi.fn()}
+          onSetProtection={vi.fn()}
+        />
+      </LocaleProvider>
+    )
+    expect(screen.getByText('无法确认（api.anthropic.com 连不上）')).toBeTruthy()
+    expect(screen.getByText('无法确认（api.anthropic.com 返回异常）')).toBeTruthy()
+    expect(screen.getByText('无法确认（chatgpt.com 检测超时）')).toBeTruthy()
+    expect(screen.getByText('chatgpt.com 响应慢（>5 秒）')).toBeTruthy()
+  })
 })

@@ -23,6 +23,8 @@ export interface EgressHostSample {
   notApplicable?: true
   ip?: string
   country?: string
+  /** True when the probe succeeded but took longer than 5 seconds. */
+  slow?: true
   error?: EgressHostError
 }
 

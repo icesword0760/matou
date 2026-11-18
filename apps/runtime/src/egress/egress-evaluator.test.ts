@@ -220,7 +220,8 @@ describe('evaluateEgress', () => {
     ).toEqual({
       id: 'login-api-match',
       family: 'openai',
-      result: 'unknown'
+      result: 'unknown',
+      facts: { error: 'invalid', host: 'chatgpt.com' }
     })
   })
 
@@ -333,4 +334,34 @@ describe('provider login checks', () => {
       expect(evaluate().families[0]).toMatchObject({ state: 'abnormal', violation: 'mainland' })
     }
   )
+
+  it('records host/error facts on unknown checks and slowHost on slow passing checks', () => {
+    const sample = makeBaseSample({
+      hosts: {
+        openai: {
+          api: { host: 'api.openai.com', ip: '5.34.216.82', country: 'US' },
+          login: { host: 'chatgpt.com', error: 'unreachable' }
+        },
+        'chatgpt-subscription': {
+          api: { host: 'chatgpt.com', ip: '5.34.216.82', country: 'US', slow: true },
+          login: { host: 'auth.openai.com', ip: '5.34.216.82', country: 'US' }
+        }
+      }
+    })
+    const result = evaluateEgress(sample, { mode: 'country', baselines: {} })
+    expect(result.checks.find((c) => c.family === 'openai' && c.id === 'login-api-match')).toEqual({
+      id: 'login-api-match',
+      family: 'openai',
+      result: 'unknown',
+      facts: { error: 'unreachable', host: 'chatgpt.com' }
+    })
+    expect(
+      result.checks.find((c) => c.family === 'chatgpt-subscription' && c.id === 'exit-rule')
+    ).toEqual({
+      id: 'exit-rule',
+      family: 'chatgpt-subscription',
+      result: 'pass',
+      facts: { slowHost: 'chatgpt.com' }
+    })
+  })
 })
