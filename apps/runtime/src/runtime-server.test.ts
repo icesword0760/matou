@@ -2471,6 +2471,62 @@ sleep 30
     })
   })
 
+  it('isolates two simultaneous requests to one new Worktree and restarts only the requested PTY', async () => {
+    const repository = join(root, 'isolation-repository')
+    const branch = 'feature/isolation'
+    await execFileAsync('git', ['init', '-b', 'main', repository])
+    await execFileAsync('git', ['-C', repository, 'config', 'user.name', 'Matou Test'])
+    await execFileAsync('git', ['-C', repository, 'config', 'user.email', 'matou@example.test'])
+    await writeFile(join(repository, 'README.md'), 'original\n')
+    await execFileAsync('git', ['-C', repository, 'add', 'README.md'])
+    await execFileAsync('git', ['-C', repository, 'commit', '-m', 'initial'])
+    await execFileAsync('git', ['-C', repository, 'branch', branch])
+    await writeFile(join(repository, 'README.md'), 'local edits\n')
+    database.run("UPDATE execution_contexts SET cwd = ? WHERE id = 'replay-context'", repository)
+    database.run("UPDATE workspaces SET root_directory = ? WHERE id = 'replay-workspace'", repository)
+    const sessionIds = ['isolate-current', 'isolate-peer']
+    for (const sessionId of sessionIds) {
+      registerCanvasSession(database, sessionId)
+      database.run('UPDATE sessions SET cwd = ? WHERE id = ?', repository, sessionId)
+    }
+    const previousShell = process.env.SHELL
+    process.env.SHELL = '/bin/sh'
+    try {
+      for (const sessionId of sessionIds) {
+        port.receive({
+          type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+          sessionId, executionContextId: 'replay-context', profile: 'shell', cols: 80, rows: 24
+        })
+        await waitUntil(() => port.last('terminal.spawned')?.sessionId === sessionId)
+      }
+      const input = { sessionId: 'isolate-current', branch, cwd: '/ignored-renderer-path', now: Date.now() }
+      port.receive({ ...rpc('isolation', 'session.environment-isolate', input), deadlineAt: Date.now() + 10_000 })
+      port.receive({ ...rpc('isolation-duplicate', 'session.environment-isolate', input), deadlineAt: Date.now() + 10_000 })
+      await waitUntil(() => port.findRpcResponse('isolation-duplicate') !== undefined, 12_000)
+
+      expect(port.findRpcResponse('isolation')).toMatchObject({
+        result: { kind: 'switched', environment: { activeTarget: 'worktree', state: 'ready' }, status: { currentBranch: branch } }
+      })
+      expect(port.findRpcResponse('isolation-duplicate')).toMatchObject({
+        result: { kind: 'rejected', reason: 'environment-not-local' }
+      })
+      const worktree = database.get<{ cwd: string }>("SELECT cwd FROM sessions WHERE id = 'isolate-current'")
+      expect(worktree?.cwd).toContain(join(root, 'worktrees', 'replay-workspace'))
+      expect(await readFile(join(worktree!.cwd, 'README.md'), 'utf8')).toBe('original\n')
+      expect(await readFile(join(repository, 'README.md'), 'utf8')).toBe('local edits\n')
+      expect((await execFileAsync('git', ['-C', repository, 'branch', '--show-current'])).stdout.trim()).toBe('main')
+      expect(database.get("SELECT cwd FROM sessions WHERE id = 'isolate-peer'")).toEqual({ cwd: repository })
+      expect(port.sent.filter((message) => message.type === 'terminal.spawned').map((message) => message.sessionId))
+        .toEqual(['isolate-current', 'isolate-peer', 'isolate-current'])
+      expect(database.get('SELECT COUNT(*) AS count FROM worktrees WHERE branch_name = ?', branch)).toEqual({ count: 1 })
+      expect(database.get(
+        "SELECT COUNT(*) AS count FROM domain_events WHERE event_type = 'session.environment-isolated'"
+      )).toEqual({ count: 2 })
+    } finally {
+      restoreEnv('SHELL', previousShell)
+    }
+  }, 15_000)
+
   it('hands one real PTY from Local to its owned Worktree and keeps the Session identity', async () => {
     const repositoryRoot = join(root, 'handoff-repository')
     const worktreePath = join(root, 'handoff-worktree')

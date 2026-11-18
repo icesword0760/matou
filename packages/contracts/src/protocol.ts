@@ -255,6 +255,7 @@ export const RPC_METHODS = [
   'session.environment-restore',
   'session.environment-locate',
   'session.environment-handoff',
+  'session.environment-isolate',
   'session.archive',
   'relation.create',
   'relation.revoke',

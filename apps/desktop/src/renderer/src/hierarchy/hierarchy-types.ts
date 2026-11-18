@@ -49,6 +49,7 @@ export interface SessionGraphNodeView {
   cwd: string
   git?: SessionGitState
   sharedWorkingDirectory?: boolean
+  sharedSessionCount?: number
   worktree?: { branch: string; path: string; shared: boolean }
   environment?: SessionEnvironment
   hasOwnedWorktree?: boolean

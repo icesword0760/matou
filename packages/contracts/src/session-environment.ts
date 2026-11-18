@@ -1,3 +1,7 @@
+import type { SessionEnvironmentBinding } from '@matou/domain'
+
+import type { GitRepositoryStatus } from './git'
+
 export type SessionEnvironmentTarget = 'local' | 'worktree'
 
 export type SessionEnvironmentLocateReason =
@@ -34,3 +38,19 @@ export interface SessionEnvironmentOpenResult {
   kind: SessionEnvironmentTarget
   path: string
 }
+export type SessionEnvironmentBindingView = SessionEnvironmentBinding
+
+export type SessionEnvironmentIsolateResult =
+  | {
+      kind: 'switched'
+      environment: SessionEnvironmentBindingView
+      status: GitRepositoryStatus
+      worktree: { id: string; path: string; branch: string }
+    }
+  | {
+      kind: 'rejected'
+      reason: 'environment-not-local' | 'branch-checked-out' | 'branch-missing' |
+        'not-a-repository' | 'worktree-create-failed'
+      message?: string
+      status?: GitRepositoryStatus
+    }

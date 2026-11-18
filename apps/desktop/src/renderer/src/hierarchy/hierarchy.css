@@ -511,6 +511,11 @@ body.light-theme .instruction-file-dialog footer button.is-primary { border-colo
 [role="alertdialog"] > p { margin: 0; padding: 8px 24px 24px; color: rgba(255,255,255,.7); font-size: 14px; line-height: 1.6; white-space: pre-line; }
 .dialog-content { padding: 0 24px; color: rgba(255,255,255,.7); font-size: 13px; line-height: 1.5; }
 .dialog-content p { margin: 0 0 12px; }
+.git-shared-checkout-dialog[role="alertdialog"] { width: 540px; }
+.git-shared-checkout-dialog .dialog-content { overflow-wrap: anywhere; }
+.git-shared-checkout-dialog[role="alertdialog"] footer { flex-wrap: wrap; }
+.git-shared-checkout-dialog[role="alertdialog"] footer button { height: auto; min-height: 32px; padding-block: 5px; }
+.git-shared-checkout-dialog footer button:focus-visible { outline: 2px solid #458bd7; outline-offset: 2px; }
 .remove-node-dialog fieldset { display: grid; gap: 8px; margin: 14px 0 12px; padding: 0; border: 0; }
 .remove-node-choice { display: grid; grid-template-columns: 18px minmax(0,1fr); gap: 10px; padding: 12px; border: 1px solid rgba(255,255,255,.1); border-radius: 9px; background: rgba(255,255,255,.025); cursor: pointer; }
 .remove-node-choice.is-selected { border-color: rgba(91,157,233,.8); background: rgba(91,157,233,.1); }

@@ -1,11 +1,12 @@
 import { execFile } from 'node:child_process'
-import { mkdir, mkdtemp, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { GitWorkspaceService } from '../git/git-workspace-service'
 import { RuntimeDatabase } from '../storage/database'
 import { MigrationRunner } from '../storage/migration-runner'
 import { FOUNDATION_MIGRATIONS } from '../storage/migrations'
@@ -92,6 +93,78 @@ afterEach(async () => {
 })
 
 describe('SessionEnvironmentService', () => {
+  it('isolates one session on an existing branch and leaves staged, unstaged and untracked files behind', async () => {
+    const branch = 'feature/isolated'
+    await exec('git', ['-C', repositoryRoot, 'branch', branch])
+    await writeFile(join(repositoryRoot, 'staged.txt'), 'staged')
+    await exec('git', ['-C', repositoryRoot, 'add', 'staged.txt'])
+    await writeFile(join(repositoryRoot, 'README.md'), 'original workspace edit')
+    await writeFile(join(repositoryRoot, 'untracked.txt'), 'untracked')
+    const git = new GitWorkspaceService({ database, dataRoot: root })
+    const before = await git.status(repositoryRoot)
+    const pauseSession = vi.fn(async () => undefined)
+    const resumeSession = vi.fn(async () => undefined)
+    const service = createService({ pauseSession, resumeSession })
+
+    const result = await service.isolate(git, { sessionId: 'first', branch, now: 5 })
+
+    expect(result).toMatchObject({
+      kind: 'switched', environment: { sessionId: 'first', activeTarget: 'worktree', state: 'ready' },
+      status: { currentBranch: branch, dirty: false }
+    })
+    if (result.kind !== 'switched') throw new Error(result.message)
+    expect(environments.get('first')?.environment.path).toBe(result.worktree.path)
+    expect(environments.get('second')?.environment.path).toBe(repositoryRoot)
+    expect(await git.status(repositoryRoot)).toMatchObject({
+      currentBranch: before.currentBranch, stagedCount: 1, unstagedCount: 1, untrackedCount: 1
+    })
+    expect(await readFile(join(repositoryRoot, 'README.md'), 'utf8')).toBe('original workspace edit')
+    expect(await readFile(join(repositoryRoot, 'staged.txt'), 'utf8')).toBe('staged')
+    expect(await readFile(join(repositoryRoot, 'untracked.txt'), 'utf8')).toBe('untracked')
+    expect(await readFile(join(result.worktree.path, 'README.md'), 'utf8')).not.toBe('original workspace edit')
+    expect(pauseSession.mock.calls).toEqual([['first']])
+    expect(resumeSession.mock.calls).toEqual([['first', 'worktree']])
+    await expect(service.isolate(git, { sessionId: 'first', branch, now: 6 }))
+      .resolves.toMatchObject({ kind: 'rejected', reason: 'environment-not-local' })
+  })
+
+  it('rolls back a failed restart, releasing the worktree without rewriting the branch', async () => {
+    const branch = 'feature/failed-restart'
+    await exec('git', ['-C', repositoryRoot, 'branch', branch])
+    const git = new GitWorkspaceService({ database, dataRoot: root })
+    const resumeSession = vi.fn<SessionEnvironmentServiceDependencies['resumeSession']>(
+      async (_sessionId, target) => {
+        if (target === 'worktree') throw new Error('restart failed')
+      }
+    )
+    const service = createService({ resumeSession })
+
+    await expect(service.isolate(git, { sessionId: 'first', branch, now: 5 })).resolves.toMatchObject({
+      kind: 'rejected', reason: 'worktree-create-failed', message: 'restart failed'
+    })
+
+    expect(resumeSession.mock.calls).toEqual([['first', 'worktree'], ['first', 'local']])
+    expect(environments.get('first')).toMatchObject({ activeTarget: 'local', state: 'ready' })
+    expect(environments.get('first')?.managedWorktreeId).toBeUndefined()
+    expect(environments.getTransition('first')).toBeUndefined()
+    const branchStatus = (await git.status(repositoryRoot)).branches.find((row) => row.name === branch)
+    expect(branchStatus).toMatchObject({ name: branch })
+    expect(branchStatus?.checkedOutPath).toBeUndefined()
+    expect(database.get('SELECT state FROM worktrees WHERE branch_name = ?', branch)).toEqual({ state: 'removed' })
+  })
+
+  it('rejects an occupied branch before pausing or binding the session', async () => {
+    const git = new GitWorkspaceService({ database, dataRoot: root })
+    const pauseSession = vi.fn()
+    const service = createService({ pauseSession })
+
+    await expect(service.isolate(git, { sessionId: 'first', branch: 'feature/second', now: 5 }))
+      .resolves.toMatchObject({ kind: 'rejected', reason: 'branch-checked-out' })
+
+    expect(pauseSession).not.toHaveBeenCalled()
+    expect(environments.get('first')?.managedWorktreeId).toBeUndefined()
+  })
+
   it('restores the original owned Worktree identity without creating a second binding', async () => {
     environments.bindOwnedWorktree({
       sessionId: 'first', worktreeId: 'first-worktree', activate: true, now: 2
