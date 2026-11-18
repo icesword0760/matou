@@ -32,6 +32,7 @@ __pycache__/
 # Local tool caches and dev server pid files
 .impeccable/
 .magic-brush/
+.claude/worktrees/
 server.pid
 
 # Short macOS socket aliases for isolated packaged acceptance
