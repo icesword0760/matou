@@ -44,7 +44,7 @@
     }
   ],
   "result": {
-    "pid": 48681,
+    "pid": 53494,
     "results": [
       {
         "role": "OPUS",
@@ -87,20 +87,20 @@
       }
     ]
   },
-  "pid": 48681,
+  "pid": 53494,
   "persisted": {
     "claudeRoleAssignments": {},
     "contextWindows": {
       "anthropic-official": "default",
-      "264b83af-ae48-4146-8ed7-34e08ed87651": "512k",
-      "f5f56d20-e656-48e8-98f6-d801cf01ab65": "default",
-      "5154e878-3429-4ee2-9b84-587aa7f59f9f": "default",
+      "caa7d59b-ba91-4c18-93a2-f32ac4f6c44e": "512k",
+      "6a62f172-7ff7-4e7b-b658-2323012c7d30": "default",
+      "b3372c19-c9ed-4ef5-93e8-31d181af9c78": "default",
       "openai-official": "512k"
     },
     "compaction": {
       "mode": "custom",
       "effort": "follow",
-      "providerId": "264b83af-ae48-4146-8ed7-34e08ed87651",
+      "providerId": "caa7d59b-ba91-4c18-93a2-f32ac4f6c44e",
       "model": "gpt-local"
     }
   }

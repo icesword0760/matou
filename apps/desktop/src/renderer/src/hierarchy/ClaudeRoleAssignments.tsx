@@ -1,47 +1,53 @@
 import { useEffect, useRef, useState } from 'react'
-import type { AgentModelSettingsSnapshot, ClaudeModelRole, ClaudeRoleAssignments as Assignments, ProviderConfigView, SubscriptionAccountDetails } from '@matou/contracts'
+import type { AgentModelSettingsSnapshot, ClaudeModelRole, ClaudeModelTarget, ClaudeRoleAssignments as Assignments, ProviderConfigView, SubscriptionAccountDetails } from '@matou/contracts'
 import type { ProviderConfigClient } from './ModelSwitchSettings'
 import { useLocale } from '../i18n/LocaleProvider'
 import { allocationModels, allocationProblem, CLAUDE_ROLES, defaultAllocationModel } from './claude-role-assignment-options'
 import './claude-role-assignments.css'
 
-const copy = (value: Assignments = {}): Assignments => structuredClone(value)
-const key = (value: Assignments = {}) => JSON.stringify(CLAUDE_ROLES.map(r => value[r] ?? null))
-export function ClaudeRoleAssignments({ client, providers, activeProviderId, snapshot, accounts, loadError, onRetry, onSaved }: {
+type AllocationDraft = Assignments & { webSearch?: ClaudeModelTarget }
+type AllocationRow = ClaudeModelRole | 'webSearch'
+const rows = [...CLAUDE_ROLES, 'webSearch'] as const
+const copy = (value: AllocationDraft = {}): AllocationDraft => structuredClone(value)
+const key = (value: AllocationDraft = {}) => JSON.stringify(rows.map(r => value[r] ?? null))
+const fromSnapshot = (snapshot: AgentModelSettingsSnapshot): AllocationDraft => ({ ...copy(snapshot.preferences.claudeRoleAssignments), ...(snapshot.preferences.claudeWebSearch ? { webSearch: structuredClone(snapshot.preferences.claudeWebSearch) } : {}) })
+export function ClaudeRoleAssignments({ client, providers, activeProviderId, snapshot, accounts, signingInProviderId, onSignIn, loadError, onRetry, onSaved }: {
   client: ProviderConfigClient | null
   providers: readonly ProviderConfigView[]
   activeProviderId?: string | undefined
   snapshot?: AgentModelSettingsSnapshot | undefined
   accounts: Record<string, SubscriptionAccountDetails>
+  signingInProviderId?: string | undefined
+  onSignIn(provider: ProviderConfigView): void
   loadError?: string | undefined
   onRetry(): void
   onSaved(snapshot: AgentModelSettingsSnapshot): void
 }) {
   const zh = useLocale() === 'zh-CN', t = (cn: string, en: string) => zh ? cn : en
-  const [draft, setDraft] = useState<Assignments>()
-  const baseline = useRef<Assignments>({})
-  const [manual, setManual] = useState<Partial<Record<ClaudeModelRole, boolean>>>({})
+  const [draft, setDraft] = useState<AllocationDraft>()
+  const baseline = useRef<AllocationDraft>({})
+  const [manual, setManual] = useState<Partial<Record<AllocationRow, boolean>>>({})
   const [saving, setSaving] = useState(false)
   const savingRef = useRef(false)
   const [saved, setSaved] = useState(false)
   const [saveError, setSaveError] = useState('')
   useEffect(() => {
     if (!snapshot) return
-    const next = copy(snapshot.preferences.claudeRoleAssignments)
+    const next = fromSnapshot(snapshot)
     const previous = baseline.current
     setDraft(current => current === undefined || key(current) === key(previous) ? copy(next) : current)
     baseline.current = next
   }, [snapshot])
-  const change = (role: ClaudeModelRole, value?: {providerId:string;model:string}) => {
+  const change = (role: AllocationRow, value?: ClaudeModelTarget) => {
     setSaved(false);setSaveError('')
     setDraft(current => { const next = copy(current); if(value) next[role]=value;else delete next[role];return next })
   }
-  const mixed = Boolean(draft && Object.keys(draft).length)
-  const problems = CLAUDE_ROLES.map(role => {
-    if (!mixed) return undefined
+  const mixed = CLAUDE_ROLES.some(role => draft?.[role])
+  const problems = rows.map(role => {
+    if (role === 'webSearch' ? !draft?.webSearch : !mixed) return undefined
     const assigned = draft?.[role]
-    const provider = providers.find(p => p.id === (assigned?.providerId ?? activeProviderId))
-    const model = assigned?.model ?? defaultAllocationModel(role, provider, providers, snapshot)?.id ?? ''
+    const provider = providers.find(p => p.id === (assigned?.providerId ?? (role === 'webSearch' ? undefined : activeProviderId)))
+    const model = assigned?.model ?? (role === 'webSearch' ? '' : defaultAllocationModel(role, provider, providers, snapshot)?.id ?? '')
     const problem = allocationProblem(provider, model, snapshot, accounts)
     return !assigned && problem === 'empty' ? 'catalog' : problem
   })
@@ -52,9 +58,10 @@ export function ClaudeRoleAssignments({ client, providers, activeProviderId, sna
     if (!client || !draft || unavailable || invalid || !dirty || savingRef.current) return
     savingRef.current=true;setSaving(true);setSaveError('');setSaved(false)
     try {
-      const result = await client.request('agent-model-settings.patch-assignments',{assignments:copy(draft)}) as AgentModelSettingsSnapshot
+      const { webSearch, ...assignments } = copy(draft)
+      const result = await client.request('agent-model-settings.patch-assignments',{assignments,webSearch:webSearch ?? null}) as AgentModelSettingsSnapshot
       if (!result?.preferences || !Array.isArray(result.providers)) throw new Error('Unconfirmed settings response')
-      baseline.current=copy(result.preferences.claudeRoleAssignments);setDraft(copy(baseline.current));setSaved(true);onSaved(result)
+      baseline.current=fromSnapshot(result);setDraft(copy(baseline.current));setSaved(true);onSaved(result)
     } catch { setSaveError(t('保存未确认，请重试。原选择已保留。','Save was not confirmed. Your selections were kept; please retry.')) }
     finally {savingRef.current=false;setSaving(false)}
   }
@@ -75,30 +82,32 @@ export function ClaudeRoleAssignments({ client, providers, activeProviderId, sna
       {snapshot && !providers.length && <p role="alert">{t('没有可用供应商，请先添加供应商。','No providers are available. Add a provider first.')}</p>}
       <div className="model-allocation__card">
         <div className="model-allocation__head" aria-hidden="true"><span>{t('档位','Tier')}</span><span>{t('供应商 / 账号','Provider / account')}</span><span>{t('模型','Model')}</span></div>
-        {CLAUDE_ROLES.map((role,index) => {
-          const title = role[0]!.toUpperCase()+role.slice(1), assigned=draft?.[role]
-          const provider=providers.find(p=>p.id===(assigned?.providerId ?? activeProviderId))
+        {rows.map((role,index) => {
+          const search = role === 'webSearch'
+          const title = search ? t('网页搜索','Web search') : role[0]!.toUpperCase()+role.slice(1), assigned=draft?.[role]
+          const provider=providers.find(p=>p.id===(assigned?.providerId ?? (search ? undefined : activeProviderId)))
           const models=allocationModels(provider,snapshot), selected=assigned?.model ?? ''
-          const defaultModel=defaultAllocationModel(role,provider,providers,snapshot)
+          const defaultModel=role === 'webSearch' ? undefined : defaultAllocationModel(role,provider,providers,snapshot)
           const problem=problems[index]
           const manualAllowed=provider && !provider.subscription && !provider.builtIn && provider.modelMetadata===undefined
           const manualActive=Boolean(manualAllowed && (manual[role] || selected && !models.some(m=>m.id===selected)))
           const unavailableModel=selected && !models.some(m=>m.id===selected)
-          const account=provider?.subscription?.account ?? accounts[provider?.id ?? '']?.account
+          const account=accounts[provider?.id ?? '']?.account ?? provider?.subscription?.account
+          const signingIn=Boolean(provider && signingInProviderId === provider.id)
           const accountText=account ? [account.email,account.plan,account.status==='ready'?t('已登录','Signed in'):t('需要重新登录','Sign in required')].filter(Boolean).join(' · ') : provider ? provider.endpoint.replace(/^https?:\/\//,'') : ''
           return <div key={role} className={`model-allocation__row${problem?' is-invalid':''}`}>
             <div className="model-allocation__role"><strong>{title}</strong></div>
             <div className="model-allocation__field" data-label={t('供应商 / 账号','Provider / account')}>
               <select id={`${role}-provider`} aria-label={`${title} ${t('供应商','provider')}`} aria-describedby={`${role}-target${problem?` ${role}-error`:''}`} disabled={unavailable || saving} value={assigned?.providerId ?? ''} onChange={e=>{setManual(current=>({...current,[role]:false}));change(role,e.target.value?{providerId:e.target.value,model:''}:undefined)}}>
-                <option value="">{t('沿用默认供应商','Follow default provider')}</option>
+                <option value="">{search ? t('未指定（按档位供应商处理）','Unassigned (use the tier provider)') : t('沿用默认供应商','Follow default provider')}</option>
                 {assigned && !provider && <option value={assigned.providerId}>{assigned.providerId} · {t('不可用','Unavailable')}</option>}
                 {providers.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
               </select>
-              <span className="model-allocation__account">{assigned ? accountText : `${provider?.name ?? t('默认供应商不可用','Default provider unavailable')} · ${t('默认供应商','Default provider')}`}</span>
+              <span className="model-allocation__account">{assigned ? accountText : search ? '' : `${provider?.name ?? t('默认供应商不可用','Default provider unavailable')} · ${t('默认供应商','Default provider')}`}{account?.status==='needs-sign-in' && provider?.subscription && <button type="button" className="provider-link model-allocation__relogin" disabled={signingIn || saving} aria-busy={signingIn} onClick={()=>onSignIn(provider)}>{signingIn ? t('登录中…','Signing in…') : t('重新登录','Sign in again')}</button>}</span>
             </div>
             <div className="model-allocation__field" data-label={t('模型','Model')}>
               <select id={`${role}-model`} aria-label={`${title} ${t('模型','model')}`} aria-invalid={Boolean(problem)} aria-describedby={`${role}-target${problem?` ${role}-error`:''}`} disabled={!assigned || !provider || unavailable || saving} value={!assigned?'':manualActive?'__manual__':selected} onChange={e=>{const value=e.target.value;setManual(current=>({...current,[role]:value==='__manual__'}));if(value!=='__manual__')change(role,{providerId:assigned!.providerId,model:value})}}>
-                {!assigned ? <option value="">{defaultModel?.name ?? t(`${title} 原生默认档位（目录暂不可用）`,`${title} native default (directory unavailable)`)}</option> : <>
+                {!assigned ? <option value="">{search ? t('未指定','Unassigned') : defaultModel?.name ?? t(`${title} 原生默认档位（目录暂不可用）`,`${title} native default (directory unavailable)`)}</option> : <>
                   <option value="">{t('请选择模型','Choose a model')}</option>
                   {unavailableModel && !manualActive && <option value={selected}>{selected} · {t('不可用','Unavailable')}</option>}
                   {models.map(m=><option key={m.id} value={m.id}>{m.name}</option>)}
@@ -107,12 +116,12 @@ export function ClaudeRoleAssignments({ client, providers, activeProviderId, sna
               </select>
               {manualActive && <input aria-label={`${title} ${t('模型 ID','model ID')}`} value={selected} disabled={saving} onChange={e=>change(role,{providerId:assigned!.providerId,model:e.target.value})}/>}
             </div>
-            <p className="model-allocation__target" id={`${role}-target`}>{assigned?t('当前目标：','Current target: '):t('最终：','Effective target: ')}{provider?.name ?? assigned?.providerId ?? '—'} · {assigned ? models.find(m=>m.id===selected)?.name ?? selected : defaultModel?.name ?? t('原生默认档位待确认','Native default tier pending')}</p>
+            <p className="model-allocation__target" id={`${role}-target`}>{search && !assigned ? t('未指定：搜索请求使用当前档位供应商','Unassigned: search requests use the current tier provider') : <>{assigned?t('当前目标：','Current target: '):t('最终：','Effective target: ')}{provider?.name ?? assigned?.providerId ?? '—'} · {assigned ? models.find(m=>m.id===selected)?.name ?? selected : defaultModel?.name ?? t('原生默认档位待确认','Native default tier pending')}</>}</p>
             {problem && <p className="model-allocation__error" id={`${role}-error`} role="alert">{!assigned && `${t('沿用默认：','Default target: ')}${provider?.name ?? '—'} · ${defaultModel?.id || title}。`}{problemCopy(problem)}{!assigned && t('请为此档位重新选择供应商和模型。','Choose another provider and model for this tier.')}{problem==='catalog' && <button type="button" onClick={onRetry}>{t('重试','Retry')}</button>}</p>}
           </div>
         })}
       </div>
-      <p className="model-allocation__privacy">{t('使用指定供应商时，请求所需的对话内容会发送给该供应商。','Conversation content needed for a request is sent to the assigned provider.')}</p>
+      <p className="model-allocation__privacy">{t('使用指定供应商时，请求所需的对话内容会发送给该供应商。搜索请求会连同当前对话内容发送给该供应商。','Conversation content needed for a request is sent to the assigned provider. Search requests include the current conversation content and are sent to that provider.')}</p>
       <div className="model-allocation__footer"><p className="model-allocation__scope">{t('新会话使用此分配，正在运行的会话不受影响','New sessions use these assignments. Running sessions are unaffected.')}</p>
         <div className="model-allocation__actions">
           <button type="button" disabled={!snapshot || saving} onClick={()=>{setDraft({});setManual({});setSaved(false);setSaveError('')}}>{t('恢复默认','Restore defaults')}</button>

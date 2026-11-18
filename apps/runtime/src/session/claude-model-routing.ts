@@ -24,9 +24,13 @@ export interface ClaudeModelRoutingOptions {
 }
 /** Credentials and router leases stay entirely in the runtime process. */
 export function claudeModelRouting(options: ClaudeModelRoutingOptions, env: NodeJS.ProcessEnv) {
-  let target: Promise<{ baseUrl: string; headers: Record<string, string>; model: string; maxOutputTokens?: number; family?: EgressFamily }> | undefined
+  let target: Promise<{ baseUrl: string; headers: Record<string, string>; model: string; maxOutputTokens?: number; family?: EgressFamily; authentication?: NonNullable<GatewayOverride['authentication']> }> | undefined
   let lease: RouterLease | undefined
   let closed = false
+  const authentication = (label: string, provider = options.provider): GatewayOverride['authentication'] => {
+    if (!provider || !provider.subscription && (provider.hasApiKey || provider.endpoint.replace(/\/$/, '') !== 'https://api.anthropic.com')) return undefined
+    return { providerId: provider.id, providerName: provider.name, label }
+  }
   async function prepareTarget() {
     const compact = options.preferences.compaction
     const selected = (await options.store.snapshot()).providers['claude-code'].find(p => p.id === compact.providerId)
@@ -36,7 +40,7 @@ export function claudeModelRouting(options: ClaudeModelRoutingOptions, env: Node
       const prepared = await options.accounts.prepareLaunch(selected.id, 'compaction')
       if (closed) { prepared.lease.release(); throw new Error('Session closed') }
       lease = prepared.lease
-      return { ...(selected.subscription.provider === 'codex' ? {family:'chatgpt-subscription' as const} : {}), baseUrl: lease.connection.baseUrl, headers: { authorization: `Bearer ${lease.connection.clientKey}` },
+      return { authentication: authentication('compaction', selected)!, ...(selected.subscription.provider === 'codex' ? {family:'chatgpt-subscription' as const} : {}), baseUrl: lease.connection.baseUrl, headers: { authorization: `Bearer ${lease.connection.clientKey}` },
         model: `${prepared.input.accountPrefix}/${compact.model.replace(/\[1m\]$/i, '')}`,
         ...(selected.subscription.modelMetadata.find(m => m.id === compact.model)?.maxOutputTokens ? { maxOutputTokens: selected.subscription.modelMetadata.find(m => m.id === compact.model)!.maxOutputTokens! } : {}) }
     }
@@ -48,17 +52,18 @@ export function claudeModelRouting(options: ClaudeModelRoutingOptions, env: Node
     if (!key && !official) throw new Error('Compaction provider requires an API key')
     const headers: Record<string, string> = key ? { 'x-api-key': key } : {}
     const model = official ? (await nativeClaudeModels()).find(m => m.id === compact.model)?.resolvedModel ?? compact.model : compact.model
-    return { baseUrl, headers, model, ...(official ? {family: 'anthropic' as const} : {}) }
+    return { ...(official && !key ? { authentication: authentication('compaction', selected)! } : {}), baseUrl, headers, model, ...(official ? {family: 'anthropic' as const} : {}) }
   }
   return {
-    async resolveOverride(input: { compaction: boolean; model: string; kind?: 'message' | 'count_tokens' }): Promise<GatewayOverride | undefined> {
+    async resolveOverride(input: { compaction: boolean; model: string; webSearch?: boolean; kind?: 'message' | 'count_tokens' }): Promise<GatewayOverride | undefined> {
       if (options.roleSnapshot) {
         const snapshot = options.roleSnapshot
         const role = claudeRequestRole(input.model, snapshot.nativeRoleModels)
         if (closed) throw new GatewayRoutingError('Session model routing is closed')
         if (!role && /^matou-role\//.test(input.model)) throw new GatewayRoutingError('Unknown Claude model role')
         const custom = input.kind !== 'count_tokens' && input.compaction && snapshot.preferences.compaction.mode === 'custom'
-        const selected = custom ? snapshot.compactionTarget : role ? snapshot.roles[role] : undefined
+        const search = !input.compaction && input.webSearch && snapshot.webSearchTarget
+        const selected = custom ? snapshot.compactionTarget : search || (role ? snapshot.roles[role] : undefined)
         if (!selected) {
           if (custom) throw new GatewayRoutingError('Custom compaction target is unavailable')
           const source = options.sourceConnection
@@ -67,14 +72,15 @@ export function claudeModelRouting(options: ClaudeModelRoutingOptions, env: Node
             if (source.kind === 'subscription') source.assertActive()
             const headers = source.kind === 'oauth' ? (await source.readHeaders()).headers : { ...source.headers }
             const family = source.kind === 'oauth' || new URL(source.baseUrl).hostname === 'api.anthropic.com' ? 'anthropic' as const : source.kind === 'subscription' && options.provider?.subscription?.provider === 'codex' ? 'chatgpt-subscription' as const : undefined
-            return { baseUrl: source.baseUrl, headers, model: input.model, ...(source.kind === 'subscription' && source.targetSignal ? { targetSignal: source.targetSignal } : {}), ...(family ? { family } : {}) }
+            return { ...(source.kind === 'api' ? {} : { authentication: authentication(claudeRequestRole(input.model, snapshot.nativeRoleModels) ?? 'main')! }), baseUrl: source.baseUrl, headers, model: input.model, ...(source.kind === 'subscription' && source.targetSignal ? { targetSignal: source.targetSignal } : {}), ...(family ? { family } : {}) }
           } catch (error) { throw new GatewayRoutingError(error instanceof SubscriptionAccountBindingError ? error.message : 'Original supplier account identity is unavailable') }
         }
-        const label = `${role ?? 'compaction'} · ${selected.providerName ?? selected.providerId}`
+        const targetLabel = search ? 'webSearch' : role ?? (custom ? 'compaction' : 'main')
+        const label = `${targetLabel === 'webSearch' ? '网页搜索' : targetLabel} · ${selected.providerName ?? selected.providerId}`
         try {
           selected.assertActive?.()
           const headers = selected.resolveHeaders ? await selected.resolveHeaders() : { ...selected.headers }
-          const base = { baseUrl: selected.baseUrl, headers, model: selected.model, ...(selected.targetSignal ? { targetSignal: selected.targetSignal } : {}), ...(selected.family ? { family: selected.family } : {}) }
+          const base = { ...(selected.kind === 'api' ? {} : { authentication: { providerId: selected.providerId, providerName: selected.providerName ?? selected.providerId, ...(selected.accountIdentity ? { accountIdentity: selected.accountIdentity } : {}), label: targetLabel } }), baseUrl: selected.baseUrl, headers, model: selected.model, ...(selected.targetSignal ? { targetSignal: selected.targetSignal } : {}), ...(selected.family ? { family: selected.family } : {}) }
           if (input.kind === 'count_tokens') return base
           const compactEffort = snapshot.preferences.compaction.effort
           const effort = custom && compactEffort !== 'follow' ? compactEffort : custom && role ? snapshot.roles[role].effort : selected.effort
@@ -92,13 +98,14 @@ export function claudeModelRouting(options: ClaudeModelRoutingOptions, env: Node
         const selected = await target
         const official = new URL(selected.baseUrl).origin === 'https://api.anthropic.com' && !selected.headers['x-api-key']
         const effort = compact.effort === 'follow' ? roleEffort(options.provider, input.model) : compact.effort
-        return { ...selected, ...(official ? { headers: await officialHeaders(env) } : {}),
+        return { ...selected, ...(selected.authentication ? { authentication: { ...selected.authentication, label: claudeRequestRole(input.model) ?? 'compaction' } } : {}), ...(official ? { headers: await officialHeaders(env) } : {}),
           ...(!effort || effort === 'follow' ? {} : { effort, thinking: 'adaptive' as const }) }
       }
       const effort = roleEffort(options.provider, input.model)
       const apiRole = /^matou-api\/(opus|sonnet|haiku)$/.exec(input.model)?.[1] as 'opus' | 'sonnet' | 'haiku' | undefined
       const model = apiRole && !options.provider?.subscription ? options.provider?.modelMapping?.[apiRole] : undefined
-      return model || effort && effort !== 'follow' ? { ...(model ? { model } : {}), ...(effort && effort !== 'follow' ? { effort } : {}) } : undefined
+      const auth = authentication(claudeRequestRole(input.model) ?? 'main')
+      return auth || model || effort && effort !== 'follow' ? { ...(auth ? { authentication: auth } : {}), ...(model ? { model } : {}), ...(effort && effort !== 'follow' ? { effort } : {}) } : undefined
     },
     close() { if (closed) return; closed = true; lease?.release(); lease = undefined; options.releaseTargets?.() }
   }
@@ -123,10 +130,10 @@ export function modelRoutingEnabled(preferences: AgentModelPreferences, provider
       deepSeek = isDeepSeekMessagesDestination(destination)
     } catch { /* Invalid provider endpoints are handled during launch. */ }
   }
-  return Object.keys(preferences.claudeRoleAssignments ?? {}).length > 0 || deepSeek || preferences.compaction.mode === 'custom' || Object.values(provider?.effortMapping ?? {}).some(value => value !== 'follow') || Boolean(provider?.reasoningEffort && provider.reasoningEffort !== 'follow')
+  return Boolean(provider?.subscription || provider && !provider.hasApiKey && provider.endpoint.replace(/\/$/, '') === 'https://api.anthropic.com') || Boolean(preferences.claudeWebSearch) || Object.keys(preferences.claudeRoleAssignments ?? {}).length > 0 || deepSeek || preferences.compaction.mode === 'custom' || Object.values(provider?.effortMapping ?? {}).some(value => value !== 'follow') || Boolean(provider?.reasoningEffort && provider.reasoningEffort !== 'follow')
 }
 export function restoredProviderModel(bound: string | undefined, selected: string | undefined, provider: ProviderConfigView | undefined, preferences: AgentModelPreferences): string | undefined {
-  if (/^matou-role\//.test(bound ?? '')) return Object.keys(preferences.claudeRoleAssignments ?? {}).length ? bound : selected
+  if (/^matou-role\//.test(bound ?? '')) return Object.keys(preferences.claudeRoleAssignments ?? {}).length || preferences.claudeWebSearch ? bound : selected
   const apiRole = /^matou-api\/(opus|sonnet|haiku)$/.exec(bound ?? '')?.[1] as 'opus' | 'sonnet' | 'haiku' | undefined
   if (apiRole) {
     const mapped = provider?.modelMapping?.[apiRole]

@@ -246,7 +246,8 @@ async function initializeRuntime(): Promise<RuntimeState> {
     ...(e2eForkSetupPolicyForWorkspace ? {
       setupPolicyForWorkspace: e2eForkSetupPolicyForWorkspace
     } : {}),
-    providerConfigs
+    providerConfigs,
+    modelAccounts: { snapshot: () => subscriptionAccounts ? subscriptionAccounts.snapshot() : providerConfigs.snapshot() }
   })
   if (opened.kind === 'read-only') {
     console.error(`[runtime.storage] database opened read-only: ${opened.reason}`)

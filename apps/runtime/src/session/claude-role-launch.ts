@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { CLI_DEFAULT_MODEL, type AgentModelPreferences, type ClaudeModelRole } from '@matou/contracts'
+import { CLI_DEFAULT_MODEL, type AgentModelPreferences, type ClaudeModelRole, type ProviderConfigView } from '@matou/contracts'
 import type { ProviderConfigStore } from '../provider-config/provider-config-store'
 import type { SubscriptionAccounts } from '../model-router/subscription-accounts'
 import type { RouterLease } from '../model-router/manager'
@@ -9,7 +9,7 @@ import { nativeClaudeModels } from './native-model-catalog'
 
 /** Same configuration-only digest at spawn and explicit global activation. */
 export function claudeRoleLaunchDigest(preferences: AgentModelPreferences, captured: Awaited<ReturnType<ProviderConfigStore['captureClaudeRouting']>>): string {
-  const ids = [...new Set([captured.providers.activeProviderIds['claude-code'], ...Object.values(preferences.claudeRoleAssignments ?? {}).map(t => t.providerId), ...(preferences.compaction.mode === 'custom' && preferences.compaction.providerId ? [preferences.compaction.providerId] : [])])].sort()
+  const ids = [...new Set([captured.providers.activeProviderIds['claude-code'], ...Object.values(preferences.claudeRoleAssignments ?? {}).map(t => t.providerId), ...(preferences.claudeWebSearch ? [preferences.claudeWebSearch.providerId] : []), ...(preferences.compaction.mode === 'custom' && preferences.compaction.providerId ? [preferences.compaction.providerId] : [])])].sort()
   const providers = ids.map(id => {
     const p = captured.providers.providers['claude-code'].find(p => p.id === id)
     return { id, endpoint: p?.endpoint, model: p?.model, mapping: p?.modelMapping, effort: p?.effortMapping, reasoningEffort: p?.reasoningEffort, subscription: p?.subscription?.provider,
@@ -17,7 +17,7 @@ export function claudeRoleLaunchDigest(preferences: AgentModelPreferences, captu
       headers: captured.apiConnections[id]?.headers, contextMode: preferences.contextWindows[id] }
   })
   const canonical = (value: unknown): unknown => Array.isArray(value) ? value.map(canonical) : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).sort(([a],[b]) => a.localeCompare(b)).map(([k,v]) => [k,canonical(v)])) : value
-  return createHash('sha256').update(JSON.stringify(canonical({ defaultProviderId: captured.providers.activeProviderIds['claude-code'], assignments: preferences.claudeRoleAssignments, compaction: preferences.compaction, providers }))).digest('hex')
+  return createHash('sha256').update(JSON.stringify(canonical({ defaultProviderId: captured.providers.activeProviderIds['claude-code'], assignments: preferences.claudeRoleAssignments, webSearch: preferences.claudeWebSearch, compaction: preferences.compaction, providers }))).digest('hex')
 }
 
 export function claudeRequestRole(model: string, nativeRoleModels: Readonly<Partial<Record<ClaudeModelRole, string>>> = {}): ClaudeModelRole | undefined {
@@ -47,7 +47,7 @@ export interface PreparedClaudeRoleLaunch {
 export async function prepareClaudeRoleLaunch(options: {
   preferences: AgentModelPreferences; store: ProviderConfigStore; accounts?: SubscriptionAccounts; env: NodeJS.ProcessEnv; isClosed?: () => boolean
 }): Promise<PreparedClaudeRoleLaunch | undefined> {
-  if (!Object.keys(options.preferences.claudeRoleAssignments ?? {}).length) return undefined
+  if (!Object.keys(options.preferences.claudeRoleAssignments ?? {}).length && !options.preferences.claudeWebSearch) return undefined
   const preferences = structuredClone(options.preferences)
   const leases: RouterLease[] = []
   let closed = false
@@ -60,7 +60,7 @@ export async function prepareClaudeRoleLaunch(options: {
     assertOpen()
     const connections: Record<string, ClaudeTargetConnection> = { ...apiConnections }
     const assigned = preferences.claudeRoleAssignments ?? {}
-    const requirements = CLAUDE_MODEL_ROLES.map(role => {
+    const requirements: Array<{ role: ClaudeModelRole | 'compaction' | 'webSearch'; providerId: string; provider: ProviderConfigView | undefined; model: string }> = CLAUDE_MODEL_ROLES.map(role => {
       const providerId = assigned[role]?.providerId ?? providers.activeProviderIds['claude-code']
       const provider = providers.providers['claude-code'].find(p => p.id === providerId)
       return { role, providerId, provider, model: assigned[role]?.model ?? (provider ? defaultClaudeRoleModel(provider, role, nativeModels) : '') }
@@ -68,7 +68,11 @@ export async function prepareClaudeRoleLaunch(options: {
     const sourceProvider = providers.providers['claude-code'].find(p => p.id === providers.activeProviderIds['claude-code'])
     if (preferences.compaction.mode === 'custom') {
       const providerId = preferences.compaction.providerId ?? ''
-      requirements.push({ role: 'compaction' as ClaudeModelRole, providerId, provider: providers.providers['claude-code'].find(p => p.id === providerId), model: preferences.compaction.model ?? '' })
+      requirements.push({ role: 'compaction', providerId, provider: providers.providers['claude-code'].find(p => p.id === providerId), model: preferences.compaction.model ?? '' })
+    }
+    if (preferences.claudeWebSearch) {
+      const { providerId, model } = preferences.claudeWebSearch
+      requirements.push({ role: 'webSearch', providerId, model, provider: providers.providers['claude-code'].find(p => p.id === providerId) })
     }
     for (const { role, providerId, provider, model } of requirements) {
       try {
@@ -89,7 +93,7 @@ export async function prepareClaudeRoleLaunch(options: {
       } catch (error) {
         if (options.isClosed?.()) throw new Error('Session closed during model target preparation')
         // Never include provider/transport diagnostics which may contain credentials.
-        throw new Error(`${role} · ${provider?.name ?? providerId}: model target is unavailable`)
+        throw new Error(`${role === 'webSearch' ? '网页搜索' : role} · ${provider?.name ?? providerId}: model target is unavailable`)
       }
     }
     const snapshot = resolveClaudeRoleSnapshot({ preferences, providers, connections, nativeModels })!

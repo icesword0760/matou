@@ -2201,7 +2201,7 @@ export class RuntimeServer {
       const legacyCompactionPlan = legacyCompactionProvider ? egressPlanForLaunch('claude-code', { ANTHROPIC_BASE_URL: legacyCompactionProvider.endpoint }, legacyCompactionProvider.subscription?.provider) : undefined
       const egressFamilies = preparedRoleLaunch ? preparedRoleLaunch.snapshot.officialFamilies : [...new Set([legacyEgressPlan.family, legacyCompactionPlan?.family].filter((f): f is import('@matou/contracts').EgressFamily => f !== undefined))]
       const hideTimeZone = preparedRoleLaunch
-        ? [...Object.values(preparedRoleLaunch.snapshot.roles), ...(preparedRoleLaunch.snapshot.compactionTarget ? [preparedRoleLaunch.snapshot.compactionTarget] : [])].some(t => t.hideTimeZone)
+        ? [...Object.values(preparedRoleLaunch.snapshot.roles), ...(preparedRoleLaunch.snapshot.webSearchTarget ? [preparedRoleLaunch.snapshot.webSearchTarget] : []), ...(preparedRoleLaunch.snapshot.compactionTarget ? [preparedRoleLaunch.snapshot.compactionTarget] : [])].some(t => t.hideTimeZone)
         : legacyEgressPlan.hideTimeZone || legacyCompactionPlan?.hideTimeZone === true
       // Multi-target sessions use the existing hidden-zone policy, never the
       // default third-party provider's apparent exit country.
@@ -4152,7 +4152,7 @@ export class RuntimeServer {
   async #providerLaunchDigest(selection: ProviderLaunchSelection): Promise<string> {
     const snapshot = await this.#providerConfigs.snapshot()
     const preferences = new AgentModelSettings(this.#database, this.#providerConfigs).preferences()
-    if (Object.keys(preferences.claudeRoleAssignments ?? {}).length) return claudeRoleLaunchDigest(preferences, await this.#providerConfigs.captureClaudeRouting())
+    if (Object.keys(preferences.claudeRoleAssignments ?? {}).length || preferences.claudeWebSearch) return claudeRoleLaunchDigest(preferences, await this.#providerConfigs.captureClaudeRouting())
     const providerFields = (providerId: string) => {
       const provider = snapshot.providers['claude-code'].find(value => value.id === providerId)
       return provider && {

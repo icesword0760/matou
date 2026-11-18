@@ -84,7 +84,7 @@ export function ModelSwitchSettings({ client, onClose }: {
     } catch { if(read===agentSettingsRead.current)setAgentSettingsError(messages().hierarchyShell.modelSettings.loadFailed) }
   }, [client])
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (syncAccountStatus = false) => {
     if (!client) {
       setLoading(false)
       setFailure(m.serviceConnecting)
@@ -93,6 +93,15 @@ export function ModelSwitchSettings({ client, onClose }: {
     try {
       const next = await client.request('provider-config.snapshot', {}) as ProviderConfigSnapshot
       accept(next); setFailure('')
+      // Runtime notifications include current authentication status. Refresh
+      // that part of the existing details cache without another quota read.
+      if (syncAccountStatus && next.revision >= revision.current) setAccounts(current => {
+        const updated = { ...current }
+        for (const provider of next.providers['claude-code']) {
+          if (provider.subscription) updated[provider.id] = { ...current[provider.id], account: provider.subscription.account, models: current[provider.id]?.models ?? provider.subscription.modelMetadata }
+        }
+        return updated
+      })
     } catch (error) {
       setFailure(message(error, m.loadFailed))
     } finally {
@@ -115,7 +124,7 @@ export function ModelSwitchSettings({ client, onClose }: {
     }).catch(() => { /* Quota reads never block the provider list or switching. */ })
     return () => { live = false; close() }
   }, [client, refreshAgentSettings])
-  useEffect(() => client?.subscribeProviderConfig?.(() => { void refresh(); void refreshAgentSettings() }), [client, refresh, refreshAgentSettings])
+  useEffect(() => client?.subscribeProviderConfig?.(() => { void refresh(true); void refreshAgentSettings() }), [client, refresh, refreshAgentSettings])
   useEffect(() => {
     const onEscape = (event: KeyboardEvent) => {
       if (event.key !== 'Escape' || editor || operation.current) return
@@ -127,7 +136,7 @@ export function ModelSwitchSettings({ client, onClose }: {
   useEffect(() => {
     if (typeof BroadcastChannel === 'undefined') return
     const channel = new BroadcastChannel('matou-provider-config')
-    channel.onmessage = () => { void refresh(); void refreshAgentSettings() }
+    channel.onmessage = () => { void refresh(true); void refreshAgentSettings() }
     return () => channel.close()
   }, [refresh, refreshAgentSettings])
 
@@ -155,7 +164,7 @@ export function ModelSwitchSettings({ client, onClose }: {
 
   const signIn = (provider: ProviderConfigView) => {
     const current = providers.find(row => row.id === provider.id) ?? provider
-    if (!current.subscription) return
+    if (!current.subscription || editor || operation.current) return
     loginDetails.current = undefined
     openEditor({ existing: current, subscriptionProvider: current.subscription.provider, relogin: true })
   }
@@ -339,7 +348,7 @@ export function ModelSwitchSettings({ client, onClose }: {
             })}
           </div>
           <p className="model-settings__impact"><span>ⓘ</span><span><b>{m.impactTitle(APP_DISPLAY_NAME)}</b> {m.impactBody}</span></p>
-          <ClaudeRoleAssignments client={client} providers={providers} activeProviderId={activeId} accounts={accounts} snapshot={agentSettings} loadError={failure || agentSettingsError} onRetry={()=>{void refresh();void refreshAgentSettings()}} onSaved={value=>{agentSettingsRead.current++;setAgentSettings(value);setAgentSettingsError('')}} />
+          <ClaudeRoleAssignments client={client} providers={providers} activeProviderId={activeId} accounts={accounts} snapshot={agentSettings} signingInProviderId={editor?.relogin ? editor.existing?.id : undefined} onSignIn={signIn} loadError={failure || agentSettingsError} onRetry={()=>{void refresh(true);void refreshAgentSettings()}} onSaved={value=>{agentSettingsRead.current++;setAgentSettings(value);setAgentSettingsError('')}} />
           <AgentModelSettings client={client} providerRevision={snapshot?.revision} activeProviderId={activeId} />
           <DispatchSettings client={client} />
         </>)}

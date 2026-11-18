@@ -362,7 +362,8 @@ export class PtySession {
         const routing = claudeModelRouting(options.modelRouting, finalEnvironment)
         const gateway = await startClaudeRequestGateway({
           upstreamUrl: finalEnvironment.ANTHROPIC_BASE_URL || 'https://api.anthropic.com',
-          env: finalEnvironment, resolveOverride: routing.resolveOverride, ...(options.modelRouting.assertTargetAllowed ? { assertTargetAllowed: options.modelRouting.assertTargetAllowed } : {})
+          env: finalEnvironment, resolveOverride: routing.resolveOverride,
+          ...(options.modelRouting.accounts ? { onAuthenticationFailure: (target) => options.modelRouting!.accounts!.markNeedsSignIn(target.providerId, target.accountIdentity) } : {}), ...(options.modelRouting.assertTargetAllowed ? { assertTargetAllowed: options.modelRouting.assertTargetAllowed } : {})
         }).catch(error => { routing.close(); throw error })
         closeRouting = () => { routing.close(); void gateway.close() }
         const gatewayEnv = { ...roleEnvironment, ANTHROPIC_BASE_URL: gateway.baseUrl, CLAUDE_CODE_GATEWAY_HINT_HEADERS: '1',

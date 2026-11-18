@@ -5,7 +5,7 @@ import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 
 import { REMOVE_NODE_SCOPES, type RpcMethod } from '@matou/contracts'
-import type { ClaudeRoleAssignments, ProviderModelsInput, ProviderCli, ProviderConfigInput } from '@matou/contracts'
+import type { ClaudeAssignmentsPatch, ProviderModelsInput, ProviderCli, ProviderConfigInput } from '@matou/contracts'
 import {
   AGENT_PERMISSION_MODES,
   getAgentManifest,
@@ -50,6 +50,7 @@ import { SessionGitStateRepository } from '../session/session-git-state-reposito
 import type { WorktreeSetupStep } from '../worktrees/worktree-service'
 import { ProviderConfigStore } from '../provider-config/provider-config-store'
 import { DispatchConfig, DispatchConfigValidationError } from './dispatch-config'
+import type { SubscriptionAccounts } from '../model-router/subscription-accounts'
 import { AgentModelSettings } from '../session/agent-model-settings'
 import { ClaudeSettings, isClaudeTimeZone } from '../session/claude-settings'
 
@@ -99,6 +100,7 @@ export class RuntimeRpcRouter {
   readonly #antigravitySessions: AntigravitySessionCatalog
   readonly #accessPolicy: RuntimeAccessPolicy
   readonly #providerConfigs: ProviderConfigStore
+  readonly #modelAccounts: Pick<SubscriptionAccounts, 'snapshot'> | undefined
 
   constructor(
     database: RuntimeDatabase,
@@ -111,9 +113,11 @@ export class RuntimeRpcRouter {
       accessPolicy?: RuntimeAccessPolicy
       setupPolicyForWorkspace?: (workspaceId: string) => WorktreeSetupStep[]
       providerConfigs?: ProviderConfigStore
+      modelAccounts?: Pick<SubscriptionAccounts, 'snapshot'>
     } = {}
   ) {
     this.#database = database
+    this.#modelAccounts = options.modelAccounts
     const transactions = new DomainTransactionManager(database)
     this.#workspaces = new WorkspaceTaskRepository(database, transactions)
     this.#sessions = new SessionRepository(database, transactions)
@@ -186,9 +190,9 @@ export class RuntimeRpcRouter {
         throw error
       }
     }
-    if (method === 'agent-model-settings.get') return new AgentModelSettings(this.#database, this.#providerConfigs).snapshot()
-    if (method === 'agent-model-settings.set') return new AgentModelSettings(this.#database, this.#providerConfigs).set(payload)
-    if (method === 'agent-model-settings.patch-assignments') return new AgentModelSettings(this.#database, this.#providerConfigs).patchAssignments(record(payload) as unknown as { assignments: ClaudeRoleAssignments })
+    if (method === 'agent-model-settings.get') return new AgentModelSettings(this.#database, this.#providerConfigs, this.#modelAccounts).snapshot()
+    if (method === 'agent-model-settings.set') return new AgentModelSettings(this.#database, this.#providerConfigs, this.#modelAccounts).set(payload)
+    if (method === 'agent-model-settings.patch-assignments') return new AgentModelSettings(this.#database, this.#providerConfigs, this.#modelAccounts).patchAssignments(record(payload) as unknown as ClaudeAssignmentsPatch)
     if (method === 'claude-settings.get') return new ClaudeSettings(this.#database).snapshot()
     if (method === 'claude-settings.set') {
       const { timeZone } = record(payload)

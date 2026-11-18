@@ -1,0 +1,44 @@
+{
+  "status": 401,
+  "body": {
+    "type": "error",
+    "error": {
+      "type": "authentication_error",
+      "message": "网页搜索 · Search supplier 登录已过期，请到 设置 → Claude Code 重新登录后重试。"
+    }
+  },
+  "accountStatus": "needs-sign-in",
+  "requests": [
+    {
+      "path": "/v1/messages",
+      "headers": {
+        "content-type": "text/plain;charset=UTF-8",
+        "accept": "*/*",
+        "accept-language": "*",
+        "sec-fetch-mode": "cors",
+        "user-agent": "node",
+        "accept-encoding": "gzip, deflate",
+        "content-length": "164",
+        "authorization": "Bearer search-key",
+        "host": "127.0.0.1:57925",
+        "connection": "keep-alive"
+      },
+      "body": {
+        "model": "search-model",
+        "max_tokens": 512,
+        "messages": [
+          {
+            "role": "user",
+            "content": "conversation context"
+          }
+        ],
+        "tools": [
+          {
+            "type": "web_search_20250305",
+            "name": "web_search"
+          }
+        ]
+      }
+    }
+  ]
+}

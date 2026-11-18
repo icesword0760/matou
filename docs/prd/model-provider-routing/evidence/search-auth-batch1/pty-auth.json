@@ -1,0 +1,35 @@
+{
+  "requests": [
+    {
+      "headers": {
+        "content-type": "text/plain;charset=UTF-8",
+        "accept": "*/*",
+        "accept-language": "*",
+        "sec-fetch-mode": "cors",
+        "user-agent": "node",
+        "accept-encoding": "gzip, deflate",
+        "content-length": "143",
+        "authorization": "Bearer fixture-search",
+        "host": "127.0.0.1:58022",
+        "connection": "keep-alive"
+      },
+      "body": {
+        "model": "matou-chatgpt/gpt",
+        "messages": [
+          {
+            "role": "user",
+            "content": "local query"
+          }
+        ],
+        "tools": [
+          {
+            "type": "web_search_20250305",
+            "name": "web_search"
+          }
+        ]
+      }
+    }
+  ],
+  "terminalOutput": "RESULT 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"网页搜索 · Search account 登录已过期，请到 设置 → Claude Code 重新登录后重试。\"}}\r\n",
+  "accountStatus": "needs-sign-in"
+}

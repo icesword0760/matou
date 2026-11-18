@@ -962,6 +962,7 @@ sleep 30
     const log = join(root, 'provider-config-invocations.txt')
     await writeFile(executable, [
       '#!/bin/sh',
+      'if [ "$1" = "--settings" ]; then shift 2; fi',
       `printf '%s|%s|%s|%s\n' "$*" "$ANTHROPIC_BASE_URL" "$ANTHROPIC_API_KEY" "$ANTHROPIC_AUTH_TOKEN" >> ${JSON.stringify(log)}`,
       "printf '\\033[2J\\033[Hsession output: %s' \"$ANTHROPIC_BASE_URL\"",
       'sleep 30',
@@ -4778,7 +4779,7 @@ sleep 30
       })
 
       await waitUntilAsync(async () => (await readFile(argumentFile, 'utf8').catch(() => '')) !== '')
-      expect((await readFile(argumentFile, 'utf8')).trim().split('\n')).toEqual([
+      expect(capturedClaudeArguments(await readFile(argumentFile, 'utf8'))).toEqual([
         '--resume', 'provider-session-42', '--dangerously-skip-permissions'
       ])
       providerPort.receive({
@@ -5335,7 +5336,7 @@ sleep 30
       })
 
       await waitUntilAsync(async () => (await readFile(argumentFile, 'utf8').catch(() => '')) !== '')
-      expect((await readFile(argumentFile, 'utf8')).trim().split('\n')).toEqual([
+      expect(capturedClaudeArguments(await readFile(argumentFile, 'utf8'))).toEqual([
         '--resume', 'provider-source-42', '--fork-session',
         '--dangerously-skip-permissions'
       ])
@@ -5376,7 +5377,7 @@ sleep 30
         profile: 'claude-code', cols: 80, rows: 24
       })
       await waitUntilAsync(async () => (await readFile(argumentFile, 'utf8').catch(() => '')) !== '')
-      expect((await readFile(argumentFile, 'utf8')).trim().split('\n')).toEqual([
+      expect(capturedClaudeArguments(await readFile(argumentFile, 'utf8'))).toEqual([
         '--resume', 'provider-derived-43'
       ])
       restoredPort.receive({
@@ -5458,7 +5459,7 @@ sleep 30
         lease: decision.lease
       })).resolves.toMatchObject({ kind: 'started' })
       await waitUntilAsync(async () => (await readFile(argumentFile, 'utf8').catch(() => '')) !== '')
-      expect((await readFile(argumentFile, 'utf8')).trim().split('\n')).toEqual([
+      expect(capturedClaudeArguments(await readFile(argumentFile, 'utf8'))).toEqual([
         '--resume', 'provider-source-durable', '--fork-session',
         '--dangerously-skip-permissions'
       ])
@@ -5481,7 +5482,7 @@ sleep 30
       // only the later Renderer attach publishes a visible spawn event.
       expect(forkPort.sent.filter(({ type }) => type === 'terminal.spawned')).toHaveLength(1)
       expect(sessions.get('fork-durable-derived')?.runId).toBe('run-renderer-gate')
-      expect((await readFile(argumentFile, 'utf8')).trim().split('\n')).toEqual([
+      expect(capturedClaudeArguments(await readFile(argumentFile, 'utf8'))).toEqual([
         '--resume', 'provider-source-durable', '--fork-session',
         '--dangerously-skip-permissions'
       ])
@@ -6113,7 +6114,7 @@ sleep 30
       await waitUntil(() => livePort.findRpcResponse('permission-bypass-live') !== undefined)
       await waitUntilAsync(async () => (await readFile(argumentFile, 'utf8').catch(() => '')).includes('--dangerously-skip-permissions'))
 
-      expect((await readFile(argumentFile, 'utf8')).trim().split('\n')).toEqual([
+      expect(capturedClaudeArguments(await readFile(argumentFile, 'utf8'))).toEqual([
         '--model', 'claude-sonnet-4-6', '--resume', 'provider-live-42',
         '--dangerously-skip-permissions'
       ])
@@ -6735,7 +6736,7 @@ sleep 30
       await waitUntil(() => freshPort.findRpcResponse('fresh-permission-bypass') !== undefined)
       await waitUntil(() => Boolean(sessions.get('provider-fresh-permission')) && sessions.get('provider-fresh-permission')!.pid !== firstPid)
       await waitUntilAsync(async () => (await readFile(argumentFile, 'utf8').catch(() => '')).length > 0)
-      expect((await readFile(argumentFile, 'utf8')).trim().split('\n')).toEqual([
+      expect(capturedClaudeArguments(await readFile(argumentFile, 'utf8'))).toEqual([
         '--dangerously-skip-permissions'
       ])
       expect(freshPort.findRpcError('fresh-permission-bypass')).toBeUndefined()
@@ -6899,7 +6900,7 @@ sleep 30
       await waitUntil(() => sessions.get('shell-promoted-provider')?.profile === 'claude-code', 6_000)
       expect(Date.now() - submittedAt).toBeLessThan(750)
       await waitUntilAsync(async () => (await readFile(argumentFile, 'utf8').catch(() => '')).length > 0, 6_000)
-      expect((await readFile(argumentFile, 'utf8')).trim().split('\n')).toEqual([
+      expect(capturedClaudeArguments(await readFile(argumentFile, 'utf8'))).toEqual([
         '--dangerously-skip-permissions'
       ])
       await waitUntilAsync(async () => (await readFile(sizeFile, 'utf8').catch(() => '')).trim() === '43 132', 6_000)
@@ -8626,7 +8627,7 @@ require('fs').writeFileSync(${JSON.stringify(capture)},JSON.stringify({base:proc
         profile: 'claude-code', cols: 80, rows: 24
       })
       await waitUntil(() => harness.testPort.last('terminal.spawned')?.sessionId === 'egress-chatgpt-sub')
-      await waitUntilAsync(async () => (await readFile(captureFile, 'utf8').catch(() => '')) === 'Asia/Taipei|http://127.0.0.1:12345')
+      await waitUntilAsync(async () => /^Asia\/Taipei\|http:\/\/127\.0\.0\.1:\d+\//.test(await readFile(captureFile, 'utf8').catch(() => '')))
 
       expect(registerSpy).toHaveBeenCalledWith('egress-chatgpt-sub', 'chatgpt-subscription')
       expect(registerSpy).not.toHaveBeenCalledWith('egress-chatgpt-sub', 'anthropic')
@@ -8735,7 +8736,7 @@ require('fs').writeFileSync(${JSON.stringify(capture)},JSON.stringify({base:proc
       })
       await waitUntil(() => harness.testPort.last('terminal.spawned')?.sessionId === 'egress-ag-sub' || harness.testPort.last('protocol.error') !== undefined, 10_000)
       expect(harness.testPort.last('protocol.error')).toBeUndefined()
-      await waitUntilAsync(async () => (await readFile(captureFile, 'utf8').catch(() => '')) === 'Asia/Singapore|http://127.0.0.1:12346')
+      await waitUntilAsync(async () => /^Asia\/Singapore\|http:\/\/127\.0\.0\.1:\d+\//.test(await readFile(captureFile, 'utf8').catch(() => '')))
 
       expect(registerSpy).not.toHaveBeenCalled()
       expect(harness.monitor.status().sessionFamilies['egress-ag-sub']).toBeUndefined()
@@ -8748,6 +8749,19 @@ require('fs').writeFileSync(${JSON.stringify(capture)},JSON.stringify({base:proc
     }
   })
 })
+
+function capturedClaudeArguments(text: string): string[] {
+  const args = text.trim().split('\n')
+  if (args[0] !== '--settings') return args
+  for (let end = 2; end <= args.length; end++) {
+    let settings: { env?: Record<string, string> }
+    try { settings = JSON.parse(args.slice(1, end).join('\n')) } catch { continue }
+    expect(settings.env?.ANTHROPIC_BASE_URL).toMatch(/^http:\/\/127\.0\.0\.1:\d+\//)
+    expect(settings.env?.CLAUDE_CODE_GATEWAY_HINT_HEADERS).toBe('1')
+    return args.slice(end)
+  }
+  throw new Error('Invalid captured Claude gateway settings')
+}
 
 class PollingSpyWorkspacePathService extends WorkspacePathService {
   startCount = 0
@@ -9347,7 +9361,7 @@ if (process.argv.includes('--dump-config')) {
   }, 15_000
 )
 
-it('Task2 role launch keeps a live PID and target snapshot across saves, then captures changes on the next process', async () => {
+it.each(['roles','search'] as const)('keeps a live PID and %s target snapshot across saves, then captures changes on the next process', async mode => {
   vi.spyOn(nativeRoleCatalog, 'nativeClaudeModels').mockResolvedValue([{ id: 'default', resolvedModel: 'claude-sonnet-fixture' }, { id: 'sonnet', resolvedModel: 'claude-sonnet-fixture' }])
   const requests: Array<{ path: string; key?: string; model: string }> = []
   const upstream = createServer(async (req, res) => { const chunks = []; for await (const c of req) chunks.push(c); const body = JSON.parse(Buffer.concat(chunks).toString()); requests.push({ path: req.url!, key: String(req.headers['x-api-key'] ?? ''), model: body.model }); res.end('{"input_tokens":1}') })
@@ -9357,14 +9371,14 @@ it('Task2 role launch keeps a live PID and target snapshot across saves, then ca
   const capture = join(root, 'role-capture.json'), executable = join(root, 'role-fixture.cjs')
   await writeFile(executable, `#!/usr/bin/env node
 const fs=require('fs');const args=process.argv.slice(2);fs.writeFileSync(${JSON.stringify(capture)},JSON.stringify({pid:process.pid,args}));console.log('READY');
-require('readline').createInterface({input:process.stdin}).on('line',async line=>{try{const data=JSON.parse(line);await fetch(process.env.ANTHROPIC_BASE_URL+data.path,{method:'POST',headers:{'x-api-key':process.env.ANTHROPIC_API_KEY||'source'},body:JSON.stringify({model:process.env.ANTHROPIC_DEFAULT_OPUS_MODEL||'same',max_tokens:1000,messages:[]})});console.log('DONE')}catch(e){console.log('FIXTURE_ERROR')}})
+require('readline').createInterface({input:process.stdin}).on('line',async line=>{try{const data=JSON.parse(line);await fetch(process.env.ANTHROPIC_BASE_URL+data.path,{method:'POST',headers:{'x-api-key':process.env.ANTHROPIC_API_KEY||'source'},body:JSON.stringify({model:process.env.ANTHROPIC_DEFAULT_OPUS_MODEL||'same',max_tokens:1000,messages:[]${mode === 'search' ? ',tools:[{type:"web_search_20250305",name:"web_search"}]' : ''}})});console.log('DONE')}catch(e){console.log('FIXTURE_ERROR')}})
 `); await chmod(executable, 0o755); process.env.MATOU_CLAUDE_COMMAND = executable
   const registry = createTestSessionRegistry(), providers = new ProviderConfigStore(root)
   const a = await providers.upsert({ cli: 'claude-code', name: 'A', endpoint, apiKey: 'a', model: 'sonnet', modelMapping: {opus:'same',sonnet:'same',haiku:'same'} })
   const b = await providers.upsert({ cli: 'claude-code', name: 'B', endpoint, apiKey: 'b', model: 'same' })
   await providers.activate('claude-code', a.id)
   const settings = new AgentModelSettings(database, providers)
-  await settings.patchAssignments({ assignments: { opus: { providerId: b.id, model: 'same' } } })
+  await settings.patchAssignments(mode === 'roles' ? { assignments: { opus: { providerId: b.id, model: 'same' } } } : { assignments: {}, webSearch: { providerId: b.id, model: 'same' } })
   server.close(); port = new MockPort(); server = new RuntimeServer(port,root,database,undefined,undefined,registry,undefined,undefined,{providerConfigs:providers})
   port.receive({type:'protocol.hello',protocolVersion:PROTOCOL_VERSION,clientId:'role-fixture'})
   registerSession(database,'role-live','claude-code')
@@ -9377,7 +9391,7 @@ require('readline').createInterface({input:process.stdin}).on('line',async line=
     first.write(JSON.stringify({path:'/v1/messages'})+'\n');await waitUntil(()=>requests.length===1,5000)
     expect(requests[0]).toMatchObject({key:'b',model:'same'})
     await providers.upsert({id:b.id,cli:'claude-code',name:'B',endpoint,apiKey:'changed-b',model:'same'})
-    port.receive({...rpc('role-patch','agent-model-settings.patch-assignments',{}),payload:{assignments:{opus:{providerId:a.id,model:'same'}}}})
+    port.receive({...rpc('role-patch','agent-model-settings.patch-assignments',{}),payload:mode === 'roles' ? {assignments:{opus:{providerId:a.id,model:'same'}}} : {assignments:{},webSearch:{providerId:a.id,model:'same'}}})
     await waitUntil(()=>port.sent.some(m=>m.type==='rpc.response'&&m.requestId==='role-patch'),5000)
     port.receive(spawn); await settle()
     expect(registry.get('role-live')!.pid).toBe(firstPid)

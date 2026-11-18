@@ -1,6 +1,6 @@
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { createServer } from 'node:http'
 import { afterEach, expect, it, vi } from 'vitest'
 import { PtySession } from './pty-session'
@@ -62,4 +62,32 @@ it('owns prepared subscription leases until exit, skips the old subscription pro
  vi.stubEnv('MATOU_CLAUDE_COMMAND',join(root,'missing-cli'))
  const failed=await prepare();const exited=await PtySession.create({...failed.options,sessionId:'failed'});disposals.push(()=>exited.shutdownForRuntime({gracePeriodMs:100,hardKillWaitMs:1000}));await exited.whenClosed();expect(leases).toBe(0)
  const cancelled=await prepare();await expect(PtySession.create({...cancelled.options,sessionId:'cancelled',modelRouting:{...cancelled.options.modelRouting,isClosed:()=>true}})).rejects.toThrow(/closed/i);expect(leases).toBe(0)
+})
+it('wires a running search request failure through the PTY gateway to subscription account state',async()=>{
+ const {SubscriptionAccounts}=await import('../model-router/subscription-accounts')
+ const root=await mkdtemp(join(tmpdir(),'search-auth-pty-'));disposals.push(()=>rm(root,{recursive:true,force:true}))
+ const requests:any[]=[]
+ const upstream=createServer(async(req,res)=>{const chunks:Buffer[]=[];for await(const c of req)chunks.push(c);requests.push({headers:req.headers,body:JSON.parse(Buffer.concat(chunks).toString())});res.writeHead(401);res.end('{"error":{"message":"private upstream diagnostic"}}')})
+ await new Promise<void>(r=>upstream.listen(0,'127.0.0.1',r));disposals.push(async()=>{upstream.closeAllConnections();await new Promise<void>(r=>upstream.close(()=>r()))})
+ const base=`http://127.0.0.1:${(upstream.address() as {port:number}).port}`
+ const store=new ProviderConfigStore(root)
+ const main=await store.upsert({cli:'claude-code',name:'Main',endpoint:'http://127.0.0.1:1',apiKey:'fixture-main',model:'sonnet',modelMapping:{opus:'same',sonnet:'same',haiku:'same'}});await store.activate('claude-code',main.id)
+ const search=await store.adoptSubscription({name:'Search account',modelMapping:{opus:'gpt',sonnet:'gpt',haiku:'gpt'},subscription:{provider:'codex',credentialRef:{name:'search.json',authIndex:'current'},account:{status:'ready'},modelMetadata:[{id:'gpt',contextWindow:8000}]}})
+ const accounts=new SubscriptionAccounts({dataRoot:root,store,manager:{onStateChange:()=>()=>{}} as unknown as import('../model-router/manager').ModelRouterManager,openAuthorizationUrl:async()=>{}});disposals.push(()=>accounts.close())
+ vi.spyOn(accounts,'prepareModelTarget').mockResolvedValue({targetSignal:new AbortController().signal,accountIdentity:'["search.json","current"]',assertActive:()=>{},baseUrl:base,headers:{authorization:'Bearer fixture-search'},model:'matou-chatgpt/gpt',metadata:{id:'gpt',contextWindow:8000},lease:{connection:{baseUrl:base,clientKey:'fixture',managementKey:'fixture',pid:1},release:()=>{}}})
+ const preferences={contextWindows:{},compaction:{mode:'follow' as const,effort:'follow' as const},claudeWebSearch:{providerId:search.id,model:'gpt'}}
+ const prepared=(await prepareClaudeRoleLaunch({preferences,store,accounts,env:{}}))!
+ const executable=join(root,'fixture.cjs')
+ await writeFile(executable,`#!/usr/bin/env node
+fetch(process.env.ANTHROPIC_BASE_URL+'/v1/messages',{method:'POST',body:JSON.stringify({model:process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL,messages:[{role:'user',content:'local query'}],tools:[{type:'web_search_20250305',name:'web_search'}]})}).then(async r=>{console.log('RESULT '+r.status+' '+await r.text());setInterval(()=>{},1000)})
+`);await chmod(executable,0o755);vi.stubEnv('MATOU_CLAUDE_COMMAND',executable)
+ let output=''
+ const session=await PtySession.create({sessionId:'search-auth',executionContextId:'context',cwd:root,dataRoot:root,cols:100,rows:24,profile:'claude-code',model:prepared.resolveMainModel('default'),modelRouting:{preferences,store,accounts,roleSnapshot:prepared.snapshot,releaseTargets:prepared.close},onOutput:data=>{output+=data}});disposals.push(()=>session.shutdownForRuntime({gracePeriodMs:100,hardKillWaitMs:1000}))
+ await until(()=>output.includes('RESULT 401'))
+ expect(requests).toHaveLength(1);expect(requests[0].body.model).toBe('matou-chatgpt/gpt');expect(requests[0].headers.authorization).toBe('Bearer fixture-search')
+ expect(output).toContain('网页搜索 · Search account');expect(output).not.toContain('private upstream diagnostic')
+ const accountStatus=(await accounts.snapshot()).providers['claude-code'].find(p=>p.id===search.id)!.subscription!.account.status
+ expect(accountStatus).toBe('needs-sign-in')
+ const evidenceRoot=resolve(import.meta.dirname,'../../../../node_modules/.cache/search-auth');await mkdir(evidenceRoot,{recursive:true})
+ await writeFile(join(evidenceRoot,'pty-auth.json'),JSON.stringify({requests,terminalOutput:output,accountStatus},null,2))
 })

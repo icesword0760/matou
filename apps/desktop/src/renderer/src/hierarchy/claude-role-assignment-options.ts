@@ -22,7 +22,7 @@ export function defaultAllocationModel(role: ClaudeModelRole, provider: Provider
 }
 export function allocationProblem(provider: ProviderConfigView | undefined, model: string, snapshot?: AgentModelSettingsSnapshot, accounts?: Record<string, SubscriptionAccountDetails>) {
   if (!provider) return 'provider'
-  if (provider.subscription && (provider.subscription.account.status ?? accounts?.[provider.id]?.account.status) !== 'ready') return 'account'
+  if (provider.subscription && (accounts?.[provider.id]?.account.status ?? provider.subscription.account.status) !== 'ready') return 'account'
   const officialOAuth = provider.builtIn === true && provider.modelMetadata === undefined && provider.endpoint.replace(/\/$/, '') === 'https://api.anthropic.com'
   if (!provider.subscription && !officialOAuth && !provider.hasApiKey) return 'key'
   if (!model.trim()) return 'empty'

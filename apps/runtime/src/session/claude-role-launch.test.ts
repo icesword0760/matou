@@ -146,3 +146,28 @@ it('recognizes only exact defined subscription aliases and captured native model
  expect(claudeRequestRole('claude-sonnet-fixture', { sonnet: 'claude-sonnet-fixture' })).toBe('sonnet')
  for (const id of ['claude-sonnet-private', 'vendor/claude-sonnet-custom', 'matou-antigravity/claude-sonnet-private', 'other/matou-sonnet', 'claude-sonnet-fixture']) expect(claudeRequestRole(id)).toBeUndefined()
 })
+
+it('captures search without role assignments, excludes its tiny context from budgets, and freezes its connection',async()=>{
+ const f=await fixture()
+ const search=await f.store.upsert({cli:'claude-code',name:'Search',endpoint:'https://search.invalid',apiKey:'search-key',model:'search',modelMetadata:[{id:'search',contextWindow:8000,maxOutputTokens:512}]})
+ const preferences={...f.preferences,claudeRoleAssignments:{},claudeWebSearch:{providerId:search.id,model:'search'}}
+ const prepared=(await prepareClaudeRoleLaunch({...f,preferences,env:{}}))!
+ expect(prepared).toBeDefined()
+ expect(prepared.contextWindow).toBe(200000)
+ expect(prepared.snapshot.webSearchTarget).toMatchObject({providerId:search.id,model:'search',headers:{'x-api-key':'search-key'},metadata:{maxOutputTokens:512}})
+ await f.store.upsert({id:search.id,cli:'claude-code',name:'Search',endpoint:'https://changed.invalid',apiKey:'changed',model:'search'})
+ expect(prepared.snapshot.webSearchTarget?.baseUrl).toBe('https://search.invalid')
+ expect(claudeRoleLaunchDigest(preferences,await f.store.captureClaudeRouting())).not.toBe(prepared.digest)
+ prepared.close()
+})
+it('includes an official search target in protection families and releases its exact lease',async()=>{
+ const f=await fixture()
+ const sub=await f.store.adoptSubscription({name:'Search account',modelMapping:{opus:'gpt',sonnet:'gpt',haiku:'gpt'},subscription:{provider:'codex',credentialRef:{name:'search.json'},account:{status:'ready'},modelMetadata:[{id:'gpt',contextWindow:8000,maxOutputTokens:512}]}})
+ const release=vi.fn()
+ const accounts={prepareModelTarget:vi.fn(async()=>({accountIdentity:'["search.json","index"]',assertActive:()=>{},lease:{release},baseUrl:'http://127.0.0.1:1234',headers:{authorization:'Bearer fixture'},model:'matou-chatgpt/gpt',metadata:{id:'gpt',contextWindow:8000,maxOutputTokens:512}}))} as unknown as SubscriptionAccounts
+ const prepared=(await prepareClaudeRoleLaunch({...f,preferences:{...f.preferences,claudeWebSearch:{providerId:sub.id,model:'gpt'}},env:{},accounts}))!
+ expect(prepared.snapshot.officialFamilies).toContain('chatgpt-subscription')
+ expect(prepared.contextWindow).toBe(200000)
+ expect(accounts.prepareModelTarget).toHaveBeenCalledExactlyOnceWith(sub.id,'gpt','role-session')
+ prepared.close();prepared.close();expect(release).toHaveBeenCalledOnce()
+})

@@ -1,17 +1,21 @@
-import { type AgentModelPreferences, type ClaudeModelRole, type ClaudeRoleAssignments, type EgressFamily, type ProviderConfigSnapshot, type ProviderConfigView, type ProviderModelMetadata, type ReasoningEffort, type SubscriptionModel, type SubscriptionProvider } from '@matou/contracts'
+import { type AgentModelPreferences, type ClaudeModelRole, type ClaudeModelTarget, type ClaudeRoleAssignments, type EgressFamily, type ProviderConfigSnapshot, type ProviderConfigView, type ProviderModelMetadata, type ReasoningEffort, type SubscriptionModel, type SubscriptionProvider } from '@matou/contracts'
 
 export const CLAUDE_MODEL_ROLES = ['opus', 'sonnet', 'haiku'] as const
 export function validateClaudeTargetId(value: unknown, maximum: number): string {
   if (typeof value !== 'string' || !value.trim() || value.length > maximum || /[\x00-\x1f\x7f]/.test(value)) throw new Error('Invalid Claude target ID')
   return value.trim()
 }
+export function validateClaudeModelTarget(value: unknown): ClaudeModelTarget {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid Claude model target')
+  const row = value as Record<string, unknown>
+  return { providerId: validateClaudeTargetId(row.providerId, 256), model: validateClaudeTargetId(row.model, 240) }
+}
 export function validateClaudeRoleAssignments(value: unknown): ClaudeRoleAssignments {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid Claude role assignments')
   const result: ClaudeRoleAssignments = {}
   for (const [role, target] of Object.entries(value)) {
     if (!CLAUDE_MODEL_ROLES.includes(role as typeof CLAUDE_MODEL_ROLES[number]) || !target || typeof target !== 'object' || Array.isArray(target)) throw new Error('Invalid Claude role assignment')
-    const row = target as Record<string, unknown>
-    result[role as typeof CLAUDE_MODEL_ROLES[number]] = { providerId: validateClaudeTargetId(row.providerId, 256), model: validateClaudeTargetId(row.model, 240) }
+    result[role as typeof CLAUDE_MODEL_ROLES[number]] = validateClaudeModelTarget(target)
   }
   return result
 }
@@ -64,6 +68,7 @@ export interface ResolvedClaudeRoleTarget {
 export interface ResolvedClaudeRoleSnapshot {
   readonly preferences: Readonly<AgentModelPreferences>
   readonly roles: Readonly<Record<ClaudeModelRole, ResolvedClaudeRoleTarget>>
+  readonly webSearchTarget?: ResolvedClaudeRoleTarget
   readonly compactionTarget?: ResolvedClaudeRoleTarget
   readonly nativeRoleModels?: Readonly<Partial<Record<ClaudeModelRole, string>>>
   readonly officialFamilies: readonly EgressFamily[]
@@ -89,7 +94,7 @@ function freezeData<T>(value: T): T {
  */
 export function resolveClaudeRoleSnapshot(input: ClaudeRoleSnapshotInput): ResolvedClaudeRoleSnapshot | undefined {
   const assignments = validateClaudeRoleAssignments(input.preferences.claudeRoleAssignments === undefined ? {} : input.preferences.claudeRoleAssignments)
-  if (!Object.keys(assignments).length) return undefined
+  if (!Object.keys(assignments).length && !input.preferences.claudeWebSearch) return undefined
   const preferences = freezeData(structuredClone(input.preferences))
   const providers = structuredClone(input.providers.providers['claude-code'])
   const nativeModels = structuredClone(input.nativeModels ?? [])
@@ -98,11 +103,11 @@ export function resolveClaudeRoleSnapshot(input: ClaudeRoleSnapshotInput): Resol
     if (!provider) throw new Error('Assignment provider is unavailable')
     return provider
   }
-  const resolve = (provider: ProviderConfigView, model: string, role?: ClaudeModelRole): ResolvedClaudeRoleTarget => {
+  const resolve = (provider: ProviderConfigView, model: string, role?: ClaudeModelRole, label = role ?? 'compaction'): ResolvedClaudeRoleTarget => {
     model = validateClaudeTargetId(model, 240)
     let metadata: ProviderModelMetadata | undefined
     try { metadata = assignedModelMetadata(provider, model, nativeModels) }
-    catch { throw new Error(`${role ?? 'compaction'} · ${provider.name}: assignment model or account is unavailable; configure this role's model`) }
+    catch { throw new Error(`${label} · ${provider.name}: assignment model or account is unavailable; configure this role's model`) }
     const connection = input.connections[provider.id]
     if (!connection) throw new Error('Assignment target connection is unavailable')
     const effort = (role ? provider.effortMapping?.[role] : undefined) ?? provider.reasoningEffort
@@ -141,10 +146,12 @@ export function resolveClaudeRoleSnapshot(input: ClaudeRoleSnapshotInput): Resol
   if (compact.mode === 'custom' && (!compact.providerId || !compact.model)) throw new Error('Compaction target is unavailable')
   const compactionTarget = compact.mode === 'custom' && compact.providerId && compact.model
     ? resolve(findProvider(compact.providerId), compact.model) : undefined
-  const officialFamilies = [...new Set([...Object.values(roles), ...(compactionTarget ? [compactionTarget] : [])].flatMap(t => t.family ? [t.family] : []))]
+  const search = preferences.claudeWebSearch
+  const webSearchTarget = search ? resolve(findProvider(search.providerId), search.model, undefined, '网页搜索') : undefined
+  const officialFamilies = [...new Set([...Object.values(roles), ...(webSearchTarget ? [webSearchTarget] : []), ...(compactionTarget ? [compactionTarget] : [])].flatMap(t => t.family ? [t.family] : []))]
   const nativeRoleModels = Object.fromEntries(CLAUDE_MODEL_ROLES.flatMap(role => {
     const model = nativeModels.find(m => m.id === role)?.resolvedModel
     return model ? [[role, model]] : []
   }))
-  return freezeData({ preferences, roles, nativeRoleModels, ...(compactionTarget ? { compactionTarget } : {}), officialFamilies })
+  return freezeData({ preferences, roles, nativeRoleModels, ...(webSearchTarget ? { webSearchTarget } : {}), ...(compactionTarget ? { compactionTarget } : {}), officialFamilies })
 }

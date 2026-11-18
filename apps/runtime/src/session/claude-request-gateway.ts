@@ -3,6 +3,7 @@ import { randomBytes } from 'node:crypto'
 import http, { type IncomingHttpHeaders, type IncomingMessage, type ServerResponse } from 'node:http'
 import https from 'node:https'
 import { Transform } from 'node:stream'
+import { brotliDecompressSync, gunzipSync, inflateSync } from 'node:zlib'
 import { HttpsProxyAgent } from 'https-proxy-agent'
 import { SocksProxyAgent } from 'socks-proxy-agent'
 import { resolveProxyForUrl } from '../egress/proxy-route'
@@ -17,7 +18,14 @@ const AUTH_HEADER = /(^|[-_])(auth(?:entication|orization)?|oauth|(?:api|subscri
 
 export class GatewayRoutingError extends Error {}
 
+export interface GatewayAuthenticationTarget {
+  providerId: string
+  providerName: string
+  accountIdentity?: string
+  label: string
+}
 export interface GatewayOverride {
+  authentication?: GatewayAuthenticationTarget
   family?: EgressFamily
   targetSignal?: AbortSignal
   baseUrl?: string
@@ -32,7 +40,8 @@ interface GatewayOptions {
   upstreamUrl: string
   env: NodeJS.ProcessEnv
   assertTargetAllowed?: (family?: EgressFamily) => void | Promise<void>
-  resolveOverride: (input: { compaction: boolean; model: string; kind?: 'message' | 'count_tokens' }) =>
+  onAuthenticationFailure?: (target: GatewayAuthenticationTarget) => void | Promise<void>
+  resolveOverride: (input: { compaction: boolean; webSearch?: boolean; model: string; kind?: 'message' | 'count_tokens' }) =>
     GatewayOverride | undefined | Promise<GatewayOverride | undefined>
 }
 
@@ -65,7 +74,7 @@ export async function startClaudeRequestGateway(options: GatewayOptions): Promis
       active.delete(controller)
       if (!response.writableFinished || !request.complete) controller.abort()
     })
-    void forwardRequest(request, response, controller, prefix, upstream, options.resolveOverride, getAgent, options.assertTargetAllowed).catch((error: unknown) => {
+    void forwardRequest(request, response, controller, prefix, upstream, options.resolveOverride, getAgent, options.assertTargetAllowed, options.onAuthenticationFailure, options.env.MATOU_LOCALE).catch((error: unknown) => {
       if (controller.signal.aborted) return
       if (error instanceof GatewayRoutingError) {
         sendError(response, 502, error.message)
@@ -111,7 +120,9 @@ async function forwardRequest(
   upstream: URL,
   resolveOverride: GatewayOptions['resolveOverride'],
   getAgent: (destination: URL) => http.Agent,
-  assertTargetAllowed?: GatewayOptions['assertTargetAllowed']
+  assertTargetAllowed?: GatewayOptions['assertTargetAllowed'],
+  onAuthenticationFailure?: GatewayOptions['onAuthenticationFailure'],
+  locale?: string
 ): Promise<void> {
   const route = readRoute(request.url, prefix)
   if (!route) {
@@ -129,13 +140,16 @@ async function forwardRequest(
     message = parseMessage(body)
     if (message && typeof message.model === 'string') {
       const marker = request.headers['x-claude-code-compaction']
+      const compactionMarked = marker === 'manual' || marker === 'auto'
+      const webSearch = !compactionMarked && Array.isArray(message.tools) && message.tools.length > 0 &&
+        message.tools.every(tool => typeof object(tool)?.type === 'string' && (object(tool)!.type as string).startsWith('web_search_'))
       override = await resolveOverride({
-        compaction: route.path === '/v1/messages' && (marker === 'manual' || marker === 'auto'),
+        compaction: route.path === '/v1/messages' && compactionMarked, ...(webSearch ? { webSearch: true } : {}),
         model: message.model, kind: route.path === '/v1/messages/count_tokens' ? 'count_tokens' : 'message'
       })
       if (route.path === '/v1/messages/count_tokens' && override) {
-        const { baseUrl, headers, model, family, targetSignal } = override
-        override = { ...(targetSignal ? { targetSignal } : {}), ...(baseUrl === undefined ? {} : { baseUrl }), ...(headers === undefined ? {} : { headers }), ...(model === undefined ? {} : { model }), ...(family === undefined ? {} : { family }) }
+        const { baseUrl, headers, model, family, targetSignal, authentication } = override
+        override = { ...(authentication ? { authentication } : {}), ...(targetSignal ? { targetSignal } : {}), ...(baseUrl === undefined ? {} : { baseUrl }), ...(headers === undefined ? {} : { headers }), ...(model === undefined ? {} : { model }), ...(family === undefined ? {} : { family }) }
       }
       if (override && rewriteMessage(message, override)) {
         body = Buffer.from(JSON.stringify(message))
@@ -210,6 +224,12 @@ async function forwardRequest(
       return
     }
     incoming.once('error', () => response.destroy())
+    if (override?.authentication && (incoming.statusCode ?? 0) >= 400) {
+      void forwardAuthenticatedError(incoming, response, override.authentication, onAuthenticationFailure, locale).catch(() => {
+        sendError(response, 502, 'Claude request gateway could not read the upstream response.')
+      })
+      return
+    }
     response.writeHead(incoming.statusCode ?? 502, endToEndHeaders(incoming.headers))
     incoming.pipe(response)
   })
@@ -236,6 +256,49 @@ async function forwardRequest(
     controller.abort()
   })
   request.pipe(limiter).pipe(outgoing)
+}
+
+/** Only failed OAuth/subscription responses are inspected; successful streams stay streaming. */
+async function forwardAuthenticatedError(incoming: IncomingMessage, response: ServerResponse, target: GatewayAuthenticationTarget,
+  notify: GatewayOptions['onAuthenticationFailure'], locale?: string): Promise<void> {
+  const status = incoming.statusCode ?? 502
+  const expired = async () => {
+    // State notification must never leak service/credential diagnostics to the CLI.
+    try { await notify?.(target) } catch { /* Still return actionable, sanitized feedback. */ }
+    const label = target.label === 'webSearch' ? (locale?.startsWith('en') ? 'Web search' : '网页搜索') : target.label
+    const message = locale?.startsWith('en')
+      ? `${label} · ${target.providerName} sign-in has expired. Go to Settings → Claude Code, sign in again, then retry.`
+      : `${label} · ${target.providerName} 登录已过期，请到 设置 → Claude Code 重新登录后重试。`
+    sendError(response, status, message, 'authentication_error')
+  }
+  if (status === 401 || status === 403) { incoming.resume(); await expired(); return }
+  // Inspect a bounded error body; larger non-auth errors remain byte-for-byte passthrough.
+  const chunks: Buffer[] = []
+  let size = 0, passthrough = false
+  for await (const chunk of incoming) {
+    if (passthrough) { response.write(chunk); continue }
+    chunks.push(chunk); size += chunk.length
+    if (size > 256 * 1024) {
+      passthrough = true
+      response.writeHead(status, endToEndHeaders(incoming.headers))
+      for (const buffered of chunks) response.write(buffered)
+      chunks.length = 0
+    }
+  }
+  if (passthrough) { response.end(); return }
+  const body = Buffer.concat(chunks, size)
+  let decoded = body
+  try {
+    const encoding = incoming.headers['content-encoding']
+    const decompress = encoding === 'gzip' ? gunzipSync : encoding === 'deflate' ? inflateSync : encoding === 'br' ? brotliDecompressSync : undefined
+    if (decompress) decoded = decompress(body, { maxOutputLength: 256 * 1024 })
+  } catch { /* Malformed or oversized encoded errors retain their original bytes. */ }
+  const error = object(parseMessage(decoded)?.error)
+  const codes = [error?.code, error?.type]
+  const explicit = codes.some(code => typeof code === 'string' && ['invalid_grant', 'invalid_token', 'token_expired', 'authentication_error', 'login_required', 'reauthentication_required'].includes(code)) ||
+    typeof error?.message === 'string' && /(?:\b(?:access token|refresh token|oauth token|session|authentication|credentials?)\b.{0,40}\b(?:expired|revoked)\b|\b(?:please|must|need to|required to) (?:re-?authenticate|(?:sign|log) in again)\b)/i.test(error.message)
+  if (explicit) { await expired(); return }
+  response.writeHead(status, endToEndHeaders(incoming.headers)); response.end(body)
 }
 
 function parseUpstream(value: string): URL {
@@ -320,7 +383,7 @@ function rewriteMessage(message: Record<string, unknown>, override: GatewayOverr
     override.thinking !== undefined || capped
 }
 
-function sendError(response: ServerResponse, status: number, message: string): void {
+function sendError(response: ServerResponse, status: number, message: string, type = status >= 500 ? 'api_error' : 'invalid_request_error'): void {
   if (response.destroyed) return
   if (response.headersSent) {
     response.destroy()
@@ -329,6 +392,6 @@ function sendError(response: ServerResponse, status: number, message: string): v
   response.writeHead(status, { 'content-type': 'application/json', connection: 'close' })
   response.end(JSON.stringify({
     type: 'error',
-    error: { type: status >= 500 ? 'api_error' : 'invalid_request_error', message }
+    error: { type, message }
   }))
 }

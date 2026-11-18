@@ -238,6 +238,9 @@ export class SubscriptionAccounts {
         if (this.#closed) throw new Error('Subscription accounts are closed')
         const row = (await this.#options.store.subscriptions()).find(row => row.id === providerConfigId)
         if (!row) throw new Error('Subscription provider does not exist')
+        if (this.#credentialStatus.get(row.subscription.credentialRef.name)?.status === 'needs-sign-in') {
+          throw new SubscriptionLaunchError('Subscription sign-in is required before preparing another target', 'needs-sign-in')
+        }
         const provider = row.subscription.provider
         lease = await this.#options.manager.acquire(scope)
         const client = new RouterManagementClient(lease.connection)
@@ -284,6 +287,22 @@ export class SubscriptionAccounts {
     const bindings = this.#targetBindings.get(name)
     this.#targetBindings.delete(name)
     for (const release of bindings ?? []) release()
+  }
+  /** Runtime inference failure; do not mutate credentials or revoke active processes. */
+  async markNeedsSignIn(providerConfigId: string, accountIdentity?: string): Promise<void> {
+    await this.#serial(async () => {
+      if (this.#closed) return
+      const row = (await this.#options.store.subscriptions()).find(row => row.id === providerConfigId)
+      if (!row) return // Native OAuth has no managed subscription row.
+      const ref = row.subscription.credentialRef
+      if (accountIdentity) {
+        let identity: unknown
+        try { identity = JSON.parse(accountIdentity) } catch { return }
+        if (!Array.isArray(identity) || identity[0] !== ref.name || ref.authIndex && identity[1] !== ref.authIndex) return
+      }
+      if (this.#credentialStatus.get(ref.name)?.status === 'needs-sign-in') return
+      this.#markNeedsSignIn(ref.name, row.subscription.account)
+    })
   }
   #markNeedsSignIn(name: string, account: SubscriptionAccountSummary): void {
     const { reason: _reason, ...summary } = account
@@ -701,7 +720,7 @@ export class SubscriptionAccounts {
           round.accounts.set(row.id, { ref: row.subscription.credentialRef.name, details })
           if (details.models.length) await this.#options.store.cacheSubscriptionModels(row.id, row.subscription.credentialRef.name, details.models)
           // A slow settings read must not erase a newer activation failure.
-          if (this.#credentialStatus.get(row.subscription.credentialRef.name) === statusAtRead) this.#credentialStatus.set(row.subscription.credentialRef.name, details.account)
+          if (statusAtRead?.status !== 'needs-sign-in' && this.#credentialStatus.get(row.subscription.credentialRef.name) === statusAtRead) this.#credentialStatus.set(row.subscription.credentialRef.name, details.account)
         }))
       })().catch(async () => {
         for (const row of await this.#options.store.subscriptions()) {
@@ -718,7 +737,7 @@ export class SubscriptionAccounts {
     const accounts = Object.fromEntries(rows.map(row => {
       const cached = round.accounts.get(row.id)
       const details = cached?.ref === row.subscription.credentialRef.name ? cached.details : this.#details.get(row.subscription.credentialRef.name)
-      return [row.id, details ?? { account: row.subscription.account, models: [] }]
+      return [row.id, { ...(details ?? { account: row.subscription.account, models: [] }), account: { ...(details?.account ?? row.subscription.account), ...this.#credentialStatus.get(row.subscription.credentialRef.name) } }]
     }))
     return structuredClone({ snapshot: await this.snapshot(), accounts, antigravityRiskAccepted: await this.#options.store.antigravityRiskAccepted() })
   }

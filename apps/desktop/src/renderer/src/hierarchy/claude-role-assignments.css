@@ -43,3 +43,6 @@
 .model-allocation__field input { box-sizing: border-box; min-width: 0; }
 
 .model-allocation__section > .model-allocation__error { grid-column: 1 / -1; }
+.model-allocation__relogin { margin-left: 8px; cursor: pointer; }
+.model-allocation__relogin:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: 2px; }
+.model-allocation__relogin:disabled { opacity: .5; cursor: default; }

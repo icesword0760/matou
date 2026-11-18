@@ -230,3 +230,47 @@ it('round2 projects exact native identity for API default validation and leaves 
  await store.activate('claude-code',a.id)
  await expect(settings.patchAssignments({assignments:{opus:{providerId:a.id,model:'arbitrary-custom'}}})).resolves.toBeDefined()
 })
+
+it('saves a search target through the assignment patch and preserves it for legacy writers', async () => {
+ const api = await store.upsert({cli:'claude-code',name:'Search',endpoint:'https://search.invalid',apiKey:'fixture',model:'search',modelMetadata:[{id:'search'}]})
+ const webSearch = {providerId:api.id,model:'search'}
+ await settings.patchAssignments({assignments:{},webSearch} as never)
+ expect(settings.preferences().claudeWebSearch).toEqual(webSearch)
+ await settings.patchAssignments({assignments:{}})
+ await settings.set({...settings.preferences(),claudeWebSearch:{providerId:'injected',model:'bad'}})
+ expect(settings.preferences().claudeWebSearch).toEqual(webSearch)
+ await settings.patchAssignments({assignments:{},webSearch:null} as never)
+ expect(settings.preferences().claudeWebSearch).toBeUndefined()
+})
+it('rejects invalid search targets atomically and retains unavailable selections on read', async () => {
+ const api = await store.upsert({cli:'claude-code',name:'Search',endpoint:'https://search.invalid',apiKey:'fixture',model:'search',modelMetadata:[{id:'search'}]})
+ const webSearch = {providerId:api.id,model:'search'}
+ await settings.patchAssignments({assignments:{},webSearch} as never)
+ for(const target of [{providerId:'missing',model:'search'},{providerId:api.id,model:'stale'},{providerId:api.id,model:'\n'},[]]) {
+  await expect(settings.patchAssignments({assignments:{},webSearch:target} as never)).rejects.toThrow()
+  expect(settings.preferences().claudeWebSearch).toEqual(webSearch)
+ }
+ await store.delete('claude-code',api.id)
+ expect((await settings.snapshot()).preferences.claudeWebSearch).toEqual(webSearch)
+})
+
+it('validates live subscription status for search through RPC and preserves the last saved target',async()=>{
+ const sub=await store.adoptSubscription({name:'Search account',modelMapping:{opus:'m',sonnet:'m',haiku:'m'},subscription:{provider:'codex',credentialRef:{name:'fixture.json'},account:{status:'ready'},modelMetadata:[{id:'m'}]}})
+ const {RuntimeRpcRouter}=await import('../rpc/runtime-rpc-router')
+ let status:'ready'|'needs-sign-in'='ready'
+ const router=new RuntimeRpcRouter(db,undefined,{providerConfigs:store,modelAccounts:{snapshot:async()=>{const snapshot=await store.snapshot();snapshot.providers['claude-code'].find(p=>p.id===sub.id)!.subscription!.account.status=status;return snapshot}}})
+ const input={assignments:{},webSearch:{providerId:sub.id,model:'m'}}
+ await router.handle('agent-model-settings.patch-assignments',input)
+ status='needs-sign-in'
+ await expect(router.handle('agent-model-settings.patch-assignments',input)).rejects.toThrow(/account.*unavailable/i)
+ expect((await settings.snapshot()).preferences.claudeWebSearch).toEqual(input.webSearch)
+ await router.handle('agent-model-settings.patch-assignments',{assignments:{}})
+ expect(settings.preferences().claudeWebSearch).toEqual(input.webSearch)
+})
+it('permits manual search models only for API providers without an authoritative catalog',async()=>{
+ const api=await store.upsert({cli:'claude-code',name:'Manual',endpoint:'https://search.invalid',apiKey:'fixture',model:'search'})
+ await settings.patchAssignments({assignments:{},webSearch:{providerId:api.id,model:'vendor/custom'}})
+ expect(settings.preferences().claudeWebSearch?.model).toBe('vendor/custom')
+ await settings.patchAssignments({assignments:{},webSearch:undefined} as never)
+ expect(settings.preferences().claudeWebSearch).toBeUndefined()
+})
