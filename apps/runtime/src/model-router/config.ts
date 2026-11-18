@@ -53,7 +53,10 @@ export function routerConfig(directory: string, port: number, keys: RouterKeys, 
     oauth: {
       'auth-dir': join(directory, 'credentials'),
       providers: {
-        antigravity: { 'antigravity-credits': false },
+        // One Antigravity account has nothing to fail over to, and upstream
+        // answers some prompt content with a deterministic 429. Cooling would
+        // block every session on that model; let Claude Code back off instead.
+        antigravity: { 'antigravity-credits': false, 'disable-cooling': true },
         // The client is Claude Code, so without this Codex would see Claude
         // Code's user agent for a ChatGPT subscription token.
         codex: { 'header-defaults': { 'user-agent': CODEX_CLIENT_USER_AGENT } }

@@ -6,6 +6,7 @@ export const sessionZhCN = {
   claudeSessionIdInvalid: 'Claude Code 会话标识格式错误',
   /** Default transcript title, read when a Claude Code session is catalogued. */
   untitledClaudeSession: '未命名 Claude 会话',
+  modelRouterRecoveryFailed: '本地模型路由未运行，自动恢复失败。请重启码头后重试。',
 
   // antigravity-session-catalog.ts
   antigravitySessionNotInWorkspace: 'Antigravity 会话不存在或不属于当前工作空间',
@@ -40,6 +41,7 @@ export const sessionEn: CatalogShape<typeof sessionZhCN> = {
     'That Claude Code session does not exist, or it does not belong to this workspace',
   claudeSessionIdInvalid: 'The Claude Code session id has an invalid format',
   untitledClaudeSession: 'Untitled Claude session',
+  modelRouterRecoveryFailed: 'The local model router is not running and could not be restarted. Restart Matou and try again.',
 
   antigravitySessionNotInWorkspace:
     'That Antigravity session does not exist, or it does not belong to this workspace',

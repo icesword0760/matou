@@ -125,6 +125,7 @@ describe('Claude model routing', () => {
     expect(await routing.resolveOverride(ordinary)).toEqual({ effort: 'max' })
     expect(snapshot).not.toHaveBeenCalled()
     expect(await routing.resolveOverride(compact)).toEqual({
+      routerTarget: true,
       authentication: {providerId: subscription.id, providerName: subscription.name, label: 'compaction'},
       family: 'chatgpt-subscription', baseUrl: connection.baseUrl, headers: { authorization: 'Bearer target-router-key' },
       model: 'matou-chatgpt/summarizer', maxOutputTokens: 4096, effort: 'max', thinking: 'adaptive'
@@ -162,6 +163,6 @@ it('enables expiry observation for subscription and native OAuth sessions withou
  expect(modelRoutingEnabled(prefs,{...target,endpoint:'https://api.anthropic.com',hasApiKey:true})).toBe(false)
  const {store}=storeFor(subscription)
  const routing=claudeModelRouting({provider:subscription,preferences:prefs,store},{})
- expect(await routing.resolveOverride({model:'matou-chatgpt/matou-haiku',compaction:false})).toEqual({authentication:{providerId:subscription.id,providerName:subscription.name,label:'haiku'}})
+ expect(await routing.resolveOverride({model:'matou-chatgpt/matou-haiku',compaction:false})).toEqual({routerTarget:true,authentication:{providerId:subscription.id,providerName:subscription.name,label:'haiku'}})
  routing.close()
 })

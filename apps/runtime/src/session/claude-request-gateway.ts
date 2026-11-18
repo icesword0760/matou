@@ -3,10 +3,12 @@ import { randomBytes } from 'node:crypto'
 import http, { type IncomingHttpHeaders, type IncomingMessage, type ServerResponse } from 'node:http'
 import https from 'node:https'
 import { Transform } from 'node:stream'
+import { aborted } from 'node:util'
 import { brotliDecompressSync, gunzipSync, inflateSync } from 'node:zlib'
 import { HttpsProxyAgent } from 'https-proxy-agent'
 import { SocksProxyAgent } from 'socks-proxy-agent'
 import { resolveProxyForUrl } from '../egress/proxy-route'
+import { sessionEn, sessionZhCN } from '../i18n/messages/session'
 import { convertDeepSeekInlineTools, DeepSeekInlineToolCompatibilityError, isDeepSeekMessagesDestination } from './deepseek-inline-tools'
 
 const MAX_REQUEST_BYTES = 64 * 1024 * 1024
@@ -15,8 +17,12 @@ const HOP_BY_HOP_HEADERS = [
   'proxy-connection', 'te', 'trailer', 'transfer-encoding', 'upgrade'
 ]
 const AUTH_HEADER = /(^|[-_])(auth(?:entication|orization)?|oauth|(?:api|subscription|access)[-_]?key|token|secret|credentials?|signature)(?=$|[-_])/
+const UPSTREAM_CONNECTION_ERROR = 'Claude request gateway could not reach the upstream service.'
+const ROUTER_CONNECTION_ERRORS = new Set(['ECONNREFUSED', 'ECONNRESET', 'EPIPE', 'ETIMEDOUT'])
 
 export class GatewayRoutingError extends Error {}
+
+interface RouterOrigin { origin?: string }
 
 export interface GatewayAuthenticationTarget {
   providerId: string
@@ -25,6 +31,7 @@ export interface GatewayAuthenticationTarget {
   label: string
 }
 export interface GatewayOverride {
+  routerTarget?: true
   authentication?: GatewayAuthenticationTarget
   family?: EgressFamily
   targetSignal?: AbortSignal
@@ -41,6 +48,8 @@ interface GatewayOptions {
   env: NodeJS.ProcessEnv
   assertTargetAllowed?: (family?: EgressFamily) => void | Promise<void>
   onAuthenticationFailure?: (target: GatewayAuthenticationTarget) => void | Promise<void>
+  /** Restarts the shared router when needed and returns its current base URL. */
+  recoverRouter?: () => Promise<string | void>
   resolveOverride: (input: { compaction: boolean; webSearch?: boolean; model: string; kind?: 'message' | 'count_tokens' }) =>
     GatewayOverride | undefined | Promise<GatewayOverride | undefined>
 }
@@ -55,6 +64,9 @@ export async function startClaudeRequestGateway(options: GatewayOptions): Promis
   const prefix = `/${randomBytes(32).toString('base64url')}`
   const active = new Set<AbortController>()
   const agents = new Map<string, http.Agent>()
+  // Sessions keep the router URL captured at launch; after a recovery that had
+  // to move ports, every later router request follows the recovered origin.
+  const router: RouterOrigin = {}
   const getAgent = (destination: URL) => {
     const loopback = ['127.0.0.1', 'localhost', '[::1]'].includes(destination.hostname)
     const proxyUrl = loopback ? undefined : resolveProxyForUrl(options.env, destination.href)
@@ -74,7 +86,7 @@ export async function startClaudeRequestGateway(options: GatewayOptions): Promis
       active.delete(controller)
       if (!response.writableFinished || !request.complete) controller.abort()
     })
-    void forwardRequest(request, response, controller, prefix, upstream, options.resolveOverride, getAgent, options.assertTargetAllowed, options.onAuthenticationFailure, options.env.MATOU_LOCALE).catch((error: unknown) => {
+    void forwardRequest(request, response, controller, prefix, upstream, getAgent, options, router).catch((error: unknown) => {
       if (controller.signal.aborted) return
       if (error instanceof GatewayRoutingError) {
         sendError(response, 502, error.message)
@@ -83,7 +95,7 @@ export async function startClaudeRequestGateway(options: GatewayOptions): Promis
       } else if (error instanceof DeepSeekInlineToolCompatibilityError) {
         sendError(response, 400, error.message)
       } else {
-        sendError(response, 502, 'Claude request gateway could not reach the upstream service.')
+        sendError(response, 502, UPSTREAM_CONNECTION_ERROR)
       }
     })
   })
@@ -118,12 +130,11 @@ async function forwardRequest(
   controller: AbortController,
   prefix: string,
   upstream: URL,
-  resolveOverride: GatewayOptions['resolveOverride'],
   getAgent: (destination: URL) => http.Agent,
-  assertTargetAllowed?: GatewayOptions['assertTargetAllowed'],
-  onAuthenticationFailure?: GatewayOptions['onAuthenticationFailure'],
-  locale?: string
+  { resolveOverride, assertTargetAllowed, onAuthenticationFailure, recoverRouter, env }: GatewayOptions,
+  router: RouterOrigin
 ): Promise<void> {
+  const locale = env.MATOU_LOCALE
   const route = readRoute(request.url, prefix)
   if (!route) {
     sendError(response, 404, 'Claude request gateway route was not found.')
@@ -148,8 +159,8 @@ async function forwardRequest(
         model: message.model, kind: route.path === '/v1/messages/count_tokens' ? 'count_tokens' : 'message'
       })
       if (route.path === '/v1/messages/count_tokens' && override) {
-        const { baseUrl, headers, model, family, targetSignal, authentication } = override
-        override = { ...(authentication ? { authentication } : {}), ...(targetSignal ? { targetSignal } : {}), ...(baseUrl === undefined ? {} : { baseUrl }), ...(headers === undefined ? {} : { headers }), ...(model === undefined ? {} : { model }), ...(family === undefined ? {} : { family }) }
+        const { effort: _effort, thinking: _thinking, maxOutputTokens: _maxOutputTokens, ...countOverride } = override
+        override = countOverride
       }
       if (override && rewriteMessage(message, override)) {
         body = Buffer.from(JSON.stringify(message))
@@ -176,6 +187,8 @@ async function forwardRequest(
   const destination = new URL(target)
   destination.pathname = target.pathname.replace(/\/+$/, '') + route.path
   if (route.query) destination.search += destination.search ? `&${route.query}` : `?${route.query}`
+  const followRouter = () => { if (override?.routerTarget === true && router.origin) destination.host = new URL(router.origin).host }
+  followRouter()
   if (message && isDeepSeekMessagesDestination(destination)) {
     const converted = convertDeepSeekInlineTools(message)
     if (converted !== message) {
@@ -208,12 +221,7 @@ async function forwardRequest(
   await assertTargetAllowed?.(override?.family)
   if (controller.signal.aborted) return
   const transport = destination.protocol === 'https:' ? https : http
-  const outgoing = transport.request(destination, {
-    method: request.method,
-    headers,
-    signal: controller.signal,
-    agent: getAgent(destination)
-  }, (incoming) => {
+  const forwardResponse = (incoming: IncomingMessage) => {
     if (controller.signal.aborted) {
       incoming.destroy()
       return
@@ -232,30 +240,62 @@ async function forwardRequest(
     }
     response.writeHead(incoming.statusCode ?? 502, endToEndHeaders(incoming.headers))
     incoming.pipe(response)
-  })
-  outgoing.once('error', () => {
-    if (!controller.signal.aborted) {
-      sendError(response, 502, 'Claude request gateway could not reach the upstream service.')
+  }
+  const send = () => new Promise<NodeJS.ErrnoException | undefined>(resolve => {
+    let responseStarted = false
+    const outgoing = transport.request(destination, {
+      method: request.method,
+      headers,
+      signal: controller.signal,
+      agent: getAgent(destination)
+    }, incoming => {
+      responseStarted = true
+      resolve(undefined)
+      forwardResponse(incoming)
+    })
+    outgoing.once('error', (error: NodeJS.ErrnoException) => {
+      if (responseStarted && !controller.signal.aborted) sendError(response, 502, UPSTREAM_CONNECTION_ERROR)
+      resolve(error)
+    })
+    if (body) {
+      outgoing.end(body)
+      return
     }
+    let size = 0
+    const limiter = new Transform({
+      transform(chunk: Buffer, _encoding, callback) {
+        size += chunk.length
+        if (size > MAX_REQUEST_BYTES) callback(new RequestTooLarge())
+        else callback(null, chunk)
+      }
+    })
+    limiter.once('error', () => {
+      sendError(response, 413, 'Claude request exceeds the gateway size limit.')
+      controller.abort()
+    })
+    request.pipe(limiter).pipe(outgoing)
   })
 
-  if (body) {
-    outgoing.end(body)
+  const error = await send()
+  if (!error || controller.signal.aborted) return
+  if (!body || override?.routerTarget !== true || !recoverRouter || !ROUTER_CONNECTION_ERRORS.has(error.code ?? '')) {
+    sendError(response, 502, UPSTREAM_CONNECTION_ERROR)
     return
   }
-  let size = 0
-  const limiter = new Transform({
-    transform(chunk: Buffer, _encoding, callback) {
-      size += chunk.length
-      if (size > MAX_REQUEST_BYTES) callback(new RequestTooLarge())
-      else callback(null, chunk)
-    }
-  })
-  limiter.once('error', () => {
-    sendError(response, 413, 'Claude request exceeds the gateway size limit.')
-    controller.abort()
-  })
-  request.pipe(limiter).pipe(outgoing)
+  const messages = locale?.startsWith('en') ? sessionEn : sessionZhCN
+  try {
+    const recovered = await Promise.race([recoverRouter(), aborted(controller.signal, response).then(() => undefined)])
+    if (typeof recovered === 'string') router.origin = new URL(recovered).origin
+  } catch {
+    if (!controller.signal.aborted) sendError(response, 502, messages.modelRouterRecoveryFailed)
+    return
+  }
+  if (controller.signal.aborted) return
+  await assertTargetAllowed?.(override.family)
+  if (controller.signal.aborted) return
+  followRouter()
+  const retryError = await send()
+  if (retryError && !controller.signal.aborted) sendError(response, 502, messages.modelRouterRecoveryFailed)
 }
 
 /** Only failed OAuth/subscription responses are inspected; successful streams stay streaming. */

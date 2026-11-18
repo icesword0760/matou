@@ -24,7 +24,7 @@ export interface ClaudeModelRoutingOptions {
 }
 /** Credentials and router leases stay entirely in the runtime process. */
 export function claudeModelRouting(options: ClaudeModelRoutingOptions, env: NodeJS.ProcessEnv) {
-  let target: Promise<{ baseUrl: string; headers: Record<string, string>; model: string; maxOutputTokens?: number; family?: EgressFamily; authentication?: NonNullable<GatewayOverride['authentication']> }> | undefined
+  let target: ReturnType<typeof prepareTarget> | undefined
   let lease: RouterLease | undefined
   let closed = false
   const authentication = (label: string, provider = options.provider): GatewayOverride['authentication'] => {
@@ -40,7 +40,8 @@ export function claudeModelRouting(options: ClaudeModelRoutingOptions, env: Node
       const prepared = await options.accounts.prepareLaunch(selected.id, 'compaction')
       if (closed) { prepared.lease.release(); throw new Error('Session closed') }
       lease = prepared.lease
-      return { authentication: authentication('compaction', selected)!, ...(selected.subscription.provider === 'codex' ? {family:'chatgpt-subscription' as const} : {}), baseUrl: lease.connection.baseUrl, headers: { authorization: `Bearer ${lease.connection.clientKey}` },
+      const headers: Record<string, string> = { authorization: `Bearer ${lease.connection.clientKey}` }
+      return { routerTarget: true as const, authentication: authentication('compaction', selected)!, ...(selected.subscription.provider === 'codex' ? {family:'chatgpt-subscription' as const} : {}), baseUrl: lease.connection.baseUrl, headers,
         model: `${prepared.input.accountPrefix}/${compact.model.replace(/\[1m\]$/i, '')}`,
         ...(selected.subscription.modelMetadata.find(m => m.id === compact.model)?.maxOutputTokens ? { maxOutputTokens: selected.subscription.modelMetadata.find(m => m.id === compact.model)!.maxOutputTokens! } : {}) }
     }
@@ -72,7 +73,7 @@ export function claudeModelRouting(options: ClaudeModelRoutingOptions, env: Node
             if (source.kind === 'subscription') source.assertActive()
             const headers = source.kind === 'oauth' ? (await source.readHeaders()).headers : { ...source.headers }
             const family = source.kind === 'oauth' || new URL(source.baseUrl).hostname === 'api.anthropic.com' ? 'anthropic' as const : source.kind === 'subscription' && options.provider?.subscription?.provider === 'codex' ? 'chatgpt-subscription' as const : undefined
-            return { ...(source.kind === 'api' ? {} : { authentication: authentication(claudeRequestRole(input.model, snapshot.nativeRoleModels) ?? 'main')! }), baseUrl: source.baseUrl, headers, model: input.model, ...(source.kind === 'subscription' && source.targetSignal ? { targetSignal: source.targetSignal } : {}), ...(family ? { family } : {}) }
+            return { ...(source.kind === 'api' ? {} : { authentication: authentication(claudeRequestRole(input.model, snapshot.nativeRoleModels) ?? 'main')! }), baseUrl: source.baseUrl, headers, model: input.model, ...(source.kind === 'subscription' ? { routerTarget: true, ...(source.targetSignal ? { targetSignal: source.targetSignal } : {}) } : {}), ...(family ? { family } : {}) }
           } catch (error) { throw new GatewayRoutingError(error instanceof SubscriptionAccountBindingError ? error.message : 'Original supplier account identity is unavailable') }
         }
         const targetLabel = search ? 'webSearch' : role ?? (custom ? 'compaction' : 'main')
@@ -80,7 +81,7 @@ export function claudeModelRouting(options: ClaudeModelRoutingOptions, env: Node
         try {
           selected.assertActive?.()
           const headers = selected.resolveHeaders ? await selected.resolveHeaders() : { ...selected.headers }
-          const base = { ...(selected.kind === 'api' ? {} : { authentication: { providerId: selected.providerId, providerName: selected.providerName ?? selected.providerId, ...(selected.accountIdentity ? { accountIdentity: selected.accountIdentity } : {}), label: targetLabel } }), baseUrl: selected.baseUrl, headers, model: selected.model, ...(selected.targetSignal ? { targetSignal: selected.targetSignal } : {}), ...(selected.family ? { family: selected.family } : {}) }
+          const base: GatewayOverride = { ...(selected.kind === 'subscription' ? { routerTarget: true } : {}), ...(selected.kind === 'api' ? {} : { authentication: { providerId: selected.providerId, providerName: selected.providerName ?? selected.providerId, ...(selected.accountIdentity ? { accountIdentity: selected.accountIdentity } : {}), label: targetLabel } }), baseUrl: selected.baseUrl, headers, model: selected.model, ...(selected.targetSignal ? { targetSignal: selected.targetSignal } : {}), ...(selected.family ? { family: selected.family } : {}) }
           if (input.kind === 'count_tokens') return base
           const compactEffort = snapshot.preferences.compaction.effort
           const effort = custom && compactEffort !== 'follow' ? compactEffort : custom && role ? snapshot.roles[role].effort : selected.effort
@@ -105,7 +106,7 @@ export function claudeModelRouting(options: ClaudeModelRoutingOptions, env: Node
       const apiRole = /^matou-api\/(opus|sonnet|haiku)$/.exec(input.model)?.[1] as 'opus' | 'sonnet' | 'haiku' | undefined
       const model = apiRole && !options.provider?.subscription ? options.provider?.modelMapping?.[apiRole] : undefined
       const auth = authentication(claudeRequestRole(input.model) ?? 'main')
-      return auth || model || effort && effort !== 'follow' ? { ...(auth ? { authentication: auth } : {}), ...(model ? { model } : {}), ...(effort && effort !== 'follow' ? { effort } : {}) } : undefined
+      return auth || model || effort && effort !== 'follow' ? { ...(options.provider?.subscription ? { routerTarget: true } : {}), ...(auth ? { authentication: auth } : {}), ...(model ? { model } : {}), ...(effort && effort !== 'follow' ? { effort } : {}) } : undefined
     },
     close() { if (closed) return; closed = true; lease?.release(); lease = undefined; options.releaseTargets?.() }
   }

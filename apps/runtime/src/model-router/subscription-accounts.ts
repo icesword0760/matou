@@ -152,6 +152,14 @@ export class SubscriptionAccounts {
   onChange(listener: () => void): () => void { this.#changeListeners.add(listener); return () => this.#changeListeners.delete(listener) }
   #notifyChanged(): void { for (const listener of this.#changeListeners) listener() }
 
+  /** Returns the router base URL, which may differ from the URL a session launched with. */
+  async ensureRouterRunning(): Promise<string> {
+    if (this.#closed) throw new Error('Subscription accounts are closed')
+    const lease = await this.#options.manager.acquire('request-recovery')
+    lease.release()
+    return lease.connection.baseUrl
+  }
+
   /** Shared preflight for activation and every final Claude spawn. The returned
    * lease belongs to the caller until process exit (or preparation failure).
    * No provider model/quota request is made here.
