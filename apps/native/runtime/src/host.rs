@@ -19,6 +19,7 @@ use crate::{
     SessionEvent, SessionOptions,
     history_worker::{HistoryReply, HistoryRequest, HistoryWorker},
     owner::{OwnerEvent, ShellOwner},
+    protocol::ClaudeRoleAssignmentsReply,
     provider_catalog,
     provider_hook::HookSetup,
     search::{SearchRequest, SearchResult},
@@ -39,18 +40,23 @@ use matou_native_core::{
     },
     journal::JournalOptions,
     provider_launch::{
-        CLAUDE_PERMISSION_MODES, ClaudeLaunch, prepare_claude_fork, prepare_claude_launch,
-        validate_cwd,
+        CLAUDE_PERMISSION_MODES, ClaudeLaunch, ClaudeRoleAssignments, prepare_claude_fork,
+        prepare_claude_launch, prepare_claude_permission_restart, prepare_new_claude_launch,
+        validate_claude_role_assignments, validate_cwd,
     },
     pty::{LaunchProfile, ShellLaunch},
-    sessions::{ClaudeBinding, ClaudeCatalogLoad, ClaudeRestore},
+    sessions::{
+        ClaudeBinding, ClaudeCatalogLoad, ClaudeRestore, read_claude_role_assignments,
+        save_claude_role_assignments,
+    },
     startup::{self, BootstrapResult},
-    storage::CommandMetadata,
+    storage::{CommandMetadata, configure_connection},
     workspace_paths::WorkspacePathState,
 };
 use matou_native_terminal::{
     GridSelection, InputModes, Screen, SelectionAction, TerminalOptions, Theme,
 };
+use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -116,6 +122,13 @@ impl LaunchOptions {
 #[derive(Serialize, Deserialize)]
 pub enum Command {
     History(HistoryRequest),
+    GetClaudeRoleAssignments {
+        request_id: u64,
+    },
+    SetClaudeRoleAssignments {
+        request_id: u64,
+        assignments: Value,
+    },
     Search {
         session_id: String,
         request: SearchRequest,
@@ -507,6 +520,12 @@ struct LaunchRetry {
     recovering: bool,
 }
 
+enum RoleAssignmentsRequest {
+    Get(u64),
+    Set(u64, Value),
+    ForLaunch(Sender<ClaudeRoleAssignments>),
+}
+
 struct PendingInput {
     workspace_id: String,
     session_id: String,
@@ -723,9 +742,46 @@ fn run(
     let mut provider_identity_events = Vec::new();
     let mut agent_notifications = Vec::new();
     let mut provider_starting = HashMap::new();
+    let mut claude_launch_targets = HashMap::new();
     let mut permission_changes = HashMap::<String, PermissionChange>::new();
     let mut permission_results = Vec::new();
     let (catalog_requests, catalog_replies) = start_provider_catalog()?;
+    let (role_requests, role_commands) = mpsc::channel();
+    let (role_results, role_replies) = mpsc::channel();
+    let role_data_root = data_root.clone();
+    let role_worker = thread::Builder::new()
+        .name("claude-role-assignments".into())
+        .spawn(move || {
+            for request in role_commands {
+                let (request_id, result) = match request {
+                    RoleAssignmentsRequest::Get(id) => {
+                        (id, Ok(load_role_assignments(&role_data_root)))
+                    }
+                    RoleAssignmentsRequest::Set(id, value) => {
+                        (id, save_role_assignments(&role_data_root, &value))
+                    }
+                    RoleAssignmentsRequest::ForLaunch(reply) => {
+                        let _ = reply.send(load_role_assignments(&role_data_root));
+                        continue;
+                    }
+                };
+                let reply = match result {
+                    Ok(assignments) => ClaudeRoleAssignmentsReply {
+                        request_id,
+                        assignments: Some(assignments),
+                        error: None,
+                    },
+                    Err(error) => ClaudeRoleAssignmentsReply {
+                        request_id,
+                        assignments: None,
+                        error: Some(format!("{error:#}")),
+                    },
+                };
+                if role_results.send(reply).is_err() {
+                    break;
+                }
+            }
+        })?;
     let mut catalog_loads = HashMap::<String, CatalogLoad>::new();
     let mut catalog_lists = Vec::new();
     let mut catalog_details = Vec::new();
@@ -776,6 +832,7 @@ fn run(
                 .collect();
             for session_id in retries {
                 let retry = launch_retries.remove(&session_id).expect("checked retry");
+                claude_launch_targets.remove(&session_id);
                 failed_launches.insert(
                     session_id.clone(),
                     report_session_launch_failure(
@@ -798,6 +855,7 @@ fn run(
                     .collect();
                 for id in failed {
                     pending_launch.remove(&id);
+                    claude_launch_targets.remove(&id);
                     let rebuilding = owner.has_shell_run(&id)?;
                     let message = match owner.session(&id)? {
                         Some(session) if session.kind == "claude-code" => {
@@ -910,7 +968,13 @@ fn run(
             }
             eligible.insert(session_id.clone());
             if !launch_preparations.contains_key(&session_id) {
-                match prepare_launch(&owner, &options, &session_id, None) {
+                match prepare_launch(
+                    &owner,
+                    &options,
+                    &session_id,
+                    LaunchIntent::Start,
+                    &role_requests,
+                ) {
                     Ok(result) => {
                         launch_preparations.insert(session_id, result);
                     }
@@ -957,7 +1021,12 @@ fn run(
                         &terminal_layouts,
                     )
                 }
-                PreparedLaunch::ClaudeCode(launch, fork_source) => {
+                PreparedLaunch::ClaudeCode {
+                    launch,
+                    fork_source,
+                } => {
+                    claude_launch_targets
+                        .insert(session_id.clone(), claude_target_metadata(&launch));
                     let terminal = terminal_layouts
                         .get(&session_id)
                         .copied()
@@ -997,6 +1066,7 @@ fn run(
                     started_shell = true;
                 }
                 Err(error) => {
+                    claude_launch_targets.remove(&session_id);
                     pending_input.retain(|input| input.session_id != session_id);
                     let recovering = rebuilding && error.downcast_ref::<HookSetup>().is_none();
                     let failure = report_session_launch_failure(
@@ -1188,6 +1258,7 @@ fn run(
                                 failed_launches.remove(id);
                                 launch_retries.remove(id);
                                 launch_preparations.remove(id);
+                                claude_launch_targets.remove(id);
                             }
                             pending_input.retain(|input| !disposed.contains(&input.session_id));
                             operations.retain(|(id, _, _)| sessions.contains(id));
@@ -1358,6 +1429,17 @@ fn run(
             }
             let (reply, result) = mpsc::channel();
             let (session_id, request, refresh) = match command {
+                Command::GetClaudeRoleAssignments { request_id } => {
+                    role_requests.send(RoleAssignmentsRequest::Get(request_id))?;
+                    continue;
+                }
+                Command::SetClaudeRoleAssignments {
+                    request_id,
+                    assignments,
+                } => {
+                    role_requests.send(RoleAssignmentsRequest::Set(request_id, assignments))?;
+                    continue;
+                }
                 Command::Input {
                     session_id,
                     bytes,
@@ -1894,6 +1976,7 @@ fn run(
                             );
                         }
                         Err(error) => {
+                            claude_launch_targets.remove(session_id);
                             let failure = report_launch_failure(
                                 send,
                                 session_id,
@@ -2141,6 +2224,7 @@ fn run(
                     searches.retain(|(id, _, _)| id != &session_id);
                     copies.retain(|(_, id, _, _)| id != &session_id);
                     if let Some((workspace_id, revision)) = launch {
+                        claude_launch_targets.remove(&session_id);
                         load.spawn_revision = Some(revision);
                         launch_retries.insert(
                             session_id,
@@ -2154,6 +2238,7 @@ fn run(
                 }
                 Err(error) => {
                     if replaced {
+                        claude_launch_targets.remove(&session_id);
                         let failure =
                             report_launch_failure(send, &session_id, true, error.to_string())?;
                         failed_launches.insert(session_id.clone(), failure);
@@ -2171,6 +2256,26 @@ fn run(
             match event {
                 OwnerEvent::Domain(mut commit) => {
                     graph_dirty = true;
+                    // The persisted exit arrives even when terminal delivery is paused.
+                    // Keep the target during intentional retirement for permission changes.
+                    if commit.result["profile"] == "claude-code"
+                        && commit.result["status"] == "exited"
+                        && (commit.result["exitCode"]
+                            .as_i64()
+                            .is_some_and(|code| code != 0)
+                            || commit.result["signal"]
+                                .as_i64()
+                                .is_some_and(|signal| signal != 0))
+                        && let Some(id) = commit.result["sessionId"].as_str()
+                        && claude_launch_targets.contains_key(id)
+                        && !permission_changes.contains_key(id)
+                        && !catalog_loads.contains_key(id)
+                        && owner
+                            .claude_binding(id)?
+                            .is_none_or(|binding| !binding.resumable)
+                    {
+                        claude_launch_targets.remove(id);
+                    }
                     if !commit.replayed
                         && let Some(notification) = commit
                             .result
@@ -2208,6 +2313,7 @@ fn run(
                             .as_str()
                             .or_else(|| result["forkError"].as_str()),
                     ) {
+                        claude_launch_targets.remove(id);
                         pending_input.retain(|input| input.session_id != id);
                         failed_launches
                             .insert(id.to_owned(), RecoveryState::Failed(error.to_owned()));
@@ -2282,7 +2388,14 @@ fn run(
                 .get(id)
                 .copied()
                 .unwrap_or_else(default_terminal_options);
-            match change.advance(&mut owner, &options, id, terminal) {
+            match change.advance(
+                &mut owner,
+                &options,
+                id,
+                terminal,
+                &role_requests,
+                &mut claude_launch_targets,
+            ) {
                 Ok(PermissionProgress::Pending) => {}
                 Ok(PermissionProgress::Launched) => {
                     sessions.insert(id.clone());
@@ -2314,6 +2427,7 @@ fn run(
                 }
                 Ok(PermissionProgress::RestoreFailed(error)) => Some(error),
                 Err(error) => {
+                    claude_launch_targets.remove(&id);
                     if let Err(rollback) = change.rollback_if_pending(&mut owner, &id) {
                         send.send_blocking(Event::Diagnostic(format!(
                             "rollback permission mode: {rollback:#}"
@@ -2350,6 +2464,17 @@ fn run(
         }
         while let Some(reply) = history.try_recv()? {
             send.send_blocking(Event::History(reply))?;
+        }
+        for reply in role_replies.try_iter() {
+            let mut graph =
+                active_graph(&owner, scene_id.as_deref(), window_id, &startup_deferred)?;
+            graph["claudeRoleAssignmentsResult"] = serde_json::to_value(reply)?;
+            let event = Event::Graph(graph);
+            if navigation_publications.is_empty() {
+                send.send_blocking(event)?;
+            } else {
+                navigation_publications.push_back((Vec::new(), false, event));
+            }
         }
         searches.retain(|(session_id, sequence, receive)| {
             let result = match receive.try_recv() {
@@ -2527,10 +2652,14 @@ fn run(
             eprintln!("[permission-respawn:{id}] {error:#}");
         }
     }
+    drop(role_requests);
+    let role_worker = role_worker
+        .join()
+        .map_err(|_| anyhow!("Claude role assignment worker panicked"));
     let sessions = owner.shutdown().context("stop native runtime sessions");
     let backup = clean_exit.then(|| owner.backup_for_clean_exit(&data_root));
     drop(owner);
-    shutdown_result(sessions.map(|_| ()), backup)
+    shutdown_result(sessions.map(|_| ()).and(role_worker), backup)
 }
 
 fn shutdown_result(sessions: Result<()>, backup: Option<Result<()>>) -> Result<()> {
@@ -2590,6 +2719,8 @@ impl PermissionChange {
         options: &LaunchOptions,
         session_id: &str,
         terminal: TerminalOptions,
+        role_requests: &Sender<RoleAssignmentsRequest>,
+        claude_launch_targets: &mut HashMap<String, Value>,
     ) -> Result<PermissionProgress> {
         match &mut self.phase {
             PermissionPhase::Stopping(stopped) => {
@@ -2618,7 +2749,11 @@ impl PermissionChange {
                     owner,
                     options,
                     session_id,
-                    fresh_permission,
+                    LaunchIntent::PermissionRestart {
+                        fresh_mode: fresh_permission,
+                        previous_target: claude_launch_targets.get(session_id),
+                    },
+                    role_requests,
                 )?));
                 Ok(PermissionProgress::Pending)
             }
@@ -2631,7 +2766,11 @@ impl PermissionChange {
                         return Err(error).context("prepare the AI Session permission respawn");
                     }
                 };
-                let PreparedLaunch::ClaudeCode(plan, None) = launch else {
+                let PreparedLaunch::ClaudeCode {
+                    launch: plan,
+                    fork_source: None,
+                } = launch
+                else {
                     bail!("AI Session permission respawn lost its binding");
                 };
                 let binding = if let Some(previous) = &self.binding {
@@ -2650,6 +2789,7 @@ impl PermissionChange {
                 } else {
                     None
                 };
+                claude_launch_targets.insert(session_id.to_owned(), claude_target_metadata(&plan));
                 let run_id =
                     owner.launch_claude_permission(session_id, terminal, plan, binding.as_ref())?;
                 self.phase = PermissionPhase::AwaitingIdentity {
@@ -3038,14 +3178,61 @@ fn default_terminal_options() -> TerminalOptions {
 
 enum PreparedLaunch {
     Shell(String),
-    ClaudeCode(ClaudeLaunch, Option<String>),
+    ClaudeCode {
+        launch: ClaudeLaunch,
+        fork_source: Option<String>,
+    },
+}
+
+// A binding may be missing or stale before SessionStart confirms this launch.
+fn claude_target_metadata(plan: &ClaudeLaunch) -> Value {
+    json!({
+        "providerConfigId": plan.provider_config_id,
+        "model": plan.model,
+        "assignedRole": plan.assigned_role,
+        "effort": plan.effort,
+        "clearAssignmentEnvironment": plan.clear_assignment_environment,
+    })
+}
+
+enum LaunchIntent<'a> {
+    Start,
+    PermissionRestart {
+        fresh_mode: Option<&'a str>,
+        previous_target: Option<&'a Value>,
+    },
+}
+
+fn load_role_assignments(data_root: &Path) -> ClaudeRoleAssignments {
+    startup::open_read_only(&data_root.join("matou.sqlite"))
+        .map(|db| read_claude_role_assignments(&db))
+        .unwrap_or_default()
+}
+
+fn save_role_assignments(data_root: &Path, value: &Value) -> Result<ClaudeRoleAssignments> {
+    let assignments = validate_claude_role_assignments(data_root, value)?;
+    let mut connection = open_role_assignments_writer(data_root)?;
+    save_claude_role_assignments(&mut connection, &assignments, now())?;
+    Ok(assignments)
+}
+
+fn open_role_assignments_writer(data_root: &Path) -> Result<Connection> {
+    // The host holds the database lease. The worker writes the preferences row
+    // through its own configured connection to the existing database.
+    let connection = Connection::open_with_flags(
+        data_root.join("matou.sqlite"),
+        OpenFlags::SQLITE_OPEN_READ_WRITE,
+    )?;
+    configure_connection(&connection)?;
+    Ok(connection)
 }
 
 fn prepare_launch(
     owner: &ShellOwner,
     options: &LaunchOptions,
     session_id: &str,
-    fresh_permission: Option<&str>,
+    intent: LaunchIntent<'_>,
+    role_requests: &Sender<RoleAssignmentsRequest>,
 ) -> Result<Receiver<Result<PreparedLaunch>>> {
     let session = owner
         .session(session_id)?
@@ -3071,8 +3258,19 @@ fn prepare_launch(
             let mut metadata = binding
                 .as_ref()
                 .map_or(Value::Null, |binding| binding.metadata.clone());
-            let resume_id = if let Some(mode) = fresh_permission {
+            let mut remembered = false;
+            let resume_id = if let LaunchIntent::PermissionRestart {
+                fresh_mode: Some(mode),
+                previous_target,
+            } = intent
+            {
                 ensure!(fork.is_none(), "Card has an unconfirmed fork");
+                if binding.as_ref().is_none_or(|binding| !binding.resumable)
+                    && let Some(target) = previous_target
+                {
+                    metadata = target.clone();
+                    remembered = true;
+                }
                 if !metadata.is_object() {
                     metadata = json!({});
                 }
@@ -3083,6 +3281,23 @@ fn prepare_launch(
                     .filter(|binding| binding.resumable)
                     .map(|binding| binding.provider_session_id)
             };
+            let assignments =
+                if fork.is_none() && resume_id.is_none() && matches!(intent, LaunchIntent::Start) {
+                    let (reply, result) = mpsc::channel();
+                    // Read in the same queue as saves so a prior save takes effect
+                    // even if the client hasn't received its reply yet.
+                    role_requests.send(RoleAssignmentsRequest::ForLaunch(reply))?;
+                    Some(result)
+                } else {
+                    None
+                };
+            let permission_fresh = matches!(
+                intent,
+                LaunchIntent::PermissionRestart {
+                    fresh_mode: Some(_),
+                    ..
+                }
+            );
             let data_root = options.data_root.clone();
             thread::Builder::new()
                 .name("claude-launch".into())
@@ -3098,22 +3313,52 @@ fn prepare_launch(
                             terminal.cols,
                             terminal.rows,
                         );
-                        let _ = send
-                            .send(result.map(|plan| {
-                                PreparedLaunch::ClaudeCode(plan, Some(fork.source_id))
-                            }));
+                        let _ = send.send(result.map(|launch| PreparedLaunch::ClaudeCode {
+                            launch,
+                            fork_source: Some(fork.source_id),
+                        }));
                         return;
                     }
-                    let result = prepare_claude_launch(
-                        &data_root,
-                        Path::new(&session.cwd),
-                        &metadata,
-                        resume_id.as_deref(),
-                        std::env::vars_os().collect(),
-                        terminal.cols,
-                        terminal.rows,
-                    );
-                    let _ = send.send(result.map(|plan| PreparedLaunch::ClaudeCode(plan, None)));
+                    let cwd = Path::new(&session.cwd);
+                    let environment = std::env::vars_os().collect();
+                    let result = if let Some(assignments) = assignments {
+                        (|| {
+                            let assignments = assignments.recv()?;
+                            prepare_new_claude_launch(
+                                &data_root,
+                                cwd,
+                                &metadata,
+                                Some(&assignments),
+                                environment,
+                                terminal.cols,
+                                terminal.rows,
+                            )
+                        })()
+                    } else if permission_fresh {
+                        prepare_claude_permission_restart(
+                            &data_root,
+                            cwd,
+                            &metadata,
+                            remembered,
+                            environment,
+                            terminal.cols,
+                            terminal.rows,
+                        )
+                    } else {
+                        prepare_claude_launch(
+                            &data_root,
+                            cwd,
+                            &metadata,
+                            resume_id.as_deref(),
+                            environment,
+                            terminal.cols,
+                            terminal.rows,
+                        )
+                    };
+                    let _ = send.send(result.map(|launch| PreparedLaunch::ClaudeCode {
+                        launch,
+                        fork_source: None,
+                    }));
                 })?;
         }
         _ => bail!("unsupported session launch kind"),
@@ -3704,6 +3949,104 @@ fn now() -> i64 {
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn role_assignment_writer_uses_runtime_pragmas() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let owner = Connection::open(root.path().join("matou.sqlite"))?;
+        configure_connection(&owner)?;
+        let writer = open_role_assignments_writer(root.path())?;
+        let pragma = |name| writer.pragma_query_value(None, name, |row| row.get::<_, i64>(0));
+        let journal: String = writer.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
+        assert_eq!(journal, "wal");
+        assert_eq!(pragma("busy_timeout")?, 5000);
+        assert_eq!(pragma("foreign_keys")?, 1);
+        assert_eq!(pragma("trusted_schema")?, 0);
+        assert_eq!(pragma("synchronous")?, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn permission_restart_with_expired_binding_does_not_read_role_assignments() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let options = LaunchOptions {
+            data_root: root.path().join("data"),
+            workspace: root.path().join("workspace"),
+            shell_home: root.path().join("home"),
+            shell: "/bin/zsh".into(),
+        };
+        let BootstrapResult::Writable {
+            mut connection,
+            ownership,
+            ..
+        } = startup::open(&options.data_root, "seed")?
+        else {
+            bail!("test database is not writable");
+        };
+        let session = hierarchy::bootstrap_window(
+            &mut connection,
+            &CommandMetadata {
+                command_id: id(),
+                command_type: "window.bootstrap".into(),
+                request_hash: "seed".into(),
+                causation_id: None,
+                correlation_id: None,
+            },
+            &BootstrapWindowInput {
+                window_id: "main-window-1".into(),
+                default_root_directory: options.workspace.to_string_lossy().into_owned(),
+                default_name: "Workspace".into(),
+                now: 1,
+            },
+            &hierarchy_ids(),
+            "默认",
+            1,
+        )?
+        .session
+        .context("seed session")?;
+        connection.execute(
+            "UPDATE sessions SET kind='claude-code' WHERE id=?",
+            [&session.id],
+        )?;
+        connection.execute(
+            "INSERT INTO provider_bindings
+                (id, session_id, provider, provider_session_id, resume_state, metadata_json,
+                 created_at, updated_at, invalidated_at, validated_at)
+             VALUES ('old-binding', ?, 'claude-code', 'old-conversation', 'expired',
+                     '{\"model\":\"bound-fixture-model\"}', 1, 1, 1, 1)",
+            [&session.id],
+        )?;
+        let mut owner = ShellOwner::new(connection, ownership, id)?;
+        assert!(
+            !owner
+                .claude_binding(&session.id)?
+                .context("expired binding")?
+                .resumable
+        );
+        let (role_requests, requests) = mpsc::channel();
+        let mut change = PermissionChange {
+            mode: "plan".into(),
+            binding: None,
+            phase: PermissionPhase::Stopping(None),
+        };
+        assert!(matches!(
+            change.advance(
+                &mut owner,
+                &options,
+                &session.id,
+                default_terminal_options(),
+                &role_requests,
+                &mut HashMap::new(),
+            )?,
+            PermissionProgress::Pending
+        ));
+        assert!(matches!(
+            requests.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        assert!(matches!(change.phase, PermissionPhase::Preparing(Some(_))));
+        Ok(())
+    }
 
     #[test]
     fn session_shutdown_failure_reports_backup_outcome() {

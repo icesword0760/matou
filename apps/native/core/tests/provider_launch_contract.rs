@@ -7,7 +7,11 @@ use std::{
 
 use anyhow::{Context, Result};
 use matou_native_core::{
-    provider_launch::{attach_claude_settings, prepare_claude_launch},
+    provider_launch::{
+        attach_claude_settings, parse_claude_role_assignments, prepare_claude_fork,
+        prepare_claude_launch, prepare_claude_permission_restart, prepare_new_claude_launch,
+        validate_claude_role_assignments,
+    },
     pty::ShellLaunch,
 };
 use serde_json::{Value, json};
@@ -59,6 +63,881 @@ fn assert_env(launch: &ShellLaunch, name: &str, expected: &str) {
             .is_some_and(|value| value == expected),
         "{name}"
     );
+}
+
+fn role_providers() -> Value {
+    config(
+        json!([
+            {
+                "id": "source", "model": "source-main[1M]",
+                "endpoint": "https://source.example.invalid", "apiKey": "source-key",
+                "modelMapping": {"opus": "source-main", "sonnet": "source-sonnet"},
+                "effortMapping": {"opus": "low"}, "reasoningEffort": "medium"
+            },
+            {
+                "id": "target", "model": "target-default",
+                "endpoint": "https://target.example.invalid/", "apiKey": "target-key",
+                "modelMapping": {"opus": "target-opus", "sonnet": "target-sonnet"},
+                "effortMapping": {"opus": "high", "sonnet": "low"}, "reasoningEffort": "max",
+                "modelMetadata": [{"id": "target-sonnet", "supportedEfforts": ["xhigh"]}]
+            }
+        ]),
+        "source",
+    )
+}
+
+fn prepare_new(
+    root: &Path,
+    assignments: &Value,
+) -> Result<matou_native_core::provider_launch::ClaudeLaunch> {
+    let plan = prepare_new_claude_launch(
+        root,
+        root,
+        &Value::Null,
+        Some(&parse_claude_role_assignments(assignments)?),
+        BTreeMap::from([
+            (
+                "MATOU_CLAUDE_COMMAND".into(),
+                std::env::current_exe()?.into_os_string(),
+            ),
+            (
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL".into(),
+                "inherited-haiku".into(),
+            ),
+            ("ANTHROPIC_DEFAULT_FABLE_MODEL".into(), "old-fable".into()),
+            (
+                "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME".into(),
+                "old-name".into(),
+            ),
+            (
+                "ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION".into(),
+                "old-description".into(),
+            ),
+            ("ANTHROPIC_MODEL".into(), "old-main".into()),
+            ("ANTHROPIC_SMALL_FAST_MODEL".into(), "old-fast".into()),
+            ("CLAUDE_CODE_SUBAGENT_MODEL".into(), "old-subagent".into()),
+            (
+                "CLAUDE_CODE_FORCE_SUBAGENT_CUSTOM_MODEL".into(),
+                "old-forced-model".into(),
+            ),
+            ("CLAUDE_CODE_MAX_CONTEXT_TOKENS".into(), "123".into()),
+            (
+                "CLAUDE_CODE_SUBAGENT_MODEL_NAME".into(),
+                "unrelated-key".into(),
+            ),
+            ("CLAUDE_CODE_OAUTH_TOKEN".into(), "inherited-token".into()),
+        ]),
+        80,
+        24,
+    )?;
+    Ok(plan)
+}
+
+#[test]
+fn new_role_assignment_projects_exact_provider_model_and_effort() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("provider-config.json");
+    let mut providers = role_providers();
+    for (explicit, mapped, expected) in [
+        (Some("xhigh"), Some("high"), Some("xhigh")),
+        (Some("follow"), Some("high"), None),
+        (None, Some("high"), Some("high")),
+        (None, Some("follow"), None),
+        (None, None, Some("max")),
+    ] {
+        let target = &mut providers["providers"]["claude-code"][1];
+        target["effortMapping"] = match mapped {
+            Some(effort) => json!({"opus": effort, "sonnet": "low"}),
+            None => json!({"sonnet": "low"}),
+        };
+        fs::write(&path, providers.to_string())?;
+        let mut assignments = json!({"opus": {"providerId": "target", "model": "target-sonnet"}});
+        if let Some(effort) = explicit {
+            assignments["opus"]["effort"] = json!(effort);
+        }
+        let plan = prepare_new(temp.path(), &assignments)?;
+        assert_eq!(plan.provider_config_id, "target");
+        assert_eq!(plan.model, "target-sonnet");
+        assert_eq!(plan.assigned_role, Some("opus"));
+        assert_eq!(plan.effort.as_deref(), expected);
+        let mut launch = plan.launch;
+        let settings = temp.path().join("settings.json");
+        attach_claude_settings(&mut launch, &settings)?;
+        let mut argv = vec![
+            "--settings",
+            settings.to_str().unwrap(),
+            "--model",
+            "target-sonnet",
+        ];
+        if let Some(effort) = expected {
+            argv.extend(["--effort", effort]);
+        }
+        assert_eq!(launch.argv, argv);
+        for (name, value) in [
+            ("ANTHROPIC_API_KEY", "target-key"),
+            ("ANTHROPIC_AUTH_TOKEN", "target-key"),
+            ("ANTHROPIC_BASE_URL", "https://target.example.invalid"),
+            ("ANTHROPIC_DEFAULT_OPUS_MODEL", "target-sonnet"),
+            ("ANTHROPIC_DEFAULT_OPUS_MODEL_NAME", "target-sonnet"),
+            ("ANTHROPIC_DEFAULT_FABLE_MODEL", "target-sonnet"),
+            ("ANTHROPIC_DEFAULT_FABLE_MODEL_NAME", "target-sonnet"),
+            ("ANTHROPIC_DEFAULT_SONNET_MODEL", "target-sonnet"),
+            ("CLAUDE_CODE_SUBAGENT_MODEL_NAME", "unrelated-key"),
+        ] {
+            assert_env(&launch, name, value);
+        }
+        for name in [
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION",
+            "ANTHROPIC_MODEL",
+            "ANTHROPIC_SMALL_FAST_MODEL",
+            "CLAUDE_CODE_SUBAGENT_MODEL",
+            "CLAUDE_CODE_FORCE_SUBAGENT_CUSTOM_MODEL",
+            "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+        ] {
+            assert!(!launch.env.contains_key(OsStr::new(name)));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn fable_uses_the_target_opus_mapping_when_another_role_is_assigned() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut providers = role_providers();
+    providers["providers"]["claude-code"][0]["model"] = json!("haiku");
+    fs::write(
+        temp.path().join("provider-config.json"),
+        providers.to_string(),
+    )?;
+    let plan = prepare_new(
+        temp.path(),
+        &json!({"haiku": {"providerId": "target", "model": "target-sonnet"}}),
+    )?;
+    assert_env(
+        &plan.launch,
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        "target-sonnet",
+    );
+    assert_env(
+        &plan.launch,
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
+        "target-sonnet",
+    );
+    for name in [
+        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        "ANTHROPIC_DEFAULT_FABLE_MODEL",
+        "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME",
+    ] {
+        assert_env(&plan.launch, name, "target-opus");
+    }
+    Ok(())
+}
+
+#[test]
+fn empty_model_and_cli_aliases_select_the_startup_role_before_mappings() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut providers = role_providers();
+    for (model, role) in [
+        ("", "opus"),
+        ("default", "opus"),
+        ("default[1M]", "opus"),
+        ("CLI 默认", "opus"),
+        ("opus[1M]", "opus"),
+        ("sonnet", "sonnet"),
+        ("haiku[1m]", "haiku"),
+        ("fable", "opus"),
+        ("matou-role/opus-fallback", "opus"),
+        ("claude-fable-5", "opus"),
+        ("claude-fable-5-2", "opus"),
+        ("claude-fable-5-5", "opus"),
+        ("matou-role/fable", "opus"),
+        ("matou-role/opus", "opus"),
+        ("matou-role/haiku", "haiku"),
+        ("matou-api/sonnet", "sonnet"),
+        ("matou-api/fable", "opus"),
+        ("matou-opus", "opus"),
+        ("matou-sonnet", "sonnet"),
+        ("matou-chatgpt/matou-opus-fallback", "opus"),
+        ("matou-chatgpt/matou-haiku", "haiku"),
+        ("matou-antigravity/matou-sonnet", "sonnet"),
+        ("claude-opus-5", "opus"),
+        ("claude-opus-5-5", "opus"),
+        ("claude-sonnet-5[1m]", "sonnet"),
+        ("claude-sonnet-5-5", "sonnet"),
+        ("claude-haiku-5-5", "haiku"),
+        ("matou-antigravity/claude-opus-5-5", "opus"),
+        ("matou-antigravity/claude-sonnet-5-5[1M]", "sonnet"),
+        ("matou-antigravity/claude-haiku-5-5", "haiku"),
+        ("source-main[1M]", "opus"),
+    ] {
+        let source = &mut providers["providers"]["claude-code"][0];
+        source["model"] = json!(model);
+        source["modelMapping"]["sonnet"] = json!(model);
+        if model == "source-main[1M]" {
+            source["modelMapping"]["sonnet"] = json!("source-sonnet");
+        }
+        fs::write(
+            temp.path().join("provider-config.json"),
+            providers.to_string(),
+        )?;
+        let plan = prepare_new(
+            temp.path(),
+            &json!({(role): {"providerId": "target", "model": "target-sonnet", "effort": "follow"}}),
+        )?;
+        assert_eq!(plan.provider_config_id, "target", "{model:?}");
+        assert_eq!(plan.launch.argv, ["--model", "target-sonnet"]);
+    }
+    Ok(())
+}
+
+#[test]
+fn startup_aliases_match_case_and_whitespace_exactly_except_for_the_context_suffix() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut providers = role_providers();
+    let assignments = json!({
+        "opus": {"providerId": "absent", "model": "unexpected-opus"},
+        "sonnet": {"providerId": "target", "model": "target-sonnet", "effort": "follow"}
+    });
+    for (model, mapping, expected_provider, expected_model) in [
+        ("  ", "source-sonnet", "source", ""),
+        (" default ", "source-sonnet", "source", "default"),
+        (" CLI 默认 ", "source-sonnet", "source", "CLI 默认"),
+        (" default ", " default ", "target", "target-sonnet"),
+        ("OPUS", "source-sonnet", "source", "OPUS"),
+        (" Opus ", "source-sonnet", "source", "Opus"),
+        (" opus ", "source-sonnet", "source", "opus"),
+        (
+            "CLAUDE-SONNET-5[1m]",
+            "source-sonnet",
+            "source",
+            "CLAUDE-SONNET-5[1m]",
+        ),
+        ("OPUS[1M]", "OPUS[1m]", "target", "target-sonnet"),
+        ("OPUS", " OPUS ", "source", "OPUS"),
+    ] {
+        let source = &mut providers["providers"]["claude-code"][0];
+        source["model"] = json!(model);
+        source["modelMapping"]["sonnet"] = json!(mapping);
+        fs::write(
+            temp.path().join("provider-config.json"),
+            providers.to_string(),
+        )?;
+        let plan = prepare_new(temp.path(), &assignments)?;
+        assert_eq!(plan.provider_config_id, expected_provider, "{model:?}");
+        assert_eq!(plan.model, expected_model, "{model:?}");
+    }
+    Ok(())
+}
+
+#[test]
+fn unassigned_and_unmatched_startup_models_use_original_provider() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut providers = role_providers();
+    let broken = json!({"providerId": "unavailable", "model": "missing-model"});
+    for (model, sonnet, assignments, effort) in [
+        (
+            "source-main[1M]",
+            "source-sonnet",
+            json!({"sonnet": broken}),
+            "low",
+        ),
+        (
+            "claude-opus-current",
+            "source-sonnet",
+            json!({"opus": broken}),
+            "low",
+        ),
+        (
+            "another-model",
+            "source-sonnet",
+            json!({"opus": broken, "sonnet": broken, "haiku": broken}),
+            "medium",
+        ),
+        (
+            "matou-antigravity/claude-sonnet-private",
+            "source-sonnet",
+            json!({"opus": broken, "sonnet": broken, "haiku": broken}),
+            "medium",
+        ),
+        (
+            "other/matou-sonnet",
+            "source-sonnet",
+            json!({"opus": broken, "sonnet": broken, "haiku": broken}),
+            "medium",
+        ),
+    ] {
+        let source = &mut providers["providers"]["claude-code"][0];
+        source["model"] = json!(model);
+        source["modelMapping"]["sonnet"] = json!(sonnet);
+        fs::write(
+            temp.path().join("provider-config.json"),
+            providers.to_string(),
+        )?;
+        let plan = prepare_new(temp.path(), &assignments)?;
+        assert_eq!(plan.provider_config_id, "source");
+        assert_eq!(plan.launch.argv, ["--model", model, "--effort", effort]);
+        assert_env(
+            &plan.launch,
+            "ANTHROPIC_BASE_URL",
+            "https://source.example.invalid",
+        );
+        assert_env(&plan.launch, "ANTHROPIC_API_KEY", "source-key");
+    }
+    Ok(())
+}
+
+#[test]
+fn ambiguous_startup_model_mapping_uses_the_first_matching_role() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut providers = role_providers();
+    let model = "source-main[1M]";
+    let opus = json!({"providerId": "target", "model": "target-sonnet", "effort": "follow"});
+    let broken = json!({"providerId": "unavailable", "model": "missing-model"});
+    for (mapping, assignments) in [
+        (
+            json!({"opus": "source-main", "sonnet": "source-main[1m]"}),
+            json!({"opus": opus, "sonnet": broken}),
+        ),
+        (
+            json!({"opus": "source-main", "sonnet": "source-main", "haiku": "source-main"}),
+            json!({"opus": opus}),
+        ),
+        (
+            json!({"opus": "other-model", "sonnet": "source-main", "haiku": "source-main"}),
+            json!({"sonnet": opus, "haiku": broken}),
+        ),
+    ] {
+        let source = &mut providers["providers"]["claude-code"][0];
+        source["model"] = json!(model);
+        source["modelMapping"] = mapping;
+        fs::write(
+            temp.path().join("provider-config.json"),
+            providers.to_string(),
+        )?;
+        let plan = prepare_new(temp.path(), &assignments)?;
+        assert_eq!(plan.provider_config_id, "target", "{assignments}");
+        assert_eq!(plan.launch.argv, ["--model", "target-sonnet"]);
+    }
+    Ok(())
+}
+
+#[test]
+fn unassigned_role_intentionally_skips_frozen_fallback_target_validation() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut providers = role_providers();
+    providers["providers"]["claude-code"][0]["modelMetadata"] = json!([{"id": "source-sonnet"}]);
+    fs::write(
+        temp.path().join("provider-config.json"),
+        providers.to_string(),
+    )?;
+    let plan = prepare_new(
+        temp.path(),
+        &json!({"sonnet": {"providerId": "target", "model": "target-sonnet"}}),
+    )?;
+    assert_eq!(plan.provider_config_id, "source");
+    assert_eq!(
+        plan.launch.argv,
+        ["--model", "source-main[1M]", "--effort", "low"]
+    );
+    Ok(())
+}
+
+#[test]
+fn sonnet_only_assignment_cleans_environment_when_starting_opus() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    fs::write(
+        temp.path().join("provider-config.json"),
+        role_providers().to_string(),
+    )?;
+    let plan = prepare_new(
+        temp.path(),
+        &json!({"sonnet": {"providerId": "target", "model": "target-sonnet"}}),
+    )?;
+    assert_eq!(plan.assigned_role, None);
+    assert_eq!(plan.provider_config_id, "source");
+    assert_env(&plan.launch, "ANTHROPIC_DEFAULT_OPUS_MODEL", "source-main");
+    assert_env(
+        &plan.launch,
+        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "source-sonnet",
+    );
+    let stale_models = [
+        "ANTHROPIC_MODEL",
+        "CLAUDE_CODE_SUBAGENT_MODEL",
+        "ANTHROPIC_DEFAULT_FABLE_MODEL",
+    ];
+    for name in stale_models {
+        assert!(!plan.launch.env.contains_key(OsStr::new(name)), "{name}");
+    }
+    let mut environment = BTreeMap::from([(
+        "MATOU_CLAUDE_COMMAND".into(),
+        std::env::current_exe()?.into_os_string(),
+    )]);
+    environment
+        .extend(stale_models.map(|name| (OsString::from(name), OsString::from("inherited-model"))));
+    let restarted = prepare_claude_permission_restart(
+        temp.path(),
+        temp.path(),
+        &json!({
+            "providerConfigId": plan.provider_config_id,
+            "model": plan.model,
+            "effort": plan.effort,
+            "clearAssignmentEnvironment": plan.clear_assignment_environment,
+            "permissionMode": "plan",
+        }),
+        true,
+        environment,
+        80,
+        24,
+    )?;
+    for name in stale_models {
+        assert!(
+            !restarted.launch.env.contains_key(OsStr::new(name)),
+            "{name}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn null_supported_efforts_allows_explicit_assignment_effort() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut providers = role_providers();
+    providers["providers"]["claude-code"][1]["modelMetadata"][0]["supportedEfforts"] = Value::Null;
+    fs::write(
+        temp.path().join("provider-config.json"),
+        providers.to_string(),
+    )?;
+    let input =
+        json!({"opus": {"providerId": "target", "model": "target-sonnet", "effort": "high"}});
+    validate_claude_role_assignments(temp.path(), &input)?;
+    assert_eq!(
+        prepare_new(temp.path(), &input)?.launch.argv,
+        ["--model", "target-sonnet", "--effort", "high"]
+    );
+    Ok(())
+}
+
+#[test]
+fn active_subscription_source_reports_service_unavailable_even_with_an_api_opus_assignment()
+-> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut providers = role_providers();
+    providers["providers"]["claude-code"][0] = json!({
+        "id": "source", "model": "opus", "endpoint": "", "kind": "subscription",
+        "modelMapping": {"opus": "subscription-opus"},
+        "subscription": {"modelMetadata": [{"id": "subscription-opus"}]}
+    });
+    fs::write(
+        temp.path().join("provider-config.json"),
+        providers.to_string(),
+    )?;
+    let assignments = json!({"opus": {"providerId": "target", "model": "target-sonnet"}});
+    validate_claude_role_assignments(temp.path(), &assignments)?;
+    let error = prepare_new(temp.path(), &assignments)
+        .err()
+        .context("subscription launch must fail")?;
+    assert_eq!(
+        error.to_string(),
+        "Subscription launch service is unavailable"
+    );
+    Ok(())
+}
+
+#[test]
+fn saving_subscription_targets_is_intentionally_unavailable() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut providers = role_providers();
+    providers["providers"]["claude-code"][1] = json!({
+        "id": "target", "model": "opus", "endpoint": "", "kind": "subscription",
+        "modelMapping": {"opus": "subscription-opus"},
+        "subscription": {"modelMetadata": [{"id": "subscription-opus"}]}
+    });
+    fs::write(
+        temp.path().join("provider-config.json"),
+        providers.to_string(),
+    )?;
+    // Native intentionally rejects saving a target it has no subscription service to launch.
+    let assignment = json!({"opus": {"providerId": "target", "model": "subscription-opus"}});
+    let error = validate_claude_role_assignments(temp.path(), &assignment).unwrap_err();
+    assert_eq!(
+        format!("{error:#}"),
+        "opus assignment: Subscription launch service is unavailable"
+    );
+    Ok(())
+}
+
+#[test]
+fn invalid_selected_assignment_fails_without_using_the_source() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("provider-config.json");
+    let mut providers = role_providers();
+    providers["providers"]["claude-code"][1]["apiKey"] = json!("  ");
+    fs::write(&path, providers.to_string())?;
+    let providers_without_key = providers.to_string();
+    providers["providers"]["claude-code"][1]["apiKey"] = json!("target-key");
+    let providers_with_key = providers.to_string();
+    for (config, provider, model, effort, reason) in [
+        (
+            &providers_with_key,
+            "missing",
+            "target-sonnet",
+            "follow",
+            "provider is unavailable",
+        ),
+        (
+            &providers_without_key,
+            "target",
+            "target-sonnet",
+            "follow",
+            "API key is unavailable",
+        ),
+        (
+            &providers_with_key,
+            "target",
+            "missing-model",
+            "follow",
+            "model is unavailable",
+        ),
+        (
+            &providers_with_key,
+            "target",
+            "target-sonnet",
+            "max",
+            "Unsupported reasoning effort",
+        ),
+    ] {
+        fs::write(&path, config)?;
+        let assignments =
+            json!({"opus": {"providerId": provider, "model": model, "effort": effort}});
+        let error = prepare_new(temp.path(), &assignments)
+            .err()
+            .context("launch must fail")?;
+        let error = format!("{error:#}");
+        assert!(error.starts_with("opus assignment:"), "{error}");
+        assert!(error.contains(reason), "{error}");
+    }
+    Ok(())
+}
+
+#[test]
+fn validates_assignments_against_frozen_limits_and_stored_model_catalog() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("provider-config.json");
+    let providers = role_providers().to_string();
+    fs::write(&path, &providers)?;
+    let cases = [
+        (Value::Null, "must be an object"),
+        (json!({"other": {}}), "Unknown Claude model role"),
+        (json!({"opus": null}), "must be an object"),
+        (
+            json!({"opus": {"providerId": " ", "model": "valid"}}),
+            "providerId is empty",
+        ),
+        (
+            json!({"opus": {"providerId": "a".repeat(257), "model": "valid"}}),
+            "exceeds 256",
+        ),
+        (
+            json!({"opus": {"providerId": "source", "model": "🚂".repeat(121)}}),
+            "exceeds 240",
+        ),
+        (
+            json!({"opus": {"providerId": "source\t", "model": "valid"}}),
+            "control character",
+        ),
+        (
+            json!({"opus": {"providerId": "source", "model": "bad\u{7f}"}}),
+            "control character",
+        ),
+        (
+            json!({"opus": {"providerId": "source", "model": "valid", "effort": null}}),
+            "Invalid reasoning effort",
+        ),
+        (
+            json!({"opus": {"providerId": "source", "model": "valid", "effort": "extreme"}}),
+            "Invalid reasoning effort",
+        ),
+        (
+            json!({"opus": {"providerId": "missing", "model": "valid"}}),
+            "provider is unavailable",
+        ),
+        (
+            json!({"opus": {"providerId": "target", "model": "not-in-catalog"}}),
+            "model is unavailable",
+        ),
+        (
+            json!({"opus": {"providerId": "target", "model": "target-sonnet", "effort": "max"}}),
+            "Unsupported reasoning effort",
+        ),
+    ];
+    for (input, reason) in cases {
+        let error = validate_claude_role_assignments(temp.path(), &input).unwrap_err();
+        assert!(format!("{error:#}").contains(reason), "{error:#}");
+    }
+    for effort in ["follow", "xhigh"] {
+        let input = json!({"haiku": {"providerId": " target ", "model": " target-sonnet ", "effort": effort}});
+        let assignments = validate_claude_role_assignments(temp.path(), &input)?;
+        assert_eq!(
+            serde_json::to_value(assignments)?,
+            json!({
+                "haiku": {"providerId": "target", "model": "target-sonnet", "effort": effort}
+            })
+        );
+    }
+    let custom = json!({"sonnet": {"providerId": "source", "model": "手填模型", "effort": "max"}});
+    assert_eq!(
+        serde_json::to_value(validate_claude_role_assignments(temp.path(), &custom)?)?,
+        custom
+    );
+    assert_eq!(fs::read_to_string(&path)?, providers);
+    Ok(())
+}
+
+#[test]
+fn official_target_without_catalog_intentionally_skips_frozen_membership_check() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("provider-config.json");
+    let official = json!({
+        "id": "anthropic-official", "builtIn": true, "model": "", "endpoint": "https://api.anthropic.com/"
+    });
+    let mut with_official = role_providers();
+    with_official["providers"]["claude-code"][1] = official;
+    let mut with_built_in = with_official.clone();
+    with_built_in["providers"]["claude-code"][1]["id"] = json!("builtin");
+    for (stored, id) in [
+        (None, "anthropic-official"),
+        (Some(&with_official), "anthropic-official"),
+        (Some(&with_built_in), "builtin"),
+    ] {
+        if let Some(config) = stored {
+            fs::write(&path, config.to_string())?;
+        }
+        let input = json!({"opus": {"providerId": id, "model": "uncatalogued-official-model", "effort": "high"}});
+        validate_claude_role_assignments(temp.path(), &input)?;
+        let plan = prepare_new(temp.path(), &input)?;
+        assert_eq!(plan.provider_config_id, id);
+        assert_eq!(
+            plan.launch.argv,
+            ["--model", "uncatalogued-official-model", "--effort", "high"]
+        );
+        assert_env(
+            &plan.launch,
+            "ANTHROPIC_BASE_URL",
+            "https://api.anthropic.com",
+        );
+        assert_env(&plan.launch, "CLAUDE_CODE_OAUTH_TOKEN", "inherited-token");
+        assert!(
+            !plan
+                .launch
+                .env
+                .contains_key(OsStr::new("ANTHROPIC_API_KEY"))
+        );
+    }
+
+    let input =
+        json!({"opus": {"providerId": "anthropic-official", "model": "opus", "effort": "high"}});
+    for stored in [role_providers(), with_built_in] {
+        fs::write(&path, stored.to_string())?;
+        let error = validate_claude_role_assignments(temp.path(), &input).unwrap_err();
+        assert_eq!(
+            format!("{error:#}"),
+            "opus assignment: Assignment provider is unavailable"
+        );
+        let error = prepare_new(temp.path(), &input)
+            .err()
+            .context("launch must fail without a configured official provider")?;
+        assert_eq!(
+            format!("{error:#}"),
+            "opus assignment: Assignment provider is unavailable"
+        );
+    }
+
+    let catalog = json!([{"id": "opus", "supportedEfforts": ["high"]}]);
+    for (field, value) in [
+        ("endpoint", json!("https://custom.example.invalid")),
+        ("endpoint", json!("https://api.anthropic.com//")),
+        ("builtIn", json!(false)),
+        ("modelMetadata", catalog.clone()),
+    ] {
+        let mut invalid = with_official.clone();
+        invalid["providers"]["claude-code"][1][field] = value;
+        fs::write(&path, invalid.to_string())?;
+        let save_error = validate_claude_role_assignments(temp.path(), &input).unwrap_err();
+        let launch_error = prepare_new(temp.path(), &input)
+            .err()
+            .context("launch must fail without an API key")?;
+        for error in [save_error, launch_error] {
+            assert_eq!(
+                format!("{error:#}"),
+                "opus assignment: Assignment API key is unavailable",
+                "{field}"
+            );
+        }
+    }
+
+    let entry = &mut with_official["providers"]["claude-code"][1];
+    entry["modelMetadata"] = catalog;
+    entry["apiKey"] = json!("official-fixture-key");
+    fs::write(&path, with_official.to_string())?;
+    validate_claude_role_assignments(temp.path(), &input)?;
+    assert_eq!(
+        prepare_new(temp.path(), &input)?.launch.argv,
+        ["--model", "opus", "--effort", "high",]
+    );
+    for (model, effort, reason) in [
+        ("sonnet", "high", "model is unavailable"),
+        ("opus", "max", "Unsupported reasoning effort"),
+    ] {
+        let input =
+            json!({"opus": {"providerId": "anthropic-official", "model": model, "effort": effort}});
+        let error = validate_claude_role_assignments(temp.path(), &input).unwrap_err();
+        assert!(format!("{error:#}").contains(reason), "{error:#}");
+        let error = prepare_new(temp.path(), &input)
+            .err()
+            .context("launch must fail")?;
+        assert!(format!("{error:#}").contains(reason), "{error:#}");
+    }
+    Ok(())
+}
+
+#[test]
+fn bound_resume_and_fork_keep_the_existing_launch_arguments() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path();
+    fs::write(
+        root.join("provider-config.json"),
+        role_providers().to_string(),
+    )?;
+    let environment = BTreeMap::from([(
+        "MATOU_CLAUDE_COMMAND".into(),
+        std::env::current_exe()?.into_os_string(),
+    )]);
+    let binding =
+        json!({"providerConfigId": "target", "model": "target-opus", "permissionMode": "plan"});
+    let resume = prepare_claude_launch(
+        root,
+        root,
+        &binding,
+        Some("original"),
+        environment.clone(),
+        80,
+        24,
+    )?;
+    let fork = prepare_claude_fork(root, root, &binding, "original", environment, 80, 24)?;
+    for plan in [&resume, &fork] {
+        assert_eq!(plan.provider_config_id, "target");
+        assert_eq!(plan.model, "target-opus");
+        assert_env(
+            &plan.launch,
+            "ANTHROPIC_BASE_URL",
+            "https://target.example.invalid",
+        );
+    }
+    assert_eq!(
+        resume.launch.argv,
+        [
+            "--model",
+            "target-opus",
+            "--effort",
+            "high",
+            "--resume",
+            "original",
+            "--permission-mode",
+            "plan",
+        ]
+    );
+    assert_eq!(
+        fork.launch.argv,
+        [
+            "--model",
+            "target-opus",
+            "--effort",
+            "high",
+            "--resume",
+            "original",
+            "--fork-session",
+            "--permission-mode",
+            "plan",
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn permission_restart_translates_legacy_bound_model_aliases() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path();
+    fs::write(
+        root.join("provider-config.json"),
+        role_providers().to_string(),
+    )?;
+    let environment = BTreeMap::from([(
+        "MATOU_CLAUDE_COMMAND".into(),
+        std::env::current_exe()?.into_os_string(),
+    )]);
+    for (alias, model, effort) in [
+        ("matou-api/opus", "target-opus", "high"),
+        ("matou-chatgpt/matou-opus", "target-default", "max"),
+        ("matou-antigravity/claude-opus-5-5", "target-default", "max"),
+    ] {
+        let binding =
+            json!({"providerConfigId": "target", "model": alias, "permissionMode": "plan"});
+        let plan = prepare_claude_permission_restart(
+            root,
+            root,
+            &binding,
+            false,
+            environment.clone(),
+            80,
+            24,
+        )?;
+        assert_eq!(
+            plan.launch.argv,
+            [
+                "--model",
+                model,
+                "--effort",
+                effort,
+                "--permission-mode",
+                "plan"
+            ]
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn permission_restart_and_assigned_resume_preserve_omitted_effort() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path();
+    fs::write(
+        root.join("provider-config.json"),
+        role_providers().to_string(),
+    )?;
+    let environment = BTreeMap::from([(
+        "MATOU_CLAUDE_COMMAND".into(),
+        std::env::current_exe()?.into_os_string(),
+    )]);
+    let mut binding = json!({"providerConfigId": "target", "model": "target-sonnet"});
+    let fresh =
+        prepare_claude_permission_restart(root, root, &binding, true, environment.clone(), 80, 24)?;
+    assert_eq!(fresh.launch.argv, ["--model", "target-sonnet"]);
+    binding["assignedRole"] = json!("sonnet");
+    let resumed =
+        prepare_claude_launch(root, root, &binding, Some("original"), environment, 80, 24)?;
+    assert_eq!(
+        resumed.launch.argv,
+        ["--model", "target-sonnet", "--resume", "original"]
+    );
+    assert_env(
+        &resumed.launch,
+        "ANTHROPIC_DEFAULT_FABLE_MODEL",
+        "target-opus",
+    );
+    Ok(())
 }
 
 #[test]

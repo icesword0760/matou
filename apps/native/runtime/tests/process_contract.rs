@@ -18,7 +18,10 @@ use matou_native_core::{
 };
 use matou_native_runtime::{
     host::{Command, Event},
-    protocol::{ClientMessage, ServerMessage, VERSION, read_messages, write_message},
+    protocol::{
+        ClaudeRoleAssignmentsReply, ClientMessage, ServerMessage, VERSION, read_messages,
+        write_message,
+    },
 };
 use matou_native_terminal::Screen;
 use rusqlite::{Connection, OpenFlags};
@@ -1215,6 +1218,745 @@ fn parked_startup_card_reads_its_binding_until_explicit_recovery() -> Result<()>
     Ok(())
 }
 
+#[test]
+fn first_claude_start_and_recovery_without_binding_use_saved_opus_assignment() -> Result<()> {
+    use matou_native_core::sessions::{claude_binding, get_session, list_runs};
+    use matou_native_runtime::host::RecoveryState;
+    use serde_json::{Value, json};
+
+    let root = tempfile::tempdir()?;
+    let missing_shell = root.path().join("missing-shell");
+    let mut child = RuntimeChild::spawn_configured(root.path(), "", &missing_shell, None)?;
+    child.ready()?;
+    let deadline = Instant::now() + TIMEOUT;
+    while !matches!(child.event(deadline, true)?, Event::Recovery { .. }) {}
+    let config = child.data.join("provider-config.json");
+    let stored_config = json!({
+        "version": 1,
+        "providers": {"claude-code": [
+            {
+                "id": "anthropic-official", "builtIn": true, "model": "",
+                "endpoint": "https://api.anthropic.com"
+            },
+            {
+                "id": "target", "model": "target-default", "apiKey": "target-fixture-key",
+                "endpoint": "https://target.example.invalid/",
+                "modelMapping": {"opus": "target-opus", "sonnet": "target-sonnet", "haiku": "target-haiku"},
+                "effortMapping": {"opus": "high"}, "reasoningEffort": "medium",
+                "modelMetadata": [{"id": "assigned-model", "supportedEfforts": ["high"]}]
+            }
+        ]},
+        "activeProviderIds": {"claude-code": "anthropic-official"}
+    }).to_string();
+    fs::write(&config, &stored_config)?;
+    let exchange =
+        |child: &mut RuntimeChild, request_id, command| -> Result<ClaudeRoleAssignmentsReply> {
+            child.send(command)?;
+            let deadline = Instant::now() + TIMEOUT;
+            loop {
+                if let Event::Graph(graph) = child.event(deadline, true)?
+                    && let Some(value) = graph.get("claudeRoleAssignmentsResult")
+                {
+                    let raw = value.to_string();
+                    assert!(!raw.contains("fixture-key"));
+                    assert!(!raw.contains("apiKey"));
+                    assert!(!raw.contains("example.invalid"));
+                    let fields = value.as_object().context("flat reply object")?;
+                    assert_eq!(fields.len(), 2);
+                    assert_eq!(fields.get("requestId"), Some(&json!(request_id)));
+                    match (fields.get("assignments"), fields.get("error")) {
+                        (Some(assignments), None) => assert!(assignments.is_object()),
+                        (None, Some(error)) => assert!(error.is_string()),
+                        _ => panic!("expected assignments or error in the Graph reply: {value}"),
+                    }
+                    let reply: ClaudeRoleAssignmentsReply = serde_json::from_value(value.clone())?;
+                    return Ok(reply);
+                }
+            }
+        };
+    let get = |child: &mut RuntimeChild, request_id| {
+        exchange(
+            child,
+            request_id,
+            Command::GetClaudeRoleAssignments { request_id },
+        )
+    };
+    let set = |child: &mut RuntimeChild, request_id, assignments| {
+        exchange(
+            child,
+            request_id,
+            Command::SetClaudeRoleAssignments {
+                request_id,
+                assignments,
+            },
+        )
+    };
+    assert!(get(&mut child, 1)?.assignments.unwrap().is_empty());
+    let official =
+        json!({"opus": {"providerId": "anthropic-official", "model": "opus", "effort": "max"}});
+    assert_eq!(
+        serde_json::to_value(set(&mut child, 8, official.clone())?.assignments.unwrap())?,
+        official,
+    );
+    let mut custom_official: Value = serde_json::from_str(&stored_config)?;
+    custom_official["providers"]["claude-code"][0]["endpoint"] =
+        json!("https://custom.example.invalid");
+    fs::write(&config, custom_official.to_string())?;
+    assert_eq!(
+        set(&mut child, 13, official)?.error.unwrap(),
+        "opus assignment: Assignment API key is unavailable"
+    );
+    fs::write(&config, &stored_config)?;
+    let assignment =
+        json!({"opus": {"providerId": "target", "model": "assigned-model", "effort": "high"}});
+    let mut draft = assignment.clone();
+    draft["opus"]["apiKey"] = json!("ignored-fixture-key");
+    let saved = set(&mut child, 2, draft)?.assignments.unwrap();
+    assert_eq!(serde_json::to_value(&saved)?, assignment);
+    for (request, provider, model, effort, reason) in [
+        (
+            3,
+            "absent",
+            "assigned-model",
+            "high",
+            "provider is unavailable",
+        ),
+        (4, "target", " ", "high", "model is empty"),
+        (
+            5,
+            "target",
+            "assigned-model",
+            "max",
+            "Unsupported reasoning effort",
+        ),
+    ] {
+        let error = set(
+            &mut child,
+            request,
+            json!({"opus": {
+                "providerId": provider, "model": model, "effort": effort
+            }}),
+        )?
+        .error
+        .unwrap();
+        assert!(error.starts_with("opus assignment:"), "{error}");
+        assert!(error.contains(reason), "{error}");
+    }
+    assert_eq!(get(&mut child, 6)?.assignments.unwrap(), saved);
+    let db = Connection::open(child.data.join("matou.sqlite"))?;
+    let mut malformed = assignment.clone();
+    malformed["sonnet"] = json!({"providerId": "target", "model": false});
+    db.execute(
+        "UPDATE preferences SET value_json=json_set(value_json, '$.claudeRoleAssignments', json(?)) WHERE key='agent.modelPreferences'",
+        [malformed.to_string()],
+    )?;
+    assert!(get(&mut child, 9)?.assignments.unwrap().is_empty());
+    assert_eq!(
+        set(&mut child, 10, assignment.clone())?
+            .assignments
+            .unwrap(),
+        saved
+    );
+    db.execute(
+        "UPDATE preferences SET value_json=json_set(value_json, '$.contextWindows.target', 'invalid') WHERE key='agent.modelPreferences'",
+        [],
+    )?;
+    assert!(get(&mut child, 11)?.assignments.unwrap().is_empty());
+    assert_eq!(
+        set(&mut child, 12, assignment.clone())?
+            .assignments
+            .unwrap(),
+        saved
+    );
+    db.execute(
+        "UPDATE preferences SET value_json = CAST(x'ff' AS TEXT) WHERE key='agent.modelPreferences'",
+        [],
+    )?;
+    assert!(get(&mut child, 14)?.assignments.unwrap().is_empty());
+    assert_eq!(
+        set(&mut child, 15, assignment.clone())?
+            .assignments
+            .unwrap(),
+        saved
+    );
+    let repaired: String = db.query_row(
+        "SELECT value_json FROM preferences WHERE key='agent.modelPreferences'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(
+        serde_json::from_str::<Value>(&repaired)?,
+        json!({
+            "contextWindows": {},
+            "compaction": {"mode": "follow", "effort": "follow"},
+            "claudeRoleAssignments": assignment
+        })
+    );
+    drop(db);
+    assert_eq!(fs::read_to_string(&config)?, stored_config);
+    child.send(Command::Shutdown)?;
+    child.closed()?;
+    let (status, stderr) = child.wait()?;
+    ensure!(status.success(), "runtime shutdown: {stderr}");
+
+    let db = Connection::open(child.data.join("matou.sqlite"))?;
+    db.execute(
+        "UPDATE sessions SET kind = 'claude-code' WHERE id = ?",
+        [&child.session],
+    )?;
+    drop(db);
+    let stub = root.path().join("claude-role-launch-stub");
+    fs::write(
+        &stub,
+        r#"#!/bin/sh
+if [ ! -f "$0.first-argv" ]; then
+    printf '%s\n' "$@" > "$0.first-argv"
+    exit 23
+fi
+printf '%s\n' "$@" > "$0.argv"
+printf '%s\n' "$ANTHROPIC_BASE_URL" "$ANTHROPIC_API_KEY" "$ANTHROPIC_AUTH_TOKEN" \
+    "$ANTHROPIC_DEFAULT_OPUS_MODEL" "$ANTHROPIC_DEFAULT_SONNET_MODEL" \
+    "$ANTHROPIC_DEFAULT_HAIKU_MODEL" "$ANTHROPIC_DEFAULT_FABLE_MODEL" \
+    "${CLAUDE_CODE_SUBAGENT_MODEL-unset}" "${ANTHROPIC_MODEL-unset}" > "$0.env"
+case "$*" in
+  *'--permission-mode acceptEdits'*) printf 'resumed permission process ready\n';;
+  *'--permission-mode plan'*) printf 'permission process ready\n';;
+  *) printf 'assigned process ready\n';;
+esac
+exec /bin/sleep 60
+"#,
+    )?;
+    fs::set_permissions(&stub, fs::Permissions::from_mode(0o700))?;
+    let mut unavailable: Value = serde_json::from_str(&stored_config)?;
+    unavailable["providers"]["claude-code"][1]["modelMetadata"] = json!([{"id": "replacement"}]);
+    fs::write(&config, unavailable.to_string())?;
+    let spawn_assigned = || {
+        RuntimeChild::spawn_configured_with(
+            root.path(),
+            "",
+            &missing_shell,
+            Some(&stub),
+            |command| {
+                command
+                    .env("ANTHROPIC_DEFAULT_FABLE_MODEL", "old-fable")
+                    .env("CLAUDE_CODE_SUBAGENT_MODEL", "old-subagent")
+                    .env("ANTHROPIC_MODEL", "old-main");
+            },
+        )
+    };
+    let mut next = spawn_assigned()?;
+    next.connect()?;
+    assert_eq!(next.session, child.session);
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        if let Event::Recovery {
+            session_id,
+            state: RecoveryState::StartFailed(reason),
+        } = next.event(deadline, true)?
+            && session_id == next.session
+        {
+            assert!(
+                reason.contains("opus assignment: Assignment model is unavailable"),
+                "{reason}"
+            );
+            break;
+        }
+    }
+    assert!(!stub.with_extension("first-argv").exists());
+    let db = Connection::open(next.data.join("matou.sqlite"))?;
+    let status: String = db.query_row(
+        "SELECT status FROM sessions WHERE id=?",
+        [&next.session],
+        |row| row.get(0),
+    )?;
+    assert_eq!(status, "created");
+    assert_eq!(get(&mut next, 7)?.assignments.unwrap(), saved);
+    fs::write(&config, &stored_config)?;
+    next.send(Command::RestartSession {
+        session_id: next.session.clone(),
+    })?;
+    let deadline = Instant::now() + TIMEOUT;
+    while get_session(&db, &next.session)?
+        .context("Claude card")?
+        .status
+        != "exited"
+    {
+        ensure!(
+            Instant::now() < deadline,
+            "first Claude process did not exit"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    let runs = list_runs(&db, &next.session)?;
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].exit_code, Some(23));
+    assert!(claude_binding(&db, &next.session)?.is_none());
+    let first_argv = fs::read_to_string(stub.with_extension("first-argv"))?;
+    assert_eq!(
+        first_argv.lines().skip(2).collect::<Vec<_>>(),
+        ["--model", "assigned-model", "--effort", "high"]
+    );
+    next.send(Command::Shutdown)?;
+    next.closed()?;
+    let (status, stderr) = next.wait()?;
+    ensure!(
+        status.success(),
+        "runtime shutdown after first Claude exit: {stderr}"
+    );
+
+    let mut next = spawn_assigned()?;
+    next.connect()?;
+    assert_eq!(next.session, child.session);
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        if let Event::Recovery {
+            session_id,
+            state: RecoveryState::Deferred,
+        } = next.event(deadline, true)?
+            && session_id == next.session
+        {
+            break;
+        }
+    }
+    assert_eq!(list_runs(&db, &next.session)?.len(), 1);
+    next.send(Command::RetryRecovery {
+        session_id: next.session.clone(),
+    })?;
+    next.frame(|_, screen, _| screen_has_line(screen, "assigned process ready"))?;
+    assert_eq!(list_runs(&db, &next.session)?.len(), 2);
+    let argv = fs::read_to_string(stub.with_extension("argv"))?;
+    let argv: Vec<_> = argv.lines().collect();
+    assert_eq!(argv.len(), 6);
+    assert_eq!(argv[0], "--settings");
+    assert!(Path::new(argv[1]).is_file());
+    assert_eq!(argv[2..], ["--model", "assigned-model", "--effort", "high"]);
+    let env = fs::read_to_string(stub.with_extension("env"))?;
+    assert_eq!(
+        env.lines().collect::<Vec<_>>(),
+        [
+            "https://target.example.invalid",
+            "target-fixture-key",
+            "target-fixture-key",
+            "assigned-model",
+            "target-sonnet",
+            "target-haiku",
+            "assigned-model",
+            "unset",
+            "unset",
+        ]
+    );
+    let prefs: String = db.query_row(
+        "SELECT value_json FROM preferences WHERE key = 'agent.modelPreferences'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(
+        serde_json::from_str::<Value>(&prefs)?,
+        json!({
+            "contextWindows": {},
+            "compaction": {"mode": "follow", "effort": "follow"},
+            "claudeRoleAssignments": assignment
+        })
+    );
+    assert!(claude_binding(&db, &next.session)?.is_none());
+    // The replacement must still use the initial target after preferences change.
+    assert!(
+        set(&mut next, 16, json!({}))?
+            .assignments
+            .unwrap()
+            .is_empty()
+    );
+    let mut edited_config: Value = serde_json::from_str(&stored_config)?;
+    let target = &mut edited_config["providers"]["claude-code"][1];
+    target["effortMapping"]["opus"] = json!("low");
+    target["reasoningEffort"] = json!("low");
+    fs::write(&config, edited_config.to_string())?;
+    next.send(Command::SetProviderPermissionMode {
+        session_id: next.session.clone(),
+        mode: "plan".into(),
+    })?;
+    next.frame(|_, screen, _| screen_has_line(screen, "permission process ready"))?;
+    assert_eq!(
+        fs::read_to_string(stub.with_extension("argv"))?
+            .lines()
+            .skip(2)
+            .collect::<Vec<_>>(),
+        [
+            "--model",
+            "assigned-model",
+            "--effort",
+            "high",
+            "--permission-mode",
+            "plan"
+        ]
+    );
+    assert_eq!(fs::read_to_string(stub.with_extension("env"))?, env);
+    assert!(claude_binding(&db, &next.session)?.is_none());
+    let settings_path = || -> Result<_> {
+        let argv = fs::read_to_string(stub.with_extension("argv"))?;
+        Ok(Path::new(argv.lines().nth(1).context("settings arg")?).to_owned())
+    };
+    post_claude_identity(&settings_path()?, "assigned-id", "plan", "assigned-model")?;
+    assert!(
+        permission_mode_result(&mut next, "plan")?
+            .get("error")
+            .is_none()
+    );
+    let binding = claude_binding(&db, &next.session)?.context("assigned binding")?;
+    assert!(binding.resumable);
+    assert_eq!(binding.metadata["providerConfigId"], "target");
+    assert_eq!(binding.metadata["model"], "assigned-model");
+    assert_eq!(binding.metadata["assignedRole"], "opus");
+    assert_eq!(binding.metadata["effort"], "high");
+    assert!(!binding.metadata.to_string().contains("fixture-key"));
+
+    next.send(Command::SetProviderPermissionMode {
+        session_id: next.session.clone(),
+        mode: "acceptEdits".into(),
+    })?;
+    next.frame(|_, screen, _| screen_has_line(screen, "resumed permission process ready"))?;
+    assert_eq!(
+        fs::read_to_string(stub.with_extension("argv"))?
+            .lines()
+            .skip(2)
+            .collect::<Vec<_>>(),
+        [
+            "--model",
+            "assigned-model",
+            "--effort",
+            "high",
+            "--resume",
+            "assigned-id",
+            "--permission-mode",
+            "acceptEdits"
+        ]
+    );
+    assert_eq!(fs::read_to_string(stub.with_extension("env"))?, env);
+    post_claude_identity(
+        &settings_path()?,
+        "assigned-id",
+        "acceptEdits",
+        "assigned-model",
+    )?;
+    assert!(
+        permission_mode_result(&mut next, "acceptEdits")?
+            .get("error")
+            .is_none()
+    );
+    next.send(Command::Shutdown)?;
+    next.closed()?;
+    let (status, stderr) = next.wait()?;
+    ensure!(status.success(), "runtime shutdown: {stderr}");
+    Ok(())
+}
+
+#[test]
+fn claude_restore_uses_binding_and_start_fresh_survives_deleted_provider() -> Result<()> {
+    use matou_native_runtime::host::RecoveryState;
+    use serde_json::json;
+
+    let root = tempfile::tempdir()?;
+    let no_shell = root.path().join("missing-shell");
+    let mut seed = RuntimeChild::spawn_configured(root.path(), "", &no_shell, None)?;
+    seed.ready()?;
+    seed.send(Command::Shutdown)?;
+    seed.closed()?;
+    let (status, stderr) = seed.wait()?;
+    ensure!(status.success(), "seed runtime shutdown: {stderr}");
+
+    let config = seed.data.join("provider-config.json");
+    let mut providers = json!({
+            "version": 1,
+            "providers": {"claude-code": [
+                {"id": "active", "model": "opus", "endpoint": "https://active.example.invalid"},
+                {
+                    "id": "bound", "model": "claude-opus-5-5", "reasoningEffort": "low",
+                    "endpoint": "https://bound.example.invalid"
+                },
+                {
+                    "id": "target", "model": "target-default", "apiKey": "target-fixture-key",
+                    "endpoint": "https://target.example.invalid"
+                }
+            ]},
+            "activeProviderIds": {"claude-code": "active"}
+    });
+    fs::write(&config, providers.to_string())?;
+    let db = Connection::open(seed.data.join("matou.sqlite"))?;
+    db.execute(
+        "UPDATE sessions SET kind='claude-code' WHERE id=?",
+        [&seed.session],
+    )?;
+    db.execute(
+        "INSERT INTO provider_bindings
+            (id, session_id, provider, provider_session_id, resume_state, restore_state,
+             metadata_json, created_at, updated_at, validated_at)
+         VALUES ('saved-binding', ?, 'claude-code', 'saved-conversation', 'available', 'restoring',
+                 '{\"providerConfigId\":\"bound\",\"model\":\"claude-opus-5-5\",\"permissionMode\":\"plan\"}', 1, 1, 1)",
+        [&seed.session],
+    )?;
+    db.execute(
+        "INSERT INTO preferences (key, value_json, updated_at) VALUES ('agent.modelPreferences', ?, 1)",
+        [json!({
+            "contextWindows": {}, "compaction": {"mode": "follow", "effort": "follow"},
+            "claudeRoleAssignments": {
+                "opus": {"providerId": "target", "model": "assigned-model", "effort": "high"}
+            }
+        })
+        .to_string()],
+    )?;
+    let stub = root.path().join("claude-restore-stub");
+    fs::write(
+        &stub,
+        r#"#!/bin/sh
+for arg in "$@"; do
+    if [ "$arg" = '--resume' ]; then
+        printf '%s\n' "$@" > "$0.resume-argv"
+        exit 23
+    fi
+done
+printf '%s\n' "$@" > "$0.fresh-argv"
+printf '%s\n' "$ANTHROPIC_BASE_URL" > "$0.endpoint"
+printf 'fresh process ready\n'
+exec /bin/sleep 60
+"#,
+    )?;
+    fs::set_permissions(&stub, fs::Permissions::from_mode(0o700))?;
+    let mut child = RuntimeChild::spawn_configured(root.path(), "", &no_shell, Some(&stub))?;
+    child.connect()?;
+    assert_eq!(child.session, seed.session);
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        if let Event::Recovery {
+            session_id,
+            state: RecoveryState::Failed(_),
+        } = child.event(deadline, true)?
+            && session_id == child.session
+        {
+            break;
+        }
+    }
+    let argv = fs::read_to_string(stub.with_extension("resume-argv"))?;
+    assert_eq!(
+        argv.lines().skip(2).collect::<Vec<_>>(),
+        [
+            "--model",
+            "claude-opus-5-5",
+            "--effort",
+            "low",
+            "--resume",
+            "saved-conversation",
+            "--permission-mode",
+            "plan"
+        ]
+    );
+    assert!(!stub.with_extension("fresh-argv").exists());
+
+    providers["providers"]["claude-code"]
+        .as_array_mut()
+        .unwrap()
+        .remove(1);
+    fs::write(&config, providers.to_string())?;
+    child.send(Command::StartFreshProviderSession {
+        session_id: child.session.clone(),
+    })?;
+    child.frame(|_, screen, _| screen_has_line(screen, "fresh process ready"))?;
+    let states: (String, String) = db.query_row(
+        "SELECT resume_state, restore_state FROM provider_bindings WHERE id='saved-binding'",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    assert_eq!(states, ("expired".into(), "none".into()));
+    let argv = fs::read_to_string(stub.with_extension("fresh-argv"))?;
+    assert_eq!(
+        argv.lines().skip(2).collect::<Vec<_>>(),
+        [
+            "--model",
+            "assigned-model",
+            "--effort",
+            "high",
+            "--permission-mode",
+            "plan"
+        ]
+    );
+    assert_eq!(
+        fs::read_to_string(stub.with_extension("endpoint"))?.trim(),
+        "https://target.example.invalid"
+    );
+    child.send(Command::Shutdown)?;
+    child.closed()?;
+    let (status, stderr) = child.wait()?;
+    ensure!(status.success(), "runtime shutdown: {stderr}");
+    Ok(())
+}
+
+#[test]
+fn start_fresh_uses_the_queued_assignment_or_the_active_provider() -> Result<()> {
+    use serde_json::json;
+
+    for scenario in [
+        "save",
+        "cleared",
+        "never configured, old provider deleted",
+        "invalid JSON",
+        "invalid UTF-8",
+    ] {
+        let root = tempfile::tempdir()?;
+        let no_shell = root.path().join("missing-shell");
+        let mut seed = RuntimeChild::spawn_configured(root.path(), "", &no_shell, None)?;
+        seed.ready()?;
+        seed.send(Command::Shutdown)?;
+        seed.closed()?;
+        let (status, stderr) = seed.wait()?;
+        ensure!(status.success(), "seed runtime shutdown: {stderr}");
+        let mut providers = vec![json!({
+            "id": "active", "model": "active-main", "endpoint": "https://active.example.invalid",
+            "apiKey": "active-fixture-key", "modelMapping": {"opus": "active-main"}
+        })];
+        if scenario != "never configured, old provider deleted" {
+            providers.push(json!({
+                "id": "target", "model": "target-default", "endpoint": "https://target.example.invalid",
+                "apiKey": "target-fixture-key", "modelMapping": {"sonnet": "last-assigned-sonnet"},
+                "modelMetadata": [{"id": "next-opus"}, {"id": "next-sonnet"}]
+            }));
+        }
+        let config = json!({
+            "version": 1,
+            "providers": {"claude-code": providers},
+            "activeProviderIds": {"claude-code": "active"}
+        });
+        fs::write(seed.data.join("provider-config.json"), config.to_string())?;
+        let db = Connection::open(seed.data.join("matou.sqlite"))?;
+        db.execute(
+            "UPDATE sessions SET kind='claude-code' WHERE id=?",
+            [&seed.session],
+        )?;
+        db.execute(
+            "INSERT INTO provider_bindings
+                (id, session_id, provider, provider_session_id, resume_state, restore_state,
+                 metadata_json, created_at, updated_at, validated_at)
+             VALUES ('old-binding', ?, 'claude-code', 'old-conversation', 'failed', 'failed',
+                     '{\"providerConfigId\":\"target\",\"model\":\"last-assigned-sonnet\",\"permissionMode\":\"acceptEdits\"}', 1, 1, 1)",
+            [&seed.session],
+        )?;
+        let stub = root.path().join("claude-queued-save-stub");
+        fs::write(
+            &stub,
+            r#"#!/bin/sh
+printf '%s\n' "$@" > "$0.argv"
+printf '%s\n' "$ANTHROPIC_BASE_URL" > "$0.endpoint"
+printf 'fresh process ready\n'
+exec /bin/sleep 60
+"#,
+        )?;
+        fs::set_permissions(&stub, fs::Permissions::from_mode(0o700))?;
+        let mut child = RuntimeChild::spawn_configured(root.path(), "", &no_shell, Some(&stub))?;
+        child.connect()?;
+        assert_eq!(child.session, seed.session);
+
+        let assignments = json!({
+            "opus": {"providerId": "target", "model": "next-opus", "effort": "high"},
+            "sonnet": {"providerId": "target", "model": "next-sonnet", "effort": "follow"}
+        });
+        match scenario {
+            "cleared" => db.execute(
+                "INSERT INTO preferences VALUES ('agent.modelPreferences', ?, 1)",
+                [json!({
+                    "contextWindows": {},
+                    "compaction": {"mode": "follow", "effort": "follow"},
+                    "claudeRoleAssignments": assignments
+                })
+                .to_string()],
+            )?,
+            "invalid JSON" => db.execute(
+                "INSERT INTO preferences VALUES ('agent.modelPreferences', '{', 1)",
+                [],
+            )?,
+            "invalid UTF-8" => db.execute(
+                "INSERT INTO preferences VALUES ('agent.modelPreferences', CAST(x'ff' AS TEXT), 1)",
+                [],
+            )?,
+            _ => 0,
+        };
+        let save = match scenario {
+            "save" => Some(assignments),
+            "cleared" => Some(json!({})),
+            _ => None,
+        };
+        if let Some(assignments) = &save {
+            child.send(Command::SetClaudeRoleAssignments {
+                request_id: 1,
+                assignments: assignments.clone(),
+            })?;
+        }
+        // Send the launch immediately, before consuming any queued save reply.
+        child.send(Command::StartFreshProviderSession {
+            session_id: child.session.clone(),
+        })?;
+        let deadline = Instant::now() + TIMEOUT;
+        let (mut launched, mut got_save_reply) = (false, save.is_none());
+        while !launched || !got_save_reply {
+            match child.event(deadline, true)? {
+                Event::Frame {
+                    session_id, screen, ..
+                } if session_id == child.session => {
+                    launched |= screen_has_line(&screen, "fresh process ready");
+                }
+                Event::Graph(graph) => {
+                    let Some(reply) = graph.get("claudeRoleAssignmentsResult") else {
+                        continue;
+                    };
+                    let reply: ClaudeRoleAssignmentsReply = serde_json::from_value(reply.clone())?;
+                    assert_eq!(reply.request_id, 1);
+                    assert_eq!(
+                        Some(serde_json::to_value(reply.assignments.unwrap())?),
+                        save
+                    );
+                    assert!(reply.error.is_none());
+                    got_save_reply = true;
+                }
+                Event::Recovery {
+                    session_id,
+                    state: matou_native_runtime::host::RecoveryState::StartFailed(error),
+                } if session_id == child.session => bail!("{scenario}: {error}"),
+                _ => {}
+            }
+        }
+        let argv = fs::read_to_string(stub.with_extension("argv"))?;
+        let expected: &[&str] = if scenario == "save" {
+            &[
+                "--model",
+                "next-opus",
+                "--effort",
+                "high",
+                "--permission-mode",
+                "acceptEdits",
+            ]
+        } else {
+            &["--model", "active-main", "--permission-mode", "acceptEdits"]
+        };
+        assert_eq!(
+            argv.lines().skip(2).collect::<Vec<_>>(),
+            expected,
+            "{scenario}"
+        );
+        let endpoint = if scenario == "save" {
+            "https://target.example.invalid"
+        } else {
+            "https://active.example.invalid"
+        };
+        assert_eq!(
+            fs::read_to_string(stub.with_extension("endpoint"))?.trim(),
+            endpoint,
+            "{scenario}"
+        );
+        child.send(Command::Shutdown)?;
+        child.closed()?;
+        let (status, stderr) = child.wait()?;
+        ensure!(status.success(), "runtime shutdown: {stderr}");
+    }
+    Ok(())
+}
+
 fn permission_mode_result(child: &mut RuntimeChild, mode: &str) -> Result<serde_json::Value> {
     let deadline = Instant::now() + TIMEOUT;
     loop {
@@ -1233,6 +1975,15 @@ fn permission_mode_result(child: &mut RuntimeChild, mode: &str) -> Result<serde_
 }
 
 fn post_permission_identity(settings_path: &Path, provider_id: &str, mode: &str) -> Result<()> {
+    post_claude_identity(settings_path, provider_id, mode, "fixture-model")
+}
+
+fn post_claude_identity(
+    settings_path: &Path,
+    provider_id: &str,
+    mode: &str,
+    model: &str,
+) -> Result<()> {
     let settings: serde_json::Value = serde_json::from_slice(&fs::read(settings_path)?)?;
     let url = settings["hooks"]["UserPromptSubmit"][0]["hooks"][0]["url"]
         .as_str()
@@ -1242,7 +1993,7 @@ fn post_permission_identity(settings_path: &Path, provider_id: &str, mode: &str)
     let (address, path) = url.split_once('/').context("hook path")?;
     let payload = serde_json::to_string(&serde_json::json!({
         "hook_event_name": "SessionStart", "session_id": provider_id,
-        "permission_mode": mode, "model": "fixture-model"
+        "permission_mode": mode, "model": model
     }))?;
     let mut connection = std::net::TcpStream::connect(address)?;
     connection.set_read_timeout(Some(TIMEOUT))?;
@@ -1299,13 +2050,23 @@ fn spawn_fresh_permission_card(
         "UPDATE sessions SET kind='claude-code' WHERE id=?",
         [&seed.session],
     )?;
+    db.execute(
+        "INSERT INTO preferences (key, value_json, updated_at) VALUES ('agent.modelPreferences', ?, 1)",
+        [serde_json::json!({
+            "contextWindows": {}, "compaction": {"mode": "follow", "effort": "follow"},
+            "claudeRoleAssignments": {
+                "opus": {"providerId": "anthropic-official", "model": "assigned-only", "effort": "high"}
+            }
+        }).to_string()],
+    )?;
     if let Some(state) = unusable {
         db.execute(
             "INSERT INTO provider_bindings
                 (id, session_id, provider, provider_session_id, resume_state, restore_state,
                  restore_error, metadata_json, created_at, updated_at, invalidated_at, validated_at)
              VALUES ('old-binding', ?, 'claude-code', 'old-id', ?, ?, ?,
-                 '{\"permissionMode\":\"acceptEdits\"}', 1, 1, ?, 1)",
+                 json_object('providerConfigId', ?, 'model', 'bound-fixture-model',
+                             'permissionMode', 'acceptEdits'), 1, 1, ?, 1)",
             rusqlite::params![
                 seed.session,
                 if state == "failed" {
@@ -1315,6 +2076,11 @@ fn spawn_fresh_permission_card(
                 },
                 if state == "failed" { state } else { "none" },
                 (state == "failed").then_some("previous restore failure"),
+                if state == "expired" {
+                    "removed-provider"
+                } else {
+                    "anthropic-official"
+                },
                 (state != "failed").then_some(1),
             ],
         )?;
@@ -1346,6 +2112,7 @@ fn fresh_permission_respawn_expires_unusable_bindings_and_coalesces() -> Result<
             r#"#!/bin/sh
 printf '%s\n' "$@" > "$0.argv"
 printf '%s' "$2" > "$0.settings"
+printf '%s' "$ANTHROPIC_BASE_URL" > "$0.endpoint"
 case "$*" in *'--permission-mode plan'*) printf 'plan ready\n';;
   *) printf 'initial ready\n';;
 esac
@@ -1353,14 +2120,30 @@ exec /bin/sleep 60
 "#,
         )?;
         fs::set_permissions(&stub, fs::Permissions::from_mode(0o700))?;
-        let mut child = spawn_fresh_permission_card(root.path(), &stub, unusable, None)?;
-        if unusable != Some("failed") {
-            child.frame(|_, screen, _| screen_has_line(screen, "initial ready"))?;
+        let mut child =
+            spawn_fresh_permission_card(root.path(), &stub, unusable.map(|_| "expired"), None)?;
+        child.frame(|_, screen, _| screen_has_line(screen, "initial ready"))?;
+        let argv = fs::read_to_string(stub.with_extension("argv"))?;
+        let mut expected = vec!["--model", "assigned-only", "--effort", "high"];
+        if unusable.is_some() {
+            expected.extend(["--permission-mode", "acceptEdits"]);
         }
+        assert_eq!(argv.lines().skip(2).collect::<Vec<_>>(), expected);
+        let endpoint = fs::read_to_string(stub.with_extension("endpoint"))?;
+        assert_eq!(endpoint, "https://api.anthropic.com");
         let session = child.session.clone();
         let db = Connection::open(child.data.join("matou.sqlite"))?;
+        if unusable == Some("failed") {
+            db.execute(
+                "UPDATE provider_bindings
+                 SET resume_state='available', restore_state='failed',
+                     restore_error='previous restore failure', invalidated_at=NULL
+                 WHERE id='old-binding'",
+                [],
+            )?;
+        }
         let original_runs = list_runs(&db, &session)?;
-        assert_eq!(original_runs.len(), usize::from(unusable != Some("failed")));
+        assert_eq!(original_runs.len(), 1);
         let set = |mode: &str| Command::SetProviderPermissionMode {
             session_id: session.clone(),
             mode: mode.into(),
@@ -1376,20 +2159,29 @@ exec /bin/sleep 60
         );
         child.frame(|_, screen, _| screen_has_line(screen, "plan ready"))?;
         let argv = fs::read_to_string(stub.with_extension("argv"))?;
-        assert!(
-            argv.lines()
-                .collect::<Vec<_>>()
-                .ends_with(&["--permission-mode", "plan"])
+        assert_eq!(
+            argv.lines().skip(2).collect::<Vec<_>>(),
+            [
+                "--model",
+                "assigned-only",
+                "--effort",
+                "high",
+                "--permission-mode",
+                "plan"
+            ]
         );
-        assert!(!argv.lines().any(|argument| argument == "--resume"));
+        assert_eq!(
+            fs::read_to_string(stub.with_extension("endpoint"))?,
+            endpoint
+        );
         if unusable.is_some() {
             let old = db.query_row(
                 "SELECT resume_state, restore_state, restore_error IS NULL, invalidated_at IS NOT NULL,
-                        json_extract(metadata_json, '$.permissionMode')
+                        json_extract(metadata_json, '$.permissionMode'), json_extract(metadata_json, '$.model')
                  FROM provider_bindings WHERE id='old-binding'",
                 [], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?,
                               row.get::<_, bool>(2)?, row.get::<_, bool>(3)?,
-                              row.get::<_, String>(4)?)),
+                              row.get::<_, String>(4)?, row.get::<_, String>(5)?)),
             )?;
             assert_eq!(
                 old,
@@ -1398,7 +2190,8 @@ exec /bin/sleep 60
                     "none".into(),
                     true,
                     true,
-                    "acceptEdits".into()
+                    "acceptEdits".into(),
+                    "bound-fixture-model".into()
                 )
             );
         } else {
@@ -1436,6 +2229,162 @@ exec /bin/sleep 60
         let (status, stderr) = child.wait()?;
         ensure!(status.success(), "runtime shutdown: {stderr}");
     }
+    Ok(())
+}
+
+#[test]
+fn failed_initial_claude_process_drops_remembered_launch_target() -> Result<()> {
+    use matou_native_core::sessions::list_runs;
+
+    let root = tempfile::tempdir()?;
+    let stub = root.path().join("claude-failed-launch-stub");
+    fs::write(
+        &stub,
+        r#"#!/bin/sh
+case "$*" in
+  *'--permission-mode plan'*)
+    printf '%s\n' "$@" > "$0.argv"
+    printf 'plan ready\n'
+    exec /bin/sleep 60
+    ;;
+  *) exit 23;;
+esac
+"#,
+    )?;
+    fs::set_permissions(&stub, fs::Permissions::from_mode(0o700))?;
+    let mut child = spawn_fresh_permission_card(root.path(), &stub, None, None)?;
+    let db = Connection::open(child.data.join("matou.sqlite"))?;
+    let deadline = Instant::now() + TIMEOUT;
+    while !list_runs(&db, &child.session)?
+        .last()
+        .is_some_and(|run| run.exit_code == Some(23))
+    {
+        ensure!(
+            Instant::now() < deadline,
+            "initial Claude process did not fail"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    child.send(Command::SetProviderPermissionMode {
+        session_id: child.session.clone(),
+        mode: "plan".into(),
+    })?;
+    child.frame(|_, screen, _| screen_has_line(screen, "plan ready"))?;
+    let argv = fs::read_to_string(stub.with_extension("argv"))?;
+    assert_eq!(
+        argv.lines().skip(2).collect::<Vec<_>>(),
+        ["--permission-mode", "plan"]
+    );
+    post_permission_identity(
+        Path::new(argv.lines().nth(1).context("settings arg")?),
+        "new-id",
+        "plan",
+    )?;
+    assert!(
+        permission_mode_result(&mut child, "plan")?
+            .get("error")
+            .is_none()
+    );
+    child.send(Command::Shutdown)?;
+    child.closed()?;
+    let (status, stderr) = child.wait()?;
+    ensure!(status.success(), "runtime shutdown: {stderr}");
+    Ok(())
+}
+
+#[test]
+fn fork_uses_the_source_binding_with_an_opus_assignment_saved() -> Result<()> {
+    use matou_native_runtime::host::{ForkPlacement, ForkWorktreeMode};
+    use serde_json::json;
+
+    let root = tempfile::tempdir()?;
+    let stub = root.path().join("claude-fork-stub");
+    fs::write(
+        &stub,
+        r#"#!/bin/sh
+case "$*" in
+  *--fork-session*)
+    printf '%s\n' "$ANTHROPIC_BASE_URL" > "$0.endpoint"
+    printf '%s\n' "$@" > "$0.fork"
+    printf 'fork ready\n'
+    ;;
+  *) printf '%s' "$2" > "$0.settings"; printf 'source ready\n';;
+esac
+exec /bin/sleep 60
+"#,
+    )?;
+    fs::set_permissions(&stub, fs::Permissions::from_mode(0o700))?;
+    let mut child = spawn_fresh_permission_card(root.path(), &stub, None, None)?;
+    child.frame(|_, screen, _| screen_has_line(screen, "source ready"))?;
+    post_permission_identity(
+        Path::new(&fs::read_to_string(stub.with_extension("settings"))?),
+        "fork-source",
+        "default",
+    )?;
+    wait_permission_identity(&mut child)?;
+    fs::write(
+        child.data.join("provider-config.json"),
+        json!({
+            "version": 1,
+            "providers": {"claude-code": [
+                {"id": "active", "model": "opus", "endpoint": "https://active.example.invalid"},
+                {"id": "bound", "model": "opus", "endpoint": "https://bound.example.invalid"},
+                {"id": "anthropic-official", "builtIn": true, "model": "", "endpoint": "https://api.anthropic.com"}
+            ]},
+            "activeProviderIds": {"claude-code": "active"}
+        }).to_string(),
+    )?;
+    let db = Connection::open(child.data.join("matou.sqlite"))?;
+    assert_eq!(
+        db.execute(
+            "UPDATE provider_bindings
+         SET metadata_json=json_set(metadata_json, '$.providerConfigId', 'bound',
+                                    '$.model', 'opus', '$.canFork', json('true'))
+         WHERE session_id=?",
+            [&child.session],
+        )?,
+        1
+    );
+    child.send(Command::ForkSession {
+        scene_id: child.scene.clone(),
+        source_session_id: child.session.clone(),
+        placement: ForkPlacement::Child,
+        name: "Fork fixture".into(),
+        worktree_mode: ForkWorktreeMode::Current,
+        submission_key: "fork-with-role-assignment".into(),
+    })?;
+    let deadline = Instant::now() + TIMEOUT;
+    let argv_path = stub.with_extension("fork");
+    loop {
+        match child.event(deadline, true)? {
+            Event::Frame { screen, .. } if screen_has_line(&screen, "fork ready") => break,
+            Event::Graph(graph) => {
+                if let Some(error) = graph["forkSessionResult"]["error"].as_str() {
+                    bail!("fork was rejected: {error}");
+                }
+            }
+            _ => {}
+        }
+    }
+    let argv = fs::read_to_string(argv_path)?;
+    assert_eq!(
+        argv.lines().skip(2).collect::<Vec<_>>(),
+        [
+            "--model",
+            "opus",
+            "--resume",
+            "fork-source",
+            "--fork-session"
+        ]
+    );
+    assert_eq!(
+        fs::read_to_string(stub.with_extension("endpoint"))?.trim(),
+        "https://bound.example.invalid"
+    );
+    child.send(Command::Shutdown)?;
+    child.closed()?;
+    let (status, stderr) = child.wait()?;
+    ensure!(status.success(), "runtime shutdown: {stderr}");
     Ok(())
 }
 
