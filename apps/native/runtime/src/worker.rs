@@ -482,6 +482,25 @@ fn run(
                     let _ = reply.send(session.scroll(lines));
                 }
                 WorkerCommand::ScrollTo { row, reply } => {
+                    let (mut row, mut reply) = (row, reply);
+                    // Multiple pointer samples can arrive before this worker runs.
+                    // Replace adjacent destinations up to the next ordered command.
+                    for _ in 0..127 {
+                        match incoming.try_recv() {
+                            Ok(WorkerCommand::ScrollTo {
+                                row: newer_row,
+                                reply: newer_reply,
+                            }) => {
+                                let _ = reply.send(Ok(()));
+                                (row, reply) = (newer_row, newer_reply);
+                            }
+                            Ok(other) => {
+                                next = Some(other);
+                                break;
+                            }
+                            Err(_) => break,
+                        }
+                    }
                     let _ = reply.send(session.scroll_to(row));
                 }
                 WorkerCommand::ScrollSelection { lines, reply } => {

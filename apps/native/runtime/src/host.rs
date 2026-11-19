@@ -1739,7 +1739,7 @@ fn run(
                         continue;
                     }
                     scroll_requests.insert(session_id.clone(), request_id);
-                    (session_id, WorkerCommand::ScrollTo { row, reply }, true)
+                    (session_id, WorkerCommand::ScrollTo { row, reply }, false)
                 }
                 Command::Theme { session_id, theme } => {
                     let live = sessions.contains(&session_id);
@@ -2255,9 +2255,14 @@ fn run(
                     break 'running shutdown_requested.get() == Some(&true);
                 }
             };
+            let absolute_scroll = matches!(request, WorkerCommand::ScrollTo { .. });
             if let Err(error) = owner.send(&session_id, request) {
                 send.send_blocking(Event::Diagnostic(format!("{error:#}")))?;
                 continue;
+            }
+            // The view request enters the same worker queue, after the scroll.
+            if absolute_scroll {
+                dirty.insert(session_id.clone());
             }
             operations.push((session_id, result, refresh));
         }
