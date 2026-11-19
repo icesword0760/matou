@@ -386,6 +386,48 @@ pub fn claude_binding(db: &Connection, session_id: &str) -> Result<Option<Claude
         .optional()?)
 }
 
+/// A missing permission is distinct from an explicit default on rollback.
+pub fn write_claude_permission(
+    db: &mut Connection,
+    command: &CommandMetadata,
+    session_id: &str,
+    binding_id: &str,
+    permission: Option<&Value>,
+    now: i64,
+) -> Result<DomainCommit> {
+    execute(db, command, now, |tx, events| {
+        let session = require_session(tx, session_id)?;
+        let raw: String = tx.query_row(
+            "SELECT metadata_json FROM provider_bindings
+             WHERE id = ? AND session_id = ? AND provider = 'claude-code'",
+            params![binding_id, session_id],
+            |row| row.get(0),
+        )?;
+        let mut metadata: serde_json::Map<String, Value> = serde_json::from_str(&raw)?;
+        if let Some(permission) = permission {
+            metadata.insert("permissionMode".into(), permission.clone());
+        } else {
+            metadata.remove("permissionMode");
+        }
+        tx.execute(
+            "UPDATE provider_bindings SET metadata_json = ? WHERE id = ?",
+            params![serde_json::to_string(&metadata)?, binding_id],
+        )?;
+        let payload = json!({
+            "sessionId": session_id, "bindingId": binding_id, "provider": "claude-code",
+            "permissionMode": permission,
+        });
+        events.push(session_event(
+            command,
+            "provider-binding.permission-mode-updated",
+            &session,
+            now,
+            payload.clone(),
+        ));
+        Ok(payload)
+    })
+}
+
 #[derive(Clone, Copy)]
 pub enum ClaudeRestore<'a> {
     Begin(&'a str),

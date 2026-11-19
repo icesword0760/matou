@@ -11,6 +11,10 @@ use rusqlite::{Connection, types::ValueRef};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
+#[path = "common/frozen_graph.rs"]
+mod frozen_graph;
+use frozen_graph::apply_permission_default;
+
 const REFERENCE: &str = include_str!("fixtures/session-interaction-reference.json");
 
 #[derive(Deserialize)]
@@ -90,7 +94,10 @@ fn interaction_transactions_and_focus_follow_the_frozen_database() -> Result<()>
             ),
         };
         match (result, step.result, step.error) {
-            (Ok(actual), Some(expected), None) => assert_eq!(actual, expected, "{label}: result"),
+            (Ok(actual), Some(mut expected), None) => {
+                apply_permission_default(&mut expected);
+                assert_eq!(actual, expected, "{label}: result");
+            }
             (Err(actual), None, Some(expected)) => {
                 assert_eq!(actual.to_string(), expected, "{label}: error");
             }
@@ -147,6 +154,7 @@ fn normalize_json_columns(mut rows: Vec<Value>) -> Result<Vec<Value>> {
             {
                 *value = serde_json::from_str(text)
                     .with_context(|| format!("invalid JSON in {column}"))?;
+                apply_permission_default(value);
             }
         }
     }

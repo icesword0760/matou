@@ -16,6 +16,13 @@ use crate::pty::{
 
 const OFFICIAL_ID: &str = "anthropic-official";
 const ROLES: [&str; 3] = ["opus", "sonnet", "haiku"];
+pub const CLAUDE_PERMISSION_MODES: [&str; 5] = [
+    "default",
+    "auto",
+    "acceptEdits",
+    "plan",
+    "bypassPermissions",
+];
 
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -191,10 +198,10 @@ fn prepare_claude(
     #[cfg(unix)]
     set_var(&mut environment, "PWD".into(), cwd.as_os_str().into());
 
-    let permission_mode = match binding["permissionMode"].as_str() {
-        Some(mode @ ("auto" | "acceptEdits" | "plan" | "bypassPermissions")) => mode,
-        _ => "default",
-    };
+    let permission_mode = binding["permissionMode"]
+        .as_str()
+        .filter(|mode| CLAUDE_PERMISSION_MODES.contains(mode))
+        .unwrap_or("default");
     Ok(ClaudeLaunch {
         launch: ShellLaunch {
             profile: LaunchProfile::ClaudeCode,

@@ -263,7 +263,12 @@ impl ProviderHookServer {
         })
     }
 
-    pub fn register(&self, data_root: &Path, scope: Scope) -> Result<Registration> {
+    pub fn register(
+        &self,
+        data_root: &Path,
+        scope: Scope,
+        permission_respawn: bool,
+    ) -> Result<Registration> {
         let token = new_token();
         let url = format!("http://127.0.0.1:{}/hooks/{token}", self.port);
         let directory = data_root.join("provider-hooks");
@@ -287,7 +292,7 @@ impl ProviderHookServer {
             script: directory.join(format!("{token}.statusline.sh")),
             temporary: directory.join(format!("{token}.settings.json.tmp")),
         };
-        let settings = settings(&url, &files.script)?;
+        let settings = settings(&url, &files.script, permission_respawn)?;
         write_private(&files.script, status_script(&url).as_bytes(), 0o700)
             .context("write provider statusline script")?;
         write_private(
@@ -356,7 +361,7 @@ fn write_private(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
     set_mode(path, mode)
 }
 
-fn settings(url: &str, script: &Path) -> Result<Value> {
+fn settings(url: &str, script: &Path, permission_respawn: bool) -> Result<Value> {
     let script = script
         .to_str()
         .context("provider statusline path is not UTF-8")?;
@@ -371,7 +376,7 @@ fn settings(url: &str, script: &Path) -> Result<Value> {
     };
     #[cfg(not(unix))]
     let command = script;
-    let hooks: Map<String, Value> = EVENTS
+    let mut hooks: Map<String, Value> = EVENTS
         .into_iter()
         .map(|(event, timeout)| {
             (
@@ -380,6 +385,24 @@ fn settings(url: &str, script: &Path) -> Result<Value> {
             )
         })
         .collect();
+    if permission_respawn {
+        // Some CLI versions skip HTTP SessionStart hooks. This switch holds
+        // input until identity is known, so the startup event must reach the
+        // same run-scoped listener without a user prompt.
+        #[cfg(unix)]
+        let (curl, sink) = ("/usr/bin/curl", "/dev/null");
+        #[cfg(not(unix))]
+        let (curl, sink) = ("curl.exe", "NUL");
+        let command = format!(
+            "{curl} --silent --noproxy '*' --max-time 2 --output {sink} --header 'content-type: application/json' --data-binary @- '{url}'"
+        );
+        hooks.insert(
+            "SessionStart".into(),
+            json!([{
+                "hooks": [{"type": "command", "command": command, "timeout": 5}]
+            }]),
+        );
+    }
     Ok(json!({
         "hooks": hooks,
         "statusLine": { "type": "command", "command": command, "padding": 0 },
@@ -677,7 +700,7 @@ mod tests {
     fn files_and_ingress_match_contract() -> Result<()> {
         let root = tempfile::tempdir()?;
         let server = ProviderHookServer::start()?;
-        let run = server.register(root.path(), scope("current"))?;
+        let run = server.register(root.path(), scope("current"), false)?;
         let config: Value = serde_json::from_reader(File::open(&run.settings_path)?)?;
         let script = run
             .settings_path
@@ -853,10 +876,10 @@ mod tests {
     fn retired_token_loses_authority_before_the_files_expire() -> Result<()> {
         let root = tempfile::tempdir()?;
         let server = ProviderHookServer::start()?;
-        let first = server.register(root.path(), scope("first"))?;
+        let first = server.register(root.path(), scope("first"), false)?;
         let old = first.token.clone();
         let old_file = first.settings_path.clone();
-        let second = server.register(root.path(), scope("second"))?;
+        let second = server.register(root.path(), scope("second"), false)?;
         assert_ne!(old, second.token);
         drop(first);
         let body = br#"{"hook_event_name":"UserPromptSubmit","sessionId":"external"}"#;

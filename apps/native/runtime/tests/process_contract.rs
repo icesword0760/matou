@@ -1006,6 +1006,326 @@ fn seed_catalog(root: &Path, workspace: &Path, id: &str) -> Result<()> {
     Ok(())
 }
 
+fn permission_mode_result(child: &mut RuntimeChild, mode: &str) -> Result<serde_json::Value> {
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        if let Event::Graph(graph) = child.event(deadline, true)?
+            && let Some(result) = graph["providerPermissionModeResults"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|result| {
+                    result["permissionMode"] == mode && result["sessionId"] == child.session
+                })
+        {
+            return Ok(result.clone());
+        }
+    }
+}
+
+fn post_permission_identity(settings_path: &Path, provider_id: &str, mode: &str) -> Result<()> {
+    let settings: serde_json::Value = serde_json::from_slice(&fs::read(settings_path)?)?;
+    let url = settings["hooks"]["UserPromptSubmit"][0]["hooks"][0]["url"]
+        .as_str()
+        .context("test hook URL")?
+        .strip_prefix("http://")
+        .context("HTTP hook")?;
+    let (address, path) = url.split_once('/').context("hook path")?;
+    let payload = serde_json::to_string(&serde_json::json!({
+        "hook_event_name": "SessionStart", "session_id": provider_id,
+        "permission_mode": mode, "model": "fixture-model"
+    }))?;
+    let mut connection = std::net::TcpStream::connect(address)?;
+    connection.set_read_timeout(Some(TIMEOUT))?;
+    write!(
+        connection,
+        "POST /{path} HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+        payload.len()
+    )?;
+    let mut response = String::new();
+    connection.read_to_string(&mut response)?;
+    ensure!(
+        response.starts_with("HTTP/1.1 200"),
+        "identity hook was rejected"
+    );
+    Ok(())
+}
+
+fn wait_permission_identity(child: &mut RuntimeChild) -> Result<()> {
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        if let Event::Graph(graph) = child.event(deadline, true)?
+            && graph["providerIdentityEvents"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|event| event["result"] == "confirmed" && event["sessionId"] == child.session)
+        {
+            return Ok(());
+        }
+    }
+}
+
+#[test]
+fn permission_respawn_validates_coalesces_blocks_input_and_rolls_back_an_early_exit() -> Result<()>
+{
+    use matou_native_core::sessions::{claude_binding, list_runs};
+    let root = tempfile::tempdir()?;
+    let stub = root.path().join("claude-permission-stub");
+    let ready_settings = stub.with_extension("settings");
+    let received_input = stub.with_extension("input");
+    fs::write(
+        &stub,
+        r#"#!/bin/sh
+case "$*" in *'--permission-mode auto'*) exit 23;; esac
+printf '%s' "$2" > "$0.settings"
+printf 'stub ready\n'
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> "$0.input"
+  printf 'input received\n'
+done
+"#,
+    )?;
+    fs::set_permissions(&stub, fs::Permissions::from_mode(0o700))?;
+    let mut child = RuntimeChild::spawn_configured(
+        root.path(),
+        &format!("PROMPT='{PROMPT} '\n"),
+        Path::new("/bin/zsh"),
+        Some(&stub),
+    )?;
+    child.hello()?;
+    let session = child.session.clone();
+    let set = |mode: &str| Command::SetProviderPermissionMode {
+        session_id: session.clone(),
+        mode: mode.into(),
+    };
+    let db = Connection::open(child.data.join("matou.sqlite"))?;
+    child.send(set("invalid"))?;
+    assert_eq!(
+        permission_mode_result(&mut child, "invalid")?["error"],
+        "invalid permission mode"
+    );
+    child.send(set("plan"))?;
+    assert_eq!(
+        permission_mode_result(&mut child, "plan")?["error"],
+        "active AI Session is required for permission respawn"
+    );
+    assert_eq!(list_runs(&db, &session)?.len(), 1);
+    assert!(claude_binding(&db, &session)?.is_none());
+
+    let provider_id = "permission-fixture-id";
+    seed_catalog(root.path(), &child.workspace, provider_id)?;
+    child.send(Command::LoadProviderSession {
+        session_id: session.clone(),
+        provider_session_id: provider_id.into(),
+    })?;
+    child.frame(|_, screen, _| screen_has_line(screen, "stub ready"))?;
+    child.send(set("plan"))?;
+    assert!(
+        permission_mode_result(&mut child, "plan")?["error"]
+            .as_str()
+            .unwrap()
+            .contains("recovering")
+    );
+    post_permission_identity(
+        Path::new(&fs::read_to_string(&ready_settings)?),
+        provider_id,
+        "default",
+    )?;
+    wait_permission_identity(&mut child)?;
+    let source = claude_binding(&db, &session)?.context("active binding")?;
+    db.execute(
+        "UPDATE provider_bindings SET metadata_json = json_set(metadata_json, '$.custom', json('[1,2]'))
+         WHERE id = ?",
+        [&source.id],
+    )?;
+    child.send(set("default"))?;
+    assert!(
+        permission_mode_result(&mut child, "default")?
+            .get("error")
+            .is_none()
+    );
+    assert_eq!(list_runs(&db, &session)?.len(), 2);
+
+    child.send(set("plan"))?;
+    child.send(set("plan"))?;
+    child.send(set("bypassPermissions"))?;
+    assert!(
+        permission_mode_result(&mut child, "bypassPermissions")?["error"]
+            .as_str()
+            .unwrap()
+            .contains("stopping")
+    );
+    child.frame(|_, screen, _| screen_has_line(screen, "stub ready"))?;
+    child.send(Command::Input {
+        session_id: session.clone(),
+        bytes: b"must be discarded\r".to_vec(),
+        defer_ordering: false,
+    })?;
+    post_permission_identity(
+        Path::new(&fs::read_to_string(&ready_settings)?),
+        provider_id,
+        "plan",
+    )?;
+    assert!(
+        permission_mode_result(&mut child, "plan")?
+            .get("error")
+            .is_none()
+    );
+    let runs = list_runs(&db, &session)?;
+    assert_eq!(runs.len(), 3);
+    assert!(runs[1].ended_at.unwrap() <= runs[2].started_at);
+    assert_shell_gone(runs[1].pid.unwrap() as u32)?;
+    child.send(Command::Input {
+        session_id: session.clone(),
+        bytes: b"after confirmation\r".to_vec(),
+        defer_ordering: false,
+    })?;
+    child.frame(|_, screen, _| screen_has_line(screen, "input received"))?;
+    assert_eq!(fs::read_to_string(received_input)?, "after confirmation\n");
+
+    let previous = claude_binding(&db, &session)?.context("plan binding")?;
+    assert_eq!(previous.id, source.id);
+    assert_eq!(previous.metadata["permissionMode"], "plan");
+    assert_eq!(previous.metadata["custom"], serde_json::json!([1, 2]));
+    child.send(set("auto"))?;
+    let failure = permission_mode_result(&mut child, "auto")?;
+    assert!(
+        failure["error"]
+            .as_str()
+            .unwrap()
+            .contains("process exited with code 23"),
+        "{failure}"
+    );
+    let restored = claude_binding(&db, &session)?.context("rolled back binding")?;
+    assert_eq!(restored.id, source.id);
+    assert_eq!(restored.metadata, previous.metadata);
+    assert_eq!(restored.restore_state, previous.restore_state);
+    let runs = list_runs(&db, &session)?;
+    assert_eq!(runs.len(), 4);
+    assert_eq!(runs[3].exit_code, Some(23));
+    child.send(Command::Shutdown)?;
+    child.closed()?;
+    let (status, stderr) = child.wait()?;
+    ensure!(status.success(), "runtime shutdown: {stderr}");
+    Ok(())
+}
+
+#[test]
+fn permission_respawn_passes_only_cli_consent_keys_and_keeps_the_mode_when_declined() -> Result<()>
+{
+    use matou_native_core::sessions::{claude_binding, list_runs};
+    use matou_native_runtime::host::RecoveryState;
+    const PROVIDER_ID: &str = "permission-consent-id";
+    for accept in [true, false] {
+        let root = tempfile::tempdir()?;
+        let stub = root.path().join("claude-permission-stub");
+        fs::write(
+            &stub,
+            r#"#!/bin/sh
+printf '%s' "$2" > "$0.settings"
+case "$*" in
+  *--dangerously-skip-permissions*)
+    printf 'WARNING: Claude Code running in Bypass Permissions mode\n'
+    printf 'No, exit\nYes, I accept\nEnter to confirm · Esc to cancel\n'
+    IFS= read -r choice || exit 19
+    printf '%s' "$choice" > "$0.choice"
+    [ "$choice" = "$(printf '\033[B')" ] || exit 17
+    printf 'consent accepted\n'
+    ;;
+  *) printf 'stub ready\n' ;;
+esac
+exec /bin/sleep 60
+"#,
+        )?;
+        fs::set_permissions(&stub, fs::Permissions::from_mode(0o700))?;
+        let mut child = RuntimeChild::spawn_configured(
+            root.path(),
+            &format!("PROMPT='{PROMPT} '\n"),
+            Path::new("/bin/zsh"),
+            Some(&stub),
+        )?;
+        child.hello()?;
+        let session = child.session.clone();
+        let db = Connection::open(child.data.join("matou.sqlite"))?;
+        let hook_path = || -> Result<PathBuf> {
+            Ok(fs::read_to_string(stub.with_extension("settings"))?.into())
+        };
+        seed_catalog(root.path(), &child.workspace, PROVIDER_ID)?;
+        child.send(Command::LoadProviderSession {
+            session_id: session.clone(),
+            provider_session_id: PROVIDER_ID.into(),
+        })?;
+        child.frame(|_, screen, _| screen_has_line(screen, "stub ready"))?;
+        post_permission_identity(&hook_path()?, PROVIDER_ID, "default")?;
+        wait_permission_identity(&mut child)?;
+        let original = claude_binding(&db, &session)?.context("source binding")?;
+        child.send(Command::SetProviderPermissionMode {
+            session_id: session.clone(),
+            mode: "bypassPermissions".into(),
+        })?;
+        let deadline = Instant::now() + TIMEOUT;
+        let mut saw_restoring = false;
+        loop {
+            if let Event::Recovery { session_id, state } = child.event(deadline, true)?
+                && session_id == session
+            {
+                if state == RecoveryState::Restoring {
+                    saw_restoring = true;
+                }
+                if saw_restoring && state == RecoveryState::Ready {
+                    break;
+                }
+            }
+        }
+        let input = |bytes: &[u8]| Command::Input {
+            session_id: session.clone(),
+            bytes: bytes.to_vec(),
+            defer_ordering: false,
+        };
+        child.send(input(b"must not reach this dialog\r"))?;
+        if accept {
+            child.send(input(b"\x1b[B"))?;
+        }
+        child.send(input(b"\r"))?;
+        if accept {
+            child.frame(|_, screen, _| screen_has_line(screen, "consent accepted"))?;
+            post_permission_identity(&hook_path()?, PROVIDER_ID, "bypassPermissions")?;
+        }
+        let result = permission_mode_result(&mut child, "bypassPermissions")?;
+        let needs_confirmation = claude_binding(&db, &session)?.context("binding after consent")?;
+        let runs = list_runs(&db, &session)?;
+        assert_eq!(runs.len(), 3);
+        assert_eq!(runs[1].status, "exited");
+        assert_eq!(needs_confirmation.id, original.id);
+        assert_eq!(needs_confirmation.provider_session_id, PROVIDER_ID);
+        assert_eq!(needs_confirmation.restore_state, "none");
+        if accept {
+            assert!(result.get("error").is_none(), "{result}");
+            assert_eq!(fs::read(stub.with_extension("choice"))?, b"\x1b[B");
+            assert_eq!(
+                needs_confirmation.metadata["permissionMode"],
+                "bypassPermissions"
+            );
+        } else {
+            let error = result["error"].as_str().context("decline error")?;
+            assert!(
+                error.contains("exited during bypass permissions confirmation"),
+                "{error}"
+            );
+            assert!(error.contains("process exited with code 17"), "{error}");
+            assert!(fs::read(stub.with_extension("choice"))?.is_empty());
+            assert_eq!(runs[2].exit_code, Some(17));
+            assert_eq!(needs_confirmation.metadata, original.metadata);
+        }
+        child.send(Command::Shutdown)?;
+        child.closed()?;
+        let (status, stderr) = child.wait()?;
+        ensure!(status.success(), "runtime shutdown: {stderr}");
+    }
+    Ok(())
+}
+
 #[test]
 fn catalog_replaces_a_live_process_once_and_requires_its_persisted_exit() -> Result<()> {
     use matou_native_core::sessions::{claude_binding, list_runs};
