@@ -13,7 +13,7 @@ use matou_native_core::{
         canvas, cards, tabs, tasks, workspaces,
     },
     ownership::DatabaseOwner,
-    provider_launch::{ClaudeLaunch, attach_claude_settings},
+    provider_launch::{ClaudeLaunch, EFFORTS, attach_claude_settings},
     pty::LaunchProfile,
     session_graph,
     sessions::{self, ClaudeBinding, ClaudeFork, ClaudeRestore, SessionRun, StartRunInput},
@@ -1236,11 +1236,23 @@ impl ShellOwner {
             })
             .collect::<Vec<_>>();
         let safe = |value: &str| safe_hook_text(value, &secrets).unwrap_or("").to_owned();
-        let metadata = json!({
+        let mut metadata = json!({
             "providerConfigId": safe(&plan.provider_config_id), "model": safe(&plan.model),
             "permissionMode": safe(&plan.permission_mode), "cwd": safe(&launch.cwd.to_string_lossy()),
         });
-        let mut metadata = metadata;
+        for (name, value) in [
+            ("assignedRole", plan.assigned_role),
+            (
+                "effort",
+                plan.effort
+                    .as_deref()
+                    .filter(|level| EFFORTS.contains(level)),
+            ),
+        ] {
+            if let Some(value) = value.and_then(|value| safe_hook_text(value, &secrets)) {
+                metadata[name] = json!(value);
+            }
+        }
         if let Some(revision) = revision {
             metadata["spawnRevision"] = revision.clone();
         }
@@ -3050,6 +3062,9 @@ mod provider_tests {
             provider_config_id: "fixture-config".into(),
             model: "fixture-model".into(),
             permission_mode: "default".into(),
+            assigned_role: None,
+            effort: None,
+            clear_assignment_environment: false,
         };
         let terminal = TerminalOptions::new(80, 24, 7, 14);
         let blocked_directory = root.path().join("provider-hooks");

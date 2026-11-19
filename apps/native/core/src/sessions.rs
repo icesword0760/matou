@@ -1,13 +1,138 @@
 //! Persistent lifecycle of sessions and their process runs.
 use anyhow::{Context, Result, ensure};
-use rusqlite::{Connection, OptionalExtension, Row, params};
+use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::{
     hierarchy::Session,
+    provider_launch::{
+        ClaudeRoleAssignments, EFFORTS, parse_assignment, parse_claude_role_assignments,
+    },
     storage::{CommandMetadata, DomainCommit, DomainEventInput, execute},
 };
+
+const AGENT_MODEL_PREFERENCES: &str = "agent.modelPreferences";
+
+fn validate_model_preferences(
+    value: &Value,
+) -> Result<(Map<String, Value>, ClaudeRoleAssignments)> {
+    let windows = value["contextWindows"]
+        .as_object()
+        .context("Invalid context window preferences")?;
+    ensure!(
+        windows.iter().all(|(id, mode)| {
+            !id.is_empty()
+                && id.encode_utf16().count() <= 256
+                && matches!(mode.as_str(), Some("default" | "512k" | "maximum"))
+        }),
+        "Invalid context window preferences"
+    );
+
+    let compaction = value
+        .get("compaction")
+        .filter(|compaction| compaction.is_object())
+        .context("Invalid compaction preferences")?;
+    let mode = compaction["mode"]
+        .as_str()
+        .filter(|mode| matches!(*mode, "follow" | "custom"))
+        .context("Invalid compaction mode")?;
+    let effort = compaction["effort"]
+        .as_str()
+        .filter(|effort| EFFORTS.contains(effort))
+        .context("Invalid compaction effort")?;
+    let provider_id = compaction["providerId"].as_str();
+    let model = compaction["model"].as_str();
+    if mode == "custom" {
+        ensure!(
+            provider_id.is_some_and(|id| !trim(id).is_empty())
+                && model.is_some_and(|model| {
+                    !trim(model).is_empty()
+                        && model.encode_utf16().count() <= 240
+                        && !model.chars().any(|c| c <= '\u{1f}')
+                }),
+            "Choose a compaction provider and model"
+        );
+    }
+    let mut compact = json!({"mode": mode, "effort": effort});
+    if let Some(id) = provider_id {
+        compact["providerId"] = json!(id);
+    }
+    if let Some(model) = model {
+        compact["model"] = json!(trim(model));
+    }
+
+    let mut fields = Map::from_iter([
+        ("contextWindows".into(), Value::Object(windows.clone())),
+        ("compaction".into(), compact),
+    ]);
+    if let Some(search) = value.get("claudeWebSearch") {
+        fields.insert(
+            "claudeWebSearch".into(),
+            serde_json::to_value(parse_assignment(search)?)?,
+        );
+    }
+    let assignments = value
+        .get("claudeRoleAssignments")
+        .map(parse_claude_role_assignments)
+        .transpose()?
+        .unwrap_or_default();
+    Ok((fields, assignments))
+}
+
+fn model_preferences(db: &Connection) -> (Map<String, Value>, ClaudeRoleAssignments) {
+    let row: Option<String> = db
+        .query_row(
+            "SELECT value_json FROM preferences WHERE key = ?",
+            [AGENT_MODEL_PREFERENCES],
+            |row| row.get(0),
+        )
+        .ok();
+    row.and_then(|value| serde_json::from_str::<Value>(&value).ok())
+        .and_then(|value| validate_model_preferences(&value).ok())
+        .unwrap_or_else(|| {
+            (
+                Map::from_iter([
+                    ("contextWindows".into(), json!({})),
+                    (
+                        "compaction".into(),
+                        json!({"mode": "follow", "effort": "follow"}),
+                    ),
+                ]),
+                ClaudeRoleAssignments::default(),
+            )
+        })
+}
+
+pub fn read_claude_role_assignments(db: &Connection) -> ClaudeRoleAssignments {
+    let (_, assignments) = model_preferences(db);
+    assignments
+}
+
+pub fn save_claude_role_assignments(
+    db: &mut Connection,
+    assignments: &ClaudeRoleAssignments,
+    updated_at: i64,
+) -> Result<()> {
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let (mut preferences, _) = model_preferences(&tx);
+    preferences.insert(
+        "claudeRoleAssignments".into(),
+        serde_json::to_value(assignments)?,
+    );
+    tx.execute(
+        "INSERT INTO preferences (key, value_json, updated_at) VALUES (?, ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json,
+                                       updated_at = excluded.updated_at",
+        params![
+            AGENT_MODEL_PREFERENCES,
+            serde_json::to_string(&preferences)?,
+            updated_at
+        ],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

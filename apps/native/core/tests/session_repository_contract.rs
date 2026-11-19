@@ -6,7 +6,8 @@ use matou_native_core::{
     sessions::{
         CreateShellSessionInput, StartRunInput, archive_session, create_shell_session, finish_run,
         get_run, get_session, interrupt_run, list_all_runs, list_runs, list_sessions,
-        rename_session, start_run, update_cwd,
+        read_claude_role_assignments, rename_session, save_claude_role_assignments, start_run,
+        update_cwd,
     },
     storage::{CommandMetadata, DomainCommit, configure_connection, migrate},
 };
@@ -21,6 +22,151 @@ const TABLES: [&str; 4] = [
     "domain_events",
     "command_deduplication",
 ];
+
+#[test]
+fn role_assignments_merge_with_existing_preferences_and_fill_missing_defaults() -> Result<()> {
+    let mut db = Connection::open_in_memory()?;
+    configure_connection(&db)?;
+    migrate(&mut db, 1)?;
+    let read = |db: &Connection| -> Result<Value> {
+        let stored: String = db.query_row(
+            "SELECT value_json FROM preferences WHERE key = 'agent.modelPreferences'",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(serde_json::from_str(&stored)?)
+    };
+    let written = json!({"haiku": {"providerId": "direct", "model": "fast"}});
+    let assignments = serde_json::from_value(written.clone())?;
+    assert!(read_claude_role_assignments(&db).is_empty());
+    save_claude_role_assignments(&mut db, &assignments, 2)?;
+    assert_eq!(
+        read(&db)?,
+        json!({
+            "claudeRoleAssignments": written,
+            "contextWindows": {},
+            "compaction": {"mode": "follow", "effort": "follow"}
+        })
+    );
+
+    let legacy = json!({
+        "claudeWebSearch": {"providerId": "other", "model": "web"},
+        "contextWindows": {"direct": "512k"},
+        "compaction": {"mode": "custom", "effort": "high", "providerId": "other", "model": "compact"},
+        "otherSetting": {"enabled": true}
+    });
+    db.execute(
+        "UPDATE preferences SET value_json = ? WHERE key = 'agent.modelPreferences'",
+        [legacy.to_string()],
+    )?;
+    assert!(read_claude_role_assignments(&db).is_empty());
+    save_claude_role_assignments(&mut db, &assignments, 3)?;
+    let mut expected = legacy;
+    expected.as_object_mut().unwrap().remove("otherSetting");
+    expected["claudeRoleAssignments"] = written.clone();
+    assert_eq!(read(&db)?, expected);
+    assert_eq!(
+        serde_json::to_value(read_claude_role_assignments(&db))?,
+        written
+    );
+    save_claude_role_assignments(&mut db, &Default::default(), 4)?;
+    expected["claudeRoleAssignments"] = json!({});
+    assert_eq!(read(&db)?, expected);
+
+    let incomplete =
+        json!({"claudeWebSearch": expected["claudeWebSearch"], "claudeRoleAssignments": written});
+    db.execute(
+        "UPDATE preferences SET value_json = ? WHERE key = 'agent.modelPreferences'",
+        [incomplete.to_string()],
+    )?;
+    assert!(read_claude_role_assignments(&db).is_empty());
+    save_claude_role_assignments(&mut db, &assignments, 5)?;
+    assert_eq!(
+        read(&db)?,
+        json!({
+            "contextWindows": {},
+            "compaction": {"mode": "follow", "effort": "follow"},
+            "claudeRoleAssignments": written
+        })
+    );
+    Ok(())
+}
+
+#[test]
+fn invalid_sibling_preferences_reset_the_entire_row_before_read_and_save() -> Result<()> {
+    let mut db = Connection::open_in_memory()?;
+    configure_connection(&db)?;
+    migrate(&mut db, 1)?;
+    let valid = json!({
+        "contextWindows": {"direct": "512k"},
+        "compaction": {"mode": "custom", "effort": "high", "providerId": "other", "model": "compact"},
+        "claudeWebSearch": {"providerId": "other", "model": "web"},
+        "claudeRoleAssignments": {"opus": {"providerId": "direct", "model": "assigned"}}
+    });
+    let written = json!({"haiku": {"providerId": "direct", "model": "fast"}});
+    let assignments = serde_json::from_value(written.clone())?;
+    for (field, invalid) in [
+        ("contextWindows", json!({"direct": "invalid"})),
+        ("compaction", json!({"mode": "custom", "effort": "high"})),
+        ("claudeWebSearch", json!({"providerId": "other"})),
+    ] {
+        let mut stored = valid.clone();
+        stored[field] = invalid;
+        db.execute(
+            "REPLACE INTO preferences (key, value_json, updated_at) VALUES ('agent.modelPreferences', ?, 1)",
+            [stored.to_string()],
+        )?;
+        assert!(read_claude_role_assignments(&db).is_empty(), "{field}");
+        save_claude_role_assignments(&mut db, &assignments, 2)?;
+        let saved: String = db.query_row(
+            "SELECT value_json FROM preferences WHERE key = 'agent.modelPreferences'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(
+            serde_json::from_str::<Value>(&saved)?,
+            json!({
+                "contextWindows": {},
+                "compaction": {"mode": "follow", "effort": "follow"},
+                "claudeRoleAssignments": written
+            }),
+            "{field}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn malformed_persisted_role_assignments_use_the_entire_default() -> Result<()> {
+    let mut db = Connection::open_in_memory()?;
+    configure_connection(&db)?;
+    migrate(&mut db, 1)?;
+    let valid = json!({"providerId": "direct", "model": "fast"});
+    for assignments in [
+        json!({"opus": valid, "other": valid}),
+        json!({"opus": valid, "sonnet": {"providerId": "direct", "model": false}}),
+        json!({"opus": valid, "sonnet": null}),
+        json!([valid]),
+        json!(false),
+    ] {
+        let stored = json!({
+            "contextWindows": {},
+            "compaction": {"mode": "follow", "effort": "follow"},
+            "claudeRoleAssignments": assignments
+        });
+        db.execute(
+            "REPLACE INTO preferences (key, value_json, updated_at) VALUES ('agent.modelPreferences', ?, 1)",
+            [stored.to_string()],
+        )?;
+        assert!(read_claude_role_assignments(&db).is_empty(), "{stored}");
+    }
+    db.execute(
+        "UPDATE preferences SET value_json = 'false' WHERE key = 'agent.modelPreferences'",
+        [],
+    )?;
+    assert!(read_claude_role_assignments(&db).is_empty());
+    Ok(())
+}
 
 #[derive(Deserialize)]
 struct Reference {

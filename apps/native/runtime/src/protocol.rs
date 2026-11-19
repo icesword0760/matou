@@ -5,6 +5,7 @@
 use std::io::{BufReader, Read, Write};
 
 use anyhow::{Result, ensure};
+use matou_native_core::provider_launch::ClaudeRoleAssignments;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::host::{Command, Event};
@@ -21,6 +22,17 @@ pub enum ClientMessage {
 pub enum ServerMessage {
     Hello { version: u32 },
     Event(Event),
+}
+
+/// Returned in the Graph event's `claudeRoleAssignmentsResult` field.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeRoleAssignmentsReply {
+    pub request_id: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assignments: Option<ClaudeRoleAssignments>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 pub fn check_version(version: u32) -> Result<()> {
