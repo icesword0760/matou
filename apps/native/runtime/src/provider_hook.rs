@@ -61,7 +61,7 @@ pub(crate) struct Observation {
     pub model: Option<String>,
     pub permission_mode: Option<String>,
     pub cwd: Option<String>,
-    pub notification: Option<(NotificationKind, Instant)>,
+    pub notification: Option<(Notification, Instant)>,
 }
 
 impl Observation {
@@ -98,8 +98,7 @@ impl Observation {
                 .map(str::to_owned),
             permission_mode: text(&["permission_mode", "permissionMode"]).map(str::to_owned),
             cwd: text(&["cwd"]).map(str::to_owned),
-            notification: NotificationKind::classify(event, payload)
-                .map(|kind| (kind, Instant::now())),
+            notification: Notification::parse(event, payload).map(|event| (event, Instant::now())),
         }
     }
 }
@@ -112,47 +111,141 @@ pub(crate) enum NotificationKind {
     Attention,
 }
 
-impl NotificationKind {
-    fn classify(event: &str, payload: &Map<String, Value>) -> Option<Self> {
-        match event {
-            "Stop" => return Some(Self::Completed),
-            "PermissionRequest" => return Some(Self::Permission),
-            "Notification" => {}
+#[derive(PartialEq, Eq)]
+pub(crate) struct Notification {
+    pub kind: NotificationKind,
+    subtitle: String,
+    body: String,
+    cooldown_key: &'static str,
+}
+
+impl Notification {
+    fn parse(event: &str, payload: &Map<String, Value>) -> Option<Self> {
+        let text = |key: &str| payload.get(key).and_then(nonempty);
+        let nested = |key: &str, field: &str| payload.get(key)?.get(field).and_then(nonempty);
+        let (kind, subtitle, body, limit, cooldown_key) = match event {
+            "Stop" => {
+                let project = text("cwd")
+                    .and_then(|cwd| cwd.rsplit(['/', '\\']).find(|part| !part.is_empty()));
+                let subtitle = project.map_or_else(
+                    || "Completed".into(),
+                    |project| format!("Completed in {project}"),
+                );
+                let body = text("last_assistant_message")
+                    .or_else(|| text("lastAssistantMessage"))
+                    .or_else(|| text("result"))
+                    .map_or_else(
+                        || {
+                            project.map_or_else(
+                                || "Claude session completed".into(),
+                                |project| format!("Claude session completed in {project}"),
+                            )
+                        },
+                        str::to_owned,
+                    );
+                (NotificationKind::Completed, subtitle, body, 200, "Stop")
+            }
+            "PermissionRequest" => {
+                let tool = text("tool_name")
+                    .or_else(|| text("toolName"))
+                    .unwrap_or("operation");
+                let detail = [
+                    text("message"),
+                    text("description"),
+                    nested("tool_input", "command"),
+                    nested("tool_input", "file_path"),
+                    nested("toolInput", "command"),
+                    nested("toolInput", "filePath"),
+                ]
+                .into_iter()
+                .flatten()
+                .next();
+                let body = detail.map_or_else(
+                    || format!("{tool} requires approval"),
+                    |detail| format!("{tool}: {detail}"),
+                );
+                (
+                    NotificationKind::Permission,
+                    "Permission".into(),
+                    body,
+                    180,
+                    "Notification",
+                )
+            }
+            "Notification" => {
+                let raw = [
+                    text("message"),
+                    text("body"),
+                    text("text"),
+                    text("prompt"),
+                    text("error"),
+                    text("description"),
+                    nested("notification", "message"),
+                    nested("data", "message"),
+                ]
+                .into_iter()
+                .flatten()
+                .next();
+                let kind = NotificationKind::classify(raw.unwrap_or_default());
+                (
+                    kind,
+                    kind.labels().1.into(),
+                    raw.unwrap_or("Claude needs your attention").into(),
+                    180,
+                    "Notification",
+                )
+            }
             _ => return None,
+        };
+        Some(Self {
+            kind,
+            subtitle,
+            body: compact(&body, limit),
+            cooldown_key,
+        })
+    }
+
+    pub fn payload(&self) -> Value {
+        json!({
+            "eventType": self.kind.labels().0,
+            "title": "Claude Code",
+            "subtitle": self.subtitle,
+            "body": self.body,
+            "sound": true,
+            "cooldownKey": self.cooldown_key,
+        })
+    }
+}
+
+impl NotificationKind {
+    fn labels(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Completed => ("completed", "Completed"),
+            Self::Permission => ("permission", "Permission"),
+            Self::Waiting => ("waiting", "Waiting"),
+            Self::Attention => ("attention", "Attention"),
         }
-        let nested_message = |name: &str| payload.get(name)?.get("message");
-        let lower = [
-            payload.get("message"),
-            payload.get("body"),
-            payload.get("text"),
-            payload.get("prompt"),
-            payload.get("error"),
-            payload.get("description"),
-            nested_message("notification"),
-            nested_message("data"),
-        ]
-        .into_iter()
-        .flatten()
-        .find_map(nonempty)
-        .unwrap_or_default()
-        .to_lowercase();
+    }
+
+    fn classify(raw: &str) -> Self {
+        let lower = raw.to_lowercase();
         if ["permission", "approve", "approval"]
             .iter()
             .any(|word| lower.contains(word))
         {
-            Some(Self::Permission)
+            Self::Permission
         } else if ["complet", "finish", "done", "success"]
             .iter()
             .any(|word| lower.contains(word))
         {
-            Some(Self::Completed)
+            Self::Completed
         } else if ["idle", "wait", "input"]
             .iter()
             .any(|word| lower.contains(word))
         {
-            Some(Self::Waiting)
+            Self::Waiting
         } else {
-            Some(Self::Attention)
+            Self::Attention
         }
     }
 
@@ -166,10 +259,30 @@ impl NotificationKind {
 }
 
 fn nonempty(value: &Value) -> Option<&str> {
-    let value = value
-        .as_str()?
-        .trim_matches(|c: char| c == '\u{feff}' || (c != '\u{85}' && c.is_whitespace()));
+    let value = value.as_str()?.trim_matches(js_whitespace);
     (!value.is_empty()).then_some(value)
+}
+
+fn js_whitespace(c: char) -> bool {
+    c == '\u{feff}' || (c != '\u{85}' && c.is_whitespace())
+}
+
+fn compact(value: &str, limit: usize) -> String {
+    let line = value
+        .split(js_whitespace)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut units: Vec<_> = line.encode_utf16().take(limit + 1).collect();
+    if units.len() <= limit {
+        return line;
+    }
+    units.truncate(limit - 1);
+    // A JavaScript slice can leave half of a surrogate pair. JSON text in Rust
+    // must be valid UTF-8, so render the surviving half as a replacement character.
+    let mut shortened = String::from_utf16_lossy(&units);
+    shortened.push('…');
+    shortened
 }
 
 fn transcript_uuid(path: &str) -> Option<&str> {
@@ -771,7 +884,7 @@ mod tests {
         assert_eq!(scope.run_id, "current");
         assert_eq!(observation.identity.as_deref(), Some("external"));
         assert_eq!(
-            observation.notification.unwrap().0,
+            observation.notification.unwrap().0.kind,
             NotificationKind::Completed
         );
         assert!(server.messages().next().is_none());
@@ -819,7 +932,7 @@ mod tests {
             assert_eq!(
                 Observation::parse(payload.as_object().unwrap())
                     .notification
-                    .map(|(kind, _)| kind),
+                    .map(|(event, _)| event.kind),
                 expected
             );
         }
@@ -864,12 +977,121 @@ mod tests {
         ] {
             payload["hookEventName"] = json!("Notification");
             let parsed = Observation::parse(payload.as_object().unwrap());
+            let event = parsed.notification.unwrap().0;
+            assert_eq!(event.kind, expected, "{payload}");
+            assert_eq!(event.payload()["subtitle"], expected.labels().1);
+            assert_eq!(event.payload()["cooldownKey"], "Notification");
+        }
+    }
+
+    fn notification(payload: Value) -> Value {
+        Observation::parse(payload.as_object().unwrap())
+            .notification
+            .unwrap()
+            .0
+            .payload()
+    }
+
+    #[test]
+    fn stop_notification_uses_the_last_reply_and_cwd_tail() {
+        let mut payload = json!({
+            "hook_event_name": "Stop", "cwd": "  C:\\workspace/工程\\\\  ",
+            "last_assistant_message": " first\u{feff}\nreply ",
+            "lastAssistantMessage": "second", "result": "third",
+        });
+        assert_eq!(
+            notification(payload.clone()),
+            json!({
+                "eventType": "completed", "title": "Claude Code",
+                "subtitle": "Completed in 工程", "body": "first reply",
+                "sound": true, "cooldownKey": "Stop",
+            })
+        );
+        payload["last_assistant_message"] = json!(" \n ");
+        assert_eq!(notification(payload.clone())["body"], "second");
+        payload["lastAssistantMessage"] = json!({"text": "ignored"});
+        assert_eq!(notification(payload.clone())["body"], "third");
+        payload["result"] = Value::Null;
+        assert_eq!(
+            notification(payload.clone())["body"],
+            "Claude session completed in 工程"
+        );
+        payload["cwd"] = json!("/");
+        let event = notification(payload);
+        assert_eq!(event["subtitle"], "Completed");
+        assert_eq!(event["body"], "Claude session completed");
+    }
+
+    #[test]
+    fn permission_notification_uses_the_frozen_tool_and_detail_order() {
+        let mut payload = json!({
+            "hook_event_name": "PermissionRequest",
+            "tool_name": " Shell ", "toolName": "Edit",
+            "message": " confirm this ", "description": "described",
+            "tool_input": {"command": "snake command", "file_path": "snake file"},
+            "toolInput": {"command": "camel command", "filePath": "camel file"},
+        });
+        assert_eq!(
+            notification(payload.clone()),
+            json!({
+                "eventType": "permission", "title": "Claude Code",
+                "subtitle": "Permission", "body": "Shell: confirm this",
+                "sound": true, "cooldownKey": "Notification",
+            })
+        );
+        for (field, previous, next) in [
+            ("/message", "confirm this", "described"),
+            ("/description", "described", "snake command"),
+            ("/tool_input/command", "snake command", "snake file"),
+            ("/tool_input/file_path", "snake file", "camel command"),
+            ("/toolInput/command", "camel command", "camel file"),
+        ] {
             assert_eq!(
-                parsed.notification.map(|(kind, _)| kind),
-                Some(expected),
-                "{payload}"
+                notification(payload.clone())["body"],
+                format!("Shell: {previous}")
+            );
+            *payload.pointer_mut(field).unwrap() = json!(" ");
+            assert_eq!(
+                notification(payload.clone())["body"],
+                format!("Shell: {next}")
             );
         }
+        payload["tool_name"] = json!(" ");
+        assert_eq!(notification(payload.clone())["body"], "Edit: camel file");
+        payload["toolInput"] = json!([{"filePath": "ignored"}]);
+        assert_eq!(
+            notification(payload.clone())["body"],
+            "Edit requires approval"
+        );
+        payload["toolName"] = Value::Null;
+        assert_eq!(notification(payload)["body"], "operation requires approval");
+    }
+
+    #[test]
+    fn notifications_compact_and_truncate_at_frozen_utf16_limits() {
+        for (hook, field, prefix, limit) in [
+            ("Stop", "result", "", 200),
+            ("PermissionRequest", "description", "File: ", 180),
+            ("Notification", "body", "", 180),
+        ] {
+            let mut payload = json!({"hook_event_name": hook, "tool_name": "File"});
+            let base = format!("a {}", "界".repeat(limit - prefix.len() - 4));
+            payload[field] = json!(format!(" a\n\t{}🙂 ", &base[2..]));
+            assert_eq!(
+                notification(payload.clone())["body"],
+                format!("{prefix}{base}🙂")
+            );
+            payload[field] = json!(format!("{base}🙂 extra"));
+            assert_eq!(notification(payload)["body"], format!("{prefix}{base}�…"));
+        }
+        assert_eq!(
+            notification(json!({"hook_event_name": "Notification"})),
+            json!({
+                "eventType": "attention", "title": "Claude Code",
+                "subtitle": "Attention", "body": "Claude needs your attention",
+                "sound": true, "cooldownKey": "Notification",
+            })
+        );
     }
 
     #[test]

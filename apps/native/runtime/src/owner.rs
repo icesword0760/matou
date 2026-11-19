@@ -1739,22 +1739,52 @@ impl ShellOwner {
                 .resume
                 .as_ref()
                 .is_some_and(|resume| resume.permission_respawn);
-        // Worker events and HTTP hooks arrive on separate queues. A queued
-        // hook must not overwrite a newer submission already applied above it.
-        if let Some((kind, received_at)) = notification
-            && !confirms
-            && hook
-                .last_submission
-                .is_none_or(|submitted| submitted <= received_at)
-            && let Err(error) = self.set_work_status(&scope.session_id, events, |current| {
-                kind.work_status(current)
-            })
-        {
-            diagnostic(
-                events,
+        let update_work_status = notification.as_ref().is_some_and(|(_, received_at)| {
+            !confirms
+                && hook
+                    .last_submission
+                    .is_none_or(|submitted| submitted <= *received_at)
+        });
+        if let Some((notification, _)) = notification {
+            let time = now();
+            let id = (self.next_id)();
+            let commit = sessions::publish_claude_notification(
+                &mut self.connection,
+                &command(
+                    format!("agent-notification-{id}"),
+                    "agent.notification.publish",
+                    id,
+                ),
                 &scope.session_id,
-                format!("persist provider hook work status: {error:#}"),
+                &scope.run_id,
+                &scope.generation,
+                notification.payload(),
+                time,
             );
+            match commit {
+                Ok(commit) if !commit.replayed && commit.first_event_sequence.is_some() => {
+                    events.push(OwnerEvent::Domain(commit));
+                }
+                Ok(_) => {}
+                Err(error) => diagnostic(
+                    events,
+                    &scope.session_id,
+                    format!("persist provider hook notification: {error:#}"),
+                ),
+            }
+            // Worker events and HTTP hooks arrive on separate queues. A queued
+            // hook must not overwrite a newer submission already applied above it.
+            if update_work_status
+                && let Err(error) = self.set_work_status(&scope.session_id, events, |current| {
+                    notification.kind.work_status(current)
+                })
+            {
+                diagnostic(
+                    events,
+                    &scope.session_id,
+                    format!("persist provider hook work status: {error:#}"),
+                );
+            }
         }
         if permission_confirmed
             && let Err(error) = self.set_work_status(&scope.session_id, events, |_| "idle")
@@ -2408,6 +2438,14 @@ mod provider_tests {
         )?)
     }
 
+    fn notification_count(owner: &ShellOwner) -> Result<i64> {
+        Ok(owner.connection.query_row(
+            "SELECT COUNT(*) FROM domain_events WHERE event_type='agent.notification'",
+            [],
+            |row| row.get(0),
+        )?)
+    }
+
     fn assert_provider_work_status(owner: &mut ShellOwner, scope: &Scope) -> Result<()> {
         let session = &scope.session_id;
         let mut events = Vec::new();
@@ -2460,8 +2498,10 @@ mod provider_tests {
             .connection
             .execute("UPDATE sessions SET archived_at=1 WHERE id=?", [session])?;
         let archived = work_state(owner, session)?;
+        let before_archive_hook = notification_count(owner)?;
         owner.apply_hook(scope.clone(), hook("Notification", "Done"), &mut events);
         assert_eq!(work_state(owner, session)?, archived);
+        assert_eq!(notification_count(owner)?, before_archive_hook);
         owner.connection.execute(
             "UPDATE sessions SET archived_at=NULL, work_status='error' WHERE id=?",
             [session],
@@ -2520,8 +2560,10 @@ mod provider_tests {
         }
         let exited = work_state(owner, session)?;
         assert_eq!(exited.0, "exited");
+        let before_exit_hook = notification_count(owner)?;
         owner.apply_hook(scope.clone(), hook("Stop", ""), &mut events);
         assert_eq!(work_state(owner, session)?, exited);
+        assert_eq!(notification_count(owner)?, before_exit_hook);
         Ok(())
     }
 
@@ -2965,13 +3007,9 @@ mod provider_tests {
             expected_id: None,
             fork_source_id: None,
         };
-        let observation = |event, identity: Option<&str>| Observation {
-            event,
-            identity: identity.map(str::to_owned),
-            model: None,
-            permission_mode: None,
-            cwd: None,
-            notification: None,
+        let observation = |event, identity: Option<&str>| {
+            let payload = json!({"hook_event_name": event, "session_id": identity});
+            Observation::parse(payload.as_object().unwrap())
         };
         let mut events = Vec::new();
         for (event, id) in [
@@ -2982,6 +3020,7 @@ mod provider_tests {
         ] {
             owner.apply_hook(scope.clone(), observation(event, id), &mut events);
         }
+        assert_eq!(notification_count(&owner)?, 0);
         let count = |owner: &ShellOwner| {
             owner
                 .connection
@@ -3069,14 +3108,51 @@ mod provider_tests {
             run_id: owner.shells[session].run_id.clone(),
             ..scope.clone()
         };
-        let stop = |id| {
-            let payload = json!({"hook_event_name": "Stop", "session_id": id});
-            Observation::parse(payload.as_object().unwrap())
-        };
+        let stop = |id| observation("Stop", Some(id));
         let before = work_state(&owner, session)?;
+        let previous_notifications = notification_count(&owner)?;
+        let start_event = events.len();
         owner.apply_hook(current.clone(), stop("current-id"), &mut events);
         assert!(owner.provider_allows_derivation(session));
         assert_eq!(work_state(&owner, session)?, before);
+        assert_eq!(notification_count(&owner)?, previous_notifications + 1);
+        let (seq, payload, command_id, request_hash): (i64, String, String, String) =
+            owner.connection.query_row(
+                "SELECT seq, payload_json, domain_events.command_id, request_hash
+                 FROM domain_events JOIN command_deduplication USING (command_id)
+                 WHERE event_type='agent.notification' AND workspace_id='workspace'
+                   AND task_id='task' AND session_id=? AND aggregate_id=?
+                   AND aggregate_type='session' AND schema_version=1
+                   AND json_extract(payload_json, '$.runId')=?
+                   AND command_type='agent.notification.publish'",
+                params![session, session, current.run_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )?;
+        let payload: Value = serde_json::from_str(&payload)?;
+        assert_eq!(
+            payload,
+            json!({
+                "targetSessionId": session, "runId": current.run_id, "provider": "claude-code",
+                "event": {
+                    "eventType": "completed", "title": "Claude Code", "subtitle": "Completed",
+                    "body": "Claude session completed", "sound": true, "cooldownKey": "Stop",
+                },
+            })
+        );
+        assert!(events[start_event..].iter().any(|event| matches!(event,
+            OwnerEvent::Domain(commit) if commit.first_event_sequence == Some(seq)
+                && commit.last_event_sequence == Some(seq))));
+        let duplicate = sessions::publish_claude_notification(
+            &mut owner.connection,
+            &command(command_id, "agent.notification.publish", request_hash),
+            session,
+            &current.run_id,
+            &current.generation,
+            payload["event"].clone(),
+            now(),
+        )?;
+        assert!(duplicate.replayed);
+        assert_eq!(duplicate.first_event_sequence, Some(seq));
         owner.apply_hook(scope, stop("late-id"), &mut events);
         owner.apply_hook(
             Scope {
@@ -3087,6 +3163,7 @@ mod provider_tests {
             &mut events,
         );
         assert_eq!(work_state(&owner, session)?, before);
+        assert_eq!(notification_count(&owner)?, previous_notifications + 1);
         assert_eq!(count(&owner)?, 2);
         assert!(
             matches!(events.last(), Some(OwnerEvent::ProviderIdentity(value)) if value["reason"] == "retired-run")
@@ -3094,6 +3171,7 @@ mod provider_tests {
         owner.retire_sessions(&[session.into()]);
         owner.apply_hook(current, stop("current-id"), &mut events);
         assert_eq!(work_state(&owner, session)?, before);
+        assert_eq!(notification_count(&owner)?, previous_notifications + 1);
         let deadline = Instant::now() + Duration::from_secs(5);
         while owner.has_shell_worker(session) && Instant::now() < deadline {
             owner.poll(Duration::from_millis(25))?;
@@ -3168,6 +3246,7 @@ mod provider_tests {
         );
         assert!(!owner.provider_allows_derivation(session));
         assert_eq!(count(&owner)?, 2);
+        assert_eq!(notification_count(&owner)?, previous_notifications + 1);
         assert_eq!(
             owner.claude_binding(session)?.unwrap().restore_state,
             "failed"

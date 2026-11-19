@@ -897,6 +897,69 @@ pub fn record_claude_identity(
     })
 }
 
+/// Publish after the owner has accepted the hook's conversation identity.
+pub fn publish_claude_notification(
+    db: &mut Connection,
+    command: &CommandMetadata,
+    session_id: &str,
+    run_id: &str,
+    generation: &str,
+    event: Value,
+    now: i64,
+) -> Result<DomainCommit> {
+    execute(db, command, now, |tx, events| {
+        let owner: Option<(String, String)> = tx
+            .query_row(
+                "SELECT tasks.workspace_id, sessions.task_id
+                 FROM sessions JOIN tasks ON tasks.id = sessions.task_id
+                 JOIN session_runs ON session_runs.id = (
+                     SELECT id FROM session_runs WHERE session_id = sessions.id
+                     ORDER BY ordinal DESC LIMIT 1
+                 )
+                 WHERE sessions.id = ? AND sessions.archived_at IS NULL
+                   AND sessions.kind = 'claude-code' AND session_runs.id = ?
+                   AND session_runs.runtime_generation = ?
+                   AND session_runs.status = 'running' AND session_runs.profile = 'claude-code'",
+                params![session_id, run_id, generation],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((workspace_id, task_id)) = owner else {
+            return Ok(json!({"published": false}));
+        };
+        let mut notification = event
+            .as_object()
+            .context("Expected a notification object")?
+            .clone();
+        notification.extend([
+            ("eventId".into(), json!(command.command_id)),
+            ("workspaceId".into(), json!(workspace_id)),
+            ("taskId".into(), json!(task_id)),
+            ("sessionId".into(), json!(session_id)),
+            ("occurredAt".into(), json!(now)),
+        ]);
+        events.push(DomainEventInput {
+            event_id: command.command_id.clone(),
+            event_type: "agent.notification".into(),
+            aggregate_type: "session".into(),
+            aggregate_id: session_id.into(),
+            workspace_id: Some(workspace_id),
+            task_id: Some(task_id),
+            session_id: Some(session_id.into()),
+            payload: json!({
+                "targetSessionId": session_id,
+                "runId": run_id,
+                "provider": "claude-code",
+                "event": event,
+            }),
+            schema_version: Some(1),
+            required_terminal_sequence: None,
+            occurred_at: now,
+        });
+        Ok(json!({"published": true, "agentNotification": notification}))
+    })
+}
+
 pub fn interrupt_run(
     db: &mut Connection,
     command: &CommandMetadata,

@@ -384,7 +384,7 @@ pub enum Event {
         update: matou_native_core::geometry::GeometryUpdate,
         error: Option<String>,
     },
-    /// Graph with optional card, provider identity and provider catalog results.
+    /// Graph with optional card, provider, catalog and new notification results.
     Graph(Value),
     ClipboardWrite {
         session_id: String,
@@ -695,6 +695,7 @@ fn run(
     let mut navigation_publications = VecDeque::new();
     let mut graph_dirty = false;
     let mut provider_identity_events = Vec::new();
+    let mut agent_notifications = Vec::new();
     let mut provider_starting = HashMap::new();
     let mut permission_changes = HashMap::<String, PermissionChange>::new();
     let mut permission_results = Vec::new();
@@ -2074,7 +2075,17 @@ fn run(
         }
         for event in owner.poll(Duration::from_millis(4))? {
             match event {
-                OwnerEvent::Domain(_) => graph_dirty = true,
+                OwnerEvent::Domain(mut commit) => {
+                    graph_dirty = true;
+                    if !commit.replayed
+                        && let Some(notification) = commit
+                            .result
+                            .as_object_mut()
+                            .and_then(|result| result.remove("agentNotification"))
+                    {
+                        agent_notifications.push(notification);
+                    }
+                }
                 OwnerEvent::ProviderIdentity(result) => {
                     if let Some(change) = result["sessionId"]
                         .as_str()
@@ -2340,6 +2351,10 @@ fn run(
             if !provider_identity_events.is_empty() {
                 graph["providerIdentityEvents"] =
                     json!(std::mem::take(&mut provider_identity_events));
+            }
+            if !agent_notifications.is_empty() {
+                graph["agentNotifications"] =
+                    Value::Array(std::mem::take(&mut agent_notifications));
             }
             if !permission_results.is_empty() {
                 graph["providerPermissionModeResults"] =
