@@ -1010,6 +1010,200 @@ fn seed_catalog(root: &Path, workspace: &Path, id: &str) -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn parked_startup_card_reads_its_binding_until_explicit_recovery() -> Result<()> {
+    use matou_native_core::{
+        hierarchy::canvas::{
+            CanvasIds, CanvasMessages, CreateShellSiblingInput, create_shell_sibling,
+        },
+        sessions::list_runs,
+        storage::CommandMetadata,
+    };
+    use matou_native_runtime::host::RecoveryState;
+
+    let root = tempfile::tempdir()?;
+    let no_shell = root.path().join("missing-shell");
+    let mut seed = RuntimeChild::spawn_configured(root.path(), "", &no_shell, None)?;
+    seed.ready()?;
+    seed.send(Command::Shutdown)?;
+    seed.closed()?;
+    let (status, stderr) = seed.wait()?;
+    ensure!(status.success(), "seed runtime shutdown: {stderr}");
+
+    let mut db = Connection::open(seed.data.join("matou.sqlite"))?;
+    let parked = &seed.session;
+    for index in 0..19 {
+        let card = if index == 0 {
+            parked.clone()
+        } else {
+            format!("recovery-card-{index}")
+        };
+        let now = 1 + i64::from(index);
+        if index != 0 {
+            create_shell_sibling(
+                &mut db,
+                &CommandMetadata {
+                    command_id: card.clone(),
+                    command_type: "hierarchy.create-shell-sibling".into(),
+                    request_hash: card.clone(),
+                    causation_id: None,
+                    correlation_id: None,
+                },
+                &CreateShellSiblingInput {
+                    window_id: "main-window-1".into(),
+                    scene_id: seed.scene.clone(),
+                    source_session_id: parked.clone(),
+                    parent_session_id: None,
+                    execution_context_id: None,
+                    title: None,
+                    navigation: None,
+                    now,
+                },
+                &CanvasIds {
+                    scene_id: seed.scene.clone(),
+                    session_id: card.clone(),
+                    root_node_id: format!("node-{index}"),
+                    secondary_node_id: format!("second-node-{index}"),
+                    mount_id: format!("mount-{index}"),
+                    relation_id: format!("relation-{index}"),
+                },
+                &CanvasMessages {
+                    new_canvas: "Canvas",
+                    duplicate_scene_name: "Duplicate",
+                    workspace_path_invalid: "Workspace unavailable",
+                    detached_session_must_return: "Card is detached",
+                },
+                now,
+            )?;
+        }
+        if index == 2 {
+            db.execute(
+                "INSERT INTO session_runs
+                    (id, session_id, ordinal, runtime_generation, profile, status, cols, rows, started_at, ended_at)
+                 VALUES ('saved-shell-run', ?1, 1, 'older-runtime', 'shell', 'interrupted', 80, 24, ?2, ?2)",
+                (&card, now),
+            )?;
+            db.execute(
+                "UPDATE sessions SET status='interrupted', work_status='interrupted' WHERE id=?1",
+                [&card],
+            )?;
+            continue;
+        }
+        db.execute(
+            "UPDATE sessions SET kind='claude-code', created_at=?1, last_activity_at=?1 WHERE id=?2",
+            (now, &card),
+        )?;
+        db.execute(
+            "INSERT INTO provider_bindings
+                (id, session_id, provider, provider_session_id, resume_state, metadata_json,
+                 created_at, updated_at, validated_at)
+             VALUES (?1, ?2, 'claude-code', ?3, 'available', '{}', ?4, ?4, ?4)",
+            (
+                format!("binding-{index}"),
+                &card,
+                format!("bound-{index}"),
+                now,
+            ),
+        )?;
+    }
+    seed_catalog(root.path(), &seed.workspace, "bound-0")?;
+    seed_catalog(root.path(), &seed.workspace, "unrelated-conversation")?;
+    let stub = root.path().join("provider-stub");
+    fs::write(
+        &stub,
+        "#!/bin/sh\nwhile [ $# -gt 1 ]; do\n  if [ \"$1\" = '--resume' ] && [ \"$2\" = 'bound-0' ]; then\n    printf 'parked binding resumed\\n'\n    exec /bin/sleep 60\n  fi\n  shift\ndone\nexit 3\n",
+    )?;
+    fs::set_permissions(&stub, fs::Permissions::from_mode(0o700))?;
+    let before = list_runs(&db, parked)?.len();
+    let mut child = RuntimeChild::spawn_configured(root.path(), "", &no_shell, Some(&stub))?;
+    child.connect()?;
+    let mut parked_ids = std::collections::HashSet::new();
+    let deadline = Instant::now() + TIMEOUT;
+    while parked_ids.len() < 3 {
+        if let Event::Recovery {
+            session_id,
+            state: RecoveryState::Deferred,
+        } = child.event(deadline, true)?
+        {
+            parked_ids.insert(session_id);
+        }
+    }
+    assert!(parked_ids.contains(parked));
+    assert!(parked_ids.contains("recovery-card-1"));
+    assert!(parked_ids.contains("recovery-card-2"));
+    assert_eq!(list_runs(&db, "recovery-card-2")?.len(), 1);
+    for (card, expected) in [(parked.as_str(), true), ("recovery-card-1", false)] {
+        child.send(Command::GetDeferredRecoveryPreview {
+            session_id: card.into(),
+        })?;
+        loop {
+            match child.event(deadline, true)? {
+                Event::DeferredRecoveryPreview {
+                    session_id,
+                    cwd,
+                    preview,
+                } if session_id == card => {
+                    assert_eq!(Path::new(&cwd), seed.workspace);
+                    assert_eq!(preview.is_some(), expected);
+                    if let Some(preview) = preview {
+                        assert_eq!(preview.title.as_deref(), Some("Synthetic command fixture"));
+                        assert_eq!(preview.events[0].text, "Synthetic command fixture");
+                        assert_eq!(preview.events[0].role.as_deref(), Some("user"));
+                    }
+                    break;
+                }
+                Event::Frame { session_id, .. } if session_id == card => {
+                    bail!("parked PTY already produced a frame")
+                }
+                _ => {}
+            }
+        }
+    }
+    child.send(Command::GetProviderSession {
+        cwd: seed.workspace.to_string_lossy().into_owned(),
+        provider_session_id: "bound-0".into(),
+        start_event_index: None,
+        limit: None,
+    })?;
+    loop {
+        if let Event::Graph(graph) = child.event(deadline, true)?
+            && let Some(history) = graph["providerSessionDetailResults"].get(0)
+        {
+            assert_eq!(history["providerSessionId"], "bound-0");
+            assert_eq!(history["events"][0]["text"], "Synthetic command fixture");
+            let card = graph["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|node| node["sessionId"].as_str() == Some(parked))
+                .unwrap();
+            assert_eq!(card["historyProviderSessionId"], "bound-0");
+            break;
+        }
+    }
+    assert_eq!(list_runs(&db, parked)?.len(), before);
+    child.send(Command::RetryRecovery {
+        session_id: parked.clone(),
+    })?;
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        if let Event::Frame {
+            session_id, screen, ..
+        } = child.event(deadline, true)?
+            && &session_id == parked
+            && screen_has_line(&screen, "parked binding resumed")
+        {
+            break;
+        }
+    }
+    assert_eq!(list_runs(&db, parked)?.len(), before + 1);
+    child.send(Command::Shutdown)?;
+    child.closed()?;
+    let (status, stderr) = child.wait()?;
+    ensure!(status.success(), "runtime shutdown: {stderr}");
+    Ok(())
+}
+
 fn permission_mode_result(child: &mut RuntimeChild, mode: &str) -> Result<serde_json::Value> {
     let deadline = Instant::now() + TIMEOUT;
     loop {

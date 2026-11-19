@@ -17,8 +17,13 @@ use matou_native_core::hierarchy::{HierarchyResult, Scene, Task, Workspace as Hi
 use matou_native_core::workspace_paths::WorkspacePathState;
 use matou_native_runtime::history::{HistoryCursor, HistoryLine, HistorySearchOptions};
 use matou_native_runtime::history_worker::{HistoryReply, HistoryRequest};
+use matou_native_runtime::host::{RecentReplies, deferred_summary_text};
 use matou_native_terminal::Theme;
 use serde_json::Value;
+
+mod deferred_recovery_card {
+    include!("deferred_recovery_card.rs");
+}
 
 mod session_levels {
     include!("session_levels.rs");
@@ -441,7 +446,32 @@ struct LoaderLoad {
     previous_revision: u64,
 }
 
+struct DeferredRecoveryCard {
+    title: String,
+    subtitle: Option<String>,
+    cwd: Option<String>,
+    agent: Option<&'static str>,
+    updated_label: Option<String>,
+    replies: Vec<DeferredReply>,
+    loading: bool,
+    can_open_history: bool,
+    can_restore: bool,
+}
+
+struct DeferredReply {
+    kind: String,
+    label: String,
+    text: String,
+}
+
+struct DeferredPreview {
+    cwd: String,
+    loading: bool,
+    result: Option<RecentReplies>,
+}
+
 struct SessionLoader {
+    history: bool,
     scene_id: String,
     session_id: String,
     cwd: String,
@@ -975,6 +1005,8 @@ pub struct Workspace {
     terminals: HashMap<String, Entity<TerminalSurface>>,
     recovery: HashMap<String, RecoveryState>,
     recovery_controls: HashMap<String, FocusHandle>,
+    deferred_previews: HashMap<String, DeferredPreview>,
+    deferred_controls: HashMap<String, [FocusHandle; 2]>,
     start_failure_controls: HashMap<String, [FocusHandle; 2]>,
     provider_restore_controls: HashMap<String, [FocusHandle; 2]>,
     pending_provider_restores: HashMap<String, PendingProviderRestore>,
@@ -1772,6 +1804,8 @@ impl Workspace {
             terminals: HashMap::new(),
             recovery: HashMap::new(),
             recovery_controls: HashMap::new(),
+            deferred_previews: HashMap::new(),
+            deferred_controls: HashMap::new(),
             start_failure_controls: HashMap::new(),
             provider_restore_controls: HashMap::new(),
             pending_provider_restores: HashMap::new(),
@@ -2006,6 +2040,8 @@ impl Workspace {
         self.domain_ready = false;
         self.session_frames.clear();
         self.recovery.clear();
+        self.deferred_previews.clear();
+        self.deferred_controls.clear();
         self.recovery_controls.clear();
         self.start_failure_controls.clear();
         self.pending_provider_restores.clear();
@@ -2184,7 +2220,11 @@ impl Workspace {
             TabDialog::SessionLoader(state) => {
                 self.active_scene_id() != Some(state.scene_id.as_str())
                     || self.graph_node(&state.session_id).is_none_or(|node| {
-                        !node["archivedAt"].is_null() || node["cwd"] != state.cwd
+                        !node["archivedAt"].is_null()
+                            || node["cwd"] != state.cwd
+                            || (state.history
+                                && trimmed_graph_text(&node["historyProviderSessionId"])
+                                    != state.selected.as_deref())
                     })
             }
             TabDialog::PermissionMode(state) => !self.permission_confirmation_valid(state),
@@ -2519,6 +2559,8 @@ impl Workspace {
                 if fresh_ready {
                     self.session_frames.clear();
                     self.recovery.clear();
+                    self.deferred_previews.clear();
+                    self.deferred_controls.clear();
                     self.start_failure_controls.clear();
                     for id in session_levels::nodes(&self.graph)
                         .iter()
@@ -2603,6 +2645,8 @@ impl Workspace {
                     self.clear_start_failure_focus(&id, window);
                     self.terminals.remove(&id);
                     self.recovery.remove(&id);
+                    self.deferred_previews.remove(&id);
+                    self.deferred_controls.remove(&id);
                     self.recovery_controls.remove(&id);
                     self.start_failure_controls.remove(&id);
                     self.provider_restore_controls.remove(&id);
@@ -2881,6 +2925,20 @@ impl Workspace {
                 {
                     window.blur();
                 }
+                if state == RecoveryState::Deferred {
+                    self.deferred_controls
+                        .entry(session_id.clone())
+                        .or_insert_with(|| {
+                            std::array::from_fn(|_| cx.focus_handle().tab_stop(true))
+                        });
+                } else {
+                    self.deferred_previews.remove(&session_id);
+                    if let Some(controls) = self.deferred_controls.remove(&session_id)
+                        && controls.iter().any(|focus| focus.is_focused(window))
+                    {
+                        window.blur();
+                    }
+                }
                 self.recovery.insert(session_id.clone(), state);
                 self.sync_terminal_input(window, cx);
                 // The replacement's first frame can precede Ready, including
@@ -2901,6 +2959,18 @@ impl Workspace {
                 self.resume_search_after_frame(cx);
             }
             Event::StorageFault { message, .. } => self.fault = Some(message),
+            Event::DeferredRecoveryPreview {
+                session_id,
+                cwd,
+                preview,
+            } => {
+                if let Some(state) = self.deferred_previews.get_mut(&session_id)
+                    && state.cwd == cwd
+                {
+                    state.loading = false;
+                    state.result = preview;
+                }
+            }
             Event::Diagnostic(message) => {
                 // Launch failures already carry this same diagnostic in their card.
                 if !self.recovery.values().any(|state| {
@@ -2970,6 +3040,8 @@ impl Workspace {
                 }
                 self.card_controls.remove(id);
                 self.recovery.remove(id);
+                self.deferred_previews.remove(id);
+                self.deferred_controls.remove(id);
                 self.session_frames.remove(id);
                 self.resize_revisions.remove(id);
                 continue;
@@ -3497,6 +3569,155 @@ impl Workspace {
         }
     }
 
+    fn is_deferred(&self, id: &str) -> bool {
+        self.recovery.get(id) == Some(&RecoveryState::Deferred)
+    }
+
+    fn request_deferred_preview(&mut self, id: &str) {
+        let Some(cwd) = self
+            .graph_node(id)
+            .filter(|node| node["currentMode"] == "claude-code")
+            .and_then(|node| node["cwd"].as_str())
+            .map(str::to_owned)
+        else {
+            return;
+        };
+        if self
+            .deferred_previews
+            .get(id)
+            .is_some_and(|preview| preview.cwd == cwd)
+            || !self.domain_ready
+            || !self.transport_connected
+        {
+            return;
+        }
+        let loading = self
+            .commands
+            .send_at(
+                self.runtime_generation,
+                Command::GetDeferredRecoveryPreview {
+                    session_id: id.to_owned(),
+                },
+            )
+            .is_ok();
+        self.deferred_previews.insert(
+            id.to_owned(),
+            DeferredPreview {
+                cwd,
+                loading,
+                result: None,
+            },
+        );
+    }
+
+    fn deferred_card(&self, id: &str) -> Option<DeferredRecoveryCard> {
+        if !self.is_deferred(id) {
+            return None;
+        }
+        let node = self.graph_node(id)?;
+        let cwd = trimmed_graph_text(&node["cwd"]);
+        let state = self
+            .deferred_previews
+            .get(id)
+            .filter(|preview| Some(preview.cwd.as_str()) == cwd);
+        let result = state.and_then(|state| state.result.as_ref());
+        let agent = (node["currentMode"] == "claude-code").then_some("Claude Code");
+        let agent_short = if agent.is_some() { "Claude" } else { "Shell" };
+        let title = node["title"].as_str().unwrap_or(agent_short);
+        let task = self
+            .hierarchy
+            .as_ref()
+            .and_then(|h| h.task.as_ref())
+            .map(|task| task.title.trim())
+            .filter(|title| !title.is_empty());
+        let provider = trimmed_graph_text(&node["providerTitle"]);
+        let transcript = result
+            .and_then(|preview| preview.title.as_deref())
+            .filter(|title| !generic_agent_title(title, agent_short));
+        let display = match node["titleSource"].as_str() {
+            Some("default") => provider.or(transcript).or(task).unwrap_or(title),
+            None if generic_agent_title(title, agent_short) => {
+                provider.or(transcript).or(task).unwrap_or(title)
+            }
+            _ => title,
+        };
+        let subtitle = [provider, transcript, task]
+            .into_iter()
+            .flatten()
+            .find(|candidate| *candidate != display);
+        let mut replies: Vec<_> = result
+            .into_iter()
+            .flat_map(|preview| &preview.events)
+            .map(|event| {
+                let label = match event.kind.as_str() {
+                    "user" => "你",
+                    "assistant" => agent_short,
+                    "tool" => event
+                        .tool_name
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|name| !name.is_empty())
+                        .unwrap_or("工具"),
+                    _ => "系统",
+                };
+                DeferredReply {
+                    kind: event.kind.clone(),
+                    label: label.into(),
+                    text: event.text.clone(),
+                }
+            })
+            .collect();
+        if replies.is_empty() {
+            replies.extend(
+                node["latestLines"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .rev()
+                    .filter_map(Value::as_str)
+                    .map(deferred_summary_text)
+                    .filter(|text| !text.is_empty())
+                    .take(4)
+                    .map(|text| DeferredReply {
+                        kind: "assistant".into(),
+                        label: agent_short.into(),
+                        text,
+                    }),
+            );
+            replies.reverse();
+        }
+        Some(DeferredRecoveryCard {
+            title: display.to_owned(),
+            subtitle: subtitle.map(str::to_owned),
+            cwd: result
+                .map(|detail| detail.cwd.as_str())
+                .filter(|cwd| !cwd.is_empty())
+                .or(cwd)
+                .map(str::to_owned),
+            agent,
+            updated_label: result.and_then(|detail| detail.updated_label.clone()),
+            replies,
+            loading: state.is_some_and(|state| state.loading),
+            can_open_history: agent.is_some(),
+            can_restore: self.launch_action_blocked_reason(id, node).is_none(),
+        })
+    }
+
+    fn restore_deferred_session(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.is_deferred(id)
+            && self
+                .graph_node(id)
+                .is_some_and(|node| self.launch_action_blocked_reason(id, node).is_none())
+        {
+            self.send(
+                Command::RetryRecovery {
+                    session_id: id.to_owned(),
+                },
+                cx,
+            );
+        }
+    }
+
     fn recovery_blocked(&self, session_id: &str) -> bool {
         !self.domain_ready
             || !self.transport_connected
@@ -3525,7 +3746,8 @@ impl Workspace {
             && !matches!(
                 self.recovery.get(id),
                 Some(
-                    RecoveryState::Failed(_)
+                    RecoveryState::Deferred
+                        | RecoveryState::Failed(_)
                         | RecoveryState::StartFailed(_)
                         | RecoveryState::Restarting(_)
                 )
@@ -4651,6 +4873,10 @@ impl Workspace {
         self.dialog_controls.clear();
         let focus = match dialog {
             Some(TabDialog::LastSession { return_focus, .. }) => return_focus,
+            Some(TabDialog::SessionLoader(state)) if state.history => self
+                .deferred_controls
+                .get(&state.session_id)
+                .map(|buttons| buttons[0].clone()),
             Some(TabDialog::SessionLoader(state)) => {
                 self.card_controls.get(&state.session_id).cloned()
             }
@@ -5572,7 +5798,8 @@ impl Workspace {
     }
 
     fn session_loader_can_submit(&self, state: &SessionLoader) -> bool {
-        state.selected.is_some()
+        !state.history
+            && state.selected.is_some()
             && !self.pending_loader_loads.contains_key(&state.session_id)
             && self.graph_node(&state.session_id).is_some_and(|node| {
                 self.launch_action_blocked_reason(&state.session_id, node)
@@ -5581,6 +5808,22 @@ impl Workspace {
     }
 
     fn open_session_loader(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_session_loader_mode(id, false, window, cx);
+    }
+
+    fn open_deferred_history(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_deferred(id) {
+            self.open_session_loader_mode(id, true, window, cx);
+        }
+    }
+
+    fn open_session_loader_mode(
+        &mut self,
+        id: &str,
+        history: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.dialog.is_some()
             || self.pending_close.is_some()
             || self.pending_card_action.is_some()
@@ -5592,13 +5835,21 @@ impl Workspace {
         };
         if !self.order.iter().any(|card| card == id)
             || !node["archivedAt"].is_null()
-            || self.session_loader_blocked_reason(id, node).is_some()
+            || if history {
+                node["currentMode"] != "claude-code"
+            } else {
+                self.session_loader_blocked_reason(id, node).is_some()
+            }
         {
             return;
         }
         let Some(cwd) = node["cwd"].as_str().filter(|path| !path.is_empty()) else {
             return;
         };
+        let selected = history
+            .then(|| trimmed_graph_text(&node["historyProviderSessionId"]))
+            .flatten()
+            .map(str::to_owned);
         let scene_id = scene_id.to_owned();
         let cwd = cwd.to_owned();
         let input =
@@ -5610,32 +5861,40 @@ impl Workspace {
                 }
             }));
         self.dialog_controls = (0..4).map(|_| cx.focus_handle().tab_stop(true)).collect();
-        window.focus(&input.read(cx).focus);
-
-        let result = self.commands.send_at(
-            self.runtime_generation,
-            Command::ListProviderSessions { cwd: cwd.clone() },
-        );
+        let result = if history {
+            window.focus(&self.dialog_controls[0]);
+            None
+        } else {
+            window.focus(&input.read(cx).focus);
+            Some(self.commands.send_at(
+                self.runtime_generation,
+                Command::ListProviderSessions { cwd: cwd.clone() },
+            ))
+        };
         self.dialog = Some(TabDialog::SessionLoader(SessionLoader {
+            history,
             scene_id,
             session_id: id.to_owned(),
             cwd: cwd.to_owned(),
             input,
             sessions: Vec::new(),
-            selected: None,
+            selected,
             events: Vec::new(),
             first_event: None,
             total_events: 0,
-            loading_list: result.is_ok(),
+            loading_list: result.as_ref().is_some_and(Result::is_ok),
             loading_detail: false,
             loading_earlier: false,
             pending_detail: None,
             has_earlier: false,
-            error: result.err().map(|error| error.to_string()),
+            error: result.and_then(Result::err).map(|error| error.to_string()),
             list_scroll: ScrollHandle::new(),
             preview_scroll: ScrollHandle::new(),
             list_focus: cx.focus_handle().tab_stop(true),
         }));
+        if history {
+            self.request_loader_detail(None);
+        }
         self.workspace_menu = None;
         self.task_menu = None;
         self.tab_menu = None;
@@ -5658,6 +5917,9 @@ impl Workspace {
         let Some(TabDialog::SessionLoader(state)) = &self.dialog else {
             return;
         };
+        if state.history {
+            return;
+        }
         if reset_scroll {
             state.list_scroll.set_offset(Point::default());
         }
@@ -7870,7 +8132,7 @@ impl Workspace {
             .and_then(|node| node["title"].as_str())
             .unwrap_or("Shell")
             .to_owned();
-        let running = self.session_loader_running(&state.session_id);
+        let running = !state.history && self.session_loader_running(&state.session_id);
         let can_submit = self.session_loader_can_submit(state);
         let mut focus_ring: Hsla = rgb(0x5b9de9).into();
         focus_ring.a = 0.13;
@@ -8125,9 +8387,13 @@ impl Workspace {
             )
             .child(list_results);
 
-        let preview_title = selected
-            .map(|session| session.title.clone())
-            .unwrap_or_else(|| SESSION_LOADER_SELECT_SESSION.to_owned());
+        let preview_title = if state.history {
+            "包含压缩前的消息，不影响当前会话".to_owned()
+        } else {
+            selected
+                .map(|session| session.title.clone())
+                .unwrap_or_else(|| SESSION_LOADER_SELECT_SESSION.to_owned())
+        };
         let preview_header = div()
             .h(px(48.))
             .flex_none()
@@ -8281,6 +8547,8 @@ impl Workspace {
         }
         if let Some(message) = if state.loading_detail {
             Some(SESSION_LOADER_LOADING_PREVIEW)
+        } else if state.history && state.error.is_none() && state.events.is_empty() {
+            Some("当前会话还没有可显示的历史内容")
         } else {
             (state.first_event.is_some() && state.events.is_empty())
                 .then_some(SESSION_LOADER_NO_HISTORY)
@@ -8317,7 +8585,7 @@ impl Workspace {
             .w_full()
             .min_w_0()
             .flex()
-            .child(list)
+            .children((!state.history).then_some(list))
             .child(preview);
 
         let primary_label = if self.pending_loader_loads.contains_key(&state.session_id) {
@@ -8402,7 +8670,44 @@ impl Workspace {
                         )
                     }),
             )
-            .child(primary);
+            .children((!state.history).then_some(primary))
+            .children(state.history.then(|| {
+                let mut actions = div().flex().items_center().gap(px(10.));
+                if state.error.is_some() && !state.loading_detail {
+                    actions = actions.child(
+                        self.button(
+                            div()
+                                .id("session-history-retry")
+                                .px(px(8.))
+                                .py(px(5.))
+                                .cursor_pointer()
+                                .child("重试读取会话历史"),
+                            &self.dialog_controls[2],
+                            |this, _, cx| {
+                                if let Some(TabDialog::SessionLoader(state)) = &mut this.dialog {
+                                    state.error = None;
+                                }
+                                this.request_loader_detail(None);
+                                cx.notify();
+                            },
+                            cx,
+                        ),
+                    );
+                }
+                actions.child(
+                    self.button(
+                        div()
+                            .id("session-history-close")
+                            .px(px(8.))
+                            .py(px(5.))
+                            .cursor_pointer()
+                            .child("关闭会话历史"),
+                        &self.dialog_controls[3],
+                        |this, window, cx| this.close_dialog(window, cx),
+                        cx,
+                    ),
+                )
+            }));
 
         let header = div()
             .h(px(58.))
@@ -8430,7 +8735,14 @@ impl Workspace {
                             .text_ellipsis()
                             .text_size(px(15.))
                             .font_weight(FontWeight::BOLD)
-                            .child(ui_text(SESSION_LOADER_TITLE).normal_line_height()),
+                            .child(
+                                ui_text(if state.history {
+                                    "会话历史"
+                                } else {
+                                    SESSION_LOADER_TITLE
+                                })
+                                .normal_line_height(),
+                            ),
                     )
                     .child(
                         div()
@@ -8440,7 +8752,14 @@ impl Workspace {
                             .text_ellipsis()
                             .text_size(px(10.))
                             .text_color(rgb(0x8d96a3))
-                            .child(ui_text(state.cwd.clone()).normal_line_height()),
+                            .child(
+                                ui_text(if state.history {
+                                    target_title
+                                } else {
+                                    state.cwd.clone()
+                                })
+                                .normal_line_height(),
+                            ),
                     ),
             )
             .child(
@@ -9891,11 +10210,24 @@ impl Render for Workspace {
         let path_valid = self.active_path_valid();
         #[cfg(target_os = "macos")]
         let recovery_water_available = self.recovery_water_available(window);
-        #[cfg(target_os = "macos")]
         let carousel_left =
             f64::from(-f32::from(self.carousel_scroll.offset().x)).clamp(0., max_scroll);
         #[cfg(target_os = "macos")]
         let mut mounted_water = HashSet::new();
+        let visible_deferred: Vec<_> = self
+            .order
+            .iter()
+            .filter(|&id| {
+                self.is_deferred(id)
+                    && (!narrow || level_focus.as_ref() == Some(id))
+                    && positions[id] < carousel_left + viewport_width
+                    && positions[id] + widths[id] > carousel_left
+            })
+            .cloned()
+            .collect();
+        for id in visible_deferred {
+            self.request_deferred_preview(&id);
+        }
         let mut badge_tooltip = None;
         for id in &self.order {
             let node = session_levels::node(session_levels::nodes(&self.graph), id);
@@ -10293,7 +10625,10 @@ impl Render for Workspace {
                             },
                         )
                         .children(self.archive_summary(id))
-                        .children(fork_progress.map(|progress| fork_progress_body(progress, now)));
+                        .children(fork_progress.map(|progress| fork_progress_body(progress, now)))
+                        .children(self.deferred_card(id).map(|card| {
+                            self.render_deferred_recovery_card(id, card, width, window, cx)
+                        }));
                     #[cfg(target_os = "macos")]
                     let body = body.when(water.is_some(), |body| body.opacity(0.));
                     body
@@ -11366,6 +11701,28 @@ fn play_notification_sound() {
         // Zero selects the standard system notification sound.
         unsafe { MessageBeep(0) };
     }
+}
+
+fn trimmed_graph_text(value: &Value) -> Option<&str> {
+    value
+        .as_str()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+}
+
+fn generic_agent_title(title: &str, short: &str) -> bool {
+    let title = title.trim().to_lowercase();
+    title == short.to_lowercase()
+        || matches!(
+            title.as_str(),
+            "" | "claude"
+                | "claude code"
+                | "antigravity"
+                | "codex"
+                | "shell"
+                | "未命名会话"
+                | "未命名 claude 会话"
+        )
 }
 
 fn loader_relative_time(updated_at: i64) -> String {
