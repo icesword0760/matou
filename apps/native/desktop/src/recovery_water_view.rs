@@ -6,6 +6,22 @@ use matou_native_terminal::Theme;
 #[cfg(target_os = "macos")]
 use std::{sync::Arc, time::Instant};
 
+impl RecoveryWater {
+    pub const TOP: Pixels = px(32.);
+
+    /// Append after the title and body of the card's relative container.
+    pub fn overlay(entity: Entity<Self>) -> Div {
+        div()
+            .absolute()
+            .top(Self::TOP)
+            .left_0()
+            .right_0()
+            .bottom_0()
+            .overflow_hidden()
+            .child(entity)
+    }
+}
+
 // Gate arguments as well as collection: release builds construct no diagnostic JSON.
 #[cfg(target_os = "macos")]
 macro_rules! trace {
@@ -87,6 +103,8 @@ pub struct RecoveryWater {
     reduced_motion: bool,
     requested_visible: bool,
     #[cfg(target_os = "macos")]
+    bottom_radius: Pixels,
+    #[cfg(target_os = "macos")]
     state: MacState,
 }
 #[cfg(target_os = "macos")]
@@ -133,6 +151,8 @@ impl RecoveryWater {
             reduced_motion,
             requested_visible: true,
             #[cfg(target_os = "macos")]
+            bottom_radius: Pixels::ZERO,
+            #[cfg(target_os = "macos")]
             state: MacState {
                 id: cx.entity_id().as_u64(),
                 origin: Instant::now(),
@@ -151,6 +171,11 @@ impl RecoveryWater {
             },
         }
     }
+    #[cfg(target_os = "macos")]
+    pub fn with_bottom_radius(mut self, radius: Pixels) -> Self {
+        self.bottom_radius = radius;
+        self
+    }
     pub fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
         if self.requested_visible == visible {
             return;
@@ -159,6 +184,21 @@ impl RecoveryWater {
         #[cfg(target_os = "macos")]
         self.invalidate(false, cx);
         cx.notify();
+    }
+    #[cfg(target_os = "macos")]
+    pub fn unmount(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_visible(false, cx);
+        let state = &mut self.state;
+        for image in state.images.drain() {
+            trace!(
+                state.id,
+                "image_drop",
+                serde_json::json!({"image":format!("{:?}",image.id),"reason":"unmount"}),
+            );
+            if let Err(error) = window.drop_image(image) {
+                eprintln!("Recovery image release: {error:#}");
+            }
+        }
     }
     pub fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
         if self.theme == theme {
@@ -263,11 +303,19 @@ impl RecoveryWater {
             trace!(
                 self.state.id,
                 "size",
-                serde_json::json!({"width":spec.width,"height":spec.height,"dpr":spec.dpr}),
+                serde_json::json!({"x":f32::from(bounds.left()),"y":f32::from(bounds.top()),"width":spec.width,"height":spec.height,"dpr":spec.dpr,"background":format!("{:06x}",self.background_color()),"bottom_radius":f32::from(self.bottom_radius)}),
             );
         }
         let visible = in_mask && self.native_visible(window);
         self.visibility(visible, cx);
+    }
+    #[cfg(target_os = "macos")]
+    fn background_color(&self) -> u32 {
+        if self.theme.background == Theme::LIGHT.background {
+            0xfafcff
+        } else {
+            self.theme.background
+        }
     }
     #[cfg(target_os = "macos")]
     fn schedule(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -385,13 +433,18 @@ impl Render for RecoveryWater {
             }
             let pre = cx.weak_entity();
             let paint = pre.clone();
-            div().size_full().relative().bg(rgb(self.theme.background)).child(canvas(
+            let corners = Corners {
+                bottom_left: self.bottom_radius,
+                bottom_right: self.bottom_radius,
+                ..Corners::default()
+            };
+            div().size_full().relative().rounded_b(self.bottom_radius).bg(rgb(self.background_color())).child(canvas(
                 move |bounds,window,cx| { let _ = pre.update(cx,|this,cx| this.layout(bounds,window,cx)); },
                 move |bounds,_,window,cx| { let _ = paint.update(cx,|this,cx| {
                     if this.state.effective_visible {
                         let paint_started = Instant::now();
                         for image in [this.state.images.background.clone(),this.state.images.dynamic.clone(),this.state.images.edges.clone()].into_iter().flatten() {
-                            if let Err(error) = window.paint_image(bounds,Corners::default(),image,0,false) { this.fail(format!("Image upload: {error:#}")); break; }
+                            if let Err(error) = window.paint_image(bounds,corners.clone(),image,0,false) { this.fail(format!("Image upload: {error:#}")); break; }
                         }
                         trace!(this.state.id,"paint",serde_json::json!({"sequence":this.state.painted_sequence,"paint_ok":this.state.error.is_none(),"callback_ms":paint_started.elapsed().as_secs_f64()*1000.,"images":[this.state.images.background.as_ref().map(|x|format!("{:?}",x.id)),this.state.images.dynamic.as_ref().map(|x|format!("{:?}",x.id)),this.state.images.edges.as_ref().map(|x|format!("{:?}",x.id))]}));
                         this.schedule(window,cx);

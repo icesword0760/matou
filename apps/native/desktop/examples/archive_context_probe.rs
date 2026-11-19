@@ -1,7 +1,9 @@
 //! Exercise the production archive handlers with a deterministic reply order.
 
 #[cfg(target_os = "macos")]
-pub use matou_native_desktop::{assets, macos, rename_input, tab_dialog_style, workspace_drag};
+pub use matou_native_desktop::{
+    assets, macos, recovery_water_view, rename_input, tab_dialog_style, workspace_drag,
+};
 
 #[cfg(target_os = "macos")]
 #[path = "../src/terminal_input.rs"]
