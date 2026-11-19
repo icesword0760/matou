@@ -421,14 +421,7 @@ pub fn create_fork_child(
                 "当前仅支持在当前工作树创建分支",
             ));
         }
-        if *placement == ForkPlacement::Peer {
-            return Err(fork_error(
-                "FORK_PLACEMENT_NOT_IMPLEMENTED",
-                "当前仅支持创建子分支",
-            ));
-        }
-        if *placement == ForkPlacement::Child
-            && let Some(accepted) = tx.query_row(
+        if let Some(accepted) = tx.query_row(
                 "SELECT session_id, stage, error_message FROM session_fork_intents WHERE submission_key = ?",
                 [submission_key],
                 |row| Ok(json!({
@@ -466,22 +459,42 @@ pub fn create_fork_child(
         let (Some(source_node), None) = (source_node, source_window) else {
             return Err(fork_error("DETACHED_SOURCE", "请先把会话返回当前画布"));
         };
-        let parent: Option<String> = tx
+        let parent: Option<(String, bool)> = tx
             .query_row(
-                "SELECT to_session_id FROM session_relations_current
-             WHERE from_session_id = ? AND relation_kind IN ('derived-from', 'forked-from')",
+                "SELECT relation.to_session_id, parent.id IS NOT NULL
+                 FROM session_relations_current AS relation
+                 LEFT JOIN sessions AS parent ON parent.id = relation.to_session_id
+                 WHERE relation.from_session_id = ? AND relation.relation_kind IN ('derived-from', 'forked-from')",
                 [source_session_id],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
-        if *placement == ForkPlacement::Sibling {
-            return Err(if parent.is_none() {
-                fork_error("ROOT_HAS_NO_FORK_PARENT", "根层会话可创建子分支")
-            } else {
-                fork_error("FORK_PLACEMENT_NOT_IMPLEMENTED", "当前仅支持创建子分支")
-            });
-        }
+        let parent_id = parent.as_ref().map(|(id, _)| id.as_str());
         let not_ready = || fork_error("FORK_SOURCE_NOT_READY", "完成首轮 AI 对话后可创建分支");
+        let (fork_source_id, execution_context, kind, cwd) = if *placement == ForkPlacement::Sibling
+        {
+            let parent_id = parent_id
+                .ok_or_else(|| fork_error("ROOT_HAS_NO_FORK_PARENT", "根层会话可创建子分支"))?;
+            let (execution_context, kind, cwd) = tx
+                .query_row(
+                    "SELECT execution_context_id, kind, cwd FROM sessions
+                     WHERE id = ? AND archived_at IS NULL",
+                    [parent_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()?
+                .ok_or_else(not_ready)?;
+            (parent_id, execution_context, kind, cwd)
+        } else {
+            (source_session_id.as_str(), execution_context, kind, cwd)
+        };
+        let structural_parent = match placement {
+            ForkPlacement::Child | ForkPlacement::Sibling => Some((fork_source_id, "forked-from")),
+            ForkPlacement::Peer => parent
+                .as_ref()
+                .filter(|(_, exists)| *exists)
+                .map(|(id, _)| (id.as_str(), "derived-from")),
+        };
         if kind != "claude-code" {
             return Err(not_ready());
         }
@@ -491,7 +504,7 @@ pub fn create_fork_child(
              WHERE session_id = ? AND provider = ? AND resume_state IN ('available', 'resumed')
                AND validated_at IS NOT NULL AND invalidated_at IS NULL
              ORDER BY updated_at DESC, id DESC LIMIT 1",
-                params![source_session_id, kind],
+                params![fork_source_id, kind],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()?
@@ -500,11 +513,12 @@ pub fn create_fork_child(
         if provider_id.trim().is_empty()
             || restore_state != "none"
             || !crate::session_graph::binding_can_fork(&binding)
-            || !project_scene_graph(tx, scene_id, Some(window_id))?["nodes"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .any(|node| node["sessionId"] == *source_session_id && node["canFork"] == true)
+            || (*placement != ForkPlacement::Sibling
+                && !project_scene_graph(tx, scene_id, Some(window_id))?["nodes"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|node| node["sessionId"] == fork_source_id && node["canFork"] == true))
         {
             return Err(not_ready());
         }
@@ -515,6 +529,13 @@ pub fn create_fork_child(
         if name.chars().count() > 64 {
             return Err(fork_error("TOO_LONG_NAME", "分支名称最多 64 个字符"));
         }
+        let structural_parent_id = structural_parent.map(|(id, _)| id);
+        // Child already checks names in the selected card's level as well.
+        let selected_level_parent = if *placement == ForkPlacement::Child {
+            parent_id
+        } else {
+            structural_parent_id
+        };
         if tx.prepare(
             "SELECT 1 FROM sessions AS session
              JOIN session_canvas_memberships AS membership ON membership.session_id = session.id
@@ -522,7 +543,7 @@ pub fn create_fork_child(
                ON relation.from_session_id = session.id AND relation.relation_kind IN ('derived-from', 'forked-from')
              WHERE membership.scene_id = ? AND session.archived_at IS NULL AND session.title = ?
                AND (relation.to_session_id IS ? OR relation.to_session_id = ?)",
-        )?.exists(params![scene_id, name, parent, source_session_id])? {
+        )?.exists(params![scene_id, name, selected_level_parent, structural_parent_id])? {
             return Err(fork_error("DUPLICATE_NAME", format!("同一层已存在“{name}”")));
         }
         let permission = match binding["permissionMode"].as_str() {
@@ -557,7 +578,7 @@ pub fn create_fork_child(
              ) VALUES (?, ?, ?, ?, 'pending', 'queued', ?, 'current', ?, ?, ?, 2, ?, ?)",
             params![
                 ids.session_id,
-                source_session_id,
+                fork_source_id,
                 kind,
                 provider_id,
                 name,
@@ -579,14 +600,16 @@ pub fn create_fork_child(
         activate_session_in_transaction(tx, window_id, &ids.session_id, now)?;
         let created = read_created_path(tx, &ids.session_id)?;
         context.emit_session_creation(events, &created, read_membership(tx, &ids.session_id)?);
-        context.create_relation(
-            tx,
-            events,
-            &ids.relation_id,
-            source_session_id,
-            "forked-from",
-            json!({"worktreeMode": "current"}),
-        )?;
+        if let Some((parent_id, relation_kind)) = structural_parent {
+            context.create_relation(
+                tx,
+                events,
+                &ids.relation_id,
+                parent_id,
+                relation_kind,
+                json!({"worktreeMode": "current"}),
+            )?;
+        }
         let result = json!({"sessionId": ids.session_id, "stage": "queued", "error": null, "replayed": false});
         events.push(context.event(
             "fork-created",
@@ -594,7 +617,7 @@ pub fn create_fork_child(
             "scene",
             scene_id,
             Some(&ids.session_id),
-            json!({"sourceSessionId": source_session_id, "fork": result}),
+            json!({"sourceSessionId": fork_source_id, "fork": result}),
         ));
         Ok(result)
     })?;
