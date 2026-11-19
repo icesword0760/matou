@@ -231,6 +231,7 @@ pub struct Session {
     read_control: Arc<ReadControl>,
     pauses: PauseReasons,
     child_exit: Option<ProcessExit>,
+    child_exit_observed_at: Option<Instant>,
     reader_finished: bool,
     decoder: Utf8Decoder,
     batcher: OutputBatcher,
@@ -296,6 +297,7 @@ impl Session {
             read_control,
             pauses: PauseReasons::default(),
             child_exit: None,
+            child_exit_observed_at: None,
             reader_finished: false,
             decoder: Utf8Decoder::new(),
             batcher,
@@ -327,7 +329,7 @@ impl Session {
         Ok(std::mem::take(&mut self.events))
     }
 
-    pub fn write(&mut self, bytes: &[u8]) -> Result<()> {
+    pub(crate) fn ensure_writable(&self) -> Result<()> {
         ensure!(
             !self.disposed && !self.closed && self.child_exit.is_none(),
             "Shell session is closed"
@@ -337,6 +339,14 @@ impl Session {
             "session storage is paused"
         );
         ensure!(!self.pauses.egress, "session output is frozen");
+        self.process
+            .as_ref()
+            .context("Shell process not available")?;
+        Ok(())
+    }
+
+    pub fn write(&mut self, bytes: &[u8]) -> Result<()> {
+        self.ensure_writable()?;
         let process = self
             .process
             .as_mut()
@@ -605,6 +615,19 @@ impl Session {
     pub fn is_closed(&self) -> bool {
         self.closed
     }
+
+    pub(crate) fn check_process(&mut self) -> Result<()> {
+        self.observe_exit()?;
+        if let Some(exit) = self.child_exit {
+            anyhow::bail!("process exited with code {}", exit.exit_code);
+        }
+        ensure!(
+            !self.closed && self.process.is_some(),
+            "PTY process is unavailable"
+        );
+        Ok(())
+    }
+
     pub fn durability_state(&self) -> State {
         self.gate.state()
     }
@@ -792,6 +815,9 @@ impl Session {
                 self.events
                     .push(diagnostic(format!("poll Shell process: {error:#}")));
             })?;
+            if self.child_exit.is_some() {
+                self.child_exit_observed_at = Some(Instant::now());
+            }
         }
         Ok(())
     }
@@ -967,6 +993,7 @@ impl Session {
                 sequence,
                 status,
                 disposed,
+                observed_at: self.child_exit_observed_at.expect("observed process exit"),
             });
             self.delivery
                 .publish_exit(&mut self.events, sequence, status);

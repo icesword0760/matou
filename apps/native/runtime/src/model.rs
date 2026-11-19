@@ -75,6 +75,7 @@ pub enum SessionEvent {
         status: ProcessExit,
         /// A disposal was requested before normal exit cleanup.
         disposed: bool,
+        observed_at: Instant,
     },
     Exited {
         sequence: u64,

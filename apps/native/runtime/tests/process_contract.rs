@@ -207,6 +207,14 @@ impl RuntimeChild {
         })
     }
 
+    fn input_bytes(&mut self, bytes: &[u8]) -> Result<()> {
+        self.send(Command::Input {
+            session_id: self.session.clone(),
+            bytes: bytes.to_vec(),
+            defer_ordering: false,
+        })
+    }
+
     fn frame(&mut self, mut accept: impl FnMut(&[String], &Screen, u64) -> bool) -> Result<u64> {
         let deadline = Instant::now() + TIMEOUT;
         let mut last = Vec::new();
@@ -1219,6 +1227,1243 @@ fn parked_startup_card_reads_its_binding_until_explicit_recovery() -> Result<()>
 }
 
 #[test]
+fn shell_promotion_keeps_the_card_and_launches_fresh_with_saved_assignments() -> Result<()> {
+    use matou_native_core::sessions::{claude_binding, list_runs};
+    use matou_native_runtime::host::{ForkPlacement, ForkWorktreeMode};
+    use serde_json::{Value, json};
+
+    for (mode, expected_title) in [("default", "Claude"), ("bypassPermissions", "My workspace")] {
+        let root = tempfile::tempdir()?;
+        let stub = root.path().join("promotion-cli");
+        fs::write(
+            &stub,
+            r#"#!/bin/sh
+case "$*" in
+  *--fork-session*)
+    printf '%s\n' "$@" > "$0.fork"
+    printf 'PROMOTED_FORK_READY\n'
+    exec /bin/sleep 60
+    ;;
+esac
+printf '%s\n' "$@" > "$0.argv"
+printf '%s\n' "$ANTHROPIC_BASE_URL" "$ANTHROPIC_DEFAULT_OPUS_MODEL" > "$0.env"
+printf 'PROMOTED_CLAUDE_READY\n'
+IFS= read -r line
+printf 'CLI_INPUT=%s\n' "$line"
+exec /bin/sleep 60
+"#,
+        )?;
+        fs::set_permissions(&stub, fs::Permissions::from_mode(0o700))?;
+        let mut child = RuntimeChild::spawn_configured(
+            root.path(),
+            &format!(
+                "PROMPT='{PROMPT} '\nclaude() {{ printf 'wrong' > \"$HOME/ran-in-shell\"; }}\n"
+            ),
+            Path::new("/bin/zsh"),
+            Some(&stub),
+        )?;
+        child.hello()?;
+        let shell_pid = child.shell_pid()?;
+        let session = child.session.clone();
+        let db = Connection::open(child.data.join("matou.sqlite"))?;
+        db.busy_timeout(TIMEOUT)?;
+        let mount: String = db.query_row(
+            "SELECT id FROM session_mounts WHERE session_id=?",
+            [&session],
+            |row| row.get(0),
+        )?;
+        if mode == "bypassPermissions" {
+            db.execute(
+                "UPDATE sessions SET title=?, title_source='manual' WHERE id=?",
+                [expected_title, &session],
+            )?;
+        } else {
+            db.execute(
+                "INSERT INTO provider_bindings (id, session_id, provider, provider_session_id, resume_state,
+                     metadata_json, created_at, updated_at, validated_at)
+                 VALUES ('stale', ?, 'claude-code', 'old-conversation', 'available',
+                         '{\"model\":\"old-model\",\"permissionMode\":\"plan\",\"canFork\":true,
+                           \"observedUserPrompt\":true,\"observedNormalStop\":true}', 1, 1, 1)",
+                [&session],
+            )?;
+        }
+        fs::write(
+            child.data.join("provider-config.json"),
+            json!({
+                "version": 1,
+                "activeProviderIds": {"claude-code": "anthropic-official"},
+                "providers": {"claude-code": [{
+                    "id": "anthropic-official", "model": "", "builtIn": true,
+                    "endpoint": "https://api.anthropic.com"
+                }, {
+                    "id": "assigned-provider", "model": "provider-default",
+                    "apiKey": "fixture-key", "endpoint": "https://assigned.example.invalid/",
+                    "modelMetadata": [{"id": "assigned-model", "supportedEfforts": ["high"]}]
+                }]}
+            })
+            .to_string(),
+        )?;
+        child.send(Command::SetClaudeRoleAssignments {
+            request_id: 1,
+            assignments: json!({"opus": {
+                "providerId": "assigned-provider", "model": "assigned-model", "effort": "high"
+            }}),
+        })?;
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            if let Event::Graph(graph) = child.event(deadline, true)?
+                && let Some(reply) = graph.get("claudeRoleAssignmentsResult")
+            {
+                assert_eq!(
+                    reply["assignments"]["opus"]["model"], "assigned-model",
+                    "{reply}"
+                );
+                break;
+            }
+        }
+        let command = if mode == "default" {
+            &b"de  \rcombined-"[..]
+        } else {
+            &b"de --dangerously-skip-permissions\ncombined-"[..]
+        };
+        for keys in [&b"  clau"[..], command, b"queued\r"] {
+            child.send(Command::Input {
+                session_id: session.clone(),
+                bytes: keys.to_vec(),
+                defer_ordering: true,
+            })?;
+        }
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            match child.event(deadline, true)? {
+                Event::Graph(graph) if graph["nodes"][0]["currentMode"] == "claude-code" => {
+                    let nodes = graph["nodes"].as_array().unwrap();
+                    assert_eq!(nodes.len(), 1);
+                    assert_eq!(nodes[0]["sessionId"], session);
+                    assert_eq!(nodes[0]["title"], expected_title);
+                    assert_eq!(nodes[0]["workStatus"], "starting");
+                    assert_eq!(nodes[0]["canFork"], false);
+                    assert_eq!(graph["focusedSessionId"], session);
+                    break;
+                }
+                Event::Diagnostic(error) => bail!("{error}"),
+                _ => {}
+            }
+        }
+        child.frame(|rows, _, _| rows.iter().any(|row| row == "CLI_INPUT=queued"))?;
+        assert_shell_gone(shell_pid)?;
+        assert!(!root.path().join("Shell 家目录/ran-in-shell").exists());
+        let runs = list_runs(&db, &session)?;
+        assert_eq!(runs.len(), 2);
+        assert_eq!((&*runs[0].profile, &*runs[0].status), ("shell", "exited"));
+        assert_eq!(
+            (&*runs[1].profile, &*runs[1].status),
+            ("claude-code", "running")
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT id FROM session_mounts WHERE session_id=?",
+                [&session],
+                |row| row.get::<_, String>(0)
+            )?,
+            mount
+        );
+        if mode == "default" {
+            let binding = claude_binding(&db, &session)?.context("retained old binding")?;
+            assert_eq!(binding.provider_session_id, "old-conversation");
+            assert!(!binding.resumable);
+            assert_eq!(binding.restore_state, "none");
+            for key in ["canFork", "observedUserPrompt", "observedNormalStop"] {
+                assert_eq!(binding.metadata[key], false, "{key}");
+            }
+            assert_eq!(binding.metadata["model"], "old-model");
+            assert_eq!(
+                db.query_row(
+                    "SELECT resume_state = 'expired' AND invalidated_at > 1
+                 FROM provider_bindings WHERE id = 'stale'",
+                    [],
+                    |row| row.get::<_, bool>(0),
+                )?,
+                true
+            );
+        }
+        let argv = fs::read_to_string(stub.with_extension("argv"))?;
+        let argv: Vec<_> = argv.lines().collect();
+        assert!(
+            argv.windows(2)
+                .any(|args| args == ["--model", "assigned-model"])
+        );
+        assert!(argv.windows(2).any(|args| args == ["--effort", "high"]));
+        for flag in ["--resume", "--fork-session", "--permission-mode"] {
+            assert!(!argv.contains(&flag), "{argv:?}");
+        }
+        assert_eq!(
+            argv.contains(&"--dangerously-skip-permissions"),
+            mode == "bypassPermissions"
+        );
+        assert_eq!(
+            fs::read_to_string(stub.with_extension("env"))?,
+            "https://assigned.example.invalid\nassigned-model\n"
+        );
+        let settings_path = Path::new(
+            argv.windows(2)
+                .find(|args| args[0] == "--settings")
+                .context("settings argv")?[1],
+        );
+        let settings: Value = serde_json::from_slice(&fs::read(settings_path)?)?;
+        assert_eq!(
+            settings["hooks"]["SessionStart"][0]["hooks"][0]["type"],
+            "http"
+        );
+        let provider_id = "promoted-conversation";
+        post_claude_identity(settings_path, provider_id, mode, "assigned-model")?;
+        wait_permission_identity(&mut child)?;
+        let binding = claude_binding(&db, &session)?.context("promoted Claude binding")?;
+        assert_eq!(binding.provider_session_id, provider_id);
+        assert_eq!(binding.metadata["permissionMode"], mode);
+        assert_eq!(binding.metadata["assignedRole"], "opus");
+        if mode == "default" {
+            for event in ["UserPromptSubmit", "Stop"] {
+                let status = post_claude_hook(
+                    settings_path,
+                    json!({
+                        "hook_event_name": event, "session_id": provider_id
+                    }),
+                )?;
+                assert_eq!(status, 200);
+            }
+            let deadline = Instant::now() + TIMEOUT;
+            loop {
+                if let Event::Graph(graph) = child.event(deadline, true)?
+                    && graph["nodes"][0]["canFork"] == true
+                {
+                    break;
+                }
+            }
+            child.send(Command::ForkSession {
+                scene_id: child.scene.clone(),
+                source_session_id: session.clone(),
+                placement: ForkPlacement::Child,
+                name: "Fork the promoted conversation".into(),
+                worktree_mode: ForkWorktreeMode::Current,
+                submission_key: "fork-promoted".into(),
+            })?;
+            let deadline = Instant::now() + TIMEOUT;
+            loop {
+                match child.event(deadline, true)? {
+                    Event::Frame { screen, .. }
+                        if screen_has_line(&screen, "PROMOTED_FORK_READY") =>
+                    {
+                        break;
+                    }
+                    Event::Graph(graph) if graph["forkSessionResult"].get("error").is_some() => {
+                        bail!("fork failed: {}", graph["forkSessionResult"]);
+                    }
+                    Event::Diagnostic(error) => bail!("{error}"),
+                    _ => {}
+                }
+            }
+            let fork = fs::read_to_string(stub.with_extension("fork"))?;
+            assert!(
+                fork.lines()
+                    .collect::<Vec<_>>()
+                    .windows(3)
+                    .any(|args| args == ["--resume", provider_id, "--fork-session"]),
+                "{fork}"
+            );
+            assert!(!fork.contains("old-conversation"), "{fork}");
+        }
+        child.send(Command::Shutdown)?;
+        assert!(child.closed()?.is_empty());
+        let (status, stderr) = child.wait()?;
+        ensure!(status.success(), "runtime shutdown: {stderr}");
+    }
+    Ok(())
+}
+
+#[test]
+fn shell_promotion_uses_the_last_submission_and_forwards_a_miss_verbatim() -> Result<()> {
+    use matou_native_core::journal::for_each_frame;
+    use matou_native_core::sessions::{get_session, list_runs};
+
+    for (label, writes, copy_interrupt, promotes, shell_claude, shell_ls) in [
+        (
+            "paste",
+            vec![&b"claude\r"[..]],
+            false,
+            true,
+            Some(false),
+            false,
+        ),
+        (
+            "crlf",
+            vec![&b"claude\r\n"[..]],
+            false,
+            false,
+            Some(true),
+            false,
+        ),
+        (
+            "multi",
+            vec![&b"claude\rls\r"[..]],
+            false,
+            false,
+            Some(true),
+            true,
+        ),
+        (
+            "prefix-and-tail",
+            vec![&b"touch x\rclaude\rSHOULD_NOT_REACH_OLD_SHELL"[..]],
+            false,
+            true,
+            Some(false),
+            false,
+        ),
+        (
+            "del-bs",
+            vec![&b"claudexy"[..], b"\x7f\x08\r"],
+            false,
+            true,
+            Some(false),
+            false,
+        ),
+        (
+            "emoji-once",
+            vec!["claude😀\x7f\r".as_bytes()],
+            false,
+            false,
+            None, // Whether zsh deletes the whole emoji depends on its locale.
+            false,
+        ),
+        (
+            "emoji-twice",
+            vec!["claude😀".as_bytes(), b"\x7f\x08\r"],
+            false,
+            true,
+            Some(false),
+            false,
+        ),
+        (
+            "ctrl-c",
+            vec![&b"claude"[..], b"\x03", b"\r"],
+            false,
+            false,
+            Some(false),
+            false,
+        ),
+        (
+            "ctrl-u",
+            vec![&b"claude"[..], b"\x15", b"\r"],
+            false,
+            false,
+            Some(false),
+            false,
+        ),
+        (
+            "copy-interrupt",
+            vec![&b"claude"[..]],
+            true,
+            false,
+            Some(false),
+            false,
+        ),
+    ] {
+        let root = tempfile::tempdir()?;
+        let stub = root.path().join("promotion-cli");
+        fs::write(
+            &stub,
+            "#!/bin/sh\nprintf 'INPUT_CONTRACT_CLI\n'\nexec /bin/sleep 60\n",
+        )?;
+        fs::set_permissions(&stub, fs::Permissions::from_mode(0o700))?;
+        let mut child = RuntimeChild::spawn_configured(
+            root.path(),
+            &format!(
+                r#"PROMPT='{PROMPT} '
+bindkey -e
+bindkey '^?' backward-delete-char
+bindkey '^H' backward-delete-char
+claude() {{ touch "$HOME/shell-claude"; }}
+ls() {{ touch "$HOME/shell-ls"; }}
+"#
+            ),
+            Path::new("/bin/zsh"),
+            Some(&stub),
+        )?;
+        child.hello()?;
+        for bytes in writes {
+            child.input_bytes(bytes)?;
+        }
+        if copy_interrupt {
+            child.send(Command::CopySelection {
+                session_id: child.session.clone(),
+                request_id: 23,
+                interrupt_if_empty: true,
+            })?;
+            // Send Return without waiting for the copy acknowledgement.
+            child.input_bytes(b"\r")?;
+        }
+        if promotes {
+            child
+                .frame(|_, screen, _| screen_has_line(screen, "INPUT_CONTRACT_CLI"))
+                .with_context(|| label.to_owned())?;
+        } else {
+            child.input("printf 'AFTER_SHELL_INPUT\n'")?;
+            child
+                .frame(|_, screen, _| screen_has_line(screen, "AFTER_SHELL_INPUT"))
+                .with_context(|| label.to_owned())?;
+        }
+        let db = Connection::open(child.data.join("matou.sqlite"))?;
+        let session = get_session(&db, &child.session)?.context("input contract card")?;
+        assert_eq!(
+            session.kind,
+            if promotes { "claude-code" } else { "shell" },
+            "{label}"
+        );
+        assert_eq!(
+            list_runs(&db, &child.session)?.len(),
+            if promotes { 2 } else { 1 },
+            "{label}"
+        );
+        let home = root.path().join("Shell 家目录");
+        if let Some(shell_claude) = shell_claude {
+            assert_eq!(home.join("shell-claude").exists(), shell_claude, "{label}");
+        }
+        assert_eq!(home.join("shell-ls").exists(), shell_ls, "{label}");
+        assert!(!child.workspace.join("x").exists(), "{label}");
+        child.send(Command::Shutdown)?;
+        assert!(child.closed()?.is_empty(), "{label}");
+        let (status, stderr) = child.wait()?;
+        ensure!(status.success(), "{label}: {stderr}");
+        if label == "prefix-and-tail" {
+            let mut output = Vec::new();
+            for_each_frame(&child.data, &child.session, 1, None, |record| {
+                output.extend_from_slice(record.frame.output());
+                Ok(())
+            })?;
+            assert!(!String::from_utf8_lossy(&output).contains("SHOULD_NOT_REACH_OLD_SHELL"));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn shell_promotion_keeps_a_verified_cli_on_shutdown_and_reopens_without_resume() -> Result<()> {
+    use matou_native_core::sessions::{claude_binding, get_session, list_runs};
+
+    let root = tempfile::tempdir()?;
+    let stub = root.path().join("promotion-cli");
+    fs::write(
+        &stub,
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$0.argv\"\nprintf 'ATTACHED_CLAUDE\\n'\nIFS= read -r line\nprintf 'VERIFIED_CLAUDE_%s\\n' \"$line\"\nexec /bin/sleep 60\n",
+    )?;
+    fs::set_permissions(&stub, fs::Permissions::from_mode(0o700))?;
+    let zshrc = format!("PROMPT='{PROMPT} '\n");
+    let mut child =
+        RuntimeChild::spawn_configured(root.path(), &zshrc, Path::new("/bin/zsh"), Some(&stub))?;
+    child.hello()?;
+    let session = child.session.clone();
+    let db = Connection::open(child.data.join("matou.sqlite"))?;
+    db.busy_timeout(TIMEOUT)?;
+    db.execute(
+        "INSERT INTO provider_bindings (id, session_id, provider, provider_session_id, resume_state,
+             metadata_json, created_at, updated_at, validated_at)
+         VALUES ('old-binding', ?, 'claude-code', 'should-never-resume', 'available',
+                 '{\"canFork\":true}', 1, 1, 1)",
+        [&session],
+    )?;
+    child.input_bytes(b"claude\r")?;
+    child.frame(|_, screen, _| screen_has_line(screen, "ATTACHED_CLAUDE"))?;
+    child.input("PROBE")?;
+    child.frame(|_, screen, _| screen_has_line(screen, "VERIFIED_CLAUDE_PROBE"))?;
+    child.send(Command::Shutdown)?;
+    assert!(child.closed()?.is_empty());
+    let (status, stderr) = child.wait()?;
+    ensure!(status.success(), "shutdown after attachment: {stderr}");
+    assert_eq!(
+        get_session(&db, &session)?.context("attached card")?.kind,
+        "claude-code"
+    );
+    assert!(
+        !claude_binding(&db, &session)?
+            .context("old binding retained")?
+            .resumable
+    );
+    assert_eq!(list_runs(&db, &session)?.len(), 2);
+
+    let mut reopened =
+        RuntimeChild::spawn_configured(root.path(), &zshrc, Path::new("/bin/zsh"), Some(&stub))?;
+    reopened.connect()?;
+    assert_eq!(reopened.session, session);
+    // A card without a resumable binding may be parked on startup.
+    reopened.send(Command::RetryRecovery {
+        session_id: session.clone(),
+    })?;
+    reopened.frame(|_, screen, _| screen_has_line(screen, "ATTACHED_CLAUDE"))?;
+    assert_eq!(list_runs(&db, &session)?.len(), 3);
+    let argv = fs::read_to_string(stub.with_extension("argv"))?;
+    assert_eq!(argv.lines().filter(|line| *line == "--settings").count(), 2);
+    assert!(!argv.contains("--resume"), "{argv}");
+    assert!(!argv.contains("should-never-resume"), "{argv}");
+    reopened.send(Command::Shutdown)?;
+    assert!(reopened.closed()?.is_empty());
+    let (status, stderr) = reopened.wait()?;
+    ensure!(status.success(), "reopened runtime: {stderr}");
+    Ok(())
+}
+
+#[test]
+#[cfg(debug_assertions)]
+fn verified_promotion_keeps_the_card_and_resumes_a_hook_received_during_shutdown() -> Result<()> {
+    use matou_native_core::sessions::{claude_binding, get_session, list_runs};
+
+    let root = tempfile::tempdir()?;
+    let stub = root.path().join("promotion-cli");
+    fs::write(
+        &stub,
+        r#"#!/bin/sh
+printf '%s' "$2" > "$0.settings"
+printf '%s\n' "$@" > "$0.argv"
+case " $* " in
+    *" --resume shutdown-conversation "*)
+        printf 'RESUMED_AFTER_SHUTDOWN\n'
+        exec /bin/sleep 60
+        ;;
+esac
+trap '
+    : > "$0.stopping"
+    until [ -f "$0.release" ]; do /bin/sleep 0.01; done
+    exit 0
+' HUP
+printf 'PROMOTION_CHECK_PENDING\n'
+while :; do /bin/sleep 0.01; done
+"#,
+    )?;
+    fs::set_permissions(&stub, fs::Permissions::from_mode(0o700))?;
+    let verified = root.path().join("promotion-verified");
+    let zshrc = format!("PROMPT='{PROMPT} '\n");
+    let mut child = RuntimeChild::spawn_configured_with(
+        root.path(),
+        &zshrc,
+        Path::new("/bin/zsh"),
+        Some(&stub),
+        |command| {
+            command.env("MATOU_TEST_HOLD_VERIFIED_PROMOTION", &verified);
+        },
+    )?;
+    child.hello()?;
+    child.input("claude")?;
+    child.frame(|_, screen, _| screen_has_line(screen, "PROMOTION_CHECK_PENDING"))?;
+    let wait_for_marker = |path: &Path| -> Result<()> {
+        let deadline = Instant::now() + TIMEOUT;
+        while !path.is_file() {
+            ensure!(Instant::now() < deadline, "waiting for {}", path.display());
+            thread::sleep(Duration::from_millis(5));
+        }
+        Ok(())
+    };
+    wait_for_marker(&verified)?;
+    let session = child.session.clone();
+    let db = Connection::open(child.data.join("matou.sqlite"))?;
+    let runs = list_runs(&db, &session)?;
+    assert_eq!(runs.len(), 2);
+    assert_eq!(fs::read_to_string(&verified)?, runs[1].id);
+    assert!(claude_binding(&db, &session)?.is_none());
+
+    let settings = PathBuf::from(fs::read_to_string(stub.with_extension("settings"))?);
+    child.send(Command::Shutdown)?;
+    // The child receives SIGHUP only after the owner has entered shutdown.
+    wait_for_marker(&stub.with_extension("stopping"))?;
+    let posted = post_claude_identity(&settings, "shutdown-conversation", "default", "fixture");
+    fs::write(stub.with_extension("release"), "")?;
+    posted?;
+    assert!(child.closed()?.is_empty());
+    let (status, stderr) = child.wait()?;
+    ensure!(status.success(), "shutdown before Ready: {stderr}");
+    let card = get_session(&db, &session)?.context("verified card")?;
+    assert_eq!(card.kind, "claude-code");
+    let work_status: String = db.query_row(
+        "SELECT work_status FROM sessions WHERE id=?",
+        [&session],
+        |row| row.get(0),
+    )?;
+    assert_ne!(work_status, "interrupted");
+    let binding = claude_binding(&db, &session)?.context("binding from shutdown hook")?;
+    assert_eq!(binding.provider_session_id, "shutdown-conversation");
+    assert!(binding.resumable);
+
+    let mut reopened =
+        RuntimeChild::spawn_configured(root.path(), &zshrc, Path::new("/bin/zsh"), Some(&stub))?;
+    reopened.connect()?;
+    assert_eq!(reopened.session, session);
+    reopened.frame(|_, screen, _| screen_has_line(screen, "RESUMED_AFTER_SHUTDOWN"))?;
+    let argv = fs::read_to_string(stub.with_extension("argv"))?;
+    assert!(
+        argv.lines()
+            .collect::<Vec<_>>()
+            .windows(2)
+            .any(|args| args == ["--resume", "shutdown-conversation"]),
+        "{argv}"
+    );
+    assert_eq!(list_runs(&db, &session)?.len(), 3);
+    reopened.send(Command::Shutdown)?;
+    assert!(reopened.closed()?.is_empty());
+    let (status, stderr) = reopened.wait()?;
+    ensure!(status.success(), "reopened runtime: {stderr}");
+    Ok(())
+}
+
+#[test]
+fn shell_promotion_shutdown_before_process_check_reopens_as_shell() -> Result<()> {
+    use matou_native_core::sessions::{get_session, list_runs};
+
+    for stage in ["stopping", "preparing", "starting"] {
+        let root = tempfile::tempdir()?;
+        let stub = root.path().join("promotion-cli");
+        fs::write(&stub, "#!/bin/sh\n: > \"$0.started\"\nexec /bin/sleep 60\n")?;
+        fs::set_permissions(&stub, fs::Permissions::from_mode(0o700))?;
+        let zshrc = if stage == "stopping" {
+            format!(
+                r#"PROMPT='{PROMPT} '
+TRAPHUP() {{
+    /bin/stty -isig -icanon -echo
+    : > "$HOME/stopping"
+    until [[ -f "$HOME/release" ]]; do
+        if read -r -k 1 -t 0.02 key; then
+            printf '%s' "$key" >> "$HOME/stopping-input"
+        fi
+    done
+    exit 0
+}}
+"#
+            )
+        } else {
+            format!("PROMPT='{PROMPT} '\n")
+        };
+        let mut child = RuntimeChild::spawn_configured(
+            root.path(),
+            &zshrc,
+            Path::new("/bin/zsh"),
+            Some(&stub),
+        )?;
+        child.hello()?;
+        let db = Connection::open(child.data.join("matou.sqlite"))?;
+        db.busy_timeout(TIMEOUT)?;
+        db.execute(
+            "UPDATE sessions SET title='Shell', title_source='manual' WHERE id=?",
+            [&child.session],
+        )?;
+        let provider_config = child.data.join("provider-config.json");
+        if stage == "preparing" {
+            // Hold the background provider preparation in its config read.
+            ensure!(
+                ProcessCommand::new("/usr/bin/mkfifo")
+                    .arg(&provider_config)
+                    .status()?
+                    .success()
+            );
+        }
+        child.input("claude")?;
+        let home = root.path().join("Shell 家目录");
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            let stored = get_session(&db, &child.session)?.context("promotion card")?;
+            let reached = match stage {
+                "stopping" => home.join("stopping").exists() && stored.kind == "shell",
+                "preparing" => stored.kind == "claude-code" && stored.title == "Claude",
+                "starting" => {
+                    stub.with_extension("started").exists() && stored.kind == "claude-code"
+                }
+                _ => unreachable!(),
+            };
+            if reached {
+                break;
+            }
+            ensure!(
+                Instant::now() < deadline,
+                "did not reach promotion phase {stage}"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            list_runs(&db, &child.session)?.len(),
+            if stage == "starting" { 2 } else { 1 }
+        );
+        if stage != "starting" {
+            let request_id = 32;
+            child.send(Command::Select {
+                session_id: child.session.clone(),
+                action: matou_native_terminal::SelectionAction::Clear,
+            })?;
+            child.send(Command::Scroll {
+                session_id: child.session.clone(),
+                lines: 1,
+            })?;
+            child.send(Command::Search {
+                session_id: child.session.clone(),
+                request: matou_native_runtime::search::SearchRequest {
+                    sequence: 31,
+                    query: PROMPT.into(),
+                    options: Default::default(),
+                    previous: false,
+                },
+            })?;
+            child.send(Command::ClearSearch {
+                session_id: child.session.clone(),
+            })?;
+            child.send(Command::CopySelection {
+                session_id: child.session.clone(),
+                request_id,
+                interrupt_if_empty: true,
+            })?;
+            let deadline = Instant::now() + TIMEOUT;
+            loop {
+                match child.event(deadline, true)? {
+                    Event::Copied {
+                        request_id: id,
+                        text,
+                    } if id == request_id => {
+                        assert_eq!(text, "", "{stage}");
+                        break;
+                    }
+                    Event::SearchResults { sequence: 31, .. } => {
+                        bail!("search ran during {stage}")
+                    }
+                    Event::Diagnostic(error) => bail!("{stage}: {error}"),
+                    _ => {}
+                }
+            }
+        }
+        child.send(Command::Shutdown)?;
+        if stage == "stopping" {
+            thread::sleep(Duration::from_millis(75));
+            fs::write(home.join("release"), "")?;
+        }
+        assert!(child.closed()?.is_empty(), "{stage}");
+        let (status, stderr) = child.wait()?;
+        ensure!(status.success(), "{stage}: {stderr}");
+        let stored = get_session(&db, &child.session)?.context("rolled back card")?;
+        assert_eq!(
+            (stored.kind.as_str(), stored.title.as_str()),
+            ("shell", "Shell"),
+            "{stage}"
+        );
+        let work_status: String = db.query_row(
+            "SELECT work_status FROM sessions WHERE id=?",
+            [&child.session],
+            |row| row.get(0),
+        )?;
+        assert_eq!(
+            work_status,
+            if stage == "stopping" {
+                "exited"
+            } else {
+                "interrupted"
+            },
+            "{stage}"
+        );
+        if stage == "stopping" {
+            let stopping_input = home.join("stopping-input");
+            if stopping_input.exists() {
+                assert!(!fs::read(stopping_input)?.contains(&0x03));
+            }
+            let promoted: bool = db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM domain_events WHERE session_id=?
+                 AND event_type='session.updated' AND json_extract(payload_json,'$.session.kind')='claude-code')",
+                [&child.session],
+                |row| row.get(0),
+            )?;
+            assert!(
+                !promoted,
+                "Shutdown must be handled before Stopping advances"
+            );
+        }
+        if stage == "preparing" {
+            fs::remove_file(&provider_config)?;
+        }
+        let mut reopened = RuntimeChild::spawn(root.path())?;
+        reopened.connect()?;
+        assert_eq!(reopened.session, child.session);
+        if stage == "stopping" {
+            reopened.send(Command::Refresh)?;
+            let deadline = Instant::now() + TIMEOUT;
+            loop {
+                match reopened.event(deadline, true)? {
+                    Event::Graph(graph) if graph["nodes"][0]["sessionId"] == child.session => {
+                        assert_eq!(graph["nodes"][0]["workStatus"], "exited");
+                        break;
+                    }
+                    Event::Frame { .. } => bail!("the stopped Shell relaunched without a request"),
+                    Event::Diagnostic(error) => bail!("{error}"),
+                    _ => {}
+                }
+            }
+            assert_eq!(list_runs(&db, &child.session)?.len(), 1);
+            reopened.send(Command::RestartSession {
+                session_id: child.session.clone(),
+            })?;
+        }
+        reopened.frame(|_, screen, _| screen_has_line(screen, PROMPT))?;
+        reopened.input("printf 'REOPENED_SHELL_%s\\n' VERIFIED")?;
+        reopened.frame(|_, screen, _| screen_has_line(screen, "REOPENED_SHELL_VERIFIED"))?;
+        reopened.send(Command::Shutdown)?;
+        assert!(reopened.closed()?.is_empty(), "{stage}");
+        let (status, stderr) = reopened.wait()?;
+        ensure!(status.success(), "{stage}: {stderr}");
+    }
+    Ok(())
+}
+
+#[test]
+fn shell_promotion_copy_interrupts_the_attached_pty_during_startup() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let stub = root.path().join("promotion-cli");
+    fs::write(
+        &stub,
+        r#"#!/bin/sh
+/bin/stty -isig -icanon -echo
+: > "$0.raw"
+/bin/dd bs=1 count=1 of="$0.byte" 2>/dev/null
+printf 'ATTACHED_PTY_RECEIVED_CONTROL\n'
+exec /bin/sleep 60
+"#,
+    )?;
+    fs::set_permissions(&stub, fs::Permissions::from_mode(0o700))?;
+    let mut child = RuntimeChild::spawn_configured(
+        root.path(),
+        &format!("PROMPT='{PROMPT} '\n"),
+        Path::new("/bin/zsh"),
+        Some(&stub),
+    )?;
+    child.hello()?;
+    child.input("claude")?;
+    child.frame(|_, screen, _| !screen_has_line(screen, PROMPT))?;
+    let deadline = Instant::now() + TIMEOUT;
+    while !stub.with_extension("raw").exists() {
+        ensure!(
+            Instant::now() < deadline,
+            "waiting for the attached CLI's terminal mode"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+    child.send(Command::CopySelection {
+        session_id: child.session.clone(),
+        request_id: 31,
+        interrupt_if_empty: true,
+    })?;
+    let deadline = Instant::now() + TIMEOUT;
+    let (mut copied, mut control_received) = (false, false);
+    while !copied || !control_received {
+        match child.event(deadline, true)? {
+            Event::Copied {
+                request_id: 31,
+                text,
+            } => {
+                assert_eq!(text, "");
+                copied = true;
+            }
+            Event::Frame { screen, .. }
+                if screen_has_line(&screen, "ATTACHED_PTY_RECEIVED_CONTROL") =>
+            {
+                control_received = true;
+            }
+            Event::Diagnostic(error) => bail!("{error}"),
+            _ => {}
+        }
+    }
+    assert_eq!(fs::read(stub.with_extension("byte"))?, b"\x03");
+    child.send(Command::Shutdown)?;
+    assert!(child.closed()?.is_empty());
+    let (status, stderr) = child.wait()?;
+    ensure!(status.success(), "{stderr}");
+    Ok(())
+}
+
+#[test]
+fn shell_promotion_keeps_the_claude_card_when_cli_exits_after_the_startup_window() -> Result<()> {
+    use matou_native_core::journal::for_each_frame;
+    use matou_native_core::sessions::{get_session, list_runs};
+
+    let root = tempfile::tempdir()?;
+    let stub = root.path().join("promotion-cli");
+    fs::write(
+        &stub,
+        r#"#!/bin/sh
+while [ ! -e "$0.attached" ]; do /bin/sleep 0.02; done
+printf 'CLI_WINDOW_PASSED\n'
+/bin/sleep 0.2
+exit 24
+"#,
+    )?;
+    fs::set_permissions(&stub, fs::Permissions::from_mode(0o700))?;
+    let mut child = RuntimeChild::spawn_configured(
+        root.path(),
+        &format!("PROMPT='{PROMPT} '\n"),
+        Path::new("/bin/zsh"),
+        Some(&stub),
+    )?;
+    child.hello()?;
+    child.input_bytes(b"claude\r")?;
+    let db = Connection::open(child.data.join("matou.sqlite"))?;
+    // Start the fixture's 200 ms lifetime after the real PTY is attached.
+    // This keeps process spawning and database setup out of the interval.
+    child.frame(|_, screen, _| !screen_has_line(screen, PROMPT))?;
+    assert_eq!(list_runs(&db, &child.session)?.len(), 2);
+    fs::write(stub.with_extension("attached"), "")?;
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        let runs = list_runs(&db, &child.session)?;
+        if runs
+            .iter()
+            .any(|run| run.profile == "claude-code" && run.exit_code == Some(24))
+        {
+            break;
+        }
+        ensure!(
+            Instant::now() < deadline,
+            "waiting for the CLI's exit record"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+    child.send(Command::Shutdown)?;
+    assert!(child.closed()?.is_empty());
+    let (status, stderr) = child.wait()?;
+    ensure!(status.success(), "{stderr}");
+    assert_eq!(
+        get_session(&db, &child.session)?
+            .context("exited card")?
+            .kind,
+        "claude-code"
+    );
+    assert_eq!(list_runs(&db, &child.session)?.len(), 2);
+    let mut output = Vec::new();
+    for_each_frame(&child.data, &child.session, 1, None, |record| {
+        output.extend_from_slice(record.frame.output());
+        Ok(())
+    })?;
+    assert!(String::from_utf8_lossy(&output).contains("CLI_WINDOW_PASSED"));
+    Ok(())
+}
+
+#[test]
+fn shell_promotion_rolls_back_an_immediate_cli_exit_and_replays_input() -> Result<()> {
+    use matou_native_core::sessions::{get_session, list_runs};
+
+    let root = tempfile::tempdir()?;
+    let stub = root.path().join("exiting-cli");
+    fs::write(&stub, "#!/bin/sh\nexit 23\n")?;
+    fs::set_permissions(&stub, fs::Permissions::from_mode(0o700))?;
+    let mut child = RuntimeChild::spawn_configured(
+        root.path(),
+        &format!("PROMPT='{PROMPT} '\n"),
+        Path::new("/bin/zsh"),
+        Some(&stub),
+    )?;
+    child.hello()?;
+    let shell_pid = child.shell_pid()?;
+    child.input_bytes(b"claude\r\xe4\xbd")?;
+    child.input("printf '%s\\n' READY_AFTER_ROLLBACK")?;
+    let db = Connection::open(child.data.join("matou.sqlite"))?;
+    child
+        .frame(|rows, _, _| rows.iter().any(|row| row == "READY_AFTER_ROLLBACK"))
+        .with_context(|| format!("rollback runs: {:?}", list_runs(&db, &child.session)))?;
+    assert_shell_gone(shell_pid)?;
+    let session = get_session(&db, &child.session)?.context("original Shell card")?;
+    assert_eq!(
+        (&*session.kind, &*session.title, &*session.status),
+        ("shell", "Shell", "running")
+    );
+    assert_eq!(session.title_source.as_deref(), Some("default"));
+    let runs = list_runs(&db, &child.session)?;
+    assert_eq!(
+        runs.iter()
+            .map(|run| run.profile.as_str())
+            .collect::<Vec<_>>(),
+        ["shell", "claude-code", "shell"]
+    );
+    assert_eq!(runs[1].exit_code, Some(23));
+    child.input("claude")?;
+    child.input("printf '%s\\n' READY_AFTER_SECOND_ROLLBACK")?;
+    child.frame(|rows, _, _| rows.iter().any(|row| row == "READY_AFTER_SECOND_ROLLBACK"))?;
+    let runs = list_runs(&db, &child.session)?;
+    assert_eq!(
+        runs.iter()
+            .map(|run| run.profile.as_str())
+            .collect::<Vec<_>>(),
+        ["shell", "claude-code", "shell", "claude-code", "shell"]
+    );
+    assert_eq!(runs[3].exit_code, Some(23));
+    assert_eq!(
+        db.query_row("SELECT COUNT(*) FROM provider_bindings", [], |row| row
+            .get::<_, i64>(0))?,
+        0
+    );
+    child.send(Command::Shutdown)?;
+    assert!(child.closed()?.is_empty());
+    let (status, stderr) = child.wait()?;
+    ensure!(
+        status.success() && stderr.contains("process exited with code 23"),
+        "runtime shutdown: {stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn promoted_cli_replays_startup_observations_in_order_and_rejects_the_retired_run() -> Result<()> {
+    use matou_native_core::journal::{Frame, for_each_frame};
+    use matou_native_core::sessions::{claude_binding, list_runs};
+    use serde_json::{Value, json};
+
+    let root = tempfile::tempdir()?;
+    let stub = root.path().join("promotion-cli");
+    fs::write(
+        &stub,
+        r#"#!/bin/sh
+if [ ! -e "$0.first-settings" ]; then
+    printf '%s' "$2" > "$0.first-settings"
+    while [ ! -e "$0.exit-first" ]; do /bin/sleep 0.01; done
+    printf 'LATE_OUTPUT_FROM_RETIRED_RUN\n'
+    exit 27
+fi
+printf '%s' "$2" > "$0.second-settings"
+while [ ! -e "$0.release-output" ]; do /bin/sleep 0.01; done
+printf 'NEW_RUN_OUTPUT\n'
+exec /bin/sleep 60
+"#,
+    )?;
+    fs::set_permissions(&stub, fs::Permissions::from_mode(0o700))?;
+    let mut child = RuntimeChild::spawn_configured(
+        root.path(),
+        &format!("PROMPT='{PROMPT} '\n"),
+        Path::new("/bin/zsh"),
+        Some(&stub),
+    )?;
+    child.hello()?;
+    let read_settings_location = |suffix| -> Result<PathBuf> {
+        let path = stub.with_extension(suffix);
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            if let Ok(value) = fs::read_to_string(&path)
+                && Path::new(&value).is_file()
+            {
+                return Ok(value.into());
+            }
+            ensure!(Instant::now() < deadline, "waiting for {}", path.display());
+            thread::sleep(Duration::from_millis(5));
+        }
+    };
+    let db = Connection::open(child.data.join("matou.sqlite"))?;
+    child.input("claude")?;
+    let old_settings = read_settings_location("first-settings")?;
+    let old_hook = claude_hook_url(&old_settings)?;
+    post_claude_identity(&old_settings, "never-bind-old", "default", "retired-model")?;
+    fs::write(stub.with_extension("exit-first"), "")?;
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        if let Event::Frame { screen, .. } = child
+            .event(deadline, true)
+            .context("waiting for the Shell after the first CLI exits")?
+            && screen_has_line(&screen, PROMPT)
+            && list_runs(&db, &child.session)?.len() == 3
+        {
+            break;
+        }
+    }
+    child.input("claude")?;
+    let new_settings = read_settings_location("second-settings")?;
+    let retired_status = post_claude_hook_url(
+        &old_hook,
+        json!({
+            "hook_event_name": "Notification", "session_id": "never-bind-old", "message": "Retired notice"
+        }),
+    )?;
+    // During the grace period the server acknowledges retired requests and
+    // reports the rejection. After that, the old URL is removed altogether.
+    if retired_status == 200 {
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            if let Event::Graph(graph) = child
+                .event(deadline, true)
+                .context("waiting for rejection of the retired hook")?
+                && graph["providerIdentityEvents"]
+                    .as_array()
+                    .is_some_and(|events| {
+                        events.iter().any(|event| event["reason"] == "retired-run")
+                    })
+            {
+                break;
+            }
+        }
+    } else {
+        assert_eq!(retired_status, 404);
+    }
+    for payload in [
+        json!({"hook_event_name": "SessionStart", "session_id": "new-conversation"}),
+        json!({"hook_event_name": "UserPromptSubmit", "session_id": "new-conversation",
+               "model": "startup-model", "permission_mode": "plan"}),
+        json!({"hook_event_name": "Notification", "session_id": "new-conversation",
+               "model": "notification-model", "message": "Awaiting input", "notification_type":"permission_prompt"}),
+    ] {
+        assert_eq!(post_claude_hook(&new_settings, payload)?, 200);
+    }
+    assert!(claude_binding(&db, &child.session)?.is_none());
+    fs::write(stub.with_extension("release-output"), "")?;
+    let mut saw_output = false;
+    let mut saw_observations = false;
+    let deadline = Instant::now() + TIMEOUT;
+    while !saw_output || !saw_observations {
+        match child.event(deadline, true).with_context(|| {
+            format!("replacement CLI output seen: {saw_output}, hook observations seen: {saw_observations}")
+        })? {
+            Event::Frame { screen, .. } => {
+                assert!(!screen_has_line(&screen, "LATE_OUTPUT_FROM_RETIRED_RUN"));
+                saw_output |= screen_has_line(&screen, "NEW_RUN_OUTPUT");
+            }
+            Event::Graph(graph) => {
+                saw_observations |= graph["nodes"][0]["model"] == "notification-model"
+                    && graph["nodes"][0]["permissionMode"] == "plan"
+                    && graph["nodes"][0]["workStatus"] == "needs-input"
+            }
+            Event::Diagnostic(error) => bail!("{error}"),
+            _ => {}
+        }
+    }
+    let runs = list_runs(&db, &child.session)?;
+    assert_eq!(runs[1].exit_code, Some(27));
+    assert_eq!(runs[3].profile, "claude-code");
+    let mut records = db.prepare(
+        "SELECT event_type, payload_json FROM domain_events
+         WHERE event_type IN ('provider-binding.recorded', 'agent.notification') ORDER BY seq",
+    )?;
+    let records = records
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .map(|row| -> Result<_> {
+            let (kind, payload) = row?;
+            Ok((kind, serde_json::from_str::<Value>(&payload)?))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    assert_eq!(records.len(), 4, "{records:?}");
+    for (_, payload) in &records {
+        assert_eq!(payload["runId"], runs[3].id);
+    }
+    assert_eq!(records[0].1["providerSessionId"], "new-conversation");
+    assert_eq!(records[1].1["metadata"]["model"], "startup-model");
+    assert_eq!(records[2].1["metadata"]["model"], "notification-model");
+    assert_eq!(records[3].0, "agent.notification");
+    assert_eq!(
+        claude_binding(&db, &child.session)?
+            .context("new binding")?
+            .metadata["permissionMode"],
+        "plan"
+    );
+
+    child.send(Command::Shutdown)?;
+    assert!(child.closed()?.is_empty());
+    let (status, stderr) = child.wait()?;
+    ensure!(status.success(), "{stderr}");
+    let mut markers = Vec::new();
+    for_each_frame(&child.data, &child.session, 1, None, |record| {
+        match record.frame {
+            Frame::Output { data, .. } => {
+                let output = String::from_utf8_lossy(&data);
+                for marker in ["LATE_OUTPUT_FROM_RETIRED_RUN", "NEW_RUN_OUTPUT"] {
+                    if output.contains(marker) {
+                        markers.push(marker);
+                    }
+                }
+            }
+            Frame::Exit { exit_code: 27, .. } => markers.push("old-run-exited"),
+            _ => {}
+        }
+        Ok(())
+    })?;
+    assert_eq!(
+        markers,
+        [
+            "LATE_OUTPUT_FROM_RETIRED_RUN",
+            "old-run-exited",
+            "NEW_RUN_OUTPUT"
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn shell_promotion_rollback_write_failure_leaves_a_failed_card_and_the_host_serves_another()
+-> Result<()> {
+    use matou_native_runtime::host::RecoveryState;
+
+    let root = tempfile::tempdir()?;
+    let stub = root.path().join("promotion-cli");
+    fs::write(
+        &stub,
+        r#"#!/bin/sh
+if [ ! -e "$0.started" ]; then
+    /usr/bin/touch "$0.started"
+    exit 29
+fi
+printf 'ANOTHER_PROMOTION_READY\n'
+exec /bin/sleep 60
+"#,
+    )?;
+    fs::set_permissions(&stub, fs::Permissions::from_mode(0o700))?;
+    let mut child = RuntimeChild::spawn_configured(
+        root.path(),
+        &format!("PROMPT='{PROMPT} '\n"),
+        Path::new("/bin/zsh"),
+        Some(&stub),
+    )?;
+    child.hello()?;
+    let db = Connection::open(child.data.join("matou.sqlite"))?;
+    db.busy_timeout(TIMEOUT)?;
+    let failed = child.session.clone();
+    let target: String = db.query_row("SELECT quote(?)", [&failed], |row| row.get(0))?;
+    db.execute_batch(&format!(
+        "CREATE TRIGGER reject_promotion_rollback BEFORE UPDATE OF kind ON sessions
+         WHEN OLD.id = {target} AND OLD.kind = 'claude-code' AND NEW.kind = 'shell'
+         BEGIN SELECT RAISE(ABORT, 'fixture rollback write failed'); END;",
+    ))?;
+    child.input("claude")?;
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        if let Event::Recovery {
+            session_id,
+            state: RecoveryState::Failed(reason),
+        } = child.event(deadline, true)?
+            && session_id == failed
+        {
+            assert!(reason.contains("fixture rollback write failed"), "{reason}");
+            break;
+        }
+    }
+    child.send(Command::CreateShellSibling {
+        scene_id: child.scene.clone(),
+        source_session_id: failed.clone(),
+        parent_session_id: None,
+    })?;
+    let deadline = Instant::now() + TIMEOUT;
+    let second = loop {
+        if let Event::Frame {
+            session_id, screen, ..
+        } = child.event(deadline, true)?
+            && session_id != failed
+            && screen_has_line(&screen, PROMPT)
+        {
+            break session_id;
+        }
+    };
+    child.session = second;
+    child.input("claude")?;
+    child.frame(|_, screen, _| screen_has_line(screen, "ANOTHER_PROMOTION_READY"))?;
+    child.send(Command::Shutdown)?;
+    assert!(child.closed()?.is_empty());
+    let (status, stderr) = child.wait()?;
+    ensure!(status.success(), "{stderr}");
+    Ok(())
+}
+
+#[test]
 fn first_claude_start_and_recovery_without_binding_use_saved_opus_assignment() -> Result<()> {
     use matou_native_core::sessions::{claude_binding, get_session, list_runs};
     use matou_native_runtime::host::RecoveryState;
@@ -1691,7 +2936,9 @@ fn claude_restore_uses_binding_and_start_fresh_survives_deleted_provider() -> Re
             (id, session_id, provider, provider_session_id, resume_state, restore_state,
              metadata_json, created_at, updated_at, validated_at)
          VALUES ('saved-binding', ?, 'claude-code', 'saved-conversation', 'available', 'restoring',
-                 '{\"providerConfigId\":\"bound\",\"model\":\"claude-opus-5-5\",\"permissionMode\":\"plan\"}', 1, 1, 1)",
+                 '{\"providerConfigId\":\"bound\",\"model\":\"claude-opus-5-5\",
+                   \"permissionMode\":\"plan\",\"canFork\":true,
+                   \"observedUserPrompt\":true,\"observedNormalStop\":true}', 1, 1, 1)",
         [&seed.session],
     )?;
     db.execute(
@@ -1766,6 +3013,22 @@ exec /bin/sleep 60
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
     assert_eq!(states, ("expired".into(), "none".into()));
+    child.send(Command::Refresh)?;
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        if let Event::Graph(graph) = child.event(deadline, true)?
+            && let Some(node) = graph["nodes"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|node| {
+                    node["sessionId"] == child.session && node["providerRestoreState"] == "none"
+                })
+        {
+            assert_eq!(node["canFork"], true);
+            break;
+        }
+    }
     let argv = fs::read_to_string(stub.with_extension("fresh-argv"))?;
     assert_eq!(
         argv.lines().skip(2).collect::<Vec<_>>(),
@@ -1984,17 +3247,36 @@ fn post_claude_identity(
     mode: &str,
     model: &str,
 ) -> Result<()> {
-    let settings: serde_json::Value = serde_json::from_slice(&fs::read(settings_path)?)?;
-    let url = settings["hooks"]["UserPromptSubmit"][0]["hooks"][0]["url"]
+    let status = post_claude_hook(
+        settings_path,
+        serde_json::json!({
+            "hook_event_name": "SessionStart", "session_id": provider_id,
+            "permission_mode": mode, "model": model
+        }),
+    )?;
+    ensure!(status == 200, "identity hook was rejected: {status}");
+    Ok(())
+}
+
+fn post_claude_hook(settings_path: &Path, payload: serde_json::Value) -> Result<u16> {
+    post_claude_hook_url(&claude_hook_url(settings_path)?, payload)
+}
+
+fn claude_hook_url(settings_path: &Path) -> Result<String> {
+    let settings: serde_json::Value = serde_json::from_slice(
+        &fs::read(settings_path)
+            .with_context(|| format!("read hook settings {}", settings_path.display()))?,
+    )?;
+    Ok(settings["hooks"]["UserPromptSubmit"][0]["hooks"][0]["url"]
         .as_str()
         .context("test hook URL")?
-        .strip_prefix("http://")
-        .context("HTTP hook")?;
+        .to_owned())
+}
+
+fn post_claude_hook_url(url: &str, payload: serde_json::Value) -> Result<u16> {
+    let url = url.strip_prefix("http://").context("HTTP hook")?;
     let (address, path) = url.split_once('/').context("hook path")?;
-    let payload = serde_json::to_string(&serde_json::json!({
-        "hook_event_name": "SessionStart", "session_id": provider_id,
-        "permission_mode": mode, "model": model
-    }))?;
+    let payload = payload.to_string();
     let mut connection = std::net::TcpStream::connect(address)?;
     connection.set_read_timeout(Some(TIMEOUT))?;
     write!(
@@ -2004,11 +3286,11 @@ fn post_claude_identity(
     )?;
     let mut response = String::new();
     connection.read_to_string(&mut response)?;
-    ensure!(
-        response.starts_with("HTTP/1.1 200"),
-        "identity hook was rejected"
-    );
-    Ok(())
+    Ok(response
+        .split_whitespace()
+        .nth(1)
+        .context("hook HTTP status")?
+        .parse()?)
 }
 
 fn wait_permission_identity(child: &mut RuntimeChild) -> Result<()> {

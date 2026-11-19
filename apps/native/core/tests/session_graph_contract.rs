@@ -197,6 +197,21 @@ fn permission_and_model_come_from_the_latest_valid_binding() -> Result<()> {
     let graph = project_scene_graph(&db, scene_id, None)?;
     assert_eq!(graph["nodes"][0]["permissionMode"], "ask");
     assert!(graph["nodes"][0].get("model").is_none());
+    db.execute("DELETE FROM provider_bindings WHERE id <> 'expired'", [])?;
+    for (state, invalidated_at, restore_state, can_fork) in [
+        ("expired", Some(5), "none", true),
+        ("failed", Some(5), "none", true),
+        ("available", None, "none", true),
+        ("available", None, "failed", false),
+    ] {
+        db.execute(
+            "UPDATE provider_bindings SET resume_state=?, invalidated_at=?, restore_state=?, metadata_json=?
+             WHERE id='expired'",
+            rusqlite::params![state, invalidated_at, restore_state, r#"{"canFork":true}"#],
+        )?;
+        let graph = project_scene_graph(&db, scene_id, None)?;
+        assert_eq!(graph["nodes"][0]["canFork"], can_fork);
+    }
     Ok(())
 }
 

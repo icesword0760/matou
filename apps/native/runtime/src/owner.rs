@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     path::Path,
-    sync::mpsc,
+    sync::{Arc, OnceLock, mpsc},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -27,10 +27,11 @@ use crate::{
     SessionEvent, SessionOptions,
     derived::{CwdTracker, WorkStatusTracker, terminal_summary_lines, utf16_tail},
     provider_hook::{
-        HookMessage, HookSetup, IDENTITY_TIMEOUT, Observation, ProviderHookServer, Registration,
-        Scope,
+        HOOK_QUEUE_CAPACITY, HookMessage, HookSetup, IDENTITY_TIMEOUT, Observation,
+        ProviderHookServer, Registration, Scope,
     },
     provider_resume::{IDENTITY_MISMATCH, ResumeMonitor},
+    shell_input::ShellInput,
     worker::{SessionWorker, WorkerCommand, WorkerEvent},
 };
 
@@ -47,9 +48,20 @@ struct RunningShell {
     exit_error: Option<String>,
     retiring: bool,
     stop_completion: Option<mpsc::Sender<Result<()>>>,
-    permission_starting: bool,
+    provider_startup_pending: bool,
+    promotion_process_check: Option<Arc<OnceLock<Result<()>>>>,
     cwd_capture: Option<(Instant, bool)>,
     hook: Option<RunHook>,
+}
+
+impl RunningShell {
+    fn promotion_process_result(&self) -> Option<&Result<()>> {
+        self.promotion_process_check.as_ref()?.get()
+    }
+
+    fn promotion_verified(&self) -> bool {
+        !self.retiring && self.promotion_process_result().is_some_and(Result::is_ok)
+    }
 }
 
 struct RunHook {
@@ -61,7 +73,7 @@ struct RunHook {
     last_submission: Option<Instant>,
     resume: Option<ResumeMonitor>,
     reported_missing: bool,
-    pending_permission_identity: Option<(Scope, Observation)>,
+    pending_startup_observations: Vec<(Scope, Observation)>,
     permission_identity_error: Option<String>,
 }
 
@@ -675,6 +687,12 @@ impl ShellOwner {
         self.shells.contains_key(session_id)
     }
 
+    pub(crate) fn shell_worker_is_retiring(&self, session_id: &str) -> bool {
+        self.shells
+            .get(session_id)
+            .is_some_and(|shell| shell.retiring)
+    }
+
     pub(crate) fn has_shell_run(&self, session_id: &str) -> Result<bool> {
         Ok(self.connection.query_row(
             "SELECT EXISTS (SELECT 1 FROM session_runs WHERE session_id=?)",
@@ -939,6 +957,47 @@ impl ShellOwner {
         Ok(receive)
     }
 
+    pub(crate) fn tracks_shell_input(&self, session_id: &str) -> bool {
+        self.shells
+            .get(session_id)
+            .is_some_and(|shell| shell.is_shell && !shell.ended && !shell.retiring)
+    }
+
+    pub(crate) fn restore_shell_input(&self, session_id: &str, before: ShellInput) {
+        if let Some(shell) = self.shells.get(session_id) {
+            shell.worker.restore_shell_input(before);
+        }
+    }
+
+    pub(crate) fn promote_shell_to_claude(&mut self, session_id: &str) -> Result<()> {
+        let id = (self.next_id)();
+        let commit = sessions::promote_shell_to_claude(
+            &mut self.connection,
+            &command(id.clone(), "session.shell-promote-agent", id),
+            session_id,
+            now(),
+        )?;
+        self.pending.push(OwnerEvent::Domain(commit));
+        Ok(())
+    }
+
+    pub(crate) fn return_promoted_claude_to_shell(&mut self, session_id: &str) -> Result<()> {
+        let id = (self.next_id)();
+        let commit = sessions::return_promoted_claude_to_shell(
+            &mut self.connection,
+            &command(id.clone(), "session.shell-promote-rollback", id),
+            session_id,
+            now(),
+        )?;
+        self.pending.push(OwnerEvent::Domain(commit));
+        Ok(())
+    }
+
+    pub(crate) fn mark_shell_promotion_interrupted(&mut self, session_id: &str) -> Result<()> {
+        let mut events = Vec::new();
+        self.set_work_status(session_id, &mut events, |_| "interrupted")
+    }
+
     pub(crate) fn stop_for_permission_change(
         &mut self,
         session_id: &str,
@@ -1038,35 +1097,110 @@ impl ShellOwner {
         Ok(self.shells[session_id].run_id.clone())
     }
 
-    pub(crate) fn finish_permission_startup(
-        &mut self,
-        session_id: &str,
-        run_id: &str,
-    ) -> Result<()> {
-        self.check_permission_run(session_id, run_id)?;
-        let shell = self.shells.get_mut(session_id).unwrap();
-        shell.permission_starting = false;
-        if let Some((scope, observation)) = shell
-            .hook
-            .as_mut()
-            .and_then(|hook| hook.pending_permission_identity.take())
-        {
-            let mut events = Vec::new();
-            self.apply_hook(scope, observation, &mut events);
-            self.pending.extend(events);
-        }
+    pub(crate) fn finish_provider_startup(&mut self, session_id: &str, run_id: &str) -> Result<()> {
+        self.check_provider_startup(session_id, run_id)?;
+        self.replay_provider_startup(session_id, run_id);
         Ok(())
     }
 
-    pub(crate) fn check_permission_run(&self, session_id: &str, run_id: &str) -> Result<()> {
+    pub(crate) fn begin_promotion_process_check(&mut self, session_id: &str) -> Result<()> {
+        let result = Arc::new(OnceLock::new());
+        self.send(
+            session_id,
+            WorkerCommand::CheckProcess {
+                result: Arc::clone(&result),
+            },
+        )?;
+        self.shells
+            .get_mut(session_id)
+            .unwrap()
+            .promotion_process_check = Some(result);
+        Ok(())
+    }
+
+    pub(crate) fn finish_promotion_startup(
+        &mut self,
+        session_id: &str,
+        run_id: &str,
+    ) -> Result<bool> {
+        let check = self
+            .shells
+            .get(session_id)
+            .filter(|shell| shell.run_id == run_id && !shell.retiring)
+            .and_then(RunningShell::promotion_process_result);
+        match check {
+            Some(Ok(())) => {
+                #[cfg(debug_assertions)]
+                if let Some(marker) = std::env::var_os("MATOU_TEST_HOLD_VERIFIED_PROMOTION") {
+                    let marker = Path::new(&marker);
+                    if !marker.exists() {
+                        std::fs::write(marker, run_id)?;
+                    }
+                    return Ok(false);
+                }
+                self.replay_provider_startup(session_id, run_id);
+                Ok(true)
+            }
+            Some(Err(error)) => anyhow::bail!("{error:#}"),
+            None => {
+                self.check_provider_startup(session_id, run_id)?;
+                Ok(false)
+            }
+        }
+    }
+
+    pub(crate) fn keep_promotion_at_shutdown(&mut self, session_id: &str, run_id: &str) -> bool {
+        let Some(shell) = self
+            .shells
+            .get_mut(session_id)
+            .filter(|shell| shell.run_id == run_id)
+        else {
+            return false;
+        };
+        if shell.promotion_verified() {
+            return true;
+        }
+        shell.promotion_process_check = None;
+        false
+    }
+
+    fn replay_provider_startup(&mut self, session_id: &str, run_id: &str) {
+        let mut events = Vec::new();
+        self.apply_startup_observations(session_id, run_id, &mut events);
+        self.pending.extend(events);
+    }
+
+    fn apply_startup_observations(
+        &mut self,
+        session_id: &str,
+        run_id: &str,
+        events: &mut Vec<OwnerEvent>,
+    ) {
+        let Some(shell) = self
+            .shells
+            .get_mut(session_id)
+            .filter(|shell| shell.run_id == run_id && !shell.ended && !shell.retiring)
+        else {
+            return;
+        };
+        shell.provider_startup_pending = false;
+        if let Some(hook) = &mut shell.hook {
+            let observations = std::mem::take(&mut hook.pending_startup_observations);
+            for (scope, observation) in observations {
+                self.apply_hook(scope, observation, events);
+            }
+        }
+    }
+
+    pub(crate) fn check_provider_startup(&self, session_id: &str, run_id: &str) -> Result<bool> {
         let shell = self
             .shells
             .get(session_id)
             .filter(|shell| shell.run_id == run_id && !shell.retiring)
-            .context("AI Session permission respawn failed")?;
+            .context("AI Session worker is no longer active")?;
         if shell.ended || shell.worker.is_finished() {
             if let Some(error) = &shell.exit_error {
-                anyhow::bail!("AI Session permission respawn failed: {error}");
+                anyhow::bail!("{error}");
             }
             let exit_code: Option<i64> = self.connection.query_row(
                 "SELECT exit_code FROM session_runs WHERE id = ?",
@@ -1074,10 +1208,8 @@ impl ShellOwner {
                 |row| row.get(0),
             )?;
             match exit_code {
-                Some(code) => anyhow::bail!(
-                    "AI Session permission respawn failed: process exited with code {code}"
-                ),
-                None => anyhow::bail!("AI Session permission respawn failed"),
+                Some(code) => anyhow::bail!("process exited with code {code}"),
+                None => anyhow::bail!("AI Session worker exited"),
             }
         }
         if let Some(error) = shell
@@ -1087,13 +1219,13 @@ impl ShellOwner {
         {
             anyhow::bail!("{error}");
         }
-        Ok(())
+        Ok(shell.emitted_output)
     }
 
     pub(crate) fn waiting_for_permission_consent(&self, session_id: &str) -> bool {
         self.shells
             .get(session_id)
-            .filter(|shell| !shell.permission_starting && !shell.ended && !shell.retiring)
+            .filter(|shell| !shell.provider_startup_pending && !shell.ended && !shell.retiring)
             .and_then(|shell| shell.hook.as_ref())
             .filter(|hook| hook.last_observation.is_none())
             .and_then(|hook| hook.resume.as_ref())
@@ -1191,6 +1323,18 @@ impl ShellOwner {
             resume,
             binding.and_then(|binding| binding.metadata.get("spawnRevision")),
         )
+    }
+
+    pub(crate) fn launch_promoted_claude(
+        &mut self,
+        session_id: &str,
+        terminal: matou_native_terminal::TerminalOptions,
+        plan: ClaudeLaunch,
+    ) -> Result<String> {
+        self.launch_claude(session_id.to_owned(), terminal, plan, None)?;
+        let shell = self.shells.get_mut(session_id).unwrap();
+        shell.provider_startup_pending = true;
+        Ok(shell.run_id.clone())
     }
 
     pub(crate) fn launch_claude_fork(
@@ -1355,7 +1499,7 @@ impl ShellOwner {
                 last_submission: None,
                 resume,
                 reported_missing: false,
-                pending_permission_identity: None,
+                pending_startup_observations: Vec::new(),
                 permission_identity_error: None,
             })
         } else {
@@ -1406,7 +1550,8 @@ impl ShellOwner {
                 exit_error: None,
                 retiring: false,
                 stop_completion: None,
-                permission_starting,
+                provider_startup_pending: permission_starting,
+                promotion_process_check: None,
                 cwd_capture: None,
                 hook,
             },
@@ -1526,14 +1671,23 @@ impl ShellOwner {
         Ok(events)
     }
 
-    fn poll_provider_hooks(&mut self, events: &mut Vec<OwnerEvent>) {
+    fn poll_provider_hook_messages(
+        &mut self,
+        events: &mut Vec<OwnerEvent>,
+        limit: usize,
+        accepts: impl Fn(&Self, &Scope, Instant) -> bool,
+    ) {
         let Some(server) = &self.hook_server else {
             return;
         };
-        let hooks: Vec<_> = server.messages().take(64).collect();
+        let hooks: Vec<_> = server.messages().take(limit).collect();
         for hook in hooks {
             match hook {
                 HookMessage::Observed(scope, observation, received_at) => {
+                    if !accepts(self, &scope, received_at) {
+                        reject_identity(events, &scope, "retired-run");
+                        continue;
+                    }
                     let late_identity = self
                         .shells
                         .get(&scope.session_id)
@@ -1556,6 +1710,10 @@ impl ShellOwner {
                 HookMessage::Retired(scope) => reject_identity(events, &scope, "retired-run"),
             }
         }
+    }
+
+    fn poll_provider_hooks(&mut self, events: &mut Vec<OwnerEvent>) {
+        self.poll_provider_hook_messages(events, 64, |_, _, _| true);
         let mut expired_forks = Vec::new();
         let mut expired_permission_restores = Vec::new();
         for (session_id, shell) in &mut self.shells {
@@ -1632,7 +1790,7 @@ impl ShellOwner {
         events: &mut Vec<OwnerEvent>,
     ) {
         let Some(shell) = self.shells.get_mut(&scope.session_id).filter(|shell| {
-            !self.closing
+            (!self.closing || shell.promotion_verified())
                 && !shell.ended
                 && !shell.retiring
                 && shell.run_id == scope.run_id
@@ -1683,14 +1841,12 @@ impl ShellOwner {
                 .resume
                 .as_ref()
                 .is_some_and(ResumeMonitor::fresh_permission);
+        if shell.provider_startup_pending && (first_fresh_identity || hook.resume.is_none()) {
+            // A newly launched child can send a hook and then immediately exit.
+            hook.pending_startup_observations.push((scope, observation));
+            return;
+        }
         if first_fresh_identity {
-            if shell.permission_starting {
-                // Passing the startup check is required before a fresh binding can be written.
-                if hook.pending_permission_identity.is_none() {
-                    hook.pending_permission_identity = Some((scope, observation));
-                }
-                return;
-            }
             if shell.worker.is_finished() {
                 return;
             }
@@ -2003,8 +2159,11 @@ impl ShellOwner {
                 return;
             }
             SessionEvent::SavedExit {
-                status, disposed, ..
-            } => self.finish_run(&event.session_id, *status, *disposed, events),
+                status,
+                disposed,
+                observed_at,
+                ..
+            } => self.finish_run(&event.session_id, *status, *disposed, *observed_at, events),
             _ => {
                 events.push(OwnerEvent::Terminal(event));
                 return;
@@ -2183,9 +2342,22 @@ impl ShellOwner {
         id: &str,
         status: matou_native_core::pty::ProcessExit,
         disposed: bool,
+        observed_at: Instant,
         events: &mut Vec<OwnerEvent>,
     ) -> Result<()> {
         let retiring = self.shells[id].retiring;
+        let promotion_verified = self.shells[id].promotion_verified();
+        if !self.closing && promotion_verified {
+            // The worker publishes the check result before emitting its exit.
+            // Drain accepted hooks while this run still owns its binding.
+            let run_id = self.shells[id].run_id.clone();
+            self.poll_provider_hook_messages(
+                events,
+                HOOK_QUEUE_CAPACITY,
+                |_, scope, received_at| scope.run_id != run_id || received_at <= observed_at,
+            );
+            self.apply_startup_observations(id, &run_id, events);
+        }
         if !retiring {
             self.flush_summary(id, events);
         }
@@ -2203,9 +2375,12 @@ impl ShellOwner {
         let shutdown = disposed && self.closing && !retiring;
         let run = shell.run_id.clone();
         let pid = shell.worker.process_id();
-        let startup_failed =
-            !shell.emitted_output && !shutdown && !retiring && (shell.is_shell || had_identity);
-        let permission_starting = shell.permission_starting;
+        let startup_failed = !shell.emitted_output
+            && !shutdown
+            && !retiring
+            && !promotion_verified
+            && (shell.is_shell || had_identity);
+        let provider_startup_pending = shell.provider_startup_pending;
         if shutdown && shell.is_shell {
             let work: String = self.connection.query_row(
                 "SELECT work_status FROM sessions WHERE id=?",
@@ -2236,7 +2411,7 @@ impl ShellOwner {
             time,
         )?;
         events.push(OwnerEvent::Domain(commit));
-        if permission_starting
+        if provider_startup_pending
             || pending_restore
                 .as_ref()
                 .is_some_and(|resume| resume.saw_bypass_consent() || resume.fresh_permission())
@@ -2340,9 +2515,19 @@ impl ShellOwner {
     }
 
     pub fn shutdown(&mut self) -> Result<Vec<OwnerEvent>> {
+        let mut events = std::mem::take(&mut self.pending);
+        if !self.closing && self.shells.values().any(RunningShell::promotion_verified) {
+            // Apply an already queued exit first so its hook cutoff still holds.
+            let queued: Vec<_> = self.receive.try_iter().collect();
+            for event in queued {
+                self.apply(event, &mut events);
+            }
+        }
         self.closing = true;
         for shell in self.shells.values_mut() {
-            shell.hook = None;
+            if !shell.promotion_verified() {
+                shell.hook = None;
+            }
         }
         // Request every active Shell to stop before waiting for any worker.
         let shutdowns: Vec<_> = self
@@ -2366,8 +2551,42 @@ impl ShellOwner {
                 first_error.get_or_insert(error);
             }
         }
-        let mut events = std::mem::take(&mut self.pending);
-        while let Ok(event) = self.receive.try_recv() {
+        if let Some(server) = &mut self.hook_server {
+            server.finish_requests();
+        }
+        let queued: Vec<_> = self.receive.try_iter().collect();
+        let exit_times: HashMap<_, _> = queued
+            .iter()
+            .filter_map(|event| match &event.event {
+                SessionEvent::SavedExit { observed_at, .. } => Some((&event.run_id, *observed_at)),
+                _ => None,
+            })
+            .collect();
+        // Finish admitted hooks while their runs still own the bindings.
+        // Each worker's observed exit is the cutoff for that run's messages.
+        self.poll_provider_hook_messages(
+            &mut events,
+            HOOK_QUEUE_CAPACITY,
+            |owner, scope, received_at| {
+                owner.shells.get(&scope.session_id).is_some_and(|shell| {
+                    shell.run_id == scope.run_id
+                        && shell.promotion_verified()
+                        && exit_times
+                            .get(&scope.run_id)
+                            .is_none_or(|cutoff| received_at <= *cutoff)
+                })
+            },
+        );
+        let verified: Vec<_> = self
+            .shells
+            .iter()
+            .filter(|(_, shell)| shell.provider_startup_pending && shell.promotion_verified())
+            .map(|(id, shell)| (id.clone(), shell.run_id.clone()))
+            .collect();
+        for (id, run_id) in verified {
+            self.apply_startup_observations(&id, &run_id, &mut events);
+        }
+        for event in queued {
             self.apply(event, &mut events);
         }
         let ids: Vec<_> = self.summaries.keys().cloned().collect();
@@ -2989,6 +3208,138 @@ mod provider_tests {
             "source-id"
         );
         owner.shutdown()?;
+        Ok(())
+    }
+
+    #[test]
+    fn verified_promotion_records_a_queued_identity_before_the_child_exit() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let BootstrapResult::Writable {
+            mut connection,
+            ownership,
+            ..
+        } = startup::open(root.path(), "promotion-generation")?
+        else {
+            anyhow::bail!("expected writable database");
+        };
+        let session = "promoted-session";
+        hierarchy::bootstrap_window(
+            &mut connection,
+            &command("bootstrap".into(), "window.bootstrap", "fixture".into()),
+            &hierarchy::BootstrapWindowInput {
+                window_id: "window".into(),
+                default_root_directory: root.path().to_string_lossy().into(),
+                default_name: "Workspace".into(),
+                now: 1,
+            },
+            &HierarchyIds {
+                workspace_id: "workspace".into(),
+                execution_context_id: "context".into(),
+                task_id: "task".into(),
+                scene_id: "scene".into(),
+                session_id: session.into(),
+                root_node_id: "node".into(),
+                mount_id: "mount".into(),
+            },
+            "默认",
+            1,
+        )?;
+        let executable = root.path().join("test-provider");
+        fs::write(&executable, "#!/bin/sh\nread -r line\nexit 24\n")?;
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700))?;
+        let mut owner =
+            ShellOwner::new(connection, ownership, || uuid::Uuid::new_v4().to_string())?;
+        owner.set_shell_launch_directory(session, &root.path().to_string_lossy())?;
+        owner.promote_shell_to_claude(session)?;
+        let run = owner.launch_promoted_claude(
+            session,
+            TerminalOptions::new(80, 24, 7, 14),
+            ClaudeLaunch {
+                launch: ShellLaunch {
+                    profile: LaunchProfile::ClaudeCode,
+                    executable,
+                    argv: Vec::new(),
+                    cwd: root.path().to_owned(),
+                    data_root: root.path().to_owned(),
+                    inherited_env: Default::default(),
+                    env: Default::default(),
+                    cols: 80,
+                    rows: 24,
+                },
+                provider_config_id: "fixture-config".into(),
+                model: "fixture-model".into(),
+                permission_mode: "default".into(),
+                assigned_role: None,
+                effort: None,
+                clear_assignment_environment: false,
+            },
+        )?;
+        let registration = &owner.shells[session].hook.as_ref().unwrap()._registration;
+        let settings: Value = serde_json::from_slice(&fs::read(&registration.settings_path)?)?;
+        let url = url::Url::parse(
+            settings["hooks"]["UserPromptSubmit"][0]["hooks"][0]["url"]
+                .as_str()
+                .unwrap(),
+        )?;
+        let post = |identity: &str| -> Result<()> {
+            let mut socket = TcpStream::connect(("127.0.0.1", url.port().unwrap()))?;
+            socket.set_read_timeout(Some(Duration::from_secs(3)))?;
+            let body =
+                json!({"hook_event_name": "UserPromptSubmit", "session_id": identity}).to_string();
+            write!(
+                socket,
+                "POST {} HTTP/1.1\r\nContent-Length: {}\r\n\r\n{body}",
+                url.path(),
+                body.len()
+            )?;
+            let mut response = String::new();
+            socket.read_to_string(&mut response)?;
+            assert!(response.starts_with("HTTP/1.1 200"));
+            Ok(())
+        };
+
+        owner.begin_promotion_process_check(session)?;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !owner.shells[session].promotion_verified() {
+            ensure!(Instant::now() < deadline, "check did not pass");
+            thread::sleep(Duration::from_millis(2));
+        }
+        // Keep the owner from polling until the real child exit is also queued.
+        post("recoverable-conversation")?;
+        assert!(owner.claude_binding(session)?.is_none());
+        let (reply, written) = mpsc::channel();
+        owner.send(
+            session,
+            WorkerCommand::Write {
+                bytes: b"\r".to_vec(),
+                reply,
+            },
+        )?;
+        written.recv_timeout(Duration::from_secs(5))??;
+        let mut queued = Vec::new();
+        loop {
+            let event = owner.receive.recv_timeout(Duration::from_secs(5))?;
+            let exit = matches!(event.event, SessionEvent::SavedExit { .. });
+            queued.push(event);
+            if exit {
+                break;
+            }
+        }
+        post("too-late-conversation")?;
+        let mut events = Vec::new();
+        for event in queued {
+            owner.apply(event, &mut events);
+        }
+        assert!(owner.finish_promotion_startup(session, &run)?);
+        assert!(events.iter().any(|event| matches!(event,
+            OwnerEvent::ProviderIdentity(value) if value["reason"] == "retired-run")));
+        assert_eq!(owner.runs(session)?[0].exit_code, Some(24));
+        owner.shutdown()?;
+        drop(owner);
+        let reopened = startup::open_read_only(&root.path().join("matou.sqlite"))?;
+        let binding = sessions::claude_binding(&reopened, session)?.context("durable binding")?;
+        assert_eq!(binding.provider_session_id, "recoverable-conversation");
+        assert!(binding.resumable);
         Ok(())
     }
 

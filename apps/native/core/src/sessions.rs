@@ -264,6 +264,82 @@ pub fn create_shell_session(
     })
 }
 
+pub fn promote_shell_to_claude(
+    db: &mut Connection,
+    command: &CommandMetadata,
+    session_id: &str,
+    now: i64,
+) -> Result<DomainCommit> {
+    execute(db, command, now, |tx, events| {
+        let before = require_session(tx, session_id)?;
+        ensure!(
+            before.kind == "shell" && before.archived_at.is_none(),
+            "only an active Shell card can be promoted"
+        );
+        require_no_active_run(tx, session_id)?;
+        tx.execute(
+            "UPDATE sessions SET kind = 'claude-code', work_status = 'starting',
+                 title = CASE WHEN title = 'Shell' OR title = id
+                              THEN 'Claude' ELSE title END,
+                 updated_at = ?, last_activity_at = ?, version = version + 1
+             WHERE id = ?",
+            params![now, now, session_id],
+        )?;
+        tx.execute(
+            "UPDATE provider_bindings SET resume_state = 'expired', restore_state = 'none',
+                restore_error = NULL, invalidated_at = ?, updated_at = ?,
+                metadata_json = json_patch(
+                    CASE WHEN json_valid(metadata_json) THEN metadata_json ELSE '{}' END,
+                    '{\"canFork\":false,\"observedUserPrompt\":false,\"observedNormalStop\":false}'
+                )
+             WHERE session_id = ?",
+            params![now, now, session_id],
+        )?;
+        let session = require_session(tx, session_id)?;
+        events.push(session_event(
+            command,
+            "session.updated",
+            &before,
+            now,
+            json!({"session": session}),
+        ));
+        Ok(serde_json::to_value(session)?)
+    })
+}
+
+pub fn return_promoted_claude_to_shell(
+    db: &mut Connection,
+    command: &CommandMetadata,
+    session_id: &str,
+    now: i64,
+) -> Result<DomainCommit> {
+    execute(db, command, now, |tx, events| {
+        let before = require_session(tx, session_id)?;
+        ensure!(
+            before.kind == "claude-code" && before.archived_at.is_none(),
+            "only an active Claude card can return to Shell"
+        );
+        require_no_active_run(tx, session_id)?;
+        tx.execute(
+            "UPDATE sessions SET kind = 'shell', work_status = 'idle',
+                 title = CASE WHEN title IN ('Claude', 'Codex', 'DSH', 'Antigravity') OR title = id
+                              THEN 'Shell' ELSE title END,
+                 updated_at = ?, last_activity_at = ?, version = version + 1
+             WHERE id = ?",
+            params![now, now, session_id],
+        )?;
+        let session = require_session(tx, session_id)?;
+        events.push(session_event(
+            command,
+            "session.updated",
+            &before,
+            now,
+            json!({"session": session}),
+        ));
+        Ok(serde_json::to_value(session)?)
+    })
+}
+
 pub fn start_run(
     db: &mut Connection,
     command: &CommandMetadata,
