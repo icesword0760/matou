@@ -2860,8 +2860,51 @@ mod probe {
         assert_submit(cx, true, false, None);
         assert!(commands(&sink).is_empty());
         fixture.commit_catalog_load(&cwd);
-        deliver(window, cx, fixture.graph_event());
+        let Event::Graph(bound_graph) = fixture.graph_event() else {
+            unreachable!()
+        };
+        let revision = bound_graph["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|node| node["sessionId"] == PEER)
+            .unwrap()["providerSpawnRevision"]
+            .as_u64()
+            .unwrap();
+        deliver(window, cx, Event::Graph(bound_graph));
         assert_closed(cx);
+
+        open(cx);
+        graph(
+            &fixture,
+            cx,
+            "providerSessionCatalogResults",
+            json!({"cwd":cwd,"sessions":[
+                {"providerSessionId":"history-b","title":"Beta draft","updatedAt":0,
+                 "messageCount":1,"model":"Haiku","permissionMode":"default",
+                 "loadedBy":{"sessionId":PEER,"title":"Beta draft"}}
+            ]}),
+            true,
+        );
+        detail("history-b", None, None);
+        control(cx, 2);
+        assert_load();
+        let mut confirmed = json!({
+            "sessionId":PEER,"providerSessionId":"history-b",
+            "result":"confirmed","spawnRevision":revision
+        });
+        graph(
+            &fixture,
+            cx,
+            "providerIdentityEvents",
+            confirmed.clone(),
+            true,
+        );
+        assert_submit(cx, true, false, None);
+        confirmed["reason"] = json!("already-loaded");
+        graph(&fixture, cx, "providerIdentityEvents", confirmed, true);
+        assert_closed(cx);
+        assert!(commands(&sink).is_empty());
 
         open(cx);
         let large_list: Vec<_> = (0..200)
