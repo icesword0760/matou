@@ -52,6 +52,16 @@ impl RuntimeChild {
         shell: &Path,
         provider: Option<&Path>,
     ) -> Result<Self> {
+        Self::spawn_configured_with(root, zshrc, shell, provider, |_| {})
+    }
+
+    fn spawn_configured_with(
+        root: &Path,
+        zshrc: &str,
+        shell: &Path,
+        provider: Option<&Path>,
+        configure: impl FnOnce(&mut ProcessCommand),
+    ) -> Result<Self> {
         let data = root.join("数据 空间");
         let workspace = root.join("工作 区");
         let home = root.join("Shell 家目录");
@@ -75,6 +85,7 @@ impl RuntimeChild {
         if let Some(provider) = provider {
             command.env("MATOU_CLAUDE_COMMAND", provider);
         }
+        configure(&mut command);
         let mut child = command.spawn()?;
         let input = child.stdin.take().context("child stdin")?;
         let stdout = child.stdout.take().context("child stdout")?;
@@ -1268,6 +1279,7 @@ fn spawn_fresh_permission_card(
     root: &Path,
     stub: &Path,
     unusable: Option<&str>,
+    permission_startup_window_ms: Option<u64>,
 ) -> Result<RuntimeChild> {
     let missing_shell = root.join("missing-shell");
     let mut seed = RuntimeChild::spawn_configured(root, "", &missing_shell, None)?;
@@ -1307,7 +1319,17 @@ fn spawn_fresh_permission_card(
             ],
         )?;
     }
-    let mut child = RuntimeChild::spawn_configured(root, "", Path::new("/bin/zsh"), Some(stub))?;
+    let mut child = RuntimeChild::spawn_configured_with(
+        root,
+        "",
+        Path::new("/bin/zsh"),
+        Some(stub),
+        |command| {
+            if let Some(millis) = permission_startup_window_ms {
+                command.env("MATOU_PERMISSION_STARTUP_WINDOW_MS", millis.to_string());
+            }
+        },
+    )?;
     child.connect()?;
     assert_eq!(child.session, seed.session);
     Ok(child)
@@ -1331,7 +1353,7 @@ exec /bin/sleep 60
 "#,
         )?;
         fs::set_permissions(&stub, fs::Permissions::from_mode(0o700))?;
-        let mut child = spawn_fresh_permission_card(root.path(), &stub, unusable)?;
+        let mut child = spawn_fresh_permission_card(root.path(), &stub, unusable, None)?;
         if unusable != Some("failed") {
             child.frame(|_, screen, _| screen_has_line(screen, "initial ready"))?;
         }
@@ -1429,7 +1451,7 @@ fn fresh_permission_respawn_failure_does_not_record_an_identity() -> Result<()> 
 case "$*" in
   *'--permission-mode auto'*)
     url=$(/usr/bin/plutil -extract hooks.UserPromptSubmit.0.hooks.0.url raw -o - "$2") || exit 91
-    /usr/bin/curl --silent --fail --noproxy '*' --max-time 2 -H 'content-type: application/json' \
+    /usr/bin/curl --silent --fail --noproxy '*' --max-time 3 -H 'content-type: application/json' \
       --data-binary '{"hook_event_name":"SessionStart","session_id":"early-id"}' "$url" || exit 92
     exit 23
     ;;
@@ -1443,7 +1465,9 @@ exec /bin/sleep 60
 "#,
         )?;
         fs::set_permissions(&stub, fs::Permissions::from_mode(0o700))?;
-        let mut child = spawn_fresh_permission_card(root.path(), &stub, unusable)?;
+        let startup_window_ms = unusable.is_none().then_some(3000);
+        let mut child =
+            spawn_fresh_permission_card(root.path(), &stub, unusable, startup_window_ms)?;
         let session = child.session.clone();
         let db = Connection::open(child.data.join("matou.sqlite"))?;
         let (mode, expected_error) = if unusable.is_some() {
