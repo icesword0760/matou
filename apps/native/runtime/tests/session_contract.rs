@@ -256,12 +256,12 @@ fn live_shell_persists_output_for_history_screen_resize_and_exit() -> Result<()>
     })?;
     assert!(matches!(
         events.get(before_submit),
-        Some(SessionEvent::InputSubmitted)
+        Some(SessionEvent::InputSubmitted(_))
     ));
     assert_eq!(
         events
             .iter()
-            .filter(|event| matches!(event, SessionEvent::InputSubmitted))
+            .filter(|event| matches!(event, SessionEvent::InputSubmitted(_)))
             .count(),
         1
     );
@@ -450,7 +450,7 @@ fn real_storage_fault_stops_one_session_and_retries_the_same_sequence() -> Resul
     assert_eq!(
         blocked_events
             .iter()
-            .filter(|event| matches!(event, SessionEvent::InputSubmitted))
+            .filter(|event| matches!(event, SessionEvent::InputSubmitted(_)))
             .count(),
         2,
         "only the warmup and fault-triggering writes reached the shell"

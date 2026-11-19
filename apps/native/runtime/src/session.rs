@@ -344,7 +344,8 @@ impl Session {
         self.display_terminal
             .selection_action(SelectionAction::Clear)?;
         if bytes.iter().any(|byte| matches!(byte, b'\r' | b'\n')) {
-            self.events.push(SessionEvent::InputSubmitted);
+            self.events
+                .push(SessionEvent::InputSubmitted(Instant::now()));
         }
         let result = process.write(bytes);
         if let Err(error) = &result {

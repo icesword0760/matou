@@ -544,29 +544,22 @@ pub fn record_claude_identity(
             event.event_id.push_str(":restore");
             events.push(event);
         }
-        let previous_work_status: String = tx.query_row(
-            "SELECT work_status FROM sessions WHERE id = ?",
-            [input.session_id],
-            |row| row.get(0),
-        )?;
-        let work_status = match input.event_name {
-            "UserPromptSubmit" | "PreToolUse" => "running",
-            "PermissionRequest" | "Notification" => "needs-input",
-            "Stop" => "idle",
-            _ => &previous_work_status,
-        };
         let cwd = input.observed_metadata["cwd"]
             .as_str()
             .unwrap_or(&session.cwd);
-        let changed = work_status != previous_work_status || cwd != session.cwd;
-        if changed {
+        if cwd != session.cwd {
             tx.execute(
-                "UPDATE sessions SET work_status = ?, cwd = ?, updated_at = ?, version = version + 1
+                "UPDATE sessions SET cwd = ?, updated_at = ?, version = version + 1
                  WHERE id = ?",
-                params![work_status, cwd, now, input.session_id],
+                params![cwd, now, input.session_id],
             )?;
         }
-        if changed || input.first_for_run {
+        if cwd != session.cwd || input.first_for_run {
+            let work_status: String = tx.query_row(
+                "SELECT work_status FROM sessions WHERE id = ?",
+                [input.session_id],
+                |row| row.get(0),
+            )?;
             let mut event = session_event(
                 command,
                 "session.mode-changed",

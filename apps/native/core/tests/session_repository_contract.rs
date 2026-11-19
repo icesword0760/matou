@@ -321,12 +321,12 @@ fn provider_binding_requires_current_run_and_validation_replays_once() -> Result
     assert_eq!(first.result["bindingId"], "existing");
     assert_eq!(first.result["metadata"]["observedNormalStop"], false);
     assert!(first.result["metadata"].get("unrelated").is_none());
-    assert_eq!(work(&db)?, "running");
+    assert_eq!(work(&db)?, "needs-input");
     input.event_name = "Stop";
     input.observed_metadata = &Value::Null;
     input.first_for_run = false;
     record_claude_identity(&mut db, &command("stop"), &input, 15)?;
-    assert_eq!(work(&db)?, "idle");
+    assert_eq!(work(&db)?, "needs-input");
     let mut rows = db.prepare("SELECT * FROM provider_bindings")?;
     let row = rows.query_row([], |row| {
         Ok(json!({
