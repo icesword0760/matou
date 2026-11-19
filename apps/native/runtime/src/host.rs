@@ -36,6 +36,7 @@ use matou_native_core::{
     journal::JournalOptions,
     provider_launch::{ClaudeLaunch, prepare_claude_launch, validate_cwd},
     pty::{LaunchProfile, ShellLaunch},
+    sessions::ClaudeRestore,
     startup::{self, BootstrapResult},
     storage::CommandMetadata,
     workspace_paths::WorkspacePathState,
@@ -161,6 +162,12 @@ pub enum Command {
         session_id: String,
     },
     RestartSession {
+        session_id: String,
+    },
+    RetryProviderRestore {
+        session_id: String,
+    },
+    StartFreshProviderSession {
         session_id: String,
     },
     CreateWorkspace {
@@ -594,6 +601,25 @@ fn run(
     if let Some(workspace_id) = &active_workspace {
         checks.request(&owner, workspace_id)?;
     }
+    let mut startup_order = HashMap::new();
+    for (rank, (session_id, workspace_id)) in owner
+        .startup_provider_restores(scene_id.as_deref())?
+        .into_iter()
+        .enumerate()
+    {
+        startup_order.insert(session_id.clone(), rank);
+        if !pending_launch.contains(&session_id) {
+            checks.request(&owner, &workspace_id)?;
+            launch_retries.insert(
+                session_id,
+                LaunchRetry {
+                    workspace_id,
+                    recovering: true,
+                    validated: false,
+                },
+            );
+        }
+    }
     let mut projected_paths = owner
         .workspace_path_states()?
         .into_iter()
@@ -632,6 +658,7 @@ fn run(
     let mut navigation_publications = VecDeque::new();
     let mut graph_dirty = false;
     let mut provider_identity_events = Vec::new();
+    let mut provider_starting = HashSet::new();
     let mut tasks_dirty = false;
     let clean_exit = 'running: loop {
         let now = Instant::now();
@@ -680,7 +707,8 @@ fn run(
                 let retry = launch_retries.remove(&session_id).expect("checked retry");
                 failed_launches.insert(
                     session_id.clone(),
-                    report_launch_failure(
+                    report_session_launch_failure(
+                        &mut owner,
                         send,
                         &session_id,
                         retry.recovering,
@@ -709,7 +737,8 @@ fn run(
                         }
                         _ => workspace_path_error(&state),
                     };
-                    let failure = report_launch_failure(send, &id, rebuilding, message)?;
+                    let failure =
+                        report_session_launch_failure(&mut owner, send, &id, rebuilding, message)?;
                     failed_launches.insert(id, failure);
                 }
             } else {
@@ -776,8 +805,34 @@ fn run(
                 .map(|(id, _)| id.clone()),
         );
         launch_preparations.retain(|id, _| launch_candidates.contains(id));
+        let mut launch_candidates: Vec<_> = launch_candidates.into_iter().collect();
+        launch_candidates.sort_unstable_by(|left, right| {
+            foreground_sessions
+                .contains(right)
+                .cmp(&foreground_sessions.contains(left))
+                .then_with(|| {
+                    startup_order
+                        .get(left)
+                        .unwrap_or(&usize::MAX)
+                        .cmp(startup_order.get(right).unwrap_or(&usize::MAX))
+                })
+                .then_with(|| left.cmp(right))
+        });
+        // Shell and fresh Claude starts do not consume provider recovery slots.
+        let mut available_slots = 4usize.saturating_sub(provider_starting.len());
+        let mut eligible = HashSet::new();
         let mut completed_launches = Vec::new();
         for session_id in launch_candidates {
+            if owner
+                .claude_binding(&session_id)?
+                .is_some_and(|binding| binding.resumable)
+            {
+                if available_slots == 0 {
+                    continue;
+                }
+                available_slots -= 1;
+            }
+            eligible.insert(session_id.clone());
             if !launch_preparations.contains_key(&session_id) {
                 match prepare_launch(&owner, &options, &session_id) {
                     Ok(result) => {
@@ -787,6 +842,7 @@ fn run(
                 }
             }
         }
+        launch_preparations.retain(|id, _| eligible.contains(id));
         launch_preparations.retain(|id, result| match result.try_recv() {
             Ok(launch) => {
                 completed_launches.push((id.clone(), launch));
@@ -804,11 +860,14 @@ fn run(
         let mut started_shell = false;
         for (session_id, launch) in completed_launches {
             pending_launch.remove(&session_id);
+            startup_order.remove(&session_id);
             let rebuilding = recovering.remove(&session_id).is_some();
             let rebuilding = match launch_retries.remove(&session_id) {
                 Some(retry) => retry.recovering,
                 None => rebuilding || owner.has_shell_run(&session_id)?,
             };
+            let binding = owner.claude_binding(&session_id)?;
+            let resume = binding.as_ref().filter(|binding| binding.resumable);
             let result = launch.and_then(|launch| match launch {
                 PreparedLaunch::Shell(directory) => {
                     owner.set_shell_launch_directory(&session_id, &directory)?;
@@ -821,20 +880,30 @@ fn run(
                     )
                 }
                 PreparedLaunch::ClaudeCode(launch) => {
+                    if let Some(binding) = resume {
+                        owner.change_claude_restore(
+                            &session_id,
+                            ClaudeRestore::Begin(&binding.id),
+                        )?;
+                    }
                     let terminal = terminal_layouts
                         .get(&session_id)
                         .copied()
                         .unwrap_or_else(default_terminal_options);
-                    owner.launch_claude(session_id.clone(), terminal, launch)
+                    owner.launch_claude(session_id.clone(), terminal, launch, binding.as_ref())
                 }
             });
             match result {
                 Ok(()) => {
                     failed_launches.remove(&session_id);
-                    send.send_blocking(Event::Recovery {
-                        session_id: session_id.clone(),
-                        state: RecoveryState::Ready,
-                    })?;
+                    if resume.is_some() {
+                        provider_starting.insert(session_id.clone());
+                    } else {
+                        send.send_blocking(Event::Recovery {
+                            session_id: session_id.clone(),
+                            state: RecoveryState::Ready,
+                        })?;
+                    }
                     dirty.insert(session_id.clone());
                     sessions.insert(session_id);
                     graph_dirty = true;
@@ -843,8 +912,13 @@ fn run(
                 Err(error) => {
                     pending_input.retain(|input| input.session_id != session_id);
                     let recovering = rebuilding && error.downcast_ref::<HookSetup>().is_none();
-                    let failure =
-                        report_launch_failure(send, &session_id, recovering, format!("{error:#}"))?;
+                    let failure = report_session_launch_failure(
+                        &mut owner,
+                        send,
+                        &session_id,
+                        recovering,
+                        format!("{error:#}"),
+                    )?;
                     failed_launches.insert(session_id, failure);
                 }
             }
@@ -1101,6 +1175,11 @@ fn run(
                 } => {
                     if failed_launches.contains_key(&session_id)
                         || launch_retries.contains_key(&session_id)
+                        || (!sessions.contains(&session_id)
+                            && !pending_launch.contains(&session_id)
+                            && owner
+                                .claude_binding(&session_id)?
+                                .is_some_and(|binding| binding.restore_state == "failed"))
                     {
                         continue;
                     }
@@ -1270,10 +1349,59 @@ fn run(
                         false,
                     )
                 }
+                Command::RetryProviderRestore { ref session_id }
+                | Command::StartFreshProviderSession { ref session_id } => {
+                    if !foreground_sessions.contains(session_id)
+                        || pending_launch.contains(session_id)
+                        || launch_retries.contains_key(session_id)
+                        || !owner.can_launch_provider(session_id)
+                    {
+                        continue;
+                    }
+                    let Some(workspace_id) = owner.session_workspace(session_id)? else {
+                        continue;
+                    };
+                    let change = if matches!(command, Command::RetryProviderRestore { .. }) {
+                        ClaudeRestore::Retry
+                    } else {
+                        ClaudeRestore::Fresh
+                    };
+                    if owner.session(session_id)?.is_none_or(|session| {
+                        session.archived_at.is_some() || session.kind != "claude-code"
+                    }) || !owner.change_claude_restore(session_id, change)?
+                    {
+                        continue;
+                    }
+                    failed_launches.remove(session_id);
+                    sessions.remove(session_id);
+                    dirty.remove(session_id);
+                    sequence.remove(session_id);
+                    scroll_requests.remove(session_id);
+                    views.remove(session_id);
+                    awaiting_ui.remove(session_id);
+                    pending_input.retain(|input| input.session_id != *session_id);
+                    operations.retain(|(id, _, _)| id != session_id);
+                    searches.retain(|(id, _, _)| id != session_id);
+                    copies.retain(|(_, id, _, _)| id != session_id);
+                    checks.request(&owner, &workspace_id)?;
+                    launch_retries.insert(
+                        session_id.clone(),
+                        LaunchRetry {
+                            workspace_id,
+                            recovering: matches!(change, ClaudeRestore::Retry),
+                            validated: false,
+                        },
+                    );
+                    continue;
+                }
                 Command::RetryRecovery { ref session_id }
                 | Command::RestartSession { ref session_id } => {
                     let rebuilding = matches!(command, Command::RetryRecovery { .. });
-                    if launch_retries.contains_key(session_id) {
+                    if launch_retries.contains_key(session_id)
+                        || owner
+                            .claude_binding(session_id)?
+                            .is_some_and(|binding| binding.restore_state == "failed")
+                    {
                         continue;
                     }
                     let failed = failed_launches.get(session_id);
@@ -1437,7 +1565,29 @@ fn run(
         for event in owner.poll(Duration::from_millis(4))? {
             match event {
                 OwnerEvent::Domain(_) => graph_dirty = true,
-                OwnerEvent::ProviderIdentity(result) => provider_identity_events.push(result),
+                OwnerEvent::ProviderIdentity(result) => {
+                    if result["result"] == "restore-failed"
+                        && let (Some(id), Some(error)) = (
+                            result["sessionId"].as_str(),
+                            result["restoreError"].as_str(),
+                        )
+                    {
+                        pending_input.retain(|input| input.session_id != id);
+                        failed_launches
+                            .insert(id.to_owned(), RecoveryState::Failed(error.to_owned()));
+                        if result.get("runId").is_some() {
+                            sessions.remove(id);
+                            dirty.remove(id);
+                            views.remove(id);
+                            awaiting_ui.remove(id);
+                            send.send_blocking(Event::Recovery {
+                                session_id: id.to_owned(),
+                                state: RecoveryState::Failed(error.to_owned()),
+                            })?;
+                        }
+                    }
+                    provider_identity_events.push(result);
+                }
                 OwnerEvent::Diagnostic { message, .. } => {
                     send.send_blocking(Event::Diagnostic(message))?
                 }
@@ -1490,6 +1640,20 @@ fn run(
                 }
             }
         }
+        let released: Vec<_> = provider_starting
+            .iter()
+            .filter(|id| !owner.waiting_for_provider_restore(id))
+            .cloned()
+            .collect();
+        for session_id in released {
+            provider_starting.remove(&session_id);
+            if !failed_launches.contains_key(&session_id) && sessions.contains(&session_id) {
+                send.send_blocking(Event::Recovery {
+                    session_id,
+                    state: RecoveryState::Ready,
+                })?;
+            }
+        }
         while let Some(reply) = history.try_recv()? {
             send.send_blocking(Event::History(reply))?;
         }
@@ -1510,7 +1674,7 @@ fn run(
         copies.retain(
             |(request_id, session_id, _, receive)| match receive.try_recv() {
                 Ok(Ok(SelectionCopy { text, interrupted })) => {
-                    if interrupted {
+                    if interrupted && owner.provider_allows_derivation(session_id) {
                         match owner.record_interaction(session_id, "control", true) {
                             Ok(_) => {
                                 graph_dirty = true;
@@ -1651,6 +1815,34 @@ fn workspace_path_error(state: &WorkspacePathState) -> String {
     format!("{WORKSPACE_PATH_INVALID} ({})", state.reason)
 }
 
+fn report_session_launch_failure(
+    owner: &mut ShellOwner,
+    send: &async_channel::Sender<Event>,
+    session_id: &str,
+    recovering: bool,
+    message: String,
+) -> Result<RecoveryState> {
+    if let Some(binding) = owner
+        .claude_binding(session_id)?
+        .filter(|binding| binding.resumable)
+        && owner
+            .session(session_id)?
+            .is_some_and(|session| session.kind == "claude-code")
+    {
+        let reason = format!("provider process could not start: {message}");
+        if owner.change_claude_restore(
+            session_id,
+            ClaudeRestore::Fail {
+                binding_id: &binding.id,
+                error: &reason,
+            },
+        )? {
+            return report_launch_failure(send, session_id, true, reason);
+        }
+    }
+    report_launch_failure(send, session_id, recovering, message)
+}
+
 fn report_launch_failure(
     send: &async_channel::Sender<Event>,
     session_id: &str,
@@ -1693,7 +1885,9 @@ fn send_input(
         return Ok(false);
     }
     // Record the interaction after queueing bytes and before a queued focus or shutdown.
-    let changed = if let Some(kind) = interaction {
+    let changed = if let Some(kind) = interaction
+        && owner.provider_allows_derivation(&session_id)
+    {
         match owner.record_interaction(&session_id, kind, defer_ordering) {
             Ok(_) => true,
             Err(error) => {
@@ -1750,11 +1944,26 @@ fn unstarted_sessions(
         else {
             continue;
         };
-        if node["currentMode"] == "shell"
+        if node["currentMode"] == "shell" {
+            pending.insert(id.to_owned());
+            continue;
+        }
+        let binding = owner.claude_binding(id)?;
+        if binding
+            .as_ref()
+            .is_some_and(|binding| binding.restore_state == "failed")
+        {
+            continue;
+        }
+        if binding.as_ref().is_some_and(|binding| binding.resumable)
             || (owner
                 .session(id)?
                 .is_some_and(|session| session.status == "created")
                 && !owner.has_shell_run(id)?)
+            || (binding.is_some()
+                && owner
+                    .session(id)?
+                    .is_some_and(|session| session.status == "starting"))
         {
             pending.insert(id.to_owned());
         }
@@ -1795,7 +2004,7 @@ fn prepare_launch(
                 })?;
         }
         "claude-code" => {
-            let binding = owner.claude_launch_binding(session_id)?;
+            let binding = owner.claude_binding(session_id)?;
             let data_root = options.data_root.clone();
             thread::Builder::new()
                 .name("claude-launch".into())
@@ -1804,7 +2013,13 @@ fn prepare_launch(
                     let result = prepare_claude_launch(
                         &data_root,
                         Path::new(&session.cwd),
-                        &binding,
+                        binding
+                            .as_ref()
+                            .map_or(&Value::Null, |binding| &binding.metadata),
+                        binding
+                            .as_ref()
+                            .filter(|binding| binding.resumable)
+                            .map(|binding| binding.provider_session_id.as_str()),
                         std::env::vars_os().collect(),
                         terminal.cols,
                         terminal.rows,

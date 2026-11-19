@@ -16,11 +16,11 @@ use matou_native_core::{
     provider_launch::{ClaudeLaunch, attach_claude_settings},
     pty::LaunchProfile,
     session_graph,
-    sessions::{self, SessionRun, StartRunInput},
+    sessions::{self, ClaudeBinding, ClaudeRestore, SessionRun, StartRunInput},
     shell_history,
     storage::{CommandMetadata, DomainCommit},
 };
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, params};
 use serde_json::{Value, json};
 
 use crate::{
@@ -30,6 +30,7 @@ use crate::{
         HookMessage, HookSetup, IDENTITY_TIMEOUT, Observation, ProviderHookServer, Registration,
         Scope,
     },
+    provider_resume::{IDENTITY_MISMATCH, ResumeMonitor},
     worker::{SessionWorker, WorkerCommand, WorkerEvent},
 };
 
@@ -54,7 +55,7 @@ struct RunHook {
     secrets: Vec<String>,
     deadline: Option<Instant>,
     last_observation: Option<Observation>,
-    rejected: bool,
+    resume: Option<ResumeMonitor>,
     reported_missing: bool,
 }
 
@@ -618,23 +619,125 @@ impl ShellOwner {
                 matches!(session.kind.as_str(), "shell" | "claude-code")
                     && session.archived_at.is_none()
                     && (start_failed || session.status == "exited")
-            }))
+            })
+            && !self
+                .claude_binding(session_id)?
+                .is_some_and(|binding| binding.restore_state == "failed"))
     }
 
-    pub(crate) fn claude_launch_binding(&self, session_id: &str) -> Result<Value> {
-        let metadata: Option<String> = self
-            .connection
-            .query_row(
-                "SELECT metadata_json FROM provider_bindings
-             WHERE session_id=? AND provider='claude-code'
-             ORDER BY updated_at DESC, id DESC LIMIT 1",
-                [session_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        Ok(metadata
-            .and_then(|data| serde_json::from_str(&data).ok())
-            .unwrap_or(Value::Null))
+    pub(crate) fn claude_binding(&self, session_id: &str) -> Result<Option<ClaudeBinding>> {
+        sessions::claude_binding(&self.connection, session_id)
+    }
+
+    pub(crate) fn startup_provider_restores(
+        &self,
+        scene_id: Option<&str>,
+    ) -> Result<Vec<(String, String)>> {
+        let mut query = self.connection.prepare(
+            "SELECT sessions.id, tasks.workspace_id FROM sessions
+             JOIN tasks ON tasks.id = sessions.task_id AND tasks.archived_at IS NULL
+             JOIN workspaces ON workspaces.id = tasks.workspace_id AND workspaces.archived_at IS NULL
+             WHERE sessions.kind = 'claude-code' AND sessions.archived_at IS NULL
+               AND EXISTS (
+                   SELECT 1 FROM session_mounts JOIN scenes ON scenes.id = session_mounts.scene_id
+                   WHERE session_mounts.session_id = sessions.id AND scenes.archived_at IS NULL
+               )
+             ORDER BY EXISTS (
+                   SELECT 1 FROM session_mounts WHERE session_id = sessions.id AND scene_id = ?
+               ) DESC, sessions.last_activity_at DESC, sessions.id",
+        )?;
+        let rows = query.query_map([scene_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get(1)?))
+        })?;
+        let mut selected = Vec::new();
+        for row in rows {
+            let (id, workspace) = row?;
+            if self
+                .claude_binding(&id)?
+                .is_some_and(|binding| binding.resumable)
+            {
+                selected.push((id, workspace));
+                if selected.len() == 16 {
+                    break;
+                }
+            }
+        }
+        Ok(selected)
+    }
+
+    pub(crate) fn change_claude_restore(
+        &mut self,
+        session_id: &str,
+        change: ClaudeRestore<'_>,
+    ) -> Result<bool> {
+        let mut events = Vec::new();
+        let changed = self.commit_claude_restore(session_id, change, None, &mut events)?;
+        self.pending.extend(events);
+        Ok(changed)
+    }
+
+    fn commit_claude_restore(
+        &mut self,
+        session_id: &str,
+        change: ClaudeRestore<'_>,
+        run_id: Option<&str>,
+        events: &mut Vec<OwnerEvent>,
+    ) -> Result<bool> {
+        let (result, mismatch) = match change {
+            ClaudeRestore::Begin(_) => ("restoring", false),
+            ClaudeRestore::Fail { error, .. } => ("restore-failed", error == IDENTITY_MISMATCH),
+            ClaudeRestore::Retry => ("retrying", false),
+            ClaudeRestore::Fresh => ("starting-fresh", false),
+        };
+        let id = (self.next_id)();
+        let Some(commit) = sessions::change_claude_restore(
+            &mut self.connection,
+            &command(id.clone(), "session.restore-state-changed", id),
+            session_id,
+            change,
+            now(),
+        )?
+        else {
+            return Ok(false);
+        };
+        let mut payload = commit.result.clone();
+        payload["result"] = json!(result);
+        if let Some(run_id) = run_id {
+            payload["runId"] = json!(run_id);
+        }
+        if mismatch {
+            let mut rejected = payload.clone();
+            rejected["result"] = json!("rejected");
+            rejected["reason"] = json!("identity-mismatch");
+            events.push(OwnerEvent::ProviderIdentity(rejected));
+        }
+        events.push(OwnerEvent::ProviderIdentity(payload));
+        events.push(OwnerEvent::Domain(commit));
+        Ok(true)
+    }
+
+    pub(crate) fn waiting_for_provider_restore(&self, session_id: &str) -> bool {
+        self.shells
+            .get(session_id)
+            .and_then(|shell| shell.hook.as_ref())
+            .is_some_and(|hook| hook.resume.is_some() && hook.deadline.is_some())
+    }
+
+    pub(crate) fn provider_allows_derivation(&self, session_id: &str) -> bool {
+        self.shells.get(session_id).is_some_and(|shell| {
+            !shell.retiring
+                && (shell.is_shell
+                    || shell
+                        .hook
+                        .as_ref()
+                        .is_some_and(|hook| hook.last_observation.is_some()))
+        })
+    }
+
+    pub(crate) fn can_launch_provider(&self, session_id: &str) -> bool {
+        self.shells
+            .get(session_id)
+            .is_none_or(|shell| shell.ended && !shell.retiring && shell.worker.is_finished())
     }
 
     /// Resolve environment and geometry before calling. Startup handshaking stays
@@ -657,6 +760,7 @@ impl ShellOwner {
         session_id: String,
         terminal: matou_native_terminal::TerminalOptions,
         plan: ClaudeLaunch,
+        binding: Option<&ClaudeBinding>,
     ) -> Result<()> {
         let mut launch = plan.launch;
         launch.cols = terminal.cols;
@@ -681,6 +785,13 @@ impl ShellOwner {
             "providerConfigId": safe(&plan.provider_config_id), "model": safe(&plan.model),
             "permissionMode": safe(&plan.permission_mode), "cwd": safe(&launch.cwd.to_string_lossy()),
         });
+        let mut metadata = metadata;
+        if let Some(revision) = binding.and_then(|binding| binding.metadata.get("spawnRevision")) {
+            metadata["spawnRevision"] = revision.clone();
+        }
+        let resume = binding.filter(|binding| binding.resumable).map(|binding| {
+            ResumeMonitor::new(binding, plan.permission_mode == "bypassPermissions")
+        });
         self.launch_run(
             SessionOptions {
                 session_id,
@@ -692,7 +803,7 @@ impl ShellOwner {
             },
             false,
             "",
-            Some((metadata, secrets)),
+            Some((metadata, secrets, resume)),
         )
     }
 
@@ -701,7 +812,7 @@ impl ShellOwner {
         mut options: SessionOptions,
         restore_history: bool,
         divider: &str,
-        provider: Option<(Value, Vec<String>)>,
+        provider: Option<(Value, Vec<String>, Option<ResumeMonitor>)>,
     ) -> Result<()> {
         ensure!(!self.closing, "Runtime is shutting down");
         if let Some(previous) = self.shells.get(&options.session_id) {
@@ -747,9 +858,13 @@ impl ShellOwner {
         let cols = options.launch.cols.into();
         let rows = options.launch.rows.into();
         let run_id = (self.next_id)();
-        let hook = if let Some((launch_metadata, secrets)) = provider {
+        let hook = if let Some((launch_metadata, secrets, resume)) = provider {
             let registration = self
-                .register_hook(&mut options, &run_id)
+                .register_hook(
+                    &mut options,
+                    &run_id,
+                    resume.as_ref().map(|resume| resume.expected_id.clone()),
+                )
                 .context(HookSetup)?;
             Some(RunHook {
                 _registration: registration,
@@ -757,7 +872,7 @@ impl ShellOwner {
                 secrets,
                 deadline: Some(Instant::now() + IDENTITY_TIMEOUT),
                 last_observation: None,
-                rejected: false,
+                resume,
                 reported_missing: false,
             })
         } else {
@@ -818,6 +933,7 @@ impl ShellOwner {
         &mut self,
         options: &mut SessionOptions,
         run_id: &str,
+        expected_id: Option<String>,
     ) -> Result<Registration> {
         if self.hook_server.is_none() {
             self.hook_server = Some(ProviderHookServer::start()?);
@@ -828,7 +944,7 @@ impl ShellOwner {
                 session_id: options.session_id.clone(),
                 run_id: run_id.to_owned(),
                 generation: self.generation.clone(),
-                expected_id: None,
+                expected_id,
             },
         )?;
         attach_claude_settings(&mut options.launch, &registration.settings_path)?;
@@ -916,11 +1032,6 @@ impl ShellOwner {
         let Some(server) = &self.hook_server else {
             return;
         };
-        for shell in self.shells.values_mut() {
-            if shell.hook.is_some() && shell.worker.is_finished() {
-                shell.hook = None;
-            }
-        }
         let hooks: Vec<_> = server.messages().take(64).collect();
         for hook in hooks {
             match hook {
@@ -937,10 +1048,27 @@ impl ShellOwner {
                     .is_some_and(|deadline| deadline <= Instant::now())
             {
                 hook.deadline = None;
+                if let Some(resume) = &mut hook.resume {
+                    resume.release_readiness();
+                }
                 events.push(OwnerEvent::ProviderIdentity(json!({
                     "result": "timed-out", "sessionId": session_id, "runId": shell.run_id,
                     "provider": "claude-code",
+                    "providerSessionId": hook.resume.as_ref().map(|resume| &resume.expected_id),
+                    "restoreState": if hook.resume.is_some() { "restoring" } else { "none" },
+                    "restoreError": null, "spawnRevision": hook.launch_metadata.get("spawnRevision"),
                 })));
+            }
+        }
+        for (session_id, shell) in &mut self.shells {
+            if let Some(bytes) = shell
+                .hook
+                .as_mut()
+                .filter(|hook| hook.last_observation.is_none())
+                .and_then(|hook| hook.resume.as_mut())
+                .and_then(ResumeMonitor::due_input)
+            {
+                write_resume_input(session_id, shell, bytes, events);
             }
         }
     }
@@ -966,7 +1094,21 @@ impl ShellOwner {
             reject_identity(events, &scope, "retired-run");
             return;
         };
-        if hook.rejected || observation.event == "SessionEnd" {
+        if matches!(observation.event, "unknown" | "SessionEnd") {
+            return;
+        }
+        if let (Some(expected), Some(identity)) = (&scope.expected_id, &observation.identity)
+            && expected != identity
+            && let Some(resume) = &hook.resume
+        {
+            let binding_id = resume.binding_id.clone();
+            self.park_provider_run(
+                &scope.session_id,
+                &scope.run_id,
+                &binding_id,
+                IDENTITY_MISMATCH,
+                events,
+            );
             return;
         }
         let safe = |value: Option<String>| {
@@ -980,20 +1122,6 @@ impl ShellOwner {
             }
             return;
         };
-        if observation.event == "unknown" {
-            return;
-        }
-        if scope
-            .expected_id
-            .as_deref()
-            .is_some_and(|expected| expected != identity)
-            && hook.last_observation.is_none()
-        {
-            hook.rejected = true;
-            hook.deadline = None;
-            reject_identity(events, &scope, "identity-mismatch");
-            return;
-        }
         observation.model = safe(observation.model);
         observation.permission_mode = safe(observation.permission_mode);
         observation.cwd = safe(observation.cwd)
@@ -1027,6 +1155,7 @@ impl ShellOwner {
                 run_id: &scope.run_id,
                 generation: &scope.generation,
                 provider_session_id: identity,
+                expected_id: scope.expected_id.as_deref(),
                 launch_metadata: &hook.launch_metadata,
                 observed_metadata: &Value::Object(observed),
                 event_name: observation.event,
@@ -1046,6 +1175,29 @@ impl ShellOwner {
                 events.push(OwnerEvent::Domain(commit));
             }
             Err(_) => reject_identity(events, &scope, "binding-write-failed"),
+        }
+    }
+
+    fn park_provider_run(
+        &mut self,
+        session_id: &str,
+        run_id: &str,
+        binding_id: &str,
+        error: &str,
+        events: &mut Vec<OwnerEvent>,
+    ) {
+        self.retire_sessions(&[session_id.to_owned()]);
+        if let Err(error) = self.commit_claude_restore(
+            session_id,
+            ClaudeRestore::Fail { binding_id, error },
+            Some(run_id),
+            events,
+        ) {
+            diagnostic(
+                events,
+                session_id,
+                format!("persist provider restore failure: {error:#}"),
+            );
         }
     }
 
@@ -1140,6 +1292,22 @@ impl ShellOwner {
     ) {
         let shell = self.shells.get_mut(id).expect("registered session output");
         shell.emitted_output = true;
+        if !self.closing
+            && let Some(hook) = &mut shell.hook
+            && hook.last_observation.is_none()
+            && let Some(resume) = &mut hook.resume
+        {
+            let (failure, input) = resume.ingest(data);
+            if let Some(error) = failure {
+                let run_id = shell.run_id.clone();
+                let binding_id = resume.binding_id.clone();
+                self.park_provider_run(id, &run_id, &binding_id, error, events);
+                return;
+            }
+            if let Some(bytes) = input {
+                write_resume_input(id, shell, bytes, events);
+            }
+        }
         if !shell.is_shell
             && shell
                 .hook
@@ -1276,17 +1444,18 @@ impl ShellOwner {
             return Ok(());
         }
         shell.ended = true;
-        let had_identity = shell
-            .hook
-            .take()
+        let hook = shell.hook.take();
+        let had_identity = hook
+            .as_ref()
             .is_some_and(|hook| hook.last_observation.is_some());
+        let pending_restore = hook.and_then(|hook| hook.resume).filter(|_| !had_identity);
         shell.cwd_capture = None;
         let shutdown = disposed && self.closing && !retiring;
         let run = shell.run_id.clone();
         let pid = shell.worker.process_id();
         let startup_failed =
             !shell.emitted_output && !shutdown && !retiring && (shell.is_shell || had_identity);
-        if shutdown {
+        if shutdown && shell.is_shell {
             let work: String = self.connection.query_row(
                 "SELECT work_status FROM sessions WHERE id=?",
                 [id],
@@ -1316,7 +1485,19 @@ impl ShellOwner {
             time,
         )?;
         events.push(OwnerEvent::Domain(commit));
-        if startup_failed {
+        if !disposed
+            && !self.closing
+            && !retiring
+            && let Some(resume) = pending_restore
+        {
+            self.park_provider_run(
+                id,
+                &run,
+                &resume.binding_id,
+                &format!("provider resume exited with code {}", status.exit_code),
+                events,
+            );
+        } else if startup_failed {
             self.set_work_status(id, "error", events)?;
         }
         Ok(())
@@ -1466,6 +1647,25 @@ fn reject_identity(events: &mut Vec<OwnerEvent>, scope: &Scope, reason: &str) {
     })));
 }
 
+fn write_resume_input(
+    session_id: &str,
+    shell: &RunningShell,
+    bytes: &[u8],
+    events: &mut Vec<OwnerEvent>,
+) {
+    let (reply, _) = mpsc::channel();
+    if let Err(error) = shell.worker.send(WorkerCommand::Write {
+        bytes: bytes.to_vec(),
+        reply,
+    }) {
+        diagnostic(
+            events,
+            session_id,
+            format!("answer Claude Code restore prompt: {error:#}"),
+        );
+    }
+}
+
 fn command(command_id: String, kind: &str, request_hash: String) -> CommandMetadata {
     CommandMetadata {
         command_id,
@@ -1599,15 +1799,15 @@ mod provider_tests {
         let blocked_directory = root.path().join("provider-hooks");
         fs::write(&blocked_directory, "")?;
         let failure = owner
-            .launch_claude(session.into(), terminal, plan())
+            .launch_claude(session.into(), terminal, plan(), None)
             .unwrap_err();
         assert!(failure.downcast_ref::<HookSetup>().is_some());
         assert!(!owner.has_shell_run(session)?);
         fs::remove_file(blocked_directory)?;
-        owner.launch_claude(session.into(), terminal, plan())?;
+        owner.launch_claude(session.into(), terminal, plan(), None)?;
         assert!(
             owner
-                .launch_claude(session.into(), terminal, plan())
+                .launch_claude(session.into(), terminal, plan(), None)
                 .is_err()
         );
         let scope = Scope {
@@ -1713,7 +1913,7 @@ mod provider_tests {
             owner.poll(Duration::from_millis(25))?;
         }
         assert!(!owner.has_shell_worker(session));
-        owner.launch_claude(session.into(), terminal, plan())?;
+        owner.launch_claude(session.into(), terminal, plan(), None)?;
         let current = Scope {
             run_id: owner.shells[session].run_id.clone(),
             ..scope.clone()
@@ -1728,6 +1928,115 @@ mod provider_tests {
         assert!(
             matches!(events.last(), Some(OwnerEvent::ProviderIdentity(value)) if value["reason"] == "retired-run")
         );
+        owner.retire_sessions(&[session.into()]);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while owner.has_shell_worker(session) && Instant::now() < deadline {
+            owner.poll(Duration::from_millis(25))?;
+        }
+        let binding = owner
+            .claude_binding(session)?
+            .context("existing provider binding")?;
+        assert!(binding.resumable);
+        assert!(owner.change_claude_restore(session, ClaudeRestore::Begin(&binding.id))?);
+        owner.launch_claude(session.into(), terminal, plan(), Some(&binding))?;
+        let resume = Scope {
+            session_id: session.into(),
+            run_id: owner.shells[session].run_id.clone(),
+            generation: owner.generation.clone(),
+            expected_id: Some(binding.provider_session_id.clone()),
+        };
+        assert_eq!(resume.expected_id.as_deref(), Some("current-id"));
+        assert!(owner.waiting_for_provider_restore(session));
+        assert!(!owner.can_launch_provider(session));
+        let last = events.len();
+        for event in ["SessionEnd", "unknown"] {
+            owner.apply_hook(
+                resume.clone(),
+                observation(event, Some("wrong-id")),
+                &mut events,
+            );
+        }
+        assert_eq!(events.len(), last);
+        owner.apply_hook(
+            Scope {
+                generation: "old-generation".into(),
+                ..resume.clone()
+            },
+            observation("SessionStart", Some("current-id")),
+            &mut events,
+        );
+        assert!(
+            matches!(events.last(), Some(OwnerEvent::ProviderIdentity(event))
+            if event["reason"] == "retired-run")
+        );
+        owner
+            .shells
+            .get_mut(session)
+            .unwrap()
+            .hook
+            .as_mut()
+            .unwrap()
+            .deadline = Some(Instant::now());
+        owner.poll_provider_hooks(&mut events);
+        assert!(!owner.waiting_for_provider_restore(session));
+        assert!(!owner.provider_allows_derivation(session));
+        assert!(
+            matches!(events.last(), Some(OwnerEvent::ProviderIdentity(event))
+            if event["result"] == "timed-out" && event["restoreState"] == "restoring")
+        );
+        owner.apply_hook(
+            resume.clone(),
+            observation("SessionStart", Some("current-id")),
+            &mut events,
+        );
+        assert!(owner.provider_allows_derivation(session));
+        assert_eq!(
+            owner.claude_binding(session)?.unwrap().restore_state,
+            "none"
+        );
+        // Even a later authoritative report cannot change a targeted run's identity.
+        owner.apply_hook(
+            resume.clone(),
+            observation("Stop", Some("CURRENT-ID")),
+            &mut events,
+        );
+        assert!(!owner.provider_allows_derivation(session));
+        assert_eq!(count(&owner)?, 2);
+        assert_eq!(
+            owner.claude_binding(session)?.unwrap().restore_state,
+            "failed"
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while owner.has_shell_worker(session) && Instant::now() < deadline {
+            owner.poll(Duration::from_millis(25))?;
+        }
+        assert!(owner.can_launch_provider(session));
+        owner.apply_hook(resume, observation("Stop", Some("current-id")), &mut events);
+        assert!(
+            matches!(events.last(), Some(OwnerEvent::ProviderIdentity(event))
+            if event["reason"] == "retired-run")
+        );
+
+        assert!(owner.change_claude_restore(session, ClaudeRestore::Retry)?);
+        assert!(!owner.change_claude_restore(session, ClaudeRestore::Retry)?);
+        let binding = owner.claude_binding(session)?.context("retried binding")?;
+        fs::write(&executable, "#!/bin/sh\nexit 23\n")?;
+        owner.launch_claude(session.into(), terminal, plan(), Some(&binding))?;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut failure_seen = false;
+        while owner.has_shell_worker(session) && Instant::now() < deadline {
+            for event in owner.poll(Duration::from_millis(25))? {
+                if let OwnerEvent::ProviderIdentity(event) = event
+                    && event["result"] == "restore-failed"
+                {
+                    assert_eq!(event["providerSessionId"], "current-id");
+                    assert_eq!(event["restoreError"], "provider resume exited with code 23");
+                    failure_seen = true;
+                }
+            }
+        }
+        assert!(failure_seen);
+        assert!(owner.can_launch_provider(session));
         owner.shutdown()?;
         assert!(
             fs::read_dir(root.path().join("provider-hooks"))?

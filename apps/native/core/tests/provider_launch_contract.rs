@@ -47,7 +47,7 @@ fn prepare(root: &Path, binding: Value, overrides: &[(&str, &str)]) -> Result<Sh
             .iter()
             .map(|&(key, value)| (OsString::from(key), OsString::from(value))),
     );
-    Ok(prepare_claude_launch(root, root, &binding, inherited, 80, 24)?.launch)
+    Ok(prepare_claude_launch(root, root, &binding, None, inherited, 80, 24)?.launch)
 }
 
 fn assert_env(launch: &ShellLaunch, name: &str, expected: &str) {
@@ -59,6 +59,53 @@ fn assert_env(launch: &ShellLaunch, name: &str, expected: &str) {
             .is_some_and(|value| value == expected),
         "{name}"
     );
+}
+
+#[test]
+fn resume_id_follows_model_and_effort_and_precedes_permission_flags() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path();
+    let executable = std::env::current_exe()?;
+    let settings = root.join("Claude settings.json");
+    let metadata = json!({"model": "fixture-model", "permissionMode": "plan"});
+    fs::write(
+        root.join("provider-config.json"),
+        config(
+            json!([{
+                "id": "fixture", "model": "fixture-model", "endpoint": "https://example.invalid",
+                "reasoningEffort": "high",
+            }]),
+            "fixture",
+        )
+        .to_string(),
+    )?;
+    let mut launch = prepare_claude_launch(
+        root,
+        root,
+        &metadata,
+        Some("Original-ID"),
+        BTreeMap::from([("MATOU_CLAUDE_COMMAND".into(), executable.into_os_string())]),
+        80,
+        24,
+    )?
+    .launch;
+    attach_claude_settings(&mut launch, &settings)?;
+    assert_eq!(
+        launch.argv,
+        [
+            "--settings",
+            settings.to_str().context("settings path")?,
+            "--model",
+            "fixture-model",
+            "--effort",
+            "high",
+            "--resume",
+            "Original-ID",
+            "--permission-mode",
+            "plan",
+        ]
+    );
+    Ok(())
 }
 
 #[test]
@@ -265,13 +312,13 @@ fn isolated_path_resolution_never_reads_login_rc() -> Result<()> {
             ),
         ])
     };
-    let error = prepare_claude_launch(root, root, &Value::Null, environment(true), 80, 24)
+    let error = prepare_claude_launch(root, root, &Value::Null, None, environment(true), 80, 24)
         .err()
         .context("closed PATH should fail without a probe")?;
     assert!(error.to_string().contains("PATH"));
     assert!(!marker.exists());
 
-    let launch = prepare_claude_launch(root, root, &Value::Null, environment(false), 80, 24)?;
+    let launch = prepare_claude_launch(root, root, &Value::Null, None, environment(false), 80, 24)?;
     assert_eq!(launch.launch.executable, Path::new("/usr/bin/true"));
     assert!(marker.exists());
     Ok(())

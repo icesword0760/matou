@@ -1,4 +1,4 @@
-//! Prepare a fresh Claude Code run from the frozen runtime's V1 settings.
+//! Prepare a Claude Code run from the frozen runtime's V1 settings.
 use std::{
     collections::BTreeMap,
     ffi::{OsStr, OsString},
@@ -87,6 +87,7 @@ pub fn prepare_claude_launch(
     data_root: &Path,
     cwd: &Path,
     binding: &Value,
+    resume_id: Option<&str>,
     mut environment: BTreeMap<OsString, OsString>,
     cols: u16,
     rows: u16,
@@ -129,6 +130,7 @@ pub fn prepare_claude_launch(
     let argv = claude_argv(
         model,
         reasoning_effort(&provider, model),
+        resume_id,
         binding["permissionMode"].as_str(),
     );
     for key in CALLER_SESSION_MARKERS {
@@ -240,13 +242,21 @@ fn read_provider(data_root: &Path, binding: &Value) -> Result<Provider> {
     })
 }
 
-fn claude_argv(model: &str, effort: Option<&str>, permission: Option<&str>) -> Vec<String> {
+fn claude_argv(
+    model: &str,
+    effort: Option<&str>,
+    resume_id: Option<&str>,
+    permission: Option<&str>,
+) -> Vec<String> {
     let mut argv = Vec::new();
     if !model.trim().is_empty() {
         argv.extend(["--model".into(), model.trim().into()]);
     }
     if let Some(effort) = effort.filter(|effort| !effort.is_empty() && *effort != "follow") {
         argv.extend(["--effort".into(), effort.into()]);
+    }
+    if let Some(id) = resume_id {
+        argv.extend(["--resume".into(), id.into()]);
     }
     match permission {
         Some("bypassPermissions") => argv.push("--dangerously-skip-permissions".into()),

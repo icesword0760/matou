@@ -7,6 +7,7 @@ mod model;
 pub mod owner;
 pub mod protocol;
 mod provider_hook;
+mod provider_resume;
 pub mod search;
 pub mod session;
 pub mod worker;

@@ -303,6 +303,7 @@ fn provider_binding_requires_current_run_and_validation_replays_once() -> Result
         run_id: "older",
         generation: "previous",
         provider_session_id: "from-cli",
+        expected_id: None,
         event_name: "UserPromptSubmit",
         launch_metadata: &metadata,
         observed_metadata: &observed,
@@ -358,5 +359,62 @@ fn provider_binding_requires_current_run_and_validation_replays_once() -> Result
         count("SELECT COUNT(*) FROM domain_events WHERE event_type='provider-binding.recorded'")?,
         2
     );
+    drop(rows);
+    use matou_native_core::sessions::{ClaudeRestore, change_claude_restore, claude_binding};
+    let change = |db: &mut Connection, id, change, time| {
+        change_claude_restore(db, &command(id), &session, change, time)
+    };
+    assert!(claude_binding(&db, &session)?.unwrap().resumable);
+    assert!(change(&mut db, "begin", ClaudeRestore::Begin("existing"), 16)?.is_some());
+    input.first_for_run = true;
+    input.expected_id = Some("from-cli");
+    for (id, event, actual) in [
+        ("case", "SessionStart", "FROM-CLI"),
+        ("space", "SessionStart", "from-cli "),
+        ("end", "SessionEnd", "from-cli"),
+        ("statusline", "unknown", "from-cli"),
+    ] {
+        input.event_name = event;
+        input.provider_session_id = actual;
+        assert!(record_claude_identity(&mut db, &command(id), &input, 17).is_err());
+    }
+    assert_eq!(
+        claude_binding(&db, &session)?.unwrap().restore_state,
+        "restoring"
+    );
+    input.event_name = "SessionStart";
+    input.provider_session_id = "from-cli";
+    let restored = record_claude_identity(&mut db, &command("resumed"), &input, 18)?;
+    assert_eq!(restored.result["bindingId"], "existing");
+    assert_eq!(restored.result["restoreState"], "none");
+    assert_eq!(restored.result["restoreError"], Value::Null);
+
+    let fail = ClaudeRestore::Fail {
+        binding_id: "existing",
+        error: "provider process could not start: fixture",
+    };
+    let failed = change(&mut db, "failed", fail, 19)?.unwrap();
+    assert_eq!(
+        failed.result["restoreError"],
+        "provider process could not start: fixture"
+    );
+    assert_eq!(work(&db)?, "error");
+    assert!(!claude_binding(&db, &session)?.unwrap().resumable);
+    assert!(change(&mut db, "auto", ClaudeRestore::Begin("existing"), 20)?.is_none());
+    let retry = change(&mut db, "retry", ClaudeRestore::Retry, 21)?.unwrap();
+    assert_eq!(retry.result["providerSessionId"], "from-cli");
+    assert_eq!(retry.result["restoreState"], "restoring");
+    assert_eq!(retry.result["restoreError"], Value::Null);
+    assert_eq!(retry.result["spawnRevision"], 1);
+    assert!(change(&mut db, "duplicate", ClaudeRestore::Retry, 22)?.is_none());
+    assert!(change(&mut db, "failed-again", fail, 23)?.is_some());
+    let fresh = change(&mut db, "fresh", ClaudeRestore::Fresh, 24)?.unwrap();
+    assert_eq!(fresh.result["spawnRevision"], 2);
+    assert_eq!(fresh.result["restoreState"], "none");
+    assert!(change(&mut db, "duplicate-fresh", ClaudeRestore::Fresh, 25)?.is_none());
+    assert_eq!(db.query_row(
+        "SELECT resume_state, invalidated_at, restore_error FROM provider_bindings WHERE id='existing'",
+        [], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, Option<String>>(2)?)),
+    )?, ("expired".into(), 23, None));
     Ok(())
 }
