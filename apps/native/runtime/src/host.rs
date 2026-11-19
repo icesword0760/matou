@@ -174,6 +174,12 @@ pub enum Command {
     ListProviderSessions {
         cwd: String,
     },
+    GetProviderSession {
+        cwd: String,
+        provider_session_id: String,
+        start_event_index: Option<i64>,
+        limit: Option<i64>,
+    },
     LoadProviderSession {
         session_id: String,
         provider_session_id: String,
@@ -670,6 +676,7 @@ fn run(
     let (catalog_requests, catalog_replies) = start_provider_catalog()?;
     let mut catalog_loads = HashMap::<String, CatalogLoad>::new();
     let mut catalog_lists = Vec::new();
+    let mut catalog_details = Vec::new();
     let mut catalog_load_errors = Vec::new();
     let mut tasks_dirty = false;
     let clean_exit = 'running: loop {
@@ -1370,11 +1377,30 @@ fn run(
                 }
                 Command::ListProviderSessions { cwd } => {
                     if let Err(
-                        mpsc::TrySendError::Full(request)
-                        | mpsc::TrySendError::Disconnected(request),
-                    ) = catalog_requests.try_send(CatalogRequest { cwd, load: None })
+                        mpsc::TrySendError::Full(CatalogRequest::Index { cwd, .. })
+                        | mpsc::TrySendError::Disconnected(CatalogRequest::Index { cwd, .. }),
+                    ) = catalog_requests.try_send(CatalogRequest::Index { cwd, load: None })
                     {
-                        catalog_lists.push(json!({"cwd": request.cwd, "error": CATALOG_BUSY}));
+                        catalog_lists.push(json!({"cwd": cwd, "error": CATALOG_BUSY}));
+                    }
+                    continue;
+                }
+                Command::GetProviderSession {
+                    cwd,
+                    provider_session_id,
+                    start_event_index,
+                    limit,
+                } => {
+                    if let Err(
+                        mpsc::TrySendError::Full(CatalogRequest::Detail(request))
+                        | mpsc::TrySendError::Disconnected(CatalogRequest::Detail(request)),
+                    ) = catalog_requests.try_send(CatalogRequest::Detail(CatalogDetailRequest {
+                        cwd,
+                        provider_session_id,
+                        start_event_index,
+                        limit,
+                    })) {
+                        catalog_details.push(request.result(Err(CATALOG_BUSY)));
                     }
                     continue;
                 }
@@ -1419,7 +1445,7 @@ fn run(
                             .filter(|session| session.archived_at.is_none())
                             .context("Card is no longer available")?;
                         catalog_requests
-                            .try_send(CatalogRequest {
+                            .try_send(CatalogRequest::Index {
                                 cwd: stored.cwd,
                                 load: Some(CatalogLoadTarget {
                                     scene_id: scene_id.clone().context("No active scene")?,
@@ -1663,7 +1689,14 @@ fn run(
         }
         // Revalidate a selected card after the background read, after any queued
         // navigation/close commands have had a chance to change its authority.
-        for (CatalogRequest { cwd, load }, result) in catalog_replies.try_iter() {
+        for reply in catalog_replies.try_iter() {
+            let (cwd, load, result) = match reply {
+                CatalogReply::Detail(result) => {
+                    catalog_details.push(result);
+                    continue;
+                }
+                CatalogReply::Index { cwd, load, result } => (cwd, load, result),
+            };
             let Some(CatalogLoadTarget {
                 scene_id: requested_scene,
                 session_id,
@@ -1952,6 +1985,7 @@ fn run(
         if (graph_dirty
             || !provider_identity_events.is_empty()
             || !catalog_lists.is_empty()
+            || !catalog_details.is_empty()
             || !catalog_load_errors.is_empty())
             && navigation_publications.is_empty()
         {
@@ -1962,6 +1996,10 @@ fn run(
             }
             if !catalog_lists.is_empty() {
                 graph["providerSessionCatalogResults"] = json!(std::mem::take(&mut catalog_lists));
+            }
+            if !catalog_details.is_empty() {
+                graph["providerSessionDetailResults"] =
+                    Value::Array(std::mem::take(&mut catalog_details));
             }
             if !catalog_load_errors.is_empty() {
                 graph["providerSessionLoadErrors"] =
@@ -2048,15 +2086,43 @@ struct CatalogLoadTarget {
     provider_session_id: String,
 }
 
-struct CatalogRequest {
-    cwd: String,
-    load: Option<CatalogLoadTarget>,
+enum CatalogRequest {
+    Index {
+        cwd: String,
+        load: Option<CatalogLoadTarget>,
+    },
+    Detail(CatalogDetailRequest),
 }
 
-type CatalogReply = (
-    CatalogRequest,
-    Result<Vec<provider_catalog::CatalogEntry>, &'static str>,
-);
+struct CatalogDetailRequest {
+    cwd: String,
+    provider_session_id: String,
+    start_event_index: Option<i64>,
+    limit: Option<i64>,
+}
+
+impl CatalogDetailRequest {
+    fn result(self, result: Result<provider_catalog::SessionDetail, &'static str>) -> Value {
+        match result {
+            Ok(detail) => json!({
+                "cwd": self.cwd, "providerSessionId": self.provider_session_id,
+                "events": detail.events, "page": detail.page,
+            }),
+            Err(error) => json!({
+                "cwd": self.cwd, "providerSessionId": self.provider_session_id, "error": error,
+            }),
+        }
+    }
+}
+
+enum CatalogReply {
+    Index {
+        cwd: String,
+        load: Option<CatalogLoadTarget>,
+        result: Result<Vec<provider_catalog::CatalogEntry>, &'static str>,
+    },
+    Detail(Value),
+}
 
 fn start_provider_catalog() -> Result<(mpsc::SyncSender<CatalogRequest>, Receiver<CatalogReply>)> {
     let (requests, incoming) = mpsc::sync_channel::<CatalogRequest>(16);
@@ -2066,12 +2132,24 @@ fn start_provider_catalog() -> Result<(mpsc::SyncSender<CatalogRequest>, Receive
         .name("provider-catalog".into())
         .spawn(move || {
             for request in incoming {
-                let selected = request
-                    .load
-                    .as_ref()
-                    .map(|load| load.provider_session_id.as_str());
-                let result = provider_catalog::read(root.as_deref(), &request.cwd, selected);
-                if outgoing.send((request, result)).is_err() {
+                let reply = match request {
+                    CatalogRequest::Index { cwd, load } => {
+                        let selected = load.as_ref().map(|load| load.provider_session_id.as_str());
+                        let result = provider_catalog::read(root.as_deref(), &cwd, selected);
+                        CatalogReply::Index { cwd, load, result }
+                    }
+                    CatalogRequest::Detail(request) => {
+                        let result = provider_catalog::detail(
+                            root.as_deref(),
+                            &request.cwd,
+                            &request.provider_session_id,
+                            request.start_event_index,
+                            request.limit,
+                        );
+                        CatalogReply::Detail(request.result(result))
+                    }
+                };
+                if outgoing.send(reply).is_err() {
                     break;
                 }
             }
