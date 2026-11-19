@@ -578,6 +578,27 @@ impl ShellOwner {
         self.shells.contains_key(session_id)
     }
 
+    pub(crate) fn has_shell_run(&self, session_id: &str) -> Result<bool> {
+        Ok(self.connection.query_row(
+            "SELECT EXISTS (SELECT 1 FROM session_runs WHERE session_id=?)",
+            [session_id],
+            |row| row.get(0),
+        )?)
+    }
+
+    pub(crate) fn can_restart_shell(&self, session_id: &str, start_failed: bool) -> Result<bool> {
+        Ok(!self.closing
+            && self
+                .shells
+                .get(session_id)
+                .is_none_or(|shell| shell.ended && !shell.retiring)
+            && self.session(session_id)?.is_some_and(|session| {
+                session.kind == "shell"
+                    && session.archived_at.is_none()
+                    && (start_failed || session.status == "exited")
+            }))
+    }
+
     /// Resolve environment and geometry before calling. Startup handshaking stays
     /// on the runtime thread; subsequent session requests are forwarded without waiting.
     pub fn launch(
@@ -588,7 +609,10 @@ impl ShellOwner {
     ) -> Result<()> {
         ensure!(!self.closing, "Runtime is shutting down");
         if let Some(previous) = self.shells.get(&options.session_id) {
-            ensure!(previous.ended, "Shell worker already exists");
+            ensure!(
+                previous.ended && !previous.retiring,
+                "Shell worker already exists or is retiring"
+            );
         }
         if let Some(mut previous) = self.shells.remove(&options.session_id) {
             previous.worker.shutdown()?;
