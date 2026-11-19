@@ -132,6 +132,10 @@ impl ShellOwner {
         session_graph::project_scene_graph(&self.connection, scene_id, window_id)
     }
 
+    pub(crate) fn scene_workspace_session_count(&self, scene_id: &str) -> Result<i64> {
+        cards::scene_workspace_session_count(&self.connection, scene_id)
+    }
+
     pub fn hierarchy(&self, window_id: &str) -> Result<HierarchyResult> {
         hierarchy::read_hierarchy(&self.connection, window_id)
     }

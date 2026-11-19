@@ -1679,7 +1679,11 @@ fn launch_shell(
 
 fn active_graph(owner: &ShellOwner, scene_id: Option<&str>, window_id: &str) -> Result<Value> {
     match scene_id {
-        Some(scene_id) => owner.graph(scene_id, Some(window_id)),
+        Some(scene_id) => {
+            let mut graph = owner.graph(scene_id, Some(window_id))?;
+            graph["workspaceSessionCount"] = json!(owner.scene_workspace_session_count(scene_id)?);
+            Ok(graph)
+        }
         None => Ok(serde_json::json!({"nodes": []})),
     }
 }

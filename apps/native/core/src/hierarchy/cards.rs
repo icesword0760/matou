@@ -237,6 +237,17 @@ fn active_session(db: &Connection, session_id: &str) -> Result<(String, String, 
     ))
 }
 
+/// Reads the same workspace-wide count used by the final-card command guard.
+pub fn scene_workspace_session_count(db: &Connection, scene_id: &str) -> Result<i64> {
+    let workspace_id: String = db.query_row(
+        "SELECT tasks.workspace_id FROM scenes JOIN tasks ON tasks.id = scenes.task_id
+         WHERE scenes.id = ?",
+        [scene_id],
+        |row| row.get(0),
+    )?;
+    workspace_session_count(db, &workspace_id)
+}
+
 fn workspace_session_count(db: &Connection, workspace_id: &str) -> Result<i64> {
     Ok(db.query_row(
         "SELECT COUNT(*) FROM sessions JOIN tasks ON tasks.id = sessions.task_id
