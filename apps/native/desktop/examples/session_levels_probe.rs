@@ -42,6 +42,84 @@ mod workspace {
     use matou_native_terminal::{Terminal, TerminalOptions};
 
     impl Workspace {
+        pub(super) fn assert_permission_chip(&self, expected: Option<(&str, &str, bool)>) {
+            let chip = self.permission_chip();
+            assert_eq!(
+                chip.as_ref()
+                    .map(|chip| (chip.mode.label(), chip.title.as_str(), chip.disabled)),
+                expected
+            );
+        }
+
+        pub(super) fn assert_permission_menu(&self, open: bool) {
+            assert_eq!(self.permission_menu.is_some(), open);
+        }
+
+        pub(super) fn assert_permission_confirmation(&self, expected: (&str, &str, &str)) {
+            let Some(TabDialog::PermissionMode(state)) = &self.dialog else {
+                panic!("expected permission confirmation");
+            };
+            assert_eq!(state.copy(), expected);
+        }
+
+        pub(super) fn assert_permission_toast(&self, expected: Option<&str>) {
+            assert_eq!(self.permission_toast.as_deref(), expected);
+        }
+
+        pub(super) fn permission_chip_point(&self, window: &Window) -> Point<Pixels> {
+            let viewport = window.viewport_size();
+            point(viewport.width - px(182.), viewport.height - px(18.5))
+        }
+
+        pub(super) fn permission_row_point(&self, index: usize, window: &Window) -> Point<Pixels> {
+            let viewport = window.viewport_size();
+            let row_center_from_bottom = 7. + 26. * (4 - index) as f32 + 13.;
+            point(
+                viewport.width - px(140.),
+                viewport.height - px(34.5 + row_center_from_bottom),
+            )
+        }
+
+        pub(super) fn assert_permission_colors(
+            &self,
+            index: usize,
+            color: u32,
+            cx: &mut Context<Self>,
+        ) {
+            let mode = PermissionMode::ALL[index];
+            let chip = self.permission_chip().unwrap();
+            assert_eq!(chip.mode, mode);
+            let mut view = self.permission_chip_view(&chip, cx);
+            let style = view.style().text.as_ref().unwrap();
+            assert_eq!(style.color, Some(rgb(color).into()));
+            assert_eq!(style.font_size, Some(px(10.).into()));
+            assert_eq!(style.font_weight, Some(FontWeight::SEMIBOLD));
+            assert_eq!(
+                permission_menu_dot_color(mode),
+                if index == 1 { 0x8b949e } else { color }
+            );
+            assert_eq!(
+                permission_chip_text(mode).as_ref(),
+                mode.label().to_ascii_uppercase()
+            );
+            assert_eq!(PERMISSION_CHIP_TRACKING, 0.2);
+            assert_eq!(PERMISSION_MENU_MIN_WIDTH, 180.);
+            assert_eq!(PERMISSION_MENU_GAP, 8.);
+            assert_eq!(PERMISSION_MENU_TITLE, "权限模式");
+            assert_eq!(PERMISSION_MENU_CHECK, "✓");
+            let mut active = permission_menu_item(mode, mode);
+            let mut inactive = permission_menu_item(PermissionMode::ALL[(index + 1) % 5], mode);
+            assert_eq!(
+                active.style().text.as_ref().unwrap().color,
+                Some(rgb(0x58a6ff).into())
+            );
+            assert_eq!(
+                inactive.style().text.as_ref().unwrap().color,
+                Some(rgb(0xc9d1d9).into())
+            );
+            assert_ne!(active.style().background, inactive.style().background);
+        }
+
         pub(super) fn fork_input(&self) -> Entity<RenameInput> {
             let Some(TabDialog::Branch(state)) = &self.dialog else {
                 panic!("expected branch dialog");
@@ -1381,6 +1459,40 @@ mod probe {
             Event::Graph(graph)
         }
 
+        fn permission_mode(&self, mode: Option<&str>) {
+            let Some(BootstrapResult::Writable { connection, .. }) = &self.db else {
+                unreachable!()
+            };
+            if let Some(mode) = mode {
+                connection
+                    .execute(
+                        "UPDATE provider_bindings SET metadata_json =
+                         json_set(metadata_json, '$.permissionMode', ?) WHERE session_id = ?",
+                        (mode, PARENT),
+                    )
+                    .unwrap();
+            } else {
+                connection
+                    .execute(
+                        "DELETE FROM provider_bindings WHERE session_id = ?",
+                        [PARENT],
+                    )
+                    .unwrap();
+            }
+        }
+
+        fn permission_result(&self, mode: &str, error: Option<&str>) -> Event {
+            let Event::Graph(mut graph) = self.graph_event() else {
+                unreachable!()
+            };
+            let mut result = serde_json::json!({"sessionId": PARENT, "permissionMode": mode});
+            if let Some(error) = error {
+                result["error"] = error.into();
+            }
+            graph["providerPermissionModeResults"] = serde_json::json!([result]);
+            Event::Graph(graph)
+        }
+
         fn process(
             &mut self,
             window: WindowHandle<Workspace>,
@@ -1422,6 +1534,7 @@ mod probe {
                     | Command::RetryRecovery { .. }
                     | Command::RetryProviderRestore { .. }
                     | Command::StartFreshProviderSession { .. }
+                    | Command::SetProviderPermissionMode { .. }
                     | Command::CloseSessionCard { .. }
                     | Command::RemoveSessionBranch { .. } => actions.push(command),
                     _ => {}
@@ -3761,10 +3874,340 @@ mod probe {
         );
     }
 
+    async fn verify_permission_mode(cx: &mut AsyncApp) {
+        const LABELS: [(&str, &str, u32); 5] = [
+            ("default", "Default", 0x8b949e),
+            ("auto", "Auto", 0x7ee787),
+            ("acceptEdits", "Accept Edits", 0xd29922),
+            ("plan", "Plan Mode", 0x58a6ff),
+            ("bypassPermissions", "Bypass Permissions", 0xff6b35),
+        ];
+        const DEFAULT: &str = "当前权限模式：Default，点击切换";
+        const PLAN: &str = "当前权限模式：Plan Mode，点击切换";
+        const BYPASS: &str = "当前权限模式：Bypass Permissions，点击切换";
+        const RECOVERING: &str = "当前终端需要先完成恢复";
+        const STORAGE: &str = "终端存储异常，请先恢复或结束当前会话";
+        const READ_ONLY: &str = "数据库处于只读恢复模式";
+        const ENTER_BYPASS: (&str, &str, &str) = (
+            "切换到高权限模式",
+            "切换到 Bypass Permissions 会打断当前 Claude 会话进程（正在执行的任务会被中断），重启后会自动 resume 恢复会话历史。\n\n是否确认？",
+            "确认切换",
+        );
+        const EXIT_BYPASS: (&str, &str, &str) = (
+            "退出高权限模式",
+            "退出 Bypass Permissions 会打断当前 Claude 会话进程（正在执行的任务会被中断），重启后会自动 resume 恢复会话历史。\n\n是否确认？",
+            "确认退出",
+        );
+        const UNBOUND: (&str, &str, &str) = (
+            "切换到高权限模式",
+            "当前 Claude 会话还没有生成可恢复的 sessionId。继续切换会启动一个全新的 Claude 会话，当前内容将不会保留。\n\n是否确认？",
+            "确认切换",
+        );
+        let mut fixture = Fixture::new();
+        fixture.fork_source(true, "idle");
+        let (window, sink) = open_hidden(cx, 1250.);
+        let assert_chip = |cx: &mut AsyncApp, expected| {
+            window
+                .update(cx, |view, _, _| view.assert_permission_chip(expected))
+                .unwrap();
+        };
+        let assert_menu = |cx: &mut AsyncApp, open| {
+            window
+                .update(cx, |view, _, _| view.assert_permission_menu(open))
+                .unwrap();
+        };
+        let click_chip = |cx: &mut AsyncApp| {
+            draw(window, cx);
+            let at = window
+                .update(cx, |view, window, _| view.permission_chip_point(window))
+                .unwrap();
+            click(window, cx, at);
+            draw(window, cx);
+        };
+        let select = |cx: &mut AsyncApp, index| {
+            click_chip(cx);
+            assert_menu(cx, true);
+            let at = window
+                .update(cx, |view, window, _| {
+                    view.permission_row_point(index, window)
+                })
+                .unwrap();
+            click(window, cx, at);
+            draw(window, cx);
+            assert_menu(cx, false);
+        };
+        let qualify = |cx: &mut AsyncApp| {
+            draw(window, cx);
+            window
+                .update(cx, |view, window, cx| view.qualify(PARENT, window, cx))
+                .unwrap();
+        };
+        let assert_dialog = |cx: &mut AsyncApp, copy| {
+            window
+                .update(cx, |view, _, _| view.assert_permission_confirmation(copy))
+                .unwrap();
+        };
+        let assert_closed = |cx: &mut AsyncApp| {
+            window
+                .update(cx, |view, _, _| view.assert_no_dialog())
+                .unwrap();
+        };
+        let dialog_action = |cx: &mut AsyncApp, index| {
+            window
+                .update(cx, |view, window, _| {
+                    view.focus_fork_dialog_control(index, window)
+                })
+                .unwrap();
+            press(window, cx, "enter");
+            draw(window, cx);
+            assert_closed(cx);
+        };
+        let assert_toast = |cx: &mut AsyncApp, expected| {
+            window
+                .update(cx, |view, _, _| view.assert_permission_toast(expected))
+                .unwrap();
+        };
+        let assert_command = |actions: Vec<Command>, mode: &str| {
+            assert!(
+                matches!(
+                    actions.as_slice(),
+                    [Command::SetProviderPermissionMode { session_id, mode: sent }]
+                        if session_id == PARENT && sent == mode
+                ),
+                "unexpected permission command: {}",
+                serde_json::to_string(&actions).unwrap(),
+            );
+        };
+
+        deliver(window, cx, fixture.event(true));
+        draw(window, cx);
+        assert_chip(cx, None);
+        click_chip(cx);
+        assert_menu(cx, false);
+        fixture.focus(SCENE, PARENT);
+        deliver(window, cx, fixture.event(false));
+        assert_chip(cx, Some(("Default", RECOVERING, true)));
+        qualify(cx);
+        for (index, (mode, label, color)) in LABELS.iter().copied().enumerate() {
+            fixture.permission_mode(Some(mode));
+            deliver(window, cx, fixture.graph_event());
+            let title = format!("当前权限模式：{label}，点击切换");
+            window
+                .update(cx, |view, _, cx| {
+                    view.assert_permission_chip(Some((label, &title, false)));
+                    view.assert_permission_colors(index, color, cx);
+                })
+                .unwrap();
+            select(cx, index);
+            assert!(fixture.process(window, cx, &sink).is_empty());
+        }
+        fixture.permission_mode(Some("default"));
+        deliver(window, cx, fixture.graph_event());
+        assert_chip(cx, Some(("Default", DEFAULT, false)));
+        click_chip(cx);
+        assert_menu(cx, true);
+        click_chip(cx);
+        assert_menu(cx, false);
+        click_chip(cx);
+        click(window, cx, point(px(1050.), px(450.)));
+        draw(window, cx);
+        assert_menu(cx, false);
+        click_chip(cx);
+        press(window, cx, "escape");
+        assert_menu(cx, false);
+        assert!(fixture.process(window, cx, &sink).is_empty());
+
+        select(cx, 3);
+        assert_closed(cx);
+        assert_command(fixture.process(window, cx, &sink), "plan");
+        assert_chip(cx, Some(("Default", DEFAULT, true)));
+        click_chip(cx);
+        assert_menu(cx, false);
+        assert!(fixture.process(window, cx, &sink).is_empty());
+        deliver(window, cx, fixture.permission_result("plan", None));
+        assert_chip(cx, Some(("Default", DEFAULT, true)));
+        fixture.permission_mode(Some("plan"));
+        deliver(window, cx, fixture.graph_event());
+        assert_chip(cx, Some(("Plan Mode", PLAN, false)));
+
+        select(cx, 1);
+        assert_closed(cx);
+        assert_command(fixture.process(window, cx, &sink), "auto");
+        deliver(
+            window,
+            cx,
+            fixture.permission_result("acceptEdits", Some("stale result")),
+        );
+        assert_chip(cx, Some(("Plan Mode", PLAN, true)));
+        deliver(
+            window,
+            cx,
+            fixture.permission_result("auto", Some("probe failure")),
+        );
+        assert_toast(cx, Some("切换失败：probe failure"));
+        assert_chip(cx, Some(("Plan Mode", PLAN, false)));
+
+        select(cx, 2);
+        assert_closed(cx);
+        assert_command(fixture.process(window, cx, &sink), "acceptEdits");
+        fixture.permission_mode(Some("acceptEdits"));
+        deliver(window, cx, fixture.permission_result("acceptEdits", None));
+        assert_chip(
+            cx,
+            Some((
+                "Accept Edits",
+                "当前权限模式：Accept Edits，点击切换",
+                false,
+            )),
+        );
+        fixture.permission_mode(Some("plan"));
+        deliver(window, cx, fixture.graph_event());
+
+        select(cx, 4);
+        assert_dialog(cx, ENTER_BYPASS);
+        assert!(fixture.process(window, cx, &sink).is_empty());
+        dialog_action(cx, 1);
+        assert!(fixture.process(window, cx, &sink).is_empty());
+        select(cx, 4);
+        dialog_action(cx, 2);
+        assert_command(fixture.process(window, cx, &sink), "bypassPermissions");
+        deliver(
+            window,
+            cx,
+            Event::Recovery {
+                session_id: PARENT.into(),
+                state: RecoveryState::Restoring,
+            },
+        );
+        fixture.permission_mode(Some("bypassPermissions"));
+        deliver(window, cx, fixture.graph_event());
+        qualify(cx); // CLI consent can render and accept ordinary terminal input in Ready.
+        assert_closed(cx);
+        assert_chip(cx, Some(("Plan Mode", PLAN, true)));
+        window
+            .update(cx, |view, window, cx| {
+                view.assert_terminal_focus(PARENT, true, window, cx)
+            })
+            .unwrap();
+        click_chip(cx);
+        assert_menu(cx, false);
+        assert!(fixture.process(window, cx, &sink).is_empty());
+        deliver(
+            window,
+            cx,
+            fixture.permission_result("bypassPermissions", None),
+        );
+        assert_chip(cx, Some(("Bypass Permissions", BYPASS, false)));
+
+        select(cx, 0);
+        assert_dialog(cx, EXIT_BYPASS);
+        press(window, cx, "escape");
+        assert_closed(cx);
+        assert!(fixture.process(window, cx, &sink).is_empty());
+        select(cx, 0);
+        dialog_action(cx, 2);
+        assert_command(fixture.process(window, cx, &sink), "default");
+        deliver(
+            window,
+            cx,
+            fixture.permission_result("default", Some("probe runtime refusal")),
+        );
+        assert_chip(cx, Some(("Bypass Permissions", BYPASS, false)));
+        assert_toast(cx, Some("切换失败：probe runtime refusal"));
+
+        fixture.permission_mode(None);
+        deliver(window, cx, fixture.graph_event());
+        select(cx, 4);
+        assert_dialog(cx, UNBOUND);
+        dialog_action(cx, 2);
+        assert_command(fixture.process(window, cx, &sink), "bypassPermissions");
+        deliver(
+            window,
+            cx,
+            fixture.permission_result(
+                "bypassPermissions",
+                Some("active AI Session is required for permission respawn"),
+            ),
+        );
+        assert_toast(
+            cx,
+            Some("切换失败：active AI Session is required for permission respawn"),
+        );
+        assert_chip(cx, Some(("Default", DEFAULT, false)));
+
+        fixture.fork_source(false, "idle");
+        let Event::Graph(mut graph) = fixture.graph_event() else {
+            unreachable!()
+        };
+        graph["providerIdentityEvents"] = serde_json::json!([{
+            "sessionId": PARENT,
+            "providerSessionId": "probe-provider",
+            "result": "confirmed",
+        }]);
+        deliver(window, cx, Event::Graph(graph));
+        deliver(window, cx, fixture.graph_event());
+        select(cx, 4);
+        assert_dialog(cx, ENTER_BYPASS);
+        dialog_action(cx, 1);
+        assert!(fixture.process(window, cx, &sink).is_empty());
+
+        deliver(
+            window,
+            cx,
+            Event::StorageFault {
+                session_id: PARENT.into(),
+                message: "probe storage fault".into(),
+            },
+        );
+        assert_chip(cx, Some(("Default", STORAGE, true)));
+        click_chip(cx);
+        assert_menu(cx, false);
+        deliver(
+            window,
+            cx,
+            Event::StorageRecovered {
+                session_id: PARENT.into(),
+            },
+        );
+        sink.read_only();
+        assert_chip(cx, Some(("Default", READ_ONLY, true)));
+        click_chip(cx);
+        assert_menu(cx, false);
+        assert!(fixture.process(window, cx, &sink).is_empty());
+        sink.generation(1);
+
+        cx.background_executor()
+            .timer(Duration::from_millis(2500))
+            .await;
+        assert_toast(
+            cx,
+            Some("切换失败：active AI Session is required for permission respawn"),
+        );
+        cx.background_executor()
+            .timer(Duration::from_millis(700))
+            .await;
+        assert_toast(cx, None);
+        window
+            .update(cx, |_, window, _| window.remove_window())
+            .unwrap();
+        println!(
+            "Permission mode | GPUI/SQLite chip, menu, confirmation, command, pending, block and toast assertions passed"
+        );
+    }
+
     pub(super) fn run() {
         let loader_only = std::env::args().any(|arg| arg == "--session-loader");
         let fork_only = std::env::args().any(|arg| arg == "--fork");
+        let permission_only = std::env::args().any(|arg| arg == "--permission");
         Application::new().with_assets(NativeAssets).run(move |cx| {
+            if permission_only {
+                cx.spawn(async |cx| {
+                    verify_permission_mode(cx).await;
+                    cx.update(|cx| cx.quit()).unwrap();
+                })
+                .detach();
+                return;
+            }
             if fork_only {
                 cx.spawn(async |cx| {
                     verify_fork(cx).await;
