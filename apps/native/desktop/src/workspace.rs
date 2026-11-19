@@ -4620,11 +4620,14 @@ impl Workspace {
                 events.iter().find(|result| {
                     result["sessionId"] == *session_id
                         && result["providerSessionId"] == load.id
-                        && newer_revision(&result["spawnRevision"])
-                        && matches!(
-                            result["result"].as_str(),
-                            Some("confirmed" | "restore-failed")
-                        )
+                        && match result["result"].as_str() {
+                            Some("confirmed") => {
+                                result["reason"] == "already-loaded"
+                                    || newer_revision(&result["spawnRevision"])
+                            }
+                            Some("restore-failed") => newer_revision(&result["spawnRevision"]),
+                            _ => false,
+                        }
                 })
             });
             let error = error.or_else(|| {
