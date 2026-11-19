@@ -104,8 +104,15 @@ def verify(root, env, guard, binary, cli, config, key, proof):
                     seen = [row for row in host.notifications if row["eventId"] == matches[0]["eventId"]]
                     require(len(seen) <= 1, "A notification was sent to the client twice")
                     if seen:
-                        require(seen[0] == matches[0], "Graph notification differed from the SQLite event")
-                        return seen[0]
+                        graph = seen[0]
+                        persisted = matches[0]
+                        # sceneId is a delivery-only field.
+                        scene_id = graph.get("sceneId")
+                        require(graph == persisted or (
+                            isinstance(scene_id, str) and scene_id != ""
+                            and {key: value for key, value in graph.items() if key != "sceneId"} == persisted
+                        ), "Graph notification differed from the SQLite event")
+                        return graph
                 return None
 
             completed = dict(eventType="completed", title="Claude Code",
