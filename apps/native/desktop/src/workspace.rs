@@ -10121,6 +10121,8 @@ impl Render for Workspace {
                 canvas(
                     |_, _, _| (),
                     move |_, _, window, cx| {
+                        #[cfg(all(target_os = "macos", debug_assertions))]
+                        crate::macos::window_diag::workspace_painted(window, cx);
                         let _ = geometry_view.update(cx, |this, cx| {
                             let overflow = this.tab_scroll.max_offset().width > px(4.);
                             if overflow != this.tab_overflow {

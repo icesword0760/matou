@@ -83,6 +83,16 @@ fn main() -> Result<()> {
             items: vec![MenuItem::action("退出 Matou Native", Quit)],
         }]);
         let bounds = Bounds::centered(None, size(px(1200.), px(780.)), cx);
+        #[cfg(all(target_os = "macos", debug_assertions))]
+        let window_diag = match std::env::var("MATOU_WINDOW_DIAG").as_deref() {
+            Ok("1") => Some(false),
+            Ok("2") => Some(true),
+            _ => None,
+        };
+        #[cfg(all(target_os = "macos", debug_assertions))]
+        if window_diag.is_some() {
+            eprintln!("[window-diag] open_window begin");
+        }
         match cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -125,6 +135,10 @@ fn main() -> Result<()> {
                         }
                         false
                     });
+                }
+                #[cfg(all(target_os = "macos", debug_assertions))]
+                if let Some(visibility_probe) = window_diag {
+                    macos::window_diag::window_created(window, cx, visibility_probe);
                 }
                 workspace
             },
