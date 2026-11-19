@@ -533,17 +533,17 @@ fn archive_task(tx: &Connection, task_id: &str, now: i64) -> Result<()> {
     Ok(())
 }
 
-struct NewTask<'a> {
-    command_id: &'a str,
-    window_id: &'a str,
-    workspace: &'a Workspace,
-    ids: &'a HierarchyIds,
-    title: &'a str,
-    now: i64,
-    last_opened_at: i64,
+pub(super) struct NewTask<'a> {
+    pub(super) command_id: &'a str,
+    pub(super) window_id: &'a str,
+    pub(super) workspace: &'a Workspace,
+    pub(super) ids: &'a HierarchyIds,
+    pub(super) title: &'a str,
+    pub(super) now: i64,
+    pub(super) last_opened_at: i64,
 }
 
-fn insert_task_hierarchy(
+pub(super) fn insert_task_hierarchy(
     tx: &Connection,
     events: &mut Vec<DomainEventInput>,
     task: NewTask<'_>,
@@ -732,7 +732,7 @@ fn update_task_order(
     Ok(())
 }
 
-fn update_workspace_order(
+pub(super) fn update_workspace_order(
     tx: &Connection,
     workspace_id: &str,
     order: &[String],
@@ -765,7 +765,7 @@ fn require_task(tx: &Connection, task_id: &str) -> Result<Task> {
         .ok_or_else(|| missing("Task"))?)
 }
 
-fn require_workspace(tx: &Connection, workspace_id: &str) -> Result<Workspace> {
+pub(super) fn require_workspace(tx: &Connection, workspace_id: &str) -> Result<Workspace> {
     Ok(tx
         .query_row(
             "SELECT * FROM workspaces WHERE id = ? AND archived_at IS NULL",
@@ -783,7 +783,7 @@ fn missing(entity: &str) -> TaskError {
     }
 }
 
-fn workspace_path_is_available(tx: &Connection, workspace_id: &str) -> Result<bool> {
+pub(super) fn workspace_path_is_available(tx: &Connection, workspace_id: &str) -> Result<bool> {
     Ok(!tx
         .prepare(
             "SELECT 1 FROM workspace_path_state WHERE workspace_id = ? AND status = 'invalid'",

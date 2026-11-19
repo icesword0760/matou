@@ -210,7 +210,8 @@ pub fn finish_run(
         )?;
         tx.execute(
             "UPDATE sessions
-             SET status = 'exited', work_status = 'exited', updated_at = ?, last_activity_at = ?,
+             SET status = CASE WHEN archived_at IS NULL THEN 'exited' ELSE 'archived' END,
+                 work_status = 'exited', updated_at = ?, last_activity_at = ?,
                  version = version + 1
              WHERE id = ?",
             params![now, now, before.session_id],
@@ -235,34 +236,45 @@ pub fn interrupt_run(
     committed_at: i64,
 ) -> Result<DomainCommit> {
     execute(db, command, committed_at, |tx, events| {
-        let before = require_run(tx, run_id)?;
-        let session = require_session(tx, &before.session_id)?;
-        ensure!(
-            matches!(before.status.as_str(), "starting" | "running"),
-            "only an active SessionRun can be interrupted"
-        );
-        tx.execute(
-            "UPDATE session_runs SET status = 'interrupted', ended_at = ? WHERE id = ?",
-            params![now, run_id],
-        )?;
-        tx.execute(
-            "UPDATE sessions SET
+        let (run, event) = interrupt_run_in_transaction(tx, command, run_id, now)?;
+        events.push(event);
+        Ok(run)
+    })
+}
+
+pub(crate) fn interrupt_run_in_transaction(
+    tx: &Connection,
+    command: &CommandMetadata,
+    run_id: &str,
+    now: i64,
+) -> Result<(Value, DomainEventInput)> {
+    let before = require_run(tx, run_id)?;
+    let session = require_session(tx, &before.session_id)?;
+    ensure!(
+        matches!(before.status.as_str(), "starting" | "running"),
+        "only an active SessionRun can be interrupted"
+    );
+    tx.execute(
+        "UPDATE session_runs SET status = 'interrupted', ended_at = ? WHERE id = ?",
+        params![now, run_id],
+    )?;
+    tx.execute(
+        "UPDATE sessions SET
                status = CASE WHEN archived_at IS NULL THEN 'interrupted' ELSE status END,
                work_status = CASE WHEN archived_at IS NULL THEN 'interrupted' ELSE work_status END,
                updated_at = ?, last_activity_at = ?, version = version + 1
              WHERE id = ?",
-            params![now, now, before.session_id],
-        )?;
-        let run = serde_json::to_value(require_run(tx, run_id)?)?;
-        events.push(session_event(
-            command,
-            "session.run-interrupted",
-            &session,
-            now,
-            json!({"run": run}),
-        ));
-        Ok(run)
-    })
+        params![now, now, before.session_id],
+    )?;
+    let run = serde_json::to_value(require_run(tx, run_id)?)?;
+    let event = session_event(
+        command,
+        "session.run-interrupted",
+        &session,
+        now,
+        json!({"run": run}),
+    );
+    Ok((run, event))
 }
 
 pub fn rename_session(
@@ -340,16 +352,7 @@ pub fn archive_session(
 ) -> Result<DomainCommit> {
     execute(db, command, committed_at, |tx, events| {
         let before = require_session(tx, session_id)?;
-        let active: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM session_runs WHERE session_id = ?
-               AND status IN ('starting', 'running'))",
-            [session_id],
-            |row| row.get(0),
-        )?;
-        ensure!(
-            !active,
-            "active SessionRuns must be stopped before archiving a Session"
-        );
+        require_no_active_run(tx, session_id)?;
         tx.execute(
             "UPDATE sessions SET status = 'archived', archived_at = ?, updated_at = ?,
                version = version + 1 WHERE id = ?",
@@ -365,6 +368,19 @@ pub fn archive_session(
         ));
         Ok(session)
     })
+}
+
+pub(crate) fn require_no_active_run(db: &Connection, session_id: &str) -> Result<()> {
+    let active = db
+        .prepare(
+            "SELECT 1 FROM session_runs WHERE session_id = ? AND status IN ('starting', 'running')",
+        )?
+        .exists([session_id])?;
+    ensure!(
+        !active,
+        "active SessionRuns must be stopped before archiving a Session"
+    );
+    Ok(())
 }
 
 pub fn get_session(db: &Connection, id: &str) -> Result<Option<Session>> {

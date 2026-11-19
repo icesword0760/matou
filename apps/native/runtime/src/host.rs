@@ -28,6 +28,7 @@ use matou_native_core::{
     hierarchy::{
         self, BootstrapWindowInput, HierarchyIds, HierarchyResult, Scene, Task, Workspace,
         canvas::{CanvasIds, CanvasMessages, CreateCanvasInput, CreateShellSiblingInput},
+        cards::{CloseSessionCardInput, RemoveScope, RemoveSessionBranchInput},
         tabs::{CloseSceneInput, RenameSceneInput, ReorderSceneInput},
         tasks, workspaces,
     },
@@ -41,7 +42,7 @@ use matou_native_terminal::{
     GridSelection, InputModes, Screen, SelectionAction, TerminalOptions, Theme,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -226,6 +227,19 @@ pub enum Command {
     PreviewSceneClose {
         scene_id: String,
     },
+    CloseSessionCard {
+        scene_id: String,
+        session_id: String,
+        confirmed_intent: Option<String>,
+        #[serde(default)]
+        preserve_scene_on_last_session: bool,
+    },
+    RemoveSessionBranch {
+        scene_id: String,
+        session_id: String,
+        #[serde(default)]
+        scope: RemoveScope,
+    },
     FocusSession {
         scene_id: String,
         session_id: String,
@@ -307,7 +321,7 @@ pub enum Event {
         message: String,
         attempted_focus: Option<(String, String)>,
     },
-    /// Session IDs retired by a scene close, before its navigation projection.
+    /// Session IDs retired by a navigation command, before its projection.
     ScenesDisposed(Vec<String>),
     SceneClosePreview {
         scene_id: String,
@@ -319,6 +333,7 @@ pub enum Event {
         update: matou_native_core::geometry::GeometryUpdate,
         error: Option<String>,
     },
+    /// Graph and optional `sessionCardAction` result for the final-card notice.
     Graph(Value),
     ClipboardWrite {
         session_id: String,
@@ -606,9 +621,10 @@ fn run(
     let mut operations = Vec::<WorkerOperation>::new();
     let mut searches = Vec::<(String, u64, Receiver<Result<SearchResult>>)>::new();
     let mut copies = Vec::<(u64, String, bool, Receiver<Result<SelectionCopy>>)>::new();
+    let mut navigation_publications = VecDeque::new();
+    let mut graph_dirty = false;
+    let mut tasks_dirty = false;
     let clean_exit = 'running: loop {
-        let mut graph_dirty = false;
-        let mut tasks_dirty = false;
         let now = Instant::now();
         if now >= next_active_check {
             if let Some(workspace_id) = &active_workspace {
@@ -839,6 +855,8 @@ fn run(
                     | Command::RenameScene { .. }
                     | Command::ReorderScene { .. }
                     | Command::CloseScene { .. }
+                    | Command::CloseSessionCard { .. }
+                    | Command::RemoveSessionBranch { .. }
                     | Command::FocusSession { .. }
             ) {
                 // Each command mutates the authoritative domain before the view changes.
@@ -878,7 +896,23 @@ fn run(
                         | Command::SelectScene { .. }
                 );
                 match navigate(&mut owner, window_id, command) {
-                    Ok((hierarchy, disposed)) => {
+                    Ok((hierarchy, disposed, card_action)) => {
+                        if let Some(action) = &card_action
+                            && action["outcome"] == "hide-window"
+                        {
+                            let mut graph = active_graph(&owner, scene_id.as_deref(), window_id)?;
+                            graph["sessionCardAction"] = action.clone();
+                            let event = Event::Graph(graph);
+                            if navigation_publications.is_empty() {
+                                send.send_blocking(event)?;
+                            } else {
+                                navigation_publications.push_back((Vec::new(), false, event));
+                            }
+                            continue;
+                        }
+                        let wait_for_workers = card_action.is_some();
+                        let defer_publication =
+                            wait_for_workers || !navigation_publications.is_empty();
                         if !disposed.is_empty() {
                             for id in &disposed {
                                 sessions.remove(id);
@@ -892,10 +926,15 @@ fn run(
                                 deferred_recovery.remove(id);
                                 failed_recovery.remove(id);
                                 recovery_retries.remove(id);
+                                launch_directories.remove(id);
                             }
                             pending_input.retain(|input| !disposed.contains(&input.session_id));
                             operations.retain(|(id, _, _)| sessions.contains(id));
-                            send.send_blocking(Event::ScenesDisposed(disposed))?;
+                            searches.retain(|(id, _, _)| !disposed.contains(id));
+                            copies.retain(|(_, id, _, _)| !disposed.contains(id));
+                            if !defer_publication {
+                                send.send_blocking(Event::ScenesDisposed(disposed.clone()))?;
+                            }
                         }
                         let next_scene = hierarchy.scene.as_ref().map(|scene| scene.id.clone());
                         let next_workspace = hierarchy
@@ -911,7 +950,7 @@ fn run(
                         scene_id = next_scene;
                         active_task = hierarchy.task.as_ref().map(|task| task.id.clone());
                         active_workspace = next_workspace;
-                        let graph = active_graph(&owner, scene_id.as_deref(), window_id)?;
+                        let mut graph = active_graph(&owner, scene_id.as_deref(), window_id)?;
                         pending_launch = unstarted_shells(&graph, &sessions);
                         pending_launch.retain(|id| !failed_recovery.contains(id));
                         foreground_shells = shell_ids(&graph).map(str::to_owned).collect();
@@ -928,7 +967,9 @@ fn run(
                             .map(|task| owner.scenes(&task.id))
                             .transpose()?
                             .unwrap_or_default();
-                        send_sidebar(&owner, window_id, send)?;
+                        if !defer_publication {
+                            send_sidebar(&owner, window_id, send)?;
+                        }
                         if let Some((action, workspace_id)) = workspace_action {
                             if action == "relink"
                                 && let Some(workspace_id) = &workspace_id
@@ -955,7 +996,16 @@ fn run(
                                 error: None,
                             })?;
                         }
-                        send.send_blocking(Event::Navigation {
+                        if let Some(mut action) = card_action {
+                            // The outer graph is already the affected canvas for foreground actions.
+                            if action["sceneId"] == graph["sceneId"]
+                                && let Some(action) = action.as_object_mut()
+                            {
+                                action.remove("graph");
+                            }
+                            graph["sessionCardAction"] = action;
+                        }
+                        let event = Event::Navigation {
                             hierarchy,
                             scenes,
                             graph,
@@ -964,7 +1014,12 @@ fn run(
                                 .map(|id| owner.geometry(id))
                                 .transpose()?
                                 .unwrap_or_default(),
-                        })?;
+                        };
+                        if defer_publication {
+                            navigation_publications.push_back((disposed, wait_for_workers, event));
+                        } else {
+                            send.send_blocking(event)?;
+                        }
                         // Existing workers and terminal surfaces remain alive across tab changes.
                         dirty.extend(sessions.iter().cloned());
                     }
@@ -1227,7 +1282,11 @@ fn run(
                             attempted_focus: None,
                         },
                     };
-                    send.send_blocking(event)?;
+                    if navigation_publications.is_empty() {
+                        send.send_blocking(event)?;
+                    } else {
+                        navigation_publications.push_back((Vec::new(), false, event));
+                    }
                     continue;
                 }
                 Command::Refresh => {
@@ -1241,7 +1300,11 @@ fn run(
                         checks.request(&owner, workspace_id)?;
                         launch_validated = false;
                     }
-                    send.send_blocking(Event::Graph(graph))?;
+                    if navigation_publications.is_empty() {
+                        send.send_blocking(Event::Graph(graph))?;
+                    } else {
+                        graph_dirty = true;
+                    }
                     continue;
                 }
                 Command::CreateWorkspace { .. }
@@ -1262,6 +1325,8 @@ fn run(
                 | Command::RenameScene { .. }
                 | Command::ReorderScene { .. }
                 | Command::CloseScene { .. }
+                | Command::CloseSessionCard { .. }
+                | Command::RemoveSessionBranch { .. }
                 | Command::FocusSession { .. } => unreachable!("navigation handled above"),
                 #[cfg(all(test, target_os = "macos"))]
                 Command::TestPause { paused, resume } => {
@@ -1400,15 +1465,36 @@ fn run(
                 false
             }
         });
-        if graph_dirty {
+        // Keep processing other Shell traffic while the existing owner loop
+        // drains SavedExit and joins each retired worker. Publish in command order.
+        while navigation_publications
+            .front()
+            .is_some_and(|(disposed, wait, _)| {
+                !wait || disposed.iter().all(|id| !owner.has_shell_worker(id))
+            })
+        {
+            let (disposed, _, event) = navigation_publications
+                .pop_front()
+                .expect("navigation result");
+            if !disposed.is_empty() {
+                send.send_blocking(Event::ScenesDisposed(disposed))?;
+            }
+            if matches!(event, Event::Navigation { .. }) {
+                send_sidebar(&owner, window_id, send)?;
+            }
+            send.send_blocking(event)?;
+        }
+        if graph_dirty && navigation_publications.is_empty() {
             send.send_blocking(Event::Graph(active_graph(
                 &owner,
                 scene_id.as_deref(),
                 window_id,
             )?))?;
+            graph_dirty = false;
         }
-        if tasks_dirty {
+        if tasks_dirty && navigation_publications.is_empty() {
             send_sidebar(&owner, window_id, send)?;
+            tasks_dirty = false;
         }
         views.retain(|session_id, pending| match pending.receive.try_recv() {
             Ok(Ok((screen, modes, selection))) => {
@@ -1648,7 +1734,7 @@ fn navigate(
     owner: &mut ShellOwner,
     window_id: &str,
     command: Command,
-) -> Result<(HierarchyResult, Vec<String>)> {
+) -> Result<(HierarchyResult, Vec<String>, Option<Value>)> {
     let time = now();
     let ids = CanvasIds {
         scene_id: id(),
@@ -1762,7 +1848,7 @@ fn navigate(
                 &input,
                 time,
             )?;
-            return Ok((owner.hierarchy(window_id)?, disposed));
+            return Ok((owner.hierarchy(window_id)?, disposed, None));
         }
         Command::CreateTask { workspace_id } => {
             let input = tasks::CreateTaskInput {
@@ -1843,7 +1929,7 @@ fn navigate(
                 &hierarchy_ids(),
                 time,
             )?;
-            return Ok((owner.hierarchy(window_id)?, disposed));
+            return Ok((owner.hierarchy(window_id)?, disposed, None));
         }
         Command::CreateCanvas { task_id } => {
             let input = CreateCanvasInput {
@@ -1935,7 +2021,76 @@ fn navigate(
                 &input,
                 time,
             )?;
-            return Ok((owner.hierarchy(window_id)?, disposed));
+            return Ok((owner.hierarchy(window_id)?, disposed, None));
+        }
+        Command::CloseSessionCard {
+            scene_id,
+            session_id,
+            confirmed_intent,
+            preserve_scene_on_last_session,
+        } => {
+            let input = CloseSessionCardInput {
+                window_id: window_id.into(),
+                scene_id,
+                session_id,
+                confirmed_intent,
+                preserve_scene_on_last_session,
+                now: time,
+            };
+            let result = owner.close_session_card(
+                &metadata("hierarchy.delete-session", &serde_json::to_value(&input)?),
+                &input,
+                &hierarchy_ids(),
+                time,
+            )?;
+            let disposed = serde_json::from_value(result["disposedSessionIds"].clone())?;
+            let mut action = json!({
+                "action": "close-session-card",
+                "sceneId": input.scene_id,
+                "sessionId": input.session_id,
+                "outcome": result["outcome"],
+                "rebuildCanvas": result["rebuildCanvas"],
+                "disposedSessionIds": disposed,
+            });
+            if action["outcome"] == "hide-window" {
+                action["notice"] = json!({
+                    "body": "当前已是最后一个事项下的最后一个标签，这里点击关闭不会删除该事项。\n\n如需删除该工作区，请在左侧事项面板的下拉菜单中执行删除。",
+                    "confirmLabel": "我知道了",
+                });
+            }
+            return Ok((owner.hierarchy(window_id)?, disposed, Some(action)));
+        }
+        Command::RemoveSessionBranch {
+            scene_id,
+            session_id,
+            scope,
+        } => {
+            let input = RemoveSessionBranchInput {
+                window_id: window_id.into(),
+                scene_id,
+                session_id,
+                scope,
+                now: time,
+            };
+            let result = owner.remove_session_branch(
+                &metadata(
+                    "hierarchy.remove-session-branch",
+                    &serde_json::to_value(&input)?,
+                ),
+                &input,
+                time,
+            )?;
+            let disposed = serde_json::from_value(result["disposedSessionIds"].clone())?;
+            let action = json!({
+                "action": "remove-session-branch",
+                "sceneId": input.scene_id,
+                "sessionId": input.session_id,
+                "scope": scope,
+                "graph": result["graph"],
+                "removedSessionIds": result["removedSessionIds"],
+                "disposedSessionIds": disposed,
+            });
+            return Ok((owner.hierarchy(window_id)?, disposed, Some(action)));
         }
         Command::FocusSession {
             scene_id,
@@ -1951,7 +2106,7 @@ fn navigate(
         }
         _ => unreachable!("only navigation commands reach navigate"),
     }
-    Ok((owner.hierarchy(window_id)?, Vec::new()))
+    Ok((owner.hierarchy(window_id)?, Vec::new(), None))
 }
 
 fn hierarchy_ids() -> HierarchyIds {
@@ -2044,7 +2199,7 @@ mod tests {
             let scene = original.scene.context("seed scene")?.id;
             let first = original.session.context("seed session")?.id;
             let mut owner = ShellOwner::new(connection, ownership, id)?;
-            let (selection, _) = navigate(
+            let (selection, _, _) = navigate(
                 &mut owner,
                 window_id,
                 Command::CreateShellSibling {
