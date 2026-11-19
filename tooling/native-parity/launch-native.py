@@ -15,13 +15,14 @@ import time
 project = Path(__file__).resolve().parents[2]
 parser = argparse.ArgumentParser()
 parser.add_argument('--binary', type=Path, required=True)
+parser.add_argument('--destination', type=Path)
 args = parser.parse_args()
 binary = args.binary.resolve(strict=True)
 runtime_binary = (binary.parent / 'matou-native-runtime').resolve(strict=True)
 for source in (binary, runtime_binary):
     if not source.is_file():
         raise SystemExit(f"Required native executable is not a file: {source}")
-destination = project / 'artifacts/native-parity/native'
+destination = args.destination.resolve() if args.destination else project / 'artifacts/native-parity/native'
 destination.mkdir(parents=True, exist_ok=True)
 launch = destination / 'launch.json'
 if launch.exists():
@@ -37,7 +38,7 @@ environment = destination / 'environment.json'
 if environment.exists():
     root = Path(json.loads(environment.read_text())['root'])
 else:
-    root = Path(tempfile.mkdtemp(prefix='matou-parity-native-'))
+    root = Path(tempfile.mkdtemp(prefix='matou-parity-native-', dir=destination if args.destination else None))
     environment.write_text(json.dumps({'root': str(root)}) + '\n')
 paths = {name: root / name for name in ('home', 'workspace', 'data', 'cache', 'tmp')}
 for path in paths.values():

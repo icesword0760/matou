@@ -437,6 +437,11 @@ fn real_pipe_owner_pty_ack_scroll_fifo_and_explicit_shutdown() -> Result<()> {
     for command in [
         Command::ScrollTo {
             session_id: child.session.clone(),
+            row: 30,
+            request_id: request_id - 1,
+        },
+        Command::ScrollTo {
+            session_id: child.session.clone(),
             row: 0,
             request_id,
         },

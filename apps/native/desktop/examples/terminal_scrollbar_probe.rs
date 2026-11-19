@@ -50,7 +50,7 @@ mod probe {
     }
 
     fn assert_position(view: &TerminalSurface, pixels: f64, request_id: u64) -> u64 {
-        let position = view.scrollbar_position.expect("optimistic scroll position");
+        let position = view.scrollbar_position.expect("requested scroll position");
         let expected_row = (pixels / f64::from(f32::from(view.metrics.height))).round() as u64;
         assert_eq!(position.pixels, pixels);
         assert_eq!(position.row, expected_row);
@@ -133,7 +133,7 @@ mod probe {
                     pressed_button: Some(MouseButton::Left),
                     ..Default::default()
                 };
-                assert!(view.scrollbar_move(&event, cx));
+                assert!(view.scrollbar_move(&event, true, true, cx));
                 let observed_delta = f64::from(f32::from(position.y - capture.pointer.y));
                 let expected = capture.metrics.drag_position(observed_delta);
                 (assert_position(view, expected, request_id), expected)
@@ -244,6 +244,8 @@ mod probe {
                     pressed_button: Some(MouseButton::Left),
                     ..Default::default()
                 },
+                true,
+                true,
                 cx,
             ));
             let drag = view.scrollbar_position.expect("final drag request");
@@ -338,7 +340,7 @@ mod probe {
     ) -> anyhow::Result<()> {
         for release in [true, false] {
             events.borrow_mut().clear();
-            let (pending, moved) = window.update(cx, |view, window, cx| {
+            let (pending, wheel, moved) = window.update(cx, |view, window, cx| {
                 view.set_screen(bottom.clone(), modes, None, view.scroll_request_id, cx);
                 view.reveal_scrollbar();
                 let bounds = view.scrollbar_bounds.expect("painted scrollbar bounds");
@@ -357,22 +359,39 @@ mod probe {
                     cx,
                 ));
                 let capture = view.scrollbar_drag.expect("left-button thumb capture");
-                assert!(view.scrollbar_move(
-                    &MouseMoveEvent {
-                        position: point(pointer.x, pointer.y - px(24.)),
-                        pressed_button: Some(MouseButton::Left),
-                        ..Default::default()
-                    },
-                    cx,
-                ));
+                let first_move = MouseMoveEvent {
+                    position: point(pointer.x, pointer.y - px(24.)),
+                    pressed_button: Some(MouseButton::Left),
+                    ..Default::default()
+                };
+                assert!(view.scrollbar_move(&first_move, true, true, cx));
                 let pending = view.scrollbar_position.expect("queued absolute drag");
                 assert_eq!(
-                    view.screen.as_ref().unwrap().scrollbar.offset,
-                    bottom.scrollbar.offset
+                    view.scrollbar_metrics().unwrap().position,
+                    metrics.position,
+                    "the thumb must still represent the displayed rows"
                 );
                 view.replace_and_mark_text_in_range(None, "ni", Some(2..2), window, cx);
                 assert_eq!(view.marked_text_range(window, cx), Some(0..2));
+                assert!(view.scrollbar_move(&first_move, true, true, cx));
                 assert!(view.scrollbar_position.is_none());
+
+                view.scrollbar_wheel(
+                    &ScrollWheelEvent {
+                        position: first_move.position,
+                        delta: ScrollDelta::Pixels(point(px(0.), px(32.))),
+                        ..Default::default()
+                    },
+                    cx,
+                );
+                let wheel = view.scrollbar_position.expect("held wheel scroll");
+                assert_eq!(wheel.pixels, metrics.position - 40.);
+                assert!(wheel.row < bottom.scrollbar.offset);
+                assert!(view.scrollbar_move(&first_move, true, true, cx));
+                assert_eq!(
+                    view.scrollbar_position.unwrap().request_id,
+                    wheel.request_id
+                );
 
                 // The return-to-live request must not rebase the held gesture.
                 let position = point(pointer.x, pointer.y - px(36.));
@@ -383,6 +402,8 @@ mod probe {
                             pressed_button: Some(MouseButton::Left),
                             ..Default::default()
                         },
+                        true,
+                        true,
                         cx,
                     ),
                     "preedit must retain capture for the next held scrollbar move"
@@ -391,7 +412,7 @@ mod probe {
                     .metrics
                     .drag_position(f64::from(f32::from(position.y - capture.pointer.y)));
                 let moved = view.scrollbar_position.expect("continued absolute drag");
-                assert_position(view, expected, pending.request_id + 1);
+                assert_position(view, expected, pending.request_id + 2);
                 assert!(moved.row < pending.row);
                 view.unmark_text(window, cx);
                 assert_eq!(view.marked_text_range(window, cx), None);
@@ -412,6 +433,8 @@ mod probe {
                             pressed_button: None,
                             ..Default::default()
                         },
+                        true,
+                        true,
                         cx,
                     ));
                 }
@@ -422,23 +445,24 @@ mod probe {
                         pressed_button: Some(MouseButton::Left),
                         ..Default::default()
                     },
+                    true,
+                    true,
                     cx,
                 ));
-                (pending, moved)
+                (pending, wheel, moved)
             })?;
             assert_eq!(
                 events.take(),
                 [
                     Observed::Absolute(pending.row, pending.request_id),
                     Observed::Lines(i32::MIN),
+                    Observed::Absolute(wheel.row, wheel.request_id),
                     Observed::Absolute(moved.row, moved.request_id),
                 ]
             );
             println!(
-                "Held preedit: queued row {} → return-to-live → original-origin row {}; {} stops further moves; cancellation sends no bytes.",
-                pending.row,
-                moved.row,
-                if release { "mouseup" } else { "button change" },
+                "Held preedit: queued row {} → return-to-live → wheel row {} → original-origin row {}; stationary events leave the viewport alone.",
+                pending.row, wheel.row, moved.row,
             );
         }
         Ok(())

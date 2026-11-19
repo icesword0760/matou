@@ -3,6 +3,11 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(target_os = "macos")]
+use core_graphics::{
+    event::{CGEventType, CGMouseButton},
+    event_source::CGEventSourceStateID,
+};
 use gpui::{
     App, Bounds, ContentMask, Context, CursorStyle as PointerStyle, DispatchPhase,
     ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Font, FontStyle,
@@ -95,10 +100,49 @@ struct VisibleGrid {
     rows: usize,
 }
 
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn CGEventSourceButtonState(source: CGEventSourceStateID, button: CGMouseButton) -> bool;
+    fn CGEventSourceCounterForEventType(source: CGEventSourceStateID, event: CGEventType) -> u32;
+}
+
 #[derive(Clone, Copy)]
 struct ScrollbarDrag {
     metrics: ScrollbarMetrics,
     pointer: Point<Pixels>,
+    last_pointer: Point<Pixels>,
+    #[cfg(target_os = "macos")]
+    left_release_count: u32,
+}
+
+impl ScrollbarDrag {
+    fn button_still_held(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            // A new press outside this window cannot revive an old gesture.
+            let pressed = unsafe {
+                CGEventSourceButtonState(
+                    CGEventSourceStateID::CombinedSessionState,
+                    CGMouseButton::Left,
+                )
+            };
+            pressed && Self::left_button_release_count() == self.left_release_count
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            true
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn left_button_release_count() -> u32 {
+        unsafe {
+            CGEventSourceCounterForEventType(
+                CGEventSourceStateID::CombinedSessionState,
+                CGEventType::LeftMouseUp,
+            )
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -574,10 +618,13 @@ impl TerminalSurface {
         ScrollbarMetrics::new(
             f64::from(f32::from(bounds.size.height)),
             screen.scrollbar.total as f64 * f64::from(f32::from(self.metrics.height)),
-            self.scrollbar_position.map_or(
-                screen.scrollbar.offset as f64 * f64::from(f32::from(self.metrics.height)),
-                |position| position.pixels,
-            ),
+            // Paint the thumb for the same viewport as the displayed cells.
+            self.scrollbar_position
+                .filter(|position| position.row == screen.scrollbar.offset)
+                .map_or(
+                    screen.scrollbar.offset as f64 * f64::from(f32::from(self.metrics.height)),
+                    |position| position.pixels,
+                ),
         )
     }
 
@@ -650,9 +697,28 @@ impl TerminalSurface {
     }
 
     fn scroll_to_pixels(&mut self, position: f64, cx: &mut Context<Self>) {
+        if self
+            .scrollbar_position
+            .is_some_and(|current| current.pixels == position)
+        {
+            return;
+        }
         let row = (position / f64::from(f32::from(self.metrics.height)))
             .round()
             .max(0.) as u64;
+        let row_is_visible = self
+            .screen
+            .as_ref()
+            .is_some_and(|screen| screen.scrollbar.offset == row);
+        if let Some(current) = &mut self.scrollbar_position
+            && current.row == row
+        {
+            current.pixels = position;
+            if row_is_visible {
+                cx.notify();
+            }
+            return;
+        }
         self.scroll_request_id += 1;
         self.scrollbar_position = Some(ScrollbarPosition {
             pixels: position,
@@ -667,7 +733,9 @@ impl TerminalSurface {
             cx,
         );
         self.reveal_scrollbar();
-        cx.notify();
+        if row_is_visible {
+            cx.notify();
+        }
     }
 
     fn scrollbar_down(&mut self, event: &gpui::MouseDownEvent, cx: &mut Context<Self>) -> bool {
@@ -689,14 +757,21 @@ impl TerminalSurface {
             && event.position.x < track.right() - px(1.)
             && offset >= metrics.thumb_top
             && offset < metrics.thumb_top + metrics.thumb_size;
-        if !on_thumb {
-            self.scroll_to_pixels(metrics.track_position(offset), cx);
-        }
+        let metrics = if on_thumb {
+            metrics
+        } else {
+            let position = metrics.track_position(offset);
+            self.scroll_to_pixels(position, cx);
+            ScrollbarMetrics::new(metrics.viewport, metrics.extent, position).unwrap()
+        };
         if event.button == MouseButton::Left {
             self.stop_drag();
             self.scrollbar_drag = Some(ScrollbarDrag {
-                metrics: self.scrollbar_metrics().unwrap(),
+                metrics,
                 pointer: event.position,
+                last_pointer: event.position,
+                #[cfg(target_os = "macos")]
+                left_release_count: ScrollbarDrag::left_button_release_count(),
             });
             self.reveal_scrollbar();
         }
@@ -716,18 +791,32 @@ impl TerminalSurface {
             })
     }
 
-    fn scrollbar_move(&mut self, event: &gpui::MouseMoveEvent, cx: &mut Context<Self>) -> bool {
+    fn scrollbar_move(
+        &mut self,
+        event: &gpui::MouseMoveEvent,
+        window_active: bool,
+        button_held: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let hovered = self
             .scrollbar_bounds
             .is_some_and(|bounds| bounds.contains(&event.position));
-        if let Some(drag) = self.scrollbar_drag {
-            self.scrollport_hovered = hovered;
-            if event.pressed_button != Some(MouseButton::Left) {
+        if let Some(drag) = &mut self.scrollbar_drag {
+            if event.pressed_button != Some(MouseButton::Left) || !button_held {
+                self.scrollport_hovered = hovered;
                 self.scrollbar_drag = None;
                 self.hide_scrollbar();
                 cx.notify();
                 return false;
             }
+            cx.stop_propagation();
+            // GPUI repeats the last drag event on macOS for selection autoscroll.
+            // A stationary pointer must let a key or wheel change the viewport.
+            if !window_active || event.position == drag.last_pointer {
+                return true;
+            }
+            self.scrollport_hovered = hovered;
+            drag.last_pointer = event.position;
             let position = if cfg!(target_os = "windows")
                 && (event.position.x - drag.pointer.x).abs() > px(140.)
             {
@@ -737,7 +826,6 @@ impl TerminalSurface {
                     .drag_position(f64::from(f32::from(event.position.y - drag.pointer.y)))
             };
             self.scroll_to_pixels(position, cx);
-            cx.stop_propagation();
             return true;
         }
         if self.scrollport_hovered != hovered {
@@ -998,6 +1086,29 @@ impl TerminalSurface {
         cx.stop_propagation();
     }
 
+    fn scrollbar_wheel(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
+        if event.modifiers.control || event.modifiers.platform {
+            return;
+        }
+        let Some(metrics) = self.scrollbar_metrics() else {
+            return;
+        };
+        let position = self
+            .scrollbar_position
+            .map_or(metrics.position, |position| position.pixels);
+        // Match the viewport's 50px per wheel unit. A precise unit is 40px.
+        let delta = match event.delta {
+            gpui::ScrollDelta::Pixels(delta) => f64::from(f32::from(delta.y)) * (50. / 40.),
+            gpui::ScrollDelta::Lines(delta) => f64::from(delta.y) * 50.,
+        } * if event.modifiers.alt { 5. } else { 1. };
+        if delta == 0. {
+            return;
+        }
+        let movement = delta.signum() * delta.abs().ceil();
+        self.scroll_to_pixels(metrics.clamp(position - movement), cx);
+        cx.stop_propagation();
+    }
+
     fn paint(
         &mut self,
         entity: Entity<Self>,
@@ -1082,7 +1193,7 @@ impl TerminalSurface {
             }
             if focused
                 && self.composition.is_active()
-                && let Some(caret) = visible_caret
+                && let Some(caret) = visible_caret.or(self.caret)
             {
                 self.paint_composition(caret, window, cx);
             }
@@ -1257,7 +1368,13 @@ impl Render for TerminalSurface {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if !window.is_window_active() {
             self.stop_drag();
-            self.scrollbar_drag = None;
+            if self
+                .scrollbar_drag
+                .is_some_and(|drag| !cfg!(target_os = "macos") || !drag.button_still_held())
+            {
+                self.scrollbar_drag = None;
+                self.hide_scrollbar();
+            }
         }
         self.schedule_blink(
             self.focus.is_focused(window) && window.is_window_active(),
@@ -1398,41 +1515,69 @@ impl Render for TerminalSurface {
                             }
                             this.paint(surface.clone(), bounds, window, cx)
                         });
-                        let moving = surface.downgrade();
-                        window.on_mouse_event(move |event: &gpui::MouseMoveEvent, phase, _, cx| {
-                            if phase == DispatchPhase::Capture {
-                                let _ = moving.update(cx, |this, cx| {
-                                    if this.transport_generation != generation
-                                        || this.transport_suspended
-                                    {
-                                        return;
-                                    }
-                                    if this.scrollbar_move(event, cx) {
-                                        return;
-                                    }
-                                    let button = event.pressed_button.and_then(Self::mouse_button);
-                                    let reporting_drag = button.is_some_and(|button| {
-                                        this.mouse_buttons & (1 << button) != 0
+                        let scrolling = surface.downgrade();
+                        window.on_mouse_event(
+                            move |event: &ScrollWheelEvent, phase, window, cx| {
+                                if phase == DispatchPhase::Capture && window.is_window_active() {
+                                    let _ = scrolling.update(cx, |this, cx| {
+                                        if this.transport_generation == generation
+                                            && !this.transport_suspended
+                                            && this
+                                                .scrollbar_drag
+                                                .is_some_and(|drag| drag.button_still_held())
+                                        {
+                                            this.scrollbar_wheel(event, cx);
+                                        }
                                     });
-                                    let reporting_hover = event.pressed_button.is_none()
-                                        && this.modes.mouse_protocol == MouseProtocol::Any
-                                        && this.contains_position(event.position);
-                                    if reporting_drag || reporting_hover {
-                                        this.report_mouse(
-                                            event.position,
-                                            event.modifiers,
-                                            button.unwrap_or(3),
-                                            32,
+                                }
+                            },
+                        );
+                        let moving = surface.downgrade();
+                        window.on_mouse_event(
+                            move |event: &gpui::MouseMoveEvent, phase, window, cx| {
+                                if phase == DispatchPhase::Capture {
+                                    let _ = moving.update(cx, |this, cx| {
+                                        if this.transport_generation != generation
+                                            || this.transport_suspended
+                                        {
+                                            return;
+                                        }
+                                        let button_held = this
+                                            .scrollbar_drag
+                                            .is_none_or(|drag| drag.button_still_held());
+                                        if this.scrollbar_move(
+                                            event,
+                                            window.is_window_active(),
+                                            button_held,
                                             cx,
-                                        );
-                                    } else if event.dragging() {
-                                        this.update_selection(event.position, cx);
-                                    } else {
-                                        this.stop_drag();
-                                    }
-                                });
-                            }
-                        });
+                                        ) {
+                                            return;
+                                        }
+                                        let button =
+                                            event.pressed_button.and_then(Self::mouse_button);
+                                        let reporting_drag = button.is_some_and(|button| {
+                                            this.mouse_buttons & (1 << button) != 0
+                                        });
+                                        let reporting_hover = event.pressed_button.is_none()
+                                            && this.modes.mouse_protocol == MouseProtocol::Any
+                                            && this.contains_position(event.position);
+                                        if reporting_drag || reporting_hover {
+                                            this.report_mouse(
+                                                event.position,
+                                                event.modifiers,
+                                                button.unwrap_or(3),
+                                                32,
+                                                cx,
+                                            );
+                                        } else if event.dragging() {
+                                            this.update_selection(event.position, cx);
+                                        } else {
+                                            this.stop_drag();
+                                        }
+                                    });
+                                }
+                            },
+                        );
                         let released = surface.downgrade();
                         window.on_mouse_event(move |event: &gpui::MouseUpEvent, phase, _, cx| {
                             if phase == DispatchPhase::Capture {
