@@ -187,7 +187,7 @@ impl BackupService {
             Ok(descriptor)
         })();
         if result.is_err() {
-            let _ = remove_file_if_present(&partial);
+            let _ = remove_partial_backup(&partial);
             let _ = remove_file_if_present(&partial_manifest);
         }
         result
@@ -401,22 +401,21 @@ fn read_schema_version(connection: &Connection) -> Result<i64> {
 }
 
 fn online_backup(connection: &Connection, path: &Path, budget: Option<&Budget>) -> Result<()> {
-    let Some(budget) = budget else {
-        return Ok(connection.backup(MAIN_DB, path, NO_PROGRESS)?);
-    };
-    check_budget(Some(budget))?;
+    check_budget(budget)?;
     let mut destination = Connection::open(path)?;
     // Backup drops before destination; both are gone before validation or the
     // caller's partial-file cleanup, on every error/timeout return as well.
     let backup = Backup::new(connection, &mut destination)?;
     loop {
-        check_budget(Some(budget))?;
+        check_budget(budget)?;
         let step = backup.step(100)?;
         #[cfg(test)]
-        test_stage(TestStage::BackupStep, budget);
-        check_budget(Some(budget))?;
+        if let Some(budget) = budget {
+            test_stage(TestStage::BackupStep, budget);
+        }
+        check_budget(budget)?;
         match step {
-            StepResult::Done => return Ok(()),
+            StepResult::Done => break,
             StepResult::More => {}
             StepResult::Busy | StepResult::Locked => {
                 let code = if step == StepResult::Busy {
@@ -424,14 +423,31 @@ fn online_backup(connection: &Connection, path: &Path, budget: Option<&Budget>) 
                 } else {
                     rusqlite::ffi::SQLITE_LOCKED
                 };
-                // Match Connection::backup: no new busy retry or sleep policy.
-                return Err(
-                    rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(code), None).into(),
-                );
+                // Preserve the message from Connection::backup on the unbudgeted path.
+                let message = budget
+                    .is_none()
+                    .then(|| rusqlite::ffi::code_to_str(code).to_owned());
+                return Err(rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(code),
+                    message,
+                )
+                .into());
             }
             _ => unreachable!("unsupported backup step result"),
         }
     }
+    drop(backup);
+    // Read page 1 after the copy so SQLite sees the copied journal mode.
+    // A competing connection should fail the switch without a busy wait.
+    destination.busy_timeout(Duration::ZERO)?;
+    destination.query_row("PRAGMA schema_version", [], |row| row.get::<_, i64>(0))?;
+    let mode: String = destination.query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))?;
+    ensure!(
+        mode == "delete",
+        "SQLite journal mode did not switch to DELETE"
+    );
+    drop(destination);
+    check_budget(budget)
 }
 
 fn assert_integrity(path: &Path) -> Result<()> {
@@ -557,6 +573,21 @@ fn remove_sidecars(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn remove_partial_backup(path: &Path) -> io::Result<()> {
+    let wal = add_suffix(path, "-wal");
+    match fs::symlink_metadata(&wal) {
+        Ok(metadata) if metadata.is_file() && metadata.len() == 0 => {
+            remove_file_if_present(&wal)?;
+        }
+        // Keep the partial database and its sidecars if the WAL may hold data.
+        Ok(_) => return Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    remove_file_if_present(&add_suffix(path, "-shm"))?;
+    remove_file_if_present(path)
+}
+
 fn remove_file_if_present(path: &Path) -> io::Result<()> {
     match fs::remove_file(path) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -658,14 +689,14 @@ mod tests {
 
     fn large_source(root: &Path) -> Result<Connection> {
         let source = save_value(&root.join("source.sqlite"), "committed")?;
+        source.execute_batch("PRAGMA journal_mode=WAL")?;
         source.execute_batch("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<20000) INSERT INTO rows SELECT printf('%0100d', x) FROM n;")?;
         Ok(source)
     }
 
-    fn assert_no_partial(service: &BackupService) -> Result<()> {
-        for entry in fs::read_dir(&service.directory)? {
-            assert!(!entry?.file_name().to_string_lossy().ends_with(".partial"));
-        }
+    fn assert_backup_pairs(service: &BackupService, count: usize) -> Result<()> {
+        assert_eq!(service.list_valid()?.len(), count);
+        assert_eq!(fs::read_dir(&service.directory)?.count(), 2 * count);
         Ok(())
     }
 
@@ -698,6 +729,53 @@ mod tests {
         assert_eq!(service.list_valid()?, vec![saved]);
         println!(
             "online backup stopped after first 100-page step; partial removed and immediate retry succeeded"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn clean_exit_journal_mode_switch_fails_with_an_active_reader() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let source = save_value(&root.path().join("source.sqlite"), "committed")?;
+        source.execute_batch("PRAGMA journal_mode=WAL")?;
+        assert!(source.query_row("PRAGMA page_count", [], |row| row.get::<_, i64>(0))? <= 100);
+        let mut service = BackupService::new(root.path())?;
+        let partial = service
+            .directory
+            .join("matou-1-clean-exit-v0.sqlite.partial");
+        let mut reader = None;
+        let guard = hook(move |stage, _| {
+            if stage == TestStage::BackupStep {
+                reader.get_or_insert_with(|| {
+                    let connection =
+                        Connection::open_with_flags(&partial, OpenFlags::SQLITE_OPEN_READ_ONLY)
+                            .unwrap();
+                    connection.execute_batch("BEGIN").unwrap();
+                    assert_eq!(
+                        connection
+                            .query_row("SELECT value FROM rows", [], |row| row.get::<_, String>(0))
+                            .unwrap(),
+                        "committed"
+                    );
+                    connection
+                });
+            }
+        });
+        let error = service
+            .backup_for_clean_exit(&source, 1, CLEAN_EXIT_BACKUP_TIMEOUT)
+            .unwrap_err();
+        drop(guard);
+        assert_eq!(
+            error
+                .downcast_ref::<rusqlite::Error>()
+                .and_then(|error| error.sqlite_error_code()),
+            Some(rusqlite::ErrorCode::DatabaseBusy),
+            "{error:#}"
+        );
+        assert_backup_pairs(&service, 0)?;
+        println!(
+            "real journal mode switch returned SQLITE_BUSY and left the backup directory empty"
         );
         Ok(())
     }
@@ -736,8 +814,7 @@ mod tests {
         drop(guard);
         assert!(reached.get(), "never reached real integrity SQL");
         interrupted(&error);
-        assert_no_partial(&service)?;
-        assert!(service.list_valid()?.is_empty());
+        assert_backup_pairs(&service, 0)?;
         source_progress.store(0, Ordering::Relaxed);
         assert_eq!(
             source.query_row("SELECT count(*) FROM rows", [], |row| row.get::<_, i64>(0))?,
@@ -768,8 +845,15 @@ mod tests {
             let bytes = fs::read(&previous.path)?;
             let reached = Rc::new(Cell::new(false));
             let observed = reached.clone();
+            let partial = service
+                .directory
+                .join("matou-2-clean-exit-v0.sqlite.partial");
             let guard = hook(move |stage, budget| {
                 if stage == target {
+                    if stage == TestStage::HashBlock {
+                        fs::write(add_suffix(&partial, "-wal"), []).unwrap();
+                        fs::write(add_suffix(&partial, "-shm"), [0; 32 * 1024]).unwrap();
+                    }
                     observed.set(true);
                     expire_at_stage(budget);
                 }
@@ -794,7 +878,7 @@ mod tests {
                 fs::read_dir(&service.directory)?.count(),
                 if sqlite_published { 3 } else { 2 }
             );
-            assert_no_partial(&service)?;
+            println!("{target:?} timeout removed partial files and sidecars");
         }
         Ok(())
     }
@@ -830,12 +914,8 @@ mod tests {
         drop(guard);
         assert!(reached.get(), "did not reach rotation's real candidate SQL");
         interrupted(&error);
-        assert_eq!(
-            service.list_valid()?.len(),
-            9,
-            "timeout must not be swallowed as an invalid backup or proceed to deletion"
-        );
-        assert_no_partial(&service)?;
+        // The timeout must not be swallowed as an invalid candidate or proceed to deletion.
+        assert_backup_pairs(&service, 9)?;
         Ok(())
     }
 
@@ -861,8 +941,7 @@ mod tests {
         drop(guard);
         assert!(reached.get());
         timeout(&error);
-        assert_eq!(service.list_valid()?.len(), 9);
-        assert_no_partial(&service)?;
+        assert_backup_pairs(&service, 9)?;
         Ok(())
     }
 
@@ -898,14 +977,30 @@ mod tests {
         for (path, bytes) in previous {
             assert_eq!(fs::read(path)?, bytes);
         }
-        assert_eq!(service.list_valid()?.len(), 9);
+        assert_backup_pairs(&service, 9)?;
         assert_eq!(load_value(&root.path().join("source.sqlite"))?, "committed");
         assert_eq!(
             source.query_row("SELECT count(*) FROM rows", [], |row| row.get::<_, i64>(0))?,
             1
         );
-        assert_no_partial(&service)?;
         println!("real rotation remove failed with PermissionDenied; all previous backups remain");
+        Ok(())
+    }
+
+    #[test]
+    fn failed_partial_cleanup_preserves_a_nonempty_wal_and_its_database() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let partial = root.path().join("saved.sqlite.partial");
+        let wal = add_suffix(&partial, "-wal");
+        let shm = add_suffix(&partial, "-shm");
+        // Sentinels exercise the cleanup guard without creating an actual WAL.
+        fs::write(&partial, b"database")?;
+        fs::write(&wal, b"potential data")?;
+        fs::write(&shm, b"index")?;
+        remove_partial_backup(&partial)?;
+        assert_eq!(fs::read(partial)?, b"database");
+        assert_eq!(fs::read(wal)?, b"potential data");
+        assert_eq!(fs::read(shm)?, b"index");
         Ok(())
     }
 
