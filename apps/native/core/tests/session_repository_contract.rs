@@ -234,3 +234,129 @@ fn compare_rows(db: &Connection, sql: &str, expected: &[Value], step: &str) -> R
     assert_eq!(actual, expected, "{step}: {sql}");
     Ok(())
 }
+
+#[test]
+fn provider_binding_requires_current_run_and_validation_replays_once() -> Result<()> {
+    use matou_native_core::sessions::{ClaudeIdentity, record_claude_identity};
+
+    let reference: Reference = serde_json::from_str(REFERENCE)?;
+    let temporary = tempfile::tempdir()?;
+    let mut db = open(&temporary.path().join("matou.sqlite"))?;
+    bootstrap_window(
+        &mut db,
+        &reference.bootstrap.command,
+        &reference.bootstrap.input,
+        &reference.bootstrap.ids,
+        "默认",
+        reference.bootstrap.committed_at,
+    )?;
+    let session = reference.bootstrap.ids.session_id;
+    db.execute(
+        "UPDATE sessions SET kind='claude-code', work_status='needs-input' WHERE id=?",
+        [&session],
+    )?;
+    let command = |id: &str| CommandMetadata {
+        command_id: id.into(),
+        command_type: "test.provider-identity".into(),
+        request_hash: id.into(),
+        causation_id: None,
+        correlation_id: None,
+    };
+    for (id, generation) in [("older", "previous"), ("current", "active")] {
+        start_run(
+            &mut db,
+            &command(id),
+            &StartRunInput {
+                id: id.into(),
+                session_id: session.clone(),
+                runtime_generation: generation.into(),
+                pid: None,
+                cols: 80,
+                rows: 24,
+                now: 10,
+            },
+            10,
+        )?;
+    }
+    let work = |db: &Connection| -> rusqlite::Result<String> {
+        db.query_row(
+            "SELECT work_status FROM sessions WHERE id=?",
+            [&session],
+            |row| row.get(0),
+        )
+    };
+    assert_eq!(work(&db)?, "needs-input");
+    db.execute(
+        "INSERT INTO provider_bindings (
+           id, session_id, provider, provider_session_id, resume_state, metadata_json,
+           created_at, updated_at, invalidated_at, restore_state, restore_error
+         ) VALUES ('existing', ?, 'claude-code', 'from-cli', 'failed',
+                   '{\"unrelated\":true,\"invalidationReason\":\"fixture\"}', 2, 3, 3, 'failed', 'fixture')",
+        [&session],
+    )?;
+    let metadata = json!({"providerConfigId": "configuration", "model": "launch-model",
+                          "permissionMode": "default", "cwd": "/launch"});
+    let observed = json!({"model": "observed-model", "permissionMode": "plan", "cwd": "/observed"});
+    let mut input = ClaudeIdentity {
+        binding_id: "unused-on-update",
+        session_id: &session,
+        run_id: "older",
+        generation: "previous",
+        provider_session_id: "from-cli",
+        event_name: "UserPromptSubmit",
+        launch_metadata: &metadata,
+        observed_metadata: &observed,
+        first_for_run: true,
+    };
+    assert!(record_claude_identity(&mut db, &command("stale"), &input, 11).is_err());
+    input.run_id = "current";
+    assert!(record_claude_identity(&mut db, &command("wrong-generation"), &input, 12).is_err());
+    assert_eq!(work(&db)?, "needs-input");
+    input.generation = "active";
+    let first = record_claude_identity(&mut db, &command("prompt"), &input, 13)?;
+    let replay = record_claude_identity(&mut db, &command("prompt"), &input, 14)?;
+    assert!(replay.replayed);
+    assert_eq!(first.result, replay.result);
+    assert_eq!(first.result["bindingId"], "existing");
+    assert_eq!(first.result["metadata"]["observedNormalStop"], false);
+    assert!(first.result["metadata"].get("unrelated").is_none());
+    assert_eq!(work(&db)?, "running");
+    input.event_name = "Stop";
+    input.observed_metadata = &Value::Null;
+    input.first_for_run = false;
+    record_claude_identity(&mut db, &command("stop"), &input, 15)?;
+    assert_eq!(work(&db)?, "idle");
+    let mut rows = db.prepare("SELECT * FROM provider_bindings")?;
+    let row = rows.query_row([], |row| {
+        Ok(json!({
+            "id": row.get::<_, String>("id")?,
+            "created": row.get::<_, i64>("created_at")?,
+            "validated": row.get::<_, i64>("validated_at")?,
+            "invalidated": row.get::<_, Option<i64>>("invalidated_at")?,
+            "resume": row.get::<_, String>("resume_state")?,
+            "restore": row.get::<_, String>("restore_state")?,
+            "error": row.get::<_, Option<String>>("restore_error")?,
+            "metadata": row.get::<_, String>("metadata_json")?,
+        }))
+    })?;
+    assert_eq!(row["id"], "existing");
+    assert_eq!(row["created"], 2);
+    assert_eq!(row["validated"], 15);
+    assert_eq!(row["invalidated"], Value::Null);
+    assert_eq!(row["resume"], "available");
+    assert_eq!(row["restore"], "none");
+    assert_eq!(row["error"], Value::Null);
+    assert_eq!(
+        serde_json::from_str::<Value>(row["metadata"].as_str().unwrap())?,
+        json!({"providerConfigId": "configuration", "model": "observed-model",
+                      "permissionMode": "plan", "cwd": "/observed", "lastHookEvent": "Stop",
+                      "observedUserPrompt": true, "observedNormalStop": true, "unrelated": true})
+    );
+    let count = |query| db.query_row(query, [], |row| row.get::<_, i64>(0));
+    assert_eq!(count("SELECT COUNT(*) FROM provider_bindings")?, 1);
+    assert_eq!(
+        count("SELECT COUNT(*) FROM domain_events WHERE event_type='provider-binding.recorded'")?,
+        2
+    );
+    Ok(())
+}

@@ -193,18 +193,25 @@ def compare_audits(home, control_before, control_after, test_before, test_after,
     }
 
 
-def sandbox(root, real_home):
+def sandbox(root, real_home, *, outbound=False):
     def subpath(path):
         return f"(subpath {json.dumps(str(path))})"
 
     protected = " ".join(subpath(real_home / name)
-                         for name in (".claude", ".claude.json", "Library/Keychains"))
+                         for name in (".claude", ".claude.json", ".matou", "Library/Keychains"))
+    outbound_policy = ("(allow network-outbound)\n"
+                       '        (allow mach-lookup (global-name "com.apple.mDNSResponder"))'
+                       if outbound else
+                       '(allow network-outbound (remote ip "localhost:*"))')
     return [
         "/usr/bin/sandbox-exec", "-p", f"""
         (version 1)
         (allow default)
         (deny network*)
         (deny mach-lookup)
+        (allow network-bind (local ip "localhost:*"))
+        (allow network-inbound (local ip "localhost:*"))
+        {outbound_policy}
         (deny process-exec (literal "/usr/bin/security"))
         (deny file-read* {protected})
         (deny file-write*)
@@ -493,8 +500,11 @@ def verify_live_run(host, root, session_id, cwd, cli, argv, proof):
     require(f"n{cli}\n" in lsof, "PTY process did not load the real installed executable")
     args = subprocess.check_output(["/bin/ps", "-ww", "-p", str(pid), "-o", "args="],
                                    text=True, timeout=5).strip()
-    require(args == " ".join((str(cli), *argv)), "Claude Code process argv differs")
-    proof.update(pid=pid, argv=argv, cwd="workspace/session-cwd",
+    hooks = root / "matou/provider-hooks"
+    settings, = hooks.glob("*.settings.json")
+    require(args == " ".join((str(cli), "--settings", str(settings), *argv)),
+            "Claude Code process argv differs")
+    proof.update(pid=pid, argv=["--settings", "<private settings>", *argv], cwd="workspace/session-cwd",
                  executable=str(cli), committed_runs=1, process_alive=True)
     proof["exit_input"] = "Ctrl+C twice"
     for _ in range(2):

@@ -19,6 +19,7 @@ use crate::{
     SessionEvent, SessionOptions,
     history_worker::{HistoryReply, HistoryRequest, HistoryWorker},
     owner::{OwnerEvent, ShellOwner},
+    provider_hook::HookSetup,
     search::{SearchRequest, SearchResult},
     worker::{SelectionCopy, WorkerCommand},
     workspace_paths::WorkspacePathChecks,
@@ -33,7 +34,7 @@ use matou_native_core::{
         tasks, workspaces,
     },
     journal::JournalOptions,
-    provider_launch::{prepare_claude_launch, validate_cwd},
+    provider_launch::{ClaudeLaunch, prepare_claude_launch, validate_cwd},
     pty::{LaunchProfile, ShellLaunch},
     startup::{self, BootstrapResult},
     storage::CommandMetadata,
@@ -339,7 +340,7 @@ pub enum Event {
         update: matou_native_core::geometry::GeometryUpdate,
         error: Option<String>,
     },
-    /// Graph and optional `sessionCardAction` result for the final-card notice.
+    /// Graph with optional `sessionCardAction` and `providerIdentityEvents` results.
     Graph(Value),
     ClipboardWrite {
         session_id: String,
@@ -630,6 +631,7 @@ fn run(
     let mut copies = Vec::<(u64, String, bool, Receiver<Result<SelectionCopy>>)>::new();
     let mut navigation_publications = VecDeque::new();
     let mut graph_dirty = false;
+    let mut provider_identity_events = Vec::new();
     let mut tasks_dirty = false;
     let clean_exit = 'running: loop {
         let now = Instant::now();
@@ -818,25 +820,12 @@ fn run(
                         &terminal_layouts,
                     )
                 }
-                PreparedLaunch::ClaudeCode(mut launch) => {
+                PreparedLaunch::ClaudeCode(launch) => {
                     let terminal = terminal_layouts
                         .get(&session_id)
                         .copied()
                         .unwrap_or_else(default_terminal_options);
-                    launch.cols = terminal.cols;
-                    launch.rows = terminal.rows;
-                    owner.launch(
-                        SessionOptions {
-                            session_id: session_id.clone(),
-                            terminal,
-                            launch,
-                            journal: JournalOptions::default(),
-                            restored_history: Vec::new(),
-                            collect_history: false,
-                        },
-                        false,
-                        "",
-                    )
+                    owner.launch_claude(session_id.clone(), terminal, launch)
                 }
             });
             match result {
@@ -853,8 +842,9 @@ fn run(
                 }
                 Err(error) => {
                     pending_input.retain(|input| input.session_id != session_id);
+                    let recovering = rebuilding && error.downcast_ref::<HookSetup>().is_none();
                     let failure =
-                        report_launch_failure(send, &session_id, rebuilding, format!("{error:#}"))?;
+                        report_launch_failure(send, &session_id, recovering, format!("{error:#}"))?;
                     failed_launches.insert(session_id, failure);
                 }
             }
@@ -1447,6 +1437,7 @@ fn run(
         for event in owner.poll(Duration::from_millis(4))? {
             match event {
                 OwnerEvent::Domain(_) => graph_dirty = true,
+                OwnerEvent::ProviderIdentity(result) => provider_identity_events.push(result),
                 OwnerEvent::Diagnostic { message, .. } => {
                     send.send_blocking(Event::Diagnostic(message))?
                 }
@@ -1584,12 +1575,15 @@ fn run(
             }
             send.send_blocking(event)?;
         }
-        if graph_dirty && navigation_publications.is_empty() {
-            send.send_blocking(Event::Graph(active_graph(
-                &owner,
-                scene_id.as_deref(),
-                window_id,
-            )?))?;
+        if (graph_dirty || !provider_identity_events.is_empty())
+            && navigation_publications.is_empty()
+        {
+            let mut graph = active_graph(&owner, scene_id.as_deref(), window_id)?;
+            if !provider_identity_events.is_empty() {
+                graph["providerIdentityEvents"] =
+                    json!(std::mem::take(&mut provider_identity_events));
+            }
+            send.send_blocking(Event::Graph(graph))?;
             graph_dirty = false;
         }
         if tasks_dirty && navigation_publications.is_empty() {
@@ -1774,7 +1768,7 @@ fn default_terminal_options() -> TerminalOptions {
 
 enum PreparedLaunch {
     Shell(String),
-    ClaudeCode(ShellLaunch),
+    ClaudeCode(ClaudeLaunch),
 }
 
 fn prepare_launch(

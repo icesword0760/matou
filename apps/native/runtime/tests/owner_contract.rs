@@ -120,7 +120,7 @@ fn collect(
                 .into_iter()
                 .filter_map(|event| match event {
                     OwnerEvent::Terminal(event) => Some(event),
-                    OwnerEvent::Domain(_) => None,
+                    OwnerEvent::Domain(_) | OwnerEvent::ProviderIdentity(_) => None,
                     OwnerEvent::Diagnostic { message, .. } => panic!("owner diagnostic: {message}"),
                 }),
         );
