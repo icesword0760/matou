@@ -42,6 +42,158 @@ mod workspace {
     use matou_native_terminal::{Terminal, TerminalOptions};
 
     impl Workspace {
+        pub(super) fn fork_input(&self) -> Entity<RenameInput> {
+            let Some(TabDialog::Branch(state)) = &self.dialog else {
+                panic!("expected branch dialog");
+            };
+            state.input.clone()
+        }
+
+        pub(super) fn assert_fork_dialog(
+            &self,
+            placement: ForkPlacement,
+            title: &str,
+            description: &str,
+            hint: &str,
+            error: Option<&str>,
+            submitting: bool,
+            cx: &App,
+        ) -> String {
+            let Some(TabDialog::Branch(state)) = &self.dialog else {
+                panic!("expected branch dialog");
+            };
+            assert_eq!(state.placement, placement);
+            assert_eq!(state.copy(), (title, description.to_owned(), hint));
+            assert_eq!(state.input.read(cx).placeholder, "例如：修复登录流程");
+            assert_eq!(state.error.as_deref(), error);
+            assert_eq!(state.submitting, submitting);
+            state.submission_key.clone()
+        }
+
+        pub(super) fn assert_fork_access(
+            &self,
+            id: &str,
+            placement: ForkPlacement,
+            expected: Option<(Option<&str>, Option<&str>)>,
+        ) {
+            assert_eq!(
+                self.fork_access(id, placement)
+                    .map(|access| (access.blocked, access.readiness)),
+                expected
+            );
+        }
+
+        pub(super) fn focus_fork_control(&self, id: &str, control: usize, window: &mut Window) {
+            window.focus(&self.fork_controls[id][control]);
+        }
+
+        pub(super) fn focus_fork_menu(&self, window: &mut Window) {
+            window.focus(&self.fork_menu.as_ref().expect("card context menu").2);
+        }
+
+        pub(super) fn assert_fork_menu_closed(&self) {
+            assert!(self.fork_menu.is_none());
+        }
+
+        pub(super) fn focus_fork_dialog_control(&self, control: usize, window: &mut Window) {
+            window.focus(&self.dialog_controls[control]);
+        }
+
+        pub(super) fn assert_fork_remove_dialog(&self, id: &str) {
+            assert!(
+                matches!(&self.dialog, Some(TabDialog::RemoveSession { session_id, .. }) if session_id == id)
+            );
+        }
+
+        pub(super) fn assert_fork_level(&self, parent: &str, new: &str) {
+            assert_eq!(self.level_parent(), Some(parent));
+            assert!(self.order.iter().any(|id| id == new));
+        }
+
+        pub(super) fn return_from_fork_level(
+            &mut self,
+            window: &mut Window,
+            cx: &mut Context<Self>,
+        ) {
+            self.return_to_parent(window, cx);
+        }
+
+        pub(super) fn assert_fork_readiness(&self, message: Option<&str>) {
+            assert_eq!(self.fork_readiness, message);
+        }
+
+        pub(super) fn fork_readiness_visible(&self) -> bool {
+            self.fork_readiness.is_some()
+        }
+
+        pub(super) fn assert_fork_failure(
+            &self,
+            id: &str,
+            failure: (&str, Option<&str>),
+            blocked: Option<&str>,
+            error: Option<&str>,
+        ) {
+            let node = self.graph_node(id).unwrap();
+            assert_eq!(fork_failure_copy(node), Some(failure));
+            assert_eq!(self.fork_repair_blocked_reason(id, node), blocked);
+            assert_eq!(
+                self.fork_retries.get(id).and_then(|retry| match retry {
+                    ForkRetry::Pending => None,
+                    ForkRetry::Rejected(error) => Some(error.as_str()),
+                }),
+                error
+            );
+        }
+
+        pub(super) fn assert_fork_stage(&self, id: &str, stage: &str) {
+            let node = self.graph_node(id).unwrap();
+            assert_eq!(node["forkProgress"]["stage"], stage);
+            let progress = fork_progress_copy(node).unwrap();
+            if stage == "queued" {
+                assert_eq!(progress.label, "正在创建分支：等待创建分支");
+                assert_eq!(progress.counter.as_deref(), Some("第 1 / 2 阶段"));
+                assert!(!progress.interactive);
+            } else {
+                assert_eq!(progress.label, "正在创建分支：正在恢复智能体会话");
+                assert!(progress.interactive);
+            }
+        }
+
+        pub(super) fn assert_fork_worktree_copy(&self) {
+            assert_eq!(FORK_WORKTREE_SECTION, "工作目录");
+            assert_eq!(FORK_USE_CURRENT_WORKTREE, "使用当前工作树");
+            assert_eq!(FORK_USE_NEW_WORKTREE, "从新工作树创建");
+            assert_eq!(
+                FORK_NEW_WORKTREE_HINT,
+                "创建隔离的 Git worktree，适合多个功能并行开发"
+            );
+            assert_eq!(FORK_NEEDS_GIT_REPOSITORY, "需要 Git 仓库");
+            assert_eq!(FORK_DIALOG_CREATING, "正在创建分支…");
+        }
+
+        pub(super) fn fork_card_header(&self, id: &str) -> Point<Pixels> {
+            let index = self
+                .order
+                .iter()
+                .position(|candidate| candidate == id)
+                .unwrap();
+            let bounds = self.carousel_scroll.bounds_for_item(index).unwrap();
+            bounds.origin + self.carousel_scroll.offset() + point(px(32.), px(20.))
+        }
+
+        pub(super) fn set_fork_input(
+            &self,
+            text: &str,
+            window: &mut Window,
+            cx: &mut Context<Self>,
+        ) {
+            let input = self.fork_input();
+            input.update(cx, |input, cx| {
+                let len = input.text.encode_utf16().count();
+                input.replace_text_in_range(Some(0..len), text, window, cx);
+            });
+        }
+
         pub(super) fn deliver(
             &mut self,
             event: Event,
@@ -230,6 +382,14 @@ mod workspace {
         pub(super) fn loader_blocked(&self) -> Option<&'static str> {
             let id = super::probe::PEER;
             self.session_loader_blocked_reason(id, self.graph_node(id).unwrap())
+        }
+
+        pub(super) fn loader_button_position(&self, id: &str) -> Point<Pixels> {
+            let fork_count = [ForkPlacement::Child, ForkPlacement::Sibling]
+                .into_iter()
+                .filter(|placement| self.fork_access(id, *placement).is_some())
+                .count();
+            self.remove_button_position(id) - point(px(31.5 + 30. * fork_count as f32), px(0.))
         }
 
         fn loader(&self) -> &SessionLoader {
@@ -801,17 +961,21 @@ mod probe {
     use cocoa::appkit::NSEventType;
 
     use gpui::{
-        AnyWindowHandle, AppContext, Application, AsyncApp, Bounds, Keystroke, Pixels, Point,
-        WindowBounds, WindowHandle, WindowOptions, point, px, size,
+        AnyWindowHandle, AppContext, Application, AsyncApp, Bounds, Keystroke, MouseButton, Pixels,
+        Point, WindowBounds, WindowHandle, WindowOptions, point, px, size,
     };
     use matou_native_core::{
         geometry,
         hierarchy::{
             self, BootstrapWindowInput, HierarchyIds,
-            canvas::{self, CanvasIds, CanvasMessages, CreateCanvasInput, CreateShellSiblingInput},
+            canvas::{
+                self, CanvasIds, CanvasMessages, CreateCanvasInput, CreateShellSiblingInput,
+                ForkPlacement, ForkSessionInput, ForkWorktreeMode,
+            },
             cards::{RemoveScope, scene_workspace_session_count},
         },
         session_graph::project_scene_graph,
+        sessions::fail_claude_fork,
         startup::{self, BootstrapResult, open_read_only},
         storage::CommandMetadata,
         workspace_paths::WorkspacePathState,
@@ -874,6 +1038,121 @@ mod probe {
     }
 
     impl Fixture {
+        fn fork_source(&self, ready: bool, work_status: &str) {
+            let Some(BootstrapResult::Writable { connection, .. }) = &self.db else {
+                unreachable!()
+            };
+            connection
+                .execute(
+                    "UPDATE sessions SET kind = 'claude-code', work_status = ? WHERE id = ?",
+                    (work_status, PARENT),
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO provider_bindings (
+                         id, session_id, provider, provider_session_id, resume_state,
+                         metadata_json, created_at, updated_at, validated_at
+                     ) VALUES ('probe-fork-parent-binding', ?, 'claude-code', 'probe-provider',
+                         'resumed', ?, 20, 20, 20)
+                     ON CONFLICT(id) DO UPDATE SET metadata_json = excluded.metadata_json",
+                    (PARENT, serde_json::json!({ "canFork": ready }).to_string()),
+                )
+                .unwrap();
+        }
+
+        fn create_fork(&mut self, id: &str, request: Command) -> serde_json::Value {
+            let Command::ForkSession {
+                scene_id,
+                source_session_id,
+                placement,
+                name,
+                worktree_mode,
+                submission_key,
+            } = request
+            else {
+                panic!("expected ForkSession");
+            };
+            let Some(BootstrapResult::Writable { connection, .. }) = &mut self.db else {
+                unreachable!()
+            };
+            canvas::create_fork_child(
+                connection,
+                &command(id),
+                &ForkSessionInput {
+                    window_id: WINDOW.into(),
+                    scene_id,
+                    source_session_id,
+                    placement,
+                    name,
+                    worktree_mode,
+                    submission_key,
+                    now: 30,
+                },
+                &canvas_ids(SCENE, id),
+                &MESSAGES,
+                30,
+            )
+            .unwrap()
+        }
+
+        fn fail_fork(&mut self, id: &str, reason: &str, sequence: i64) {
+            let Some(BootstrapResult::Writable { connection, .. }) = &mut self.db else {
+                unreachable!()
+            };
+            fail_claude_fork(
+                connection,
+                &command(&format!("fork-failure-{sequence}")),
+                id,
+                reason,
+                sequence,
+            )
+            .unwrap();
+        }
+
+        fn retry_fork(&mut self, id: &str) -> serde_json::Value {
+            let Some(BootstrapResult::Writable { connection, .. }) = &mut self.db else {
+                unreachable!()
+            };
+            canvas::retry_fork(connection, &command("probe-retry"), WINDOW, id, 33).unwrap()
+        }
+
+        fn start_fork(&self, id: &str) {
+            let Some(BootstrapResult::Writable { connection, .. }) = &self.db else {
+                unreachable!()
+            };
+            connection
+                .execute(
+                    "UPDATE session_fork_intents SET state = 'starting',
+                   stage = 'restoring-provider', completed_steps = 1 WHERE session_id = ?",
+                    [id],
+                )
+                .unwrap();
+        }
+
+        fn fork_reply(&self, result: serde_json::Value, navigation: bool) -> Event {
+            let Event::Navigation {
+                hierarchy,
+                scenes,
+                mut graph,
+                geometry,
+            } = self.event(false)
+            else {
+                unreachable!()
+            };
+            graph["forkSessionResult"] = result;
+            if navigation {
+                Event::Navigation {
+                    hierarchy,
+                    scenes,
+                    graph,
+                    geometry,
+                }
+            } else {
+                Event::Graph(graph)
+            }
+        }
+
         fn new() -> Self {
             let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("../target")
@@ -1251,8 +1530,24 @@ mod probe {
             base::{id, nil},
             foundation::{NSInteger, NSPoint},
         };
+        use core_foundation::base::CFRelease;
+        use core_graphics::{
+            display::CGDisplay,
+            event::{CGEventType, CGMouseButton},
+            geometry::CGPoint,
+        };
         use objc::{msg_send, sel, sel_impl};
         use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        use std::ffi::c_void;
+
+        unsafe extern "C" {
+            fn CGEventCreateMouseEvent(
+                source: *const c_void,
+                kind: CGEventType,
+                location: CGPoint,
+                button: CGMouseButton,
+            ) -> *mut c_void;
+        }
 
         let (view, location, number) = window
             .update(cx, |_, window, _| {
@@ -1275,6 +1570,38 @@ mod probe {
             .unwrap();
         // Target only the probe NSView. The event never enters the desktop queue.
         unsafe {
+            if matches!(
+                kind,
+                NSEventType::NSRightMouseDown | NSEventType::NSRightMouseUp
+            ) {
+                // The AppKit mouse-event constructor above always sets buttonNumber to 0.
+                let down = kind == NSEventType::NSRightMouseDown;
+                let event = CGEventCreateMouseEvent(
+                    std::ptr::null(),
+                    if down {
+                        CGEventType::RightMouseDown
+                    } else {
+                        CGEventType::RightMouseUp
+                    },
+                    CGPoint::new(
+                        location.x,
+                        CGDisplay::main().bounds().size.height - location.y,
+                    ),
+                    CGMouseButton::Right,
+                );
+                assert!(!event.is_null());
+                let native = NSEvent::eventWithCGEvent_(nil, event);
+                CFRelease(event);
+                assert_eq!(native.buttonNumber(), 1);
+                assert_eq!(native.locationInWindow().x, location.x);
+                assert_eq!(native.locationInWindow().y, location.y);
+                if down {
+                    let _: () = msg_send![view, rightMouseDown: native];
+                } else {
+                    let _: () = msg_send![view, rightMouseUp: native];
+                }
+                return;
+            }
             let event = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure_(
                 nil, kind, location, NSEventModifierFlags::empty(), 0., number, nil, 0, 1, 1.,
             );
@@ -1310,6 +1637,457 @@ mod probe {
     fn click(window: WindowHandle<Workspace>, cx: &mut AsyncApp, position: Point<Pixels>) {
         mouse(window, cx, position, NSEventType::NSLeftMouseDown);
         mouse(window, cx, position, NSEventType::NSLeftMouseUp);
+    }
+
+    fn fork_click(
+        window: WindowHandle<Workspace>,
+        cx: &mut AsyncApp,
+        button: MouseButton,
+        position: Point<Pixels>,
+    ) {
+        match button {
+            MouseButton::Left => click(window, cx, position),
+            MouseButton::Right => {
+                mouse(window, cx, position, NSEventType::NSRightMouseDown);
+                mouse(window, cx, position, NSEventType::NSRightMouseUp);
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    async fn verify_fork(cx: &mut AsyncApp) {
+        use ForkPlacement::{Child, Peer, Sibling};
+        use serde_json::json;
+
+        const BRANCH_HINT: &str = "和父会话使用同一目录，适合连续处理同一份改动";
+        const PEER_HINT: &str = "和当前会话使用同一目录，适合连续处理同一份改动";
+        const EXPIRED_REASON: &str = "原 Claude Code 对话身份已失效，本次分支没有创建成功。请返回父会话继续，或移除此失败节点后新建空会话。";
+        const FAILED: &str = "probe-created-peer";
+        let mut fixture = Fixture::new();
+        fixture.fork_source(false, "needs-input");
+        fixture.focus(SCENE, PARENT);
+        let (window, sink) = open_hidden(cx, 1250.);
+        deliver(window, cx, fixture.event(true));
+        draw(window, cx);
+        let assert_closed = |cx: &mut AsyncApp| {
+            window
+                .update(cx, |view, _, _| view.assert_no_dialog())
+                .unwrap();
+        };
+        let qualify = |cx: &mut AsyncApp, id: &str| {
+            draw(window, cx);
+            window
+                .update(cx, |view, window, cx| view.qualify(id, window, cx))
+                .unwrap();
+        };
+        let enter = |cx: &mut AsyncApp| {
+            AnyWindowHandle::from(window)
+                .update(cx, |_, window, cx| {
+                    window.dispatch_keystroke(Keystroke::parse("enter").unwrap(), cx);
+                })
+                .unwrap();
+        };
+        let control = |cx: &mut AsyncApp, id: &str, index: usize| {
+            draw(window, cx);
+            window
+                .update(cx, |view, window, _| {
+                    view.focus_fork_control(id, index, window)
+                })
+                .unwrap();
+            enter(cx);
+            draw(window, cx);
+        };
+        let menu_item = |cx: &mut AsyncApp, id: &str| {
+            draw(window, cx);
+            let position = window
+                .update(cx, |view, _, _| view.fork_card_header(id))
+                .unwrap();
+            fork_click(window, cx, MouseButton::Right, position);
+            draw(window, cx);
+            window
+                .update(cx, |view, window, _| view.focus_fork_menu(window))
+                .unwrap();
+            press(window, cx, "enter");
+            draw(window, cx);
+        };
+        let name = |cx: &mut AsyncApp, text: &str| {
+            window
+                .update(cx, |view, window, cx| view.set_fork_input(text, window, cx))
+                .unwrap();
+        };
+        let dialog_control = |cx: &mut AsyncApp, index: usize| {
+            draw(window, cx);
+            window
+                .update(cx, |view, window, _| {
+                    view.focus_fork_dialog_control(index, window)
+                })
+                .unwrap();
+            enter(cx);
+            draw(window, cx);
+        };
+        let commands = || {
+            std::iter::from_fn(|| sink.try_recv().ok())
+                .filter(|command| {
+                    matches!(
+                        command,
+                        Command::ForkSession { .. }
+                            | Command::RetryFork { .. }
+                            | Command::RemoveSessionBranch { .. }
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        window
+            .update(cx, |view, _, _| {
+                view.assert_fork_access(PARENT, Sibling, None);
+                view.assert_fork_access(CHILD, Sibling, None);
+                view.assert_fork_access(PEER, Child, None);
+                view.assert_fork_access(
+                    PARENT,
+                    Child,
+                    Some((Some("当前终端仍在恢复"), Some("当前回复完成后即可 Fork"))),
+                );
+            })
+            .unwrap();
+        control(cx, PARENT, 0);
+        assert_closed(cx);
+        let header = window
+            .update(cx, |view, _, _| view.fork_card_header(PARENT))
+            .unwrap();
+        fork_click(window, cx, MouseButton::Right, header);
+        window
+            .update(cx, |view, _, _| {
+                view.assert_fork_readiness(None);
+                view.assert_fork_menu_closed();
+            })
+            .unwrap();
+        assert!(commands().is_empty());
+        qualify(cx, PARENT);
+        control(cx, PARENT, 0);
+        assert_closed(cx);
+        window
+            .update(cx, |view, _, _| {
+                view.assert_fork_readiness(Some("当前回复完成后即可 Fork"))
+            })
+            .unwrap();
+        let until = Instant::now() + Duration::from_secs(5);
+        while window
+            .update(cx, |view, _, _| view.fork_readiness_visible())
+            .unwrap()
+        {
+            assert!(Instant::now() < until, "fork readiness did not expire");
+            cx.background_executor()
+                .timer(Duration::from_millis(100))
+                .await;
+        }
+        fixture.fork_source(false, "idle");
+        deliver(window, cx, fixture.graph_event());
+        menu_item(cx, PARENT);
+        assert_closed(cx);
+        window
+            .update(cx, |view, _, _| {
+                view.assert_fork_readiness(Some(
+                    "在当前会话输入一次，并等待 Claude Code 完成回复后，即可创建分支",
+                ));
+            })
+            .unwrap();
+        assert!(commands().is_empty());
+        println!(
+            "Fork entries | root hides sibling, unsupported profile hides child, recovering is blocked, child and peer show timed readiness"
+        );
+
+        fixture.fork_source(true, "idle");
+        deliver(window, cx, fixture.graph_event());
+        let mut keys = Vec::new();
+        for (placement, source, new, title, description, hint) in [
+            (
+                Child,
+                PARENT,
+                "probe-created-child",
+                "创建子会话分支",
+                "从“分支主会话”继续一条独立工作路径",
+                BRANCH_HINT,
+            ),
+            (
+                Sibling,
+                CHILD,
+                "probe-created-sibling",
+                "创建同级分支",
+                "从“分支主会话”继续一条独立工作路径",
+                BRANCH_HINT,
+            ),
+            (
+                Peer,
+                PARENT,
+                FAILED,
+                "Fork 会话",
+                "复制“分支主会话”的当前对话并加入当前列表",
+                PEER_HINT,
+            ),
+        ] {
+            if placement == Peer {
+                window
+                    .update(cx, |view, window, cx| {
+                        view.return_from_fork_level(window, cx)
+                    })
+                    .unwrap();
+            }
+            fixture.focus(SCENE, source);
+            deliver(window, cx, fixture.event(false));
+            qualify(cx, source);
+            match placement {
+                Child => control(cx, source, 0),
+                Sibling => control(cx, source, 1),
+                Peer => menu_item(cx, source),
+            }
+            let assert_dialog = |cx: &mut AsyncApp, error, submitting| {
+                window
+                    .update(cx, |view, _, cx| {
+                        view.assert_fork_dialog(
+                            placement,
+                            title,
+                            description,
+                            hint,
+                            error,
+                            submitting,
+                            cx,
+                        )
+                    })
+                    .unwrap()
+            };
+            let key = assert_dialog(cx, None, false);
+            assert!(!key.is_empty() && !keys.contains(&key));
+            if placement == Child {
+                let disabled_option = window
+                    .update(cx, |view, window, _| {
+                        view.assert_fork_worktree_copy();
+                        let viewport = window.viewport_size();
+                        point(viewport.width / 2., viewport.height / 2. + px(80.))
+                    })
+                    .unwrap();
+                click(window, cx, disabled_option);
+                assert_dialog(cx, None, false);
+                dialog_control(cx, 2);
+                assert_dialog(cx, Some("请输入分支名称"), false);
+                name(cx, &"中".repeat(65));
+                dialog_control(cx, 2);
+                assert_dialog(cx, Some("分支名称最多 64 个字符"), false);
+                assert!(commands().is_empty());
+            }
+            name(cx, &format!("  {new}  "));
+            dialog_control(cx, 2);
+            assert_eq!(assert_dialog(cx, None, true), key);
+            press(window, cx, "escape");
+            fork_click(window, cx, MouseButton::Left, point(px(8.), px(85.)));
+            dialog_control(cx, 2);
+            assert_eq!(assert_dialog(cx, None, true), key);
+            let take_submission = || {
+                let mut sent = commands();
+                assert_eq!(sent.len(), 1);
+                let request = sent.pop().unwrap();
+                assert!(matches!(&request, Command::ForkSession {
+                    scene_id, source_session_id, placement: actual, name, worktree_mode, submission_key
+                } if scene_id == SCENE && source_session_id == source && actual == &placement
+                    && name == new && *worktree_mode == ForkWorktreeMode::Current && submission_key == &key));
+                request
+            };
+            let mut request = take_submission();
+            if placement == Child {
+                deliver(
+                    window,
+                    cx,
+                    fixture.fork_reply(
+                        json!({
+                            "submissionKey": "unrelated", "error": "ignored"
+                        }),
+                        false,
+                    ),
+                );
+                assert_dialog(cx, None, true);
+                deliver(
+                    window,
+                    cx,
+                    fixture.fork_reply(
+                        json!({
+                            "submissionKey": key, "error": "原始 Fork 错误"
+                        }),
+                        false,
+                    ),
+                );
+                assert_eq!(assert_dialog(cx, Some("原始 Fork 错误"), false), key);
+                dialog_control(cx, 2);
+                request = take_submission();
+            }
+            let mut result = fixture.create_fork(new, request);
+            result["submissionKey"] = json!(key);
+            keys.push(key);
+            deliver(window, cx, fixture.fork_reply(result, placement != Sibling));
+            assert_closed(cx);
+            draw(window, cx);
+            window
+                .update(cx, |view, _, _| view.assert_fork_stage(new, "queued"))
+                .unwrap();
+            if placement != Peer {
+                window
+                    .update(cx, |view, _, _| view.assert_fork_level(PARENT, new))
+                    .unwrap();
+            }
+        }
+        println!(
+            "Fork dialog | three placements, frozen copy, Unicode validation, current worktree payload, duplicate suppression, error, same key, Graph and Navigation completion"
+        );
+
+        fixture.start_fork(FAILED);
+        deliver(window, cx, fixture.graph_event());
+        draw(window, cx);
+        window
+            .update(cx, |view, _, _| {
+                view.assert_fork_stage(FAILED, "restoring-provider")
+            })
+            .unwrap();
+        fixture.fail_fork(FAILED, "No Conversation Found", 32);
+        deliver(window, cx, fixture.graph_event());
+        let failed = |cx: &mut AsyncApp, title, reason, blocked, error| {
+            window
+                .update(cx, |view, _, _| {
+                    view.assert_fork_failure(FAILED, (title, Some(reason)), blocked, error);
+                })
+                .unwrap();
+        };
+        failed(cx, "父会话已失效", EXPIRED_REASON, None, None);
+        deliver(
+            window,
+            cx,
+            Event::Recovery {
+                session_id: FAILED.into(),
+                state: RecoveryState::Restoring,
+            },
+        );
+        failed(
+            cx,
+            "父会话已失效",
+            EXPIRED_REASON,
+            Some("当前终端仍在恢复"),
+            None,
+        );
+        deliver(
+            window,
+            cx,
+            Event::Recovery {
+                session_id: FAILED.into(),
+                state: RecoveryState::Failed("No Conversation Found".into()),
+            },
+        );
+        deliver(
+            window,
+            cx,
+            Event::StorageFault {
+                session_id: FAILED.into(),
+                message: "probe storage".into(),
+            },
+        );
+        failed(
+            cx,
+            "父会话已失效",
+            EXPIRED_REASON,
+            Some("终端存储异常，请先恢复或结束当前会话"),
+            None,
+        );
+        deliver(
+            window,
+            cx,
+            Event::StorageRecovered {
+                session_id: FAILED.into(),
+            },
+        );
+        sink.read_only();
+        failed(
+            cx,
+            "父会话已失效",
+            EXPIRED_REASON,
+            Some("数据库处于只读恢复模式"),
+            None,
+        );
+        sink.generation(1);
+        control(cx, FAILED, 2);
+        control(cx, FAILED, 2);
+        assert!(
+            matches!(commands().as_slice(), [Command::RetryFork { session_id }] if session_id == FAILED)
+        );
+        deliver(
+            window,
+            cx,
+            fixture.fork_reply(
+                json!({
+                    "sessionId": FAILED, "error": "当前分支无需重试"
+                }),
+                false,
+            ),
+        );
+        failed(
+            cx,
+            "父会话已失效",
+            EXPIRED_REASON,
+            None,
+            Some("当前分支无需重试"),
+        );
+        control(cx, FAILED, 3);
+        window
+            .update(cx, |view, _, _| view.assert_fork_remove_dialog(FAILED))
+            .unwrap();
+        assert!(commands().is_empty());
+        press(window, cx, "escape");
+        assert_closed(cx);
+        control(cx, FAILED, 2);
+        assert!(
+            matches!(commands().as_slice(), [Command::RetryFork { session_id }] if session_id == FAILED)
+        );
+        let result = fixture.retry_fork(FAILED);
+        deliver(window, cx, fixture.fork_reply(result, true));
+        draw(window, cx);
+        window
+            .update(cx, |view, _, _| view.assert_fork_stage(FAILED, "queued"))
+            .unwrap();
+        fixture.fail_fork(FAILED, "probe launch error", 34);
+        deliver(window, cx, fixture.graph_event());
+        failed(cx, "分支创建失败", "probe launch error", None, None);
+        control(cx, FAILED, 3);
+        window
+            .update(cx, |view, _, _| view.assert_fork_remove_dialog(FAILED))
+            .unwrap();
+        dialog_control(cx, 2);
+        assert_remove_command(commands(), FAILED, RemoveScope::NodeOnly);
+        println!(
+            "Fork failure | expired parent mapping, recovery/storage/read-only reasons, deduplicated RetryFork, original rejection and remove entry"
+        );
+
+        fixture.focus(SCENE, PARENT);
+        deliver(window, cx, fixture.event(false));
+        qualify(cx, PARENT);
+        control(cx, PARENT, 0);
+        press(window, cx, "escape");
+        assert_closed(cx);
+        control(cx, PARENT, 0);
+        fork_click(window, cx, MouseButton::Left, point(px(8.), px(85.)));
+        assert_closed(cx);
+        control(cx, PARENT, 0);
+        dialog_control(cx, 0);
+        assert_closed(cx);
+        control(cx, PARENT, 0);
+        let Event::Graph(mut removed) = fixture.graph_event() else {
+            unreachable!()
+        };
+        removed["nodes"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|node| node["sessionId"] != PARENT);
+        deliver(window, cx, Event::Graph(removed));
+        assert_closed(cx);
+        assert!(commands().is_empty());
+        window
+            .update(cx, |_, window, _| window.remove_window())
+            .unwrap();
+        println!("Fork UI hidden GPUI probe passed");
     }
 
     fn click_remove(window: WindowHandle<Workspace>, cx: &mut AsyncApp, id: &str) {
@@ -2559,9 +3337,9 @@ mod probe {
         let click_entry = |cx: &mut AsyncApp| {
             draw(window, cx);
             let at = window
-                .update(cx, |view, _, _| view.remove_button_position(PEER))
+                .update(cx, |view, _, _| view.loader_button_position(PEER))
                 .unwrap();
-            click(window, cx, at - point(px(31.5), px(0.)));
+            click(window, cx, at);
             draw(window, cx);
         };
         let commands = |sink: &ProbeReceiver| {
@@ -2985,7 +3763,16 @@ mod probe {
 
     pub(super) fn run() {
         let loader_only = std::env::args().any(|arg| arg == "--session-loader");
+        let fork_only = std::env::args().any(|arg| arg == "--fork");
         Application::new().with_assets(NativeAssets).run(move |cx| {
+            if fork_only {
+                cx.spawn(async |cx| {
+                    verify_fork(cx).await;
+                    cx.update(|cx| cx.quit()).unwrap();
+                })
+                .detach();
+                return;
+            }
             if loader_only {
                 cx.spawn(async |cx| {
                     verify_session_loader(cx);

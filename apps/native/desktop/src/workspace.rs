@@ -2,6 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
     rc::Rc,
+    sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -10,6 +11,7 @@ use crate::history_view::{HistoryView, HistoryViewEvent, HistoryViewState};
 use crate::recovery_water_view::RecoveryWater;
 use gpui::{prelude::*, *};
 use matou_native_core::geometry::GeometryUpdate;
+use matou_native_core::hierarchy::canvas::{ForkPlacement, ForkWorktreeMode};
 use matou_native_core::hierarchy::cards::RemoveScope;
 use matou_native_core::hierarchy::{HierarchyResult, Scene, Task, Workspace as HierarchyWorkspace};
 use matou_native_core::workspace_paths::WorkspacePathState;
@@ -140,6 +142,7 @@ enum TabDialog {
         scope: RemoveScope,
     },
     SessionLoader(SessionLoader),
+    Branch(BranchDialog),
 }
 
 impl TabDialog {
@@ -150,8 +153,125 @@ impl TabDialog {
                 | Self::LastSession { .. }
                 | Self::RemoveSession { .. }
                 | Self::SessionLoader(_)
+                | Self::Branch(_)
         )
     }
+}
+
+struct BranchDialog {
+    scene_id: String,
+    session_id: String,
+    source_title: String,
+    placement: ForkPlacement,
+    input: Entity<RenameInput>,
+    submission_key: String,
+    submitting: bool,
+    error: Option<String>,
+}
+
+impl BranchDialog {
+    fn copy(&self) -> (&'static str, String, &'static str) {
+        let title = match self.placement {
+            ForkPlacement::Child => "创建子会话分支",
+            ForkPlacement::Sibling => "创建同级分支",
+            ForkPlacement::Peer => "Fork 会话",
+        };
+        if self.placement == ForkPlacement::Peer {
+            (
+                title,
+                format!("复制“{}”的当前对话并加入当前列表", self.source_title),
+                "和当前会话使用同一目录，适合连续处理同一份改动",
+            )
+        } else {
+            (
+                title,
+                format!("从“{}”继续一条独立工作路径", self.source_title),
+                "和父会话使用同一目录，适合连续处理同一份改动",
+            )
+        }
+    }
+}
+
+struct ForkAccess {
+    blocked: Option<&'static str>,
+    readiness: Option<&'static str>,
+}
+
+enum ForkRetry {
+    Pending,
+    Rejected(String),
+}
+
+fn fork_failure_copy(node: &Value) -> Option<(&'static str, Option<&str>)> {
+    let progress = &node["forkProgress"];
+    if progress["stage"] != "failed" && node["forkState"] != "failed" {
+        return None;
+    }
+    let error = progress["error"]
+        .as_str()
+        .or_else(|| node["forkError"].as_str());
+    if error.is_some_and(|error| {
+        error
+            .split(['\n', '\r', '\u{2028}', '\u{2029}'])
+            .any(|line| {
+                let line = line.to_ascii_lowercase();
+                line.contains("provider session not found")
+                    || line.contains("no conversation found")
+                    || line
+                        .split_once("conversation")
+                        .is_some_and(|(_, rest)| rest.contains("not found"))
+            })
+    }) {
+        Some((
+            "父会话已失效",
+            Some(
+                "原 Claude Code 对话身份已失效，本次分支没有创建成功。请返回父会话继续，或移除此失败节点后新建空会话。",
+            ),
+        ))
+    } else {
+        Some(("分支创建失败", error))
+    }
+}
+
+struct ForkProgressCopy {
+    label: String,
+    description: &'static str,
+    counter: Option<String>,
+    fraction: Option<f32>,
+    interactive: bool,
+}
+
+fn fork_progress_copy(node: &Value) -> Option<ForkProgressCopy> {
+    let progress = &node["forkProgress"];
+    let stage_key = progress["stage"].as_str()?;
+    let (stage, description) = match stage_key {
+        "queued" => ("等待创建分支", "前面的分支任务完成后会自动继续"),
+        "creating-worktree" => (
+            "正在创建独立工作目录",
+            "正在隔离文件修改，其他会话可继续工作",
+        ),
+        "applying-setup" => ("正在准备分支环境", "正在执行此工作空间需要的准备步骤"),
+        "binding-session" => ("正在绑定分支会话", "正在把新会话连接到独立工作目录"),
+        "restoring-provider" => ("正在恢复智能体会话", "正在续接原会话上下文并启动分支任务"),
+        "starting-window" => ("正在打开分支窗口", "分支窗口即将可以输入和查看输出"),
+        _ => return None,
+    };
+    let steps = progress["totalSteps"]
+        .as_i64()
+        .zip(progress["completedSteps"].as_i64());
+    let steps = steps.map(|(total, completed)| (total.max(1), completed.clamp(0, total.max(0))));
+    Some(ForkProgressCopy {
+        label: format!("正在创建分支：{stage}"),
+        description,
+        counter: steps.map(|(total, completed)| {
+            format!(
+                "第 {} / {total} 阶段",
+                completed + i64::from(completed < total)
+            )
+        }),
+        fraction: steps.map(|(total, completed)| completed as f32 / total as f32),
+        interactive: matches!(stage_key, "restoring-provider" | "starting-window"),
+    })
 }
 
 struct LoaderOwner {
@@ -513,6 +633,11 @@ pub struct Workspace {
     tab_controls: HashMap<String, [FocusHandle; 2]>,
     card_controls: HashMap<String, FocusHandle>,
     remove_card_controls: HashMap<String, FocusHandle>,
+    fork_controls: HashMap<String, [FocusHandle; 4]>,
+    fork_menu: Option<(String, Point<Pixels>, FocusHandle)>,
+    fork_readiness: Option<&'static str>,
+    fork_readiness_generation: u64,
+    fork_retries: HashMap<String, ForkRetry>,
     keyboard_focus: bool,
     dialog: Option<TabDialog>,
     dialog_controls: Vec<FocusHandle>,
@@ -1293,6 +1418,11 @@ impl Workspace {
             tab_controls: HashMap::new(),
             card_controls: HashMap::new(),
             remove_card_controls: HashMap::new(),
+            fork_controls: HashMap::new(),
+            fork_menu: None,
+            fork_readiness: None,
+            fork_readiness_generation: 0,
+            fork_retries: HashMap::new(),
             keyboard_focus: false,
             dialog: None,
             dialog_controls: Vec::new(),
@@ -1410,6 +1540,7 @@ impl Workspace {
     }
 
     fn retire_transport(&mut self, generation: u64, cx: &mut Context<Self>) {
+        self.fail_pending_forks(&crate::runtime_bridge::SendError::NotReady.to_string());
         self.runtime_generation = generation;
         self.transport_connected = false;
         self.domain_ready = false;
@@ -1596,6 +1727,12 @@ impl Workspace {
                         !node["archivedAt"].is_null() || node["cwd"] != state.cwd
                     })
             }
+            TabDialog::Branch(state) => {
+                self.active_scene_id() != Some(state.scene_id.as_str())
+                    || self
+                        .graph_node(&state.session_id)
+                        .is_none_or(|node| !node["archivedAt"].is_null())
+            }
         });
         if invalid {
             self.close_dialog(window, cx);
@@ -1611,6 +1748,7 @@ impl Workspace {
         }
         let event = match envelope {
             BridgeEvent::TransportDiagnostic { message, .. } => {
+                self.fail_pending_forks(&message);
                 self.fail_pending_loader_commands(message.clone());
                 self.transport_fault = Some((generation, message));
                 cx.notify();
@@ -1623,6 +1761,7 @@ impl Workspace {
                         ConnectionPhase::Blocked(block) => block.message.clone(),
                         _ => crate::runtime_bridge::SendError::NotReady.to_string(),
                     };
+                    self.fail_pending_forks(&message);
                     self.fail_pending_loader_commands(message);
                     self.domain_ready = false;
                     self.pending_card_action = None;
@@ -1888,7 +2027,7 @@ impl Workspace {
                 }
                 self.hierarchy = Some(hierarchy);
                 self.finish_card_action(&graph["sessionCardAction"]);
-                self.graph = graph;
+                self.replace_fork_graph(graph, window, cx);
                 self.refresh_terminals(window, cx);
                 if fresh_ready {
                     self.session_frames.clear();
@@ -1899,6 +2038,7 @@ impl Workspace {
                         .filter(|node| {
                             node["archivedAt"].is_null()
                                 && Self::provider_restore_state(node) != Some("failed")
+                                && fork_failure_copy(node).is_none()
                         })
                         .filter_map(|node| node["sessionId"].as_str())
                     {
@@ -2105,7 +2245,7 @@ impl Workspace {
                         graph.remove("providerSessionLoadErrors"),
                     ]
                 });
-                self.graph = graph;
+                self.replace_fork_graph(graph, window, cx);
                 self.refresh_terminals(window, cx);
                 if self.dialog.as_ref().is_some_and(TabDialog::is_session_card) {
                     self.close_invalid_dialog(window, cx);
@@ -2274,6 +2414,15 @@ impl Workspace {
             self.remove_card_controls
                 .entry(id.to_owned())
                 .or_insert_with(|| cx.focus_handle().tab_stop(true));
+            if node["archivedAt"].is_null()
+                && (node["currentMode"] == "claude-code"
+                    || session_levels::parent_id(node).is_some()
+                    || fork_failure_copy(node).is_some())
+            {
+                self.fork_controls
+                    .entry(id.to_owned())
+                    .or_insert_with(|| std::array::from_fn(|_| cx.focus_handle().tab_stop(true)));
+            }
             if node["archivedAt"].is_null() && Self::provider_restore_state(node) == Some("failed")
             {
                 self.provider_restore_controls
@@ -2334,6 +2483,8 @@ impl Workspace {
             self.dismiss_history_context(cx);
         }
         self.refresh_level(cx);
+        self.fork_controls
+            .retain(|id, _| self.terminals.contains_key(id));
     }
 
     fn handle_surface_event(
@@ -2846,6 +2997,8 @@ impl Workspace {
     #[cfg(target_os = "macos")]
     fn recovery_water_needed(&self, id: &str, node: &Value) -> bool {
         node["archivedAt"].is_null()
+            && fork_failure_copy(node).is_none()
+            && fork_progress_copy(node).is_none()
             && Self::provider_restore_state(node) != Some("failed")
             && self.recovery_blocked(id)
             && !self.storage_fault_sessions.contains(id)
@@ -3984,6 +4137,7 @@ impl Workspace {
             Some(TabDialog::SessionLoader(state)) => {
                 self.card_controls.get(&state.session_id).cloned()
             }
+            Some(TabDialog::Branch(state)) => self.card_controls.get(&state.session_id).cloned(),
             _ => None,
         };
         if let Some(focus) = focus {
@@ -4022,6 +4176,10 @@ impl Workspace {
             .then(|| format!("当前事项下已存在名为\"{value}\"的标签页"))
     }
     fn confirm_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.dialog, Some(TabDialog::Branch(_))) {
+            self.submit_fork(window, cx);
+            return;
+        }
         if let Some(TabDialog::RenameTask { task_id, input, .. }) = &self.dialog {
             let task_id = task_id.clone();
             let text = input.read(cx);
@@ -4104,7 +4262,7 @@ impl Workspace {
                     session_id: session_id.clone(),
                     scope: *scope,
                 }),
-            Some(TabDialog::SessionLoader(_)) | None => return,
+            Some(TabDialog::SessionLoader(_) | TabDialog::Branch(_)) | None => return,
         };
         self.close_dialog(window, cx);
         if let Some(command) = command {
@@ -4229,7 +4387,12 @@ impl Workspace {
     }
 
     fn remove_session_available(&self, id: &str) -> bool {
-        if self.is_stopped_session(id) {
+        if let Some(node) = self
+            .graph_node(id)
+            .filter(|node| node["archivedAt"].is_null() && fork_failure_copy(node).is_some())
+        {
+            self.fork_repair_blocked_reason(id, node).is_none()
+        } else if self.is_stopped_session(id) {
             self.stopped_remove_available(id)
         } else {
             self.card_action_available(id)
@@ -4265,6 +4428,334 @@ impl Workspace {
     fn session_loader_blocked_reason(&self, id: &str, node: &Value) -> Option<&'static str> {
         self.launch_action_blocked_reason(id, node)
             .or_else(|| self.recovery_blocked(id).then_some("当前终端仍在恢复"))
+    }
+
+    fn fork_connection_blocked_reason(&self) -> Option<&'static str> {
+        match self.commands.connection() {
+            (_, ConnectionPhase::Blocked(block)) if block.kind == StartupBlockKind::ReadOnly => {
+                Some("数据库处于只读恢复模式")
+            }
+            (generation, ConnectionPhase::Ready)
+                if generation == self.runtime_generation
+                    && self.domain_ready
+                    && self.transport_connected =>
+            {
+                None
+            }
+            _ => Some("当前终端仍在恢复"),
+        }
+    }
+
+    fn fork_access(&self, id: &str, placement: ForkPlacement) -> Option<ForkAccess> {
+        let node = self.graph_node(id)?;
+        if !node["archivedAt"].is_null() || !node["detachedWindowId"].is_null() {
+            return None;
+        }
+        let readiness = if placement == ForkPlacement::Sibling {
+            let parent = self.graph_node(session_levels::parent_id(node)?)?;
+            if parent["canFork"] != true || !parent["archivedAt"].is_null() {
+                return None;
+            }
+            None
+        } else {
+            if node["currentMode"] != "claude-code" {
+                return None;
+            }
+            (node["canFork"] != true).then(|| {
+                if matches!(
+                    node["workStatus"].as_str(),
+                    Some("running" | "starting" | "needs-input")
+                ) {
+                    "当前回复完成后即可 Fork"
+                } else {
+                    "在当前会话输入一次，并等待 Claude Code 完成回复后，即可创建分支"
+                }
+            })
+        };
+        Some(ForkAccess {
+            blocked: self
+                .fork_connection_blocked_reason()
+                .or_else(|| self.card_action_blocked_reason(id, node)),
+            readiness,
+        })
+    }
+
+    fn fork_repair_blocked_reason(&self, id: &str, node: &Value) -> Option<&'static str> {
+        self.fork_connection_blocked_reason()
+            .or_else(|| self.card_mutation_blocked_reason(id, node))
+            .or_else(|| {
+                // A failed fork has no usable terminal frame. Only actual recovery
+                // in progress should block repairing the failed operation.
+                matches!(
+                    self.recovery.get(id),
+                    Some(RecoveryState::Restoring | RecoveryState::Restarting(_))
+                )
+                .then_some("当前终端仍在恢复")
+            })
+    }
+
+    fn show_fork_readiness(&mut self, message: &'static str, cx: &mut Context<Self>) {
+        self.fork_readiness = Some(message);
+        self.fork_readiness_generation += 1;
+        let generation = self.fork_readiness_generation;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(2800))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.fork_readiness_generation == generation {
+                    this.fork_readiness = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn open_fork_menu(&mut self, id: &str, position: Point<Pixels>, cx: &mut Context<Self>) {
+        if self.dialog.is_some()
+            || self
+                .fork_access(id, ForkPlacement::Peer)
+                .is_none_or(|access| access.blocked.is_some())
+        {
+            return;
+        }
+        self.workspace_menu = None;
+        self.task_menu = None;
+        self.tab_menu = None;
+        self.hidden_tabs = None;
+        self.fork_menu = Some((id.to_owned(), position, cx.focus_handle().tab_stop(true)));
+        cx.notify();
+    }
+
+    fn open_fork(
+        &mut self,
+        id: &str,
+        placement: ForkPlacement,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.fork_menu = None;
+        cx.notify();
+        if self.dialog.is_some() {
+            return;
+        }
+        let Some(access) = self.fork_access(id, placement) else {
+            return;
+        };
+        if access.blocked.is_some() {
+            return;
+        }
+        if let Some(reason) = access.readiness {
+            self.show_fork_readiness(reason, cx);
+            return;
+        }
+        let Some((scene_id, node)) = self.active_scene_id().zip(self.graph_node(id)) else {
+            return;
+        };
+        let source = if placement == ForkPlacement::Sibling {
+            session_levels::parent_id(node)
+                .and_then(|parent| self.graph_node(parent))
+                .unwrap_or(node)
+        } else {
+            node
+        };
+        let state = BranchDialog {
+            scene_id: scene_id.into(),
+            session_id: id.into(),
+            source_title: source["title"].as_str().unwrap_or_default().into(),
+            placement,
+            input: cx.new(|cx| RenameInput::session_loader_search("例如：修复登录流程", cx)),
+            submission_key: fork_submission_key(),
+            submitting: false,
+            error: None,
+        };
+        self.workspace_menu = None;
+        self.task_menu = None;
+        self.tab_menu = None;
+        self.hidden_tabs = None;
+        self.fork_readiness = None;
+        self.dialog_controls = (0..3).map(|_| cx.focus_handle().tab_stop(true)).collect();
+        self.dialog_subscription = Some(cx.subscribe_in(
+            &state.input,
+            window,
+            |this, _, event, window, cx| match event {
+                RenameInputEvent::Changed => {
+                    if let Some(TabDialog::Branch(state)) = &mut this.dialog {
+                        state.error = None;
+                    }
+                    cx.notify();
+                }
+                RenameInputEvent::Cancel => this.cancel_fork(window, cx),
+                RenameInputEvent::Confirm => this.submit_fork(window, cx),
+            },
+        ));
+        window.focus(&state.input.read(cx).focus);
+        self.dialog = Some(TabDialog::Branch(state));
+        cx.notify();
+    }
+
+    fn cancel_fork(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(&self.dialog, Some(TabDialog::Branch(state)) if !state.submitting) {
+            self.close_dialog(window, cx);
+        }
+    }
+
+    fn submit_fork(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(TabDialog::Branch(state)) = &self.dialog else {
+            return;
+        };
+        let input = state.input.read(cx);
+        if state.submitting || input.composing() {
+            return;
+        }
+        let name = trim_name(&input.text);
+        let error = if name.is_empty() {
+            Some("请输入分支名称")
+        } else if name.chars().count() > FORK_NAME_LIMIT {
+            Some("分支名称最多 64 个字符")
+        } else {
+            match self.fork_access(&state.session_id, state.placement) {
+                Some(access) => access.blocked.or(access.readiness),
+                None => Some(if state.placement == ForkPlacement::Sibling {
+                    "完成首轮 AI 对话后可创建分支"
+                } else {
+                    "当前终端仍在恢复"
+                }),
+            }
+        };
+        let result = if let Some(error) = error {
+            Err(error.to_owned())
+        } else {
+            self.commands
+                .send_at(
+                    self.runtime_generation,
+                    Command::ForkSession {
+                        scene_id: state.scene_id.clone(),
+                        source_session_id: state.session_id.clone(),
+                        placement: state.placement,
+                        name: name.to_owned(),
+                        worktree_mode: ForkWorktreeMode::Current,
+                        submission_key: state.submission_key.clone(),
+                    },
+                )
+                .map_err(|error| error.to_string())
+        };
+        let focus = input.focus.clone();
+        let Some(TabDialog::Branch(state)) = &mut self.dialog else {
+            return;
+        };
+        state.submitting = result.is_ok();
+        state.error = result.err();
+        if state.submitting {
+            window.blur();
+        } else {
+            window.focus(&focus);
+        }
+        cx.notify();
+    }
+
+    fn retry_fork(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.graph_node(id).is_none_or(|node| {
+            !node["archivedAt"].is_null()
+                || fork_failure_copy(node).is_none()
+                || self.fork_repair_blocked_reason(id, node).is_some()
+        }) || matches!(self.fork_retries.get(id), Some(ForkRetry::Pending))
+        {
+            return;
+        }
+        let result = self.commands.send_at(
+            self.runtime_generation,
+            Command::RetryFork {
+                session_id: id.to_owned(),
+            },
+        );
+        self.fork_retries.insert(
+            id.into(),
+            match result {
+                Ok(()) => ForkRetry::Pending,
+                Err(error) => ForkRetry::Rejected(error.to_string()),
+            },
+        );
+        cx.notify();
+    }
+
+    fn fail_pending_forks(&mut self, message: &str) {
+        if let Some(TabDialog::Branch(state)) = &mut self.dialog
+            && state.submitting
+        {
+            state.submitting = false;
+            state.error = Some(message.into());
+        }
+        for retry in self.fork_retries.values_mut() {
+            if matches!(retry, ForkRetry::Pending) {
+                *retry = ForkRetry::Rejected(message.into());
+            }
+        }
+    }
+
+    fn replace_fork_graph(
+        &mut self,
+        mut graph: Value,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let result = graph
+            .as_object_mut()
+            .and_then(|object| object.remove("forkSessionResult"));
+        self.graph = graph;
+        if self
+            .fork_menu
+            .as_ref()
+            .is_some_and(|(id, _, _)| self.fork_access(id, ForkPlacement::Peer).is_none())
+        {
+            self.fork_menu = None;
+        }
+        if let Some(result) = result {
+            let error = result["error"].as_str();
+            if let Some(TabDialog::Branch(state)) = &mut self.dialog
+                && state.submitting
+                && result["submissionKey"] == state.submission_key
+            {
+                if let Some(error) = error {
+                    state.error = Some(error.into());
+                    state.submitting = false;
+                    window.focus(&state.input.read(cx).focus);
+                } else if result["sessionId"].is_string() {
+                    if state.placement == ForkPlacement::Child
+                        && session_levels::node(
+                            session_levels::nodes(&self.graph),
+                            &state.session_id,
+                        )
+                        .is_some_and(|node| node["archivedAt"].is_null())
+                    {
+                        self.level_parent_by_scene
+                            .insert(state.scene_id.clone(), Some(state.session_id.clone()));
+                    }
+                    self.close_dialog(window, cx);
+                }
+            } else if let Some(id) = result["sessionId"].as_str()
+                && matches!(self.fork_retries.get(id), Some(ForkRetry::Pending))
+            {
+                if let Some(error) = error {
+                    if self.graph_node(id).and_then(fork_failure_copy).is_some() {
+                        self.fork_retries
+                            .insert(id.into(), ForkRetry::Rejected(error.into()));
+                    } else {
+                        self.show_toast(error, cx);
+                    }
+                } else {
+                    self.fork_retries.remove(id);
+                }
+            }
+        }
+        let nodes = session_levels::nodes(&self.graph);
+        self.fork_retries.retain(|id, _| {
+            session_levels::node(nodes, id).is_some_and(|node| {
+                node["archivedAt"].is_null() && fork_failure_copy(node).is_some()
+            })
+        });
     }
 
     fn session_loader_running(&self, id: &str) -> bool {
@@ -5397,6 +5888,39 @@ impl Workspace {
 
     fn tab_key(&mut self, stroke: &Keystroke, window: &mut Window, cx: &mut Context<Self>) {
         let mods = stroke.modifiers;
+        if let Some(TabDialog::Branch(state)) = &self.dialog {
+            let input = state.input.read(cx);
+            if stroke.key == "escape" && !input.composing() {
+                self.cancel_fork(window, cx);
+                cx.stop_propagation();
+            } else if stroke.key == "tab" && !mods.alt && !mods.control && !mods.platform {
+                if !state.submitting && !input.composing() {
+                    let controls = [
+                        &self.dialog_controls[0],
+                        &input.focus,
+                        &self.dialog_controls[1],
+                        &self.dialog_controls[2],
+                    ];
+                    let current = controls.iter().position(|focus| focus.is_focused(window));
+                    let next = match (current, mods.shift) {
+                        (Some(index), true) => (index + controls.len() - 1) % controls.len(),
+                        (Some(index), false) => (index + 1) % controls.len(),
+                        (None, true) => controls.len() - 1,
+                        (None, false) => 0,
+                    };
+                    window.focus(controls[next]);
+                    self.keyboard_focus = true;
+                    cx.notify();
+                }
+                cx.stop_propagation();
+            }
+            return;
+        }
+        if stroke.key == "escape" && self.fork_menu.take().is_some() {
+            cx.notify();
+            cx.stop_propagation();
+            return;
+        }
         if let Some(TabDialog::SessionLoader(state)) = &self.dialog {
             if stroke.key == "escape" {
                 self.close_dialog(window, cx);
@@ -7162,13 +7686,230 @@ impl Workspace {
             .into_any_element()
     }
 
+    fn render_fork_header(
+        &self,
+        id: &str,
+        placement: ForkPlacement,
+        cx: &mut Context<Self>,
+    ) -> Option<Stateful<Div>> {
+        let access = self.fork_access(id, placement)?;
+        let sibling = placement == ForkPlacement::Sibling;
+        let (role, title) = if sibling {
+            ("sibling", "从共同父会话 Fork 兄弟分支")
+        } else {
+            ("child", "创建子分支")
+        };
+        let tooltip = access.blocked.or(access.readiness).unwrap_or(title);
+        let button = fork_header_button(
+            format!("fork-{role}-{id}").into(),
+            sibling,
+            access.blocked.or(access.readiness).is_some(),
+            access.blocked.is_some(),
+            tooltip.into(),
+        );
+        Some(if access.blocked.is_some() {
+            button.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        } else {
+            let id = id.to_owned();
+            self.button(
+                button,
+                &self.fork_controls[&id][usize::from(sibling)],
+                {
+                    let id = id.clone();
+                    move |this, window, cx| this.open_fork(&id, placement, window, cx)
+                },
+                cx,
+            )
+        })
+    }
+
+    fn render_fork_failure(&self, id: &str, node: &Value, cx: &mut Context<Self>) -> Option<Div> {
+        let (title, reason) = fork_failure_copy(node)?;
+        let retry = self.fork_retries.get(id);
+        let pending = matches!(retry, Some(ForkRetry::Pending));
+        let error = match retry {
+            Some(ForkRetry::Rejected(error)) => Some(error.as_str()),
+            _ => None,
+        };
+        let blocked = self.fork_repair_blocked_reason(id, node);
+        let action = |remove: bool, cx: &mut Context<Self>| {
+            let (role, label) = if remove {
+                ("remove", "移除节点…")
+            } else {
+                ("retry", "重试创建分支")
+            };
+            let retry_pending = pending && !remove;
+            let button = fork_failure_button(
+                format!("fork-{role}-{id}").into(),
+                label,
+                blocked,
+                retry_pending,
+            );
+            if blocked.is_some() || retry_pending {
+                return button;
+            }
+            let session_id = id.to_owned();
+            self.button(
+                button,
+                &self.fork_controls[id][2 + usize::from(remove)],
+                move |this, window, cx| {
+                    if remove {
+                        this.open_remove_session(&session_id, window, cx);
+                    } else {
+                        this.retry_fork(&session_id, cx);
+                    }
+                },
+                cx,
+            )
+        };
+        Some(fork_failure_body(
+            title,
+            reason,
+            error,
+            action(false, cx).into_any_element(),
+            action(true, cx).into_any_element(),
+        ))
+    }
+
+    fn render_branch_dialog(
+        &self,
+        state: &BranchDialog,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (title, description, hint) = state.copy();
+        let input = state.input.read(cx);
+        let focused = input.focus.is_focused(window);
+        let count = trim_name(&input.text).chars().count();
+        let input = div()
+            .w_full()
+            .h(px(38.))
+            .flex()
+            .items_center()
+            .pl(px(11.))
+            .pr(px(52.))
+            .rounded(px(9.))
+            .border_1()
+            .border_color(rgb(if focused { 0x5b9de9 } else { 0x414752 }))
+            .when(focused, |input| {
+                input.shadow(vec![BoxShadow {
+                    color: rgba(0x5b9de929).into(),
+                    offset: point(px(0.), px(0.)),
+                    blur_radius: px(0.),
+                    spread_radius: px(3.),
+                }])
+            })
+            .bg(rgb(0x15171a))
+            .when_else(
+                state.submitting,
+                |field| {
+                    field.child(
+                        div()
+                            .truncate()
+                            .text_color(rgb(0xf2f3f5))
+                            .child(input.text.clone()),
+                    )
+                },
+                |field| field.child(state.input.clone()),
+            );
+        let close = fork_dialog_close();
+        let cancel = fork_dialog_button("fork-dialog-cancel", "取消", false, state.submitting);
+        let confirm = fork_dialog_button("fork-dialog-confirm", "创建分支", true, state.submitting);
+        let (close, cancel, confirm) = if state.submitting {
+            (close.opacity(0.55).cursor_default(), cancel, confirm)
+        } else {
+            (
+                self.button(close, &self.dialog_controls[0], Self::cancel_fork, cx),
+                self.button(cancel, &self.dialog_controls[1], Self::cancel_fork, cx),
+                self.button(confirm, &self.dialog_controls[2], Self::submit_fork, cx),
+            )
+        };
+        let panel = fork_dialog_panel(
+            window.viewport_size().width,
+            title,
+            &description,
+            hint,
+            count,
+            state.submitting,
+            state.error.as_deref(),
+            (
+                close.into_any_element(),
+                input.into_any_element(),
+                cancel.into_any_element(),
+                confirm.into_any_element(),
+            ),
+        );
+        tabs_ui::dialog_overlay("fork-dialog-backdrop")
+            .bg(rgba(0x00000070))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    this.cancel_fork(window, cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+            .child(panel.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()))
+            .into_any_element()
+    }
+
+    fn render_fork_menu(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (id, position, focus) = self.fork_menu.as_ref()?;
+        let access = self.fork_access(id, ForkPlacement::Peer)?;
+        if access.blocked.is_some() {
+            return None;
+        }
+        let tooltip = access.readiness.unwrap_or("创建 Fork 会话");
+        let item = tabs_ui::menu_item("fork-menu-peer", "⑂ Fork 会话")
+            .when(access.readiness.is_some(), |item| item.opacity(0.38))
+            .tooltip(move |_, cx| cx.new(|_| CardTooltip(tooltip.into())).into());
+        let id = id.clone();
+        let item = self.button(
+            item,
+            focus,
+            move |this, window, cx| this.open_fork(&id, ForkPlacement::Peer, window, cx),
+            cx,
+        );
+        let viewport = window.viewport_size();
+        let position = point(
+            position.x.min((viewport.width - px(132.)).max(px(0.))),
+            position.y.min((viewport.height - px(36.)).max(px(0.))),
+        );
+        let menu = tabs_ui::context_menu("fork-card-menu")
+            .w(px(132.))
+            .left(position.x)
+            .top(position.y)
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(item);
+        let dismiss =
+            |this: &mut Self, _: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>| {
+                this.fork_menu = None;
+                cx.stop_propagation();
+                cx.notify();
+            };
+        Some(
+            div()
+                .id("fork-menu-overlay")
+                .absolute()
+                .inset_0()
+                .occlude()
+                .on_mouse_down(MouseButton::Left, cx.listener(dismiss))
+                .on_mouse_down(MouseButton::Right, cx.listener(dismiss))
+                .child(menu)
+                .into_any_element(),
+        )
+    }
+
     fn tab_overlay(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if let Some(TabDialog::Branch(state)) = &self.dialog {
+            return Some(self.render_branch_dialog(state, window, cx));
+        }
         if let Some(TabDialog::SessionLoader(state)) = &self.dialog {
             return Some(self.render_session_loader(state, window, cx));
         }
         if let Some(dialog) = &self.dialog {
             let (title, body, confirm, show_cancel, disabled): (SharedString, _, SharedString, _, _) = match dialog {
-                TabDialog::SessionLoader(_) => unreachable!("loader rendered above"),
+                TabDialog::SessionLoader(_) | TabDialog::Branch(_) => unreachable!("specialized dialog rendered above"),
                 TabDialog::RenameTask { task_id, input, empty_submitted, failure } => {
                     let value = trim_name(&input.read(cx).text);
                     let error = if *empty_submitted && value.is_empty() { Some("工作台名称不能为空".into()) }
@@ -8431,10 +9172,16 @@ impl Render for Workspace {
                         }
                     }),
                 );
-            let provider_banner = node
+            let fork_failure = node
                 .filter(|_| !compact)
+                .and_then(|node| self.render_fork_failure(id, node, cx));
+            let fork_progress = node.and_then(fork_progress_copy);
+            let provider_banner = node
+                .filter(|_| !compact && fork_failure.is_none() && fork_progress.is_none())
                 .and_then(|node| self.provider_restore_banner(id, node));
             let card = if !compact
+                && fork_failure.is_none()
+                && fork_progress.is_none()
                 && provider_banner.is_none()
                 && let Some(RecoveryState::Failed(error)) = self.recovery.get(id)
             {
@@ -8508,6 +9255,7 @@ impl Render for Workspace {
             } else {
                 card.child(
                     div()
+                        .id(SharedString::from(format!("session-header-{id}")))
                         .h(px(42.))
                         .flex_none()
                         .rounded_t(px(12.))
@@ -8515,6 +9263,16 @@ impl Render for Workspace {
                         .flex()
                         .items_center()
                         .bg(rgb(0xffffff))
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener({
+                                let id = id.clone();
+                                move |this, event: &MouseDownEvent, _, cx| {
+                                    this.open_fork_menu(&id, event.position, cx);
+                                    cx.stop_propagation();
+                                }
+                            }),
+                        )
                         .child(
                             div()
                                 .text_size(px(12.))
@@ -8529,6 +9287,8 @@ impl Render for Workspace {
                                 .gap(px(6.))
                                 .children(badge)
                                 .children(node.map(|node| self.session_loader_button(id, node, cx)))
+                                .children(self.render_fork_header(id, ForkPlacement::Child, cx))
+                                .children(self.render_fork_header(id, ForkPlacement::Sibling, cx))
                                 .children(
                                     node.filter(|node| node["archivedAt"].is_null())
                                         .map(|node| self.remove_card_button(id, node, cx)),
@@ -8552,11 +9312,17 @@ impl Render for Workspace {
                 .children(provider_banner.map(|banner| {
                     self.render_provider_restore_banner(id, banner, Theme::default(), cx)
                 }))
-                .children(node.and_then(|node| {
-                    self.start_failure_card(id, node)
-                        .map(|card| self.render_start_failure_card(id, card, width, cx))
-                }))
-                .child({
+                .children(
+                    (fork_failure.is_none() && fork_progress.is_none())
+                        .then(|| {
+                            node.and_then(|node| self.start_failure_card(id, node))
+                                .map(|card| self.render_start_failure_card(id, card, width, cx))
+                        })
+                        .flatten(),
+                )
+                .child(if let Some(failure) = fork_failure {
+                    failure.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                } else {
                     let body = div()
                         .flex_1()
                         .min_h_0()
@@ -8575,7 +9341,8 @@ impl Render for Workspace {
                                 )
                             },
                         )
-                        .children(self.archive_summary(id));
+                        .children(self.archive_summary(id))
+                        .children(fork_progress.map(|progress| fork_progress_body(progress, now)));
                     #[cfg(target_os = "macos")]
                     let body = body.when(water.is_some(), |body| body.opacity(0.));
                     body
@@ -8695,7 +9462,9 @@ impl Render for Workspace {
         .absolute()
         .size_full();
         let canvas_dialog = matches!(self.dialog, Some(TabDialog::RemoveSession { .. }));
-        let overlay = self.tab_overlay(window, cx);
+        let overlay = self
+            .tab_overlay(window, cx)
+            .or_else(|| self.render_fork_menu(window, cx));
         let (carousel_overlay, window_overlay) = if canvas_dialog {
             (overlay, None)
         } else {
@@ -8792,8 +9561,23 @@ impl Render for Workspace {
             )
             .children(badge_tooltip.filter(|_| !canvas_dialog))
             .children(toast)
+            .children(
+                self.fork_readiness
+                    .filter(|_| self.dialog.is_none())
+                    .map(fork_readiness_toast),
+            )
             .children(window_overlay)
     }
+}
+
+fn fork_submission_key() -> String {
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let time = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    format!("desktop-fork-{}-{time}-{sequence}", std::process::id())
 }
 
 fn loader_relative_time(updated_at: i64) -> String {
@@ -8904,4 +9688,600 @@ fn record_motion(trace: &MotionTrace, record: &Value) {
     if let Err(error) = writeln!(trace.borrow_mut(), "{record}") {
         eprintln!("Write motion acceptance trace: {error}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Fork entry points, dialog, progress, failure and readiness views.
+//
+// Render-only: commands, submission keys, graph state and the Workspace
+// callbacks stay in the main view. Frozen sources:
+// - hierarchy/hierarchy.css `.pane-fork` (221-224) and its light-surface
+//   variant (759-761), `.fork-readiness-toast` (225 / 762),
+//   `.fork-failure-card` (767-771);
+// - hierarchy/hierarchy.css `.branch-dialog*` (787-813);
+// - session-canvas/ForkProgressOverlay.tsx and fork-progress-overlay.css;
+// - i18n sessionCanvas.ts `branchDialog`, hierarchyTerminal.ts `pane`.
+//
+// The native card head is a light surface, so the entry icon uses the frozen
+// light-theme `.pane-fork` colors; the dialog, progress and failure surfaces
+// keep their frozen dark colors.
+// ---------------------------------------------------------------------------
+
+/// `sessionCanvas.branchDialog.worktreeSection`.
+const FORK_WORKTREE_SECTION: &str = "工作目录";
+/// `sessionCanvas.branchDialog.useCurrentWorktree`.
+const FORK_USE_CURRENT_WORKTREE: &str = "使用当前工作树";
+/// `sessionCanvas.branchDialog.useNewWorktree`.
+const FORK_USE_NEW_WORKTREE: &str = "从新工作树创建";
+/// `sessionCanvas.branchDialog.newWorktreeHint`.
+const FORK_NEW_WORKTREE_HINT: &str = "创建隔离的 Git worktree，适合多个功能并行开发";
+/// `sessionCanvas.branchDialog.needsGitRepository`.
+const FORK_NEEDS_GIT_REPOSITORY: &str = "需要 Git 仓库";
+/// `sessionCanvas.branchDialog.name`.
+const FORK_DIALOG_NAME: &str = "分支名称";
+/// `sessionCanvas.branchDialog.creating`.
+const FORK_DIALOG_CREATING: &str = "正在创建分支…";
+/// `sessionCanvas.branchDialog.nameTooLong` / the frozen counter denominator.
+const FORK_NAME_LIMIT: usize = 64;
+
+/// `hierarchyTerminal.pane.forkChild` uses lucide `layers-plus`;
+/// `forkSibling` uses `copy-plus`.
+fn fork_header_icon(sibling: bool) -> &'static str {
+    if sibling { "copy-plus" } else { "layers-plus" }
+}
+
+/// `.pane-fork` at 24×24 with a 16px frozen AppIcon (the React default).
+/// `dimmed` means `canFork == false`, `blocked` means the shared action gate is
+/// closed. Both share the frozen `[aria-disabled="true"]` opacity; a blocked
+/// entry shows the not-allowed cursor in place of the browser's `help`.
+fn fork_header_button(
+    id: SharedString,
+    sibling: bool,
+    dimmed: bool,
+    blocked: bool,
+    tooltip: SharedString,
+) -> Stateful<Div> {
+    let enabled = !dimmed && !blocked;
+    let glyph = svg()
+        .path(SharedString::from(format!(
+            "icons/{}.svg",
+            fork_header_icon(sibling)
+        )))
+        .size(px(16.))
+        .flex_none()
+        .text_color(rgba(0x00000085))
+        .when(enabled, |glyph| {
+            glyph.group_hover(id.clone(), |style| style.text_color(rgba(0x000000d1)))
+        });
+    let button = div()
+        .id(id.clone())
+        .group(id)
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .size(px(24.))
+        .rounded(px(5.))
+        .bg(rgba(0x00000000))
+        .text_color(rgba(0x00000085))
+        .child(glyph)
+        .tooltip(move |_, cx| cx.new(|_| CardTooltip(tooltip.clone())).into());
+    if enabled {
+        button
+            .cursor_pointer()
+            .hover(|style| style.text_color(rgba(0x000000d1)).bg(rgba(0x0000000f)))
+    } else {
+        button
+            .opacity(0.38)
+            .cursor(CursorStyle::OperationNotAllowed)
+    }
+}
+
+/// `.branch-dialog__field small`: `n/64`, bottom-right of the input wrapper.
+fn fork_dialog_name_counter(count: usize) -> Div {
+    div()
+        .absolute()
+        .right(px(10.))
+        .bottom(px(12.))
+        .text_color(rgb(0x747b86))
+        .text_size(px(12.))
+        .child(format!("{count}/{FORK_NAME_LIMIT}"))
+}
+
+/// `.branch-worktree-card input` (frozen accent `#5b9de9`).
+fn fork_worktree_radio(selected: bool) -> Div {
+    div()
+        .flex_none()
+        .mt(px(2.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .size(px(14.))
+        .rounded_full()
+        .border_1()
+        .border_color(if selected {
+            rgb(0x5b9de9)
+        } else {
+            rgb(0x5a616c)
+        })
+        .when(selected, |radio| {
+            radio.child(div().size(px(6.)).rounded_full().bg(rgb(0x5b9de9)))
+        })
+}
+
+/// `.branch-worktree-card` (+ `.is-selected` / `.is-disabled`).
+fn fork_worktree_card(
+    selected: bool,
+    disabled: bool,
+    title: &'static str,
+    hint: &str,
+    note: Option<&'static str>,
+) -> Div {
+    let card = div()
+        .flex()
+        .gap(px(10.))
+        .p(px(12.))
+        .border_1()
+        .border_color(if selected {
+            rgb(0x5b9de9)
+        } else {
+            rgb(0x343942)
+        })
+        .rounded(px(10.))
+        .bg(if selected {
+            rgba(0x5b9de917)
+        } else {
+            rgb(0x181a1e)
+        })
+        .child(fork_worktree_radio(selected))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(4.))
+                .child(div().text_size(px(13.)).child(title))
+                .child(
+                    div()
+                        .text_color(rgb(0x8f96a1))
+                        .text_size(px(11.))
+                        .child(ui_text(hint.to_owned())),
+                )
+                .children(note.map(|note| {
+                    div()
+                        .text_color(rgb(0xe6a44a))
+                        .text_size(px(11.))
+                        .child(note)
+                })),
+        );
+    if disabled {
+        card.opacity(0.55)
+    } else {
+        card.cursor_pointer()
+    }
+}
+
+/// `.branch-dialog` panel, excluding the overlay/backdrop owned by the host.
+/// `so` is `(close, input, cancel, confirm)`; the input must be the existing
+/// `RenameInput` entity. The two worktree cards are frozen presentation: the
+/// current worktree is selected and the new-worktree card is always disabled
+/// this round, with its "需要 Git 仓库" note.
+#[allow(clippy::too_many_arguments)]
+fn fork_dialog_panel(
+    viewport_width: Pixels,
+    title: &str,
+    description: &str,
+    current_hint: &str,
+    count: usize,
+    submitting: bool,
+    error: Option<&str>,
+    so: (AnyElement, AnyElement, AnyElement, AnyElement),
+) -> Div {
+    let (close, input, cancel, confirm) = so;
+    let panel_width = 520.0_f32.min((f32::from(viewport_width) - 48.0).max(0.0));
+    let header = div()
+        .flex()
+        .items_start()
+        .justify_between()
+        .gap(px(16.))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .text_size(px(18.))
+                        .font_weight(FontWeight::BOLD)
+                        .child(ui_text(title.to_owned())),
+                )
+                .child(
+                    div()
+                        .mt(px(6.))
+                        .text_color(rgb(0x9298a3))
+                        .text_size(px(12.))
+                        .line_height(relative(1.45))
+                        .child(ui_text(description.to_owned())),
+                ),
+        )
+        .child(close);
+    let field = div()
+        .relative()
+        .flex()
+        .flex_col()
+        .gap(px(7.))
+        .mt(px(20.))
+        .text_color(rgb(0xc9cdd4))
+        .text_size(px(12.))
+        .child(div().child(FORK_DIALOG_NAME))
+        .child(
+            div()
+                .relative()
+                .w_full()
+                .child(input)
+                .child(fork_dialog_name_counter(count)),
+        );
+    let worktrees = div()
+        .flex()
+        .flex_col()
+        .gap(px(9.))
+        .mt(px(18.))
+        .child(
+            div()
+                .mb(px(8.))
+                .text_color(rgb(0xc9cdd4))
+                .text_size(px(12.))
+                .child(FORK_WORKTREE_SECTION),
+        )
+        .child(fork_worktree_card(
+            true,
+            false,
+            FORK_USE_CURRENT_WORKTREE,
+            current_hint,
+            None,
+        ))
+        .child(fork_worktree_card(
+            false,
+            true,
+            FORK_USE_NEW_WORKTREE,
+            FORK_NEW_WORKTREE_HINT,
+            Some(FORK_NEEDS_GIT_REPOSITORY),
+        ));
+    let mut panel = div()
+        .flex()
+        .flex_col()
+        .w(px(panel_width))
+        .p(px(20.))
+        .border_1()
+        .border_color(rgb(0x343942))
+        .rounded(px(16.))
+        .text_color(rgb(0xe8eaed))
+        .bg(rgb(0x1d1f23))
+        .shadow(vec![shadow(0x000000, 0.46, 24., 80.)])
+        .child(header)
+        .child(field)
+        .child(worktrees);
+    if let Some(error) = error {
+        panel = panel.child(
+            div()
+                .mt(px(12.))
+                .text_color(rgb(0xff8276))
+                .text_size(px(12.))
+                .child(ui_text(error.to_owned())),
+        );
+    }
+    if submitting {
+        panel = panel.child(
+            div()
+                .mt(px(12.))
+                .text_color(rgb(0x8ebcf4))
+                .text_size(px(12.))
+                .child(FORK_DIALOG_CREATING),
+        );
+    }
+    panel.child(
+        div()
+            .flex()
+            .justify_end()
+            .gap(px(8.))
+            .mt(px(20.))
+            .child(cancel)
+            .child(confirm),
+    )
+}
+
+/// `.branch-dialog__header button`: the frozen 22px `×` close affordance.
+fn fork_dialog_close() -> Stateful<Div> {
+    div()
+        .id("fork-dialog-close")
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .px(px(6.))
+        .py(px(1.))
+        .text_color(rgb(0xa5abb4))
+        .text_size(px(22.))
+        .line_height(relative(1.))
+        .cursor_pointer()
+        .child("×")
+}
+
+/// `.branch-dialog__footer button` (+ `.primary` / `:disabled`).
+fn fork_dialog_button(
+    id: &'static str,
+    label: &'static str,
+    primary: bool,
+    disabled: bool,
+) -> Stateful<Div> {
+    let (border, text, background) = if primary {
+        (rgb(0x4b8edc), rgb(0xffffff), rgb(0x347bc8))
+    } else {
+        (rgb(0x3b414a), rgb(0xd9dce1), rgb(0x26292e))
+    };
+    let button = div()
+        .id(id)
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .h(px(34.))
+        .px(px(16.))
+        .border_1()
+        .border_color(border)
+        .rounded(px(8.))
+        .text_color(text)
+        .bg(background)
+        .text_size(px(16.))
+        .whitespace_nowrap()
+        .child(ui_text(label).normal_line_height());
+    if disabled {
+        button.opacity(0.55).cursor(CursorStyle::Arrow)
+    } else {
+        button.cursor_pointer()
+    }
+}
+
+/// `.fork-failure-card`: fills the card below the retained head, over an opaque
+/// `#181a1e` surface so the terminal cannot show through. The latest
+/// `retry_error` replaces the stale reason on the single frozen reason line.
+fn fork_failure_body(
+    title: &'static str,
+    reason: Option<&str>,
+    retry_error: Option<&str>,
+    retry: AnyElement,
+    remove: AnyElement,
+) -> Div {
+    div()
+        .flex_1()
+        .min_h_0()
+        .w_full()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap(px(14.))
+        .p(px(28.))
+        .bg(rgb(0x181a1e))
+        .text_color(rgb(0xd9dce2))
+        .text_center()
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .child(
+                    div()
+                        .text_size(px(14.))
+                        .font_weight(FontWeight::BOLD)
+                        .child(title),
+                )
+                .children(
+                    reason
+                        .into_iter()
+                        .chain(retry_error.filter(|error| Some(*error) != reason))
+                        .map(|error| {
+                            div()
+                                .max_w(px(520.))
+                                .mt(px(8.))
+                                .text_color(rgb(0xf08a80))
+                                .text_size(px(12.))
+                                .line_height(relative(1.5))
+                                .child(ui_text(error.to_owned()))
+                        }),
+                ),
+        )
+        .child(
+            div()
+                .flex()
+                .justify_center()
+                .gap(px(8.))
+                .child(retry)
+                .child(remove),
+        )
+}
+
+/// `.fork-failure-actions button`; `blocked_reason` disables with a frozen
+/// `CardTooltip`, `pending` only dims while the retry is in flight.
+fn fork_failure_button(
+    id: SharedString,
+    label: &'static str,
+    blocked_reason: Option<&'static str>,
+    pending: bool,
+) -> Stateful<Div> {
+    let button = div()
+        .id(id)
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .h(px(30.))
+        .px(px(13.))
+        .border_1()
+        .border_color(rgb(0x434955))
+        .rounded(px(7.))
+        .text_color(rgb(0xd9dce2))
+        .bg(rgb(0x282b31))
+        .text_size(px(16.))
+        .whitespace_nowrap()
+        .child(ui_text(label).normal_line_height());
+    if let Some(reason) = blocked_reason {
+        button
+            .opacity(0.55)
+            .cursor(CursorStyle::OperationNotAllowed)
+            .tooltip(move |_, cx| cx.new(|_| CardTooltip(reason.into())).into())
+    } else if pending {
+        button.opacity(0.55).cursor(CursorStyle::Arrow)
+    } else {
+        button.cursor_pointer()
+    }
+}
+
+/// `.fork-progress-overlay` and its interactive variant for provider prompts.
+fn fork_progress_body(progress: ForkProgressCopy, now: f64) -> Stateful<Div> {
+    let fill = progress.fraction.unwrap_or(0.);
+    let animate = !reduced_motion();
+    let spinner_size = if progress.interactive { 12. } else { 20. };
+    let spinner = div()
+        .flex_none()
+        .size(px(spinner_size))
+        .rounded_full()
+        .border_2()
+        .border_color(rgba(0x7eb1f247))
+        .relative()
+        .child(
+            canvas(
+                |_, _, _| (),
+                move |bounds, _, window, _| {
+                    if !bounds.intersects(&window.content_mask().bounds) {
+                        return;
+                    }
+                    let rotation = if animate {
+                        (now as f32 / 800.).fract() * std::f32::consts::TAU
+                    } else {
+                        0.
+                    };
+                    let radius = px(spinner_size / 2. - 1.);
+                    let at = |angle: f32| {
+                        bounds.center() + point(radius * angle.cos(), radius * angle.sin())
+                    };
+                    let start = rotation - 3. * std::f32::consts::FRAC_PI_4;
+                    let mut arc = PathBuilder::stroke(px(2.));
+                    arc.move_to(at(start));
+                    arc.arc_to(
+                        point(radius, radius),
+                        px(0.),
+                        false,
+                        true,
+                        at(start + std::f32::consts::FRAC_PI_2),
+                    );
+                    if let Ok(arc) = arc.build() {
+                        window.paint_path(arc, rgb(0x7eb1f2));
+                    }
+                    if animate {
+                        window.request_animation_frame();
+                    }
+                },
+            )
+            .absolute()
+            .top(px(-2.))
+            .left(px(-2.))
+            .size(px(spinner_size)),
+        );
+    let content = div()
+        .flex()
+        .items_center()
+        .gap(px(9.))
+        .border_1()
+        .border_color(rgba(0x78abef57))
+        .rounded(px(12.))
+        .text_color(rgb(0xe7eef9))
+        .bg(rgba(0x1d222bf5))
+        .shadow(vec![shadow(0x000000, 0.34, 16., 44.)])
+        .text_center()
+        .child(spinner)
+        .child(
+            div()
+                .text_size(px(if progress.interactive { 11. } else { 16. }))
+                .font_weight(FontWeight::BOLD)
+                .child(progress.label),
+        );
+    if progress.interactive {
+        return div()
+            .id("fork-progress")
+            .absolute()
+            .right(px(12.))
+            .bottom(px(12.))
+            .child(content.max_w(px(260.)).px(px(12.)).py(px(8.)));
+    }
+    let detail = |label: SharedString| {
+        div()
+            .text_color(rgb(0xaebdd1))
+            .text_size(px(11.))
+            .line_height(relative(1.5))
+            .child(ui_text(label))
+    };
+    let content = content
+        .flex_col()
+        .w_full()
+        .max_w(px(420.))
+        .p(px(22.))
+        .child(detail(progress.description.into()))
+        .children(progress.fraction.map(|_| {
+            div()
+                .w_full()
+                .max_w(px(280.))
+                .h(px(4.))
+                .overflow_hidden()
+                .rounded_full()
+                .bg(rgba(0x7eb1f229))
+                .child(
+                    div()
+                        .h_full()
+                        .w(relative(fill))
+                        .rounded_full()
+                        .bg(rgb(0x7eb1f2)),
+                )
+        }))
+        .children(progress.counter.map(|counter| detail(counter.into())));
+    div()
+        .id("fork-progress")
+        .absolute()
+        .inset_0()
+        .occlude()
+        .flex()
+        .items_center()
+        .justify_center()
+        .p(px(24.))
+        .bg(rgba(0x111214c7))
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .child(content)
+}
+
+/// `.fork-readiness-toast` (frozen light-surface variant): fixed below the card
+/// head, horizontally centered, max 420px. The host owns the 2.8s dismissal.
+fn fork_readiness_toast(message: &'static str) -> Div {
+    div()
+        .absolute()
+        .top(px(72.))
+        .left_0()
+        .right_0()
+        .flex()
+        .justify_center()
+        .child(
+            div()
+                .max_w(px(420.))
+                .mx(px(16.))
+                .px(px(14.))
+                .py(px(9.))
+                .border_1()
+                .border_color(rgb(0xbdd7f6))
+                .rounded(px(8.))
+                .text_color(rgb(0x365a83))
+                .bg(rgb(0xf3f8ff))
+                .shadow(vec![shadow(0x314660, 0.18, 10., 28.)])
+                .text_size(px(12.))
+                .line_height(relative(1.45))
+                .child(ui_text(message)),
+        )
 }

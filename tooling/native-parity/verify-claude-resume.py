@@ -203,7 +203,7 @@ class Card:
     def input(self, data):
         identity.input_bytes(self.host, self.id, data)
 
-    def interactive(self):
+    def interactive(self, *, allow_scrolled_banner=False):
         def ready():
             screen = self.screen
             for marker, action in (("❯ No (recommended)", b"\x1b[A"),
@@ -216,7 +216,9 @@ class Card:
                     self.input(action)
                     self.sent.add(marker)
                     return None
-            if "Claude Code" in screen and "❯" in screen and not any(
+            # A resumed transcript can scroll the startup banner out of the viewport.
+            prompt_box_visible = allow_scrolled_banner and re.search(r"─{20,} ❯ ─{20,}", screen)
+            if ("Claude Code" in screen or prompt_box_visible) and "❯" in screen and not any(
                 marker in screen for marker in ("Quick safety check", "Detected a custom API key",
                                                 "Resume this conversation?")
             ):
