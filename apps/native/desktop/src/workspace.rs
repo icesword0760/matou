@@ -102,6 +102,105 @@ struct WorkspaceDragMotion {
     background: Transition,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PermissionMode {
+    Default,
+    Auto,
+    AcceptEdits,
+    Plan,
+    Bypass,
+}
+
+impl PermissionMode {
+    const ALL: [Self; 5] = [
+        Self::Default,
+        Self::Auto,
+        Self::AcceptEdits,
+        Self::Plan,
+        Self::Bypass,
+    ];
+
+    fn from_node(node: &Value) -> Self {
+        let value = node["permissionMode"].as_str();
+        Self::ALL
+            .into_iter()
+            .find(|mode| Some(mode.value()) == value)
+            .unwrap_or(Self::Default)
+    }
+
+    fn value(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Auto => "auto",
+            Self::AcceptEdits => "acceptEdits",
+            Self::Plan => "plan",
+            Self::Bypass => "bypassPermissions",
+        }
+    }
+
+    // Frozen i18n/messages/hud.ts: permission.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Default => "Default",
+            Self::Auto => "Auto",
+            Self::AcceptEdits => "Accept Edits",
+            Self::Plan => "Plan Mode",
+            Self::Bypass => "Bypass Permissions",
+        }
+    }
+}
+
+struct PermissionChip {
+    mode: PermissionMode,
+    title: String,
+    disabled: bool,
+}
+
+struct PermissionConfirmation {
+    session_id: String,
+    from: PermissionMode,
+    target: PermissionMode,
+    resumable: bool,
+}
+
+impl PermissionConfirmation {
+    // Frozen i18n/messages/hud.ts: bypassEnter*, bypassExit*, bypassNotResumable.
+    fn copy(&self) -> (&'static str, &'static str, &'static str) {
+        let (title, body, confirm) = if self.target == PermissionMode::Bypass {
+            (
+                "切换到高权限模式",
+                "切换到 Bypass Permissions 会打断当前 Claude 会话进程（正在执行的任务会被中断），重启后会自动 resume 恢复会话历史。\n\n是否确认？",
+                "确认切换",
+            )
+        } else {
+            (
+                "退出高权限模式",
+                "退出 Bypass Permissions 会打断当前 Claude 会话进程（正在执行的任务会被中断），重启后会自动 resume 恢复会话历史。\n\n是否确认？",
+                "确认退出",
+            )
+        };
+        let body = if self.resumable {
+            body
+        } else {
+            "当前 Claude 会话还没有生成可恢复的 sessionId。继续切换会启动一个全新的 Claude 会话，当前内容将不会保留。\n\n是否确认？"
+        };
+        (title, body, confirm)
+    }
+}
+
+#[derive(PartialEq, Eq)]
+enum PermissionOutcome {
+    Pending,
+    Confirmed,
+    Failed,
+}
+
+struct PermissionChange {
+    from: PermissionMode,
+    target: PermissionMode,
+    outcome: PermissionOutcome,
+}
+
 enum TabDialog {
     RemoveWorkspace {
         workspace_id: String,
@@ -143,6 +242,7 @@ enum TabDialog {
     },
     SessionLoader(SessionLoader),
     Branch(BranchDialog),
+    PermissionMode(PermissionConfirmation),
 }
 
 impl TabDialog {
@@ -546,7 +646,7 @@ const CONTROLS: &[&str] = &[
     "graph",
     "split",
     "update",
-    "account",
+    "permission-mode",
     "session-return-parent",
 ];
 
@@ -624,6 +724,11 @@ pub struct Workspace {
     pub(crate) sidebar_scrollbar: SidebarScrollbarState,
     task_toast: Option<String>,
     toast_generation: u64,
+    permission_menu: Option<String>,
+    permission_changes: HashMap<String, PermissionChange>,
+    permission_identities: HashSet<String>,
+    permission_toast: Option<String>,
+    permission_toast_timer: Option<gpui::Task<()>>,
     tab_scroll: ScrollHandle,
     tab_hover: Option<String>,
     tab_overflow: bool,
@@ -1406,6 +1511,11 @@ impl Workspace {
             sidebar_scrollbar: SidebarScrollbarState::default(),
             task_toast: None,
             toast_generation: 0,
+            permission_menu: None,
+            permission_changes: HashMap::new(),
+            permission_identities: HashSet::new(),
+            permission_toast: None,
+            permission_toast_timer: None,
             tab_scroll: ScrollHandle::new(),
             tab_hover: None,
             tab_overflow: false,
@@ -1540,7 +1650,10 @@ impl Workspace {
     }
 
     fn retire_transport(&mut self, generation: u64, cx: &mut Context<Self>) {
-        self.fail_pending_forks(&crate::runtime_bridge::SendError::NotReady.to_string());
+        let reason = crate::runtime_bridge::SendError::NotReady.to_string();
+        self.fail_pending_forks(&reason);
+        self.fail_pending_permission_modes(&reason, cx);
+        self.permission_identities.clear();
         self.runtime_generation = generation;
         self.transport_connected = false;
         self.domain_ready = false;
@@ -1727,6 +1840,7 @@ impl Workspace {
                         !node["archivedAt"].is_null() || node["cwd"] != state.cwd
                     })
             }
+            TabDialog::PermissionMode(state) => !self.permission_confirmation_valid(state),
             TabDialog::Branch(state) => {
                 self.active_scene_id() != Some(state.scene_id.as_str())
                     || self
@@ -1749,6 +1863,8 @@ impl Workspace {
         let event = match envelope {
             BridgeEvent::TransportDiagnostic { message, .. } => {
                 self.fail_pending_forks(&message);
+                self.fail_pending_permission_modes(&message, cx);
+                self.reconcile_permission_overlay(window, cx);
                 self.fail_pending_loader_commands(message.clone());
                 self.transport_fault = Some((generation, message));
                 cx.notify();
@@ -1762,6 +1878,7 @@ impl Workspace {
                         _ => crate::runtime_bridge::SendError::NotReady.to_string(),
                     };
                     self.fail_pending_forks(&message);
+                    self.fail_pending_permission_modes(&message, cx);
                     self.fail_pending_loader_commands(message);
                     self.domain_ready = false;
                     self.pending_card_action = None;
@@ -1774,6 +1891,7 @@ impl Workspace {
                     }
                     self.sync_terminal_input(window, cx);
                 }
+                self.reconcile_permission_overlay(window, cx);
                 #[cfg(target_os = "macos")]
                 self.prune_recovery_water(window, cx);
                 cx.notify();
@@ -2113,6 +2231,8 @@ impl Workspace {
                     self.provider_restore_controls.remove(&id);
                     self.pending_provider_restores.remove(&id);
                     self.pending_loader_loads.remove(&id);
+                    self.permission_changes.remove(&id);
+                    self.permission_identities.remove(&id);
                     self.storage_fault_sessions.remove(&id);
                     self.card_controls.remove(&id);
                     self.remove_card_controls.remove(&id);
@@ -2377,8 +2497,23 @@ impl Workspace {
                 {
                     window.blur();
                 }
-                self.recovery.insert(session_id, state);
+                self.recovery.insert(session_id.clone(), state);
                 self.sync_terminal_input(window, cx);
+                // The replacement's first frame can precede Ready, including
+                // when the CLI is waiting for its own bypass confirmation.
+                if self
+                    .permission_changes
+                    .get(&session_id)
+                    .is_some_and(|change| change.outcome == PermissionOutcome::Pending)
+                    && self.active_level_focus() == Some(session_id.as_str())
+                    && self.dialog.is_none()
+                    && self.active_path_valid()
+                    && !self.recovery_blocked(&session_id)
+                    && window.focused(cx).is_none()
+                    && let Some(terminal) = self.terminals.get(&session_id)
+                {
+                    window.focus(&terminal.read(cx).focus);
+                }
                 self.resume_search_after_frame(cx);
             }
             Event::StorageFault { message, .. } => self.fault = Some(message),
@@ -2393,6 +2528,7 @@ impl Workspace {
             Event::StorageRecovered { .. } => self.fault = None,
             Event::StartupBlocked(_) | Event::Closed => {}
         }
+        self.reconcile_permission_overlay(window, cx);
         #[cfg(target_os = "macos")]
         self.prune_recovery_water(window, cx);
         cx.notify();
@@ -4138,6 +4274,10 @@ impl Workspace {
                 self.card_controls.get(&state.session_id).cloned()
             }
             Some(TabDialog::Branch(state)) => self.card_controls.get(&state.session_id).cloned(),
+            Some(TabDialog::PermissionMode(_)) => self
+                .permission_chip()
+                .filter(|chip| !chip.disabled)
+                .map(|_| self.control_focus["permission-mode"].clone()),
             _ => None,
         };
         if let Some(focus) = focus {
@@ -4176,6 +4316,16 @@ impl Workspace {
             .then(|| format!("当前事项下已存在名为\"{value}\"的标签页"))
     }
     fn confirm_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(TabDialog::PermissionMode(state)) = &self.dialog {
+            let request = self
+                .permission_confirmation_valid(state)
+                .then(|| (state.session_id.clone(), state.from, state.target));
+            self.close_dialog(window, cx);
+            if let Some((id, from, target)) = request {
+                self.send_permission_mode(id, from, target, window, cx);
+            }
+            return;
+        }
         if matches!(self.dialog, Some(TabDialog::Branch(_))) {
             self.submit_fork(window, cx);
             return;
@@ -4262,7 +4412,10 @@ impl Workspace {
                     session_id: session_id.clone(),
                     scope: *scope,
                 }),
-            Some(TabDialog::SessionLoader(_) | TabDialog::Branch(_)) | None => return,
+            Some(
+                TabDialog::SessionLoader(_) | TabDialog::Branch(_) | TabDialog::PermissionMode(_),
+            )
+            | None => return,
         };
         self.close_dialog(window, cx);
         if let Some(command) = command {
@@ -4338,6 +4491,269 @@ impl Workspace {
             .scene
             .as_ref()
             .map(|scene| scene.id.as_str())
+    }
+
+    fn permission_blocked_reason(&self, id: &str, node: &Value) -> Option<&'static str> {
+        let (generation, phase) = self.commands.connection();
+        if matches!(&phase, ConnectionPhase::Blocked(block) if block.kind == StartupBlockKind::ReadOnly)
+        {
+            Some("数据库处于只读恢复模式")
+        } else if self.storage_fault_sessions.contains(id) {
+            Some("终端存储异常，请先恢复或结束当前会话")
+        } else if self.recovery_blocked(id)
+            || generation != self.runtime_generation
+            || phase != ConnectionPhase::Ready
+            || matches!(
+                Self::provider_restore_state(node),
+                Some("restoring" | "failed")
+            )
+        {
+            Some("当前终端需要先完成恢复")
+        } else {
+            self.card_mutation_blocked_reason(id, node)
+        }
+    }
+
+    fn permission_node(&self) -> Option<(&str, &Value)> {
+        let id = self.level_focus()?;
+        let node = self.graph_node(id)?;
+        (node["currentMode"] == "claude-code").then_some((id, node))
+    }
+
+    fn permission_chip(&self) -> Option<PermissionChip> {
+        let (id, node) = self.permission_node()?;
+        let change = self.permission_changes.get(id);
+        let mode = change.map_or_else(|| PermissionMode::from_node(node), |change| change.from);
+        let blocked = self.permission_blocked_reason(id, node);
+        Some(PermissionChip {
+            mode,
+            title: blocked.map_or_else(
+                || format!("当前权限模式：{}，点击切换", mode.label()),
+                str::to_owned,
+            ),
+            disabled: blocked.is_some() || change.is_some() || self.is_stopped_session(id),
+        })
+    }
+
+    fn toggle_permission_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.permission_menu.is_some() {
+            self.dismiss_permission_menu(window, cx);
+        } else if self.dialog.is_none() && self.permission_chip().is_some_and(|chip| !chip.disabled)
+        {
+            self.permission_menu = self.permission_node().map(|(id, _)| id.to_owned());
+            self.workspace_menu = None;
+            self.task_menu = None;
+            self.tab_menu = None;
+            self.fork_menu = None;
+            self.hidden_tabs = None;
+            cx.notify();
+        }
+    }
+
+    fn dismiss_permission_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.permission_menu.take() else {
+            return;
+        };
+        if self.dialog.is_none()
+            && self.level_focus() == Some(id.as_str())
+            && self.permission_chip().is_some_and(|chip| !chip.disabled)
+        {
+            window.focus(&self.control_focus["permission-mode"]);
+        }
+        cx.notify();
+    }
+
+    fn permission_confirmation_valid(&self, state: &PermissionConfirmation) -> bool {
+        self.permission_node().is_some_and(|(id, node)| {
+            id == state.session_id
+                && PermissionMode::from_node(node) == state.from
+                && self.permission_chip().is_some_and(|chip| !chip.disabled)
+        })
+    }
+
+    fn choose_permission_mode(
+        &mut self,
+        target: PermissionMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session_id) = self.permission_menu.take() else {
+            return;
+        };
+        cx.notify();
+        let Some((id, node)) = self.permission_node().filter(|(id, _)| *id == session_id) else {
+            return;
+        };
+        let Some(chip) = self.permission_chip().filter(|chip| !chip.disabled) else {
+            return;
+        };
+        let from = chip.mode;
+        if from == target {
+            window.focus(&self.control_focus["permission-mode"]);
+            return;
+        }
+        if from == PermissionMode::Bypass || target == PermissionMode::Bypass {
+            // Older graph nodes omit the provider session ID. A confirmed identity
+            // event or binding-backed fields can still establish resumability.
+            let resumable = node["canFork"] == true
+                || self.permission_identities.contains(id)
+                || ["providerSessionId", "model"].into_iter().any(|key| {
+                    node[key]
+                        .as_str()
+                        .is_some_and(|value| !value.trim().is_empty())
+                })
+                || from != PermissionMode::Default;
+            self.open_card_dialog(
+                TabDialog::PermissionMode(PermissionConfirmation {
+                    session_id,
+                    from,
+                    target,
+                    resumable,
+                }),
+                3,
+                window,
+                cx,
+            );
+        } else {
+            self.send_permission_mode(session_id, from, target, window, cx);
+        }
+    }
+
+    fn send_permission_mode(
+        &mut self,
+        session_id: String,
+        from: PermissionMode,
+        target: PermissionMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let result = self.commands.send_at(
+            self.runtime_generation,
+            Command::SetProviderPermissionMode {
+                session_id: session_id.clone(),
+                mode: target.value().into(),
+            },
+        );
+        match result {
+            Ok(()) => {
+                self.permission_changes.insert(
+                    session_id,
+                    PermissionChange {
+                        from,
+                        target,
+                        outcome: PermissionOutcome::Pending,
+                    },
+                );
+                // The terminal can reclaim focus when the replacement frame is ready.
+                window.blur();
+                cx.notify();
+            }
+            Err(error) => self.show_permission_failure(&error.to_string(), cx),
+        }
+    }
+
+    fn reconcile_permission_modes(&mut self, results: &[Value], cx: &mut Context<Self>) {
+        let nodes = session_levels::nodes(&self.graph);
+        for identity in self.graph["providerIdentityEvents"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            if let Some(id) = identity["sessionId"].as_str() {
+                if identity["result"] == "confirmed"
+                    && identity["providerSessionId"]
+                        .as_str()
+                        .is_some_and(|value| !value.trim().is_empty())
+                {
+                    self.permission_identities.insert(id.to_owned());
+                } else if identity["result"] == "restore-failed" {
+                    self.permission_identities.remove(id);
+                }
+            }
+        }
+        let mut failure = None;
+        for result in results {
+            let Some(id) = result["sessionId"].as_str() else {
+                continue;
+            };
+            let Some(change) = self.permission_changes.get_mut(id) else {
+                continue;
+            };
+            if result["permissionMode"] != change.target.value()
+                || change.outcome != PermissionOutcome::Pending
+            {
+                continue;
+            }
+            change.outcome = if let Some(error) = result.get("error") {
+                failure = Some(
+                    error
+                        .as_str()
+                        .filter(|error| !error.is_empty())
+                        .unwrap_or("未知错误"),
+                );
+                PermissionOutcome::Failed
+            } else {
+                PermissionOutcome::Confirmed
+            };
+        }
+        self.permission_changes.retain(|id, change| {
+            let node = session_levels::node(nodes, id);
+            match change.outcome {
+                PermissionOutcome::Pending => true,
+                PermissionOutcome::Confirmed => {
+                    node.is_none_or(|node| PermissionMode::from_node(node) != change.target)
+                }
+                // The existing runtime can park a failed restore and omit its
+                // binding's mode. Keep the pre-switch label while it is parked.
+                PermissionOutcome::Failed => {
+                    node.is_some_and(|node| Self::provider_restore_state(node) == Some("failed"))
+                }
+            }
+        });
+        if let Some(reason) = failure {
+            self.show_permission_failure(reason, cx);
+        }
+    }
+
+    fn reconcile_permission_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.permission_menu.as_deref().is_some_and(|id| {
+            self.dialog.is_some()
+                || self
+                    .permission_node()
+                    .is_none_or(|(focused, _)| id != focused)
+                || self.permission_chip().is_none_or(|chip| chip.disabled)
+        }) {
+            self.dismiss_permission_menu(window, cx);
+        }
+        if matches!(
+            &self.dialog,
+            Some(TabDialog::PermissionMode(state)) if !self.permission_confirmation_valid(state)
+        ) {
+            self.close_dialog(window, cx);
+        }
+    }
+
+    fn fail_pending_permission_modes(&mut self, reason: &str, cx: &mut Context<Self>) {
+        let was_pending = self
+            .permission_changes
+            .values()
+            .any(|change| change.outcome != PermissionOutcome::Failed);
+        self.permission_changes.clear();
+        if was_pending {
+            self.show_permission_failure(reason, cx);
+        }
+    }
+
+    fn show_permission_failure(&mut self, reason: &str, cx: &mut Context<Self>) {
+        self.permission_toast = Some(format!("切换失败：{reason}"));
+        self.permission_toast_timer = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_secs(3)).await;
+            let _ = this.update(cx, |this, cx| {
+                this.permission_toast = None;
+                cx.notify();
+            });
+        }));
+        cx.notify();
     }
 
     fn graph_node(&self, id: &str) -> Option<&Value> {
@@ -4704,7 +5120,17 @@ impl Workspace {
         let result = graph
             .as_object_mut()
             .and_then(|object| object.remove("forkSessionResult"));
+        let permission_results = graph
+            .as_object_mut()
+            .and_then(|object| object.remove("providerPermissionModeResults"));
         self.graph = graph;
+        self.reconcile_permission_modes(
+            permission_results
+                .as_ref()
+                .and_then(Value::as_array)
+                .map_or(&[], Vec::as_slice),
+            cx,
+        );
         if self
             .fork_menu
             .as_ref()
@@ -5921,6 +6347,11 @@ impl Workspace {
             cx.stop_propagation();
             return;
         }
+        if stroke.key == "escape" && self.permission_menu.is_some() {
+            self.dismiss_permission_menu(window, cx);
+            cx.stop_propagation();
+            return;
+        }
         if let Some(TabDialog::SessionLoader(state)) = &self.dialog {
             if stroke.key == "escape" {
                 self.close_dialog(window, cx);
@@ -5995,6 +6426,7 @@ impl Workspace {
                     | TabDialog::CloseSession { .. }
                     | TabDialog::LastSession { .. }
                     | TabDialog::RemoveSession { .. }
+                    | TabDialog::PermissionMode(_)
             )
         );
         if stroke.key == "escape" {
@@ -7930,6 +8362,19 @@ impl Workspace {
                 TabDialog::DeleteTask { title, .. } => (
                     "提示".into(), tabs_ui::dialog_body().child(ui_text(format!("删除 \"{title}\" 会丢失该事项下所有终端会话，但不会删除本地目录。 是否继续？")).pre_line()), "确定".into(), true, false,
                 ),
+                // Frozen permission confirmation reuses the native ConfirmDialog
+                // shell verbatim. The generic footer below supplies close, cancel
+                // and confirm, so only the copy is read here.
+                TabDialog::PermissionMode(state) => {
+                    let (title, body, confirm) = state.copy();
+                    (
+                        title.into(),
+                        tabs_ui::dialog_body().child(ui_text(body).pre_line()),
+                        confirm.into(),
+                        true,
+                        false,
+                    )
+                }
                 TabDialog::Rename { scene_id, input } => {
                     let value = trim_name(&input.read(cx).text);
                     let error = self.rename_error(scene_id, value);
@@ -8535,22 +8980,7 @@ impl Workspace {
         )
     }
 
-    fn footer(&self, window: &Window, cx: &mut Context<Self>) -> Div {
-        let recovering = self
-            .focused
-            .as_ref()
-            .is_some_and(|id| self.recovery_blocked(id));
-        let cwd = self
-            .focused
-            .as_ref()
-            .and_then(|id| {
-                self.graph["nodes"]
-                    .as_array()?
-                    .iter()
-                    .find(|n| n["sessionId"] == *id)
-            })
-            .and_then(|n| n["cwd"].as_str())
-            .unwrap_or("");
+    fn footer(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
         struct ReturnParentTooltip;
         impl Render for ReturnParentTooltip {
             fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
@@ -8640,12 +9070,12 @@ impl Workspace {
                     .child(content),
             )
         };
-        div()
-            .h(px(38.))
+        let mut footer = div()
+            .h(px(PERMISSION_FOOTER_HEIGHT))
             .flex_none()
             .flex()
             .items_center()
-            .px(px(20.))
+            .px(px(PERMISSION_FOOTER_PADDING_X))
             .gap(px(8.))
             .border_t_1()
             .border_color(rgb(0xe8e8e8))
@@ -8653,38 +9083,172 @@ impl Workspace {
             .text_size(px(10.))
             .text_color(rgb(0x606572))
             .child(breadcrumb)
-            .when(!recovering, |footer| {
-                footer.child(
-                    div()
-                        .ml(px(8.))
-                        .pl(px(12.))
-                        .border_l_1()
-                        .border_color(rgb(0xe8e8e8))
-                        .child("zsh"),
-                )
+            .child(div().flex_1());
+        if let Some(chip) = self.permission_chip() {
+            let menu_open = self.permission_menu.is_some() && !chip.disabled;
+            // The dismiss layer is mounted before the status area so the chip
+            // and the anchored menu paint (and receive input) above it.
+            if menu_open {
+                footer = footer.child(self.permission_menu_overlay(window, cx));
+            }
+            footer = footer.child(self.permission_status(&chip, menu_open, window, cx));
+        }
+        footer
+    }
+
+    /// The right-hand footer cell reserved for the permission control. The
+    /// 180px width is the frozen menu's minimum width so an open menu can sit
+    /// flush above the chip without overlapping the breadcrumb.
+    fn permission_status(
+        &self,
+        chip: &PermissionChip,
+        menu_open: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        div()
+            .id("permission-status")
+            .w(px(PERMISSION_STATUS_WIDTH))
+            .h_full()
+            .flex_none()
+            .flex()
+            .items_center()
+            .child(self.permission_chip_view(chip, cx))
+            .when(menu_open, |status| {
+                status.child(self.permission_menu_view(chip.mode, window, cx))
             })
-            .child(div().flex_1())
-            .when(!recovering, |footer| {
-                footer.child(
-                    div()
-                        .max_w(px(160.))
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .child(
-                            cwd.rsplit(['/', '\\'])
-                                .find(|s| !s.is_empty())
-                                .map(|s| format!("~/{s}"))
-                                .unwrap_or_default(),
-                        ),
-                )
+    }
+
+    /// `.status-perm-badge` + `.is-clickable` + `.status-field:disabled`.
+    /// The label is uppercased and tracked here because GPUI has no
+    /// `text-transform` / `letter-spacing`; the tooltip keeps the whole title.
+    fn permission_chip_view(&self, chip: &PermissionChip, cx: &mut Context<Self>) -> Stateful<Div> {
+        let tooltip: SharedString = chip.title.clone().into();
+        let cell = div()
+            .id("permission-chip")
+            .h(px(PERMISSION_CHIP_HEIGHT))
+            .flex()
+            .items_center()
+            .px(px(6.))
+            .py(px(1.))
+            .rounded(px(4.))
+            .text_size(px(10.))
+            .line_height(px(PERMISSION_CHIP_LINE_HEIGHT))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(rgb(permission_mode_color(chip.mode)))
+            .whitespace_nowrap()
+            .hover(|style| {
+                style.bg(Rgba {
+                    a: 0.08,
+                    ..rgb(0xffffff)
+                })
             })
-            .child(
-                self.control(div(), "account")
-                    .ml(px(14.))
-                    .text_color(rgb(0x60758b))
-                    .child("Claude 账户"),
+            .tooltip(move |_, cx| cx.new(|_| CardTooltip(tooltip.clone())).into())
+            .child(permission_tracked_text(
+                permission_chip_text(chip.mode),
+                PERMISSION_CHIP_TRACKING,
+            ));
+        if chip.disabled {
+            cell.opacity(PERMISSION_CHIP_DISABLED_OPACITY)
+                .cursor(CursorStyle::Arrow)
+        } else {
+            self.button(
+                cell.cursor_pointer(),
+                &self.control_focus["permission-mode"],
+                |this, window, cx| this.toggle_permission_menu(window, cx),
+                cx,
             )
-            .child(icon("chevron-down", 13., 0x60758b))
+        }
+    }
+
+    /// Full-window dismiss layer shown only while the menu is open. It is a
+    /// sibling mounted before the status cell, so the chip and the deferred
+    /// menu stay hittable above it.
+    fn permission_menu_overlay(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let viewport = window.viewport_size();
+        anchored()
+            .anchor(Corner::TopLeft)
+            .position(point(px(0.), px(0.)))
+            .child(
+                div()
+                    .id("permission-menu-overlay")
+                    .w(viewport.width)
+                    .h(viewport.height)
+                    .occlude()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            this.dismiss_permission_menu(window, cx);
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(|this, _, window, cx| {
+                            this.dismiss_permission_menu(window, cx);
+                            cx.stop_propagation();
+                        }),
+                    ),
+            )
+    }
+
+    /// `.perm-menu` in a deferred anchored layer. The window-space anchor is
+    /// the chip's top-left minus the frozen 8px gap; `BottomLeft` grows the
+    /// menu upward and left-aligns it with the chip.
+    fn permission_menu_view(
+        &self,
+        active: PermissionMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let focuses = window
+            .use_keyed_state(
+                SharedString::from("permission-menu-item-focus"),
+                cx,
+                |_, cx| {
+                    (0..PermissionMode::ALL.len())
+                        .map(|_| cx.focus_handle().tab_stop(true))
+                        .collect::<Vec<_>>()
+                },
+            )
+            .read(cx)
+            .clone();
+        let items = PermissionMode::ALL
+            .into_iter()
+            .enumerate()
+            .map(|(index, mode)| {
+                let item = permission_menu_item(mode, active);
+                self.button(
+                    item,
+                    &focuses[index],
+                    move |this, window, cx| this.choose_permission_mode(mode, window, cx),
+                    cx,
+                )
+            });
+        let panel = div()
+            .id("permission-menu")
+            .flex()
+            .flex_col()
+            .min_w(px(PERMISSION_MENU_MIN_WIDTH))
+            .p(px(PERMISSION_MENU_PADDING))
+            .border_1()
+            .border_color(rgb(0x30363d))
+            .rounded(px(8.))
+            .occlude()
+            .bg(rgb(0x1c2128))
+            .text_color(rgb(0xc9d1d9))
+            .text_size(px(12.))
+            .shadow(vec![shadow(0x000000, 0.5, 8., 24.)])
+            .child(permission_menu_title())
+            .children(items);
+        deferred(
+            anchored()
+                .anchor(Corner::BottomLeft)
+                .position(permission_menu_anchor(window.viewport_size()))
+                .snap_to_window()
+                .child(panel),
+        )
+        .with_priority(2)
     }
 }
 
@@ -9499,6 +10063,30 @@ impl Render for Workspace {
                         .child(text.clone()),
                 )
         });
+        // `.terminal-toast.is-error`: independent 3s permission failure feedback.
+        let permission_toast = self.permission_toast.as_ref().map(|text| {
+            div()
+                .absolute()
+                .top(px(20.))
+                .left_0()
+                .right_0()
+                .flex()
+                .justify_center()
+                .child(
+                    div()
+                        .id("permission-error-toast")
+                        .px(px(15.))
+                        .py(px(9.))
+                        .rounded(px(6.))
+                        .border_1()
+                        .border_color(rgba(0xf8514959))
+                        .bg(rgb(0x2b1718))
+                        .text_color(rgb(0xffa198))
+                        .text_size(px(13.))
+                        .shadow(vec![shadow(0x000000, 0.3, 6., 18.)])
+                        .child(text.clone()),
+                )
+        });
         let geometry_view = cx.entity().downgrade();
         div()
             .id("workspace-root")
@@ -9567,6 +10155,7 @@ impl Render for Workspace {
                     .map(fork_readiness_toast),
             )
             .children(window_overlay)
+            .children(permission_toast)
     }
 }
 
@@ -9597,6 +10186,197 @@ fn loader_relative_time(updated_at: i64) -> String {
     } else {
         format!("{} 天前", hours / 24)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Permission chip / menu visuals.
+//
+// Render-only. Frozen sources:
+// - apps/desktop/src/renderer/src/hud/TerminalHud.tsx:137-145,205-260;
+// - apps/desktop/src/renderer/src/i18n/messages/hud.ts:7-18,44-66;
+// - apps/desktop/src/renderer/src/hierarchy/hierarchy.css:317-323,347-362;
+// - apps/desktop/src/renderer/src/hierarchy/hierarchy.css:446-447
+//   (`.terminal-toast.is-error`).
+//
+// State and commands stay with the Workspace wiring; these helpers only
+// encode the frozen geometry, colors and copy so probes can assert them.
+// ---------------------------------------------------------------------------
+
+const PERMISSION_FOOTER_HEIGHT: f32 = 38.;
+const PERMISSION_FOOTER_PADDING_X: f32 = 20.;
+/// The frozen `.perm-menu { min-width: 180px }`; the footer keeps this much
+/// room on the right so the left-aligned menu never clips at the window edge.
+const PERMISSION_STATUS_WIDTH: f32 = 180.;
+const PERMISSION_MENU_MIN_WIDTH: f32 = 180.;
+const PERMISSION_MENU_PADDING: f32 = 6.;
+/// Frozen item padding (6px) plus a 12px/14px line box: the browser's normal
+/// line-height at 12px. Fixed so probe row centres stay stable.
+const PERMISSION_MENU_ITEM_HEIGHT: f32 = 26.;
+const PERMISSION_CHIP_HEIGHT: f32 = 14.;
+const PERMISSION_CHIP_LINE_HEIGHT: f32 = 12.;
+const PERMISSION_CHIP_TRACKING: f32 = 0.2;
+const PERMISSION_CHIP_DISABLED_OPACITY: f32 = 0.7;
+const PERMISSION_MENU_GAP: f32 = 8.;
+const PERMISSION_MENU_TITLE: &str = "权限模式";
+const PERMISSION_MENU_TITLE_TRACKING: f32 = 0.5;
+const PERMISSION_MENU_TITLE_LINE_HEIGHT: f32 = 13.;
+const PERMISSION_MENU_CHECK: &str = "✓";
+
+/// `.status-perm-badge.perm-<mode>`. `Auto` keeps the frozen green text.
+fn permission_mode_color(mode: PermissionMode) -> u32 {
+    match mode {
+        PermissionMode::Default => 0x8b949e,
+        PermissionMode::Auto => 0x7ee787,
+        PermissionMode::AcceptEdits => 0xd29922,
+        PermissionMode::Plan => 0x58a6ff,
+        PermissionMode::Bypass => 0xff6b35,
+    }
+}
+
+/// `.perm-menu__dot.perm-<mode>`. The frozen CSS has no `.perm-auto` dot rule;
+/// use the same neutral as Default instead of the chip's green.
+fn permission_menu_dot_color(mode: PermissionMode) -> u32 {
+    match mode {
+        PermissionMode::Auto => 0x8b949e,
+        other => permission_mode_color(other),
+    }
+}
+
+/// Uppercased chip label. CSS `text-transform: uppercase`; the tooltip keeps
+/// the original mixed-case label supplied in `PermissionChip::title`.
+fn permission_chip_text(mode: PermissionMode) -> SharedString {
+    mode.label().to_uppercase().into()
+}
+
+fn permission_mode_slug(mode: PermissionMode) -> &'static str {
+    match mode {
+        PermissionMode::Default => "default",
+        PermissionMode::Auto => "auto",
+        PermissionMode::AcceptEdits => "accept-edits",
+        PermissionMode::Plan => "plan",
+        PermissionMode::Bypass => "bypass-permissions",
+    }
+}
+
+fn permission_menu_item_id(mode: PermissionMode) -> SharedString {
+    format!("permission-menu-item-{}", permission_mode_slug(mode)).into()
+}
+
+fn permission_menu_dot_id(mode: PermissionMode) -> SharedString {
+    format!("permission-menu-dot-{}", permission_mode_slug(mode)).into()
+}
+
+fn permission_menu_label_id(mode: PermissionMode) -> SharedString {
+    format!("permission-menu-label-{}", permission_mode_slug(mode)).into()
+}
+
+fn permission_menu_check_id(mode: PermissionMode) -> SharedString {
+    format!("permission-menu-check-{}", permission_mode_slug(mode)).into()
+}
+
+/// CSS `letter-spacing` substitute: one text cell per glyph with a fractional
+/// flex gap. The trailing zero-width cell contributes the spacing after the
+/// final glyph, matching the browser's included advance.
+fn permission_tracked_text(text: impl Into<SharedString>, tracking: f32) -> Div {
+    let text = text.into();
+    div()
+        .flex()
+        .items_center()
+        .gap(px(tracking))
+        .children(text.chars().map(|ch| ui_text(ch.to_string())))
+        .child(div().w(px(0.)))
+}
+
+/// `.perm-menu__title`.
+fn permission_menu_title() -> Stateful<Div> {
+    div()
+        .id("permission-menu-title")
+        .mb(px(4.))
+        .px(px(10.))
+        .pt(px(6.))
+        .pb(px(8.))
+        .border_b_1()
+        .border_color(rgb(0x30363d))
+        .text_color(rgb(0x6e7681))
+        .text_size(px(11.))
+        .line_height(px(PERMISSION_MENU_TITLE_LINE_HEIGHT))
+        .child(permission_tracked_text(
+            PERMISSION_MENU_TITLE.to_uppercase(),
+            PERMISSION_MENU_TITLE_TRACKING,
+        ))
+}
+
+/// `.perm-menu button.perm-menu__item` (+ `.is-active` / `:hover`).
+fn permission_menu_item(mode: PermissionMode, active: PermissionMode) -> Stateful<Div> {
+    let is_active = mode == active;
+    let item = div()
+        .id(permission_menu_item_id(mode))
+        .flex()
+        .items_center()
+        .w_full()
+        .h(px(PERMISSION_MENU_ITEM_HEIGHT))
+        .gap(px(8.))
+        .px(px(10.))
+        .py(px(6.))
+        .rounded(px(4.))
+        .text_size(px(12.))
+        .line_height(px(14.))
+        .text_color(rgb(if is_active { 0x58a6ff } else { 0xc9d1d9 }))
+        .bg(if is_active {
+            Rgba {
+                a: 0.1,
+                ..rgb(0x58a6ff)
+            }
+        } else {
+            rgba(0x00000000)
+        })
+        .cursor_pointer()
+        .child(
+            div()
+                .id(permission_menu_dot_id(mode))
+                .flex_none()
+                .size(px(8.))
+                .rounded_full()
+                .bg(rgb(permission_menu_dot_color(mode))),
+        )
+        .child(
+            div()
+                .id(permission_menu_label_id(mode))
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .child(ui_text(mode.label())),
+        )
+        .when(is_active, |item| {
+            item.child(
+                div()
+                    .id(permission_menu_check_id(mode))
+                    .flex_none()
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(rgb(0x58a6ff))
+                    .child(ui_text(PERMISSION_MENU_CHECK)),
+            )
+        });
+    if is_active {
+        // The frozen `.is-active` rule follows `:hover`, so the active row
+        // keeps its blue tint instead of switching to the neutral hover gray.
+        item
+    } else {
+        item.hover(|style| style.bg(rgb(0x21262d)))
+    }
+}
+
+/// Window-space bottom-left anchor for the menu: chip's left/top edge, 8px up.
+/// The chip is vertically centred in the 38px footer and left-aligned in the
+/// 180px status cell, so this is exact without per-frame measurement.
+fn permission_menu_anchor(viewport: Size<Pixels>) -> Point<Pixels> {
+    let chip_top_from_bottom = (PERMISSION_FOOTER_HEIGHT - 1. + PERMISSION_CHIP_HEIGHT) / 2.;
+    point(
+        viewport.width - px(PERMISSION_FOOTER_PADDING_X + PERMISSION_STATUS_WIDTH),
+        viewport.height - px(chip_top_from_bottom + PERMISSION_MENU_GAP),
+    )
 }
 
 fn loader_permission_label(mode: &str) -> &str {
