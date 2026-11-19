@@ -282,6 +282,13 @@ struct ChildCount {
     claude_code: i64,
 }
 
+pub(crate) fn binding_can_fork(metadata: &Value) -> bool {
+    match metadata.get("canFork") {
+        Some(value) => value == true,
+        None => metadata["observedUserPrompt"] == true && metadata["observedNormalStop"] == true,
+    }
+}
+
 fn map_node(
     row: &Row<'_>,
     children: &HashMap<String, ChildCount>,
@@ -313,11 +320,7 @@ fn map_node(
         .and_then(|serialized| serde_json::from_str(serialized).ok());
     let can_fork = matches!(kind.as_str(), "claude-code" | "antigravity")
         && restore_state.as_deref() == Some("none")
-        && metadata
-            .as_ref()
-            .and_then(|value| value.get("canFork"))
-            .and_then(Value::as_bool)
-            == Some(true);
+        && metadata.as_ref().is_some_and(binding_can_fork);
     let cwd: String = row.get("cwd")?;
     let shared = sharing.get(&cwd).is_some_and(|&count| count > 1);
     let counts = children.get(&session_id).copied().unwrap_or_default();

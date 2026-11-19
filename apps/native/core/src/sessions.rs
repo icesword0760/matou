@@ -174,6 +174,13 @@ pub fn start_run(
             ],
         )?;
         tx.execute(
+            "UPDATE session_fork_intents
+             SET state = 'starting', stage = 'restoring-provider', completed_steps = 1,
+                 attempt = 1, attempt_count = 1, started_at = ?, updated_at = ?
+             WHERE session_id = ? AND operation_id = ? || session_id AND state = 'pending'",
+            params![input.now, input.now, input.session_id, NATIVE_FORK_PREFIX],
+        )?;
+        tx.execute(
             "UPDATE sessions
              SET status = 'running',
                  work_status = CASE WHEN kind = 'claude-code' THEN work_status ELSE 'idle' END,
@@ -249,6 +256,105 @@ pub struct ClaudeBinding {
     pub metadata: Value,
     pub resumable: bool,
     pub restore_state: String,
+}
+
+pub(crate) const NATIVE_FORK_PREFIX: &str = "native-fork:";
+
+pub struct ClaudeFork {
+    pub source_id: String,
+    pub metadata: Value,
+}
+
+pub fn pending_claude_fork(db: &Connection, session_id: &str) -> Result<Option<ClaudeFork>> {
+    Ok(db
+        .query_row(
+            "SELECT fork.source_provider_session_id, fork.permission_mode, binding.metadata_json
+         FROM session_fork_intents AS fork
+         LEFT JOIN provider_bindings AS binding ON binding.session_id = fork.source_session_id
+           AND binding.provider = fork.source_provider
+           AND binding.provider_session_id = fork.source_provider_session_id
+         WHERE fork.session_id = ? AND fork.operation_id = ? || fork.session_id
+           AND fork.state = 'pending'",
+            params![session_id, NATIVE_FORK_PREFIX],
+            |row| {
+                let permission: String = row.get(1)?;
+                let stored: Option<String> = row.get(2)?;
+                let binding: Value = stored
+                    .and_then(|text| serde_json::from_str(&text).ok())
+                    .unwrap_or(Value::Null);
+                Ok(ClaudeFork {
+                    source_id: row.get(0)?,
+                    metadata: json!({
+                        "providerConfigId": binding["providerConfigId"],
+                        "model": binding["model"],
+                        "permissionMode": permission,
+                    }),
+                })
+            },
+        )
+        .optional()?)
+}
+
+pub fn unfinished_claude_forks(db: &Connection) -> Result<Vec<String>> {
+    let mut query = db.prepare(
+        "SELECT fork.session_id FROM session_fork_intents AS fork
+         JOIN sessions ON sessions.id = fork.session_id
+         WHERE fork.operation_id = ? || fork.session_id AND fork.state = 'starting'
+           AND sessions.archived_at IS NULL",
+    )?;
+    Ok(query
+        .query_map([NATIVE_FORK_PREFIX], |row| row.get(0))?
+        .collect::<rusqlite::Result<_>>()?)
+}
+
+pub fn has_unconfirmed_claude_fork(db: &Connection, session_id: &str) -> Result<bool> {
+    Ok(db.query_row(
+        "SELECT EXISTS (SELECT 1 FROM session_fork_intents
+         WHERE session_id = ? AND operation_id = ? || session_id AND state <> 'succeeded')",
+        params![session_id, NATIVE_FORK_PREFIX],
+        |row| row.get(0),
+    )?)
+}
+
+pub fn fail_claude_fork(
+    db: &mut Connection,
+    command: &CommandMetadata,
+    session_id: &str,
+    error: &str,
+    now: i64,
+) -> Result<DomainCommit> {
+    execute(db, command, now, |tx, events| {
+        let session = require_session(tx, session_id)?;
+        if session.archived_at.is_some()
+            || tx.execute(
+                "UPDATE session_fork_intents
+             SET state = 'failed', stage = 'failed', error_message = ?,
+                 completed_at = ?, updated_at = ?
+             WHERE session_id = ? AND operation_id = ? || session_id
+               AND state IN ('pending', 'starting')",
+                params![error, now, now, session_id, NATIVE_FORK_PREFIX],
+            )? == 0
+        {
+            return Ok(Value::Null);
+        }
+        tx.execute(
+            "UPDATE sessions SET status = 'interrupted', work_status = 'error',
+                 updated_at = ?, version = version + 1 WHERE id = ?",
+            params![now, session_id],
+        )?;
+        let payload = json!({
+            "result": "fork-failed", "sessionId": session_id,
+            "provider": "claude-code", "forkError": error,
+        });
+        events.push(session_event(
+            command,
+            "session.fork-failed",
+            &session,
+            now,
+            payload.clone(),
+        ));
+        Ok(payload)
+    })
 }
 
 pub fn claude_binding(db: &Connection, session_id: &str) -> Result<Option<ClaudeBinding>> {
@@ -327,6 +433,10 @@ pub fn load_claude_catalog_binding(
             |row| row.get(0),
         )?;
         ensure!(!running, "Card already has a running process");
+        ensure!(
+            !has_unconfirmed_claude_fork(tx, input.session_id)?,
+            "Card has an unconfirmed fork"
+        );
 
         let existing: Option<(String, String)> = tx
             .query_row(
@@ -363,6 +473,7 @@ pub fn load_claude_catalog_binding(
             ("spawnRevision".into(), json!(revision)),
             ("observedUserPrompt".into(), json!(false)),
             ("observedNormalStop".into(), json!(false)),
+            ("canFork".into(), json!(false)),
         ]);
         tx.execute(
             "UPDATE provider_bindings SET resume_state = 'expired', restore_state = 'none',
@@ -561,6 +672,28 @@ pub fn record_claude_identity(
                     }),
             "Provider hook no longer owns its SessionRun"
         );
+        let fork: Option<(String, String)> = tx
+            .query_row(
+                "SELECT state, source_provider_session_id FROM session_fork_intents
+             WHERE session_id = ? AND operation_id = ? || session_id
+               AND state <> 'succeeded'",
+                params![input.session_id, NATIVE_FORK_PREFIX],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if let Some((state, source_id)) = &fork {
+            ensure!(
+                state == "starting"
+                    && input.first_for_run
+                    && input.expected_id.is_none()
+                    && !matches!(input.event_name, "unknown" | "SessionEnd"),
+                "Fork requires a lifecycle identity from its active launch"
+            );
+            ensure!(
+                provider_session_id != trim(source_id),
+                "Fork returned the source conversation"
+            );
+        }
         let existing: Option<(String, String)> = tx
             .query_row(
                 "SELECT id, metadata_json FROM provider_bindings
@@ -608,6 +741,9 @@ pub fn record_claude_identity(
                 Value::Bool(observed || metadata.get(key).and_then(Value::as_bool) == Some(true)),
             );
         }
+        let can_fork =
+            metadata["observedUserPrompt"] == true && metadata["observedNormalStop"] == true;
+        metadata.insert("canFork".into(), json!(can_fork));
         tx.execute(
             "INSERT INTO provider_bindings (
                  id, session_id, provider, provider_session_id, resume_state,
@@ -627,6 +763,19 @@ pub fn record_claude_identity(
                 now
             ],
         )?;
+        if fork.is_some() {
+            tx.execute(
+                "UPDATE session_fork_intents SET state = 'succeeded', stage = 'succeeded',
+                     completed_steps = total_steps, completed_at = ?, updated_at = ?
+                 WHERE session_id = ?",
+                params![now, now, input.session_id],
+            )?;
+            tx.execute(
+                "UPDATE sessions SET work_status = 'idle', updated_at = ?, version = version + 1
+                 WHERE id = ? AND work_status = 'starting'",
+                params![now, input.session_id],
+            )?;
+        }
         // Publish only the fields owned by this observation. Existing binding
         // metadata can contain fields from other versions of the runtime.
         let mut public_metadata = serde_json::Map::new();
@@ -639,6 +788,7 @@ pub fn record_claude_identity(
             "lastHookEvent",
             "observedUserPrompt",
             "observedNormalStop",
+            "canFork",
         ] {
             if let Some(value) = metadata.get(key) {
                 public_metadata.insert(key.into(), value.clone());

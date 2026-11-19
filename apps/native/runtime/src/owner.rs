@@ -16,7 +16,7 @@ use matou_native_core::{
     provider_launch::{ClaudeLaunch, attach_claude_settings},
     pty::LaunchProfile,
     session_graph,
-    sessions::{self, ClaudeBinding, ClaudeRestore, SessionRun, StartRunInput},
+    sessions::{self, ClaudeBinding, ClaudeFork, ClaudeRestore, SessionRun, StartRunInput},
     shell_history,
     storage::{CommandMetadata, DomainCommit},
 };
@@ -61,6 +61,10 @@ struct RunHook {
     resume: Option<ResumeMonitor>,
     reported_missing: bool,
 }
+
+const FORK_SOURCE_IDENTITY: &str = "CLI returned the source conversation ID for the fork";
+const FORK_IDENTITY_TIMEOUT: &str = "Fork 会话身份确认超时，请重试";
+const FORK_IDENTITY_WAIT: Duration = Duration::from_secs(60);
 
 #[derive(Default)]
 struct Summary {
@@ -143,6 +147,12 @@ impl ShellOwner {
                 time,
             )?;
             owner.pending.push(OwnerEvent::Domain(commit));
+        }
+        for session_id in sessions::unfinished_claude_forks(&owner.connection)? {
+            owner.fail_claude_fork(
+                &session_id,
+                "Runtime exited before the fork identity was confirmed",
+            )?;
         }
         Ok(owner)
     }
@@ -458,6 +468,23 @@ impl ShellOwner {
         )
     }
 
+    pub(crate) fn create_fork_child(
+        &mut self,
+        command: &CommandMetadata,
+        input: &canvas::ForkSessionInput,
+        ids: &canvas::CanvasIds,
+        messages: &canvas::CanvasMessages<'_>,
+    ) -> Result<Value> {
+        canvas::create_fork_child(
+            &mut self.connection,
+            command,
+            input,
+            ids,
+            messages,
+            input.now,
+        )
+    }
+
     pub fn rename_scene(
         &mut self,
         command: &CommandMetadata,
@@ -623,6 +650,7 @@ impl ShellOwner {
                     && session.archived_at.is_none()
                     && (start_failed || session.status == "exited")
             })
+            && !sessions::has_unconfirmed_claude_fork(&self.connection, session_id)?
             && !self
                 .claude_binding(session_id)?
                 .is_some_and(|binding| binding.restore_state == "failed"))
@@ -630,6 +658,17 @@ impl ShellOwner {
 
     pub(crate) fn claude_binding(&self, session_id: &str) -> Result<Option<ClaudeBinding>> {
         sessions::claude_binding(&self.connection, session_id)
+    }
+
+    pub(crate) fn pending_claude_fork(&self, session_id: &str) -> Result<Option<ClaudeFork>> {
+        sessions::pending_claude_fork(&self.connection, session_id)
+    }
+
+    pub(crate) fn fail_claude_fork(&mut self, session_id: &str, error: &str) -> Result<bool> {
+        let mut events = Vec::new();
+        let failed = self.commit_fork_failure(session_id, None, error, &mut events)?;
+        self.pending.extend(events);
+        Ok(failed)
     }
 
     pub(crate) fn load_claude_catalog_binding(
@@ -879,6 +918,42 @@ impl ShellOwner {
         plan: ClaudeLaunch,
         binding: Option<&ClaudeBinding>,
     ) -> Result<()> {
+        let resume = binding.filter(|binding| binding.resumable).map(|binding| {
+            ResumeMonitor::new(binding, plan.permission_mode == "bypassPermissions")
+        });
+        self.launch_claude_with_monitor(
+            session_id,
+            terminal,
+            plan,
+            resume,
+            binding.and_then(|binding| binding.metadata.get("spawnRevision")),
+        )
+    }
+
+    pub(crate) fn launch_claude_fork(
+        &mut self,
+        session_id: String,
+        terminal: matou_native_terminal::TerminalOptions,
+        plan: ClaudeLaunch,
+        source_id: String,
+    ) -> Result<()> {
+        ensure!(
+            self.pending_claude_fork(&session_id)?
+                .is_some_and(|fork| fork.source_id == source_id),
+            "Fork launch no longer owns its pending operation"
+        );
+        let monitor = ResumeMonitor::for_id(source_id, plan.permission_mode == "bypassPermissions");
+        self.launch_claude_with_monitor(session_id, terminal, plan, Some(monitor), None)
+    }
+
+    fn launch_claude_with_monitor(
+        &mut self,
+        session_id: String,
+        terminal: matou_native_terminal::TerminalOptions,
+        plan: ClaudeLaunch,
+        resume: Option<ResumeMonitor>,
+        revision: Option<&Value>,
+    ) -> Result<()> {
         let mut launch = plan.launch;
         launch.cols = terminal.cols;
         launch.rows = terminal.rows;
@@ -903,12 +978,9 @@ impl ShellOwner {
             "permissionMode": safe(&plan.permission_mode), "cwd": safe(&launch.cwd.to_string_lossy()),
         });
         let mut metadata = metadata;
-        if let Some(revision) = binding.and_then(|binding| binding.metadata.get("spawnRevision")) {
+        if let Some(revision) = revision {
             metadata["spawnRevision"] = revision.clone();
         }
-        let resume = binding.filter(|binding| binding.resumable).map(|binding| {
-            ResumeMonitor::new(binding, plan.permission_mode == "bypassPermissions")
-        });
         self.launch_run(
             SessionOptions {
                 session_id,
@@ -976,18 +1048,26 @@ impl ShellOwner {
         let rows = options.launch.rows.into();
         let run_id = (self.next_id)();
         let hook = if let Some((launch_metadata, secrets, resume)) = provider {
+            let (expected_id, fork_source_id) = match &resume {
+                Some(resume) if resume.binding_id.is_some() => {
+                    (Some(resume.expected_id.clone()), None)
+                }
+                Some(fork) => (None, Some(fork.expected_id.clone())),
+                None => (None, None),
+            };
+            let identity_wait = if fork_source_id.is_some() {
+                FORK_IDENTITY_WAIT
+            } else {
+                IDENTITY_TIMEOUT
+            };
             let registration = self
-                .register_hook(
-                    &mut options,
-                    &run_id,
-                    resume.as_ref().map(|resume| resume.expected_id.clone()),
-                )
+                .register_hook(&mut options, &run_id, expected_id, fork_source_id)
                 .context(HookSetup)?;
             Some(RunHook {
                 _registration: registration,
                 launch_metadata,
                 secrets,
-                deadline: Some(Instant::now() + IDENTITY_TIMEOUT),
+                deadline: Some(Instant::now() + identity_wait),
                 last_observation: None,
                 last_submission: None,
                 resume,
@@ -1054,6 +1134,7 @@ impl ShellOwner {
         options: &mut SessionOptions,
         run_id: &str,
         expected_id: Option<String>,
+        fork_source_id: Option<String>,
     ) -> Result<Registration> {
         if self.hook_server.is_none() {
             self.hook_server = Some(ProviderHookServer::start()?);
@@ -1065,6 +1146,7 @@ impl ShellOwner {
                 run_id: run_id.to_owned(),
                 generation: self.generation.clone(),
                 expected_id,
+                fork_source_id,
             },
         )?;
         attach_claude_settings(&mut options.launch, &registration.settings_path)?;
@@ -1163,12 +1245,23 @@ impl ShellOwner {
         let hooks: Vec<_> = server.messages().take(64).collect();
         for hook in hooks {
             match hook {
-                HookMessage::Observed(scope, observation) => {
-                    self.apply_hook(scope, observation, events)
+                HookMessage::Observed(scope, observation, received_at) => {
+                    let late_fork = scope.fork_source_id.is_some()
+                        && self
+                            .shells
+                            .get(&scope.session_id)
+                            .filter(|shell| shell.run_id == scope.run_id)
+                            .and_then(|shell| shell.hook.as_ref())
+                            .and_then(|hook| hook.deadline)
+                            .is_some_and(|deadline| received_at >= deadline);
+                    if !late_fork {
+                        self.apply_hook(scope, observation, events);
+                    }
                 }
                 HookMessage::Retired(scope) => reject_identity(events, &scope, "retired-run"),
             }
         }
+        let mut expired_forks = Vec::new();
         for (session_id, shell) in &mut self.shells {
             if let Some(hook) = &mut shell.hook
                 && hook
@@ -1177,6 +1270,10 @@ impl ShellOwner {
             {
                 hook.deadline = None;
                 if let Some(resume) = &mut hook.resume {
+                    if resume.binding_id.is_none() {
+                        expired_forks.push((session_id.clone(), shell.run_id.clone()));
+                        continue;
+                    }
                     resume.release_readiness();
                 }
                 events.push(OwnerEvent::ProviderIdentity(json!({
@@ -1187,6 +1284,9 @@ impl ShellOwner {
                     "restoreError": null, "spawnRevision": hook.launch_metadata.get("spawnRevision"),
                 })));
             }
+        }
+        for (session_id, run_id) in expired_forks {
+            self.park_fork_run(&session_id, &run_id, FORK_IDENTITY_TIMEOUT, events);
         }
         for (session_id, shell) in &mut self.shells {
             if let Some(bytes) = shell
@@ -1227,9 +1327,11 @@ impl ShellOwner {
         }
         if let (Some(expected), Some(identity)) = (&scope.expected_id, &observation.identity)
             && expected != identity
-            && let Some(resume) = &hook.resume
+            && let Some(binding_id) = hook
+                .resume
+                .as_ref()
+                .and_then(|resume| resume.binding_id.clone())
         {
-            let binding_id = resume.binding_id.clone();
             self.park_provider_run(
                 &scope.session_id,
                 &scope.run_id,
@@ -1250,6 +1352,22 @@ impl ShellOwner {
             }
             return;
         };
+        if let Some(source_id) = &scope.fork_source_id {
+            if let Some(confirmed) = &hook.last_observation {
+                if confirmed.identity.as_deref().map(str::trim) != Some(identity.trim()) {
+                    reject_identity(events, &scope, "fork-identity-changed");
+                    return;
+                }
+            } else if identity.trim() == source_id.trim() {
+                self.park_fork_run(
+                    &scope.session_id,
+                    &scope.run_id,
+                    FORK_SOURCE_IDENTITY,
+                    events,
+                );
+                return;
+            }
+        }
         observation.model = safe(observation.model);
         observation.permission_mode = safe(observation.permission_mode);
         observation.cwd = safe(observation.cwd)
@@ -1291,9 +1409,21 @@ impl ShellOwner {
                 },
                 now(),
             );
-            let Ok(commit) = commit else {
-                reject_identity(events, &scope, "binding-write-failed");
-                return;
+            let commit = match commit {
+                Ok(commit) => commit,
+                Err(error) => {
+                    if scope.fork_source_id.is_some() && hook.last_observation.is_none() {
+                        self.park_fork_run(
+                            &scope.session_id,
+                            &scope.run_id,
+                            &format!("Could not record the fork identity: {error:#}"),
+                            events,
+                        );
+                    } else {
+                        reject_identity(events, &scope, "binding-write-failed");
+                    }
+                    return;
+                }
             };
             hook.deadline = None;
             hook.last_observation = Some(observation);
@@ -1344,6 +1474,50 @@ impl ShellOwner {
                 format!("persist provider restore failure: {error:#}"),
             );
         }
+    }
+
+    fn park_fork_run(
+        &mut self,
+        session_id: &str,
+        run_id: &str,
+        error: &str,
+        events: &mut Vec<OwnerEvent>,
+    ) {
+        self.retire_sessions(&[session_id.to_owned()]);
+        if let Err(error) = self.commit_fork_failure(session_id, Some(run_id), error, events) {
+            diagnostic(
+                events,
+                session_id,
+                format!("persist fork failure: {error:#}"),
+            );
+        }
+    }
+
+    fn commit_fork_failure(
+        &mut self,
+        session_id: &str,
+        run_id: Option<&str>,
+        error: &str,
+        events: &mut Vec<OwnerEvent>,
+    ) -> Result<bool> {
+        let id = (self.next_id)();
+        let commit = sessions::fail_claude_fork(
+            &mut self.connection,
+            &command(id.clone(), "session.fork-failed", id),
+            session_id,
+            error,
+            now(),
+        )?;
+        if commit.result.is_null() {
+            return Ok(false);
+        }
+        let mut payload = commit.result.clone();
+        if let Some(run_id) = run_id {
+            payload["runId"] = json!(run_id);
+        }
+        events.push(OwnerEvent::ProviderIdentity(payload));
+        events.push(OwnerEvent::Domain(commit));
+        Ok(true)
     }
 
     fn apply(&mut self, event: WorkerEvent, events: &mut Vec<OwnerEvent>) {
@@ -1452,7 +1626,11 @@ impl ShellOwner {
             if let Some(error) = failure {
                 let run_id = shell.run_id.clone();
                 let binding_id = resume.binding_id.clone();
-                self.park_provider_run(id, &run_id, &binding_id, error, events);
+                if let Some(binding_id) = binding_id {
+                    self.park_provider_run(id, &run_id, &binding_id, error, events);
+                } else {
+                    self.park_fork_run(id, &run_id, error, events);
+                }
                 return;
             }
             if let Some(bytes) = input {
@@ -1643,18 +1821,28 @@ impl ShellOwner {
             time,
         )?;
         events.push(OwnerEvent::Domain(commit));
-        if !disposed
-            && !self.closing
-            && !retiring
-            && let Some(resume) = pending_restore
-        {
-            self.park_provider_run(
-                id,
-                &run,
-                &resume.binding_id,
-                &format!("provider resume exited with code {}", status.exit_code),
-                events,
-            );
+        if let Some(resume) = pending_restore.filter(|_| !retiring) {
+            if let Some(binding_id) = resume.binding_id {
+                if !disposed && !self.closing {
+                    self.park_provider_run(
+                        id,
+                        &run,
+                        &binding_id,
+                        &format!("provider resume exited with code {}", status.exit_code),
+                        events,
+                    );
+                }
+            } else {
+                self.park_fork_run(
+                    id,
+                    &run,
+                    &format!(
+                        "CLI exited with code {} before confirming the fork identity",
+                        status.exit_code
+                    ),
+                    events,
+                );
+            }
         } else if startup_failed {
             self.set_work_status(id, events, |_| "error")?;
         }
@@ -2016,6 +2204,318 @@ mod provider_tests {
     }
 
     #[test]
+    fn fork_identity_is_scoped_to_the_child_run_and_must_be_new() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let BootstrapResult::Writable {
+            mut connection,
+            ownership,
+            ..
+        } = startup::open(root.path(), "fork-generation")?
+        else {
+            anyhow::bail!("expected writable database");
+        };
+        hierarchy::bootstrap_window(
+            &mut connection,
+            &command("bootstrap".into(), "window.bootstrap", "fixture".into()),
+            &hierarchy::BootstrapWindowInput {
+                window_id: "window".into(),
+                default_root_directory: root.path().to_string_lossy().into(),
+                default_name: "Workspace".into(),
+                now: 1,
+            },
+            &HierarchyIds {
+                workspace_id: "workspace".into(),
+                execution_context_id: "context".into(),
+                task_id: "task".into(),
+                scene_id: "scene".into(),
+                session_id: "source".into(),
+                root_node_id: "node".into(),
+                mount_id: "mount".into(),
+            },
+            "默认",
+            1,
+        )?;
+        connection.execute_batch(
+            r#"UPDATE sessions SET kind='claude-code', work_status='running' WHERE id='source';
+             INSERT INTO provider_bindings (id, session_id, provider, provider_session_id, resume_state,
+                                            metadata_json, created_at, updated_at, validated_at)
+             VALUES ('source-binding', 'source', 'claude-code', 'source-id', 'available',
+                     '{"canFork":true}', 2, 2, 2);
+             INSERT INTO session_graph_summaries (session_id, latest_lines_json, updated_at)
+             VALUES ('source', '["source summary"]', 2);"#,
+        )?;
+        let mut owner =
+            ShellOwner::new(connection, ownership, || uuid::Uuid::new_v4().to_string())?;
+        let source = owner.session("source")?.unwrap();
+        let authority = owner.claude_binding("source")?.unwrap();
+        let executable = root.path().join("test-provider");
+        fs::write(&executable, "#!/bin/sh\nread -r line\nexit 23\n")?;
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700))?;
+        let create = |owner: &mut ShellOwner, label: &str| -> Result<canvas::ForkSessionInput> {
+            let input = canvas::ForkSessionInput {
+                window_id: "window".into(),
+                scene_id: "scene".into(),
+                source_session_id: "source".into(),
+                placement: canvas::ForkPlacement::Child,
+                name: label.into(),
+                worktree_mode: canvas::ForkWorktreeMode::Current,
+                submission_key: label.into(),
+                now: 3,
+            };
+            let created = owner.create_fork_child(
+                &command(
+                    format!("create-{label}"),
+                    "hierarchy.fork-session",
+                    label.into(),
+                ),
+                &input,
+                &canvas::CanvasIds {
+                    scene_id: "scene".into(),
+                    session_id: label.into(),
+                    root_node_id: format!("{label}-node"),
+                    secondary_node_id: format!("{label}-split"),
+                    mount_id: format!("{label}-mount"),
+                    relation_id: format!("{label}-relation"),
+                },
+                &canvas::CanvasMessages {
+                    new_canvas: "",
+                    duplicate_scene_name: "",
+                    workspace_path_invalid: "",
+                    detached_session_must_return: "",
+                },
+            )?;
+            assert_eq!(created["sessionId"], label);
+            Ok(input)
+        };
+        let spawn = |owner: &mut ShellOwner, label: &str| -> Result<Scope> {
+            create(owner, label)?;
+            let target = owner.pending_claude_fork(label)?.unwrap();
+            let plan = matou_native_core::provider_launch::prepare_claude_fork(
+                root.path(),
+                root.path(),
+                &target.metadata,
+                &target.source_id,
+                [(
+                    "MATOU_CLAUDE_COMMAND".into(),
+                    executable.clone().into_os_string(),
+                )]
+                .into(),
+                80,
+                24,
+            )?;
+            assert_eq!(
+                plan.launch.argv,
+                ["--resume", "source-id", "--fork-session"]
+            );
+            owner.launch_claude_fork(
+                label.into(),
+                TerminalOptions::new(80, 24, 7, 14),
+                plan,
+                target.source_id,
+            )?;
+            Ok(Scope {
+                session_id: label.into(),
+                run_id: owner.shells[label].run_id.clone(),
+                generation: owner.generation.clone(),
+                expected_id: None,
+                fork_source_id: Some("source-id".into()),
+            })
+        };
+        let observation = |event, id| {
+            let payload = json!({"hook_event_name": event, "session_id": id});
+            Observation::parse(payload.as_object().unwrap())
+        };
+        let mut events = Vec::new();
+        let rejected = spawn(&mut owner, "rejected")?;
+        owner.apply_hook(
+            rejected.clone(),
+            observation("SessionEnd", "source-id"),
+            &mut events,
+        );
+        owner.apply_hook(
+            rejected.clone(),
+            observation("unknown", "source-id"),
+            &mut events,
+        );
+        assert!(owner.waiting_for_provider_restore("rejected"));
+        assert!(owner.claude_binding("rejected")?.is_none());
+        owner.apply_hook(
+            rejected.clone(),
+            observation("SessionStart", "source-id"),
+            &mut events,
+        );
+        owner.apply_hook(
+            rejected.clone(),
+            observation("SessionStart", "other-id"),
+            &mut events,
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, OwnerEvent::ProviderIdentity(value)
+            if value["result"] == "fork-failed" && value["forkError"] == FORK_SOURCE_IDENTITY))
+        );
+        assert!(owner.claude_binding("rejected")?.is_none());
+        assert_eq!(work_state(&owner, "rejected")?.0, "error");
+
+        let timeout = spawn(&mut owner, "timeout")?;
+        owner
+            .shells
+            .get_mut("timeout")
+            .unwrap()
+            .hook
+            .as_mut()
+            .unwrap()
+            .deadline = Some(Instant::now());
+        owner.poll_provider_hooks(&mut events);
+        owner.apply_hook(
+            timeout,
+            observation("SessionStart", "too-late"),
+            &mut events,
+        );
+        assert!(owner.claude_binding("timeout")?.is_none());
+        assert_eq!(work_state(&owner, "timeout")?.0, "error");
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, OwnerEvent::ProviderIdentity(value)
+            if value["sessionId"] == "timeout" && value["forkError"] == FORK_IDENTITY_TIMEOUT))
+        );
+
+        let early = spawn(&mut owner, "early-exit")?;
+        let (reply, result) = mpsc::channel();
+        owner.send(
+            "early-exit",
+            WorkerCommand::Write {
+                bytes: vec![b'\n'],
+                reply,
+            },
+        )?;
+        result.recv_timeout(Duration::from_secs(5))??;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while owner
+            .shells
+            .get("early-exit")
+            .is_some_and(|shell| !shell.ended)
+            && Instant::now() < deadline
+        {
+            events.extend(owner.poll(Duration::from_millis(25))?);
+        }
+        assert!(events.iter().any(|event| matches!(event, OwnerEvent::ProviderIdentity(value)
+            if value["runId"] == early.run_id && value["forkError"].as_str().is_some_and(|error| error.contains("code 23")))));
+        assert!(owner.claude_binding("early-exit")?.is_none());
+
+        let never_started = create(&mut owner, "start-failure")?;
+        assert!(owner.fail_claude_fork("start-failure", "executable unavailable")?);
+        let same = owner.create_fork_child(
+            &command(
+                "repeat-failed".into(),
+                "hierarchy.fork-session",
+                "repeat".into(),
+            ),
+            &never_started,
+            &canvas::CanvasIds {
+                scene_id: String::new(),
+                root_node_id: String::new(),
+                secondary_node_id: String::new(),
+                session_id: String::new(),
+                mount_id: String::new(),
+                relation_id: String::new(),
+            },
+            &canvas::CanvasMessages {
+                new_canvas: "",
+                duplicate_scene_name: "",
+                workspace_path_invalid: "",
+                detached_session_must_return: "",
+            },
+        )?;
+        assert_eq!(same["sessionId"], "start-failure");
+        assert_eq!(same["stage"], "failed");
+        assert_eq!(same["error"], "executable unavailable");
+        assert!(owner.claude_binding("start-failure")?.is_none());
+        assert_eq!(owner.session("source")?.unwrap(), source);
+        let after = owner.claude_binding("source")?.unwrap();
+        assert_eq!(
+            (after.id, after.provider_session_id, after.metadata),
+            (
+                authority.id,
+                authority.provider_session_id,
+                authority.metadata
+            )
+        );
+        assert_eq!(
+            owner.connection.query_row(
+                "SELECT latest_lines_json FROM session_graph_summaries WHERE session_id='source'",
+                [],
+                |row| row.get::<_, String>(0)
+            )?,
+            r#"["source summary"]"#,
+        );
+
+        let confirmed = spawn(&mut owner, "confirmed")?;
+        // The child owns its launch after acceptance, even if its source is removed.
+        owner.remove_session_branch(
+            &command(
+                "remove-source".into(),
+                "hierarchy.remove-session-branch",
+                "source".into(),
+            ),
+            &cards::RemoveSessionBranchInput {
+                window_id: "window".into(),
+                scene_id: "scene".into(),
+                session_id: "source".into(),
+                scope: cards::RemoveScope::NodeOnly,
+                now: 4,
+            },
+            4,
+        )?;
+        owner.apply_hook(
+            Scope {
+                generation: "stale".into(),
+                ..confirmed.clone()
+            },
+            observation("SessionStart", "stale-id"),
+            &mut events,
+        );
+        assert!(owner.claude_binding("confirmed")?.is_none());
+        owner.apply_hook(
+            confirmed.clone(),
+            observation("SessionStart", "child-id"),
+            &mut events,
+        );
+        owner.apply_hook(confirmed, observation("Stop", "source-id"), &mut events);
+        assert_eq!(
+            owner
+                .claude_binding("confirmed")?
+                .unwrap()
+                .provider_session_id,
+            "child-id"
+        );
+        assert_eq!(
+            owner.connection.query_row(
+                "SELECT COUNT(*) FROM provider_bindings WHERE session_id='confirmed'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )?,
+            1,
+        );
+        assert_eq!(
+            owner.connection.query_row(
+                "SELECT stage FROM session_fork_intents WHERE session_id='confirmed'",
+                [],
+                |row| row.get::<_, String>(0)
+            )?,
+            "succeeded",
+        );
+        assert_eq!(
+            owner.claude_binding("source")?.unwrap().provider_session_id,
+            "source-id"
+        );
+        owner.shutdown()?;
+        Ok(())
+    }
+
+    #[test]
     fn current_provider_run_alone_can_project_identity() -> Result<()> {
         let root = tempfile::tempdir()?;
         let cwd = root.path().join("workspace");
@@ -2098,6 +2598,7 @@ mod provider_tests {
             run_id: owner.shells[session].run_id.clone(),
             generation: owner.generation.clone(),
             expected_id: None,
+            fork_source_id: None,
         };
         let observation = |event, identity: Option<&str>| Observation {
             event,
@@ -2243,6 +2744,7 @@ mod provider_tests {
             run_id: owner.shells[session].run_id.clone(),
             generation: owner.generation.clone(),
             expected_id: Some(binding.provider_session_id.clone()),
+            fork_source_id: None,
         };
         assert_eq!(resume.expected_id.as_deref(), Some("current-id"));
         assert!(owner.waiting_for_provider_restore(session));
