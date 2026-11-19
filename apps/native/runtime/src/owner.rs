@@ -767,40 +767,77 @@ impl ShellOwner {
         Ok(owners)
     }
 
-    pub(crate) fn startup_provider_restores(
+    pub(crate) fn startup_recovery_candidates(
         &self,
         scene_id: Option<&str>,
-    ) -> Result<Vec<(String, String)>> {
+    ) -> Result<Vec<(String, String, bool)>> {
         let mut query = self.connection.prepare(
-            "SELECT sessions.id, tasks.workspace_id FROM sessions
+            "SELECT sessions.id, tasks.workspace_id, sessions.kind, sessions.status,
+                    EXISTS(SELECT 1 FROM session_runs WHERE session_id = sessions.id),
+                    (sessions.work_status IN ('starting', 'running', 'needs-input', 'interrupted')
+                        OR EXISTS (
+                            SELECT 1 FROM domain_events
+                            WHERE event_id = 'runtime-shutdown-' || (
+                                SELECT id FROM session_runs WHERE session_id = sessions.id
+                                ORDER BY ordinal DESC LIMIT 1
+                            )
+                        )) AS automatic
+             FROM sessions
              JOIN tasks ON tasks.id = sessions.task_id AND tasks.archived_at IS NULL
              JOIN workspaces ON workspaces.id = tasks.workspace_id AND workspaces.archived_at IS NULL
-             WHERE sessions.kind = 'claude-code' AND sessions.archived_at IS NULL
+             WHERE sessions.kind IN ('shell', 'claude-code') AND sessions.archived_at IS NULL
                AND EXISTS (
                    SELECT 1 FROM session_mounts JOIN scenes ON scenes.id = session_mounts.scene_id
                    WHERE session_mounts.session_id = sessions.id AND scenes.archived_at IS NULL
                )
-             ORDER BY EXISTS (
+             ORDER BY COALESCE((
+                 SELECT MAX(membership.updated_at) FROM session_canvas_memberships AS membership
+                 WHERE membership.session_id = sessions.id
+                   AND max(membership.last_user_interaction_seq, membership.pending_user_interaction_seq) > 0
+               ), sessions.created_at) DESC,
+               EXISTS (
                    SELECT 1 FROM session_mounts WHERE session_id = sessions.id AND scene_id = ?
-               ) DESC, sessions.last_activity_at DESC, sessions.id",
+               ) DESC, sessions.id",
         )?;
         let rows = query.query_map([scene_id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, bool>(4)?,
+                row.get::<_, bool>(5)?,
+            ))
         })?;
-        let mut selected = Vec::new();
+        let mut candidates = Vec::new();
         for row in rows {
-            let (id, workspace) = row?;
-            if self
-                .claude_binding(&id)?
-                .is_some_and(|binding| binding.resumable)
-            {
-                selected.push((id, workspace));
-                if selected.len() == 16 {
-                    break;
+            let (id, workspace, kind, status, has_run, automatic) = row?;
+            if kind == "shell" {
+                if has_run {
+                    candidates.push((id, workspace, automatic));
                 }
+                continue;
+            }
+            if self.pending_claude_fork(&id)?.is_some() {
+                continue;
+            }
+            let binding = self.claude_binding(&id)?;
+            if binding.as_ref().is_some_and(|binding| binding.resumable) {
+                candidates.push((id, workspace, true));
+                continue;
+            }
+            // A card that normally starts fresh still follows its existing launch
+            // path. Failed restores have their own recovery banner and commands.
+            let starts_fresh =
+                (status == "created" && !has_run) || (status == "starting" && binding.is_some());
+            if !starts_fresh
+                && (has_run || binding.is_some())
+                && !binding.is_some_and(|binding| binding.restore_state == "failed")
+            {
+                candidates.push((id, workspace, false));
             }
         }
-        Ok(selected)
+        Ok(candidates)
     }
 
     pub(crate) fn change_claude_restore(

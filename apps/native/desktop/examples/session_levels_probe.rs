@@ -288,6 +288,50 @@ mod workspace {
             );
         }
 
+        pub(super) fn verify_deferred_card(
+            &self,
+            title: &str,
+            cwd: &str,
+            time: Option<&str>,
+            replies: &[&str],
+            loading: bool,
+        ) {
+            let card = self
+                .deferred_card(crate::probe::PEER)
+                .expect("deferred recovery card");
+            assert_eq!(card.title, title);
+            assert_eq!(card.agent, Some("Claude Code"));
+            assert_eq!(card.cwd.as_deref(), Some(cwd));
+            assert_eq!(card.updated_label.as_deref(), time);
+            assert_eq!(
+                card.replies
+                    .iter()
+                    .map(|reply| reply.text.as_str())
+                    .collect::<Vec<_>>(),
+                replies
+            );
+            assert_eq!(card.loading, loading);
+            assert!(card.can_open_history);
+            assert!(card.can_restore);
+            assert!(!self.session_frames.contains(crate::probe::PEER));
+        }
+
+        pub(super) fn focus_deferred_action(&self, index: usize, window: &mut Window) {
+            window.focus(&self.deferred_controls[crate::probe::PEER][index]);
+        }
+
+        pub(super) fn assert_deferred_history(&self, open: bool) {
+            if open {
+                let state = self.loader();
+                assert!(state.history);
+                assert_eq!(state.selected.as_deref(), Some("probe-conversation"));
+                assert!(!self.session_loader_can_submit(state));
+                assert!(self.is_deferred(crate::probe::PEER));
+            } else {
+                assert!(self.dialog.is_none());
+            }
+        }
+
         pub(super) fn assert_level(
             &self,
             parent: Option<&str>,
@@ -2213,13 +2257,21 @@ mod probe {
     }
 
     fn open_hidden(cx: &mut AsyncApp, width: f32) -> (WindowHandle<Workspace>, ProbeReceiver) {
+        open_probe_window(cx, width, false)
+    }
+
+    fn open_probe_window(
+        cx: &mut AsyncApp,
+        width: f32,
+        visible: bool,
+    ) -> (WindowHandle<Workspace>, ProbeReceiver) {
         let (commands, sink) = runtime_bridge::probe_channel();
         let (_events, incoming) = async_channel::unbounded();
         let window = cx
             .open_window(
                 WindowOptions {
-                    show: false,
-                    focus: false,
+                    show: visible,
+                    focus: visible,
                     window_bounds: Some(WindowBounds::Windowed(Bounds::new(
                         point(px(0.), px(0.)),
                         size(px(width), px(780.)),
@@ -2229,6 +2281,13 @@ mod probe {
                 |window, cx| cx.new(|cx| Workspace::new(commands, incoming, window, cx)),
             )
             .unwrap();
+        if visible {
+            window
+                .update(cx, |_, window, _| {
+                    window.set_window_title("Matou · 延后恢复验收")
+                })
+                .unwrap();
+        }
         (window, sink)
     }
 
@@ -3424,6 +3483,179 @@ mod probe {
             .unwrap();
     }
 
+    fn verify_deferred_recovery(cx: &mut AsyncApp, visible: bool) {
+        use matou_native_runtime::host::{RecentReplies, RecentReply};
+
+        const TIME: &str = "11/19 19:30";
+        let fixture = Fixture::new();
+        let set_title =
+            |fixture: &Fixture, source: &str, provider: Option<&str>| {
+                let Some(BootstrapResult::Writable { connection, .. }) = &fixture.db else {
+                    unreachable!()
+                };
+                let title = if source == "manual" {
+                    "手工卡名"
+                } else {
+                    "Claude Code"
+                };
+                connection.execute(
+                "UPDATE sessions SET title_source=?1, provider_title=?2, title=?3 WHERE id=?4",
+                (source, provider, title, PEER),
+            ).unwrap();
+            };
+        let deferred_graph = |fixture: &Fixture, ready| {
+            use matou_native_core::sessions::{claude_binding, get_session};
+            let Some(BootstrapResult::Writable { connection, .. }) = &fixture.db else {
+                unreachable!()
+            };
+            let mut event = fixture.event(ready);
+            let (Event::Ready { graph, .. } | Event::Navigation { graph, .. }) = &mut event else {
+                unreachable!()
+            };
+            let node = graph["nodes"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|node| node["sessionId"] == PEER)
+                .unwrap();
+            let session = get_session(connection, PEER).unwrap().unwrap();
+            node["titleSource"] = serde_json::json!(session.title_source);
+            node["providerTitle"] = serde_json::json!(session.provider_title);
+            node["historyProviderSessionId"] = serde_json::json!(
+                claude_binding(connection, PEER)
+                    .unwrap()
+                    .map(|binding| binding.provider_session_id)
+            );
+            if ready {
+                event
+            } else {
+                Event::Graph(std::mem::take(graph))
+            }
+        };
+        fixture.set_provider_restore("none", None, 3);
+        set_title(&fixture, "default", Some("保存的会话名"));
+        let (window, sink) = open_probe_window(cx, 1200., visible);
+        deliver(window, cx, deferred_graph(&fixture, true));
+        deliver(
+            window,
+            cx,
+            Event::Recovery {
+                session_id: PEER.into(),
+                state: RecoveryState::Deferred,
+            },
+        );
+        draw(window, cx);
+        let cwd = fixture.root.to_str().unwrap();
+        let verify = |cx: &mut AsyncApp, title: &str, time, replies: &[&str], loading| {
+            window
+                .update(cx, |view, _, _| {
+                    view.verify_deferred_card(title, cwd, time, replies, loading)
+                })
+                .unwrap();
+        };
+        let send_preview = |cx: &mut AsyncApp, preview| {
+            deliver(
+                window,
+                cx,
+                Event::DeferredRecoveryPreview {
+                    session_id: PEER.into(),
+                    cwd: cwd.into(),
+                    preview,
+                },
+            );
+            draw(window, cx);
+        };
+        let detail = |has_reply: bool| RecentReplies {
+            title: has_reply.then(|| "对话标题".into()),
+            cwd: cwd.into(),
+            updated_label: Some(TIME.into()),
+            events: if has_reply {
+                vec![RecentReply {
+                    kind: "assistant".into(),
+                    role: Some("assistant".into()),
+                    timestamp: Some(serde_json::json!(1234)),
+                    text: "最近的一条回复".into(),
+                    tool_name: None,
+                }]
+            } else {
+                Vec::new()
+            },
+        };
+        verify(cx, "保存的会话名", None, &[], true);
+        let mut sent = std::iter::from_fn(|| sink.try_recv().ok());
+        assert!(sent.any(|command| matches!(command, Command::GetDeferredRecoveryPreview { session_id } if session_id == PEER)));
+        send_preview(cx, Some(detail(true)));
+        verify(cx, "保存的会话名", Some(TIME), &["最近的一条回复"], false);
+        if visible {
+            println!("Deferred recovery | visual review fixture ready");
+            return;
+        }
+        set_title(&fixture, "default", None);
+        deliver(window, cx, deferred_graph(&fixture, false));
+        verify(cx, "对话标题", Some(TIME), &["最近的一条回复"], false);
+        set_title(&fixture, "manual", Some("其他会话名"));
+        deliver(window, cx, deferred_graph(&fixture, false));
+        verify(cx, "手工卡名", Some(TIME), &["最近的一条回复"], false);
+        set_title(&fixture, "default", None);
+        deliver(window, cx, deferred_graph(&fixture, false));
+        send_preview(cx, Some(detail(false)));
+        let Event::Navigation { hierarchy, .. } = fixture.event(false) else {
+            unreachable!()
+        };
+        let task_title = hierarchy.task.unwrap().title;
+        verify(cx, &task_title, Some(TIME), &[], false);
+        send_preview(cx, None);
+        verify(cx, &task_title, None, &[], false);
+        {
+            let Some(BootstrapResult::Writable { connection, .. }) = &fixture.db else {
+                unreachable!()
+            };
+            connection
+                .execute(
+                    "INSERT INTO session_graph_summaries VALUES (?1, ?2, 22)",
+                    (PEER, r#"["No response requested.","  终端摘要  "]"#),
+                )
+                .unwrap();
+        }
+        deliver(window, cx, deferred_graph(&fixture, false));
+        draw(window, cx);
+        verify(cx, &task_title, None, &["终端摘要"], false);
+
+        window
+            .update(cx, |view, window, _| view.focus_deferred_action(0, window))
+            .unwrap();
+        press(window, cx, "enter");
+        draw(window, cx);
+        window
+            .update(cx, |view, _, _| view.assert_deferred_history(true))
+            .unwrap();
+        assert!(sent.any(|command| matches!(command,
+            Command::GetProviderSession { provider_session_id, cwd: directory, start_event_index: None, .. }
+                if provider_session_id == "probe-conversation" && directory == cwd)));
+        assert!(!sent.any(|command| matches!(
+            command,
+            Command::RetryRecovery { .. } | Command::LoadProviderSession { .. }
+        )));
+        press(window, cx, "escape");
+        draw(window, cx);
+        window
+            .update(cx, |view, _, _| view.assert_deferred_history(false))
+            .unwrap();
+        window
+            .update(cx, |view, window, _| view.focus_deferred_action(1, window))
+            .unwrap();
+        press(window, cx, "enter");
+        assert!(sent.any(
+            |command| matches!(command, Command::RetryRecovery { session_id } if session_id == PEER)
+        ));
+        println!(
+            "Deferred recovery | SQLite + hidden GPUI verified loading, title precedence, Agent, timestamp, directory, replies, empty/error, terminal fallback, history and restore"
+        );
+        window
+            .update(cx, |_, window, _| window.remove_window())
+            .unwrap();
+    }
+
     fn verify_session_loader(cx: &mut AsyncApp) {
         use serde_json::{Value, json};
 
@@ -4196,10 +4428,21 @@ mod probe {
     }
 
     pub(super) fn run() {
+        let deferred_only = std::env::args().any(|arg| arg == "--deferred-recovery");
+        let show_deferred = std::env::args().any(|arg| arg == "--show-deferred-recovery");
         let loader_only = std::env::args().any(|arg| arg == "--session-loader");
         let fork_only = std::env::args().any(|arg| arg == "--fork");
         let permission_only = std::env::args().any(|arg| arg == "--permission");
         Application::new().with_assets(NativeAssets).run(move |cx| {
+            if deferred_only || show_deferred {
+                cx.spawn(async move |cx| {
+                    verify_deferred_recovery(cx, show_deferred);
+                    if !show_deferred {
+                        cx.update(|cx| cx.quit()).unwrap();
+                    }
+                }).detach();
+                return;
+            }
             if permission_only {
                 cx.spawn(async |cx| {
                     verify_permission_mode(cx).await;
@@ -4246,6 +4489,7 @@ mod probe {
                 verify_start_failure_card(cx);
                 verify_provider_restore_banner(cx).await;
                 verify_session_loader(cx);
+                verify_deferred_recovery(cx, false);
                 verify_card_actions(cx);
                 verify_stopped_cards(cx);
                 verify_narrow_stopped_cards(cx);

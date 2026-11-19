@@ -55,6 +55,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+pub use crate::provider_catalog::{RecentReplies, RecentReply, deferred_summary_text};
 pub use matou_native_core::hierarchy::canvas::{ForkPlacement, ForkWorktreeMode};
 
 #[derive(Clone)]
@@ -192,6 +193,9 @@ pub enum Command {
         start_event_index: Option<i64>,
         limit: Option<i64>,
     },
+    GetDeferredRecoveryPreview {
+        session_id: String,
+    },
     LoadProviderSession {
         session_id: String,
         provider_session_id: String,
@@ -309,6 +313,7 @@ pub enum Command {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RecoveryState {
+    Deferred,
     Restoring,
     Ready,
     Failed(String),
@@ -342,6 +347,11 @@ pub enum Event {
     Recovery {
         session_id: String,
         state: RecoveryState,
+    },
+    DeferredRecoveryPreview {
+        session_id: String,
+        cwd: String,
+        preview: Option<RecentReplies>,
     },
     Workspaces(Vec<Workspace>),
     WorkspacePaths(Vec<WorkspacePathState>),
@@ -621,8 +631,23 @@ fn run(
         .as_ref()
         .map(|workspace| workspace.id.clone());
     let mut checks = WorkspacePathChecks::default();
-    let graph = active_graph(&owner, scene_id.as_deref(), window_id)?;
+    let mut startup_order = HashMap::new();
+    let mut startup_restores = Vec::new();
+    // Startup parking is independent from the existing path-repair rebuild queue.
+    let mut startup_deferred = HashSet::new();
+    for (session_id, workspace_id, automatic) in
+        owner.startup_recovery_candidates(scene_id.as_deref())?
+    {
+        if automatic && startup_order.len() < 16 {
+            startup_order.insert(session_id.clone(), startup_order.len());
+            startup_restores.push((session_id, workspace_id));
+        } else {
+            startup_deferred.insert(session_id);
+        }
+    }
+    let graph = active_graph(&owner, scene_id.as_deref(), window_id, &startup_deferred)?;
     let mut pending_launch = unstarted_sessions(&owner, &graph, &sessions)?;
+    pending_launch.retain(|id| !startup_deferred.contains(id));
     let mut foreground_sessions: HashSet<_> = launchable_ids(&graph).map(str::to_owned).collect();
     let mut deferred_recovery = HashSet::new();
     let mut launch_preparations = HashMap::<String, Receiver<Result<PreparedLaunch>>>::new();
@@ -638,13 +663,7 @@ fn run(
     if let Some(workspace_id) = &active_workspace {
         checks.request(&owner, workspace_id)?;
     }
-    let mut startup_order = HashMap::new();
-    for (rank, (session_id, workspace_id)) in owner
-        .startup_provider_restores(scene_id.as_deref())?
-        .into_iter()
-        .enumerate()
-    {
-        startup_order.insert(session_id.clone(), rank);
+    for (session_id, workspace_id) in startup_restores {
         if !pending_launch.contains(&session_id) {
             checks.request(&owner, &workspace_id)?;
             launch_retries.insert(
@@ -684,6 +703,12 @@ fn run(
             .transpose()?
             .unwrap_or_default(),
     })?;
+    for session_id in &startup_deferred {
+        send.send_blocking(Event::Recovery {
+            session_id: session_id.clone(),
+            state: RecoveryState::Deferred,
+        })?;
+    }
     let mut dirty = HashSet::<String>::new();
     let mut sequence = HashMap::<String, u64>::new();
     let mut views = HashMap::<String, PendingView>::new();
@@ -910,6 +935,7 @@ fn run(
         let mut started_shell = false;
         for (session_id, launch) in completed_launches {
             pending_launch.remove(&session_id);
+            startup_deferred.remove(&session_id);
             startup_order.remove(&session_id);
             let rebuilding = recovering.remove(&session_id).is_some();
             let rebuilding = match launch_retries.remove(&session_id) {
@@ -1092,8 +1118,12 @@ fn run(
                                     result["submissionKey"] = json!(submission_key);
                                 }
                                 if result["replayed"] == true {
-                                    let mut graph =
-                                        active_graph(&owner, scene_id.as_deref(), window_id)?;
+                                    let mut graph = active_graph(
+                                        &owner,
+                                        scene_id.as_deref(),
+                                        window_id,
+                                        &startup_deferred,
+                                    )?;
                                     graph["forkSessionResult"] = result;
                                     send.send_blocking(Event::Graph(graph))?;
                                     continue;
@@ -1105,7 +1135,12 @@ fn run(
                         if let Some(action) = &card_action
                             && action["outcome"] == "hide-window"
                         {
-                            let mut graph = active_graph(&owner, scene_id.as_deref(), window_id)?;
+                            let mut graph = active_graph(
+                                &owner,
+                                scene_id.as_deref(),
+                                window_id,
+                                &startup_deferred,
+                            )?;
                             graph["sessionCardAction"] = action.clone();
                             let event = Event::Graph(graph);
                             if navigation_publications.is_empty() {
@@ -1148,6 +1183,7 @@ fn run(
                                 terminal_layouts.remove(id);
                                 recovering.remove(id);
                                 deferred_recovery.remove(id);
+                                startup_deferred.remove(id);
                                 failed_launches.remove(id);
                                 launch_retries.remove(id);
                                 launch_preparations.remove(id);
@@ -1174,10 +1210,16 @@ fn run(
                         scene_id = next_scene;
                         active_task = hierarchy.task.as_ref().map(|task| task.id.clone());
                         active_workspace = next_workspace;
-                        let mut graph = active_graph(&owner, scene_id.as_deref(), window_id)?;
+                        let mut graph = active_graph(
+                            &owner,
+                            scene_id.as_deref(),
+                            window_id,
+                            &startup_deferred,
+                        )?;
                         pending_launch = unstarted_sessions(&owner, &graph, &sessions)?;
                         pending_launch.retain(|id| {
-                            !failed_launches.contains_key(id)
+                            !startup_deferred.contains(id)
+                                && !failed_launches.contains_key(id)
                                 && !launch_retries.contains_key(id)
                                 && !catalog_loads.contains_key(id)
                                 && !permission_changes.contains_key(id)
@@ -1273,7 +1315,12 @@ fn run(
                     }
                     Err(error) => {
                         if fork_submission.is_some() || fork_retry.is_some() {
-                            let mut graph = active_graph(&owner, scene_id.as_deref(), window_id)?;
+                            let mut graph = active_graph(
+                                &owner,
+                                scene_id.as_deref(),
+                                window_id,
+                                &startup_deferred,
+                            )?;
                             let mut result = json!({
                                 "code": error.downcast_ref::<CanvasError>().map_or("FORK_CREATE_FAILED", |error| error.code),
                                 "error": format!("{error:#}"),
@@ -1607,6 +1654,41 @@ fn run(
                     }
                     continue;
                 }
+                Command::GetDeferredRecoveryPreview { session_id } => {
+                    if !startup_deferred.contains(&session_id)
+                        || !foreground_sessions.contains(&session_id)
+                    {
+                        continue;
+                    }
+                    let Some(session) = owner.session(&session_id)? else {
+                        continue;
+                    };
+                    let cwd = session.cwd;
+                    let binding = owner.claude_binding(&session_id)?;
+                    if let Some(binding) =
+                        binding.filter(|binding| !binding.provider_session_id.is_empty())
+                    {
+                        let request = CatalogRecentRequest {
+                            session_id,
+                            cwd,
+                            provider_session_id: binding.provider_session_id,
+                        };
+                        if let Err(
+                            mpsc::TrySendError::Full(CatalogRequest::Recent(request))
+                            | mpsc::TrySendError::Disconnected(CatalogRequest::Recent(request)),
+                        ) = catalog_requests.try_send(CatalogRequest::Recent(request))
+                        {
+                            send.send_blocking(request.event(None))?;
+                        }
+                    } else {
+                        send.send_blocking(Event::DeferredRecoveryPreview {
+                            session_id,
+                            cwd,
+                            preview: None,
+                        })?;
+                    }
+                    continue;
+                }
                 Command::LoadProviderSession {
                     session_id,
                     provider_session_id,
@@ -1753,9 +1835,13 @@ fn run(
                     {
                         continue;
                     }
+                    let parked = rebuilding && startup_deferred.contains(session_id);
+                    if parked && !foreground_sessions.contains(session_id) {
+                        continue;
+                    }
                     let failed = failed_launches.get(session_id);
                     let state = if rebuilding {
-                        if !matches!(failed, Some(RecoveryState::Failed(_))) {
+                        if !parked && !matches!(failed, Some(RecoveryState::Failed(_))) {
                             continue;
                         }
                         RecoveryState::Restoring
@@ -1777,6 +1863,7 @@ fn run(
                     let Some(workspace_id) = owner.session_workspace(session_id)? else {
                         continue;
                     };
+                    startup_deferred.remove(session_id);
                     send.send_blocking(Event::Recovery {
                         session_id: session_id.clone(),
                         state,
@@ -1857,10 +1944,12 @@ fn run(
                 Command::Refresh => {
                     dirty.extend(sessions.iter().cloned());
                     awaiting_ui.clear();
-                    let graph = active_graph(&owner, scene_id.as_deref(), window_id)?;
+                    let graph =
+                        active_graph(&owner, scene_id.as_deref(), window_id, &startup_deferred)?;
                     pending_launch = unstarted_sessions(&owner, &graph, &sessions)?;
                     pending_launch.retain(|id| {
-                        !failed_launches.contains_key(id)
+                        !startup_deferred.contains(id)
+                            && !failed_launches.contains_key(id)
                             && !launch_retries.contains_key(id)
                             && !catalog_loads.contains_key(id)
                             && !permission_changes.contains_key(id)
@@ -1938,6 +2027,10 @@ fn run(
             let (cwd, load, result) = match reply {
                 CatalogReply::Detail(result) => {
                     catalog_details.push(result);
+                    continue;
+                }
+                CatalogReply::Recent(event) => {
+                    send.send_blocking(event)?;
                     continue;
                 }
                 CatalogReply::Index { cwd, load, result } => (cwd, load, result),
@@ -2347,7 +2440,8 @@ fn run(
             || !catalog_load_errors.is_empty())
             && navigation_publications.is_empty()
         {
-            let mut graph = active_graph(&owner, scene_id.as_deref(), window_id)?;
+            let mut graph =
+                active_graph(&owner, scene_id.as_deref(), window_id, &startup_deferred)?;
             if !provider_identity_events.is_empty() {
                 graph["providerIdentityEvents"] =
                     json!(std::mem::take(&mut provider_identity_events));
@@ -2669,6 +2763,23 @@ enum CatalogRequest {
         load: Option<CatalogLoadTarget>,
     },
     Detail(CatalogDetailRequest),
+    Recent(CatalogRecentRequest),
+}
+
+struct CatalogRecentRequest {
+    session_id: String,
+    cwd: String,
+    provider_session_id: String,
+}
+
+impl CatalogRecentRequest {
+    fn event(self, preview: Option<RecentReplies>) -> Event {
+        Event::DeferredRecoveryPreview {
+            session_id: self.session_id,
+            cwd: self.cwd,
+            preview,
+        }
+    }
 }
 
 struct CatalogDetailRequest {
@@ -2699,6 +2810,7 @@ enum CatalogReply {
         result: Result<Vec<provider_catalog::CatalogEntry>, &'static str>,
     },
     Detail(Value),
+    Recent(Event),
 }
 
 fn start_provider_catalog() -> Result<(mpsc::SyncSender<CatalogRequest>, Receiver<CatalogReply>)> {
@@ -2714,6 +2826,15 @@ fn start_provider_catalog() -> Result<(mpsc::SyncSender<CatalogRequest>, Receive
                         let selected = load.as_ref().map(|load| load.provider_session_id.as_str());
                         let result = provider_catalog::read(root.as_deref(), &cwd, selected);
                         CatalogReply::Index { cwd, load, result }
+                    }
+                    CatalogRequest::Recent(request) => {
+                        let preview = provider_catalog::recent_replies(
+                            root.as_deref(),
+                            &request.cwd,
+                            &request.provider_session_id,
+                        )
+                        .ok();
+                        CatalogReply::Recent(request.event(preview))
                     }
                     CatalogRequest::Detail(request) => {
                         let result = provider_catalog::detail(
@@ -3034,11 +3155,36 @@ fn launch_shell(
     )
 }
 
-fn active_graph(owner: &ShellOwner, scene_id: Option<&str>, window_id: &str) -> Result<Value> {
+fn active_graph(
+    owner: &ShellOwner,
+    scene_id: Option<&str>,
+    window_id: &str,
+    startup_deferred: &HashSet<String>,
+) -> Result<Value> {
     match scene_id {
         Some(scene_id) => {
             let mut graph = owner.graph(scene_id, Some(window_id))?;
             graph["workspaceSessionCount"] = json!(owner.scene_workspace_session_count(scene_id)?);
+            if !startup_deferred.is_empty()
+                && let Some(nodes) = graph["nodes"].as_array_mut()
+            {
+                for node in nodes {
+                    let Some(id) = node["sessionId"]
+                        .as_str()
+                        .filter(|id| startup_deferred.contains(*id))
+                    else {
+                        continue;
+                    };
+                    let Some(session) = owner.session(id)? else {
+                        continue;
+                    };
+                    let binding = owner.claude_binding(id)?;
+                    node["titleSource"] = json!(session.title_source);
+                    node["providerTitle"] = json!(session.provider_title);
+                    node["historyProviderSessionId"] =
+                        json!(binding.map(|binding| binding.provider_session_id));
+                }
+            }
             Ok(graph)
         }
         None => Ok(serde_json::json!({"nodes": []})),

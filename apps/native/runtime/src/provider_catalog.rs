@@ -5,10 +5,12 @@ use std::{
     fs::{self, File},
     io::{self, BufRead, BufReader, Read},
     path::{Component, Path, PathBuf},
+    sync::LazyLock,
 };
 
+use regex::Regex;
 use rusqlite::{Connection, Statement};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 const LIST_LIMIT: usize = 200;
@@ -16,6 +18,8 @@ const MAX_LINE_BYTES: u64 = 8 * 1024 * 1024;
 const DEFAULT_EVENT_PAGE_LIMIT: i64 = 200;
 const MAX_EVENT_PAGE_LIMIT: i64 = 500;
 const SESSION_NOT_FOUND: &str = "Provider session was not found in this working directory";
+const MAX_RECENT_REPLIES: usize = 4;
+const MAX_REPLY_UNITS: usize = 240;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -49,6 +53,23 @@ pub(crate) struct PreviewEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_name: Option<String>,
     matched: bool,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecentReply {
+    pub kind: String,
+    pub role: Option<String>,
+    pub timestamp: Option<Value>,
+    pub text: String,
+    pub tool_name: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecentReplies {
+    pub title: Option<String>,
+    pub cwd: String,
+    pub updated_label: Option<String>,
+    pub events: Vec<RecentReply>,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
@@ -224,30 +245,41 @@ pub(crate) fn detail(
     }
     let (root, cwd, workspace) = catalog_paths(root, cwd)?.ok_or(SESSION_NOT_FOUND)?;
     let mut skipped = Skipped::default();
-    let result = detail_from_projects(
+    let start = start_event_index.map(|start| usize::try_from(start.max(1)).unwrap_or(usize::MAX));
+    let limit = limit
+        .unwrap_or(DEFAULT_EVENT_PAGE_LIMIT)
+        .clamp(1, MAX_EVENT_PAGE_LIMIT) as usize;
+    let result = transcript_in_projects(
         &root,
         &cwd,
         &workspace,
         id,
-        start_event_index.map(|start| usize::try_from(start.max(1)).unwrap_or(usize::MAX)),
-        limit
-            .unwrap_or(DEFAULT_EVENT_PAGE_LIMIT)
-            .clamp(1, MAX_EVENT_PAGE_LIMIT) as usize,
         &mut skipped,
+        |reader, dates, skipped| {
+            preview_page(reader, &workspace, start, limit, dates, skipped).map(|page| {
+                page.map(|page| {
+                    let has_events = !page.events.is_empty();
+                    (page, has_events)
+                })
+            })
+        },
     );
     skipped.report();
     result
 }
 
-fn detail_from_projects(
+fn transcript_in_projects<T>(
     root: &Path,
     cwd: &Path,
     workspace: &Path,
     id: &str,
-    start: Option<usize>,
-    limit: usize,
     skipped: &mut Skipped,
-) -> Result<SessionDetail, &'static str> {
+    mut read: impl FnMut(
+        BufReader<io::Take<&File>>,
+        &mut Statement<'_>,
+        &mut Skipped,
+    ) -> io::Result<Option<(T, bool)>>,
+) -> Result<T, &'static str> {
     const READ_ERROR: &str = "Could not read the provider session transcript";
     const CHANGED_ERROR: &str = "Provider session transcript changed while it was being read";
     let names = project_names(cwd, workspace);
@@ -279,8 +311,7 @@ fn detail_from_projects(
         }
         let before = file.metadata().map_err(|_| READ_ERROR)?;
         let reader = BufReader::new((&file).take(before.len()));
-        let page = preview_page(reader, workspace, start, limit, &mut timestamp, skipped)
-            .map_err(|_| READ_ERROR)?;
+        let page = read(reader, &mut timestamp, skipped).map_err(|_| READ_ERROR)?;
         let after = file.metadata().map_err(|_| READ_ERROR)?;
         if before.len() != after.len()
             || before.modified().ok() != after.modified().ok()
@@ -293,14 +324,155 @@ fn detail_from_projects(
         if !matches_windows_file(&path, &file).map_err(|_| READ_ERROR)? {
             return Err(CHANGED_ERROR);
         }
-        if let Some(detail) = page {
-            if !detail.events.is_empty() {
+        if let Some((detail, has_events)) = page {
+            if has_events {
                 return Ok(detail);
             }
             found = Some(detail);
         }
     }
     found.ok_or(SESSION_NOT_FOUND)
+}
+
+pub(crate) fn recent_replies(
+    root: Option<&Path>,
+    cwd: &str,
+    id: &str,
+) -> Result<RecentReplies, &'static str> {
+    if !valid_id(id) {
+        return Err("Invalid provider session ID");
+    }
+    let (root, cwd, workspace) = catalog_paths(root, cwd)?.ok_or(SESSION_NOT_FOUND)?;
+    let mut skipped = Skipped::default();
+    let dates = Connection::open_in_memory()
+        .map_err(|_| "Could not initialize catalog timestamp parsing")?;
+    let mut updated_label = dates
+        .prepare(
+            "SELECT printf('%d/%d %s', strftime('%m', ?1 / 1000., 'unixepoch', 'localtime'),
+            strftime('%d', ?1 / 1000., 'unixepoch', 'localtime'),
+            strftime('%H:%M', ?1 / 1000., 'unixepoch', 'localtime'))",
+        )
+        .map_err(|_| "Could not initialize catalog timestamp parsing")?;
+    let result = transcript_in_projects(
+        &root,
+        &cwd,
+        &workspace,
+        id,
+        &mut skipped,
+        |reader, dates, skipped| {
+            recent_replies_from_transcript(reader, &workspace, dates, &mut updated_label, skipped)
+        },
+    );
+    skipped.report();
+    result
+}
+
+fn recent_replies_from_transcript(
+    mut reader: impl BufRead,
+    workspace: &Path,
+    dates: &mut Statement<'_>,
+    updated_label: &mut Statement<'_>,
+    skipped: &mut Skipped,
+) -> io::Result<Option<(RecentReplies, bool)>> {
+    let mut cwd = None;
+    let mut updated_at = 0;
+    let mut title = TranscriptTitle::default();
+    let mut line = Vec::new();
+    let mut total = 0;
+    let mut dialogue = VecDeque::with_capacity(MAX_RECENT_REPLIES);
+    let mut fallback = VecDeque::with_capacity(MAX_RECENT_REPLIES);
+    while let Some(row) = read_row(&mut reader, &mut line, skipped, false)? {
+        if cwd.is_none()
+            && let Some(origin) = nonempty(&row["cwd"])
+        {
+            if !matches_workspace(origin, workspace)? {
+                return Ok(None);
+            }
+            cwd = Some(origin.to_owned());
+        }
+        let event = preview_event(&row["message"]);
+        title.observe(
+            &row,
+            event.as_ref().is_some_and(|event| event.kind == "user"),
+        );
+        updated_at = updated_at.max(update_millis(&row["timestamp"], dates).unwrap_or(0));
+        let Some(event) = event else { continue };
+        total += 1;
+        let date = row.get("timestamp").cloned();
+        if matches!(event.kind, "user" | "assistant") {
+            push_recent(&mut dialogue, total, &event, date.clone(), event.kind);
+        }
+        push_recent(&mut fallback, total, &event, date, "other");
+    }
+    let Some(cwd) = cwd else { return Ok(None) };
+    let first = total.saturating_sub(DEFAULT_EVENT_PAGE_LIMIT as usize);
+    dialogue.retain(|(index, _)| *index > first);
+    fallback.retain(|(index, _)| *index > first);
+    let rows = if dialogue.is_empty() {
+        fallback
+    } else {
+        dialogue
+    };
+    let events = rows
+        .into_iter()
+        .map(|(_, mut reply)| {
+            reply.timestamp = reply
+                .timestamp
+                .take()
+                .and_then(|date| preview_timestamp(date, dates));
+            reply
+        })
+        .collect();
+    let updated_label = (updated_at > 0)
+        .then(|| {
+            updated_label
+                .query_row([updated_at], |row| row.get::<_, String>(0))
+                .ok()
+        })
+        .flatten();
+    let title = title
+        .into_title()
+        .map(|title| sanitize_reply("user", &title))
+        .filter(|title| !title.is_empty());
+    Ok(Some((
+        RecentReplies {
+            title,
+            cwd,
+            updated_label,
+            events,
+        },
+        total > 0,
+    )))
+}
+
+fn push_recent(
+    recent: &mut VecDeque<(usize, RecentReply)>,
+    index: usize,
+    event: &PreviewEvent,
+    timestamp: Option<Value>,
+    filter_kind: &str,
+) {
+    let text = format_reply(&sanitize_reply(filter_kind, &event.text));
+    if text.is_empty() {
+        return;
+    }
+    if recent.len() == MAX_RECENT_REPLIES {
+        recent.pop_front();
+    }
+    recent.push_back((
+        index,
+        RecentReply {
+            kind: event.kind.into(),
+            role: event.role.map(str::to_owned),
+            timestamp,
+            text,
+            tool_name: event.tool_name.clone(),
+        },
+    ));
+}
+
+pub fn deferred_summary_text(text: &str) -> String {
+    format_reply(&sanitize_reply("other", text))
 }
 
 fn preview_page(
@@ -668,9 +840,7 @@ fn index(
     let mut reader = BufReader::new(file);
     let mut line = Vec::new();
     let mut origin_found = false;
-    let mut title = None;
-    let mut auto_title = None;
-    let mut first_prompt = None;
+    let mut title = TranscriptTitle::default();
     let mut entry = CatalogEntry {
         provider_session_id: id.to_owned(),
         title: String::new(),
@@ -688,20 +858,7 @@ fn index(
             }
             origin_found = true;
         }
-        if let Some(custom) = nonempty(&row["customTitle"]) {
-            title = Some(custom.to_owned());
-        }
-        if row["type"] == "ai-title"
-            && let Some(auto) = nonempty(&row["aiTitle"])
-        {
-            auto_title = Some(auto.to_owned());
-        }
-        let date = &row["timestamp"];
-        let millis = date
-            .as_f64()
-            .map(|millis| millis as i64)
-            .or_else(|| parse_date(date, timestamp));
-        if let Some(millis) = millis {
+        if let Some(millis) = update_millis(&row["timestamp"], timestamp) {
             entry.updated_at = entry.updated_at.max(millis);
         }
         let message = &row["message"];
@@ -719,20 +876,14 @@ fn index(
         {
             entry.model = Some(model.to_owned());
         }
-        let (has_text, tool, text) = message_content(
-            &message["content"],
-            first_prompt.is_none() && message["role"] == "user",
-        );
+        let (has_text, tool) = message_content(&message["content"]);
         if has_text {
             entry.message_count += 1;
-            if !tool && first_prompt.is_none() && !text.is_empty() {
-                first_prompt = Some(compact_title(&text));
-            }
         }
+        title.observe(&row, has_text && !tool && message["role"] == "user");
     }
     entry.title = title
-        .or(auto_title)
-        .or(first_prompt)
+        .into_title()
         .unwrap_or_else(|| "未命名 Claude 会话".into());
     Ok((origin_found && entry.message_count > 0).then_some(entry))
 }
@@ -744,64 +895,231 @@ fn nonempty(value: &Value) -> Option<&str> {
         .filter(|text| !text.is_empty())
 }
 
-fn message_content(content: &Value, collect_title: bool) -> (bool, bool, String) {
-    if let Some(text) = nonempty(content) {
-        return (
-            true,
-            false,
-            if collect_title {
-                text.to_owned()
-            } else {
-                String::new()
-            },
-        );
-    }
-    let mut has_text = false;
+fn update_millis(date: &Value, timestamp: &mut Statement<'_>) -> Option<i64> {
+    date.as_f64()
+        .map(|millis| millis as i64)
+        .or_else(|| parse_date(date, timestamp))
+}
+
+fn message_content(content: &Value) -> (bool, bool) {
+    let mut has_text = content
+        .as_str()
+        .is_some_and(|text| !trim_preview(text).is_empty());
     let mut tool = false;
-    let mut title = String::new();
     for block in content.as_array().into_iter().flatten() {
         match block["type"].as_str() {
-            Some("text") if let Some(text) = nonempty(&block["text"]) => {
-                has_text = true;
-                if collect_title {
-                    if !title.is_empty() {
-                        title.push(' ');
-                    }
-                    title.push_str(text);
-                }
+            Some("text") => {
+                has_text |= block["text"]
+                    .as_str()
+                    .is_some_and(|text| !trim_preview(text).is_empty());
             }
             Some("tool_use") if block["name"].is_string() => {
                 tool = true;
-                has_text |= nonempty(&block["name"]).is_some() || block.get("input").is_some();
+                has_text = true;
             }
             Some("tool_result") => {
                 tool = true;
-                has_text |= nonempty(&block["content"]).is_some()
-                    || block
-                        .get("content")
-                        .is_some_and(|content| !content.is_string());
+                has_text |= block.get("content").is_some_and(|value| {
+                    value
+                        .as_str()
+                        .is_none_or(|text| !trim_preview(text).is_empty())
+                });
             }
             _ => {}
         }
     }
-    (has_text, tool, title)
+    (has_text, tool)
 }
 
-fn compact_title(text: &str) -> String {
-    let mut title = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if title.encode_utf16().count() > 72 {
-        let mut units = 0;
-        let end = title
-            .char_indices()
-            .find(|(_, c)| {
-                units += c.len_utf16();
-                units > 71
-            })
-            .map_or(title.len(), |(index, _)| index);
-        title.truncate(end);
-        title.push('…');
+#[derive(Default)]
+struct TranscriptTitle {
+    custom: Option<String>,
+    auto: Option<String>,
+    prompt: Option<String>,
+}
+
+impl TranscriptTitle {
+    fn observe(&mut self, row: &Value, user_prompt: bool) {
+        if let Some(custom) = nonempty(&row["customTitle"]) {
+            self.custom = Some(custom.into());
+        }
+        if row["type"] == "ai-title"
+            && let Some(auto) = nonempty(&row["aiTitle"])
+        {
+            self.auto = Some(auto.into());
+        }
+        if self.prompt.is_none() && user_prompt {
+            let title = compact_title(&row["message"]["content"]);
+            if !title.is_empty() {
+                self.prompt = Some(title);
+            }
+        }
     }
-    title
+
+    fn into_title(self) -> Option<String> {
+        self.custom.or(self.auto).or(self.prompt)
+    }
+}
+
+const SYNTHETIC_TAGS: &[&str] = &[
+    "local-command-caveat",
+    "local-command-stdout",
+    "system-reminder",
+    "task-notification",
+    "teammate-message",
+    "agent-message",
+];
+
+const SYNTHETIC_USER_PREFIXES: &[&str] = &[
+    "Base directory for this skill:",
+    "Launching skill:",
+    "Stop hook feedback:",
+    "A session-scoped Stop hook is now active",
+    "Goal check-in:",
+    "[Request interrupted by user]",
+    "[Image: source:",
+];
+
+const SYNTHETIC_ASSISTANT_PREFIXES: &[&str] = &[
+    "API Error:",
+    "Prompt is too long",
+    "automatic compaction failed:",
+    "All credentials for model ",
+    "No response requested.",
+];
+
+// Separate alternatives pair each closing tag with its own opening tag.
+static SYNTHETIC_BLOCKS: LazyLock<Regex> = LazyLock::new(|| {
+    let patterns: Vec<_> = SYNTHETIC_TAGS
+        .iter()
+        .map(|tag| format!(r"<{tag}(?-u:\b)[^>]*>.*?</{tag}>"))
+        .collect();
+    Regex::new(&format!("(?is){}", patterns.join("|"))).unwrap()
+});
+static UNCLOSED_SYNTHETIC: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(&format!(
+        r"(?is)<(?:{})(?-u:\b).*",
+        SYNTHETIC_TAGS.join("|")
+    ))
+    .unwrap()
+});
+static COMMAND_ARGS: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?is)<command-args>(.*?)</command-args>").unwrap());
+static IMAGE_MARKER: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)^\[Image #[0-9]+\]").unwrap());
+
+fn starts_with_any(text: &str, prefixes: &[&str]) -> bool {
+    prefixes.iter().any(|prefix| text.starts_with(prefix))
+}
+
+fn strip_image_markers(mut text: &str) -> &str {
+    while let Some(marker) = IMAGE_MARKER.find(text) {
+        text = text[marker.end()..].trim_start_matches(is_preview_space);
+    }
+    trim_preview(text)
+}
+
+fn user_text(text: &str, title: bool) -> String {
+    // The directory title and the card deliberately handle unclosed tags differently.
+    if title
+        && !text.starts_with(['<', '['])
+        && text.len() > 32_768
+        && text.encode_utf16().count() > 32_768
+    {
+        return text.into();
+    }
+    let mut text = trim_preview(text);
+    while text.contains("<command-name>") && !starts_with_any(text, SYNTHETIC_USER_PREFIXES) {
+        let Some(args) = COMMAND_ARGS.captures(text).and_then(|args| args.get(1)) else {
+            return String::new();
+        };
+        text = trim_preview(args.as_str());
+        if title
+            && !text.starts_with(['<', '['])
+            && text.len() > 32_768
+            && text.encode_utf16().count() > 32_768
+        {
+            return text.into();
+        }
+    }
+    if starts_with_any(text, SYNTHETIC_USER_PREFIXES) {
+        return String::new();
+    }
+    let cleaned = SYNTHETIC_BLOCKS.replace_all(text, " ");
+    if title && starts_with_any(&cleaned, &["<local-command-", "<task-notification"]) {
+        return String::new();
+    }
+    let cleaned = if title {
+        cleaned
+    } else {
+        Cow::Owned(UNCLOSED_SYNTHETIC.replace(&cleaned, " ").into_owned())
+    };
+    let cleaned = strip_image_markers(&cleaned);
+    if starts_with_any(cleaned, SYNTHETIC_USER_PREFIXES) {
+        return String::new();
+    }
+    cleaned.into()
+}
+
+fn sanitize_reply(kind: &str, text: &str) -> String {
+    let text = trim_preview(text);
+    if kind == "user" {
+        return user_text(text, false);
+    }
+    if starts_with_any(text, SYNTHETIC_ASSISTANT_PREFIXES) {
+        return String::new();
+    }
+    if kind == "assistant" {
+        return text.into();
+    }
+    let stripped = SYNTHETIC_BLOCKS.replace_all(text, " ");
+    trim_preview(&UNCLOSED_SYNTHETIC.replace(&stripped, " ")).into()
+}
+
+fn words(text: &str) -> impl Iterator<Item = &str> {
+    text.split(is_preview_space).filter(|word| !word.is_empty())
+}
+
+fn format_reply(text: &str) -> String {
+    let units: Vec<_> = words(text)
+        .enumerate()
+        .flat_map(|(index, word)| {
+            (index != 0)
+                .then_some(u16::from(b' '))
+                .into_iter()
+                .chain(word.encode_utf16())
+        })
+        .take(MAX_REPLY_UNITS + 1)
+        .collect();
+    if units.len() > MAX_REPLY_UNITS {
+        format!("{}…", String::from_utf16_lossy(&units[..MAX_REPLY_UNITS]))
+    } else {
+        String::from_utf16_lossy(&units)
+    }
+}
+
+fn compact_title(content: &Value) -> String {
+    let blocks = content
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|block| block["type"] == "text")
+        .filter_map(|block| block["text"].as_str())
+        .chain(content.as_str());
+    let mut units = Vec::with_capacity(73);
+    for block in blocks {
+        let cleaned = user_text(block, true);
+        for word in words(&cleaned) {
+            if !units.is_empty() {
+                units.push(u16::from(b' '));
+            }
+            units.extend(word.encode_utf16().take(73 - units.len()));
+            if units.len() == 73 {
+                return format!("{}…", String::from_utf16_lossy(&units[..71]));
+            }
+        }
+    }
+    String::from_utf16_lossy(&units)
 }
 
 #[cfg(test)]
@@ -980,6 +1298,154 @@ mod tests {
         assert_eq!(skipped.malformed_lines, 1);
         assert_eq!(skipped.oversized_lines, 1);
         Ok(())
+    }
+
+    #[test]
+    fn deferred_card_filters_dialogue_and_keeps_full_history() -> anyhow::Result<()> {
+        let root = tempfile::tempdir()?;
+        let workspace = root.path();
+        let cwd = workspace.to_str().unwrap();
+        let projects = workspace.join("projects");
+        let bucket = projects.join(encode(workspace));
+        fs::create_dir_all(&bucket)?;
+        let path = bucket.join("saved.jsonl");
+        let long_reply = format!("{}终", "🦀".repeat(120));
+        let rows = [
+            json!({"cwd": cwd, "message": {"role": "user", "content": "  Launching skill: example"}}),
+            json!({"message": {"role": "user", "content": "<command-name>/clear</command-name><command-args></command-args>"}}),
+            json!({"message": {"role": "user", "content": [
+                {"type": "text", "text": "Goal check-in: synthetic"},
+                {"type": "text", "text": "<task-notification>background</task-notification>"},
+                {"type": "text", "text": "<command-name>/review</command-name><command-args>[Image #1] 核对\n  这个结果</command-args>"}
+            ]}}),
+            json!({"message": {"role": "assistant", "content": "No response requested."}}),
+            json!({"message": {"role": "user", "content": "请继续 <system-reminder>内部数据</system-reminder> 查看"}}),
+            json!({"message": {"role": "assistant", "content": "All credentials for model isolated-probe are unavailable"}}),
+            json!({"message": {"role": "assistant", "content": "这是回复"}}),
+            json!({"message": {"role": "user", "content": "接着看<agent-message>未闭合包装"}}),
+            json!({"timestamp": 1770000000000_i64, "message": {"role": "assistant", "content": long_reply}}),
+            json!({"message": {"role": "assistant", "content": [{"type": "tool_use", "name": "Read", "input": {}}]}}),
+        ];
+        write_rows(&path, &rows)?;
+        let before = fs::read(&path)?;
+        let list = read(Some(&projects), cwd, None).unwrap();
+        assert_eq!(list[0].title, "核对 这个结果");
+        let preview = recent_replies(Some(&projects), cwd, "saved").unwrap();
+        assert_eq!(preview.title.as_deref(), Some("核对 这个结果"));
+        assert_eq!(preview.cwd, cwd);
+        assert!(
+            preview
+                .updated_label
+                .as_deref()
+                .is_some_and(|label| label.contains('/'))
+        );
+        let messages: Vec<_> = preview
+            .events
+            .iter()
+            .map(|event| event.text.as_str())
+            .collect();
+        assert_eq!(&messages[..3], ["请继续 查看", "这是回复", "接着看"]);
+        assert_eq!(messages[3], format!("{}…", "🦀".repeat(120)));
+        assert_eq!(preview.events[3].timestamp, Some(json!(1770000000000_i64)));
+        assert_eq!(preview.events[3].role.as_deref(), Some("assistant"));
+        assert_eq!(preview.events[3].kind, "assistant");
+        let full = detail(Some(&projects), cwd, "saved", None, None).unwrap();
+        assert_eq!(full.events.len(), rows.len());
+        assert!(
+            full.events
+                .iter()
+                .any(|event| event.text == "No response requested.")
+        );
+        assert_eq!(fs::read(&path)?, before);
+        Ok(())
+    }
+
+    #[test]
+    fn recent_card_falls_back_to_readable_events_only_within_the_last_200() -> anyhow::Result<()> {
+        let root = tempfile::tempdir()?;
+        let cwd = root.path().to_str().unwrap();
+        let bucket = root.path().join(encode(root.path()));
+        fs::create_dir_all(&bucket)?;
+        let mut rows =
+            vec![json!({"cwd": cwd, "message": {"role": "user", "content": "old prompt"}})];
+        rows.extend(
+            (1..=200)
+                .map(|n| json!({"message": {"role": "system", "content": format!("event {n}")}})),
+        );
+        rows.push(json!({"message": {"role": "assistant", "content": "API Error: ignore"}}));
+        write_rows(&bucket.join("events.jsonl"), &rows)?;
+        let preview = recent_replies(Some(root.path()), cwd, "events").unwrap();
+        assert_eq!(preview.title.as_deref(), Some("old prompt"));
+        let messages: Vec<_> = preview
+            .events
+            .iter()
+            .map(|event| event.text.as_str())
+            .collect();
+        assert_eq!(
+            messages,
+            ["event 197", "event 198", "event 199", "event 200"]
+        );
+        write_rows(&bucket.join("empty.jsonl"), &[json!({"cwd": cwd})])?;
+        assert!(
+            recent_replies(Some(root.path()), cwd, "empty")
+                .unwrap()
+                .events
+                .is_empty()
+        );
+        assert!(recent_replies(Some(root.path()), cwd, "missing").is_err());
+        assert!(recent_replies(Some(root.path()), cwd, "../events").is_err());
+        assert_eq!(
+            deferred_summary_text(" <task-notification>noise</task-notification> summary "),
+            "summary"
+        );
+        assert_eq!(
+            deferred_summary_text("automatic compaction failed: noise"),
+            ""
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn title_cleanup_applies_to_each_user_text_block() {
+        for noise in SYNTHETIC_USER_PREFIXES {
+            assert!(compact_title(&json!(format!("{noise} x"))).is_empty());
+        }
+        for tag in SYNTHETIC_TAGS {
+            assert_eq!(
+                compact_title(&json!(format!(
+                    "<{tag} attr=\"test\">hidden</{tag}> actual"
+                ))),
+                "actual"
+            );
+            assert_eq!(
+                sanitize_reply("user", &format!("actual <{tag}>hidden")),
+                "actual"
+            );
+        }
+        assert_eq!(
+            compact_title(&json!("<local-command-stdout>unterminated")),
+            ""
+        );
+        assert_eq!(compact_title(&json!("<task-notification>unterminated")), "");
+        assert_eq!(
+            compact_title(&json!("<system-reminder>retained by catalog")),
+            "<system-reminder>retained by catalog"
+        );
+        assert_eq!(
+            compact_title(&json!("[image #1] [Image #14] first prompt")),
+            "first prompt"
+        );
+        assert_eq!(
+            compact_title(
+                &json!([{"type":"text","text":"   one "}, {"type":"text","text":"  two"}])
+            ),
+            "one two"
+        );
+        for prefix in SYNTHETIC_ASSISTANT_PREFIXES {
+            for kind in ["assistant", "other"] {
+                assert!(sanitize_reply(kind, &format!("{prefix} test")).is_empty());
+            }
+        }
     }
 
     #[test]
