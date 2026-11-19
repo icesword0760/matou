@@ -434,6 +434,7 @@ pub enum ClaudeRestore<'a> {
     Fail { binding_id: &'a str, error: &'a str },
     Retry,
     Fresh,
+    PermissionFresh,
 }
 
 pub struct ClaudeCatalogLoad<'a> {
@@ -595,6 +596,9 @@ pub fn change_claude_restore(
                 ClaudeRestore::Retry => ("available", "restoring", None, Some("starting")),
                 _ => ("expired", "none", None, Some("starting")),
             }
+        }
+        ClaudeRestore::PermissionFresh if !binding.resumable => {
+            ("expired", "none", None, Some("starting"))
         }
         _ => return Ok(None),
     };

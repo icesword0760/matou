@@ -15,7 +15,7 @@ static MISSING: LazyLock<Regex> = LazyLock::new(|| {
 
 pub(crate) struct ResumeMonitor {
     pub binding_id: Option<String>,
-    pub expected_id: String,
+    pub expected_id: Option<String>,
     pub permission_respawn: bool,
     recent: String,
     has_visible_output: bool,
@@ -46,16 +46,23 @@ impl ResumeMonitor {
     }
 
     pub(crate) fn for_permission_respawn(
-        binding: &ClaudeBinding,
+        binding: Option<&ClaudeBinding>,
         bypass_permissions: bool,
     ) -> Self {
-        let mut monitor = Self::new(binding, bypass_permissions);
+        let mut monitor = match binding {
+            Some(binding) => Self::new(binding, bypass_permissions),
+            None => Self::with_target(None, bypass_permissions),
+        };
         monitor.permission_respawn = true;
         monitor.bypass_consent = bypass_permissions.then_some(BypassConsent::Watching);
         monitor
     }
 
     pub(crate) fn for_id(expected_id: String, bypass_permissions: bool) -> Self {
+        Self::with_target(Some(expected_id), bypass_permissions)
+    }
+
+    fn with_target(expected_id: Option<String>, bypass_permissions: bool) -> Self {
         Self {
             binding_id: None,
             expected_id,
@@ -67,6 +74,10 @@ impl ResumeMonitor {
             trust: bypass_permissions.then_some(Trust::Watching),
             bypass_consent: None,
         }
+    }
+
+    pub(crate) fn fresh_permission(&self) -> bool {
+        self.permission_respawn && self.expected_id.is_none()
     }
 
     pub(crate) fn ingest(&mut self, data: &str) -> (Option<&'static str>, Option<&'static [u8]>) {
@@ -119,7 +130,7 @@ impl ResumeMonitor {
         {
             self.trust = Some(Trust::Select(Instant::now() + Duration::from_millis(500)));
         }
-        if !self.full_prompt_handled {
+        if self.expected_id.is_some() && !self.full_prompt_handled {
             let selection: Option<&[u8]> = if has(&[
                 "resume this conversation?",
                 "this conversation has been inactive for",
@@ -171,7 +182,7 @@ impl ResumeMonitor {
     }
 
     fn failure_in(&self, output: &str) -> Option<&'static str> {
-        let id = self.expected_id.to_ascii_lowercase();
+        let id = self.expected_id.as_ref()?.to_ascii_lowercase();
         if id.len() == 36
             && uuid::Uuid::parse_str(&id).is_ok()
             && output.contains(&format!(
