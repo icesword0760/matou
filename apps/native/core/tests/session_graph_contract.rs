@@ -13,6 +13,10 @@ use rusqlite::{Connection, types::ValueRef};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
+#[path = "common/frozen_graph.rs"]
+mod frozen_graph;
+use frozen_graph::apply_permission_default;
+
 const REFERENCE: &str = include_str!("fixtures/session-graph-reference.json");
 
 #[derive(Deserialize)]
@@ -134,6 +138,68 @@ fn projection_and_status_transactions_match_the_frozen_database() -> Result<()> 
     Ok(())
 }
 
+#[test]
+fn permission_and_model_come_from_the_latest_valid_binding() -> Result<()> {
+    let reference: Reference = serde_json::from_str(REFERENCE)?;
+    let Step::Project { scene_id, .. } = &reference.steps[0] else {
+        bail!("expected initial graph fixture");
+    };
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("matou.sqlite");
+    fs::write(&path, STANDARD.decode(reference.seed_base64)?)?;
+    let db = Connection::open(path)?;
+    let initial = project_scene_graph(&db, scene_id, None)?;
+    let node = &initial["nodes"][0];
+    let session_id = node["sessionId"].as_str().context("initial session")?;
+    assert_eq!(node["permissionMode"], "default");
+    assert!(node.get("model").is_none());
+    db.execute(
+        "UPDATE sessions SET kind = 'claude-code' WHERE id = ?",
+        [session_id],
+    )?;
+
+    for (id, state, when, metadata) in [
+        (
+            "earlier",
+            "available",
+            1,
+            json!({"permissionMode":"auto", "model":"old-model"}),
+        ),
+        (
+            "latest",
+            "available",
+            2,
+            json!({"permissionMode":"plan", "model":"bound-model"}),
+        ),
+        (
+            "expired",
+            "expired",
+            3,
+            json!({"permissionMode":"bypassPermissions", "model":"expired-model"}),
+        ),
+    ] {
+        db.execute(
+            "INSERT INTO provider_bindings
+                (id, session_id, provider, provider_session_id, resume_state, metadata_json,
+                 created_at, updated_at, validated_at)
+             VALUES (?1, ?2, 'claude-code', ?1, ?3, ?4, ?5, ?5, ?5)",
+            rusqlite::params![id, session_id, state, metadata.to_string(), when],
+        )?;
+    }
+    let graph = project_scene_graph(&db, scene_id, None)?;
+    assert_eq!(graph["nodes"][0]["permissionMode"], "plan");
+    assert_eq!(graph["nodes"][0]["model"], "bound-model");
+    db.execute(
+        "UPDATE provider_bindings SET provider = 'antigravity', metadata_json = ?
+         WHERE id = 'latest'",
+        [json!({"permissionMode": "ask"}).to_string()],
+    )?;
+    let graph = project_scene_graph(&db, scene_id, None)?;
+    assert_eq!(graph["nodes"][0]["permissionMode"], "ask");
+    assert!(graph["nodes"][0].get("model").is_none());
+    Ok(())
+}
+
 fn compare_result(
     actual: Result<Value>,
     result: Option<Value>,
@@ -141,7 +207,10 @@ fn compare_result(
     label: &str,
 ) -> Result<()> {
     match (actual, result, error) {
-        (Ok(actual), Some(expected), None) => assert_eq!(actual, expected, "{label}"),
+        (Ok(actual), Some(mut expected), None) => {
+            apply_permission_default(&mut expected);
+            assert_eq!(actual, expected, "{label}");
+        }
         (Err(actual), None, Some(expected)) => assert_eq!(actual.to_string(), expected, "{label}"),
         (actual, result, error) => {
             bail!("{label}: expected result {result:?}, error {error:?}, observed {actual:?}")
@@ -185,8 +254,9 @@ fn normalize_json_columns(mut rows: Vec<Value>) -> Result<Vec<Value>> {
             if column.ends_with("_json")
                 && let Some(text) = value.as_str()
             {
-                let parsed: Value = serde_json::from_str(text)
+                let mut parsed: Value = serde_json::from_str(text)
                     .with_context(|| format!("invalid JSON text in {column}"))?;
+                apply_permission_default(&mut parsed);
                 *value = json!({ "json": parsed });
             }
         }

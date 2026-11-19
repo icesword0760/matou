@@ -10,6 +10,10 @@ use rusqlite::{Connection, types::ValueRef};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
+#[path = "common/frozen_graph.rs"]
+mod frozen_graph;
+use frozen_graph::apply_permission_default;
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Reference {
@@ -104,7 +108,10 @@ fn canvas_navigation_matches_frozen_reference() -> Result<()> {
                 .and_then(|result| Ok(serde_json::to_value(result)?)),
         };
         match (actual, step.result, step.error) {
-            (Ok(actual), Some(expected), None) => assert_eq!(actual, expected, "{label}"),
+            (Ok(actual), Some(mut expected), None) => {
+                apply_permission_default(&mut expected);
+                assert_eq!(actual, expected, "{label}");
+            }
             (Err(actual), None, Some(expected)) => {
                 assert_eq!(actual.to_string(), expected, "{label}")
             }
@@ -161,6 +168,7 @@ fn normalize_json_columns(mut rows: Vec<Value>) -> Result<Vec<Value>> {
             {
                 *value = serde_json::from_str(text)
                     .with_context(|| format!("invalid JSON in {column}"))?;
+                apply_permission_default(value);
             }
         }
     }

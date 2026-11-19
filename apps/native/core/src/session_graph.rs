@@ -136,6 +136,13 @@ fn node_query(environment: bool, git: bool, fork: bool) -> String {
          provider.restore_state,
          provider.restore_error,
          provider.metadata_json AS provider_metadata_json,
+         (SELECT binding.metadata_json FROM provider_bindings AS binding
+          WHERE binding.session_id = sessions.id
+            AND binding.invalidated_at IS NULL AND binding.user_exited_at IS NULL
+            AND binding.resume_state NOT IN ('failed', 'expired')
+            AND binding.restore_state <> 'failed'
+            AND binding.provider_session_id <> ''
+          ORDER BY binding.updated_at DESC, binding.id DESC LIMIT 1) AS active_provider_metadata_json,
          fork.state AS fork_state,
          fork.error_message AS fork_error,
          fork.attempt_count AS fork_attempt,
@@ -338,6 +345,23 @@ fn map_node(
     );
     node["currentMode"] = json!(kind);
     node["workStatus"] = json!(work_status);
+    let active_metadata: Option<String> = row.get("active_provider_metadata_json")?;
+    let active_metadata: Value = active_metadata
+        .and_then(|serialized| serde_json::from_str(&serialized).ok())
+        .unwrap_or(Value::Null);
+    node["permissionMode"] = json!(
+        active_metadata["permissionMode"]
+            .as_str()
+            .filter(|mode| !mode.trim().is_empty())
+            .unwrap_or("default")
+    );
+    insert_optional(
+        &mut node,
+        "model",
+        active_metadata["model"]
+            .as_str()
+            .filter(|model| !model.trim().is_empty()),
+    );
     node["providerRestoreState"] = json!(restore_state.as_deref().unwrap_or("none"));
     insert_optional(
         &mut node,

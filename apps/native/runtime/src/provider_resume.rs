@@ -16,11 +16,20 @@ static MISSING: LazyLock<Regex> = LazyLock::new(|| {
 pub(crate) struct ResumeMonitor {
     pub binding_id: Option<String>,
     pub expected_id: String,
+    pub permission_respawn: bool,
     recent: String,
     has_visible_output: bool,
     watching_failure_output: bool,
     full_prompt_handled: bool,
     trust: Option<Trust>,
+    bypass_consent: Option<BypassConsent>,
+}
+
+#[derive(PartialEq, Eq)]
+enum BypassConsent {
+    Watching,
+    Waiting,
+    Submitted,
 }
 
 enum Trust {
@@ -36,15 +45,27 @@ impl ResumeMonitor {
         monitor
     }
 
+    pub(crate) fn for_permission_respawn(
+        binding: &ClaudeBinding,
+        bypass_permissions: bool,
+    ) -> Self {
+        let mut monitor = Self::new(binding, bypass_permissions);
+        monitor.permission_respawn = true;
+        monitor.bypass_consent = bypass_permissions.then_some(BypassConsent::Watching);
+        monitor
+    }
+
     pub(crate) fn for_id(expected_id: String, bypass_permissions: bool) -> Self {
         Self {
             binding_id: None,
             expected_id,
+            permission_respawn: false,
             recent: String::new(),
             has_visible_output: false,
             watching_failure_output: true,
             full_prompt_handled: false,
             trust: bypass_permissions.then_some(Trust::Watching),
+            bypass_consent: None,
         }
     }
 
@@ -75,6 +96,17 @@ impl ResumeMonitor {
             self.watching_failure_output = output.encode_utf16().count() <= 2_000;
         }
         let has = |markers: &[&str]| markers.iter().all(|marker| output.contains(marker));
+        if self.bypass_consent == Some(BypassConsent::Watching)
+            && has(&[
+                "warning: claude code running in bypass permissions mode",
+                "no, exit",
+                "yes, i accept",
+                "enter to confirm",
+                "esc to cancel",
+            ])
+        {
+            self.bypass_consent = Some(BypassConsent::Waiting);
+        }
         if matches!(self.trust, Some(Trust::Watching))
             && has(&[
                 "accessing workspace:",
@@ -115,6 +147,21 @@ impl ResumeMonitor {
             }
         }
         (None, None)
+    }
+
+    pub(crate) fn waiting_for_bypass_consent(&self) -> bool {
+        self.bypass_consent == Some(BypassConsent::Waiting)
+    }
+
+    pub(crate) fn saw_bypass_consent(&self) -> bool {
+        matches!(
+            self.bypass_consent,
+            Some(BypassConsent::Waiting | BypassConsent::Submitted)
+        )
+    }
+
+    pub(crate) fn submit_bypass_consent(&mut self) {
+        self.bypass_consent = Some(BypassConsent::Submitted);
     }
 
     pub(crate) fn release_readiness(&mut self) {

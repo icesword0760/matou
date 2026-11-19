@@ -25,7 +25,7 @@ use crate::{
     worker::{SelectionCopy, WorkerCommand},
     workspace_paths::WorkspacePathChecks,
 };
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use matou_native_core::{
     hierarchy::{
         self, BootstrapWindowInput, HierarchyIds, HierarchyResult, Scene, Task, Workspace,
@@ -38,9 +38,12 @@ use matou_native_core::{
         tasks, workspaces,
     },
     journal::JournalOptions,
-    provider_launch::{ClaudeLaunch, prepare_claude_fork, prepare_claude_launch, validate_cwd},
+    provider_launch::{
+        CLAUDE_PERMISSION_MODES, ClaudeLaunch, prepare_claude_fork, prepare_claude_launch,
+        validate_cwd,
+    },
     pty::{LaunchProfile, ShellLaunch},
-    sessions::{ClaudeCatalogLoad, ClaudeRestore},
+    sessions::{ClaudeBinding, ClaudeCatalogLoad, ClaudeRestore},
     startup::{self, BootstrapResult},
     storage::CommandMetadata,
     workspace_paths::WorkspacePathState,
@@ -175,6 +178,10 @@ pub enum Command {
     },
     StartFreshProviderSession {
         session_id: String,
+    },
+    SetProviderPermissionMode {
+        session_id: String,
+        mode: String,
     },
     ListProviderSessions {
         cwd: String,
@@ -689,6 +696,8 @@ fn run(
     let mut graph_dirty = false;
     let mut provider_identity_events = Vec::new();
     let mut provider_starting = HashMap::new();
+    let mut permission_changes = HashMap::<String, PermissionChange>::new();
+    let mut permission_results = Vec::new();
     let (catalog_requests, catalog_replies) = start_provider_catalog()?;
     let mut catalog_loads = HashMap::<String, CatalogLoad>::new();
     let mut catalog_lists = Vec::new();
@@ -1117,6 +1126,18 @@ fn run(
                                         &anyhow!("Card was closed while loading the conversation"),
                                     ));
                                 }
+                                if let Some(change) = permission_changes.remove(id) {
+                                    permission_results.push(permission_result(
+                                        id,
+                                        &change.mode,
+                                        Some("Card was closed during permission respawn".into()),
+                                    ));
+                                    if let Err(error) = change.rollback_if_pending(&mut owner, id) {
+                                        send.send_blocking(Event::Diagnostic(format!(
+                                            "{error:#}"
+                                        )))?;
+                                    }
+                                }
                                 sessions.remove(id);
                                 dirty.remove(id);
                                 sequence.remove(id);
@@ -1158,6 +1179,7 @@ fn run(
                             !failed_launches.contains_key(id)
                                 && !launch_retries.contains_key(id)
                                 && !catalog_loads.contains_key(id)
+                                && !permission_changes.contains_key(id)
                         });
                         foreground_sessions = launchable_ids(&graph).map(str::to_owned).collect();
                         if (target_changed || check_target || !pending_launch.is_empty())
@@ -1292,6 +1314,13 @@ fn run(
                     bytes,
                     defer_ordering,
                 } => {
+                    if permission_changes.contains_key(&session_id) {
+                        if let Err(error) = owner.send_permission_consent_input(&session_id, bytes)
+                        {
+                            send.send_blocking(Event::Diagnostic(format!("{error:#}")))?;
+                        }
+                        continue;
+                    }
                     if failed_launches.contains_key(&session_id)
                         || launch_retries.contains_key(&session_id)
                         || catalog_loads
@@ -1400,7 +1429,8 @@ fn run(
                             &session_id,
                             WorkerCommand::CopySelection {
                                 reply,
-                                interrupt_if_empty,
+                                interrupt_if_empty: interrupt_if_empty
+                                    && !permission_changes.contains_key(&session_id),
                             },
                         )?;
                         copies.push((request_id, session_id, interrupt_if_empty, receive));
@@ -1471,6 +1501,77 @@ fn run(
                         false,
                     )
                 }
+                Command::SetProviderPermissionMode { session_id, mode } => {
+                    if !CLAUDE_PERMISSION_MODES.contains(&mode.as_str()) {
+                        permission_results.push(permission_result(
+                            &session_id,
+                            &mode,
+                            Some("invalid permission mode".into()),
+                        ));
+                        continue;
+                    }
+                    if let Some(change) = permission_changes.get(&session_id) {
+                        if change.mode != mode {
+                            permission_results.push(permission_result(
+                                &session_id,
+                                &mode,
+                                Some("AI Session is already stopping or recovering".into()),
+                            ));
+                        }
+                        continue;
+                    }
+                    let attempt = (|| -> Result<Option<PermissionChange>> {
+                        ensure!(
+                            !pending_launch.contains(&session_id)
+                                && !recovering.contains_key(&session_id)
+                                && !launch_retries.contains_key(&session_id)
+                                && !catalog_loads.contains_key(&session_id),
+                            "AI Session is already stopping or recovering"
+                        );
+                        let binding = owner.permission_binding(&session_id)?;
+                        let current = binding.metadata["permissionMode"]
+                            .as_str()
+                            .filter(|mode| CLAUDE_PERMISSION_MODES.contains(mode))
+                            .unwrap_or("default");
+                        if current == mode {
+                            return Ok(None);
+                        }
+                        let stopped = owner.stop_for_provider_relaunch(&session_id)?;
+                        Ok(Some(PermissionChange {
+                            mode: mode.clone(),
+                            binding,
+                            phase: PermissionPhase::Stopping(stopped),
+                        }))
+                    })();
+                    match attempt {
+                        Ok(Some(change)) => {
+                            sessions.remove(&session_id);
+                            dirty.remove(&session_id);
+                            sequence.remove(&session_id);
+                            scroll_requests.remove(&session_id);
+                            views.remove(&session_id);
+                            awaiting_ui.remove(&session_id);
+                            pending_input.retain(|input| input.session_id != session_id);
+                            operations.retain(|(id, _, _)| id != &session_id);
+                            searches.retain(|(id, _, _)| id != &session_id);
+                            copies.retain(|(_, id, _, _)| id != &session_id);
+                            permission_changes.insert(session_id.clone(), change);
+                            send.send_blocking(Event::Recovery {
+                                session_id,
+                                state: RecoveryState::Restoring,
+                            })?;
+                        }
+                        Ok(None) => {
+                            permission_results.push(permission_result(&session_id, &mode, None))
+                        }
+                        Err(error) => permission_results.push(permission_result(
+                            &session_id,
+                            &mode,
+                            Some(format!("{error:#}")),
+                        )),
+                    }
+                    continue;
+                }
                 Command::ListProviderSessions { cwd } => {
                     if let Err(
                         mpsc::TrySendError::Full(CatalogRequest::Index { cwd, .. })
@@ -1508,6 +1609,10 @@ fn run(
                         anyhow::ensure!(
                             foreground_sessions.contains(&session_id),
                             "Card is no longer available in this scene"
+                        );
+                        ensure!(
+                            !permission_changes.contains_key(&session_id),
+                            "AI Session is already stopping or recovering"
                         );
                         if let Some(loading) = catalog_loads.get(&session_id) {
                             anyhow::ensure!(
@@ -1586,6 +1691,7 @@ fn run(
                 Command::RetryProviderRestore { ref session_id }
                 | Command::StartFreshProviderSession { ref session_id } => {
                     if !foreground_sessions.contains(session_id)
+                        || permission_changes.contains_key(session_id)
                         || catalog_loads.contains_key(session_id)
                         || pending_launch.contains(session_id)
                         || launch_retries.contains_key(session_id)
@@ -1633,6 +1739,7 @@ fn run(
                 | Command::RestartSession { ref session_id } => {
                     let rebuilding = matches!(command, Command::RetryRecovery { .. });
                     if catalog_loads.contains_key(session_id)
+                        || permission_changes.contains_key(session_id)
                         || launch_retries.contains_key(session_id)
                         || owner
                             .claude_binding(session_id)?
@@ -1750,6 +1857,7 @@ fn run(
                         !failed_launches.contains_key(id)
                             && !launch_retries.contains_key(id)
                             && !catalog_loads.contains_key(id)
+                            && !permission_changes.contains_key(id)
                     });
                     foreground_sessions = launchable_ids(&graph).map(str::to_owned).collect();
                     if let Some(workspace_id) = &active_workspace {
@@ -1887,7 +1995,7 @@ fn run(
                         }),
                         "Card is no longer available in this working directory"
                     );
-                    let completion = owner.stop_for_catalog_load(&session_id)?;
+                    let completion = owner.stop_for_provider_relaunch(&session_id)?;
                     load.stopping = Some(CatalogStop {
                         selection: CatalogReply::Index {
                             cwd,
@@ -1963,6 +2071,12 @@ fn run(
             match event {
                 OwnerEvent::Domain(_) => graph_dirty = true,
                 OwnerEvent::ProviderIdentity(result) => {
+                    if let Some(change) = result["sessionId"]
+                        .as_str()
+                        .and_then(|id| permission_changes.get_mut(id))
+                    {
+                        change.observe_identity(&result);
+                    }
                     if matches!(
                         result["result"].as_str(),
                         Some("confirmed" | "restore-failed")
@@ -2051,6 +2165,64 @@ fn run(
                     }
                 }
             }
+        }
+        let mut completed_changes = Vec::new();
+        for (id, change) in &mut permission_changes {
+            let terminal = terminal_layouts
+                .get(id)
+                .copied()
+                .unwrap_or_else(default_terminal_options);
+            match change.advance(&mut owner, &options, id, terminal) {
+                Ok(PermissionProgress::Pending) => {}
+                Ok(PermissionProgress::Launched) => {
+                    sessions.insert(id.clone());
+                    dirty.insert(id.clone());
+                    graph_dirty = true;
+                }
+                Ok(PermissionProgress::ConsentPrompt) => {
+                    // The terminal already knows how to accept keystrokes in Ready.
+                    // The host continues to gate which bytes reach the replacement.
+                    send.send_blocking(Event::Recovery {
+                        session_id: id.clone(),
+                        state: RecoveryState::Ready,
+                    })?;
+                }
+                result => completed_changes.push((id.clone(), result)),
+            }
+        }
+        for (id, result) in completed_changes {
+            let change = permission_changes
+                .remove(&id)
+                .expect("completed permission respawn");
+            let error = match result {
+                Ok(PermissionProgress::Confirmed) => {
+                    send.send_blocking(Event::Recovery {
+                        session_id: id.clone(),
+                        state: RecoveryState::Ready,
+                    })?;
+                    None
+                }
+                Ok(PermissionProgress::RestoreFailed(error)) => Some(error),
+                Err(error) => {
+                    if let Err(rollback) = change.rollback_if_pending(&mut owner, &id) {
+                        send.send_blocking(Event::Diagnostic(format!(
+                            "rollback permission mode: {rollback:#}"
+                        )))?;
+                    }
+                    owner.retire_sessions(std::slice::from_ref(&id));
+                    sessions.remove(&id);
+                    dirty.remove(&id);
+                    views.remove(&id);
+                    awaiting_ui.remove(&id);
+                    let message = format!("{error:#}");
+                    let failure = report_launch_failure(send, &id, false, message.clone())?;
+                    failed_launches.insert(id.clone(), failure);
+                    Some(message)
+                }
+                _ => unreachable!("permission respawn still in progress"),
+            };
+            permission_results.push(permission_result(&id, &change.mode, error));
+            graph_dirty = true;
         }
         let released: Vec<_> = provider_starting
             .keys()
@@ -2153,6 +2325,7 @@ fn run(
         }
         if (graph_dirty
             || !provider_identity_events.is_empty()
+            || !permission_results.is_empty()
             || !catalog_lists.is_empty()
             || !catalog_details.is_empty()
             || !catalog_load_errors.is_empty())
@@ -2162,6 +2335,10 @@ fn run(
             if !provider_identity_events.is_empty() {
                 graph["providerIdentityEvents"] =
                     json!(std::mem::take(&mut provider_identity_events));
+            }
+            if !permission_results.is_empty() {
+                graph["providerPermissionModeResults"] =
+                    json!(std::mem::take(&mut permission_results));
             }
             if !catalog_lists.is_empty() {
                 graph["providerSessionCatalogResults"] = json!(std::mem::take(&mut catalog_lists));
@@ -2221,6 +2398,11 @@ fn run(
             dirty.remove(&session_id);
         }
     };
+    for (id, change) in permission_changes {
+        if let Err(error) = change.rollback_if_pending(&mut owner, &id) {
+            eprintln!("[permission-respawn:{id}] {error:#}");
+        }
+    }
     let sessions = owner.shutdown().context("stop native runtime sessions");
     let backup = clean_exit.then(|| owner.backup_for_clean_exit(&data_root));
     drop(owner);
@@ -2243,6 +2425,175 @@ fn workspace_path_error(state: &WorkspacePathState) -> String {
 }
 
 const CATALOG_BUSY: &str = "Claude Code catalog is busy or unavailable";
+const PERMISSION_STARTUP_WINDOW: Duration = Duration::from_millis(150);
+
+struct PermissionChange {
+    mode: String,
+    binding: ClaudeBinding,
+    phase: PermissionPhase,
+}
+
+enum PermissionPhase {
+    Stopping(Receiver<Result<()>>),
+    Preparing(Option<Receiver<Result<PreparedLaunch>>>),
+    AwaitingIdentity {
+        run_id: String,
+        startup_until: Option<Instant>,
+        consent_shown: bool,
+        outcome: Option<Result<(), String>>,
+    },
+}
+
+enum PermissionProgress {
+    Pending,
+    Launched,
+    ConsentPrompt,
+    Confirmed,
+    RestoreFailed(String),
+}
+
+impl PermissionChange {
+    fn advance(
+        &mut self,
+        owner: &mut ShellOwner,
+        options: &LaunchOptions,
+        session_id: &str,
+        terminal: TerminalOptions,
+    ) -> Result<PermissionProgress> {
+        match &mut self.phase {
+            PermissionPhase::Stopping(stopped) => {
+                match stopped.try_recv() {
+                    Ok(result) => result?,
+                    Err(mpsc::TryRecvError::Empty) => return Ok(PermissionProgress::Pending),
+                    Err(error) => {
+                        return Err(error).context("wait for the current AI Session to stop");
+                    }
+                }
+                owner.write_claude_permission(
+                    session_id,
+                    &self.binding.id,
+                    Some(&json!(self.mode)),
+                )?;
+                // Record that the metadata was written before scheduling fallible preparation.
+                self.phase = PermissionPhase::Preparing(None);
+                self.phase =
+                    PermissionPhase::Preparing(Some(prepare_launch(owner, options, session_id)?));
+                Ok(PermissionProgress::Pending)
+            }
+            PermissionPhase::Preparing(preparation) => {
+                let preparation = preparation.as_ref().expect("started launch preparation");
+                let launch = match preparation.try_recv() {
+                    Ok(launch) => launch?,
+                    Err(mpsc::TryRecvError::Empty) => return Ok(PermissionProgress::Pending),
+                    Err(error) => {
+                        return Err(error).context("prepare the AI Session permission respawn");
+                    }
+                };
+                let PreparedLaunch::ClaudeCode(plan, None) = launch else {
+                    bail!("AI Session permission respawn lost its binding");
+                };
+                let binding = owner
+                    .claude_binding(session_id)?
+                    .filter(|binding| {
+                        binding.id == self.binding.id
+                            && binding.resumable
+                            && binding.provider_session_id == self.binding.provider_session_id
+                            && binding.metadata["permissionMode"] == self.mode
+                            && plan.permission_mode == self.mode
+                    })
+                    .context("AI Session permission respawn lost its binding")?;
+                let run_id =
+                    owner.launch_claude_permission(session_id, terminal, plan, &binding)?;
+                self.phase = PermissionPhase::AwaitingIdentity {
+                    run_id,
+                    startup_until: Some(Instant::now() + PERMISSION_STARTUP_WINDOW),
+                    consent_shown: false,
+                    outcome: None,
+                };
+                Ok(PermissionProgress::Launched)
+            }
+            PermissionPhase::AwaitingIdentity {
+                run_id,
+                startup_until,
+                consent_shown,
+                outcome,
+            } => {
+                if let Some(Err(error)) = outcome {
+                    return Ok(PermissionProgress::RestoreFailed(std::mem::take(error)));
+                }
+                if let Some(until) = *startup_until {
+                    if Instant::now() < until {
+                        return Ok(PermissionProgress::Pending);
+                    }
+                    owner.finish_permission_startup(session_id, run_id)?;
+                    *startup_until = None;
+                } else if outcome.is_none() {
+                    let running = owner.check_permission_run(session_id, run_id);
+                    if *consent_shown {
+                        running
+                            .context("Claude Code exited during bypass permissions confirmation")?;
+                    } else {
+                        running?;
+                    }
+                }
+                if outcome.is_some() {
+                    return Ok(PermissionProgress::Confirmed);
+                }
+                if !*consent_shown && owner.waiting_for_permission_consent(session_id) {
+                    *consent_shown = true;
+                    return Ok(PermissionProgress::ConsentPrompt);
+                }
+                Ok(PermissionProgress::Pending)
+            }
+        }
+    }
+
+    fn observe_identity(&mut self, identity: &Value) {
+        if let PermissionPhase::AwaitingIdentity {
+            run_id, outcome, ..
+        } = &mut self.phase
+            && identity["runId"] == *run_id
+            && identity["bindingId"] == self.binding.id
+        {
+            match identity["result"].as_str() {
+                Some("confirmed") => *outcome = Some(Ok(())),
+                Some("restore-failed") => {
+                    *outcome = Some(Err(identity["restoreError"]
+                        .as_str()
+                        .unwrap_or("AI Session permission respawn failed")
+                        .to_owned()));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn rollback_if_pending(&self, owner: &mut ShellOwner, session_id: &str) -> Result<()> {
+        if matches!(
+            self.phase,
+            PermissionPhase::Preparing(_)
+                | PermissionPhase::AwaitingIdentity {
+                    outcome: None | Some(Ok(())),
+                    ..
+                }
+        ) {
+            owner.write_claude_permission(
+                session_id,
+                &self.binding.id,
+                self.binding.metadata.get("permissionMode"),
+            )?;
+        }
+        Ok(())
+    }
+}
+
+fn permission_result(session_id: &str, mode: &str, error: Option<String>) -> Value {
+    let mut result = json!({ "sessionId": session_id, "permissionMode": mode });
+    if let Some(error) = error {
+        result["error"] = json!(error);
+    }
+    result
+}
 
 struct CatalogLoad {
     provider_session_id: String,
