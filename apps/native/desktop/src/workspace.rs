@@ -6,12 +6,16 @@ use std::{
 };
 
 use crate::history_view::{HistoryView, HistoryViewEvent, HistoryViewState};
+#[cfg(target_os = "macos")]
+use crate::recovery_water_view::RecoveryWater;
 use gpui::{prelude::*, *};
 use matou_native_core::geometry::GeometryUpdate;
 use matou_native_core::hierarchy::{HierarchyResult, Scene, Task, Workspace as HierarchyWorkspace};
 use matou_native_core::workspace_paths::WorkspacePathState;
 use matou_native_runtime::history::{HistoryCursor, HistoryLine, HistorySearchOptions};
 use matou_native_runtime::history_worker::{HistoryReply, HistoryRequest};
+#[cfg(target_os = "macos")]
+use matou_native_terminal::Theme;
 use serde_json::Value;
 
 use crate::{
@@ -244,6 +248,12 @@ pub struct Workspace {
     terminals: HashMap<String, Entity<TerminalSurface>>,
     recovery: HashMap<String, RecoveryState>,
     recovery_controls: HashMap<String, FocusHandle>,
+    #[cfg(target_os = "macos")]
+    recovery_water: HashMap<String, Entity<RecoveryWater>>,
+    #[cfg(target_os = "macos")]
+    recovery_water_visibility: Option<gpui::Task<()>>,
+    #[cfg(target_os = "macos")]
+    storage_fault_sessions: HashSet<String>,
     order: Vec<String>,
     focused: Option<String>,
     pending_focus: Option<(String, String)>,
@@ -1009,6 +1019,12 @@ impl Workspace {
             terminals: HashMap::new(),
             recovery: HashMap::new(),
             recovery_controls: HashMap::new(),
+            #[cfg(target_os = "macos")]
+            recovery_water: HashMap::new(),
+            #[cfg(target_os = "macos")]
+            recovery_water_visibility: None,
+            #[cfg(target_os = "macos")]
+            storage_fault_sessions: HashSet::new(),
             order: Vec::new(),
             focused: None,
             pending_focus: None,
@@ -1108,6 +1124,10 @@ impl Workspace {
             terminal.update(cx, |terminal, cx| {
                 terminal.begin_transport_generation(generation, cx)
             });
+        }
+        #[cfg(target_os = "macos")]
+        for water in self.recovery_water.values() {
+            water.update(cx, |water, cx| water.set_generation(generation, cx));
         }
         cx.notify();
     }
@@ -1237,6 +1257,8 @@ impl Workspace {
                     self.session_frames.clear();
                     self.sync_terminal_input(window, cx);
                 }
+                #[cfg(target_os = "macos")]
+                self.prune_recovery_water(window, cx);
                 cx.notify();
                 return;
             }
@@ -1247,6 +1269,16 @@ impl Workspace {
             self.domain_ready = true;
             self.transport_connected = true;
             self.transport_fault = None;
+        }
+        #[cfg(target_os = "macos")]
+        match &event {
+            Event::StorageFault { session_id, .. } => {
+                self.storage_fault_sessions.insert(session_id.clone());
+            }
+            Event::StorageRecovered { session_id } => {
+                self.storage_fault_sessions.remove(session_id);
+            }
+            _ => {}
         }
         match event {
             Event::Workspaces(workspaces) => {
@@ -1408,6 +1440,8 @@ impl Workspace {
                     self.pending_focus = None;
                 }
                 if scene_changed {
+                    #[cfg(target_os = "macos")]
+                    self.retain_recovery_water(window, cx, |_, _| false);
                     // A newly mounted source carousel starts at its current styles.
                     for saved in &geometry {
                         if !self.geometry_dirty.contains(&saved.owner_key) {
@@ -1749,6 +1783,8 @@ impl Workspace {
             Event::StorageRecovered { .. } => self.fault = None,
             Event::StartupBlocked(_) | Event::Closed => {}
         }
+        #[cfg(target_os = "macos")]
+        self.prune_recovery_water(window, cx);
         cx.notify();
     }
 
@@ -2270,6 +2306,101 @@ impl Workspace {
             || !self.transport_connected
             || !self.session_frames.contains(session_id)
             || !matches!(self.recovery.get(session_id), Some(RecoveryState::Ready))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn recovery_water_needed(&self, id: &str, node: &Value) -> bool {
+        self.recovery_blocked(id)
+            && !self.storage_fault_sessions.contains(id)
+            && !matches!(self.recovery.get(id), Some(RecoveryState::Failed(_)))
+            && !matches!(node["workStatus"].as_str(), Some("error" | "exited"))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn recovery_water_window_visible(window: &Window) -> bool {
+        crate::macos::is_window_visible(window).unwrap_or_else(|error| {
+            eprintln!("Recovery water window visibility: {error:#}");
+            false
+        })
+    }
+
+    #[cfg(target_os = "macos")]
+    fn recovery_water_available(&self, window: &Window) -> bool {
+        self.active_path_valid()
+            && self.hierarchy.as_ref().is_some_and(|h| h.scene.is_some())
+            && !matches!(
+                self.commands.connection().1,
+                ConnectionPhase::Stopped | ConnectionPhase::Blocked(_)
+            )
+            && Self::recovery_water_window_visible(window)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn prune_recovery_water(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.recovery_water.is_empty() {
+            return;
+        }
+        let available = self.recovery_water_available(window);
+        self.retain_recovery_water(window, cx, |this, id| {
+            available
+                && this.graph["nodes"].as_array().is_some_and(|nodes| {
+                    nodes
+                        .iter()
+                        .find(|node| node["sessionId"].as_str() == Some(id))
+                        .is_some_and(|node| this.recovery_water_needed(id, node))
+                })
+        });
+    }
+
+    #[cfg(target_os = "macos")]
+    fn retain_recovery_water(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        mut keep: impl FnMut(&Self, &str) -> bool,
+    ) {
+        let mut water = std::mem::take(&mut self.recovery_water);
+        water.retain(|id, entity| {
+            if keep(self, id) {
+                true
+            } else {
+                entity.update(cx, |water, cx| water.unmount(window, cx));
+                false
+            }
+        });
+        self.recovery_water = water;
+        if self.recovery_water.is_empty() {
+            self.recovery_water_visibility = None;
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn watch_recovery_water_visibility(&mut self, window: &Window, cx: &mut Context<Self>) {
+        if self.recovery_water.is_empty() || self.recovery_water_visibility.is_some() {
+            return;
+        }
+        // GPUI stops drawing hidden windows. An already inactive window can
+        // also hide without an activation callback. Only watch while mounted.
+        self.recovery_water_visibility = Some(cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(100))
+                    .await;
+                let keep = cx.update(|window, cx| {
+                    let visible = Self::recovery_water_window_visible(window);
+                    if !visible {
+                        let _ = this.update(cx, |this, cx| {
+                            this.retain_recovery_water(window, cx, |_, _| false);
+                            cx.notify();
+                        });
+                    }
+                    visible
+                });
+                if !matches!(keep, Ok(true)) {
+                    break;
+                }
+            }
+        }));
     }
 
     fn workspace_invalid(&self, workspace_id: &str) -> bool {
@@ -4516,6 +4647,7 @@ impl Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        const CARD_RADIUS: Pixels = px(12.);
         let viewport_width = f64::from(f32::from(window.viewport_size().width)) - 260.;
         let content_width = viewport_width - 20.;
         let columns = (((viewport_width + 12.) / 292.).floor()).clamp(1., 4.);
@@ -4760,13 +4892,21 @@ impl Render for Workspace {
                 }
             }));
         let path_valid = self.active_path_valid();
+        #[cfg(target_os = "macos")]
+        let recovery_water_available = self.recovery_water_available(window);
+        #[cfg(target_os = "macos")]
+        let carousel_left =
+            f64::from(-f32::from(self.carousel_scroll.offset().x)).clamp(0., max_scroll);
+        #[cfg(target_os = "macos")]
+        let mut mounted_water = HashSet::new();
         for id in &self.order {
             let Some(terminal) = self.terminals.get(id) else {
                 continue;
             };
-            let title = self.graph["nodes"]
+            let node = self.graph["nodes"]
                 .as_array()
-                .and_then(|nodes| nodes.iter().find(|node| node["sessionId"] == *id))
+                .and_then(|nodes| nodes.iter().find(|node| node["sessionId"] == *id));
+            let title = node
                 .and_then(|node| node["title"].as_str())
                 .unwrap_or("Shell");
             let focus = terminal.read(cx).focus.clone();
@@ -4787,6 +4927,26 @@ impl Render for Workspace {
             let selected = self.focused.as_ref() == Some(id);
             let width = widths[id] as f32;
             let lift = -4. * self.card_motion[id].lift.value(now) as f32;
+            #[cfg(target_os = "macos")]
+            let water = if recovery_water_available
+                && (!narrow || selected)
+                && positions[id] < carousel_left + viewport_width
+                && positions[id] + widths[id] > carousel_left
+                && node.is_some_and(|node| self.recovery_water_needed(id, node))
+            {
+                mounted_water.insert(id.clone());
+                // Match the native terminal's current default workspace theme.
+                let theme = Theme::default();
+                let entity = self.recovery_water.entry(id.clone()).or_insert_with(|| {
+                    cx.new(|cx| {
+                        RecoveryWater::new(self.runtime_generation, theme, reduced_motion(), cx)
+                            .with_bottom_radius(CARD_RADIUS)
+                    })
+                });
+                Some(RecoveryWater::overlay(entity.clone()))
+            } else {
+                None
+            };
             let card = div()
                 .id(SharedString::from(format!("card-{id}")))
                 .w(px(width))
@@ -4794,7 +4954,7 @@ impl Render for Workspace {
                 .flex_none()
                 .relative()
                 .top(px(lift))
-                .rounded(px(12.))
+                .rounded(CARD_RADIUS)
                 .overflow_hidden()
                 .bg(rgb(0xfcfcfd))
                 .flex()
@@ -4823,6 +4983,20 @@ impl Render for Workspace {
                 }))
                 .capture_any_mouse_down(cx.listener(
                     move |this, event: &MouseDownEvent, window, cx| {
+                        #[cfg(target_os = "macos")]
+                        if this.recovery_water.contains_key(&scrollbar_session)
+                            && let Some(index) =
+                                this.order.iter().position(|id| id == &scrollbar_session)
+                            && let Some(bounds) = this.carousel_scroll.bounds_for_item(index)
+                            && event.position.y
+                                >= bounds.top()
+                                    + this.carousel_scroll.offset().y
+                                    + RecoveryWater::TOP
+                        {
+                            // The terminal and the card's normal click handler are both below the water.
+                            cx.stop_propagation();
+                            return;
+                        }
                         // The original card activates in pointer capture, before
                         // the scrollbar consumes its drag and preserves focus.
                         if scrollbar_terminal.read(cx).scrollbar_hit(event.position)
@@ -4938,9 +5112,6 @@ impl Render for Workspace {
                         ),
                 )
             } else if narrow && !selected {
-                let node = self.graph["nodes"]
-                    .as_array()
-                    .and_then(|nodes| nodes.iter().find(|node| node["sessionId"] == *id));
                 let status = node
                     .and_then(|node| node["workStatus"].as_str())
                     .unwrap_or("idle");
@@ -5046,8 +5217,8 @@ impl Render for Workspace {
                             .child("工作区目录不可用，请先在本地恢复原路径，或移出该工作区"),
                     )
                 })
-                .child(
-                    div()
+                .child({
+                    let body = div()
                         .flex_1()
                         .min_h_0()
                         .relative()
@@ -5065,9 +5236,14 @@ impl Render for Workspace {
                                 )
                             },
                         )
-                        .children(self.archive_summary(id)),
-                )
+                        .children(self.archive_summary(id));
+                    #[cfg(target_os = "macos")]
+                    let body = body.when(water.is_some(), |body| body.opacity(0.));
+                    body
+                })
             };
+            #[cfg(target_os = "macos")]
+            let card = card.children(water);
             #[cfg(debug_assertions)]
             let card = if let Some(trace) = self
                 .motion_trace
@@ -5085,6 +5261,11 @@ impl Render for Workspace {
                 card
             };
             carousel = carousel.child(card);
+        }
+        #[cfg(target_os = "macos")]
+        {
+            self.retain_recovery_water(window, cx, |_, id| mounted_water.contains(id));
+            self.watch_recovery_water_visibility(window, cx);
         }
         if let Some(fault) = &self.fault {
             carousel = carousel.child(
