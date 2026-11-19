@@ -16,8 +16,8 @@ use matou_native_terminal::{
 };
 
 use crate::terminal_input::{
-    Composition, byte_from_utf16, encode_paste, selection_scroll_amount, terminal_key,
-    utf16_from_byte,
+    Composition, byte_from_utf16, encode_paste, read_clipboard_text, selection_scroll_amount,
+    terminal_key, utf16_from_byte,
 };
 use crate::terminal_scrollbar::ScrollbarMetrics;
 
@@ -510,7 +510,7 @@ impl TerminalSurface {
             mods.control && !mods.platform
         };
         if key == "v" && paste_mod && !mods.alt {
-            if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+            if let Some(text) = read_clipboard_text(cx) {
                 self.send(encode_paste(&text, self.modes), cx);
             }
             cx.stop_propagation();
