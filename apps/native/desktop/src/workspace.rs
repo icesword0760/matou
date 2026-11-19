@@ -30,6 +30,7 @@ use crate::{
     rename_input::{RenameInput, RenameInputEvent, trim_name},
     runtime_bridge::{
         BridgeEvent, Command, ConnectionPhase, Event, RecoveryState, RuntimeCommands,
+        StartupBlockKind,
     },
     sidebar_scrollbar::{self, SidebarScrollbarState},
     tab_dialog_style as tabs_ui,
@@ -153,6 +154,7 @@ impl TabDialog {
 const LAST_TAB_BODY: &str = "当前已是最后一个事项下的最后一个标签，这里点击关闭不会删除该事项。\n\n如需删除该工作区，请在左侧事项面板的下拉菜单中执行删除。";
 const LAST_TAB_CONFIRM: &str = "我知道了";
 const STOP_SESSION: &str = "停止会话";
+const STOPPED_SESSION_STATUS: &str = "正在恢复会话…";
 const REMOVE_NODE_ACTION: &str = "移除节点…";
 const WORKSPACE_PATH_UNAVAILABLE: &str = "工作区目录不可用，请先在本地恢复原路径，或移出该工作区";
 
@@ -1406,6 +1408,8 @@ impl Workspace {
                 scope,
             } => {
                 self.active_scene_id() != Some(scene_id)
+                    || (self.is_stopped_session(session_id)
+                        && !self.stopped_remove_available(session_id))
                     || self
                         .removal_dialog_text(session_id, *scope)
                         .is_none_or(|text| {
@@ -1436,6 +1440,11 @@ impl Workspace {
                     self.domain_ready = false;
                     self.pending_card_action = None;
                     self.session_frames.clear();
+                    if matches!(&self.dialog, Some(TabDialog::RemoveSession { session_id, .. })
+                        if self.is_stopped_session(session_id))
+                    {
+                        self.close_invalid_dialog(window, cx);
+                    }
                     self.sync_terminal_input(window, cx);
                 }
                 #[cfg(target_os = "macos")]
@@ -1495,6 +1504,11 @@ impl Workspace {
             }
             Event::WorkspacePaths(paths) => {
                 self.workspace_paths = paths;
+                if matches!(&self.dialog, Some(TabDialog::RemoveSession { session_id, .. })
+                    if self.is_stopped_session(session_id))
+                {
+                    self.close_invalid_dialog(window, cx);
+                }
                 self.sync_terminal_input(window, cx);
             }
             Event::WorkspaceActionResult {
@@ -1687,12 +1701,13 @@ impl Workspace {
                 self.hierarchy = Some(hierarchy);
                 self.finish_card_action(&graph["sessionCardAction"]);
                 self.graph = graph;
-                self.refresh_terminals(cx);
+                self.refresh_terminals(window, cx);
                 if fresh_ready {
                     self.session_frames.clear();
                     self.recovery.clear();
                     for id in session_levels::nodes(&self.graph)
                         .iter()
+                        .filter(|node| node["archivedAt"].is_null())
                         .filter_map(|node| node["sessionId"].as_str())
                     {
                         self.recovery
@@ -1743,7 +1758,7 @@ impl Workspace {
                     && let Some(terminal) = self
                         .focused
                         .as_ref()
-                        .filter(|id| self.order.contains(id))
+                        .filter(|id| self.active_level_focus() == Some(id.as_str()))
                         .and_then(|id| self.terminals.get(id))
                 {
                     window.focus(&terminal.read(cx).focus);
@@ -1887,7 +1902,7 @@ impl Workspace {
                     return;
                 }
                 self.graph = graph;
-                self.refresh_terminals(cx);
+                self.refresh_terminals(window, cx);
                 if self.dialog.as_ref().is_some_and(TabDialog::is_session_card) {
                     self.close_invalid_dialog(window, cx);
                 }
@@ -1965,6 +1980,9 @@ impl Workspace {
                 );
             }
             Event::Recovery { session_id, state } => {
+                if self.is_stopped_session(&session_id) {
+                    return;
+                }
                 if !matches!(&state, RecoveryState::Ready)
                     || (self.recovery_blocked(&session_id)
                         && !self
@@ -2008,12 +2026,29 @@ impl Workspace {
         cx.notify();
     }
 
-    fn refresh_terminals(&mut self, cx: &mut Context<Self>) {
-        self.refresh_level(cx);
-        for id in session_levels::nodes(&self.graph)
-            .iter()
-            .filter_map(|node| node["sessionId"].as_str())
-        {
+    fn refresh_terminals(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let nodes = session_levels::nodes(&self.graph);
+        for node in nodes {
+            let Some(id) = node["sessionId"].as_str() else {
+                continue;
+            };
+            self.remove_card_controls
+                .entry(id.to_owned())
+                .or_insert_with(|| cx.focus_handle().tab_stop(true));
+            if !node["archivedAt"].is_null() {
+                let terminal = self.terminals.remove(id);
+                let retry = self.recovery_controls.remove(id);
+                if terminal.is_some_and(|terminal| terminal.read(cx).focus.is_focused(window))
+                    || retry.is_some_and(|focus| focus.is_focused(window))
+                {
+                    window.blur();
+                }
+                self.card_controls.remove(id);
+                self.recovery.remove(id);
+                self.session_frames.remove(id);
+                self.resize_revisions.remove(id);
+                continue;
+            }
             if self.terminals.contains_key(id) {
                 continue;
             }
@@ -2026,17 +2061,23 @@ impl Workspace {
             });
             self.card_controls
                 .insert(id.to_owned(), cx.focus_handle().tab_stop(true));
-            self.remove_card_controls
-                .insert(id.to_owned(), cx.focus_handle().tab_stop(true));
             let session_id = id.to_owned();
-            self.subscriptions.push(cx.subscribe(
-                &terminal,
-                move |this, _, event: &SurfaceEvent, cx| {
-                    this.handle_surface_event(&session_id, event, cx)
-                },
-            ));
+            cx.subscribe(&terminal, move |this, source, event: &SurfaceEvent, cx| {
+                if this.terminals.get(&session_id) == Some(&source) {
+                    this.handle_surface_event(&session_id, event, cx);
+                }
+            })
+            .detach();
             self.terminals.insert(id.to_owned(), terminal);
         }
+        if self
+            .history_request
+            .as_ref()
+            .is_some_and(|request| self.is_stopped_session(&request.session_id))
+        {
+            self.dismiss_history_context(cx);
+        }
+        self.refresh_level(cx);
     }
 
     fn handle_surface_event(
@@ -2045,6 +2086,10 @@ impl Workspace {
         event: &SurfaceEvent,
         cx: &mut Context<Self>,
     ) {
+        let Some(terminal) = self.terminals.get(session_id) else {
+            return;
+        };
+        let terminal_id = terminal.entity_id();
         if event.generation != self.runtime_generation
             || !self.domain_ready
             || self.commands.connection() != (event.generation, ConnectionPhase::Ready)
@@ -2141,6 +2186,9 @@ impl Workspace {
                         if this.resize_revisions.get(&id) != Some(&revision) {
                             return;
                         }
+                        if this.terminals.get(&id).map(Entity::entity_id) != Some(terminal_id) {
+                            return;
+                        }
                         this.send(
                             Command::Resize {
                                 session_id: id,
@@ -2170,6 +2218,15 @@ impl Workspace {
     }
 
     fn write_geometry(&mut self, update: GeometryUpdate, attempt: u8, cx: &mut Context<Self>) {
+        if self.active_scene_id() == Some(update.scene_id.as_str())
+            && update.geometry["focusedSessionId"]
+                .as_str()
+                .is_some_and(|id| self.is_stopped_session(id))
+        {
+            self.geometry_dirty.remove(&update.owner_key);
+            self.reconnect_geometry.remove(&update.owner_key);
+            return;
+        }
         self.geometry_sequence += 1;
         let sequence = self.geometry_sequence;
         self.geometry_writes
@@ -2188,6 +2245,7 @@ impl Workspace {
             })
             .map(|(_, session_id)| session_id.as_str())
             .or(self.focused.as_deref())
+            .filter(|id| !self.is_stopped_session(id))
     }
 
     fn capture_geometry(
@@ -2340,12 +2398,13 @@ impl Workspace {
             (f64::from(f32::from(self.carousel_scroll.offset().x + amount))).clamp(-max_scroll, 0.);
         self.carousel_scroll
             .set_offset(point(px(next as f32), px(0.)));
-        let focused = self
+        if let Some(focused) = self
             .geometry_focus()
             .filter(|id| self.order.iter().any(|card| card == id))
-            .or_else(|| self.level_focus())
-            .map(str::to_owned);
-        self.capture_geometry(focused, true, window, cx);
+            .or_else(|| self.active_level_focus())
+        {
+            self.capture_geometry(Some(focused.to_owned()), true, window, cx);
+        }
         // A horizontal gesture retargets visual expansion under the pointer,
         // while its own wheel deltas continue to own the viewport.
         if let Some(position) = self.pointer_position {
@@ -2520,7 +2579,8 @@ impl Workspace {
 
     #[cfg(target_os = "macos")]
     fn recovery_water_needed(&self, id: &str, node: &Value) -> bool {
-        self.recovery_blocked(id)
+        node["archivedAt"].is_null()
+            && self.recovery_blocked(id)
             && !self.storage_fault_sessions.contains(id)
             && !matches!(self.recovery.get(id), Some(RecoveryState::Failed(_)))
             && !matches!(node["workStatus"].as_str(), Some("error" | "exited"))
@@ -3761,7 +3821,7 @@ impl Workspace {
                 session_id,
                 scope,
             }) => self
-                .card_action_available(session_id)
+                .remove_session_available(session_id)
                 .then(|| Command::RemoveSessionBranch {
                     scene_id: scene_id.clone(),
                     session_id: session_id.clone(),
@@ -3801,7 +3861,9 @@ impl Workspace {
     }
 
     fn split_horizontal(&mut self, cx: &mut Context<Self>) {
-        if !self.active_path_valid() {
+        if !self.active_path_valid()
+            || (self.level_focus().is_some() && self.active_level_focus().is_none())
+        {
             return;
         }
         if let (Some(scene_id), Some(source_session_id)) =
@@ -3821,6 +3883,9 @@ impl Workspace {
             } else {
                 source_session_id
             };
+            if self.is_stopped_session(source_session_id) {
+                return;
+            }
             self.send(
                 Command::CreateShellSibling {
                     scene_id: scene_id.to_owned(),
@@ -3844,10 +3909,54 @@ impl Workspace {
         session_levels::node(session_levels::nodes(&self.graph), id)
     }
 
+    fn is_stopped_session(&self, id: &str) -> bool {
+        self.graph_node(id)
+            .is_some_and(|node| !node["archivedAt"].is_null())
+    }
+
     fn card_action_available(&self, id: &str) -> bool {
         self.graph_node(id).is_some_and(|node| {
             node["archivedAt"].is_null() && self.card_action_blocked_reason(id, node).is_none()
         })
+    }
+
+    fn stopped_remove_blocked_reason(&self) -> Option<&'static str> {
+        if !self.active_path_valid() {
+            return Some(WORKSPACE_PATH_UNAVAILABLE);
+        }
+        match self.commands.connection() {
+            (generation, ConnectionPhase::Ready)
+                if generation == self.runtime_generation && self.domain_ready =>
+            {
+                None
+            }
+            (_, ConnectionPhase::Blocked(block)) if block.kind == StartupBlockKind::ReadOnly => {
+                Some("数据库处于只读恢复模式")
+            }
+            _ => Some("当前连接不可用"),
+        }
+    }
+
+    fn stopped_remove_visible(&self, node: &Value) -> bool {
+        let nodes = session_levels::nodes(&self.graph);
+        nodes.iter().any(|other| {
+            other["sessionId"] != node["sessionId"] && session_levels::parent_id(other).is_none()
+        }) || self.removal_branch_impact(node).sessions < nodes.len()
+    }
+
+    fn stopped_remove_available(&self, id: &str) -> bool {
+        self.stopped_remove_blocked_reason().is_none()
+            && self
+                .graph_node(id)
+                .is_some_and(|node| self.stopped_remove_visible(node))
+    }
+
+    fn remove_session_available(&self, id: &str) -> bool {
+        if self.is_stopped_session(id) {
+            self.stopped_remove_available(id)
+        } else {
+            self.card_action_available(id)
+        }
     }
 
     fn card_action_blocked_reason(&self, id: &str, node: &Value) -> Option<&'static str> {
@@ -3915,7 +4024,7 @@ impl Workspace {
         {
             return;
         }
-        let (Some(scene_id), Some(id)) = (self.active_scene_id(), self.level_focus()) else {
+        let (Some(scene_id), Some(id)) = (self.active_scene_id(), self.active_level_focus()) else {
             return;
         };
         if !self.card_action_available(id) {
@@ -4010,7 +4119,7 @@ impl Workspace {
         if self.dialog.is_some()
             || self.pending_close.is_some()
             || self.pending_card_action.is_some()
-            || !self.card_action_available(id)
+            || !self.remove_session_available(id)
         {
             return;
         }
@@ -4043,17 +4152,13 @@ impl Workspace {
         }
     }
 
-    fn removal_dialog_text(&self, id: &str, scope: RemoveScope) -> Option<RemovalDialogText> {
-        let current = self.graph_node(id)?;
-        let title = format!("移除节点“{}”？", current["title"].as_str()?);
+    fn removal_branch_impact(&self, current: &Value) -> RemovalImpact {
         let mut children: HashMap<&str, Vec<&Value>> = HashMap::new();
         for node in session_levels::nodes(&self.graph) {
             if let Some(parent) = session_levels::parent_id(node) {
                 children.entry(parent).or_default().push(node);
             }
         }
-        let mut node_only = RemovalImpact::default();
-        node_only.add(current);
         let mut branch = RemovalImpact::default();
         let mut stack = vec![current];
         let mut seen = HashSet::new();
@@ -4068,6 +4173,15 @@ impl Workspace {
                 }
             }
         }
+        branch
+    }
+
+    fn removal_dialog_text(&self, id: &str, scope: RemoveScope) -> Option<RemovalDialogText> {
+        let current = self.graph_node(id)?;
+        let title = format!("移除节点“{}”？", current["title"].as_str()?);
+        let mut node_only = RemovalImpact::default();
+        node_only.add(current);
+        let branch = self.removal_branch_impact(current);
         if branch.sessions == 1 {
             return Some(RemovalDialogText {
                 title,
@@ -4135,6 +4249,11 @@ impl Workspace {
             .filter(|id| self.order.contains(id))
             .or_else(|| self.order.first())
             .map(String::as_str)
+    }
+
+    fn active_level_focus(&self) -> Option<&str> {
+        // Visual focus can expand a stopped card. Runtime actions require a live session.
+        self.level_focus().filter(|id| !self.is_stopped_session(id))
     }
 
     fn breadcrumb_labels(&self) -> (String, String) {
@@ -4207,7 +4326,11 @@ impl Workspace {
             return;
         };
         let nodes = session_levels::nodes(&self.graph);
-        if self.graph_node(id).is_none() || !self.order.iter().any(|card| card == id) {
+        if self
+            .graph_node(id)
+            .is_none_or(|node| !node["archivedAt"].is_null())
+            || !self.order.iter().any(|card| card == id)
+        {
             return;
         }
         let children = || session_levels::children_of(nodes, Some(id));
@@ -4891,6 +5014,226 @@ impl Workspace {
             move |this, _, cx| this.select_remove_scope(scope, cx),
             cx,
         )
+    }
+
+    fn compact_session_summary(node: Option<&Value>, title: &str) -> Div {
+        let status = node
+            .and_then(|node| node["workStatus"].as_str())
+            .unwrap_or("idle");
+        let active_child_count = node
+            .and_then(|node| node["activeChildCount"].as_u64())
+            .unwrap_or(0);
+        let summary = node
+            .and_then(|node| node["latestLines"].as_array())
+            .map(|lines| {
+                lines
+                    .iter()
+                    .skip(lines.len().saturating_sub(3))
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .filter(|text| !text.is_empty())
+            .unwrap_or_else(|| {
+                node.and_then(|node| node["cwd"].as_str())
+                    .unwrap_or("")
+                    .to_owned()
+            });
+        div()
+            .size_full()
+            .px(px(12.))
+            .py(px(14.))
+            .bg(rgb(0xf2f4f7))
+            .rounded(px(12.))
+            .text_color(rgb(0x6b7482))
+            .flex()
+            .flex_col()
+            .gap(px(9.))
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(rgb(0x364050))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .child(title.to_owned()),
+            )
+            .child(
+                div()
+                    .text_size(px(9.))
+                    .px(px(6.))
+                    .py(px(2.))
+                    .rounded(px(8.))
+                    .bg(rgba(0xffffff0f))
+                    .map(|mut badge| {
+                        badge.style().align_self = Some(AlignSelf::FlexStart);
+                        badge
+                    })
+                    .child(match status {
+                        "starting" | "running" => "运行中",
+                        "needs-input" => "等待输入",
+                        "error" => "异常",
+                        "interrupted" => "中断",
+                        "exited" => "已停止",
+                        _ => "空闲",
+                    }),
+            )
+            .children((active_child_count > 0).then(|| {
+                div()
+                    .text_size(px(9.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(0xe8ae48))
+                    .child(format!("子会话 {active_child_count}"))
+            }))
+            .child(
+                div()
+                    .text_size(px(9.))
+                    .font_family("Menlo")
+                    .line_height(relative(1.5))
+                    .overflow_hidden()
+                    .child(summary.to_owned()),
+            )
+    }
+
+    fn stopped_session_status(id: &str) -> Stateful<Div> {
+        div()
+            .id(SharedString::from(format!("stopped-session-status-{id}")))
+            .flex_none()
+            .px(px(7.))
+            .py(px(2.))
+            .rounded(px(999.))
+            // The frozen light theme inherits the white-on-white label.
+            .bg(white().alpha(0.06))
+            .text_color(white().alpha(0.52))
+            .text_size(px(9.))
+            .whitespace_nowrap()
+            .child(ui_text(STOPPED_SESSION_STATUS).normal_line_height())
+    }
+
+    fn stopped_session_lines(node: &Value) -> Option<String> {
+        let lines = node["latestLines"]
+            .as_array()
+            .filter(|lines| !lines.is_empty())?;
+        let end = &lines[lines.len().saturating_sub(8)..];
+        Some(
+            end.iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+    }
+
+    fn stopped_session_card(
+        &self,
+        id: &str,
+        node: &Value,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let title = node["title"].as_str().unwrap_or("Shell");
+        let remove = self.stopped_remove_visible(node).then(|| {
+            let blocked_reason = self.stopped_remove_blocked_reason();
+            let tooltip = RemoveNodeTooltip { blocked_reason };
+            let button_id = SharedString::from(format!("remove-session-{id}"));
+            let session_id = id.to_owned();
+            let glyph = svg()
+                .path("icons/circle-minus.svg")
+                .size(px(14.))
+                .flex_none()
+                .text_color(rgb(0x6a7380))
+                .when(blocked_reason.is_none(), |glyph| {
+                    glyph.group_hover(button_id.clone(), |style| style.text_color(rgb(0xc5443e)))
+                });
+            let button = div()
+                .id(button_id.clone())
+                .group(button_id)
+                .w(px(28.))
+                .h(px(27.))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(5.))
+                .child(glyph)
+                .tooltip(move |_, cx| cx.new(|_| tooltip).into());
+            if blocked_reason.is_none() {
+                self.focus_control(button, &self.remove_card_controls[id])
+                    .cursor_pointer()
+                    .hover(|style| style.bg(rgb(0xfff0ef)))
+                    .capture_any_mouse_down(|event, window, _| {
+                        if event.button == MouseButton::Left {
+                            window.prevent_default();
+                        }
+                    })
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.open_remove_session(&session_id, window, cx);
+                    }))
+            } else {
+                button.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            }
+        });
+        let monospace = if cfg!(target_os = "macos") {
+            "SF Mono"
+        } else {
+            "Consolas"
+        };
+        div()
+            .id(SharedString::from(format!("stopped-session-card-{id}")))
+            .size_full()
+            .flex()
+            .flex_col()
+            .gap(px(14.))
+            .pb(px(18.))
+            .bg(rgb(0xf8f9fb))
+            .text_color(rgb(0x687180))
+            .child(
+                div()
+                    .id(SharedString::from(format!("stopped-session-header-{id}")))
+                    .h(px(42.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .px(px(14.))
+                    .bg(white())
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("stopped-session-title-{id}")))
+                            .min_w_0()
+                            .max_h(px(42.))
+                            .overflow_hidden()
+                            .text_color(rgb(0x303744))
+                            .text_size(px(12.))
+                            .font_weight(FontWeight::BOLD)
+                            .child(ui_text(title.to_owned()).normal_line_height()),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .child(Self::stopped_session_status(id))
+                            .children(remove),
+                    ),
+            )
+            .children(Self::stopped_session_lines(node).map(|lines| {
+                div()
+                    .id(SharedString::from(format!("stopped-session-lines-{id}")))
+                    .mx(px(18.))
+                    .max_h(px(180.))
+                    .overflow_hidden()
+                    .p(px(10.))
+                    .rounded(px(7.))
+                    .bg(black().alpha(0.16))
+                    .font_family(monospace)
+                    .text_size(px(10.))
+                    .line_height(px(15.5))
+                    .whitespace_normal()
+                    .child(lines)
+            }))
     }
 
     fn remove_card_button(
@@ -5718,6 +6061,7 @@ impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         const CARD_RADIUS: Pixels = px(12.);
         let level_focus = self.level_focus().map(str::to_owned);
+        let active_level_focus = self.active_level_focus().map(str::to_owned);
         let viewport_width = f64::from(f32::from(window.viewport_size().width)) - 260.;
         let content_width = viewport_width - 20.;
         let columns = (((viewport_width + 12.) / 292.).floor()).clamp(1., 4.);
@@ -5916,14 +6260,14 @@ impl Render for Workspace {
             && self.focus_follow_until.is_none()
             && !self.restore_geometry
             && self.pending_focus.is_none()
-            && level_focus.is_some()
+            && active_level_focus.is_some()
         {
             let scroll =
                 f64::from(-f32::from(self.carousel_scroll.offset().x)).clamp(0., max_scroll);
             self.save_geometry(
                 scroll,
                 active_geometry.map(|(left, _)| left),
-                level_focus.clone(),
+                active_level_focus,
                 false,
                 cx,
             );
@@ -5972,13 +6316,61 @@ impl Render for Workspace {
         let mut mounted_water = HashSet::new();
         let mut badge_tooltip = None;
         for id in &self.order {
+            let node = session_levels::node(session_levels::nodes(&self.graph), id);
+            let selected = level_focus.as_ref() == Some(id);
+            let width = widths[id] as f32;
+            let lift = -4. * self.card_motion[id].lift.value(now) as f32;
+            let hover_id = id.clone();
+            let card = div()
+                .id(SharedString::from(format!("card-{id}")))
+                .w(px(width))
+                .h_full()
+                .flex_none()
+                .relative()
+                .top(px(lift))
+                .rounded(CARD_RADIUS)
+                .overflow_hidden()
+                .bg(rgb(0xfcfcfd))
+                .flex()
+                .flex_col()
+                .shadow(if selected {
+                    vec![
+                        shadow(0x32445c, 0.11, 7., 15.),
+                        shadow(0x32445c, 0.19, 24., 52.),
+                        shadow(0x3f82d4, 0.12, 15., 42.),
+                    ]
+                } else if self.hovered.as_ref() == Some(id) {
+                    vec![
+                        shadow(0x2a3748, 0.1, 4., 12.),
+                        shadow(0x2a3748, 0.12, 17., 36.),
+                    ]
+                } else {
+                    vec![
+                        shadow(0x2a3748, 0.075, 2., 7.),
+                        shadow(0x2a3748, 0.07, 13., 30.),
+                    ]
+                })
+                .on_hover(cx.listener(move |this, hovered, _, cx| {
+                    if *hovered {
+                        this.hover_card(Some(hover_id.clone()), cx);
+                    }
+                }));
+            let compact = narrow && !selected;
+            let title = node
+                .and_then(|node| node["title"].as_str())
+                .unwrap_or("Shell");
+            if let Some(node) = node.filter(|node| !node["archivedAt"].is_null()) {
+                let card = if compact {
+                    card.child(Self::compact_session_summary(Some(node), title))
+                } else {
+                    card.child(self.stopped_session_card(id, node, cx))
+                };
+                carousel = carousel.child(card);
+                continue;
+            }
             let Some(terminal) = self.terminals.get(id) else {
                 continue;
             };
-            let selected = level_focus.as_ref() == Some(id);
-            // Narrow, non-selected cards only paint the frozen compact summary.
-            // They have no badge, tooltip or badge hit area from earlier frames.
-            let compact = narrow && !selected;
             // The badge measures its painted bounds so pointer-down can be
             // excluded from the card's capture-phase activation even before
             // the first hover event reaches the freshly rendered badge.
@@ -6031,12 +6423,6 @@ impl Render for Workspace {
                 }
                 Some(self.child_badge_button(id, badge, badge_bounds.clone(), &focus, cx))
             });
-            let node = self.graph["nodes"]
-                .as_array()
-                .and_then(|nodes| nodes.iter().find(|node| node["sessionId"] == *id));
-            let title = node
-                .and_then(|node| node["title"].as_str())
-                .unwrap_or("Shell");
             let focus = terminal.read(cx).focus.clone();
             let scrollbar_terminal = terminal.clone();
             let scrollbar_session = id.clone();
@@ -6046,14 +6432,11 @@ impl Render for Workspace {
                 .and_then(|h| h.scene.as_ref())
                 .map(|s| s.id.clone());
             let session_id = id.clone();
-            let hover_id = id.clone();
             let scene_id = self
                 .hierarchy
                 .as_ref()
                 .and_then(|h| h.scene.as_ref())
                 .map(|s| s.id.clone());
-            let width = widths[id] as f32;
-            let lift = -4. * self.card_motion[id].lift.value(now) as f32;
             #[cfg(target_os = "macos")]
             let water = if recovery_water_available
                 && (!narrow || selected)
@@ -6074,42 +6457,12 @@ impl Render for Workspace {
             } else {
                 None
             };
-            let card = div()
-                .id(SharedString::from(format!("card-{id}")))
-                .w(px(width))
-                .h_full()
-                .flex_none()
-                .relative()
-                .top(px(lift))
-                .rounded(CARD_RADIUS)
-                .overflow_hidden()
-                .bg(rgb(0xfcfcfd))
-                .flex()
-                .flex_col()
-                .shadow(if selected {
-                    vec![
-                        shadow(0x32445c, 0.11, 7., 15.),
-                        shadow(0x32445c, 0.19, 24., 52.),
-                        shadow(0x3f82d4, 0.12, 15., 42.),
-                    ]
-                } else if self.hovered.as_ref() == Some(id) {
-                    vec![
-                        shadow(0x2a3748, 0.1, 4., 12.),
-                        shadow(0x2a3748, 0.12, 17., 36.),
-                    ]
-                } else {
-                    vec![
-                        shadow(0x2a3748, 0.075, 2., 7.),
-                        shadow(0x2a3748, 0.07, 13., 30.),
-                    ]
-                })
-                .on_hover(cx.listener(move |this, hovered, _, cx| {
-                    if *hovered {
-                        this.hover_card(Some(hover_id.clone()), cx);
-                    }
-                }))
+            let card = card
                 .capture_any_mouse_down(cx.listener(
                     move |this, event: &MouseDownEvent, window, cx| {
+                        if this.is_stopped_session(&scrollbar_session) {
+                            return;
+                        }
                         // Compact cards mount no badge bounds, so a stale hit
                         // area can never swallow their ordinary activation.
                         if let Some(badge_bounds) = &badge_bounds_for_capture
@@ -6165,6 +6518,9 @@ impl Render for Workspace {
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _, window, cx| {
+                        if this.is_stopped_session(&session_id) {
+                            return;
+                        }
                         if this.active_path_valid() && !this.recovery_blocked(&session_id) {
                             window.focus(&focus);
                         }
@@ -6253,85 +6609,7 @@ impl Render for Workspace {
                 )
                 .children(badge.map(|badge| badge.absolute().top(px(8.)).right(px(8.))))
             } else if compact {
-                let status = node
-                    .and_then(|node| node["workStatus"].as_str())
-                    .unwrap_or("idle");
-                let active_child_count = node
-                    .and_then(|node| node["activeChildCount"].as_u64())
-                    .unwrap_or(0);
-                let summary = node
-                    .and_then(|node| node["latestLines"].as_array())
-                    .map(|lines| {
-                        lines
-                            .iter()
-                            .skip(lines.len().saturating_sub(3))
-                            .filter_map(Value::as_str)
-                            .collect::<Vec<_>>()
-                            .join("\n")
-                    })
-                    .filter(|text| !text.is_empty())
-                    .unwrap_or_else(|| {
-                        node.and_then(|node| node["cwd"].as_str())
-                            .unwrap_or("")
-                            .to_owned()
-                    });
-                card.child(
-                    div()
-                        .size_full()
-                        .px(px(12.))
-                        .py(px(14.))
-                        .bg(rgb(0xf2f4f7))
-                        .rounded(px(12.))
-                        .text_color(rgb(0x6b7482))
-                        .flex()
-                        .flex_col()
-                        .gap(px(9.))
-                        .child(
-                            div()
-                                .text_size(px(12.))
-                                .font_weight(FontWeight::BOLD)
-                                .text_color(rgb(0x364050))
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .text_ellipsis()
-                                .child(title.to_owned()),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(9.))
-                                .px(px(6.))
-                                .py(px(2.))
-                                .rounded(px(8.))
-                                .bg(rgba(0xffffff0f))
-                                .map(|mut badge| {
-                                    badge.style().align_self = Some(AlignSelf::FlexStart);
-                                    badge
-                                })
-                                .child(match status {
-                                    "starting" | "running" => "运行中",
-                                    "needs-input" => "等待输入",
-                                    "error" => "异常",
-                                    "interrupted" => "中断",
-                                    "exited" => "已停止",
-                                    _ => "空闲",
-                                }),
-                        )
-                        .children((active_child_count > 0).then(|| {
-                            div()
-                                .text_size(px(9.))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(rgb(0xe8ae48))
-                                .child(format!("子会话 {active_child_count}"))
-                        }))
-                        .child(
-                            div()
-                                .text_size(px(9.))
-                                .font_family("Menlo")
-                                .line_height(relative(1.5))
-                                .overflow_hidden()
-                                .child(summary.to_owned()),
-                        ),
-                )
+                card.child(Self::compact_session_summary(node, title))
             } else {
                 card.child(
                     div()

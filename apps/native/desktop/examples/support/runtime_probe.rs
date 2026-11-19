@@ -20,6 +20,12 @@ impl ProbeReceiver {
         state.generation = generation;
         state.phase = ConnectionPhase::Ready;
     }
+    pub(super) fn read_only(&self) {
+        self.shared.state.lock().unwrap().phase = ConnectionPhase::Blocked(StartupBlock {
+            kind: StartupBlockKind::ReadOnly,
+            message: "probe read-only recovery".into(),
+        });
+    }
 }
 pub(super) fn probe_channel() -> (RuntimeCommands, ProbeReceiver) {
     let (send, incoming) = mpsc::channel();

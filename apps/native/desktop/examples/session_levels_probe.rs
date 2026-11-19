@@ -220,6 +220,120 @@ mod workspace {
             )
         }
 
+        pub(super) fn stopped_card_position(&self, id: &str, inset: Pixels) -> Point<Pixels> {
+            self.remove_button_position(id) - point(inset, px(0.))
+        }
+
+        pub(super) fn assert_stopped_state(&self, id: &str, focus: Option<&str>) {
+            assert!(self.order.iter().any(|card| card == id));
+            let node = self
+                .graph_node(id)
+                .expect("stopped card stays in the graph");
+            assert!(!node["archivedAt"].is_null());
+            assert_eq!(self.active_level_focus(), focus);
+            assert!(!self.terminals.contains_key(id));
+            assert!(!self.card_controls.contains_key(id));
+            assert!(!self.recovery.contains_key(id));
+            assert!(!self.recovery_controls.contains_key(id));
+            assert!(!self.recovery_water.contains_key(id));
+            assert!(!self.recovery_water_needed(id, node));
+        }
+
+        pub(super) fn assert_stopped_content(&self, id: &str, title: &str, lines: &[&str]) {
+            let node = self.graph_node(id).unwrap();
+            assert_eq!(node["title"], title);
+            assert_eq!(STOPPED_SESSION_STATUS, "正在恢复会话…");
+            assert_eq!(
+                Workspace::stopped_session_lines(node),
+                (!lines.is_empty()).then(|| lines.join("\n")),
+            );
+            let mut status = Workspace::stopped_session_status(id);
+            let style = status.style();
+            assert_eq!(
+                style.text.as_ref().unwrap().color,
+                Some(white().alpha(0.52))
+            );
+            assert_eq!(style.background, Some(white().alpha(0.06).into()));
+            assert_eq!(
+                RemoveNodeTooltip {
+                    blocked_reason: None
+                }
+                .text(),
+                "移除节点…"
+            );
+            println!(
+                "{title} | {STOPPED_SESSION_STATUS} | {} summary lines | white label alpha .52/.06",
+                lines.len()
+            );
+        }
+
+        pub(super) fn seed_recovery_water(&mut self, id: &str, cx: &mut Context<Self>) {
+            assert!(self.terminals.contains_key(id));
+            assert!(self.recovery_water_needed(id, self.graph_node(id).unwrap()));
+            self.recovery_water.insert(
+                id.to_owned(),
+                cx.new(|cx| {
+                    RecoveryWater::new(self.runtime_generation, Theme::default(), true, cx)
+                }),
+            );
+        }
+
+        pub(super) fn assert_stopped_remove_dialog(
+            &self,
+            id: &str,
+            title: &str,
+            scope: RemoveScope,
+            branch: bool,
+        ) {
+            let Some(TabDialog::RemoveSession {
+                session_id,
+                scope: selected,
+                ..
+            }) = &self.dialog
+            else {
+                panic!("expected stopped-card removal confirmation");
+            };
+            let text = self.removal_dialog_text(id, scope).unwrap();
+            assert_eq!(session_id, id);
+            assert_eq!(*selected, scope);
+            assert_eq!(text.title, title);
+            assert_eq!(text.choices.is_some(), branch);
+            assert_eq!(self.dialog_controls.len(), if branch { 5 } else { 3 });
+            println!("{title} | scope={scope:?}");
+        }
+
+        pub(super) fn settle_stopped_probe_geometry(&mut self, cx: &mut Context<Self>) {
+            self.hover_follow_until = None;
+            self.focus_follow_until = None;
+            self.restore_geometry = false;
+            self.flush_geometry(cx);
+        }
+
+        pub(super) fn stopped_remove_status(&self, id: &str) -> (bool, Option<&'static str>) {
+            let node = self.graph_node(id).unwrap();
+            (
+                self.stopped_remove_visible(node),
+                self.stopped_remove_blocked_reason(),
+            )
+        }
+
+        pub(super) fn assert_visual_focus(&self, id: &str) {
+            assert_eq!(self.level_focus(), Some(id));
+            assert_eq!(self.card_motion[id].width.value(f64::INFINITY), 1.);
+        }
+
+        pub(super) fn assert_live_card(&self, id: &str, has_children: bool, cx: &Context<Self>) {
+            assert!(self.terminals[id].read(cx).target_dimensions().is_some());
+            assert!(!self.is_stopped_session(id));
+            assert_eq!(self.child_badge(id).is_some(), has_children);
+        }
+
+        pub(super) fn assert_root_without_badge_hover(&self, id: &str) {
+            assert_eq!(self.level_parent(), None);
+            assert!(self.child_badge(id).is_some(), "fixture needs children");
+            assert!(self.hovered_child_badge.is_none());
+        }
+
         pub(super) fn assert_no_dialog(&self) {
             assert!(self.dialog.is_none());
         }
@@ -693,6 +807,40 @@ mod probe {
                 .unwrap();
             project_scene_graph(connection, SCENE, Some(WINDOW)).unwrap()
         }
+
+        fn set_archived(&self, id: &str, archived: bool) {
+            let Some(BootstrapResult::Writable { connection, .. }) = &self.db else {
+                unreachable!()
+            };
+            assert_eq!(
+                connection
+                    .execute(
+                        "UPDATE sessions SET archived_at = ? WHERE id = ?",
+                        (archived.then_some(21), id),
+                    )
+                    .unwrap(),
+                1
+            );
+        }
+
+        fn stopped_graph(&self) -> serde_json::Value {
+            let Some(BootstrapResult::Writable { connection, .. }) = &self.db else {
+                unreachable!()
+            };
+            project_scene_graph(connection, SCENE, Some(WINDOW)).unwrap()
+        }
+
+        fn seed_stopped_summary(&self, lines: &[&str]) {
+            let Some(BootstrapResult::Writable { connection, .. }) = &self.db else {
+                unreachable!()
+            };
+            connection
+                .execute(
+                    "INSERT INTO session_graph_summaries VALUES (?, ?, 22)",
+                    (PARENT, serde_json::to_string(lines).unwrap()),
+                )
+                .unwrap();
+        }
     }
 
     fn draw(window: WindowHandle<Workspace>, cx: &mut AsyncApp) {
@@ -833,6 +981,324 @@ mod probe {
             scene_id, session_id, confirmed_intent, preserve_scene_on_last_session: false,
         }] if scene_id == SCENE && session_id == id && confirmed_intent.as_deref() == intent));
         println!("CloseSessionCard | session={id} | confirmed_intent={intent:?}");
+    }
+
+    fn assert_stopped_interaction_writes(sink: &ProbeReceiver, stopped: &[&str]) {
+        while let Ok(command) = sink.try_recv() {
+            match command {
+                Command::Applied { .. } => {}
+                Command::Resize { session_id, .. } => {
+                    assert!(!stopped.contains(&session_id.as_str()))
+                }
+                _ => panic!("stopped-card interaction sent an unexpected command"),
+            }
+        }
+    }
+
+    fn acknowledge_stopped_removal(
+        fixture: &Fixture,
+        window: WindowHandle<Workspace>,
+        cx: &mut AsyncApp,
+        id: &str,
+    ) {
+        // Release the pending action in the command-sink probe. Keep the fixture
+        // nodes so the next case can exercise the same graph without a new owner.
+        let mut event = fixture.event(false);
+        let Event::Navigation { graph, .. } = &mut event else {
+            unreachable!()
+        };
+        graph["sessionCardAction"] = serde_json::json!({
+            "action": "remove-session-branch",
+            "sceneId": SCENE,
+            "sessionId": id,
+        });
+        deliver(window, cx, event);
+    }
+
+    fn verify_stopped_cards(cx: &mut AsyncApp) {
+        const LINES: &[&str] = &[
+            "drop one",
+            "drop two",
+            "step 03",
+            "step 04",
+            "",
+            "  step 06  ",
+            "step 07",
+            "step 08",
+            "step 09",
+            "step 10",
+        ];
+        let fixture = Fixture::new();
+        let (window, sink) = open_hidden(cx, 1200.);
+        deliver(window, cx, fixture.event(true));
+        draw(window, cx);
+        window
+            .update(cx, |view, window, cx| {
+                view.qualify(PEER, window, cx);
+                view.assert_terminal_focus(PEER, true, window, cx);
+                view.seed_recovery_water(PARENT, cx);
+            })
+            .unwrap();
+
+        fixture.seed_stopped_summary(LINES);
+        fixture.set_archived(PARENT, true);
+        let graph = fixture.stopped_graph();
+        deliver(window, cx, Event::Graph(graph.clone()));
+        window
+            .update(cx, |view, _, _| {
+                view.assert_stopped_state(PARENT, Some(PEER));
+                view.assert_stopped_content(PARENT, "分支主会话", &LINES[6..]);
+                assert_eq!(view.stopped_remove_status(PARENT), (true, None));
+            })
+            .unwrap();
+
+        let mut expanded_graph = graph.clone();
+        expanded_graph["nodes"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|node| node["sessionId"] == PARENT)
+            .unwrap()["latestLines"] = serde_json::json!(LINES);
+        deliver(window, cx, Event::Graph(expanded_graph));
+        deliver(
+            window,
+            cx,
+            Event::Recovery {
+                session_id: PARENT.into(),
+                state: RecoveryState::Failed("stale recovery callback".into()),
+            },
+        );
+        window
+            .update(cx, |view, _, cx| view.settle_stopped_probe_geometry(cx))
+            .unwrap();
+        draw(window, cx);
+        window
+            .update(cx, |view, window, cx| {
+                view.assert_level(None, ROOTS, "根会话", "· 2 个会话", PEER);
+                view.assert_stopped_content(PARENT, "分支主会话", &LINES[2..]);
+                view.assert_stopped_state(PARENT, Some(PEER));
+                view.assert_terminal_focus(PEER, true, window, cx);
+                view.assert_live_card(PEER, false, cx);
+                view.assert_root_without_badge_hover(PARENT);
+                view.flush_geometry(cx);
+            })
+            .unwrap();
+        while sink.try_recv().is_ok() {}
+
+        let (body, badge_slot, remove) = window
+            .update(cx, |view, _, _| {
+                (
+                    view.stopped_card_position(PARENT, px(90.)) + point(px(0.), px(60.)),
+                    view.stopped_card_position(PARENT, px(58.)),
+                    view.remove_button_position(PARENT),
+                )
+            })
+            .unwrap();
+        click(window, cx, body);
+        mouse(window, cx, badge_slot, NSEventType::NSMouseMoved);
+        click(window, cx, badge_slot);
+        window
+            .update(cx, |view, window, cx| {
+                view.assert_no_dialog();
+                view.assert_root_without_badge_hover(PARENT);
+                view.assert_terminal_focus(PEER, true, window, cx);
+                view.flush_geometry(cx);
+            })
+            .unwrap();
+        assert_stopped_interaction_writes(&sink, &[PARENT]);
+
+        mouse(window, cx, remove, NSEventType::NSLeftMouseDown);
+        window
+            .update(cx, |view, window, cx| {
+                view.assert_no_dialog();
+                view.assert_stopped_state(PARENT, Some(PEER));
+                view.assert_terminal_focus(PEER, true, window, cx);
+                view.flush_geometry(cx);
+            })
+            .unwrap();
+        assert_stopped_interaction_writes(&sink, &[PARENT]);
+        mouse(window, cx, remove, NSEventType::NSLeftMouseUp);
+        draw(window, cx);
+        window
+            .update(cx, |view, _, _| {
+                view.assert_stopped_remove_dialog(
+                    PARENT,
+                    "移除节点“分支主会话”？",
+                    RemoveScope::NodeOnly,
+                    true,
+                );
+            })
+            .unwrap();
+        press(window, cx, "tab"); // Node only
+        press(window, cx, "tab"); // Node and descendants
+        press(window, cx, "enter");
+        draw(window, cx);
+        window
+            .update(cx, |view, _, _| {
+                view.assert_stopped_remove_dialog(
+                    PARENT,
+                    "移除节点“分支主会话”？",
+                    RemoveScope::NodeAndDescendants,
+                    true,
+                );
+            })
+            .unwrap();
+        press(window, cx, "tab"); // Cancel
+        press(window, cx, "tab"); // Confirm
+        press(window, cx, "enter");
+        assert_remove_command(
+            std::iter::from_fn(|| sink.try_recv().ok()).collect(),
+            PARENT,
+            RemoveScope::NodeAndDescendants,
+        );
+
+        acknowledge_stopped_removal(&fixture, window, cx, PARENT);
+        fixture.set_archived(PEER, true);
+        deliver(window, cx, Event::Graph(fixture.stopped_graph()));
+        draw(window, cx);
+        window
+            .update(cx, |view, _, _| {
+                view.assert_level(None, ROOTS, "根会话", "· 2 个会话", PEER);
+                view.assert_visual_focus(PEER);
+                view.assert_stopped_state(PEER, None);
+                view.assert_stopped_content(PEER, "level-peer", &[]);
+            })
+            .unwrap();
+        press(window, cx, "cmd-w");
+        assert_stopped_interaction_writes(&sink, &[PARENT, PEER]);
+        click_remove(window, cx, PEER);
+        window
+            .update(cx, |view, _, _| {
+                view.assert_stopped_remove_dialog(
+                    PEER,
+                    "移除节点“level-peer”？",
+                    RemoveScope::NodeOnly,
+                    false,
+                );
+            })
+            .unwrap();
+        deliver(
+            window,
+            cx,
+            Event::WorkspacePaths(vec![WorkspacePathState {
+                workspace_id: "levels-workspace".into(),
+                status: "invalid".into(),
+                reason: "probe path".into(),
+                checked_at: 1,
+                validation_generation: 1,
+            }]),
+        );
+        click_remove(window, cx, PEER);
+        window
+            .update(cx, |view, _, _| {
+                view.assert_no_dialog();
+                assert_eq!(
+                    view.stopped_remove_status(PEER),
+                    (
+                        true,
+                        Some("工作区目录不可用，请先在本地恢复原路径，或移出该工作区")
+                    )
+                );
+            })
+            .unwrap();
+        assert_stopped_interaction_writes(&sink, &[PARENT, PEER]);
+        deliver(window, cx, Event::WorkspacePaths(Vec::new()));
+        sink.read_only();
+        click_remove(window, cx, PEER);
+        window
+            .update(cx, |view, _, _| {
+                view.assert_no_dialog();
+                assert_eq!(
+                    view.stopped_remove_status(PEER),
+                    (true, Some("数据库处于只读恢复模式"))
+                );
+            })
+            .unwrap();
+        assert_stopped_interaction_writes(&sink, &[PARENT, PEER]);
+        sink.generation(1);
+        click_remove(window, cx, PEER);
+        press(window, cx, "shift-tab");
+        press(window, cx, "enter");
+        assert_remove_command(
+            std::iter::from_fn(|| sink.try_recv().ok()).collect(),
+            PEER,
+            RemoveScope::NodeOnly,
+        );
+        acknowledge_stopped_removal(&fixture, window, cx, PEER);
+
+        let mut only_branch = fixture.stopped_graph();
+        only_branch["nodes"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|node| node["sessionId"] != PEER);
+        deliver(window, cx, Event::Graph(only_branch));
+        click_remove(window, cx, PARENT);
+        window
+            .update(cx, |view, _, _| {
+                view.assert_no_dialog();
+                assert_eq!(view.stopped_remove_status(PARENT), (false, None));
+                view.assert_visual_focus(PARENT);
+            })
+            .unwrap();
+        assert_stopped_interaction_writes(&sink, &[PARENT, PEER]);
+        fixture.set_archived(PARENT, false);
+        deliver(window, cx, Event::Graph(fixture.stopped_graph()));
+        draw(window, cx);
+        window
+            .update(cx, |view, window, cx| {
+                view.assert_live_card(PARENT, true, cx);
+                window.remove_window();
+            })
+            .unwrap();
+        println!("Stopped cards preserve the visual level and never activate a terminal");
+    }
+
+    fn verify_narrow_stopped_cards(cx: &mut AsyncApp) {
+        let fixture = Fixture::new();
+        let (window, sink) = open_hidden(cx, 900.);
+        fixture.set_archived(PARENT, true);
+        deliver(window, cx, fixture.event(true));
+        draw(window, cx);
+        window
+            .update(cx, |view, _, cx| view.settle_stopped_probe_geometry(cx))
+            .unwrap();
+        draw(window, cx);
+        window
+            .update(cx, |view, _, cx| view.flush_geometry(cx))
+            .unwrap();
+        while sink.try_recv().is_ok() {}
+        let compact_header = window
+            .update(cx, |view, window, _| {
+                view.compact_parent_position(window, px(21.))
+            })
+            .unwrap();
+        click(window, cx, compact_header);
+        click_remove(window, cx, PARENT);
+        window
+            .update(cx, |view, _, cx| {
+                view.assert_stopped_state(PARENT, Some(PEER));
+                view.assert_no_dialog();
+                view.flush_geometry(cx);
+            })
+            .unwrap();
+        assert_stopped_interaction_writes(&sink, &[PARENT]);
+
+        fixture.set_archived(PEER, true);
+        deliver(window, cx, Event::Graph(fixture.stopped_graph()));
+        click_remove(window, cx, PEER);
+        window
+            .update(cx, |view, window, _| {
+                view.assert_visual_focus(PEER);
+                view.assert_stopped_remove_dialog(
+                    PEER,
+                    "移除节点“level-peer”？",
+                    RemoveScope::NodeOnly,
+                    false,
+                );
+                window.remove_window();
+            })
+            .unwrap();
+        println!("Narrow stopped peer uses the shared summary until visually selected");
     }
 
     fn verify_card_actions(cx: &mut AsyncApp) {
@@ -1420,6 +1886,8 @@ mod probe {
             cx.spawn(async move |cx| {
                 verify_compact_card(cx);
                 verify_card_actions(cx);
+                verify_stopped_cards(cx);
+                verify_narrow_stopped_cards(cx);
                 verify_last_card(cx);
                 deliver(window, cx, fixture.event(true));
                 draw(window, cx);
@@ -1634,6 +2102,50 @@ mod probe {
                     .unwrap();
                 println!("An archived-only level opened without changing focus");
 
+                fixture.set_archived(PARENT, true);
+                deliver(window, cx, Event::Graph(fixture.stopped_graph()));
+                draw(window, cx);
+                let return_button = window
+                    .update(cx, |view, window, _| {
+                        view.assert_level(
+                            Some(PARENT),
+                            CHILDREN,
+                            "分支主会话 的子会话",
+                            "· 4 个会话",
+                            PEER,
+                        );
+                        point(px(300.), window.viewport_size().height - px(19.))
+                    })
+                    .unwrap();
+                click(window, cx, return_button);
+                draw(window, cx);
+                window
+                    .update(cx, |view, _, _| {
+                        view.assert_level(None, ROOTS, "根会话", "· 2 个会话", PEER);
+                        view.assert_stopped_state(PARENT, Some(PEER));
+                    })
+                    .unwrap();
+                assert_focus(
+                    std::iter::from_fn(|| sink.try_recv().ok())
+                        .filter(|command| matches!(command, Command::FocusSession { .. }))
+                        .collect(),
+                    PARENT,
+                );
+                println!("Return from an archived parent preserves the level change and sends the parent focus request");
+                deliver(
+                    window,
+                    cx,
+                    Event::NavigationFailed {
+                        message: "probe: archived parent focus rejected".into(),
+                        attempted_focus: Some((SCENE.into(), PARENT.into())),
+                    },
+                );
+                deliver(window, cx, Event::StorageRecovered { session_id: PARENT.into() });
+                fixture.set_archived(PARENT, false);
+                deliver(window, cx, Event::Graph(graph.clone()));
+                draw(window, cx);
+                let badge = window.update(cx, |view, _, _| view.badge_position()).unwrap();
+                click(window, cx, badge);
                 graph["nodes"]
                     .as_array_mut()
                     .unwrap()
