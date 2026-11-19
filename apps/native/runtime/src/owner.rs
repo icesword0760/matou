@@ -2242,7 +2242,22 @@ mod provider_tests {
              VALUES ('source-binding', 'source', 'claude-code', 'source-id', 'available',
                      '{"canFork":true}', 2, 2, 2);
              INSERT INTO session_graph_summaries (session_id, latest_lines_json, updated_at)
-             VALUES ('source', '["source summary"]', 2);"#,
+             VALUES ('source', '["source summary"]', 2);
+             INSERT INTO sessions (id, task_id, execution_context_id, kind, status, title, cwd,
+                                   work_status, created_at, updated_at, last_activity_at)
+               SELECT 'parent', task_id, execution_context_id, kind, 'running', 'Parent', cwd,
+                      'running', created_at, updated_at, last_activity_at FROM sessions WHERE id='source';
+             INSERT INTO provider_bindings (id, session_id, provider, provider_session_id, resume_state,
+                                            metadata_json, created_at, updated_at, validated_at)
+             VALUES ('parent-binding', 'parent', 'claude-code', 'parent-id', 'available',
+                     '{"canFork":true}', 2, 2, 2);
+             INSERT INTO session_relation_events (event_id, relation_id, operation, task_id,
+                                                   from_session_id, to_session_id, relation_kind, command_id, occurred_at)
+             VALUES ('parent-event', 'parent-relation', 'created', 'task',
+                     'source', 'parent', 'derived-from', 'fixture', 2);
+             INSERT INTO session_relations_current (relation_id, task_id, from_session_id, to_session_id,
+                                                    relation_kind, created_at, updated_at, source_event_sequence)
+             VALUES ('parent-relation', 'task', 'source', 'parent', 'derived-from', 2, 2, last_insert_rowid());"#,
         )?;
         let mut owner =
             ShellOwner::new(connection, ownership, || uuid::Uuid::new_v4().to_string())?;
@@ -2251,44 +2266,49 @@ mod provider_tests {
         let executable = root.path().join("test-provider");
         fs::write(&executable, "#!/bin/sh\nread -r line\nexit 23\n")?;
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o700))?;
-        let create = |owner: &mut ShellOwner, label: &str| -> Result<canvas::ForkSessionInput> {
-            let input = canvas::ForkSessionInput {
-                window_id: "window".into(),
-                scene_id: "scene".into(),
-                source_session_id: "source".into(),
-                placement: canvas::ForkPlacement::Child,
-                name: label.into(),
-                worktree_mode: canvas::ForkWorktreeMode::Current,
-                submission_key: label.into(),
-                now: 3,
-            };
-            let created = owner.create_fork_child(
-                &command(
-                    format!("create-{label}"),
-                    "hierarchy.fork-session",
-                    label.into(),
-                ),
-                &input,
-                &canvas::CanvasIds {
+        let create =
+            |owner: &mut ShellOwner, label: &str, placement| -> Result<canvas::ForkSessionInput> {
+                let input = canvas::ForkSessionInput {
+                    window_id: "window".into(),
                     scene_id: "scene".into(),
-                    session_id: label.into(),
-                    root_node_id: format!("{label}-node"),
-                    secondary_node_id: format!("{label}-split"),
-                    mount_id: format!("{label}-mount"),
-                    relation_id: format!("{label}-relation"),
-                },
-                &canvas::CanvasMessages {
-                    new_canvas: "",
-                    duplicate_scene_name: "",
-                    workspace_path_invalid: "",
-                    detached_session_must_return: "",
-                },
-            )?;
-            assert_eq!(created["sessionId"], label);
-            Ok(input)
-        };
-        let spawn = |owner: &mut ShellOwner, label: &str| -> Result<Scope> {
-            create(owner, label)?;
+                    source_session_id: "source".into(),
+                    placement,
+                    name: label.into(),
+                    worktree_mode: canvas::ForkWorktreeMode::Current,
+                    submission_key: label.into(),
+                    now: 3,
+                };
+                let created = owner.create_fork_child(
+                    &command(
+                        format!("create-{label}"),
+                        "hierarchy.fork-session",
+                        label.into(),
+                    ),
+                    &input,
+                    &canvas::CanvasIds {
+                        scene_id: "scene".into(),
+                        session_id: label.into(),
+                        root_node_id: format!("{label}-node"),
+                        secondary_node_id: format!("{label}-split"),
+                        mount_id: format!("{label}-mount"),
+                        relation_id: format!("{label}-relation"),
+                    },
+                    &canvas::CanvasMessages {
+                        new_canvas: "",
+                        duplicate_scene_name: "",
+                        workspace_path_invalid: "",
+                        detached_session_must_return: "",
+                    },
+                )?;
+                assert_eq!(created["sessionId"], label);
+                Ok(input)
+            };
+        let spawn = |owner: &mut ShellOwner,
+                     label: &str,
+                     placement,
+                     expected_source: &str|
+         -> Result<Scope> {
+            create(owner, label, placement)?;
             let target = owner.pending_claude_fork(label)?.unwrap();
             let plan = matou_native_core::provider_launch::prepare_claude_fork(
                 root.path(),
@@ -2305,7 +2325,7 @@ mod provider_tests {
             )?;
             assert_eq!(
                 plan.launch.argv,
-                ["--resume", "source-id", "--fork-session"]
+                ["--resume", expected_source, "--fork-session"]
             );
             owner.launch_claude_fork(
                 label.into(),
@@ -2318,7 +2338,7 @@ mod provider_tests {
                 run_id: owner.shells[label].run_id.clone(),
                 generation: owner.generation.clone(),
                 expected_id: None,
-                fork_source_id: Some("source-id".into()),
+                fork_source_id: Some(expected_source.into()),
             })
         };
         let observation = |event, id| {
@@ -2326,7 +2346,8 @@ mod provider_tests {
             Observation::parse(payload.as_object().unwrap())
         };
         let mut events = Vec::new();
-        let rejected = spawn(&mut owner, "rejected")?;
+        use canvas::ForkPlacement::{Child, Peer, Sibling};
+        let rejected = spawn(&mut owner, "rejected", Child, "source-id")?;
         owner.apply_hook(
             rejected.clone(),
             observation("SessionEnd", "source-id"),
@@ -2358,7 +2379,29 @@ mod provider_tests {
         assert!(owner.claude_binding("rejected")?.is_none());
         assert_eq!(work_state(&owner, "rejected")?.0, "error");
 
-        let timeout = spawn(&mut owner, "timeout")?;
+        for (label, placement, expected_source) in [
+            ("sibling-rejected", Sibling, "parent-id"),
+            ("peer-rejected", Peer, "source-id"),
+        ] {
+            let scope = spawn(&mut owner, label, placement, expected_source)?;
+            owner.apply_hook(
+                scope.clone(),
+                observation("SessionStart", expected_source),
+                &mut events,
+            );
+            owner.apply_hook(scope, observation("SessionStart", "other-id"), &mut events);
+            assert!(
+                events
+                    .iter()
+                    .any(|event| matches!(event, OwnerEvent::ProviderIdentity(value)
+                if value["sessionId"] == label && value["result"] == "fork-failed"
+                   && value["forkError"] == FORK_SOURCE_IDENTITY))
+            );
+            assert!(owner.claude_binding(label)?.is_none());
+            assert_eq!(work_state(&owner, label)?.0, "error");
+        }
+
+        let timeout = spawn(&mut owner, "timeout", Child, "source-id")?;
         owner
             .shells
             .get_mut("timeout")
@@ -2382,7 +2425,7 @@ mod provider_tests {
             if value["sessionId"] == "timeout" && value["forkError"] == FORK_IDENTITY_TIMEOUT))
         );
 
-        let early = spawn(&mut owner, "early-exit")?;
+        let early = spawn(&mut owner, "early-exit", Child, "source-id")?;
         let (reply, result) = mpsc::channel();
         owner.send(
             "early-exit",
@@ -2405,7 +2448,7 @@ mod provider_tests {
             if value["runId"] == early.run_id && value["forkError"].as_str().is_some_and(|error| error.contains("code 23")))));
         assert!(owner.claude_binding("early-exit")?.is_none());
 
-        let never_started = create(&mut owner, "start-failure")?;
+        let never_started = create(&mut owner, "start-failure", Child)?;
         assert!(owner.fail_claude_fork("start-failure", "executable unavailable")?);
         let same = owner.create_fork_child(
             &command(
@@ -2452,7 +2495,7 @@ mod provider_tests {
             r#"["source summary"]"#,
         );
 
-        let confirmed = spawn(&mut owner, "confirmed")?;
+        let confirmed = spawn(&mut owner, "confirmed", Child, "source-id")?;
         // The child owns its launch after acceptance, even if its source is removed.
         owner.remove_session_branch(
             &command(

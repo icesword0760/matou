@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify a native child fork and real context readback with Claude Code and DeepSeek."""
+"""Verify native forks and real context readback with Claude Code and DeepSeek."""
 
 import argparse
 import importlib.util
@@ -75,7 +75,7 @@ def verify_source_unchanged(before, after, proof):
         raise RuntimeError("Source session, binding, or run rows changed during the test")
 
 
-def verify(root, env, guard, binary, cli, config, key, proof):
+def seed_fork_canvas(root, env, guard, binary):
     cwd = root / "workspace/session-cwd"
     cwd.mkdir(parents=True)
     (root / "matou").mkdir()
@@ -83,7 +83,26 @@ def verify(root, env, guard, binary, cli, config, key, proof):
                   "projects": {str(cwd): {"hasTrustDialogAccepted": True}}}
     for path in (root / "home/.claude.json", root / "claude/.claude.json"):
         launch.write_json(path, onboarding)
-    source_id = launch.seed(root, env, guard, binary, cwd)
+    return launch.seed(root, env, guard, binary, cwd), cwd
+
+
+def live_fork_argv(run, cli, provider_id):
+    command = subprocess.check_output(
+        ["/bin/ps", "-ww", "-p", str(run["pid"]), "-o", "args="],
+        timeout=5, text=True, stderr=subprocess.DEVNULL,
+    )
+    argv = shlex.split(command)
+    require(argv[:2] == [str(cli), "--settings"] and "--resume" in argv,
+            "Live process did not use the installed CLI and resume")
+    index = argv.index("--resume")
+    observed = argv[index:index + 3]
+    require(observed == ["--resume", provider_id, "--fork-session"],
+            "Live process used incorrect fork arguments")
+    return observed
+
+
+def verify(root, env, guard, binary, cli, config, key, proof):
+    source_id, cwd = seed_fork_canvas(root, env, guard, binary)
     config_path = identity.config_file(root, config)
     try:
         with launch.database(root) as db:
@@ -143,16 +162,8 @@ def verify(root, env, guard, binary, cli, config, key, proof):
 
             child = resume.Card(host, child_id, key)
             run = resume.running(root, child, 1)
-            command = subprocess.check_output(
-                ["/bin/ps", "-ww", "-p", str(run["pid"]), "-o", "args="],
-                timeout=5, text=True, stderr=subprocess.DEVNULL,
-            )
-            argv = shlex.split(command)
-            require(argv[:2] == [str(cli), "--settings"] and "--resume" in argv
-                    and argv[argv.index("--resume"):argv.index("--resume") + 3]
-                    == ["--resume", parent, "--fork-session"], "Live process used incorrect fork arguments")
             proof["fork"] = {"card_id": child_id, "run_id": run["id"],
-                             "argv": ["--resume", parent, "--fork-session"]}
+                             "argv": live_fork_argv(run, cli, parent)}
 
             def confirmation():
                 failure = child.event("fork-failed", run["id"])
@@ -221,16 +232,163 @@ def verify(root, env, guard, binary, cli, config, key, proof):
         proof["credential_absent_from_artifacts"] = True
 
 
+def verify_sibling_and_peer(root, env, guard, binary, cli, config, key, proof, placements):
+    parent_id, cwd = seed_fork_canvas(root, env, guard, binary)
+    config_path = identity.config_file(root, config)
+    turns = proof["original_conversations"] = {}
+    forks = proof["forks"] = {}
+    try:
+        with launch.database(root) as db:
+            scene_id, = db.execute(
+                "SELECT scene_id FROM session_canvas_memberships WHERE session_id=?", (parent_id,),
+            ).fetchone()
+
+        def request(selected_id, placement):
+            return {"scene_id": scene_id, "source_session_id": selected_id,
+                    "placement": placement, "worktree_mode": "current",
+                    "name": f"real {placement}", "submission_key": f"verify-{placement}"}
+
+        def open_fork(host, command, parent, relation, origin_provider, evidence):
+            result, graph = fork_result(host, command, key)
+            card_id = result.get("sessionId")
+            require(card_id and card_id != command["source_session_id"]
+                    and result["stage"] == "queued" and not result["replayed"],
+                    f"{command['placement']} fork did not queue a new card ({result.get('code')})")
+            node = next(node for node in graph["nodes"] if node["sessionId"] == card_id)
+            require(node.get("parentSessionId") == parent and node.get("relationKind") == relation
+                    and node["cwd"] == str(cwd), f"Wrong {command['placement']} graph")
+            evidence.update(card_id=card_id, parent_card_id=parent, relation=relation,
+                            selected_card_id=command["source_session_id"])
+            replay, _ = fork_result(host, command, key)
+            require(replay["sessionId"] == card_id and replay["replayed"],
+                    "Pending fork did not replay its existing card")
+            card = resume.Card(host, card_id, key)
+            run = resume.running(root, card, 1)
+            evidence.update(run_id=run["id"], argv=live_fork_argv(run, cli, origin_provider))
+            host.command("Refresh")
+            try:
+                card.interactive(allow_scrolled_banner=True)
+            except RuntimeError:
+                evidence["terminal_screen"] = card.screen[-1200:]
+                evidence["run_status"] = [row["status"] for row in resume.rows(
+                    root, "session_runs", card.id
+                )]
+                raise
+            return card, run["id"]
+
+        def completed_turn(card, prompt, expected, evidence):
+            provider_id, reply, transcript = card.ask(root, prompt, expected)
+            card.wait("idle after Stop", lambda: True if
+                      identity.session_state(root, card.id)[1] == "idle" else None)
+            evidence.update(card_id=card.id, provider_id=provider_id, prompt=prompt, reply=reply)
+            return provider_id, transcript
+
+        def check_settled(host, command, card, run_id, provider_id, origin_provider, evidence):
+            confirmed = card.wait("fork identity", lambda: card.event("confirmed", run_id))
+            require(confirmed["providerSessionId"] == provider_id and provider_id != origin_provider,
+                    "Fork identity did not match its new transcript")
+            replay, _ = fork_result(host, command, key)
+            require(replay["sessionId"] == card.id and replay["stage"] == "succeeded"
+                    and replay["replayed"], "Completed fork did not replay its durable result")
+            require(len(resume.rows(root, "session_runs", card.id)) == 1
+                    and len(resume.rows(root, "provider_bindings", card.id)) == 1,
+                    "Replayed fork created an extra run or binding")
+            evidence.update(authoritative_hook=confirmed["metadata"]["lastHookEvent"],
+                            replay_reused_card_and_run=True)
+
+        with launch.runtime(root, env, guard, binary) as host:
+            require(host.ready() == parent_id, "Runtime opened a different parent card")
+            parent = resume.Card(host, parent_id, key)
+            parent.interactive()
+            parent_run = resume.running(root, parent, 1)
+            resume.assert_argv(parent_run, cli, None)
+            parent_token, source_token = (secrets.token_hex(8).upper() for _ in range(2))
+            require(parent_token != source_token, "Seed tokens collided")
+            turns["parent"] = {"token": parent_token, "run_id": parent_run["id"]}
+            parent_provider, parent_transcript = completed_turn(
+                parent, f"记住代号 {parent_token}，只回答 OK。不要调用工具。",
+                "OK", turns["parent"],
+            )
+            seed = request(parent_id, "child")
+            turns["source"] = {"token": source_token}
+            source, source_run = open_fork(
+                host, seed, parent_id, "forked-from", parent_provider, turns["source"],
+            )
+            source_provider, source_transcript = completed_turn(
+                source, f"将当前代号改为 {source_token}，只回答 OK。不要调用工具。",
+                "OK", turns["source"],
+            )
+            check_settled(host, seed, source, source_run, source_provider, parent_provider,
+                          turns["source"])
+            require(source_transcript != parent_transcript, "Original cards share a transcript")
+            time.sleep(2)
+            originals = {"parent": parent_id, "source": source.id}
+            baseline = {label: source_snapshot(root, card_id) for label, card_id in originals.items()}
+            for rows in baseline.values():
+                require(rows["runs"][0]["status"] == "running"
+                        and json.loads(rows["bindings"][0]["metadata_json"])["canFork"],
+                        "Original cards must be live with completed turns")
+
+            blocked, _ = fork_result(host, {
+                **request(parent_id, "sibling"), "submission_key": "verify-root-sibling",
+            }, key)
+            require(blocked.get("code") == "ROOT_HAS_NO_FORK_PARENT"
+                    and blocked.get("error") == "根层会话可创建子分支",
+                    "Root sibling did not return the frozen error")
+            proof["root_sibling_rejection"] = blocked
+
+            for placement, relation, origin, prompt in (
+                ("sibling", "forked-from", "parent", resume.READBACK),
+                ("peer", "derived-from", "source", "当前的代号是什么？只回答代号。不要调用工具。"),
+            ):
+                if placement not in placements:
+                    continue
+                evidence = forks[placement] = {"fork_source": origin}
+                command = request(source.id, placement)
+                provider_id = turns[origin]["provider_id"]
+                card, run_id = open_fork(host, command, parent_id, relation, provider_id, evidence)
+                new_provider, transcript = completed_turn(
+                    card, prompt, turns[origin]["token"], evidence,
+                )
+                require(transcript not in (parent_transcript, source_transcript)
+                        and new_provider not in (parent_provider, source_provider),
+                        "Fork reused an original transcript or provider identity")
+                check_settled(host, command, card, run_id, new_provider, provider_id, evidence)
+                evidence["original_cards_unchanged"] = {}
+                for label, card_id in originals.items():
+                    details = evidence["original_cards_unchanged"][label] = {}
+                    verify_source_unchanged(source_snapshot_copy(baseline[label]),
+                                            source_snapshot(root, card_id), details)
+                    details["session_binding_run_and_summary_text_unchanged"] = True
+
+            with launch.database(root) as db:
+                count = len(placements) + 1
+                require(db.execute("SELECT COUNT(*) FROM sessions").fetchone() == (count + 1,)
+                        and db.execute("SELECT state, stage FROM session_fork_intents").fetchall()
+                        == [("succeeded", "succeeded")] * count,
+                        "A rejected or repeated request created an extra card or fork intent")
+            host.shutdown()
+    finally:
+        identity.check_secret(root, config_path, key, proof)
+        proof["credential_absent_from_artifacts"] = True
+
+
+def source_snapshot_copy(snapshot):
+    return {table: [row.copy() for row in rows] for table, rows in snapshot.items()}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--claude", type=Path, default=shutil.which("claude"))
     parser.add_argument("--runtime", type=Path, default=launch.BINARY)
-    parser.add_argument("--evidence", type=Path, default=launch.CHECKS / "claude-fork.json")
+    parser.add_argument("--placement", choices=("child", "sibling", "peer", "both"), default="child")
+    parser.add_argument("--evidence", type=Path)
     args = parser.parse_args()
     require(sys.platform == "darwin", "Real fork verification requires macOS sandbox-exec")
     cli = args.claude.resolve(strict=True)
     binary = args.runtime.resolve(strict=True)
-    evidence = args.evidence.resolve()
+    default_name = "claude-fork.json" if args.placement == "child" else f"claude-fork-{args.placement}.json"
+    evidence = (args.evidence or launch.CHECKS / default_name).resolve()
     require(evidence.is_relative_to(launch.REPO), "Evidence must stay inside the workspace")
     launch.CHECKS.mkdir(parents=True, exist_ok=True)
     evidence.parent.mkdir(parents=True, exist_ok=True)
@@ -254,7 +412,11 @@ def main():
                                                   text=True, timeout=10, stderr=subprocess.DEVNULL).strip()
                 require(re.fullmatch(r"[\d.]+ \(Claude Code\)", version), "Unexpected CLI version response")
                 proof["cli_version"] = version
-                verify(root, env, guard, binary, cli, config, key, proof)
+                if args.placement == "child":
+                    verify(root, env, guard, binary, cli, config, key, proof)
+                else:
+                    placements = ("sibling", "peer") if args.placement == "both" else (args.placement,)
+                    verify_sibling_and_peer(root, env, guard, binary, cli, config, key, proof, placements)
             proof["passed"] = True
         except Exception as error:
             message = str(error) if isinstance(error, RuntimeError) else type(error).__name__

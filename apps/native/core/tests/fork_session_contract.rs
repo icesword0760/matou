@@ -197,14 +197,6 @@ fn fork_validation_rejects_before_writing_any_card() -> Result<()> {
         ),
         (
             ForkSessionInput {
-                placement: ForkPlacement::Peer,
-                ..request()
-            },
-            "FORK_PLACEMENT_NOT_IMPLEMENTED",
-            "当前仅支持创建子分支",
-        ),
-        (
-            ForkSessionInput {
                 worktree_mode: ForkWorktreeMode::New,
                 ..request()
             },
@@ -213,6 +205,187 @@ fn fork_validation_rejects_before_writing_any_card() -> Result<()> {
         ),
     ] {
         reject(fixture(cwd)?, input, code, message);
+    }
+    Ok(())
+}
+
+fn add_parent(db: &Connection) -> Result<()> {
+    db.execute_batch(
+        r#"INSERT INTO execution_contexts (id, workspace_id, kind, cwd, created_at)
+           SELECT 'parent-context', workspace_id, kind, cwd || '/parent', created_at
+           FROM execution_contexts WHERE id='context';
+         INSERT INTO sessions (id, task_id, execution_context_id, kind, status, title, cwd,
+                               work_status, created_at, updated_at, last_activity_at)
+           SELECT 'parent', task_id, 'parent-context', kind, 'running', 'Parent', cwd || '/parent',
+                  'running', created_at, updated_at, last_activity_at
+           FROM sessions WHERE id='source';
+         INSERT INTO provider_bindings (id, session_id, provider, provider_session_id, resume_state,
+                                        metadata_json, created_at, updated_at, validated_at)
+         VALUES ('parent-binding', 'parent', 'claude-code', 'parent-provider-id', 'available',
+                 '{"canFork":true,"providerConfigId":"parent-config","model":"parent-model","permissionMode":"acceptEdits"}',
+                 2, 2, 2);
+         INSERT INTO session_relation_events (event_id, relation_id, operation, task_id,
+                                              from_session_id, to_session_id, relation_kind, command_id, occurred_at)
+         VALUES ('parent-event', 'parent-relation', 'created', 'task',
+                 'source', 'parent', 'derived-from', 'fixture', 2);
+         INSERT INTO session_relations_current (relation_id, task_id, from_session_id, to_session_id,
+                                                relation_kind, created_at, updated_at, source_event_sequence)
+         VALUES ('parent-relation', 'task', 'source', 'parent', 'derived-from', 2, 2, last_insert_rowid());"#,
+    )?;
+    Ok(())
+}
+
+#[test]
+fn sibling_and_peer_use_their_own_fork_source_and_structural_parent() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let cwd = directory.path().to_str().unwrap();
+    for (placement, parent_state, fork_source, expected_relation) in [
+        (
+            ForkPlacement::Sibling,
+            "running",
+            "parent",
+            Some(("parent", "forked-from")),
+        ),
+        (
+            ForkPlacement::Peer,
+            "running",
+            "source",
+            Some(("parent", "derived-from")),
+        ),
+        (
+            ForkPlacement::Peer,
+            "archived",
+            "source",
+            Some(("parent", "derived-from")),
+        ),
+        (ForkPlacement::Peer, "removed", "source", None),
+        (ForkPlacement::Peer, "absent", "source", None),
+    ] {
+        let mut db = fixture(cwd)?;
+        if parent_state != "absent" {
+            add_parent(&db)?;
+        }
+        match parent_state {
+            "archived" => db.execute_batch(
+                "UPDATE sessions SET archived_at=3, status='archived' WHERE id='parent'",
+            )?,
+            "removed" => remove_parent_with_stale_relation(&db)?,
+            _ => {}
+        }
+        if placement == ForkPlacement::Sibling {
+            // The selected card only provides the structural relation and mount.
+            db.execute_batch("DELETE FROM provider_bindings WHERE session_id='source'")?;
+        }
+        let input = ForkSessionInput {
+            placement,
+            ..request()
+        };
+        let origin = get_session(&db, fork_source)?.unwrap();
+        let accepted = create(&mut db, "first", &input)?;
+        assert_eq!(accepted["sessionId"], "child");
+        let child = get_session(&db, "child")?.unwrap();
+        assert_eq!(child.cwd, origin.cwd);
+        assert_eq!(child.execution_context_id, origin.execution_context_id);
+        let graph = project_scene_graph(&db, "scene", Some("window"))?;
+        let node = graph["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|node| node["sessionId"] == "child")
+            .unwrap();
+        assert_eq!(
+            node["parentSessionId"].as_str(),
+            expected_relation.map(|(id, _)| id)
+        );
+        assert_eq!(
+            node["relationKind"].as_str(),
+            expected_relation.map(|(_, kind)| kind)
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT split.direction, source.ordinal, child.ordinal
+                 FROM scene_nodes AS split
+                 JOIN scene_nodes AS source ON source.parent_node_id=split.id AND source.id='source-node'
+                 JOIN scene_nodes AS child ON child.parent_node_id=split.id AND child.id='child-node'",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
+            )?,
+            ("horizontal".into(), 0, 1)
+        );
+        let target = pending_claude_fork(&db, "child")?.unwrap();
+        assert_eq!(target.source_id, format!("{fork_source}-provider-id"));
+        assert_eq!(
+            target.metadata["providerConfigId"],
+            format!("{fork_source}-config")
+        );
+        assert_eq!(
+            target.metadata["permissionMode"],
+            if fork_source == "parent" {
+                "acceptEdits"
+            } else {
+                "plan"
+            }
+        );
+        assert_eq!(get_session(&db, fork_source)?.unwrap(), origin);
+        let replay = create(&mut db, "replay", &input)?;
+        assert_eq!(replay["sessionId"], "child");
+        assert_eq!(replay["replayed"], true);
+        assert_eq!(
+            db.query_row("SELECT COUNT(*) FROM session_fork_intents", [], |row| row
+                .get::<_, i64>(
+                0
+            ))?,
+            1
+        );
+    }
+    Ok(())
+}
+
+fn remove_parent_with_stale_relation(db: &Connection) -> Result<()> {
+    db.execute_batch(
+        "PRAGMA foreign_keys=OFF;
+         DELETE FROM provider_bindings WHERE session_id='parent';
+         DELETE FROM sessions WHERE id='parent';
+         PRAGMA foreign_keys=ON;",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn sibling_rejects_an_unusable_parent_without_creating_a_card() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let cwd = directory.path().to_str().unwrap();
+    for sql in [
+        None,
+        Some("UPDATE sessions SET status='archived', archived_at=3 WHERE id='parent'"),
+        Some("DELETE FROM provider_bindings WHERE session_id='parent'"),
+        Some(
+            r#"UPDATE provider_bindings SET metadata_json='{"canFork":false}' WHERE session_id='parent'"#,
+        ),
+    ] {
+        let mut db = fixture(cwd)?;
+        add_parent(&db)?;
+        match sql {
+            Some(sql) => db.execute_batch(sql)?,
+            None => remove_parent_with_stale_relation(&db)?,
+        }
+        let input = ForkSessionInput {
+            placement: ForkPlacement::Sibling,
+            ..request()
+        };
+        let error = create(&mut db, "rejected", &input).unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<CanvasError>().unwrap().code,
+            "FORK_SOURCE_NOT_READY"
+        );
+        assert!(get_session(&db, "child")?.is_none());
+        assert_eq!(
+            db.query_row("SELECT COUNT(*) FROM session_fork_intents", [], |row| row
+                .get::<_, i64>(
+                0
+            ))?,
+            0
+        );
     }
     Ok(())
 }
