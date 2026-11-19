@@ -61,12 +61,16 @@ struct RunHook {
     last_submission: Option<Instant>,
     resume: Option<ResumeMonitor>,
     reported_missing: bool,
+    pending_permission_identity: Option<(Scope, Observation)>,
+    permission_identity_error: Option<String>,
 }
 
 const FORK_SOURCE_IDENTITY: &str = "CLI returned the source conversation ID for the fork";
 const FORK_IDENTITY_TIMEOUT: &str = "Fork 会话身份确认超时，请重试";
 const FORK_IDENTITY_WAIT: Duration = Duration::from_secs(60);
 const ACTIVE_PERMISSION_SESSION: &str = "active AI Session is required for permission respawn";
+const FRESH_PERMISSION_IDENTITY_TIMEOUT: &str =
+    "provider fresh session identity confirmation timed out";
 
 #[derive(Default)]
 struct Summary {
@@ -800,7 +804,7 @@ impl ShellOwner {
             ClaudeRestore::Begin(_) => ("restoring", false),
             ClaudeRestore::Fail { error, .. } => ("restore-failed", error == IDENTITY_MISMATCH),
             ClaudeRestore::Retry => ("retrying", false),
-            ClaudeRestore::Fresh => ("starting-fresh", false),
+            ClaudeRestore::Fresh | ClaudeRestore::PermissionFresh => ("starting-fresh", false),
         };
         let id = (self.next_id)();
         let Some(commit) = sessions::change_claude_restore(
@@ -877,7 +881,17 @@ impl ShellOwner {
         Ok(receive)
     }
 
-    pub(crate) fn permission_binding(&self, session_id: &str) -> Result<ClaudeBinding> {
+    pub(crate) fn stop_for_permission_change(
+        &mut self,
+        session_id: &str,
+    ) -> Result<Option<mpsc::Receiver<Result<()>>>> {
+        self.shells
+            .contains_key(session_id)
+            .then(|| self.stop_for_provider_relaunch(session_id))
+            .transpose()
+    }
+
+    pub(crate) fn permission_binding(&self, session_id: &str) -> Result<Option<ClaudeBinding>> {
         let session = self
             .session(session_id)?
             .context(ACTIVE_PERMISSION_SESSION)?;
@@ -886,14 +900,27 @@ impl ShellOwner {
             "archived Session permission mode cannot be modified"
         );
         ensure!(session.kind == "claude-code", "{ACTIVE_PERMISSION_SESSION}");
-        let shell = self
-            .shells
-            .get(session_id)
-            .context(ACTIVE_PERMISSION_SESSION)?;
+        let shell = self.shells.get(session_id);
         ensure!(
-            !shell.retiring && !self.waiting_for_provider_restore(session_id),
+            !shell.is_some_and(|shell| shell.retiring)
+                && !self.waiting_for_provider_restore(session_id),
             "AI Session is already stopping or recovering"
         );
+        let Some(binding) = self
+            .claude_binding(session_id)?
+            .filter(|binding| binding.resumable)
+        else {
+            ensure!(
+                !shell.is_some_and(|shell| shell.is_shell),
+                "{ACTIVE_PERMISSION_SESSION}"
+            );
+            ensure!(
+                self.pending_claude_fork(session_id)?.is_none(),
+                "Card has an unconfirmed fork"
+            );
+            return Ok(None);
+        };
+        let shell = shell.context(ACTIVE_PERMISSION_SESSION)?;
         ensure!(
             !shell.is_shell && !shell.ended && !shell.worker.is_finished(),
             "{ACTIVE_PERMISSION_SESSION}"
@@ -904,14 +931,13 @@ impl ShellOwner {
             .and_then(|hook| hook.last_observation.as_ref())
             .and_then(|observation| observation.identity.as_deref())
             .context(ACTIVE_PERMISSION_SESSION)?;
-        self.claude_binding(session_id)?
-            .filter(|binding| {
-                binding.resumable
-                    && binding.restore_state == "none"
-                    && binding.provider_session_id == identity
-                    && binding.metadata.is_object()
-            })
-            .context(ACTIVE_PERMISSION_SESSION)
+        ensure!(
+            binding.restore_state == "none"
+                && binding.provider_session_id == identity
+                && binding.metadata.is_object(),
+            "{ACTIVE_PERMISSION_SESSION}"
+        );
+        Ok(Some(binding))
     }
 
     pub(crate) fn write_claude_permission(
@@ -938,7 +964,7 @@ impl ShellOwner {
         session_id: &str,
         terminal: matou_native_terminal::TerminalOptions,
         plan: ClaudeLaunch,
-        binding: &ClaudeBinding,
+        binding: Option<&ClaudeBinding>,
     ) -> Result<String> {
         let resume = ResumeMonitor::for_permission_respawn(
             binding,
@@ -949,7 +975,7 @@ impl ShellOwner {
             terminal,
             plan,
             Some(resume),
-            binding.metadata.get("spawnRevision"),
+            binding.and_then(|binding| binding.metadata.get("spawnRevision")),
         )?;
         Ok(self.shells[session_id].run_id.clone())
     }
@@ -960,7 +986,17 @@ impl ShellOwner {
         run_id: &str,
     ) -> Result<()> {
         self.check_permission_run(session_id, run_id)?;
-        self.shells.get_mut(session_id).unwrap().permission_starting = false;
+        let shell = self.shells.get_mut(session_id).unwrap();
+        shell.permission_starting = false;
+        if let Some((scope, observation)) = shell
+            .hook
+            .as_mut()
+            .and_then(|hook| hook.pending_permission_identity.take())
+        {
+            let mut events = Vec::new();
+            self.apply_hook(scope, observation, &mut events);
+            self.pending.extend(events);
+        }
         Ok(())
     }
 
@@ -985,6 +1021,13 @@ impl ShellOwner {
                 ),
                 None => anyhow::bail!("AI Session permission respawn failed"),
             }
+        }
+        if let Some(error) = shell
+            .hook
+            .as_ref()
+            .and_then(|hook| hook.permission_identity_error.as_ref())
+        {
+            anyhow::bail!("{error}");
         }
         Ok(())
     }
@@ -1215,10 +1258,8 @@ impl ShellOwner {
                 .as_ref()
                 .is_some_and(|resume| resume.permission_respawn);
             let (expected_id, fork_source_id) = match &resume {
-                Some(resume) if resume.binding_id.is_some() => {
-                    (Some(resume.expected_id.clone()), None)
-                }
-                Some(fork) => (None, Some(fork.expected_id.clone())),
+                Some(resume) if resume.binding_id.is_some() => (resume.expected_id.clone(), None),
+                Some(resume) => (None, resume.expected_id.clone()),
                 None => (None, None),
             };
             let identity_wait = if fork_source_id.is_some() {
@@ -1244,6 +1285,8 @@ impl ShellOwner {
                 last_submission: None,
                 resume,
                 reported_missing: false,
+                pending_permission_identity: None,
+                permission_identity_error: None,
             })
         } else {
             None
@@ -1421,15 +1464,22 @@ impl ShellOwner {
         for hook in hooks {
             match hook {
                 HookMessage::Observed(scope, observation, received_at) => {
-                    let late_fork = scope.fork_source_id.is_some()
-                        && self
-                            .shells
-                            .get(&scope.session_id)
-                            .filter(|shell| shell.run_id == scope.run_id)
-                            .and_then(|shell| shell.hook.as_ref())
-                            .and_then(|hook| hook.deadline)
-                            .is_some_and(|deadline| received_at >= deadline);
-                    if !late_fork {
+                    let late_identity = self
+                        .shells
+                        .get(&scope.session_id)
+                        .filter(|shell| shell.run_id == scope.run_id)
+                        .and_then(|shell| shell.hook.as_ref())
+                        .is_some_and(|hook| {
+                            (scope.fork_source_id.is_some()
+                                || hook
+                                    .resume
+                                    .as_ref()
+                                    .is_some_and(ResumeMonitor::fresh_permission))
+                                && hook
+                                    .deadline
+                                    .is_some_and(|deadline| received_at >= deadline)
+                        });
+                    if !late_identity {
                         self.apply_hook(scope, observation, events);
                     }
                 }
@@ -1450,6 +1500,11 @@ impl ShellOwner {
             {
                 hook.deadline = None;
                 if let Some(resume) = &mut hook.resume {
+                    if resume.fresh_permission() {
+                        hook.permission_identity_error =
+                            Some(FRESH_PERMISSION_IDENTITY_TIMEOUT.into());
+                        continue;
+                    }
                     if resume.permission_respawn
                         && let Some(binding_id) = &resume.binding_id
                     {
@@ -1469,7 +1524,7 @@ impl ShellOwner {
                 events.push(OwnerEvent::ProviderIdentity(json!({
                     "result": "timed-out", "sessionId": session_id, "runId": shell.run_id,
                     "provider": "claude-code",
-                    "providerSessionId": hook.resume.as_ref().map(|resume| &resume.expected_id),
+                    "providerSessionId": hook.resume.as_ref().and_then(|resume| resume.expected_id.as_deref()),
                     "restoreState": if hook.resume.is_some() { "restoring" } else { "none" },
                     "restoreError": null, "spawnRevision": hook.launch_metadata.get("spawnRevision"),
                 })));
@@ -1506,21 +1561,23 @@ impl ShellOwner {
         mut observation: Observation,
         events: &mut Vec<OwnerEvent>,
     ) {
-        let Some(hook) = self
-            .shells
-            .get_mut(&scope.session_id)
-            .filter(|shell| {
-                !self.closing
-                    && !shell.ended
-                    && !shell.retiring
-                    && shell.run_id == scope.run_id
-                    && scope.generation == self.generation
-            })
-            .and_then(|shell| shell.hook.as_mut())
-        else {
+        let Some(shell) = self.shells.get_mut(&scope.session_id).filter(|shell| {
+            !self.closing
+                && !shell.ended
+                && !shell.retiring
+                && shell.run_id == scope.run_id
+                && scope.generation == self.generation
+        }) else {
             reject_identity(events, &scope, "retired-run");
             return;
         };
+        let Some(hook) = &mut shell.hook else {
+            reject_identity(events, &scope, "retired-run");
+            return;
+        };
+        if hook.permission_identity_error.is_some() {
+            return;
+        }
         if matches!(observation.event, "unknown" | "SessionEnd") {
             return;
         }
@@ -1551,6 +1608,39 @@ impl ShellOwner {
             }
             return;
         };
+        let first_fresh_identity = hook.last_observation.is_none()
+            && hook
+                .resume
+                .as_ref()
+                .is_some_and(ResumeMonitor::fresh_permission);
+        if first_fresh_identity {
+            if shell.permission_starting {
+                // Passing the startup check is required before a fresh binding can be written.
+                if hook.pending_permission_identity.is_none() {
+                    hook.pending_permission_identity = Some((scope, observation));
+                }
+                return;
+            }
+            if shell.worker.is_finished() {
+                return;
+            }
+            let known = self.connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM provider_bindings
+                 WHERE session_id = ? AND provider = 'claude-code' AND provider_session_id = ?)",
+                params![scope.session_id, identity.trim()],
+                |row| row.get::<_, bool>(0),
+            );
+            let error = match known {
+                Ok(false) => None,
+                Ok(true) => Some("Claude Code returned a previous conversation ID for the fresh permission session".into()),
+                Err(error) => Some(format!("Could not verify the fresh permission session identity: {error}")),
+            };
+            if let Some(error) = error {
+                hook.permission_identity_error = Some(error);
+                hook.deadline = None;
+                return;
+            }
+        }
         if let Some(source_id) = &scope.fork_source_id {
             if let Some(confirmed) = &hook.last_observation {
                 if confirmed.identity.as_deref().map(str::trim) != Some(identity.trim()) {
@@ -1568,7 +1658,13 @@ impl ShellOwner {
             }
         }
         observation.model = safe(observation.model);
-        observation.permission_mode = safe(observation.permission_mode);
+        observation.permission_mode = if first_fresh_identity {
+            hook.launch_metadata["permissionMode"]
+                .as_str()
+                .map(str::to_owned)
+        } else {
+            safe(observation.permission_mode)
+        };
         observation.cwd = safe(observation.cwd)
             .filter(|cwd| Path::new(cwd).is_absolute() && Path::new(cwd).is_dir());
         // Hook status is independent of whether the identity metadata changed.
@@ -1611,7 +1707,12 @@ impl ShellOwner {
             let commit = match commit {
                 Ok(commit) => commit,
                 Err(error) => {
-                    if scope.fork_source_id.is_some() && hook.last_observation.is_none() {
+                    if first_fresh_identity {
+                        hook.permission_identity_error = Some(format!(
+                            "Could not record the fresh permission session identity: {error:#}"
+                        ));
+                        hook.deadline = None;
+                    } else if scope.fork_source_id.is_some() && hook.last_observation.is_none() {
                         self.park_fork_run(
                             &scope.session_id,
                             &scope.run_id,
@@ -2038,7 +2139,7 @@ impl ShellOwner {
         if permission_starting
             || pending_restore
                 .as_ref()
-                .is_some_and(ResumeMonitor::saw_bypass_consent)
+                .is_some_and(|resume| resume.saw_bypass_consent() || resume.fresh_permission())
         {
             return Ok(());
         }

@@ -883,7 +883,7 @@ fn run(
             }
             eligible.insert(session_id.clone());
             if !launch_preparations.contains_key(&session_id) {
-                match prepare_launch(&owner, &options, &session_id) {
+                match prepare_launch(&owner, &options, &session_id, None) {
                     Ok(result) => {
                         launch_preparations.insert(session_id, result);
                     }
@@ -1529,14 +1529,16 @@ fn run(
                             "AI Session is already stopping or recovering"
                         );
                         let binding = owner.permission_binding(&session_id)?;
-                        let current = binding.metadata["permissionMode"]
-                            .as_str()
-                            .filter(|mode| CLAUDE_PERMISSION_MODES.contains(mode))
-                            .unwrap_or("default");
-                        if current == mode {
+                        if binding.as_ref().is_some_and(|binding| {
+                            binding.metadata["permissionMode"]
+                                .as_str()
+                                .filter(|mode| CLAUDE_PERMISSION_MODES.contains(mode))
+                                .unwrap_or("default")
+                                == mode
+                        }) {
                             return Ok(None);
                         }
-                        let stopped = owner.stop_for_provider_relaunch(&session_id)?;
+                        let stopped = owner.stop_for_permission_change(&session_id)?;
                         Ok(Some(PermissionChange {
                             mode: mode.clone(),
                             binding,
@@ -1545,6 +1547,9 @@ fn run(
                     })();
                     match attempt {
                         Ok(Some(change)) => {
+                            if change.binding.is_none() {
+                                failed_launches.remove(&session_id);
+                            }
                             sessions.remove(&session_id);
                             dirty.remove(&session_id);
                             sequence.remove(&session_id);
@@ -2429,12 +2434,12 @@ const PERMISSION_STARTUP_WINDOW: Duration = Duration::from_millis(150);
 
 struct PermissionChange {
     mode: String,
-    binding: ClaudeBinding,
+    binding: Option<ClaudeBinding>,
     phase: PermissionPhase,
 }
 
 enum PermissionPhase {
-    Stopping(Receiver<Result<()>>),
+    Stopping(Option<Receiver<Result<()>>>),
     Preparing(Option<Receiver<Result<PreparedLaunch>>>),
     AwaitingIdentity {
         run_id: String,
@@ -2462,22 +2467,33 @@ impl PermissionChange {
     ) -> Result<PermissionProgress> {
         match &mut self.phase {
             PermissionPhase::Stopping(stopped) => {
-                match stopped.try_recv() {
-                    Ok(result) => result?,
-                    Err(mpsc::TryRecvError::Empty) => return Ok(PermissionProgress::Pending),
-                    Err(error) => {
-                        return Err(error).context("wait for the current AI Session to stop");
+                if let Some(stopped) = stopped {
+                    match stopped.try_recv() {
+                        Ok(result) => result?,
+                        Err(mpsc::TryRecvError::Empty) => return Ok(PermissionProgress::Pending),
+                        Err(error) => {
+                            return Err(error).context("wait for the current AI Session to stop");
+                        }
                     }
                 }
-                owner.write_claude_permission(
-                    session_id,
-                    &self.binding.id,
-                    Some(&json!(self.mode)),
-                )?;
+                if let Some(binding) = &self.binding {
+                    owner.write_claude_permission(
+                        session_id,
+                        &binding.id,
+                        Some(&json!(self.mode)),
+                    )?;
+                } else {
+                    owner.change_claude_restore(session_id, ClaudeRestore::PermissionFresh)?;
+                }
                 // Record that the metadata was written before scheduling fallible preparation.
                 self.phase = PermissionPhase::Preparing(None);
-                self.phase =
-                    PermissionPhase::Preparing(Some(prepare_launch(owner, options, session_id)?));
+                let fresh_permission = self.binding.is_none().then_some(self.mode.as_str());
+                self.phase = PermissionPhase::Preparing(Some(prepare_launch(
+                    owner,
+                    options,
+                    session_id,
+                    fresh_permission,
+                )?));
                 Ok(PermissionProgress::Pending)
             }
             PermissionPhase::Preparing(preparation) => {
@@ -2492,18 +2508,24 @@ impl PermissionChange {
                 let PreparedLaunch::ClaudeCode(plan, None) = launch else {
                     bail!("AI Session permission respawn lost its binding");
                 };
-                let binding = owner
-                    .claude_binding(session_id)?
-                    .filter(|binding| {
-                        binding.id == self.binding.id
-                            && binding.resumable
-                            && binding.provider_session_id == self.binding.provider_session_id
-                            && binding.metadata["permissionMode"] == self.mode
-                            && plan.permission_mode == self.mode
-                    })
-                    .context("AI Session permission respawn lost its binding")?;
+                let binding = if let Some(previous) = &self.binding {
+                    Some(
+                        owner
+                            .claude_binding(session_id)?
+                            .filter(|binding| {
+                                binding.id == previous.id
+                                    && binding.resumable
+                                    && binding.provider_session_id == previous.provider_session_id
+                                    && binding.metadata["permissionMode"] == self.mode
+                                    && plan.permission_mode == self.mode
+                            })
+                            .context("AI Session permission respawn lost its binding")?,
+                    )
+                } else {
+                    None
+                };
                 let run_id =
-                    owner.launch_claude_permission(session_id, terminal, plan, &binding)?;
+                    owner.launch_claude_permission(session_id, terminal, plan, binding.as_ref())?;
                 self.phase = PermissionPhase::AwaitingIdentity {
                     run_id,
                     startup_until: Some(Instant::now() + PERMISSION_STARTUP_WINDOW),
@@ -2553,7 +2575,10 @@ impl PermissionChange {
             run_id, outcome, ..
         } = &mut self.phase
             && identity["runId"] == *run_id
-            && identity["bindingId"] == self.binding.id
+            && self
+                .binding
+                .as_ref()
+                .is_none_or(|binding| identity["bindingId"] == binding.id)
         {
             match identity["result"].as_str() {
                 Some("confirmed") => *outcome = Some(Ok(())),
@@ -2569,18 +2594,20 @@ impl PermissionChange {
     }
 
     fn rollback_if_pending(&self, owner: &mut ShellOwner, session_id: &str) -> Result<()> {
-        if matches!(
-            self.phase,
-            PermissionPhase::Preparing(_)
-                | PermissionPhase::AwaitingIdentity {
-                    outcome: None | Some(Ok(())),
-                    ..
-                }
-        ) {
+        if let Some(binding) = &self.binding
+            && matches!(
+                self.phase,
+                PermissionPhase::Preparing(_)
+                    | PermissionPhase::AwaitingIdentity {
+                        outcome: None | Some(Ok(())),
+                        ..
+                    }
+            )
+        {
             owner.write_claude_permission(
                 session_id,
-                &self.binding.id,
-                self.binding.metadata.get("permissionMode"),
+                &binding.id,
+                binding.metadata.get("permissionMode"),
             )?;
         }
         Ok(())
@@ -2865,6 +2892,7 @@ fn prepare_launch(
     owner: &ShellOwner,
     options: &LaunchOptions,
     session_id: &str,
+    fresh_permission: Option<&str>,
 ) -> Result<Receiver<Result<PreparedLaunch>>> {
     let session = owner
         .session(session_id)?
@@ -2887,6 +2915,21 @@ fn prepare_launch(
         "claude-code" => {
             let binding = owner.claude_binding(session_id)?;
             let fork = owner.pending_claude_fork(session_id)?;
+            let mut metadata = binding
+                .as_ref()
+                .map_or(Value::Null, |binding| binding.metadata.clone());
+            let resume_id = if let Some(mode) = fresh_permission {
+                ensure!(fork.is_none(), "Card has an unconfirmed fork");
+                if !metadata.is_object() {
+                    metadata = json!({});
+                }
+                metadata["permissionMode"] = json!(mode);
+                None
+            } else {
+                binding
+                    .filter(|binding| binding.resumable)
+                    .map(|binding| binding.provider_session_id)
+            };
             let data_root = options.data_root.clone();
             thread::Builder::new()
                 .name("claude-launch".into())
@@ -2911,13 +2954,8 @@ fn prepare_launch(
                     let result = prepare_claude_launch(
                         &data_root,
                         Path::new(&session.cwd),
-                        binding
-                            .as_ref()
-                            .map_or(&Value::Null, |binding| &binding.metadata),
-                        binding
-                            .as_ref()
-                            .filter(|binding| binding.resumable)
-                            .map(|binding| binding.provider_session_id.as_str()),
+                        &metadata,
+                        resume_id.as_deref(),
                         std::env::vars_os().collect(),
                         terminal.cols,
                         terminal.rows,

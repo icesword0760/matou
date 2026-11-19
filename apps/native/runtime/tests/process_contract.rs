@@ -122,6 +122,10 @@ impl RuntimeChild {
             !self.data.exists() && !self.workspace.exists(),
             "host started before Hello"
         );
+        self.connect()
+    }
+
+    fn connect(&mut self) -> Result<()> {
         write_message(
             self.input.as_mut().context("stdin")?,
             &ClientMessage::Hello { version: VERSION },
@@ -1064,6 +1068,237 @@ fn wait_permission_identity(child: &mut RuntimeChild) -> Result<()> {
             return Ok(());
         }
     }
+}
+
+fn spawn_fresh_permission_card(
+    root: &Path,
+    stub: &Path,
+    unusable: Option<&str>,
+) -> Result<RuntimeChild> {
+    let missing_shell = root.join("missing-shell");
+    let mut seed = RuntimeChild::spawn_configured(root, "", &missing_shell, None)?;
+    seed.ready()?;
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        if let Event::Recovery { .. } = seed.event(deadline, true)? {
+            break;
+        }
+    }
+    seed.send(Command::Shutdown)?;
+    seed.closed()?;
+    let (status, stderr) = seed.wait()?;
+    ensure!(status.success(), "seed runtime shutdown: {stderr}");
+    let db = Connection::open(seed.data.join("matou.sqlite"))?;
+    db.execute(
+        "UPDATE sessions SET kind='claude-code' WHERE id=?",
+        [&seed.session],
+    )?;
+    if let Some(state) = unusable {
+        db.execute(
+            "INSERT INTO provider_bindings
+                (id, session_id, provider, provider_session_id, resume_state, restore_state,
+                 restore_error, metadata_json, created_at, updated_at, invalidated_at, validated_at)
+             VALUES ('old-binding', ?, 'claude-code', 'old-id', ?, ?, ?,
+                 '{\"permissionMode\":\"acceptEdits\"}', 1, 1, ?, 1)",
+            rusqlite::params![
+                seed.session,
+                if state == "failed" {
+                    "available"
+                } else {
+                    state
+                },
+                if state == "failed" { state } else { "none" },
+                (state == "failed").then_some("previous restore failure"),
+                (state != "failed").then_some(1),
+            ],
+        )?;
+    }
+    let mut child = RuntimeChild::spawn_configured(root, "", Path::new("/bin/zsh"), Some(stub))?;
+    child.connect()?;
+    assert_eq!(child.session, seed.session);
+    Ok(child)
+}
+
+#[test]
+fn fresh_permission_respawn_expires_unusable_bindings_and_coalesces() -> Result<()> {
+    use matou_native_core::sessions::{claude_binding, list_runs};
+    for unusable in [None, Some("expired"), Some("failed")] {
+        let root = tempfile::tempdir()?;
+        let stub = root.path().join("claude-fresh-permission-stub");
+        fs::write(
+            &stub,
+            r#"#!/bin/sh
+printf '%s\n' "$@" > "$0.argv"
+printf '%s' "$2" > "$0.settings"
+case "$*" in *'--permission-mode plan'*) printf 'plan ready\n';;
+  *) printf 'initial ready\n';;
+esac
+exec /bin/sleep 60
+"#,
+        )?;
+        fs::set_permissions(&stub, fs::Permissions::from_mode(0o700))?;
+        let mut child = spawn_fresh_permission_card(root.path(), &stub, unusable)?;
+        if unusable != Some("failed") {
+            child.frame(|_, screen, _| screen_has_line(screen, "initial ready"))?;
+        }
+        let session = child.session.clone();
+        let db = Connection::open(child.data.join("matou.sqlite"))?;
+        let original_runs = list_runs(&db, &session)?;
+        assert_eq!(original_runs.len(), usize::from(unusable != Some("failed")));
+        let set = |mode: &str| Command::SetProviderPermissionMode {
+            session_id: session.clone(),
+            mode: mode.into(),
+        };
+        child.send(set("plan"))?;
+        child.send(set("plan"))?;
+        child.send(set("auto"))?;
+        assert!(
+            permission_mode_result(&mut child, "auto")?["error"]
+                .as_str()
+                .unwrap()
+                .contains("stopping")
+        );
+        child.frame(|_, screen, _| screen_has_line(screen, "plan ready"))?;
+        let argv = fs::read_to_string(stub.with_extension("argv"))?;
+        assert!(
+            argv.lines()
+                .collect::<Vec<_>>()
+                .ends_with(&["--permission-mode", "plan"])
+        );
+        assert!(!argv.lines().any(|argument| argument == "--resume"));
+        if unusable.is_some() {
+            let old = db.query_row(
+                "SELECT resume_state, restore_state, restore_error IS NULL, invalidated_at IS NOT NULL,
+                        json_extract(metadata_json, '$.permissionMode')
+                 FROM provider_bindings WHERE id='old-binding'",
+                [], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?,
+                              row.get::<_, bool>(2)?, row.get::<_, bool>(3)?,
+                              row.get::<_, String>(4)?)),
+            )?;
+            assert_eq!(
+                old,
+                (
+                    "expired".into(),
+                    "none".into(),
+                    true,
+                    true,
+                    "acceptEdits".into()
+                )
+            );
+        } else {
+            assert!(claude_binding(&db, &session)?.is_none());
+        }
+        post_permission_identity(
+            Path::new(&fs::read_to_string(stub.with_extension("settings"))?),
+            "fresh-id",
+            "default",
+        )?;
+        let result = permission_mode_result(&mut child, "plan")?;
+        assert!(result.get("error").is_none(), "{result}");
+        let binding = claude_binding(&db, &session)?.context("new binding")?;
+        assert_eq!(binding.provider_session_id, "fresh-id");
+        assert_eq!(binding.metadata["permissionMode"], "plan");
+        assert!(binding.resumable);
+        let runs = list_runs(&db, &session)?;
+        assert_eq!(runs.len(), original_runs.len() + 1);
+        let new_run = runs.last().context("fresh run")?;
+        if let Some(first) = original_runs.first() {
+            assert_eq!(runs[0].id, first.id);
+            assert_eq!(runs[0].status, "exited");
+            assert!(runs[0].ended_at.unwrap() <= new_run.started_at);
+            assert_shell_gone(first.pid.context("original process")? as u32)?;
+        }
+        child.send(set("plan"))?;
+        assert!(
+            permission_mode_result(&mut child, "plan")?
+                .get("error")
+                .is_none()
+        );
+        assert_eq!(list_runs(&db, &session)?.len(), runs.len());
+        child.send(Command::Shutdown)?;
+        child.closed()?;
+        let (status, stderr) = child.wait()?;
+        ensure!(status.success(), "runtime shutdown: {stderr}");
+    }
+    Ok(())
+}
+
+#[test]
+fn fresh_permission_respawn_failure_does_not_record_an_identity() -> Result<()> {
+    use matou_native_core::sessions::{claude_binding, list_runs};
+    for unusable in [None, Some("failed")] {
+        let root = tempfile::tempdir()?;
+        let stub = root.path().join("claude-fresh-permission-stub");
+        fs::write(
+            &stub,
+            r#"#!/bin/sh
+case "$*" in
+  *'--permission-mode auto'*)
+    url=$(/usr/bin/plutil -extract hooks.UserPromptSubmit.0.hooks.0.url raw -o - "$2") || exit 91
+    /usr/bin/curl --silent --fail --noproxy '*' --max-time 2 -H 'content-type: application/json' \
+      --data-binary '{"hook_event_name":"SessionStart","session_id":"early-id"}' "$url" || exit 92
+    exit 23
+    ;;
+  *'--permission-mode plan'*)
+    printf '%s' "$2" > "$0.settings"
+    printf 'plan ready\n'
+    ;;
+  *) printf 'initial ready\n' ;;
+esac
+exec /bin/sleep 60
+"#,
+        )?;
+        fs::set_permissions(&stub, fs::Permissions::from_mode(0o700))?;
+        let mut child = spawn_fresh_permission_card(root.path(), &stub, unusable)?;
+        let session = child.session.clone();
+        let db = Connection::open(child.data.join("matou.sqlite"))?;
+        let (mode, expected_error) = if unusable.is_some() {
+            ("plan", "returned a previous conversation ID")
+        } else {
+            child.frame(|_, screen, _| screen_has_line(screen, "initial ready"))?;
+            ("auto", "process exited with code 23")
+        };
+        child.send(Command::SetProviderPermissionMode {
+            session_id: session.clone(),
+            mode: mode.into(),
+        })?;
+        if unusable.is_some() {
+            child.frame(|_, screen, _| screen_has_line(screen, "plan ready"))?;
+            post_permission_identity(
+                Path::new(&fs::read_to_string(stub.with_extension("settings"))?),
+                "old-id",
+                "plan",
+            )?;
+        }
+        let result = permission_mode_result(&mut child, mode)?;
+        assert!(
+            result["error"].as_str().unwrap().contains(expected_error),
+            "{result}"
+        );
+        let count: i64 = db.query_row(
+            "SELECT COUNT(*) FROM provider_bindings WHERE session_id = ?",
+            [&session],
+            |row| row.get(0),
+        )?;
+        assert_eq!(count, i64::from(unusable.is_some()));
+        if unusable.is_some() {
+            let old = claude_binding(&db, &session)?.context("expired binding")?;
+            assert_eq!(old.id, "old-binding");
+            assert_eq!(old.restore_state, "none");
+            assert!(!old.resumable);
+            assert_eq!(old.metadata["permissionMode"], "acceptEdits");
+        } else {
+            assert_eq!(
+                list_runs(&db, &session)?.last().unwrap().exit_code,
+                Some(23)
+            );
+        }
+        child.send(Command::Shutdown)?;
+        child.closed()?;
+        let (status, stderr) = child.wait()?;
+        ensure!(status.success(), "runtime shutdown: {stderr}");
+    }
+    Ok(())
 }
 
 #[test]
