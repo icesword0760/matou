@@ -7,7 +7,10 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
     ffi::OsString,
     path::{Component, Path, PathBuf},
-    sync::mpsc::{self, Receiver, Sender},
+    sync::{
+        Arc, OnceLock,
+        mpsc::{self, Receiver, Sender},
+    },
     thread::{self, JoinHandle},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -348,6 +351,7 @@ pub enum Event {
 pub struct RuntimeHost {
     pub commands: Sender<Command>,
     pub events: async_channel::Receiver<Event>,
+    shutdown_requested: Arc<OnceLock<bool>>,
     thread: Option<JoinHandle<Result<()>>>,
 }
 
@@ -355,10 +359,12 @@ impl RuntimeHost {
     pub fn start(options: LaunchOptions) -> Result<Self> {
         let (commands, incoming) = mpsc::channel();
         let (send, events) = async_channel::unbounded();
+        let shutdown_requested = Arc::new(OnceLock::new());
+        let domain_shutdown = Arc::clone(&shutdown_requested);
         let thread = thread::Builder::new()
             .name("matou-domain-owner".into())
             .spawn(move || {
-                let result = run(options, incoming, &send);
+                let result = run(options, incoming, &send, &domain_shutdown);
                 if let Err(error) = &result {
                     let _ = send.send_blocking(Event::Diagnostic(format!("{error:#}")));
                 }
@@ -368,15 +374,31 @@ impl RuntimeHost {
         Ok(Self {
             commands,
             events,
+            shutdown_requested,
             thread: Some(thread),
         })
     }
 
+    /// Lets the input thread request shutdown while the caller still owns the join handle.
+    pub fn shutdown_request(&self) -> impl FnOnce(bool) + Send + use<> {
+        let commands = self.commands.clone();
+        let shutdown_requested = Arc::clone(&self.shutdown_requested);
+        move |clean_exit| request_shutdown(&commands, &shutdown_requested, clean_exit)
+    }
+
     pub fn shutdown(&mut self) -> Result<()> {
+        self.shutdown_and_join(false)
+    }
+
+    pub fn shutdown_clean(&mut self) -> Result<()> {
+        self.shutdown_and_join(true)
+    }
+
+    fn shutdown_and_join(&mut self, clean_exit: bool) -> Result<()> {
         let Some(thread) = self.thread.take() else {
             return Ok(());
         };
-        let _ = self.commands.send(Command::Shutdown);
+        request_shutdown(&self.commands, &self.shutdown_requested, clean_exit);
         thread
             .join()
             .map_err(|_| anyhow!("native runtime thread panicked"))?
@@ -385,7 +407,14 @@ impl RuntimeHost {
 
 impl Drop for RuntimeHost {
     fn drop(&mut self) {
-        let _ = self.commands.send(Command::Shutdown);
+        request_shutdown(&self.commands, &self.shutdown_requested, false);
+    }
+}
+
+fn request_shutdown(commands: &Sender<Command>, requested: &OnceLock<bool>, clean_exit: bool) {
+    // Publish the first request's intent before waking the domain thread.
+    if requested.set(clean_exit).is_ok() {
+        let _ = commands.send(Command::Shutdown);
     }
 }
 
@@ -416,6 +445,7 @@ fn run(
     options: LaunchOptions,
     incoming: Receiver<Command>,
     send: &async_channel::Sender<Event>,
+    shutdown_requested: &OnceLock<bool>,
 ) -> Result<()> {
     let initialization = (|| -> Result<_> {
         std::fs::create_dir_all(&options.workspace)?;
@@ -454,12 +484,12 @@ fn run(
             return Err(error);
         }
     };
-    let (mut connection, ownership) = match bootstrap {
+    let (mut connection, ownership, data_root) = match bootstrap {
         BootstrapResult::Writable {
             connection,
             ownership,
-            ..
-        } => (connection, ownership),
+            data_root,
+        } => (connection, ownership, data_root),
         BootstrapResult::ReadOnly { reason, .. } => {
             let message = format!("Native startup requires the recovery interface: {reason:?}");
             let _ = send.send_blocking(Event::StartupBlocked(StartupBlock {
@@ -576,8 +606,7 @@ fn run(
     let mut operations = Vec::<WorkerOperation>::new();
     let mut searches = Vec::<(String, u64, Receiver<Result<SearchResult>>)>::new();
     let mut copies = Vec::<(u64, String, bool, Receiver<Result<SelectionCopy>>)>::new();
-    loop {
-        let mut shutdown = false;
+    let clean_exit = 'running: loop {
         let mut graph_dirty = false;
         let mut tasks_dirty = false;
         let now = Instant::now();
@@ -788,10 +817,7 @@ fn run(
             let command = match incoming.try_recv() {
                 Ok(command) => command,
                 Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    shutdown = true;
-                    break;
-                }
+                Err(mpsc::TryRecvError::Disconnected) => break 'running false,
             };
             if matches!(
                 &command,
@@ -1244,8 +1270,7 @@ fn run(
                     continue;
                 }
                 Command::Shutdown => {
-                    shutdown = true;
-                    break;
+                    break 'running shutdown_requested.get() == Some(&true);
                 }
             };
             if let Err(error) = owner.send(&session_id, request) {
@@ -1254,10 +1279,6 @@ fn run(
             }
             operations.push((session_id, result, refresh));
         }
-        if shutdown {
-            break;
-        }
-
         for event in owner.poll(Duration::from_millis(4))? {
             match event {
                 OwnerEvent::Domain(_) => graph_dirty = true,
@@ -1428,9 +1449,22 @@ fn run(
             );
             dirty.remove(&session_id);
         }
+    };
+    let sessions = owner.shutdown().context("stop native runtime sessions");
+    let backup = clean_exit.then(|| owner.backup_for_clean_exit(&data_root));
+    drop(owner);
+    shutdown_result(sessions.map(|_| ()), backup)
+}
+
+fn shutdown_result(sessions: Result<()>, backup: Option<Result<()>>) -> Result<()> {
+    match (sessions, backup) {
+        (Err(sessions), Some(Err(backup))) => Err(sessions.context(format!(
+            "session shutdown and clean exit backup both failed ({backup:#})"
+        ))),
+        (Err(sessions), Some(Ok(()))) => Err(sessions.context("clean exit backup completed")),
+        (Ok(()), Some(backup)) => backup,
+        (sessions, None) => sessions,
     }
-    owner.shutdown()?;
-    Ok(())
 }
 
 fn report_failed_recovery(send: &async_channel::Sender<Event>, session_id: &str) -> Result<()> {
@@ -1944,6 +1978,22 @@ fn now() -> i64 {
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_shutdown_failure_reports_backup_outcome() {
+        let session_error = || std::io::Error::other("worker cleanup failed").into();
+        let completed = shutdown_result(Err(session_error()), Some(Ok(()))).unwrap_err();
+        assert!(format!("{completed:#}").contains("clean exit backup completed"));
+        assert!(completed.downcast_ref::<std::io::Error>().is_some());
+
+        let backup =
+            anyhow!("backup file could not be written").context("clean exit backup failed");
+        let failed = shutdown_result(Err(session_error()), Some(Err(backup))).unwrap_err();
+        let report = format!("{failed:#}");
+        assert!(report.contains("worker cleanup failed"));
+        assert!(report.contains("clean exit backup failed: backup file could not be written"));
+        assert!(failed.downcast_ref::<std::io::Error>().is_some());
+    }
 
     #[test]
     fn interaction_precedes_queued_focus_and_shutdown() -> Result<()> {

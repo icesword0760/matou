@@ -7,6 +7,7 @@ use std::{
 
 use anyhow::{Context, Result, ensure};
 use matou_native_core::{
+    backup::{BackupService, CLEAN_EXIT_BACKUP_TIMEOUT},
     hierarchy::{
         self, HierarchyIds, HierarchyResult, Scene, Session as StoredSession, Task, Workspace,
         canvas, tabs, tasks, workspaces,
@@ -1031,11 +1032,23 @@ impl ShellOwner {
         }
         Ok(events)
     }
+
+    pub(crate) fn backup_for_clean_exit(&self, data_root: &Path) -> Result<()> {
+        BackupService::new(data_root)
+            .and_then(|mut backups| {
+                backups.backup_for_clean_exit(&self.connection, now(), CLEAN_EXIT_BACKUP_TIMEOUT)
+            })
+            .map(|_| ())
+            .with_context(|| format!("clean exit backup failed for {}", data_root.display()))
+    }
 }
 
 impl Drop for ShellOwner {
     fn drop(&mut self) {
-        let _ = self.shutdown();
+        // After explicit shutdown the snapshot already contains the final summary.
+        if !self.closing || !self.shells.is_empty() {
+            let _ = self.shutdown();
+        }
     }
 }
 fn command(command_id: String, kind: &str, request_hash: String) -> CommandMetadata {

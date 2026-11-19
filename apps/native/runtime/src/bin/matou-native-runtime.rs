@@ -25,15 +25,16 @@ fn main() -> Result<()> {
     // real owner, not the protocol Hello, signals successful domain initialization.
     let mut host = RuntimeHost::start(options)?;
     let commands = host.commands.clone();
+    let request_shutdown = host.shutdown_request();
     let (input_result, receive_input_result) = mpsc::channel();
     let pump_result = (|| -> Result<()> {
         thread::Builder::new()
             .name("matou-runtime-input".into())
             .spawn(move || {
-                let result = (|| -> Result<()> {
+                let result = (|| -> Result<bool> {
                     for message in messages {
                         match message.context("decode native runtime command")? {
-                            ClientMessage::Command(Command::Shutdown) => return Ok(()),
+                            ClientMessage::Command(Command::Shutdown) => return Ok(true),
                             ClientMessage::Command(command) => commands
                                 .send(command)
                                 .context("forward native runtime command")?,
@@ -42,12 +43,13 @@ fn main() -> Result<()> {
                             }
                         }
                     }
-                    Ok(()) // Clean stdin EOF is an orderly shutdown request.
+                    Ok(false)
                 })();
+                let clean_exit = matches!(result, Ok(true));
                 // Publish the decode/EOF outcome before the owner can close, so
                 // Event::Closed cannot race ahead and hide an input error.
-                let _ = input_result.send(result);
-                let _ = commands.send(Command::Shutdown);
+                let _ = input_result.send(result.map(|_| ()));
+                request_shutdown(clean_exit);
             })
             .context("start native runtime input reader")?;
         loop {
