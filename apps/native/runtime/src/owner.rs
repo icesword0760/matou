@@ -44,7 +44,9 @@ struct RunningShell {
     work_tracker: WorkStatusTracker,
     emitted_output: bool,
     ended: bool,
+    exit_error: Option<String>,
     retiring: bool,
+    catalog_stop: Option<mpsc::Sender<Result<()>>>,
     cwd_capture: Option<(Instant, bool)>,
     hook: Option<RunHook>,
 }
@@ -525,7 +527,7 @@ impl ShellOwner {
         let run_id = self
             .shells
             .get(&input.session_id)
-            .filter(|shell| !shell.retiring && !shell.ended)
+            .filter(|shell| !shell.ended && (!shell.retiring || shell.catalog_stop.is_some()))
             .map(|shell| shell.run_id.as_str());
         let result = cards::close_card(
             &mut self.connection,
@@ -793,6 +795,68 @@ impl ShellOwner {
             .is_none_or(|shell| shell.ended && !shell.retiring && shell.worker.is_finished())
     }
 
+    pub(crate) fn can_replace_catalog_run(&self, session_id: &str) -> bool {
+        self.shells
+            .get(session_id)
+            .is_some_and(|shell| !shell.ended || shell.retiring)
+    }
+
+    pub(crate) fn stop_for_catalog_load(
+        &mut self,
+        session_id: &str,
+    ) -> Result<mpsc::Receiver<Result<()>>> {
+        let shell = self
+            .shells
+            .get_mut(session_id)
+            .context("Card has no worker to stop")?;
+        ensure!(
+            shell.catalog_stop.is_none(),
+            "Card is already being stopped for a load"
+        );
+        let (send, receive) = mpsc::channel();
+        shell.catalog_stop = Some(send);
+        self.retire_sessions(&[session_id.to_owned()]);
+        Ok(receive)
+    }
+
+    pub(crate) fn already_loaded_catalog_identity(
+        &self,
+        session_id: &str,
+        provider_session_id: &str,
+    ) -> Result<Option<Value>> {
+        let Some(shell) = self.shells.get(session_id).filter(|shell| {
+            !shell.ended
+                && !shell.retiring
+                && shell.hook.as_ref().is_some_and(|hook| {
+                    hook.last_observation
+                        .as_ref()
+                        .and_then(|observation| observation.identity.as_deref())
+                        == Some(provider_session_id)
+                })
+        }) else {
+            return Ok(None);
+        };
+        Ok(self
+            .claude_binding(session_id)?
+            .filter(|binding| {
+                binding.resumable && binding.provider_session_id == provider_session_id
+            })
+            .map(|binding| {
+                json!({
+                    "result": "confirmed",
+                    "reason": "already-loaded",
+                    "sessionId": session_id,
+                    "runId": shell.run_id,
+                    "provider": "claude-code",
+                    "providerSessionId": provider_session_id,
+                    "bindingId": binding.id,
+                    "restoreState": binding.restore_state,
+                    "restoreError": null,
+                    "spawnRevision": binding.metadata["spawnRevision"],
+                })
+            }))
+    }
+
     /// Resolve environment and geometry before calling. Startup handshaking stays
     /// on the runtime thread; subsequent session requests are forwarded without waiting.
     pub fn launch(
@@ -974,7 +1038,9 @@ impl ShellOwner {
                 work_tracker: WorkStatusTracker::default(),
                 emitted_output: false,
                 ended: false,
+                exit_error: None,
                 retiring: false,
+                catalog_stop: None,
                 cwd_capture: None,
                 hook,
             },
@@ -1059,20 +1125,28 @@ impl ShellOwner {
             if !shell.retiring || !(shell.ended || missing_exit) || !shell.worker.is_finished() {
                 return true;
             }
-            match shell.worker.join_after_shutdown() {
-                Err(error) => diagnostic(
+            let stopped = shell
+                .worker
+                .join_after_shutdown()
+                .map_err(|error| anyhow::anyhow!("shut down closed Shell session: {error:#}"));
+            if let Err(error) = &stopped {
+                diagnostic(&mut events, id, error.to_string());
+            } else if !shell.ended {
+                diagnostic(
                     &mut events,
                     id,
-                    format!("shut down closed Shell session: {error:#}"),
-                ),
-                Ok(()) if !shell.ended => {
-                    diagnostic(
-                        &mut events,
-                        id,
-                        "closed Shell stopped before recording its exit".into(),
-                    );
-                }
-                Ok(()) => {}
+                    "closed Shell stopped before recording its exit".into(),
+                );
+            }
+            if let Some(reply) = shell.catalog_stop.take() {
+                let result = stopped.and_then(|()| {
+                    ensure!(shell.ended, "Shell stopped before recording its exit");
+                    if let Some(error) = &shell.exit_error {
+                        anyhow::bail!("persist Shell exit: {error}");
+                    }
+                    Ok(())
+                });
+                let _ = reply.send(result);
             }
             false
         });
@@ -1349,6 +1423,9 @@ impl ShellOwner {
             }
         };
         if let Err(error) = result {
+            if let Some(shell) = self.shells.get_mut(&event.session_id) {
+                shell.exit_error = Some(format!("{error:#}"));
+            }
             diagnostic(
                 events,
                 &event.session_id,

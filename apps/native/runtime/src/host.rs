@@ -1097,7 +1097,9 @@ fn run(
                         let mut graph = active_graph(&owner, scene_id.as_deref(), window_id)?;
                         pending_launch = unstarted_sessions(&owner, &graph, &sessions)?;
                         pending_launch.retain(|id| {
-                            !failed_launches.contains_key(id) && !launch_retries.contains_key(id)
+                            !failed_launches.contains_key(id)
+                                && !launch_retries.contains_key(id)
+                                && !catalog_loads.contains_key(id)
                         });
                         foreground_sessions = launchable_ids(&graph).map(str::to_owned).collect();
                         if (target_changed || check_target || !pending_launch.is_empty())
@@ -1201,6 +1203,9 @@ fn run(
                 } => {
                     if failed_launches.contains_key(&session_id)
                         || launch_retries.contains_key(&session_id)
+                        || catalog_loads
+                            .get(&session_id)
+                            .is_some_and(|load| load.stopping.is_some())
                         || (!sessions.contains(&session_id)
                             && !pending_launch.contains(&session_id)
                             && owner
@@ -1420,8 +1425,14 @@ fn run(
                             );
                             return Ok(());
                         }
+                        if let Some(identity) = owner
+                            .already_loaded_catalog_identity(&session_id, &provider_session_id)?
+                        {
+                            provider_identity_events.push(identity);
+                            return Ok(());
+                        }
                         if launch_retries.contains_key(&session_id)
-                            || !owner.can_launch_provider(&session_id)
+                            || owner.waiting_for_provider_restore(&session_id)
                         {
                             let duplicate =
                                 owner.claude_binding(&session_id)?.is_some_and(|binding| {
@@ -1439,6 +1450,14 @@ fn run(
                             !pending_launch.contains(&session_id)
                                 && !recovering.contains_key(&session_id),
                             "Card already has a starting process"
+                        );
+                        anyhow::ensure!(
+                            owner.can_launch_provider(&session_id)
+                                || (owner.can_replace_catalog_run(&session_id)
+                                    && !owner.claude_binding(&session_id)?.is_some_and(
+                                        |binding| { binding.restore_state == "failed" }
+                                    )),
+                            "Card already has a running or starting process"
                         );
                         let stored = owner
                             .session(&session_id)?
@@ -1459,6 +1478,7 @@ fn run(
                             CatalogLoad {
                                 provider_session_id: provider_session_id.clone(),
                                 spawn_revision: None,
+                                stopping: None,
                             },
                         );
                         Ok(())
@@ -1636,7 +1656,9 @@ fn run(
                     let graph = active_graph(&owner, scene_id.as_deref(), window_id)?;
                     pending_launch = unstarted_sessions(&owner, &graph, &sessions)?;
                     pending_launch.retain(|id| {
-                        !failed_launches.contains_key(id) && !launch_retries.contains_key(id)
+                        !failed_launches.contains_key(id)
+                            && !launch_retries.contains_key(id)
+                            && !catalog_loads.contains_key(id)
                     });
                     foreground_sessions = launchable_ids(&graph).map(str::to_owned).collect();
                     if let Some(workspace_id) = &active_workspace {
@@ -1689,7 +1711,23 @@ fn run(
         }
         // Revalidate a selected card after the background read, after any queued
         // navigation/close commands have had a chance to change its authority.
-        for reply in catalog_replies.try_iter() {
+        let stopped_loads: Vec<_> = catalog_loads
+            .values_mut()
+            .filter_map(|load| {
+                let stopped = match load.stopping.as_ref()?.completion.try_recv() {
+                    Ok(result) => result,
+                    Err(mpsc::TryRecvError::Empty) => return None,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        Err(anyhow!("Shell worker did not report its retirement"))
+                    }
+                };
+                Some((load.stopping.take().unwrap().selection, Some(stopped)))
+            })
+            .collect();
+        for (reply, stopped) in stopped_loads
+            .into_iter()
+            .chain(catalog_replies.try_iter().map(|reply| (reply, None)))
+        {
             let (cwd, load, result) = match reply {
                 CatalogReply::Detail(result) => {
                     catalog_details.push(result);
@@ -1726,17 +1764,21 @@ fn run(
                 // The navigation command already rejected and disposed this load.
                 continue;
             };
-            let attempt = (|| -> Result<(String, i64)> {
+            let replaced = stopped.is_some();
+            let attempt = (|| -> Result<Option<(String, i64)>> {
+                if let Some(result) = stopped {
+                    result?;
+                }
                 anyhow::ensure!(
                     scene_id.as_ref() == Some(&requested_scene)
                         && foreground_sessions.contains(&session_id),
                     "Card is no longer available in this scene"
                 );
                 anyhow::ensure!(
-                    owner.can_launch_provider(&session_id)
-                        && !pending_launch.contains(&session_id)
+                    !pending_launch.contains(&session_id)
                         && !recovering.contains_key(&session_id)
-                        && !launch_retries.contains_key(&session_id),
+                        && !launch_retries.contains_key(&session_id)
+                        && !owner.waiting_for_provider_restore(&session_id),
                     "Card already has a running or starting process"
                 );
                 let entry = result
@@ -1744,6 +1786,29 @@ fn run(
                     .into_iter()
                     .next()
                     .context("Provider session was not found in this working directory")?;
+                if !owner.can_launch_provider(&session_id) {
+                    anyhow::ensure!(!replaced, "Card already has a running or starting process");
+                    anyhow::ensure!(
+                        owner.session(&session_id)?.is_some_and(|session| {
+                            session.archived_at.is_none() && session.cwd == cwd
+                        }),
+                        "Card is no longer available in this working directory"
+                    );
+                    let completion = owner.stop_for_catalog_load(&session_id)?;
+                    load.stopping = Some(CatalogStop {
+                        selection: CatalogReply::Index {
+                            cwd,
+                            load: Some(CatalogLoadTarget {
+                                scene_id: requested_scene,
+                                session_id: session_id.clone(),
+                                provider_session_id: provider_session_id.clone(),
+                            }),
+                            result: Ok(vec![entry]),
+                        },
+                        completion,
+                    });
+                    return Ok(None);
+                }
                 let workspace_id = owner
                     .session_workspace(&session_id)?
                     .context("Card is no longer available")?;
@@ -1758,12 +1823,12 @@ fn run(
                     model: entry.model.as_deref(),
                     permission_mode: &entry.permission_mode,
                 })?;
-                Ok((workspace_id, revision))
+                Ok(Some((workspace_id, revision)))
             })();
             match attempt {
-                Ok((workspace_id, revision)) => {
-                    load.spawn_revision = Some(revision);
+                Ok(launch) => {
                     failed_launches.remove(&session_id);
+                    deferred_recovery.remove(&session_id);
                     sessions.remove(&session_id);
                     dirty.remove(&session_id);
                     sequence.remove(&session_id);
@@ -1774,16 +1839,24 @@ fn run(
                     operations.retain(|(id, _, _)| id != &session_id);
                     searches.retain(|(id, _, _)| id != &session_id);
                     copies.retain(|(_, id, _, _)| id != &session_id);
-                    launch_retries.insert(
-                        session_id,
-                        LaunchRetry {
-                            workspace_id,
-                            recovering: true,
-                            validated: false,
-                        },
-                    );
+                    if let Some((workspace_id, revision)) = launch {
+                        load.spawn_revision = Some(revision);
+                        launch_retries.insert(
+                            session_id,
+                            LaunchRetry {
+                                workspace_id,
+                                recovering: true,
+                                validated: false,
+                            },
+                        );
+                    }
                 }
                 Err(error) => {
+                    if replaced {
+                        let failure =
+                            report_launch_failure(send, &session_id, true, error.to_string())?;
+                        failed_launches.insert(session_id.clone(), failure);
+                    }
                     catalog_loads.remove(&session_id);
                     catalog_load_errors.push(catalog_load_error(
                         &session_id,
@@ -2078,6 +2151,12 @@ const CATALOG_BUSY: &str = "Claude Code catalog is busy or unavailable";
 struct CatalogLoad {
     provider_session_id: String,
     spawn_revision: Option<i64>,
+    stopping: Option<CatalogStop>,
+}
+
+struct CatalogStop {
+    selection: CatalogReply,
+    completion: Receiver<Result<()>>,
 }
 
 struct CatalogLoadTarget {

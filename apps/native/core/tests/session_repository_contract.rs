@@ -544,7 +544,14 @@ fn catalog_binding_replaces_available_history_without_validating_the_new_id() ->
         },
         12,
     )?;
-    assert!(load_claude_catalog_binding(&mut db, &command("running"), &input, 13).is_err());
+    for status in ["running", "starting"] {
+        db.execute(
+            "UPDATE session_runs SET status = ? WHERE id = 'running'",
+            [status],
+        )?;
+        let error = load_claude_catalog_binding(&mut db, &command(status), &input, 13).unwrap_err();
+        assert_eq!(error.to_string(), "Card already has a running process");
+    }
     assert_eq!(
         claude_binding(&db, session_id)?.unwrap().metadata["spawnRevision"],
         8

@@ -984,10 +984,206 @@ fn card_write_count(db: &Connection) -> Result<(i64, i64)> {
     )?)
 }
 
+fn seed_catalog(root: &Path, workspace: &Path, id: &str) -> Result<()> {
+    let cwd = workspace.to_str().context("workspace UTF-8")?;
+    let bucket_name: String = cwd
+        .encode_utf16()
+        .map(|unit| match unit {
+            48..=57 | 65..=90 | 97..=122 => char::from(unit as u8),
+            _ => '-',
+        })
+        .collect();
+    let bucket = root.join("Shell 家目录/claude/projects").join(bucket_name);
+    fs::create_dir_all(&bucket)?;
+    fs::write(
+        bucket.join(format!("{id}.jsonl")),
+        serde_json::json!({
+            "cwd": cwd, "timestamp": 1234,
+            "message": {"role": "user", "content": "Synthetic command fixture"}
+        })
+        .to_string(),
+    )?;
+    Ok(())
+}
+
+#[test]
+fn catalog_replaces_a_live_process_once_and_requires_its_persisted_exit() -> Result<()> {
+    use matou_native_core::sessions::{claude_binding, list_runs};
+
+    for fail_exit in [false, true] {
+        let root = tempfile::tempdir()?;
+        let stub = root.path().join("claude-stub");
+        fs::write(
+            &stub,
+            "#!/bin/sh\nwhile [ $# -gt 0 ]; do\n  if [ \"$1\" = '--resume' ] && [ \"$2\" = 'replace-id' ]; then printf 'resuming replace-id\\n'; exec /bin/sleep 60; fi\n  shift\ndone\nexit 3\n",
+        )?;
+        fs::set_permissions(&stub, fs::Permissions::from_mode(0o700))?;
+        let mut child = RuntimeChild::spawn_configured(
+            root.path(),
+            &format!("PROMPT='{PROMPT} '\ntrap 'exit 42' HUP\n"),
+            Path::new("/bin/zsh"),
+            Some(&stub),
+        )?;
+        child.hello()?;
+        seed_catalog(root.path(), &child.workspace, "replace-id")?;
+        let db = Connection::open(child.data.join("matou.sqlite"))?;
+        let session = child.session.clone();
+        let old_run = list_runs(&db, &session)?.remove(0);
+        assert_eq!(old_run.status, "running");
+        let old_pid = old_run.pid.context("old PTY PID")? as u32;
+        if fail_exit {
+            db.execute_batch(
+                "CREATE TRIGGER fail_exit BEFORE UPDATE OF status ON session_runs
+                 WHEN NEW.status = 'exited'
+                 BEGIN SELECT RAISE(ABORT, 'injected exit persistence failure'); END;",
+            )?;
+        }
+        for _ in 0..2 {
+            child.send(Command::LoadProviderSession {
+                session_id: session.clone(),
+                provider_session_id: "replace-id".into(),
+            })?;
+        }
+        let deadline = Instant::now() + TIMEOUT;
+        if fail_exit {
+            loop {
+                if let Event::Graph(graph) = child.event(deadline, true)?
+                    && let Some(error) = graph["providerSessionLoadErrors"].get(0)
+                {
+                    assert_eq!(error["providerSessionId"], "replace-id");
+                    assert!(
+                        error["error"]
+                            .as_str()
+                            .unwrap()
+                            .contains("injected exit persistence failure")
+                    );
+                    break;
+                }
+            }
+            assert!(claude_binding(&db, &session)?.is_none());
+            let runs = list_runs(&db, &session)?;
+            assert_eq!(runs.len(), 1);
+            assert_eq!(runs[0].status, "running");
+            db.execute_batch("DROP TRIGGER fail_exit;")?;
+        } else {
+            child.frame(|_, screen, _| screen_has_line(screen, "resuming replace-id"))?;
+            let runs = list_runs(&db, &session)?;
+            assert_eq!(runs.len(), 2);
+            assert_eq!(runs[0].id, old_run.id);
+            assert_eq!(runs[0].status, "exited");
+            assert_eq!(runs[0].exit_code, Some(42));
+            assert_eq!(runs[0].signal, Some(0));
+            assert!(runs[0].ended_at.unwrap() <= runs[1].started_at);
+            assert_eq!(runs[1].status, "running");
+            let binding = claude_binding(&db, &session)?.context("replacement binding")?;
+            assert_eq!(binding.provider_session_id, "replace-id");
+            assert_eq!(binding.restore_state, "restoring");
+            assert_eq!(binding.metadata["loadedFromCatalog"], true);
+            assert_eq!(binding.metadata["spawnRevision"], 1);
+            let event_order: (i64, i64) = db.query_row(
+                "SELECT
+                   (SELECT rowid FROM domain_events WHERE event_type='session.run-exited'),
+                   (SELECT rowid FROM domain_events WHERE event_type='session.mode-changed')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            assert!(event_order.0 < event_order.1);
+        }
+        assert_shell_gone(old_pid)?;
+        child.send(Command::Shutdown)?;
+        child.closed()?;
+        let (status, stderr) = child.wait()?;
+        ensure!(status.success(), "runtime shutdown: {stderr}");
+    }
+    Ok(())
+}
+
+#[test]
+fn closing_a_card_during_catalog_retirement_cancels_the_load() -> Result<()> {
+    use matou_native_core::sessions::{claude_binding, get_session, list_runs};
+
+    let root = tempfile::tempdir()?;
+    let shell_home = root.path().join("Shell 家目录");
+    let mut child = RuntimeChild::spawn_configured(
+        root.path(),
+        &format!(
+            "PROMPT='{PROMPT} '\ntrap 'print stopping > \"$HOME/retiring\"; \
+             while [[ ! -f \"$HOME/release\" ]]; do /bin/sleep 0.01; done; exit 43' HUP\n"
+        ),
+        Path::new("/bin/zsh"),
+        Some(Path::new("/usr/bin/false")),
+    )?;
+    child.hello()?;
+    seed_catalog(root.path(), &child.workspace, "replace-id")?;
+    let session = child.session.clone();
+    let scene = child.scene.clone();
+    let db = startup::open_read_only(&child.data.join("matou.sqlite"))?;
+    let pid = list_runs(&db, &session)?[0].pid.context("old PTY PID")? as u32;
+    child.send(Command::CreateShellSibling {
+        scene_id: scene.clone(),
+        source_session_id: session.clone(),
+        parent_session_id: None,
+    })?;
+    let deadline = Instant::now() + TIMEOUT;
+    while !matches!(child.event(deadline, true)?, Event::Navigation { .. }) {}
+    child.send(Command::LoadProviderSession {
+        session_id: session.clone(),
+        provider_session_id: "replace-id".into(),
+    })?;
+    let deadline = Instant::now() + TIMEOUT;
+    while !shell_home.join("retiring").is_file() {
+        ensure!(
+            Instant::now() < deadline,
+            "Shell did not receive its stop signal"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+    child.send(Command::CloseSessionCard {
+        scene_id: scene,
+        session_id: session.clone(),
+        confirmed_intent: Some(format!("delete-session:{session}")),
+        preserve_scene_on_last_session: true,
+    })?;
+    let deadline = Instant::now() + TIMEOUT;
+    while get_session(&db, &session)?
+        .context("closing card")?
+        .archived_at
+        .is_none()
+    {
+        ensure!(
+            Instant::now() < deadline,
+            "card was not archived during retirement"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+    fs::write(shell_home.join("release"), "")?;
+    loop {
+        if let Event::Graph(graph) = child.event(deadline, true)?
+            && let Some(error) = graph["providerSessionLoadErrors"].get(0)
+        {
+            assert_eq!(error["sessionId"], session);
+            assert_eq!(
+                error["error"],
+                "Card was closed while loading the conversation"
+            );
+            break;
+        }
+    }
+    let runs = list_runs(&db, &session)?;
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].status, "exited");
+    assert_eq!(runs[0].exit_code, Some(43));
+    assert!(claude_binding(&db, &session)?.is_none());
+    assert_shell_gone(pid)?;
+    child.send(Command::Shutdown)?;
+    child.closed()?;
+    assert!(child.wait()?.0.success());
+    Ok(())
+}
+
 #[test]
 fn catalog_rejects_absent_ids_and_closing_a_pending_load_stops_its_only_run() -> Result<()> {
     use matou_native_core::sessions::{claude_binding, list_runs};
-    use serde_json::json;
 
     let root = tempfile::tempdir()?;
     let stub = root.path().join("claude-stub");
@@ -1019,31 +1215,7 @@ fn catalog_rejects_absent_ids_and_closing_a_pending_load_stops_its_only_run() ->
         }
     }
 
-    let cwd = child
-        .workspace
-        .to_str()
-        .context("workspace UTF-8")?
-        .to_owned();
-    let bucket_name: String = cwd
-        .encode_utf16()
-        .map(|unit| match unit {
-            48..=57 | 65..=90 | 97..=122 => char::from(unit as u8),
-            _ => '-',
-        })
-        .collect();
-    let bucket = root
-        .path()
-        .join("Shell 家目录/claude/projects")
-        .join(bucket_name);
-    fs::create_dir_all(&bucket)?;
-    fs::write(
-        bucket.join("catalog-test-id.jsonl"),
-        json!({
-            "cwd": cwd, "timestamp": 1234,
-            "message": {"role": "user", "content": "Synthetic command fixture"}
-        })
-        .to_string(),
-    )?;
+    seed_catalog(root.path(), &child.workspace, "catalog-test-id")?;
     let session = child.session.clone();
     let scene = child.scene.clone();
     // With a sibling, Close actually archives the target instead of hiding the window.
