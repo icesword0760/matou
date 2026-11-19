@@ -25,6 +25,7 @@ pub struct RenameInput {
     pub text: String,
     pub placeholder: String,
     pub search_style: bool,
+    session_loader_search_style: bool,
     selection: Range<usize>,
     reversed: bool,
     marked: Option<Range<usize>>,
@@ -46,6 +47,7 @@ impl RenameInput {
             text,
             placeholder: "输入标签页名称".into(),
             search_style: false,
+            session_loader_search_style: false,
             selection: end..end,
             reversed: false,
             marked: None,
@@ -58,6 +60,14 @@ impl RenameInput {
             scroll: px(0.),
             selecting: false,
         }
+    }
+
+    pub fn session_loader_search(placeholder: &str, cx: &mut Context<Self>) -> Self {
+        let mut input = Self::new(String::new(), cx);
+        input.placeholder = placeholder.into();
+        input.search_style = true;
+        input.session_loader_search_style = true;
+        input
     }
     pub fn composing(&self) -> bool {
         self.marked.is_some()
@@ -328,7 +338,13 @@ impl RenameInput {
         let mut run = TextRun {
             len: display.len(),
             font: window.text_style().font(),
-            color: rgba(if self.text.is_empty() {
+            color: rgba(if self.session_loader_search_style {
+                if self.text.is_empty() {
+                    0x858e9bff
+                } else {
+                    0xe7eaf0ff
+                }
+            } else if self.text.is_empty() {
                 if self.search_style {
                     0x747474ff
                 } else {
@@ -370,7 +386,13 @@ impl RenameInput {
         };
         let line = window.text_system().shape_line(
             display,
-            px(if self.search_style { 12. } else { 14. }),
+            px(if self.session_loader_search_style {
+                11.
+            } else if self.search_style {
+                12.
+            } else {
+                14.
+            }),
             &runs,
             None,
         );
@@ -412,7 +434,11 @@ impl RenameInput {
                         point(origin.x + cursor, bounds.top() + px(2.)),
                         size(px(1.), bounds.size.height - px(4.)),
                     ),
-                    rgba(0x000000d9),
+                    rgba(if self.session_loader_search_style {
+                        0xe7eaf0ff
+                    } else {
+                        0x000000d9
+                    }),
                 ));
             }
         });

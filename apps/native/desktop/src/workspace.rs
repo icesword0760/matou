@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
     rc::Rc,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use crate::history_view::{HistoryView, HistoryViewEvent, HistoryViewState};
@@ -139,16 +139,128 @@ enum TabDialog {
         session_id: String,
         scope: RemoveScope,
     },
+    SessionLoader(SessionLoader),
 }
 
 impl TabDialog {
     fn is_session_card(&self) -> bool {
         matches!(
             self,
-            Self::CloseSession { .. } | Self::LastSession { .. } | Self::RemoveSession { .. }
+            Self::CloseSession { .. }
+                | Self::LastSession { .. }
+                | Self::RemoveSession { .. }
+                | Self::SessionLoader(_)
         )
     }
 }
+
+struct LoaderOwner {
+    session_id: String,
+    title: String,
+}
+
+struct LoaderSession {
+    id: String,
+    title: String,
+    model: Option<String>,
+    permission_mode: String,
+    message_count: usize,
+    updated_at: i64,
+    loaded_by: Option<LoaderOwner>,
+}
+
+impl LoaderSession {
+    fn from_graph(value: &Value) -> Option<Self> {
+        let loaded_by = &value["loadedBy"];
+        Some(Self {
+            id: value["providerSessionId"].as_str()?.into(),
+            title: value["title"].as_str()?.into(),
+            model: value["model"].as_str().map(str::to_owned),
+            permission_mode: value["permissionMode"].as_str()?.into(),
+            message_count: value["messageCount"].as_u64()?.try_into().ok()?,
+            updated_at: value["updatedAt"].as_i64()?,
+            loaded_by: if loaded_by.is_null() {
+                None
+            } else {
+                Some(LoaderOwner {
+                    session_id: loaded_by["sessionId"].as_str()?.into(),
+                    title: loaded_by["title"].as_str()?.into(),
+                })
+            },
+        })
+    }
+}
+
+struct LoaderEvent {
+    index: usize,
+    kind: String,
+    text: String,
+    tool_name: Option<String>,
+}
+
+impl LoaderEvent {
+    fn from_graph(value: &Value) -> Option<Self> {
+        Some(Self {
+            index: value["index"].as_u64()?.try_into().ok()?,
+            kind: value["kind"].as_str()?.into(),
+            text: value["text"].as_str()?.into(),
+            tool_name: value["toolName"].as_str().map(str::to_owned),
+        })
+    }
+}
+
+struct LoaderDetailRequest {
+    id: String,
+    start: Option<i64>,
+}
+
+struct LoaderLoad {
+    id: String,
+    title: String,
+    previous_revision: u64,
+}
+
+struct SessionLoader {
+    scene_id: String,
+    session_id: String,
+    cwd: String,
+    input: Entity<RenameInput>,
+    sessions: Vec<LoaderSession>,
+    selected: Option<String>,
+    events: Vec<LoaderEvent>,
+    first_event: Option<i64>,
+    total_events: usize,
+    loading_list: bool,
+    loading_detail: bool,
+    loading_earlier: bool,
+    pending_detail: Option<LoaderDetailRequest>,
+    has_earlier: bool,
+    error: Option<String>,
+    list_scroll: ScrollHandle,
+    preview_scroll: ScrollHandle,
+    list_focus: FocusHandle,
+}
+
+impl SessionLoader {
+    fn visible_sessions<'a>(
+        &'a self,
+        cx: &App,
+    ) -> impl Iterator<Item = &'a LoaderSession> + use<'a> {
+        let query = self.input.read(cx).text.trim().to_lowercase();
+        let cwd_matches = query.is_empty() || self.cwd.to_lowercase().contains(&query);
+        self.sessions.iter().filter(move |session| {
+            cwd_matches
+                || session.title.to_lowercase().contains(&query)
+                || session.id.to_lowercase().contains(&query)
+                || session
+                    .model
+                    .as_ref()
+                    .is_some_and(|model| model.to_lowercase().contains(&query))
+        })
+    }
+}
+
+const SESSION_LOADER_PAGE_SIZE: i64 = 200;
 
 const LAST_TAB_BODY: &str = "当前已是最后一个事项下的最后一个标签，这里点击关闭不会删除该事项。\n\n如需删除该工作区，请在左侧事项面板的下拉菜单中执行删除。";
 const LAST_TAB_CONFIRM: &str = "我知道了";
@@ -156,6 +268,17 @@ const STOP_SESSION: &str = "停止会话";
 const STOPPED_SESSION_STATUS: &str = "正在恢复会话…";
 const REMOVE_NODE_ACTION: &str = "移除节点…";
 const WORKSPACE_PATH_UNAVAILABLE: &str = "工作区目录不可用，请先在本地恢复原路径，或移出该工作区";
+const SESSION_LOADER_TITLE: &str = "载入 Claude Code 会话";
+const SESSION_LOADER_FILTER_PLACEHOLDER: &str = "筛选左侧：标题、路径、模型或会话 ID";
+const SESSION_LOADER_RUNNING_WARNING: &str = "当前卡片正在运行，继续会结束当前进程。";
+const SESSION_LOADER_NO_SESSIONS: &str = "当前工作空间内没有 Claude Code 会话";
+const SESSION_LOADER_NO_MATCHES: &str = "左侧没有匹配的会话";
+const SESSION_LOADER_LOADING_MORE: &str = "正在载入更多会话…";
+const SESSION_LOADER_SELECT_SESSION: &str = "选择会话查看内容";
+const SESSION_LOADER_LOADING_PREVIEW: &str = "正在载入预览…";
+const SESSION_LOADER_NO_HISTORY: &str = "当前会话还没有可显示的历史内容";
+const SESSION_LOADER_LOADING_EARLIER: &str = "正在载入更早内容…";
+const SESSION_LOADER_LOADING: &str = "正在载入…";
 
 struct StartFailureCard<'a> {
     title: &'static str,
@@ -433,6 +556,7 @@ pub struct Workspace {
     start_failure_controls: HashMap<String, [FocusHandle; 2]>,
     provider_restore_controls: HashMap<String, [FocusHandle; 2]>,
     pending_provider_restores: HashMap<String, PendingProviderRestore>,
+    pending_loader_loads: HashMap<String, LoaderLoad>,
     #[cfg(target_os = "macos")]
     recovery_water: HashMap<String, Entity<RecoveryWater>>,
     #[cfg(target_os = "macos")]
@@ -1212,6 +1336,7 @@ impl Workspace {
             start_failure_controls: HashMap::new(),
             provider_restore_controls: HashMap::new(),
             pending_provider_restores: HashMap::new(),
+            pending_loader_loads: HashMap::new(),
             #[cfg(target_os = "macos")]
             recovery_water: HashMap::new(),
             #[cfg(target_os = "macos")]
@@ -1465,6 +1590,12 @@ impl Workspace {
                             text.choices.is_some() != (self.dialog_controls.len() == 5)
                         })
             }
+            TabDialog::SessionLoader(state) => {
+                self.active_scene_id() != Some(state.scene_id.as_str())
+                    || self.graph_node(&state.session_id).is_none_or(|node| {
+                        !node["archivedAt"].is_null() || node["cwd"] != state.cwd
+                    })
+            }
         });
         if invalid {
             self.close_dialog(window, cx);
@@ -1480,12 +1611,19 @@ impl Workspace {
         }
         let event = match envelope {
             BridgeEvent::TransportDiagnostic { message, .. } => {
+                self.fail_pending_loader_commands(message.clone());
                 self.transport_fault = Some((generation, message));
+                cx.notify();
                 return;
             }
             BridgeEvent::Connection { phase, .. } => {
                 self.transport_connected = matches!(phase, ConnectionPhase::Ready);
                 if !self.transport_connected {
+                    let message = match &phase {
+                        ConnectionPhase::Blocked(block) => block.message.clone(),
+                        _ => crate::runtime_bridge::SendError::NotReady.to_string(),
+                    };
+                    self.fail_pending_loader_commands(message);
                     self.domain_ready = false;
                     self.pending_card_action = None;
                     self.pending_provider_restores.clear();
@@ -1834,6 +1972,7 @@ impl Workspace {
                     self.start_failure_controls.remove(&id);
                     self.provider_restore_controls.remove(&id);
                     self.pending_provider_restores.remove(&id);
+                    self.pending_loader_loads.remove(&id);
                     self.storage_fault_sessions.remove(&id);
                     self.card_controls.remove(&id);
                     self.remove_card_controls.remove(&id);
@@ -1938,7 +2077,7 @@ impl Workspace {
                 }
                 self.fault = Some(message);
             }
-            Event::Graph(graph) => {
+            Event::Graph(mut graph) => {
                 let action = &graph["sessionCardAction"];
                 if action["outcome"] == "hide-window" {
                     if self.finish_card_action(action)
@@ -1959,10 +2098,26 @@ impl Workspace {
                     }
                     return;
                 }
+                let loader_results = graph.as_object_mut().map(|graph| {
+                    [
+                        graph.remove("providerSessionCatalogResults"),
+                        graph.remove("providerSessionDetailResults"),
+                        graph.remove("providerSessionLoadErrors"),
+                    ]
+                });
                 self.graph = graph;
                 self.refresh_terminals(window, cx);
                 if self.dialog.as_ref().is_some_and(TabDialog::is_session_card) {
                     self.close_invalid_dialog(window, cx);
+                }
+                if let Some([catalog, details, errors]) = loader_results {
+                    let rows = |result: Option<Value>| match result {
+                        Some(Value::Array(rows)) => rows,
+                        _ => Vec::new(),
+                    };
+                    self.finish_session_loader(&rows(errors), window, cx);
+                    self.loader_detail_result(&rows(details), cx);
+                    self.loader_catalog_result(&rows(catalog), cx);
                 }
                 self.sync_terminal_input(window, cx);
             }
@@ -3824,11 +3979,14 @@ impl Workspace {
         let dialog = self.dialog.take();
         self.dialog_subscription = None;
         self.dialog_controls.clear();
-        if let Some(TabDialog::LastSession {
-            return_focus: Some(focus),
-            ..
-        }) = dialog
-        {
+        let focus = match dialog {
+            Some(TabDialog::LastSession { return_focus, .. }) => return_focus,
+            Some(TabDialog::SessionLoader(state)) => {
+                self.card_controls.get(&state.session_id).cloned()
+            }
+            _ => None,
+        };
+        if let Some(focus) = focus {
             window.focus(&focus);
         } else {
             window.blur();
@@ -3946,7 +4104,7 @@ impl Workspace {
                     session_id: session_id.clone(),
                     scope: *scope,
                 }),
-            None => return,
+            Some(TabDialog::SessionLoader(_)) | None => return,
         };
         self.close_dialog(window, cx);
         if let Some(command) = command {
@@ -4102,6 +4260,419 @@ impl Workspace {
         RemoveNodeTooltip {
             blocked_reason: self.card_action_blocked_reason(id, node),
         }
+    }
+
+    fn session_loader_blocked_reason(&self, id: &str, node: &Value) -> Option<&'static str> {
+        self.launch_action_blocked_reason(id, node)
+            .or_else(|| self.recovery_blocked(id).then_some("当前终端仍在恢复"))
+    }
+
+    fn session_loader_running(&self, id: &str) -> bool {
+        self.graph_node(id)
+            .is_some_and(|node| matches!(node["workStatus"].as_str(), Some("running" | "starting")))
+    }
+
+    fn session_loader_can_submit(&self, state: &SessionLoader) -> bool {
+        state.selected.is_some()
+            && !self.pending_loader_loads.contains_key(&state.session_id)
+            && self.graph_node(&state.session_id).is_some_and(|node| {
+                self.launch_action_blocked_reason(&state.session_id, node)
+                    .is_none()
+            })
+    }
+
+    fn open_session_loader(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dialog.is_some()
+            || self.pending_close.is_some()
+            || self.pending_card_action.is_some()
+        {
+            return;
+        }
+        let Some((scene_id, node)) = self.active_scene_id().zip(self.graph_node(id)) else {
+            return;
+        };
+        if !self.order.iter().any(|card| card == id)
+            || !node["archivedAt"].is_null()
+            || self.session_loader_blocked_reason(id, node).is_some()
+        {
+            return;
+        }
+        let Some(cwd) = node["cwd"].as_str().filter(|path| !path.is_empty()) else {
+            return;
+        };
+        let scene_id = scene_id.to_owned();
+        let cwd = cwd.to_owned();
+        let input =
+            cx.new(|cx| RenameInput::session_loader_search(SESSION_LOADER_FILTER_PLACEHOLDER, cx));
+        self.dialog_subscription =
+            Some(cx.subscribe_in(&input, window, |this, _, event, _, cx| {
+                if matches!(event, RenameInputEvent::Changed) {
+                    this.refresh_loader_selection(true, cx);
+                }
+            }));
+        self.dialog_controls = (0..4).map(|_| cx.focus_handle().tab_stop(true)).collect();
+        window.focus(&input.read(cx).focus);
+
+        let result = self.commands.send_at(
+            self.runtime_generation,
+            Command::ListProviderSessions { cwd: cwd.clone() },
+        );
+        self.dialog = Some(TabDialog::SessionLoader(SessionLoader {
+            scene_id,
+            session_id: id.to_owned(),
+            cwd: cwd.to_owned(),
+            input,
+            sessions: Vec::new(),
+            selected: None,
+            events: Vec::new(),
+            first_event: None,
+            total_events: 0,
+            loading_list: result.is_ok(),
+            loading_detail: false,
+            loading_earlier: false,
+            pending_detail: None,
+            has_earlier: false,
+            error: result.err().map(|error| error.to_string()),
+            list_scroll: ScrollHandle::new(),
+            preview_scroll: ScrollHandle::new(),
+            list_focus: cx.focus_handle().tab_stop(true),
+        }));
+        self.workspace_menu = None;
+        self.task_menu = None;
+        self.tab_menu = None;
+        self.hidden_tabs = None;
+        cx.notify();
+    }
+
+    fn clear_session_loader_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(TabDialog::SessionLoader(state)) = &self.dialog {
+            let input = state.input.clone();
+            window.focus(&input.read(cx).focus);
+            input.update(cx, |input, cx| {
+                let length = input.text.encode_utf16().count();
+                input.replace_text_in_range(Some(0..length), "", window, cx);
+            });
+        }
+    }
+
+    fn refresh_loader_selection(&mut self, reset_scroll: bool, cx: &mut Context<Self>) {
+        let Some(TabDialog::SessionLoader(state)) = &self.dialog else {
+            return;
+        };
+        if reset_scroll {
+            state.list_scroll.set_offset(Point::default());
+        }
+        let mut visible = state.visible_sessions(cx);
+        let first = visible.next();
+        let selected = state.selected.as_deref();
+        let next = first
+            .filter(|first| Some(first.id.as_str()) == selected)
+            .or_else(|| visible.find(|session| Some(session.id.as_str()) == selected))
+            .or(first)
+            .map(|session| session.id.clone());
+        drop(visible);
+        self.set_loader_selection(next, cx);
+        cx.notify();
+    }
+
+    fn select_loader_session(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.set_loader_selection(Some(id.to_owned()), cx);
+    }
+
+    fn step_loader_session(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let Some(TabDialog::SessionLoader(state)) = &self.dialog else {
+            return;
+        };
+        let visible: Vec<_> = state.visible_sessions(cx).collect();
+        let Some(current) = visible
+            .iter()
+            .position(|session| Some(&session.id) == state.selected.as_ref())
+        else {
+            return;
+        };
+        let next = current.saturating_add_signed(delta).min(visible.len() - 1);
+        let id = visible[next].id.clone();
+        state.list_scroll.scroll_to_item(next);
+        self.select_loader_session(&id, cx);
+    }
+
+    fn set_loader_selection(&mut self, next: Option<String>, cx: &mut Context<Self>) {
+        let Some(TabDialog::SessionLoader(state)) = &mut self.dialog else {
+            return;
+        };
+        if state.selected == next {
+            return;
+        }
+        state.selected = next;
+        state.events.clear();
+        state.first_event = None;
+        state.total_events = 0;
+        state.has_earlier = false;
+        state.loading_earlier = false;
+        state.loading_detail = state.selected.is_some();
+        state.error = None;
+        state.preview_scroll.set_offset(Point::default());
+        if state.loading_detail {
+            self.request_loader_detail(None);
+        }
+        cx.notify();
+    }
+
+    fn request_loader_detail(&mut self, page: Option<(i64, i64)>) {
+        let Some(TabDialog::SessionLoader(state)) = &mut self.dialog else {
+            return;
+        };
+        let Some(id) = state
+            .selected
+            .as_ref()
+            .filter(|_| state.pending_detail.is_none())
+        else {
+            return;
+        };
+        let start = page.map(|(start, _)| start);
+        match self.commands.send_at(
+            self.runtime_generation,
+            Command::GetProviderSession {
+                cwd: state.cwd.clone(),
+                provider_session_id: id.clone(),
+                start_event_index: start,
+                limit: page.map(|(_, limit)| limit),
+            },
+        ) {
+            Ok(()) => {
+                state.pending_detail = Some(LoaderDetailRequest {
+                    id: id.clone(),
+                    start,
+                });
+                state.loading_detail = page.is_none();
+                state.loading_earlier = page.is_some();
+            }
+            Err(error) => {
+                state.loading_detail = false;
+                state.loading_earlier = false;
+                state.error = Some(error.to_string());
+            }
+        }
+    }
+
+    fn load_earlier_session_events(&mut self, cx: &mut Context<Self>) {
+        let Some(TabDialog::SessionLoader(state)) = &mut self.dialog else {
+            return;
+        };
+        let Some(first) = state.first_event.filter(|first| *first > 1) else {
+            return;
+        };
+        if !state.has_earlier || state.pending_detail.is_some() {
+            return;
+        }
+        let count = (first - 1).min(SESSION_LOADER_PAGE_SIZE);
+        let start = first - count;
+        state.error = None;
+        self.request_loader_detail(Some((start, count)));
+        cx.notify();
+    }
+
+    fn submit_session_loader(&mut self, cx: &mut Context<Self>) {
+        let Some(TabDialog::SessionLoader(state)) = &self.dialog else {
+            return;
+        };
+        if !self.session_loader_can_submit(state) {
+            return;
+        }
+        let Some(session) = state
+            .sessions
+            .iter()
+            .find(|session| Some(&session.id) == state.selected.as_ref())
+        else {
+            return;
+        };
+        let session_id = state.session_id.clone();
+        let previous_revision = self
+            .graph_node(&session_id)
+            .and_then(|node| node["providerSpawnRevision"].as_u64())
+            .unwrap_or(0);
+        let load = LoaderLoad {
+            id: session.id.clone(),
+            title: session.title.clone(),
+            previous_revision,
+        };
+        let result = self.commands.send_at(
+            self.runtime_generation,
+            Command::LoadProviderSession {
+                session_id: session_id.clone(),
+                provider_session_id: load.id.clone(),
+            },
+        );
+        if let Some(TabDialog::SessionLoader(state)) = &mut self.dialog {
+            state.error = result.err().map(|error| error.to_string());
+            if state.error.is_none() {
+                self.pending_loader_loads.insert(session_id, load);
+            }
+        }
+        cx.notify();
+    }
+
+    fn loader_catalog_result(&mut self, results: &[Value], cx: &mut Context<Self>) {
+        let Some(TabDialog::SessionLoader(state)) = &mut self.dialog else {
+            return;
+        };
+        let Some(result) = results
+            .iter()
+            .find(|result| state.loading_list && result["cwd"] == state.cwd)
+        else {
+            return;
+        };
+        state.loading_list = false;
+        if let Some(error) = result["error"].as_str() {
+            state.error = Some(error.to_owned());
+        } else if let Some(sessions) = result["sessions"].as_array() {
+            state.sessions = sessions
+                .iter()
+                .filter_map(LoaderSession::from_graph)
+                .collect();
+            self.refresh_loader_selection(true, cx);
+        }
+    }
+
+    fn loader_detail_result(&mut self, results: &[Value], cx: &mut Context<Self>) {
+        let Some(TabDialog::SessionLoader(state)) = &mut self.dialog else {
+            return;
+        };
+        let Some(request) = &state.pending_detail else {
+            return;
+        };
+        let Some(result) = results.iter().find(|result| {
+            result["cwd"] == state.cwd
+                && result["providerSessionId"] == request.id
+                && (result["error"].is_string()
+                    || match request.start {
+                        Some(start) => {
+                            result["page"]["startEventIndex"].as_i64() == Some(start)
+                                || result["page"]["hasLater"] == false
+                        }
+                        None => result["page"]["hasLater"] == false,
+                    })
+        }) else {
+            return;
+        };
+        let request = state.pending_detail.take().unwrap();
+        state.loading_earlier = false;
+        if state.selected.as_ref() != Some(&request.id)
+            || request.start.is_some() && state.first_event.is_none()
+        {
+            self.request_loader_detail(None);
+            cx.notify();
+            return;
+        }
+        state.loading_detail = false;
+        if let Some(error) = result["error"].as_str() {
+            state.error = Some(error.to_owned());
+        } else if let Some(rows) = result["events"].as_array() {
+            let page = &result["page"];
+            let previous_first = state.first_event;
+            state.first_event = page["startEventIndex"].as_i64();
+            state.total_events = page["total"].as_u64().unwrap_or(0) as usize;
+            state.has_earlier = page["hasEarlier"] == true;
+            let events = rows.iter().filter_map(LoaderEvent::from_graph);
+            if request.start.is_some() && page["hasLater"] == true {
+                let first = previous_first.unwrap_or_default() as usize;
+                let mut previous: Vec<_> = events.filter(|event| event.index < first).collect();
+                let anchor = previous.len() + usize::from(state.has_earlier);
+                previous.append(&mut state.events);
+                state.events = previous;
+                state.preview_scroll.scroll_to_top_of_item(anchor);
+            } else {
+                state.events = events.collect();
+                state.preview_scroll.scroll_to_bottom();
+            }
+        }
+        cx.notify();
+    }
+
+    fn finish_session_loader(
+        &mut self,
+        errors: &[Value],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let nodes = session_levels::nodes(&self.graph);
+        let identities = self.graph["providerIdentityEvents"].as_array();
+        let visible_target = match &self.dialog {
+            Some(TabDialog::SessionLoader(state)) => Some(state.session_id.as_str()),
+            _ => None,
+        };
+        let mut outcome = None;
+        // The runtime request can still finish after the user dismisses the modal.
+        self.pending_loader_loads.retain(|session_id, load| {
+            let error = errors.iter().find_map(|result| {
+                (result["sessionId"] == *session_id
+                    && (result["providerSessionId"].is_null()
+                        || result["providerSessionId"] == load.id))
+                    .then(|| result["error"].as_str())
+                    .flatten()
+            });
+            let newer_revision = |value: &Value| {
+                value
+                    .as_u64()
+                    .is_some_and(|revision| revision > load.previous_revision)
+            };
+            let identity = identities.and_then(|events| {
+                events.iter().find(|result| {
+                    result["sessionId"] == *session_id
+                        && result["providerSessionId"] == load.id
+                        && newer_revision(&result["spawnRevision"])
+                        && matches!(
+                            result["result"].as_str(),
+                            Some("confirmed" | "restore-failed")
+                        )
+                })
+            });
+            let error = error.or_else(|| {
+                identity
+                    .filter(|result| result["result"] == "restore-failed")
+                    .and_then(|result| result["restoreError"].as_str())
+            });
+            // The committed binding hands off subsequent recovery to the card.
+            let committed = session_levels::node(nodes, session_id).is_some_and(|node| {
+                node["currentMode"] == "claude-code"
+                    && newer_revision(&node["providerSpawnRevision"])
+                    && node["title"] == load.title
+            });
+            if error.is_none()
+                && !committed
+                && !identity.is_some_and(|result| result["result"] == "confirmed")
+            {
+                return true;
+            }
+            if visible_target == Some(session_id.as_str()) {
+                outcome = Some(error.map_or(Ok(()), |error| Err(error.to_owned())));
+            }
+            false
+        });
+        match outcome {
+            Some(Ok(())) => self.close_dialog(window, cx),
+            Some(Err(error)) => {
+                if let Some(TabDialog::SessionLoader(state)) = &mut self.dialog {
+                    state.error = Some(error);
+                }
+            }
+            None => {}
+        }
+    }
+
+    fn fail_pending_loader_commands(&mut self, message: String) {
+        if let Some(TabDialog::SessionLoader(state)) = &mut self.dialog
+            && (state.loading_list
+                || state.pending_detail.is_some()
+                || self.pending_loader_loads.contains_key(&state.session_id))
+        {
+            state.loading_list = false;
+            state.loading_detail = false;
+            state.loading_earlier = false;
+            state.pending_detail = None;
+            state.error = Some(message);
+        }
+        self.pending_loader_loads.clear();
     }
 
     fn launch_action_blocked_reason(&self, id: &str, node: &Value) -> Option<&'static str> {
@@ -4823,6 +5394,37 @@ impl Workspace {
 
     fn tab_key(&mut self, stroke: &Keystroke, window: &mut Window, cx: &mut Context<Self>) {
         let mods = stroke.modifiers;
+        if let Some(TabDialog::SessionLoader(state)) = &self.dialog {
+            if stroke.key == "escape" {
+                self.close_dialog(window, cx);
+                cx.stop_propagation();
+            } else if stroke.key == "tab" && !mods.alt && !mods.control && !mods.platform {
+                let input = state.input.read(cx);
+                let mut controls = vec![&self.dialog_controls[0], &input.focus];
+                if !input.text.is_empty() {
+                    controls.push(&self.dialog_controls[3]);
+                }
+                controls.push(&state.list_focus);
+                if state.has_earlier && !state.loading_earlier {
+                    controls.push(&self.dialog_controls[1]);
+                }
+                if self.session_loader_can_submit(state) {
+                    controls.push(&self.dialog_controls[2]);
+                }
+                let current = controls.iter().position(|focus| focus.is_focused(window));
+                let next = match (current, mods.shift) {
+                    (Some(index), true) => (index + controls.len() - 1) % controls.len(),
+                    (Some(index), false) => (index + 1) % controls.len(),
+                    (None, true) => controls.len() - 1,
+                    (None, false) => 0,
+                };
+                window.focus(controls[next]);
+                self.keyboard_focus = true;
+                cx.stop_propagation();
+                cx.notify();
+            }
+            return;
+        }
         if cfg!(target_os = "macos")
             && stroke.key == "w"
             && mods.platform
@@ -5613,6 +6215,50 @@ impl Workspace {
         }
     }
 
+    fn session_loader_button(
+        &self,
+        id: &str,
+        node: &Value,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let blocked = self.session_loader_blocked_reason(id, node);
+        let tooltip: SharedString = blocked.unwrap_or(SESSION_LOADER_TITLE).to_owned().into();
+        let button = div()
+            .id(SharedString::from(format!("session-loader-open-{id}")))
+            .size(px(24.))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(5.))
+            .text_color(rgba(0x00000085))
+            .child(
+                svg()
+                    .path("icons/folder-input.svg")
+                    .size(px(16.))
+                    .flex_none(),
+            )
+            .tooltip(move |_, cx| cx.new(|_| CardTooltip(tooltip.clone())).into());
+        if blocked.is_none() {
+            let session_id = id.to_owned();
+            self.button(
+                button
+                    .cursor_pointer()
+                    .hover(|style| style.text_color(rgba(0x000000d1)).bg(rgba(0x0000000f))),
+                &self.card_controls[id],
+                move |this, window, cx| {
+                    this.open_session_loader(&session_id, window, cx);
+                },
+                cx,
+            )
+        } else {
+            button
+                .opacity(0.38)
+                .cursor(CursorStyle::OperationNotAllowed)
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        }
+    }
+
     fn render_provider_restore_banner(
         &self,
         id: &str,
@@ -5848,9 +6494,678 @@ impl Workspace {
             )
     }
 
+    fn render_session_loader(
+        &self,
+        state: &SessionLoader,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let viewport = window.viewport_size();
+        let viewport_width = f32::from(viewport.width);
+        let viewport_height = f32::from(viewport.height);
+        let backdrop_pad = (viewport_width * 0.03).clamp(14., 34.);
+        let panel_width = 1040_f32.min((viewport_width - backdrop_pad * 2.).max(0.));
+        let panel_height = 720_f32
+            .min((viewport_height - backdrop_pad * 2.).max(0.))
+            .max(430.);
+        let list_width = (panel_width * 0.36).max(250.);
+        let events_padding = (viewport_width * 0.03).clamp(14., 28.);
+
+        let sessions: Vec<_> = state.visible_sessions(cx).collect();
+        let input = state.input.read(cx);
+        let filter_empty = input.text.is_empty();
+        let filter_focused = input.focus.is_focused(window);
+        let selected = state
+            .selected
+            .as_ref()
+            .and_then(|id| state.sessions.iter().find(|session| &session.id == id));
+        let target_title = self
+            .graph_node(&state.session_id)
+            .and_then(|node| node["title"].as_str())
+            .unwrap_or("Shell")
+            .to_owned();
+        let running = self.session_loader_running(&state.session_id);
+        let can_submit = self.session_loader_can_submit(state);
+        let mut focus_ring: Hsla = rgb(0x5b9de9).into();
+        focus_ring.a = 0.13;
+
+        let filter = div()
+            .id("session-loader-filter")
+            .h(px(34.))
+            .w_full()
+            .max_w(px(310.))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(7.))
+            .px(px(9.))
+            .border_1()
+            .border_color(if filter_focused {
+                rgb(0x5b9de9)
+            } else {
+                rgb(0x414854)
+            })
+            .rounded(px(9.))
+            .bg(rgb(0x15181c))
+            .when(filter_focused, |filter| {
+                filter.shadow(vec![BoxShadow {
+                    color: focus_ring,
+                    offset: point(px(0.), px(0.)),
+                    blur_radius: px(0.),
+                    spread_radius: px(3.),
+                }])
+            })
+            .child(icon("search", 15., 0x858e9b))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .child(state.input.clone()),
+            )
+            .children((!filter_empty).then(|| {
+                self.button(
+                    div()
+                        .id("session-loader-filter-clear")
+                        .size(px(20.))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(5.))
+                        .text_size(px(14.))
+                        .text_color(rgb(0x7f8895))
+                        .cursor_pointer()
+                        .child("×"),
+                    &self.dialog_controls[3],
+                    |this, window, cx| this.clear_session_loader_filter(window, cx),
+                    cx,
+                )
+            }));
+
+        let mut rows = Vec::with_capacity(sessions.len());
+        for session in &sessions {
+            let is_selected = state.selected.as_deref() == Some(session.id.as_str());
+            let row_session_id = session.id.clone();
+            let model = session
+                .model
+                .as_deref()
+                .filter(|model| !model.is_empty())
+                .unwrap_or("Claude Code");
+            let meta = format!("{} · {}", loader_relative_time(session.updated_at), model);
+            let detail = format!(
+                "{} · {} 条内容",
+                loader_permission_label(&session.permission_mode),
+                session.message_count
+            );
+            let loaded = session.loaded_by.as_ref().map(|owner| {
+                if owner.session_id == state.session_id {
+                    "已载入当前卡片".to_owned()
+                } else {
+                    format!("已载入{}", owner.title)
+                }
+            });
+            rows.push(
+                div()
+                    .id(SharedString::from(format!(
+                        "session-loader-row-{}",
+                        session.id
+                    )))
+                    .w_full()
+                    .flex_none()
+                    .mb(px(6.))
+                    .border_1()
+                    .border_color(if is_selected {
+                        rgba(0x5b9de999)
+                    } else {
+                        rgba(0x00000000)
+                    })
+                    .rounded(px(10.))
+                    .bg(if is_selected {
+                        rgba(0x5b9de91a)
+                    } else {
+                        rgba(0xffffff06)
+                    })
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.select_loader_session(&row_session_id, cx);
+                    }))
+                    .child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .flex_col()
+                            .gap(px(4.))
+                            .px(px(11.))
+                            .py(px(10.))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .text_size(px(11.))
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(rgb(0xe8ebf0))
+                                    .child(ui_text(session.title.clone()).normal_line_height()),
+                            )
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .text_size(px(9.))
+                                    .text_color(rgb(0x8a939f))
+                                    .child(ui_text(meta).normal_line_height()),
+                            )
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .text_size(px(9.))
+                                    .text_color(rgb(0x8a939f))
+                                    .child(ui_text(detail).normal_line_height()),
+                            )
+                            .children(loaded.map(|loaded| {
+                                div()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .text_size(px(9.))
+                                    .text_color(rgb(0x8a939f))
+                                    .child(ui_text(loaded).normal_line_height())
+                            })),
+                    ),
+            );
+        }
+
+        let list_focus = state.list_focus.clone();
+        let list_results = div()
+            .id("session-loader-results")
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .pb(px(12.))
+            .overflow_y_scroll()
+            .track_scroll(&state.list_scroll)
+            .track_focus(&state.list_focus)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |_, _, window, _| {
+                    window.focus(&list_focus);
+                }),
+            )
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                match event.keystroke.key.as_str() {
+                    "up" => {
+                        cx.stop_propagation();
+                        this.step_loader_session(-1, cx);
+                    }
+                    "down" => {
+                        cx.stop_propagation();
+                        this.step_loader_session(1, cx);
+                    }
+                    _ => {}
+                }
+            }))
+            .children(rows);
+        let list_results = if state.loading_list {
+            list_results.child(
+                div()
+                    .w_full()
+                    .py(px(7.))
+                    .text_center()
+                    .text_size(px(9.))
+                    .text_color(rgb(0x8490a0))
+                    .child(ui_text(SESSION_LOADER_LOADING_MORE).normal_line_height()),
+            )
+        } else if sessions.is_empty() {
+            list_results.child(
+                div()
+                    .min_h(px(120.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .p(px(18.))
+                    .text_center()
+                    .text_size(px(11.))
+                    .text_color(rgb(0x77818e))
+                    .child(ui_text(if filter_empty {
+                        SESSION_LOADER_NO_SESSIONS
+                    } else {
+                        SESSION_LOADER_NO_MATCHES
+                    })),
+            )
+        } else {
+            list_results
+        };
+
+        let list = div()
+            .id("session-loader-list")
+            .w(px(list_width))
+            .flex_none()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .pt(px(14.))
+            .px(px(12.))
+            .border_r_1()
+            .border_color(rgb(0x333943))
+            .bg(rgb(0x1d2025))
+            .child(filter)
+            .child(
+                div()
+                    .h(px(32.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .text_size(px(9.))
+                    .text_color(rgb(0x747e8c))
+                    .child(
+                        ui_text(format!(
+                            "{} / {} 个会话",
+                            sessions.len(),
+                            state.sessions.len()
+                        ))
+                        .normal_line_height(),
+                    ),
+            )
+            .child(list_results);
+
+        let preview_title = selected
+            .map(|session| session.title.clone())
+            .unwrap_or_else(|| SESSION_LOADER_SELECT_SESSION.to_owned());
+        let preview_header = div()
+            .h(px(48.))
+            .flex_none()
+            .flex()
+            .items_center()
+            .px(px(16.))
+            .border_b_1()
+            .border_color(rgb(0x303640))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(3.))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_size(px(11.))
+                            .font_weight(FontWeight::BOLD)
+                            .child(ui_text(preview_title).normal_line_height()),
+                    )
+                    .when(state.first_event.is_some(), |title| {
+                        title.child(div().text_size(px(9.)).text_color(rgb(0x818b98)).child(
+                            ui_text(format!("{} 条内容", state.total_events)).normal_line_height(),
+                        ))
+                    }),
+            );
+
+        let mut events = div()
+            .id("session-loader-events")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .track_scroll(&state.preview_scroll)
+            .px(px(events_padding))
+            .pt(px(16.))
+            .pb(px(28.));
+        if state.has_earlier || state.loading_earlier {
+            let pill = div()
+                .id("session-loader-earlier")
+                .h(px(22.))
+                .px(px(9.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(999.))
+                .border_1()
+                .border_color(rgba(0x5b9de926))
+                .bg(rgba(0x181b20eb))
+                .text_size(px(9.))
+                .text_color(rgb(0x8490a0))
+                .child(ui_text(SESSION_LOADER_LOADING_EARLIER).normal_line_height());
+            let pill = if state.loading_earlier {
+                pill.opacity(0.6)
+            } else {
+                self.button(
+                    pill.cursor_pointer().hover(|style| {
+                        style
+                            .border_color(rgb(0x3c4653))
+                            .text_color(rgb(0xb5c0cd))
+                            .bg(rgba(0xffffff0a))
+                    }),
+                    &self.dialog_controls[1],
+                    |this, _, cx| this.load_earlier_session_events(cx),
+                    cx,
+                )
+            };
+            events = events.child(
+                div()
+                    .w_full()
+                    .flex()
+                    .justify_center()
+                    .mb(px(10.))
+                    .child(pill),
+            );
+        }
+        let mono = if cfg!(target_os = "macos") {
+            "SF Mono"
+        } else {
+            "Consolas"
+        };
+        for event in &state.events {
+            let (border, background) = match event.kind.as_str() {
+                "tool" => (0x4c3d5a, 0x241f2a),
+                "user" => (0x343b46, 0x252b32),
+                _ => (0x343b46, 0x20242a),
+            };
+            let label = loader_event_label(&event.kind, event.tool_name.as_deref());
+            let is_user = event.kind == "user";
+            events = events.child(
+                div()
+                    .w_full()
+                    .flex()
+                    .mb(px(12.))
+                    .when(is_user, |row| row.justify_end())
+                    .when(!is_user, |row| row.justify_center())
+                    .child(
+                        div()
+                            .w_full()
+                            .max_w(px(760.))
+                            .border_1()
+                            .border_color(rgb(border))
+                            .rounded(px(11.))
+                            .bg(rgb(background))
+                            .px(px(13.))
+                            .py(px(11.))
+                            .child(
+                                div()
+                                    .w_full()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap(px(8.))
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .whitespace_nowrap()
+                                            .text_ellipsis()
+                                            .text_size(px(9.))
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_color(rgb(0xb9c1cc))
+                                            .child(ui_text(label.to_owned()).normal_line_height()),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .text_size(px(9.))
+                                            .text_color(rgb(0x8e98a5))
+                                            .child(format!("#{}", event.index)),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .w_full()
+                                    .min_w_0()
+                                    .mt(px(7.))
+                                    .font_family(mono)
+                                    .text_size(px(10.))
+                                    .line_height(px(16.))
+                                    .text_color(rgb(0xd9dde3))
+                                    .whitespace_normal()
+                                    .child(ui_text(event.text.clone())),
+                            ),
+                    ),
+            );
+        }
+        if let Some(message) = if state.loading_detail {
+            Some(SESSION_LOADER_LOADING_PREVIEW)
+        } else {
+            (state.first_event.is_some() && state.events.is_empty())
+                .then_some(SESSION_LOADER_NO_HISTORY)
+        } {
+            events = events.child(
+                div()
+                    .min_h(px(120.))
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .p(px(18.))
+                    .text_center()
+                    .text_size(px(11.))
+                    .text_color(rgb(0x77818e))
+                    .child(ui_text(message)),
+            );
+        }
+
+        let preview = div()
+            .id("session-loader-preview")
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .bg(rgb(0x181b20))
+            .child(preview_header)
+            .child(events);
+
+        let body = div()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .min_w_0()
+            .flex()
+            .child(list)
+            .child(preview);
+
+        let primary_label = if self.pending_loader_loads.contains_key(&state.session_id) {
+            SESSION_LOADER_LOADING.to_owned()
+        } else {
+            format!("载入到“{target_title}”")
+        };
+        let primary = div()
+            .id("session-loader-submit")
+            .h(px(32.))
+            .max_w(px(480.))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_ellipsis()
+            .px(px(14.))
+            .border_1()
+            .border_color(rgb(0x4a8fdc))
+            .rounded(px(8.))
+            .bg(rgb(0x347bc8))
+            .text_color(rgb(0xffffff))
+            .text_size(px(12.))
+            .child(ui_text(primary_label).normal_line_height());
+        let primary = if can_submit {
+            self.button(
+                primary.cursor_pointer(),
+                &self.dialog_controls[2],
+                |this, _, cx| this.submit_session_loader(cx),
+                cx,
+            )
+        } else {
+            primary
+                .opacity(0.48)
+                .cursor(CursorStyle::OperationNotAllowed)
+        };
+
+        let footer = div()
+            .h(px(58.))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .px(px(18.))
+            .border_t_1()
+            .border_color(rgb(0x343a44))
+            .bg(rgb(0x20242a))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .children(state.error.as_ref().map(|error| {
+                        div()
+                            .id("session-loader-error")
+                            .w_full()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_size(px(10.))
+                            .text_color(rgb(0xff8276))
+                            .child(ui_text(error.clone()).normal_line_height())
+                    }))
+                    .when(running, |left| {
+                        left.child(
+                            div()
+                                .w_full()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .text_size(px(10.))
+                                .text_color(rgb(0xe5af52))
+                                .child(
+                                    ui_text(SESSION_LOADER_RUNNING_WARNING).normal_line_height(),
+                                ),
+                        )
+                    }),
+            )
+            .child(primary);
+
+        let header = div()
+            .h(px(58.))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(px(10.))
+            .px(px(18.))
+            .border_b_1()
+            .border_color(rgb(0x343a44))
+            .bg(rgb(0x20242a))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(3.))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_size(px(15.))
+                            .font_weight(FontWeight::BOLD)
+                            .child(ui_text(SESSION_LOADER_TITLE).normal_line_height()),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_size(px(10.))
+                            .text_color(rgb(0x8d96a3))
+                            .child(ui_text(state.cwd.clone()).normal_line_height()),
+                    ),
+            )
+            .child(
+                self.button(
+                    div()
+                        .id("session-loader-close")
+                        .size(px(28.))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(7.))
+                        .text_size(px(20.))
+                        .line_height(relative(1.))
+                        .text_color(rgb(0x9fa7b3))
+                        .cursor_pointer()
+                        .hover(|style| style.text_color(rgb(0xffffff)).bg(rgba(0xffffff12)))
+                        .child("×"),
+                    &self.dialog_controls[0],
+                    |this, window, cx| this.close_dialog(window, cx),
+                    cx,
+                ),
+            );
+
+        let panel = div()
+            .id("session-loader-dialog")
+            .w(px(panel_width))
+            .h(px(panel_height))
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .rounded(px(16.))
+            .border_1()
+            .border_color(rgb(0x3b424d))
+            .bg(rgb(0x1a1d22))
+            .text_color(rgb(0xe8ebf0))
+            .shadow(vec![shadow(0x000000, 0.48, 28., 90.)])
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(header)
+            .child(body)
+            .child(footer);
+
+        div()
+            .id("session-loader-backdrop")
+            .absolute()
+            .inset_0()
+            .occlude()
+            .flex()
+            .items_center()
+            .justify_center()
+            .p(px(backdrop_pad))
+            .bg(rgba(0x0f12177a))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    this.close_dialog(window, cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+            .child(panel)
+            .into_any_element()
+    }
+
     fn tab_overlay(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if let Some(TabDialog::SessionLoader(state)) = &self.dialog {
+            return Some(self.render_session_loader(state, window, cx));
+        }
         if let Some(dialog) = &self.dialog {
             let (title, body, confirm, show_cancel, disabled): (SharedString, _, SharedString, _, _) = match dialog {
+                TabDialog::SessionLoader(_) => unreachable!("loader rendered above"),
                 TabDialog::RenameTask { task_id, input, empty_submitted, failure } => {
                     let value = trim_name(&input.read(cx).text);
                     let error = if *empty_submitted && value.is_empty() { Some("工作台名称不能为空".into()) }
@@ -7210,10 +8525,7 @@ impl Render for Workspace {
                                 .items_center()
                                 .gap(px(6.))
                                 .children(badge)
-                                .child(self.focus_control(
-                                    div().child(icon("folder-input", 16., 0x687d92)),
-                                    &self.card_controls[id],
-                                ))
+                                .children(node.map(|node| self.session_loader_button(id, node, cx)))
                                 .children(
                                     node.filter(|node| node["archivedAt"].is_null())
                                         .map(|node| self.remove_card_button(id, node, cx)),
@@ -7478,6 +8790,48 @@ impl Render for Workspace {
             .children(badge_tooltip.filter(|_| !canvas_dialog))
             .children(toast)
             .children(window_overlay)
+    }
+}
+
+fn loader_relative_time(updated_at: i64) -> String {
+    if updated_at == 0 {
+        return "时间未知".into();
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_millis() as i64);
+    let hours = (now - updated_at).max(0) / 3_600_000;
+    if hours < 24 {
+        if hours <= 0 {
+            "刚刚".into()
+        } else {
+            format!("{hours} 小时前")
+        }
+    } else {
+        format!("{} 天前", hours / 24)
+    }
+}
+
+fn loader_permission_label(mode: &str) -> &str {
+    match mode {
+        "" | "default" => "默认权限",
+        "auto" => "自动模式",
+        "acceptEdits" => "自动接受编辑",
+        "plan" => "计划模式",
+        "bypassPermissions" => "开放所有权限",
+        "ask" => "逐项确认",
+        other => other,
+    }
+}
+
+fn loader_event_label(kind: &str, tool_name: Option<&str>) -> SharedString {
+    match kind {
+        "user" => "你".into(),
+        "assistant" => "Claude".into(),
+        "tool" => tool_name
+            .filter(|name| !name.is_empty())
+            .map_or_else(|| "工具".into(), |name| format!("工具 · {name}").into()),
+        _ => "系统".into(),
     }
 }
 

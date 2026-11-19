@@ -220,6 +220,158 @@ mod workspace {
             )
         }
 
+        pub(super) fn loader_cwd(&self) -> String {
+            self.graph_node(super::probe::PEER).unwrap()["cwd"]
+                .as_str()
+                .unwrap()
+                .into()
+        }
+
+        pub(super) fn loader_blocked(&self) -> Option<&'static str> {
+            let id = super::probe::PEER;
+            self.session_loader_blocked_reason(id, self.graph_node(id).unwrap())
+        }
+
+        fn loader(&self) -> &SessionLoader {
+            let Some(TabDialog::SessionLoader(state)) = &self.dialog else {
+                panic!("expected the session loader");
+            };
+            state
+        }
+
+        pub(super) fn assert_loader_open(&self, window: &Window, cx: &Context<Self>) {
+            let state = self.loader();
+            let input = state.input.read(cx);
+            assert_eq!(input.placeholder, "筛选左侧：标题、路径、模型或会话 ID");
+            assert!(input.focus.is_focused(window));
+            assert!(input.search_style);
+            assert!(state.loading_list);
+            assert!(state.list_scroll.bounds().size.width >= px(220.));
+            assert!(state.preview_scroll.bounds().size.width > px(250.));
+            assert_eq!(SESSION_LOADER_TITLE, "载入 Claude Code 会话");
+            assert_eq!(SESSION_LOADER_LOADING_MORE, "正在载入更多会话…");
+        }
+
+        pub(super) fn assert_loader_list(
+            &self,
+            visible: &[&str],
+            selected: Option<&str>,
+            cx: &Context<Self>,
+        ) {
+            let state = self.loader();
+            assert_eq!(state.cwd, self.loader_cwd());
+            assert_eq!(state.selected.as_deref(), selected);
+            let rows: Vec<_> = state.visible_sessions(cx).collect();
+            assert_eq!(
+                rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+                visible
+            );
+            if let Some(row) = rows.iter().find(|row| row.id == "history-a") {
+                assert_eq!(row.title, "Alpha planning");
+                assert_eq!(row.message_count, 205);
+                assert_eq!(row.model.as_deref(), Some("Sonnet"));
+                assert_eq!(row.permission_mode, "plan");
+                let owner = row.loaded_by.as_ref().unwrap();
+                assert_eq!(
+                    (owner.session_id.as_str(), owner.title.as_str()),
+                    (PARENT, "分支主会话")
+                );
+            }
+        }
+
+        pub(super) fn assert_loader_preview(&self, indices: &[usize], total: usize, earlier: bool) {
+            let state = self.loader();
+            assert_eq!(
+                state
+                    .events
+                    .iter()
+                    .map(|event| event.index)
+                    .collect::<Vec<_>>(),
+                indices
+            );
+            assert_eq!(state.total_events, total);
+            assert_eq!(state.has_earlier, earlier);
+            assert_eq!(SESSION_LOADER_LOADING_EARLIER, "正在载入更早内容…");
+            if !indices.is_empty() {
+                assert_eq!(
+                    state.preview_scroll.children_count(),
+                    indices.len() + usize::from(earlier)
+                );
+            }
+            if indices.contains(&8) {
+                let latest = &state.events[state.events.len() - 4..];
+                assert_eq!(
+                    latest
+                        .iter()
+                        .map(|event| event.kind.as_str())
+                        .collect::<Vec<_>>(),
+                    ["user", "assistant", "tool", "system"]
+                );
+                assert_eq!(latest[0].text, "第一行\n第二行");
+                assert_eq!(latest[2].tool_name.as_deref(), Some("Read"));
+                assert_eq!(
+                    latest
+                        .iter()
+                        .map(|event| loader_event_label(&event.kind, event.tool_name.as_deref()))
+                        .collect::<Vec<_>>(),
+                    ["你", "Claude", "工具 · Read", "系统"]
+                );
+            }
+        }
+
+        pub(super) fn loader_filter(
+            &self,
+            query: &str,
+            window: &mut Window,
+            cx: &mut Context<Self>,
+        ) {
+            self.loader().input.update(cx, |input, cx| {
+                let length = input.text.encode_utf16().count();
+                input.replace_text_in_range(Some(0..length), query, window, cx);
+            });
+        }
+
+        pub(super) fn focus_loader_control(&self, index: usize, window: &mut Window) {
+            window.focus(&self.dialog_controls[index]);
+        }
+
+        pub(super) fn focus_loader_list(&self, window: &mut Window) {
+            window.focus(&self.loader().list_focus);
+        }
+
+        pub(super) fn assert_loader_submit(
+            &self,
+            running: bool,
+            enabled: bool,
+            error: Option<&str>,
+        ) {
+            let state = self.loader();
+            assert_eq!(self.session_loader_running(&state.session_id), running);
+            assert_eq!(self.session_loader_can_submit(state), enabled);
+            assert_eq!(state.error.as_deref(), error);
+            if running {
+                assert_eq!(
+                    SESSION_LOADER_RUNNING_WARNING,
+                    "当前卡片正在运行，继续会结束当前进程。"
+                );
+            }
+        }
+
+        pub(super) fn deliver_loader_bridge_error(
+            &mut self,
+            window: &mut Window,
+            cx: &mut Context<Self>,
+        ) {
+            self.apply(
+                BridgeEvent::TransportDiagnostic {
+                    generation: self.commands.connection().0,
+                    message: "probe: runtime connection lost".into(),
+                },
+                window,
+                cx,
+            );
+        }
+
         pub(super) fn stopped_card_position(&self, id: &str, inset: Pixels) -> Point<Pixels> {
             self.remove_button_position(id) - point(inset, px(0.))
         }
@@ -888,6 +1040,30 @@ mod probe {
                     (PEER, resume, revision, state, error),
                 )
                 .unwrap();
+        }
+
+        fn commit_catalog_load(&mut self, cwd: &str) {
+            use matou_native_core::sessions::{ClaudeCatalogLoad, load_claude_catalog_binding};
+
+            let Some(BootstrapResult::Writable { connection, .. }) = &mut self.db else {
+                unreachable!()
+            };
+            load_claude_catalog_binding(
+                connection,
+                &command("probe-load-history"),
+                &ClaudeCatalogLoad {
+                    binding_id: "probe-loaded-binding",
+                    session_id: PEER,
+                    scene_id: SCENE,
+                    cwd,
+                    provider_session_id: "history-b",
+                    title: "Beta draft",
+                    model: Some("Haiku"),
+                    permission_mode: "default",
+                },
+                24,
+            )
+            .unwrap();
         }
 
         fn event(&self, ready: bool) -> Event {
@@ -2357,8 +2533,424 @@ mod probe {
             .unwrap();
     }
 
+    fn verify_session_loader(cx: &mut AsyncApp) {
+        use serde_json::{Value, json};
+
+        let mut fixture = Fixture::new();
+        let Some(BootstrapResult::Writable { connection, .. }) = &fixture.db else {
+            unreachable!()
+        };
+        connection
+            .execute("UPDATE sessions SET title = '目标卡' WHERE id = ?1", [PEER])
+            .unwrap();
+        let (window, sink) = open_hidden(cx, 1200.);
+        deliver(window, cx, fixture.event(true));
+        draw(window, cx);
+        window
+            .update(cx, |view, window, cx| view.qualify(PEER, window, cx))
+            .unwrap();
+        draw(window, cx);
+        let cwd = window.update(cx, |view, _, _| view.loader_cwd()).unwrap();
+        let assert_blocked = |cx: &mut AsyncApp, expected| {
+            window
+                .update(cx, |view, _, _| assert_eq!(view.loader_blocked(), expected))
+                .unwrap();
+        };
+        let click_entry = |cx: &mut AsyncApp| {
+            draw(window, cx);
+            let at = window
+                .update(cx, |view, _, _| view.remove_button_position(PEER))
+                .unwrap();
+            click(window, cx, at - point(px(31.5), px(0.)));
+            draw(window, cx);
+        };
+        let commands = |sink: &ProbeReceiver| {
+            std::iter::from_fn(|| sink.try_recv().ok())
+                .filter(|command| {
+                    matches!(
+                        command,
+                        Command::ListProviderSessions { .. }
+                            | Command::GetProviderSession { .. }
+                            | Command::LoadProviderSession { .. }
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let assert_closed = |cx: &mut AsyncApp| {
+            window
+                .update(cx, |view, _, _| view.assert_no_dialog())
+                .unwrap();
+        };
+        for (event, reason) in [
+            (
+                Event::WorkspacePaths(vec![WorkspacePathState {
+                    workspace_id: "levels-workspace".into(),
+                    status: "invalid".into(),
+                    reason: "probe path".into(),
+                    checked_at: 1,
+                    validation_generation: 1,
+                }]),
+                "工作区目录不可用，请先在本地恢复原路径，或移出该工作区",
+            ),
+            (
+                Event::StorageFault {
+                    session_id: PEER.into(),
+                    message: "probe storage".into(),
+                },
+                "终端存储异常，请先恢复或结束当前会话",
+            ),
+        ] {
+            deliver(window, cx, event);
+            assert_blocked(cx, Some(reason));
+            click_entry(cx);
+            assert_closed(cx);
+            assert!(commands(&sink).is_empty());
+            deliver(window, cx, Event::WorkspacePaths(Vec::new()));
+        }
+        deliver(
+            window,
+            cx,
+            Event::StorageRecovered {
+                session_id: PEER.into(),
+            },
+        );
+        sink.read_only();
+        assert_blocked(cx, Some("数据库处于只读恢复模式"));
+        click_entry(cx);
+        assert_closed(cx);
+        assert!(commands(&sink).is_empty());
+        sink.generation(1);
+        assert_blocked(cx, None);
+
+        let open = |cx: &mut AsyncApp| {
+            click_entry(cx);
+            window
+                .update(cx, |view, window, cx| view.assert_loader_open(window, cx))
+                .unwrap();
+            assert!(
+                matches!(commands(&sink).as_slice(), [Command::ListProviderSessions { cwd: path }]
+                if path == &cwd)
+            );
+        };
+        let list = |cx: &mut AsyncApp, visible: &[&str], selected: Option<&str>| {
+            window
+                .update(cx, |view, _, cx| {
+                    view.assert_loader_list(visible, selected, cx)
+                })
+                .unwrap();
+        };
+        let detail = |id: &str, start: Option<i64>, limit: Option<i64>| {
+            assert!(
+                matches!(commands(&sink).as_slice(), [Command::GetProviderSession {
+                cwd: path, provider_session_id, start_event_index, limit: count,
+            }] if path == &cwd && provider_session_id == id && *start_event_index == start && *count == limit)
+            );
+        };
+        let graph =
+            |fixture: &Fixture, cx: &mut AsyncApp, key: &str, result: Value, running: bool| {
+                let Event::Graph(mut graph) = fixture.graph_event() else {
+                    unreachable!()
+                };
+                if running {
+                    let card = graph["nodes"]
+                        .as_array_mut()
+                        .unwrap()
+                        .iter_mut()
+                        .find(|node| node["sessionId"] == PEER)
+                        .unwrap();
+                    card["workStatus"] = json!("running");
+                }
+                graph[key] = json!([result]);
+                deliver(window, cx, Event::Graph(graph));
+                draw(window, cx);
+            };
+        let preview = |cx: &mut AsyncApp, indices: &[usize], total, earlier| {
+            window
+                .update(cx, |view, _, _| {
+                    view.assert_loader_preview(indices, total, earlier)
+                })
+                .unwrap();
+        };
+        let control = |cx: &mut AsyncApp, index| {
+            draw(window, cx);
+            window
+                .update(cx, |view, window, _| {
+                    view.focus_loader_control(index, window)
+                })
+                .unwrap();
+            draw(window, cx);
+            press(window, cx, "enter");
+            draw(window, cx);
+        };
+        let assert_submit = |cx: &mut AsyncApp, running, enabled, error| {
+            window
+                .update(cx, |view, _, _| {
+                    view.assert_loader_submit(running, enabled, error)
+                })
+                .unwrap();
+        };
+        open(cx);
+        list(cx, &[], None);
+        assert_submit(cx, false, false, None);
+        graph(
+            &fixture,
+            cx,
+            "providerSessionCatalogResults",
+            json!({"cwd":cwd,"sessions":[]}),
+            false,
+        );
+        list(cx, &[], None);
+        press(window, cx, "escape");
+        assert_closed(cx);
+
+        open(cx);
+        graph(
+            &fixture,
+            cx,
+            "providerSessionCatalogResults",
+            json!({"cwd":cwd,"error":"probe list error"}),
+            false,
+        );
+        assert_submit(cx, false, false, Some("probe list error"));
+        press(window, cx, "escape");
+        assert_closed(cx);
+
+        open(cx);
+        graph(
+            &fixture,
+            cx,
+            "providerSessionCatalogResults",
+            json!({"cwd":cwd,"sessions":[
+                {"providerSessionId":"history-a","title":"Alpha planning","updatedAt":1730000000000_i64,
+                 "messageCount":205,"model":"Sonnet","permissionMode":"plan",
+                 "loadedBy":{"sessionId":PARENT,"title":"分支主会话"}},
+                {"providerSessionId":"history-b","title":"Beta draft","updatedAt":1720000000000_i64,
+                 "messageCount":0,"model":"Haiku","permissionMode":"default",
+                 "loadedBy":{"sessionId":PEER,"title":"目标卡"}}
+            ]}),
+            false,
+        );
+        list(cx, &["history-a", "history-b"], Some("history-a"));
+        detail("history-a", None, None);
+        graph(
+            &fixture,
+            cx,
+            "providerSessionDetailResults",
+            json!({
+                "cwd":cwd, "providerSessionId":"history-a",
+                "events":[
+                    {"index":5,"kind":"user","role":"user","text":"第一行\n第二行","matched":false},
+                    {"index":6,"kind":"assistant","role":"assistant","text":"回答","matched":false},
+                    {"index":7,"kind":"tool","toolName":"Read","text":"工具结果","matched":false},
+                    {"index":8,"kind":"system","text":"系统消息","matched":false}
+                ],
+                "page":{"startEventIndex":5,"endEventIndex":9,"total":8,"hasEarlier":true,"hasLater":false}
+            }),
+            false,
+        );
+        preview(cx, &[5, 6, 7, 8], 8, true);
+        control(cx, 1);
+        detail("history-a", Some(1), Some(4));
+        graph(
+            &fixture,
+            cx,
+            "providerSessionDetailResults",
+            json!({
+                "cwd":cwd,"providerSessionId":"history-a",
+                "events":(1..=4).map(|index| json!({"index":index,"kind":"user","text":"更早","matched":false})).collect::<Vec<_>>(),
+                "page":{"startEventIndex":1,"endEventIndex":5,"total":8,"hasEarlier":false,"hasLater":true}
+            }),
+            false,
+        );
+        preview(cx, &[1, 2, 3, 4, 5, 6, 7, 8], 8, false);
+
+        let filter = |cx: &mut AsyncApp, query: &str| {
+            window
+                .update(cx, |view, window, cx| view.loader_filter(query, window, cx))
+                .unwrap();
+            draw(window, cx);
+        };
+        filter(cx, "sOnNeT");
+        list(cx, &["history-a"], Some("history-a"));
+        filter(cx, "ALPHA");
+        list(cx, &["history-a"], Some("history-a"));
+        filter(cx, "HISTORY-A");
+        list(cx, &["history-a"], Some("history-a"));
+        filter(cx, &cwd.to_uppercase());
+        list(cx, &["history-a", "history-b"], Some("history-a"));
+        filter(cx, "");
+        window
+            .update(cx, |view, window, _| view.focus_loader_list(window))
+            .unwrap();
+        draw(window, cx);
+        press(window, cx, "down");
+        list(cx, &["history-a", "history-b"], Some("history-b"));
+        detail("history-b", None, None);
+        graph(
+            &fixture,
+            cx,
+            "providerSessionDetailResults",
+            json!({
+                "cwd":cwd,"providerSessionId":"history-b","error":"probe preview error"
+            }),
+            false,
+        );
+        assert_submit(cx, false, true, Some("probe preview error"));
+        filter(cx, "no such conversation");
+        list(cx, &[], None);
+        assert_submit(cx, false, false, None);
+        filter(cx, "beta");
+        list(cx, &["history-b"], Some("history-b"));
+        detail("history-b", None, None);
+        graph(
+            &fixture,
+            cx,
+            "providerSessionDetailResults",
+            json!({
+                "cwd":cwd,"providerSessionId":"history-b","events":[],
+                "page":{"startEventIndex":0,"endEventIndex":0,"total":0,"hasEarlier":false,"hasLater":false}
+            }),
+            true,
+        );
+        preview(cx, &[], 0, false);
+        assert_submit(cx, true, true, None);
+        let assert_load = || {
+            assert!(
+                matches!(commands(&sink).as_slice(), [Command::LoadProviderSession {
+                session_id, provider_session_id,
+            }] if session_id == PEER && provider_session_id == "history-b")
+            );
+        };
+        control(cx, 2);
+        assert_load();
+        assert_submit(cx, true, false, None);
+        AnyWindowHandle::from(window)
+            .update(cx, |_, window, cx| {
+                window.dispatch_keystroke(Keystroke::parse("enter").unwrap(), cx);
+            })
+            .unwrap();
+        assert!(commands(&sink).is_empty());
+        let busy = "Card already has a running or starting process";
+        graph(
+            &fixture,
+            cx,
+            "providerSessionLoadErrors",
+            json!({
+                "sessionId":PEER,"providerSessionId":"history-b","error":busy
+            }),
+            true,
+        );
+        assert_submit(cx, true, true, Some(busy));
+        control(cx, 2);
+        assert_load();
+        press(window, cx, "escape");
+        assert_closed(cx);
+        open(cx);
+        graph(
+            &fixture,
+            cx,
+            "providerSessionCatalogResults",
+            json!({"cwd":cwd,"sessions":[
+                {"providerSessionId":"history-b","title":"Beta draft","updatedAt":0,
+                 "messageCount":1,"model":"Haiku","permissionMode":"default","loadedBy":null}
+            ]}),
+            true,
+        );
+        detail("history-b", None, None);
+        assert_submit(cx, true, false, None);
+        assert!(commands(&sink).is_empty());
+        fixture.commit_catalog_load(&cwd);
+        deliver(window, cx, fixture.graph_event());
+        assert_closed(cx);
+
+        open(cx);
+        let large_list: Vec<_> = (0..200)
+            .map(|index| {
+                json!({
+                    "providerSessionId":format!("fixture-list-{index}"),
+                    "title":format!("历史会话 {index}"),
+                    "updatedAt":0,"permissionMode":"default","messageCount":1,"loadedBy":null
+                })
+            })
+            .collect();
+        let started = Instant::now();
+        graph(
+            &fixture,
+            cx,
+            "providerSessionCatalogResults",
+            json!({"cwd":cwd,"sessions":large_list}),
+            true,
+        );
+        println!(
+            "Session loader 200-row graph + hidden GPUI draw | {:?}",
+            started.elapsed()
+        );
+        detail("fixture-list-0", None, None);
+        filter(cx, "fixture-list-199");
+        list(cx, &["fixture-list-199"], Some("fixture-list-199"));
+        graph(
+            &fixture,
+            cx,
+            "providerSessionDetailResults",
+            json!({
+                "cwd":cwd,"providerSessionId":"fixture-list-0","error":"stale detail"
+            }),
+            true,
+        );
+        assert_submit(cx, true, true, None);
+        detail("fixture-list-199", None, None);
+        click(window, cx, point(px(300.), px(12.)));
+        assert_closed(cx);
+        open(cx);
+        let close = window
+            .update(cx, |_, window, _| {
+                let viewport = window.viewport_size();
+                let inset = (f32::from(viewport.width) * 0.03).clamp(14., 34.);
+                let width = px(1040.).min(viewport.width - px(inset * 2.));
+                let height = px(720.).min(viewport.height - px(inset * 2.)).max(px(430.));
+                point(
+                    (viewport.width + width) / 2. - px(33.),
+                    (viewport.height - height) / 2. + px(30.),
+                )
+            })
+            .unwrap();
+        click(window, cx, close);
+        assert_closed(cx);
+        open(cx);
+        window
+            .update(cx, |view, window, cx| {
+                view.deliver_loader_bridge_error(window, cx)
+            })
+            .unwrap();
+        assert_submit(cx, true, false, Some("probe: runtime connection lost"));
+        let Event::Graph(mut removed) = fixture.graph_event() else {
+            unreachable!()
+        };
+        removed["nodes"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|node| node["sessionId"] != PEER);
+        deliver(window, cx, Event::Graph(removed));
+        assert_closed(cx);
+        window
+            .update(cx, |_, window, _| window.remove_window())
+            .unwrap();
+        println!(
+            "Session loader | GPUI entry, filter, selection, preview pages, command payloads, runtime outcomes and dismissal"
+        );
+    }
+
     pub(super) fn run() {
-        Application::new().with_assets(NativeAssets).run(|cx| {
+        let loader_only = std::env::args().any(|arg| arg == "--session-loader");
+        Application::new().with_assets(NativeAssets).run(move |cx| {
+            if loader_only {
+                cx.spawn(async |cx| {
+                    verify_session_loader(cx);
+                    cx.update(|cx| cx.quit()).unwrap();
+                })
+                .detach();
+                return;
+            }
             let mut fixture = Fixture::new();
             let (commands, sink) = runtime_bridge::probe_channel();
             let (_events, incoming) = async_channel::unbounded();
@@ -2380,6 +2972,7 @@ mod probe {
                 verify_compact_card(cx);
                 verify_start_failure_card(cx);
                 verify_provider_restore_banner(cx).await;
+                verify_session_loader(cx);
                 verify_card_actions(cx);
                 verify_stopped_cards(cx);
                 verify_narrow_stopped_cards(cx);
