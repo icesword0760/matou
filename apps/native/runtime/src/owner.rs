@@ -173,6 +173,27 @@ impl ShellOwner {
         session_graph::project_scene_graph(&self.connection, scene_id, window_id)
     }
 
+    pub(crate) fn notification_scene_id(
+        &self,
+        window_id: &str,
+        session_id: &str,
+    ) -> Result<Option<String>> {
+        // FocusSession accepts the session's canvas membership. Among eligible
+        // mounts prefer the latest activation, then the newest mount.
+        Ok(self.connection.query_row(
+            "SELECT mount.scene_id FROM session_mounts mount
+             JOIN session_canvas_memberships member
+               ON member.session_id = mount.session_id AND member.scene_id = mount.scene_id
+             JOIN sessions ON sessions.id = mount.session_id AND sessions.archived_at IS NULL
+             JOIN scenes ON scenes.id = mount.scene_id AND scenes.archived_at IS NULL
+             LEFT JOIN window_scene_focus focus ON focus.scene_id = mount.scene_id AND focus.window_id = ?1
+             WHERE mount.session_id = ?2
+             ORDER BY focus.updated_at DESC, mount.created_at DESC, mount.id DESC LIMIT 1",
+            params![window_id, session_id],
+            |row| row.get(0),
+        ).optional()?)
+    }
+
     pub(crate) fn scene_workspace_session_count(&self, scene_id: &str) -> Result<i64> {
         cards::scene_workspace_session_count(&self.connection, scene_id)
     }
@@ -2964,6 +2985,14 @@ mod provider_tests {
         let mut owner =
             ShellOwner::new(connection, ownership, || uuid::Uuid::new_v4().to_string())?;
         let executable = root.path().join("test-provider");
+        assert_eq!(
+            owner.notification_scene_id("window", session)?.as_deref(),
+            Some("scene")
+        );
+        assert_eq!(
+            owner.notification_scene_id("window", "missing-session")?,
+            None
+        );
         fs::write(
             &executable,
             "#!/bin/sh\nprintf 'provider output before identity\\n'\nread -r line\n",

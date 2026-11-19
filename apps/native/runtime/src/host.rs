@@ -2353,6 +2353,15 @@ fn run(
                     json!(std::mem::take(&mut provider_identity_events));
             }
             if !agent_notifications.is_empty() {
+                for notification in &mut agent_notifications {
+                    if let Some(session_id) = notification["sessionId"].as_str() {
+                        match owner.notification_scene_id(window_id, session_id) {
+                            Ok(Some(scene_id)) => notification["sceneId"] = json!(scene_id),
+                            Ok(None) => {}
+                            Err(error) => eprintln!("Resolve notification scene: {error:#}"),
+                        }
+                    }
+                }
                 graph["agentNotifications"] =
                     Value::Array(std::mem::take(&mut agent_notifications));
             }
