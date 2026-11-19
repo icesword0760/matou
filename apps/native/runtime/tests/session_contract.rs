@@ -570,7 +570,7 @@ fn storage_fault_keeps_saved_scrollback_readable_until_retry() -> Result<()> {
         })?;
         session.selection_action(SelectionAction::SetEnd(GridPoint {
             row: last_row,
-            col: view.cols,
+            col: isize::try_from(view.cols)?,
         }))
     };
     select_saved_output(&mut session)?;

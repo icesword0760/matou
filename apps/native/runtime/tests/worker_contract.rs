@@ -186,7 +186,10 @@ fn real_workers_keep_shell_output_independent_and_return_owned_screens() -> Resu
         range.anchor.row,
         usize::try_from(selected_screen.scrollbar.offset)? + output_row
     );
-    assert_eq!(range.end.col - range.anchor.col, "WORKER_B_ONLY".len());
+    assert_eq!(
+        range.end.col - range.anchor.col,
+        isize::try_from("WORKER_B_ONLY".len())?
+    );
 
     a.set_egress_frozen(false)?;
     a.write(b"printf 'WORKER_%s\\n' 'A_BACK'\r")?;
@@ -286,7 +289,7 @@ fn drag_scroll_extends_selection_in_the_new_worker_viewport() -> Result<()> {
         selection.end,
         GridPoint {
             row: usize::try_from(bottom.scrollbar.total)? - 1,
-            col: bottom.cols,
+            col: isize::try_from(bottom.cols)?,
         }
     );
     let downward_text = copy(false)?.text;
