@@ -41,6 +41,461 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 const TERMINATE_NOW: usize = 1;
 const TERMINATE_LATER: usize = 2;
 
+#[cfg(debug_assertions)]
+pub mod window_diag {
+    use super::*;
+    use cocoa::{
+        appkit::{NSColor, NSScreen},
+        base::BOOL,
+        foundation::{NSArray, NSAutoreleasePool, NSDictionary, NSPoint, NSRect, NSSize},
+    };
+    use core_foundation::base::{CFType, CFTypeRef};
+    use core_graphics::display::CGDisplay;
+    use gpui::{AnyWindowHandle, App};
+    use std::{
+        ffi::CStr,
+        sync::{
+            Arc, OnceLock,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
+        time::{Duration, Instant},
+    };
+
+    static SAMPLE: OnceLock<FrameSample> = OnceLock::new();
+
+    struct FrameSample {
+        window: AnyWindowHandle,
+        end: Instant,
+        painted: AtomicBool,
+        frame_requests: AtomicUsize,
+        display_callbacks: AtomicUsize,
+    }
+
+    pub fn window_created(window: &Window, cx: &mut App, visibility_probe: bool) {
+        let display = snapshot(window, "created").unwrap_or_else(|| CGDisplay::main().id);
+        let duration = Duration::from_secs(1);
+        let sample = SAMPLE.get_or_init(|| FrameSample {
+            window: window.window_handle(),
+            end: Instant::now() + duration,
+            painted: AtomicBool::new(false),
+            frame_requests: AtomicUsize::new(0),
+            display_callbacks: AtomicUsize::new(0),
+        });
+        watch_gpui_frame(window, sample);
+        let timer = cx.background_executor().timer(duration);
+        cx.background_executor()
+            .spawn(async move {
+                timer.await;
+                let requests = sample.frame_requests.load(Ordering::Relaxed);
+                eprintln!("[window-diag] GPUI frame requests in 1s: {requests}");
+            })
+            .detach();
+
+        if let Err(error) =
+            thread::Builder::new().spawn(move || sample_display_link(display, sample))
+        {
+            eprintln!("[window-diag] start CoreVideo sampling thread: {error}");
+        }
+
+        // Wait until GPUI has registered the window before AppKit can notify it about ordering.
+        window.defer(cx, move |window, _| {
+            if let Some((native_window, _)) = native_window_and_view(window) {
+                eprintln!("[window-diag] orderFrontRegardless");
+                unsafe {
+                    if visibility_probe {
+                        let color = NSColor::colorWithSRGBRed_green_blue_alpha_(nil, 1., 0., 1., 1.);
+                        native_window.setBackgroundColor_(color);
+                        native_window.setOpaque_(YES);
+                        eprintln!("[window-diag] visibility probe: NSWindow background sRGB(1,0,1,1), opaque=true");
+                    }
+                    let _: () = msg_send![native_window, orderFrontRegardless];
+                }
+            }
+        });
+    }
+
+    pub fn workspace_painted(window: &Window, cx: &mut App) {
+        let Some(sample) = SAMPLE.get() else { return };
+        if sample.window == window.window_handle() && !sample.painted.swap(true, Ordering::Relaxed)
+        {
+            let size = window.viewport_size();
+            eprintln!(
+                "[window-diag] first paint size={}x{}",
+                f32::from(size.width),
+                f32::from(size.height)
+            );
+            window.defer(cx, |window, cx| {
+                snapshot(window, "after first paint");
+                probe_metal_drawable(window, cx);
+            });
+        }
+    }
+
+    fn watch_gpui_frame(window: &Window, sample: &'static FrameSample) {
+        // This also sees AppKit-driven frame requests. It queues no redraw.
+        window.on_next_frame(move |window, _| {
+            if Instant::now() < sample.end {
+                sample.frame_requests.fetch_add(1, Ordering::Relaxed);
+                watch_gpui_frame(window, sample);
+            }
+        });
+    }
+
+    fn native_window_and_view(window: &Window) -> Option<(id, id)> {
+        let RawWindowHandle::AppKit(handle) = HasWindowHandle::window_handle(window).ok()?.as_raw()
+        else {
+            return None;
+        };
+        let view = handle.ns_view.as_ptr() as id;
+        let native_window: id = unsafe { msg_send![view, window] };
+        (native_window != nil).then_some((native_window, view))
+    }
+
+    fn snapshot(window: &Window, phase: &str) -> Option<u32> {
+        // The GPUI window keeps these AppKit objects alive on the main thread.
+        unsafe {
+            let app = NSApp();
+            let policy: isize = msg_send![app, activationPolicy];
+            let active: BOOL = msg_send![app, isActive];
+            eprintln!(
+                "[window-diag] {phase} NSApp.activationPolicy={policy} NSApp.isActive={}",
+                active == YES
+            );
+
+            let Some((native_window, view)) = native_window_and_view(window) else {
+                eprintln!("[window-diag] {phase} NSWindow unavailable");
+                return None;
+            };
+            let visible: BOOL = msg_send![native_window, isVisible];
+            let key: BOOL = msg_send![native_window, isKeyWindow];
+            let main: BOOL = msg_send![native_window, isMainWindow];
+            let frame = NSWindow::frame(native_window);
+            let content = native_window.contentView();
+            let content_frame = (content != nil).then(|| NSView::frame(content));
+            let level: isize = msg_send![native_window, level];
+            let occlusion: usize = msg_send![native_window, occlusionState];
+            let scale: f64 = msg_send![native_window, backingScaleFactor];
+            eprintln!(
+                "[window-diag] {phase} NSWindow.isVisible={} isKeyWindow={} isMainWindow={} frame={:?} contentView.frame={:?} level={level} occlusionState={occlusion:#x} backingScaleFactor={scale}",
+                visible == YES,
+                key == YES,
+                main == YES,
+                frame.as_CGRect(),
+                content_frame.as_ref().map(NSRect::as_CGRect),
+            );
+            let key_window: id = msg_send![app, keyWindow];
+            let main_window: id = msg_send![app, mainWindow];
+            let can_become_key: BOOL = msg_send![native_window, canBecomeKeyWindow];
+            let window_number: isize = msg_send![native_window, windowNumber];
+            let color_space_name: id =
+                msg_send![NSWindow::colorSpace(native_window), localizedName];
+            let background: id = msg_send![native_window.backgroundColor(), description];
+            let opaque: BOOL = msg_send![native_window, isOpaque];
+            eprintln!(
+                "[window-diag] {phase} NSWindow.windowNumber={window_number} NSApp.keyWindow={} NSApp.mainWindow={} NSWindow.canBecomeKeyWindow={} colorSpace={:?} hasShadow={} isOpaque={} backgroundColor={:?}",
+                describe_window(key_window, native_window),
+                describe_window(main_window, native_window),
+                can_become_key == YES,
+                ns_string(color_space_name),
+                native_window.hasShadow() == YES,
+                opaque == YES,
+                ns_string(background),
+            );
+            let screen = native_window.screen();
+            let display = if screen != nil {
+                let frame = NSScreen::frame(screen);
+                let visible_frame = NSScreen::visibleFrame(screen);
+                let description = NSScreen::deviceDescription(screen);
+                let key = NSString::alloc(nil).init_str("NSScreenNumber");
+                let number = description.objectForKey_(key);
+                let _: () = msg_send![key, release];
+                let display: u32 = msg_send![number, unsignedIntValue];
+                eprintln!(
+                    "[window-diag] {phase} screen.frame={:?} screen.visibleFrame={:?} display={display}",
+                    frame.as_CGRect(),
+                    visible_frame.as_CGRect(),
+                );
+                (number != nil).then_some(display)
+            } else {
+                eprintln!(
+                    "[window-diag] {phase} screen.frame unavailable screen.visibleFrame unavailable"
+                );
+                None
+            };
+
+            log_view_tree(phase, content, view);
+            log_layer(phase, "contentView.layer", content);
+            if view != content {
+                log_layer(phase, "gpuiView.layer", view);
+            }
+            display
+        }
+    }
+
+    unsafe fn describe_window(window: id, target: id) -> String {
+        if window == nil {
+            return "nil".into();
+        }
+        let number: isize = unsafe { msg_send![window, windowNumber] };
+        let relation = if window == target { "this" } else { "other" };
+        format!("{relation}(#{number})")
+    }
+
+    unsafe fn ns_string(value: id) -> Option<String> {
+        let bytes = unsafe { value.UTF8String() };
+        (!bytes.is_null()).then(|| unsafe { CStr::from_ptr(bytes).to_string_lossy().into_owned() })
+    }
+
+    unsafe fn log_view_tree(phase: &str, content: id, gpui_view: id) {
+        if content == nil {
+            eprintln!("[window-diag] {phase} contentView=nil");
+            return;
+        }
+        unsafe {
+            let subviews: id = msg_send![content, subviews];
+            let superview: id = msg_send![gpui_view, superview];
+            eprintln!(
+                "[window-diag] {phase} contentView.wantsLayer={} contentView.subviews.count={} gpuiView.inContentViewSubviews={}",
+                content.wantsLayer() == YES,
+                NSArray::count(subviews),
+                superview == content,
+            );
+            log_subviews(phase, "contentView", subviews, gpui_view);
+        }
+    }
+
+    unsafe fn log_subviews(phase: &str, parent: &str, subviews: id, gpui_view: id) {
+        unsafe {
+            for index in 0..NSArray::count(subviews) {
+                let view = subviews.objectAtIndex(index);
+                let path = format!("{parent}.subviews[{index}]");
+                let class = (*view).class().name();
+                let frame = NSView::frame(view);
+                let hidden: BOOL = msg_send![view, isHidden];
+                let alpha: f64 = msg_send![view, alphaValue];
+                eprintln!(
+                    "[window-diag] {phase} {path} class={class} frame={:?} hidden={} alphaValue={alpha} wantsLayer={} isGPUIView={}",
+                    frame.as_CGRect(),
+                    hidden == YES,
+                    view.wantsLayer() == YES,
+                    view == gpui_view,
+                );
+                let children: id = msg_send![view, subviews];
+                log_subviews(phase, &path, children, gpui_view);
+            }
+        }
+    }
+
+    unsafe fn allows_drawable_timeout(layer: id) -> Option<bool> {
+        unsafe {
+            let supported: BOOL =
+                msg_send![layer, respondsToSelector: sel!(allowsNextDrawableTimeout)];
+            (supported == YES).then(|| {
+                let allowed: BOOL = msg_send![layer, allowsNextDrawableTimeout];
+                allowed == YES
+            })
+        }
+    }
+
+    unsafe fn log_layer(phase: &str, label: &str, view: id) {
+        unsafe {
+            let layer: id = msg_send![view, layer];
+            if layer == nil {
+                eprintln!("[window-diag] {phase} {label}=nil");
+                return;
+            }
+            let name = (*layer).class().name();
+            let bounds: NSRect = msg_send![layer, bounds];
+            let position: NSPoint = msg_send![layer, position];
+            let scale: f64 = msg_send![layer, contentsScale];
+            let opaque: BOOL = msg_send![layer, isOpaque];
+            let opacity: f32 = msg_send![layer, opacity];
+            let masks: BOOL = msg_send![layer, masksToBounds];
+            let background: CFTypeRef = msg_send![layer, backgroundColor];
+            let background =
+                (!background.is_null()).then(|| CFType::wrap_under_get_rule(background));
+            let gravity: id = msg_send![layer, contentsGravity];
+            let allows_timeout = allows_drawable_timeout(layer);
+            let has_drawable_size: BOOL = msg_send![layer, respondsToSelector: sel!(drawableSize)];
+            let drawable_size = (has_drawable_size == YES).then(|| {
+                let size: NSSize = msg_send![layer, drawableSize];
+                (size.width, size.height)
+            });
+            eprintln!(
+                "[window-diag] {phase} {label}={name} bounds={:?} position=({}, {}) contentsScale={scale} opaque={} opacity={opacity} drawableSize={drawable_size:?}",
+                bounds.as_CGRect(),
+                position.x,
+                position.y,
+                opaque == YES,
+            );
+            eprintln!(
+                "[window-diag] {phase} {label} masksToBounds={} backgroundColor={background:?} contentsGravity={:?} allowsNextDrawableTimeout={allows_timeout:?}",
+                masks == YES,
+                ns_string(gravity),
+            );
+        }
+    }
+
+    fn probe_metal_drawable(window: &Window, cx: &App) {
+        let Some((_, view)) = native_window_and_view(window) else {
+            return;
+        };
+        unsafe {
+            let layer: id = msg_send![view, layer];
+            let is_metal_layer: BOOL = msg_send![layer, isKindOfClass: class!(CAMetalLayer)];
+            if is_metal_layer != YES {
+                eprintln!(
+                    "[window-diag] after first paint Metal probe unavailable: no CAMetalLayer"
+                );
+                return;
+            }
+            let presents_with_transaction: BOOL = msg_send![layer, presentsWithTransaction];
+            let maximum_drawables: usize = msg_send![layer, maximumDrawableCount];
+            // currentDrawable is an MTKView property; use only its public accessor.
+            let is_mtk_view = Class::get("MTKView").is_some_and(|class| {
+                let matches: BOOL = msg_send![view, isKindOfClass: class];
+                matches == YES
+            });
+            let current_drawable = if is_mtk_view {
+                let drawable: id = msg_send![view, currentDrawable];
+                if drawable == nil { "nil" } else { "available" }
+            } else {
+                "unavailable (requires MTKView)"
+            };
+            eprintln!(
+                "[window-diag] after first paint Metal currentDrawable={current_drawable} presentsWithTransaction={} maximumDrawableCount={maximum_drawables}",
+                presents_with_transaction == YES,
+            );
+            let layer = DrawableProbeLayer(msg_send![layer, retain]);
+            let returned = Arc::new(AtomicBool::new(false));
+            let worker_returned = returned.clone();
+            if let Err(error) = thread::Builder::new().spawn(move || {
+                let start = Instant::now();
+                eprintln!("[window-diag] after first paint Metal nextDrawable begin");
+                let result = layer.acquire_and_release();
+                worker_returned.store(true, Ordering::Relaxed);
+                eprintln!(
+                    "[window-diag] after first paint Metal nextDrawable={result} elapsed_ms={:.1}",
+                    start.elapsed().as_secs_f64() * 1000.,
+                );
+            }) {
+                eprintln!("[window-diag] after first paint Metal nextDrawable worker: {error}");
+                return;
+            }
+            let timer = cx.background_executor().timer(Duration::from_secs(1));
+            cx.background_executor()
+                .spawn(async move {
+                    timer.await;
+                    if !returned.load(Ordering::Relaxed) {
+                        eprintln!(
+                            "[window-diag] after first paint Metal nextDrawable=pending after 1s"
+                        );
+                    }
+                })
+                .detach();
+        }
+    }
+
+    struct DrawableProbeLayer(id);
+
+    // Core Animation supports obtaining a CAMetalLayer drawable on a rendering
+    // thread. The worker owns a retained layer and never touches AppKit views.
+    unsafe impl Send for DrawableProbeLayer {}
+
+    impl DrawableProbeLayer {
+        fn acquire_and_release(&self) -> &'static str {
+            // Hold the diagnostic drawable only for this autorelease scope.
+            unsafe {
+                let pool = NSAutoreleasePool::new(nil);
+                let drawable: id = msg_send![self.0, nextDrawable];
+                let result = if drawable == nil { "nil" } else { "available" };
+                pool.drain();
+                result
+            }
+        }
+    }
+
+    impl Drop for DrawableProbeLayer {
+        fn drop(&mut self) {
+            unsafe {
+                let _: () = msg_send![self.0, release];
+            }
+        }
+    }
+
+    type DisplayLinkRef = *mut c_void;
+    type DisplayLinkCallback = unsafe extern "C" fn(
+        DisplayLinkRef,
+        *const c_void,
+        *const c_void,
+        u64,
+        *mut u64,
+        *mut c_void,
+    ) -> i32;
+
+    #[link(name = "CoreVideo", kind = "framework")]
+    unsafe extern "C" {
+        fn CVDisplayLinkCreateWithCGDisplay(display: u32, link: *mut DisplayLinkRef) -> i32;
+        fn CVDisplayLinkSetOutputCallback(
+            link: DisplayLinkRef,
+            callback: DisplayLinkCallback,
+            context: *mut c_void,
+        ) -> i32;
+        fn CVDisplayLinkStart(link: DisplayLinkRef) -> i32;
+        fn CVDisplayLinkStop(link: DisplayLinkRef) -> i32;
+        fn CVDisplayLinkRelease(link: DisplayLinkRef);
+    }
+
+    unsafe extern "C" fn count_display_callback(
+        _: DisplayLinkRef,
+        _: *const c_void,
+        _: *const c_void,
+        _: u64,
+        _: *mut u64,
+        context: *mut c_void,
+    ) -> i32 {
+        // SAMPLE outlives the link and any pending CoreVideo callback.
+        let sample = unsafe { &*context.cast::<FrameSample>() };
+        if Instant::now() < sample.end {
+            sample.display_callbacks.fetch_add(1, Ordering::Relaxed);
+        }
+        0
+    }
+
+    fn sample_display_link(display: u32, sample: &'static FrameSample) {
+        unsafe {
+            let mut link = ptr::null_mut();
+            let status = CVDisplayLinkCreateWithCGDisplay(display, &mut link);
+            if status != 0 || link.is_null() {
+                eprintln!("[window-diag] CVDisplayLinkCreateWithCGDisplay({display}): {status}");
+                return;
+            }
+            let context = ptr::from_ref(sample).cast_mut().cast();
+            let callback_status =
+                CVDisplayLinkSetOutputCallback(link, count_display_callback, context);
+            if callback_status != 0 {
+                eprintln!("[window-diag] CVDisplayLinkSetOutputCallback: {callback_status}");
+            } else {
+                let start_status = CVDisplayLinkStart(link);
+                if start_status != 0 {
+                    eprintln!("[window-diag] CVDisplayLinkStart: {start_status}");
+                } else {
+                    thread::sleep(sample.end.saturating_duration_since(Instant::now()));
+                    let callbacks = sample.display_callbacks.load(Ordering::Relaxed);
+                    eprintln!(
+                        "[window-diag] CoreVideo display link callbacks in 1s: {callbacks} display={display}"
+                    );
+                    let stop_status = CVDisplayLinkStop(link);
+                    if stop_status != 0 {
+                        eprintln!("[window-diag] CVDisplayLinkStop: {stop_status}");
+                    }
+                }
+            }
+            CVDisplayLinkRelease(link);
+        }
+    }
+}
+
 type RuntimeShutdown = Option<JoinHandle<Result<()>>>;
 
 enum Termination {
