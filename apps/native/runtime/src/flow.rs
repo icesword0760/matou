@@ -11,7 +11,7 @@ pub const CREDIT_HIGH_WATERMARK_BYTES: usize = 1024 * 1024;
 pub const CREDIT_LOW_WATERMARK_BYTES: usize = 512 * 1024;
 
 /// Preserve a structurally unfinished UTF-8 character between PTY reads.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Utf8Decoder {
     tail: [u8; 3],
     tail_len: usize,

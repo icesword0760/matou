@@ -124,6 +124,71 @@ fn collect_worker(
     Ok(())
 }
 
+#[test]
+fn worker_copy_interrupt_clears_the_line_and_preserves_the_decoder_tail() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let (events, _incoming) = mpsc::channel();
+    let mut worker = SessionWorker::spawn(
+        shell_options(root.path(), "copy-utf8", 4096)?,
+        events,
+        "copy-utf8-run".into(),
+    )?;
+    let timeout = Duration::from_secs(5);
+    let (reply, written) = mpsc::channel();
+    worker.send(WorkerCommand::WriteShellInput {
+        bytes: b"old-line\xef".to_vec(),
+        submission: None,
+        reply,
+    })?;
+    written.recv_timeout(timeout)??;
+    let (reply, copied) = mpsc::channel();
+    worker.send(WorkerCommand::CopySelection {
+        interrupt_if_empty: true,
+        reply,
+    })?;
+    let copy = copied.recv_timeout(timeout)??;
+    assert!(copy.text.is_empty() && copy.interrupted);
+
+    // Completing the split BOM permits the match only if the decoder survived CopySelection.
+    let (submission, decision) = mpsc::channel();
+    let (reply, written) = mpsc::channel();
+    worker.send(WorkerCommand::WriteShellInput {
+        bytes: b"\xbb\xbfclaude\r".to_vec(),
+        submission: Some(submission),
+        reply,
+    })?;
+    assert!(decision.recv_timeout(timeout)?.is_some());
+    written.recv_timeout(timeout)??;
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn worker_promotion_clear_resets_the_decoder_tail() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let (events, _incoming) = mpsc::channel();
+    let mut worker = SessionWorker::spawn(
+        shell_options(root.path(), "promotion-utf8", 4096)?,
+        events,
+        "promotion-utf8-run".into(),
+    )?;
+    // Leave the original Shell attached so both submissions use the same tracker.
+    for bytes in [&b"claude\r\xe4\xbd"[..], b"claude\r"] {
+        let (submission, decision) = mpsc::channel();
+        let (reply, written) = mpsc::channel();
+        worker.send(WorkerCommand::WriteShellInput {
+            bytes: bytes.to_vec(),
+            submission: Some(submission),
+            reply,
+        })?;
+        let timeout = Duration::from_secs(5);
+        assert!(decision.recv_timeout(timeout)?.is_some(), "{bytes:?}");
+        written.recv_timeout(timeout)??;
+    }
+    worker.shutdown()?;
+    Ok(())
+}
+
 fn output_bytes(events: &[SessionEvent]) -> Vec<u8> {
     let mut bytes = Vec::new();
     for event in events {
@@ -345,7 +410,7 @@ fn live_shell_persists_output_for_history_screen_resize_and_exit() -> Result<()>
         if *sequence == frames.last().unwrap().sequence())
     );
     assert!(
-        matches!(events.get(events.len() - 2), Some(SessionEvent::SavedExit { sequence, status: ProcessExit { exit_code: 7, signal: Some(0) }, disposed: false })
+        matches!(events.get(events.len() - 2), Some(SessionEvent::SavedExit { sequence, status: ProcessExit { exit_code: 7, signal: Some(0) }, disposed: false, .. })
         if *sequence == frames.last().unwrap().sequence())
     );
     let published: Vec<_> = events

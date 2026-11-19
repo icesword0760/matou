@@ -382,6 +382,100 @@ fn compare_rows(db: &Connection, sql: &str, expected: &[Value], step: &str) -> R
 }
 
 #[test]
+fn shell_promotion_updates_the_existing_card_with_frozen_title_rules() -> Result<()> {
+    use matou_native_core::sessions::{promote_shell_to_claude, return_promoted_claude_to_shell};
+
+    let seed = serde_json::from_str::<Reference>(REFERENCE)?.bootstrap;
+    let mut db = open(Path::new(":memory:"))?;
+    bootstrap_window(
+        &mut db,
+        &seed.command,
+        &seed.input,
+        &seed.ids,
+        "默认",
+        seed.committed_at,
+    )?;
+    let id = &seed.ids.session_id;
+    let command = |name: &str| CommandMetadata {
+        command_id: name.into(),
+        command_type: name.into(),
+        request_hash: name.into(),
+        causation_id: None,
+        correlation_id: None,
+    };
+    let mounts = read_rows(&db, "SELECT * FROM session_mounts")?;
+    let memberships = read_rows(&db, "SELECT * FROM session_canvas_memberships")?;
+    let read_card = |db: &Connection| {
+        db.query_row(
+            "SELECT kind, title, title_source, status, work_status FROM sessions WHERE id=?",
+            [id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            },
+        )
+    };
+    for (index, (title, source, promoted_title, rollback_title)) in [
+        ("Shell", "default", "Claude", "Shell"),
+        ("My workspace", "manual", "My workspace", "My workspace"),
+        ("Claude", "manual", "Claude", "Shell"),
+        (id.as_str(), "default", "Claude", "Shell"),
+        ("Shell", "manual", "Claude", "Shell"),
+        (id.as_str(), "manual", "Claude", "Shell"),
+        ("Codex", "manual", "Codex", "Shell"),
+        ("DSH", "manual", "DSH", "Shell"),
+        ("Antigravity", "manual", "Antigravity", "Shell"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        db.execute(
+            "UPDATE sessions SET title=?, title_source=?, status='exited' WHERE id=?",
+            [title, source, id],
+        )?;
+        promote_shell_to_claude(&mut db, &command(&format!("promote-{index}")), id, 100)?;
+        assert_eq!(
+            read_card(&db)?,
+            (
+                "claude-code".into(),
+                promoted_title.into(),
+                source.into(),
+                "exited".into(),
+                "starting".into()
+            )
+        );
+        return_promoted_claude_to_shell(&mut db, &command(&format!("rollback-{index}")), id, 101)?;
+        assert_eq!(
+            read_card(&db)?,
+            (
+                "shell".into(),
+                rollback_title.into(),
+                source.into(),
+                "exited".into(),
+                "idle".into()
+            )
+        );
+    }
+    promote_shell_to_claude(&mut db, &command("promote-before-rename"), id, 102)?;
+    db.execute("UPDATE sessions SET title=id WHERE id=?", [id])?;
+    return_promoted_claude_to_shell(&mut db, &command("rollback-after-rename"), id, 103)?;
+    assert_eq!(read_card(&db)?.1, "Shell");
+    assert_eq!(list_sessions(&db)?.len(), 1);
+    assert_eq!(read_rows(&db, "SELECT * FROM session_mounts")?, mounts);
+    assert_eq!(
+        read_rows(&db, "SELECT * FROM session_canvas_memberships")?,
+        memberships
+    );
+    assert!(read_rows(&db, "SELECT * FROM provider_bindings")?.is_empty());
+    Ok(())
+}
+
+#[test]
 fn provider_binding_requires_current_run_and_validation_replays_once() -> Result<()> {
     use matou_native_core::sessions::{ClaudeIdentity, record_claude_identity};
 

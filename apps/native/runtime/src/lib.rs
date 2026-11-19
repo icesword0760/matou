@@ -11,6 +11,7 @@ mod provider_hook;
 mod provider_resume;
 pub mod search;
 pub mod session;
+mod shell_input;
 pub mod worker;
 
 pub use model::{SessionEvent, SessionOptions, StorageFaultCode};

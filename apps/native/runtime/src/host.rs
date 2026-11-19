@@ -23,7 +23,8 @@ use crate::{
     provider_catalog,
     provider_hook::HookSetup,
     search::{SearchRequest, SearchResult},
-    worker::{SelectionCopy, WorkerCommand},
+    shell_input::ShellInput,
+    worker::{SelectionCopy, ShellSubmission, WorkerCommand},
     workspace_paths::WorkspacePathChecks,
 };
 use anyhow::{Context, Result, anyhow, bail, ensure};
@@ -321,6 +322,25 @@ pub enum Command {
         paused: Sender<()>,
         resume: Receiver<()>,
     },
+    #[cfg(all(test, target_os = "macos"))]
+    #[serde(skip)]
+    TestPauseShellWorker {
+        session_id: String,
+        paused: Sender<()>,
+        resume: Receiver<()>,
+    },
+    #[cfg(all(test, target_os = "macos"))]
+    #[serde(skip)]
+    TestFreezeShellWrites {
+        session_id: String,
+        frozen: bool,
+        reply: Sender<Result<()>>,
+    },
+    #[cfg(all(test, target_os = "macos"))]
+    #[serde(skip)]
+    TestFailPromotionClear {
+        session_id: String,
+    },
     Shutdown,
 }
 
@@ -533,6 +553,13 @@ struct PendingInput {
     defer_ordering: bool,
 }
 
+struct PendingShellSubmission {
+    defer_ordering: bool,
+    record_on_match: bool,
+    decision: Receiver<Option<ShellSubmission>>,
+    following: VecDeque<Command>,
+}
+
 const WORKSPACE_PATH_INVALID: &str = "工作区目录不可用，请先在本地恢复原路径，或移出该工作区";
 const ACTIVE_PATH_INTERVAL: Duration = Duration::from_millis(400);
 const WORKSPACE_POLL_INTERVAL: Duration = Duration::from_secs(30);
@@ -666,6 +693,7 @@ fn run(
         }
     }
     let graph = active_graph(&owner, scene_id.as_deref(), window_id, &startup_deferred)?;
+    let mut focused_session = graph["focusedSessionId"].as_str().map(str::to_owned);
     let mut pending_launch = unstarted_sessions(&owner, &graph, &sessions)?;
     pending_launch.retain(|id| !startup_deferred.contains(id));
     let mut foreground_sessions: HashSet<_> = launchable_ids(&graph).map(str::to_owned).collect();
@@ -677,6 +705,8 @@ fn run(
     let mut launch_retries = HashMap::<String, LaunchRetry>::new();
     let mut launch_validated = false;
     let mut pending_input = VecDeque::<PendingInput>::new();
+    let mut shell_promotions = HashMap::<String, ShellPromotion>::new();
+    let mut retry_pending_input = false;
     let mut terminal_layouts = HashMap::new();
     let mut next_active_check = Instant::now() + ACTIVE_PATH_INTERVAL;
     let mut next_workspace_poll = Instant::now() + WORKSPACE_POLL_INTERVAL;
@@ -735,6 +765,8 @@ fn run(
     let mut scroll_requests = HashMap::<String, u64>::new();
     let mut awaiting_ui = HashMap::<String, u64>::new();
     let mut operations = Vec::<WorkerOperation>::new();
+    let mut shell_submissions = HashMap::<String, PendingShellSubmission>::new();
+    let mut replay_shell_inputs = VecDeque::<Command>::new();
     let mut searches = Vec::<(String, u64, Receiver<Result<SearchResult>>)>::new();
     let mut copies = Vec::<(u64, String, bool, Receiver<Result<SelectionCopy>>)>::new();
     let mut navigation_publications = VecDeque::new();
@@ -876,7 +908,9 @@ fn run(
                         let graph = owner.graph(&scene.id, None)?;
                         deferred_recovery.extend(
                             shell_ids(&graph)
-                                .filter(|id| sessions.contains(*id))
+                                .filter(|id| {
+                                    sessions.contains(*id) && !shell_promotions.contains_key(*id)
+                                })
                                 .map(str::to_owned),
                         );
                     }
@@ -891,6 +925,7 @@ fn run(
                 owner.retire_sessions(&running);
                 operations.retain(|(id, _, _)| !running.contains(id));
                 for id in running {
+                    shell_submissions.remove(&id);
                     sessions.remove(&id);
                     dirty.remove(&id);
                     sequence.remove(&id);
@@ -930,7 +965,7 @@ fn run(
         launch_candidates.extend(
             launch_retries
                 .iter()
-                .filter(|(_, retry)| retry.validated)
+                .filter(|(id, retry)| retry.validated && !owner.shell_worker_is_retiring(id))
                 .map(|(id, _)| id.clone()),
         );
         launch_preparations.retain(|id, _| launch_candidates.contains(id));
@@ -1080,17 +1115,78 @@ fn run(
                 }
             }
         }
-        if path_checked || started_shell {
+        // Only the submitted Shell's later input waits for its worker.
+        let mut resolved_submissions = Vec::new();
+        for (session_id, pending) in &shell_submissions {
+            match pending.decision.try_recv() {
+                Ok(decision) => {
+                    if let Some(ShellSubmission {
+                        mode,
+                        before,
+                        cleared,
+                    }) = decision
+                    {
+                        shell_promotions.insert(
+                            session_id.clone(),
+                            ShellPromotion {
+                                mode,
+                                phase: ShellPromotionPhase::Clearing {
+                                    result: cleared,
+                                    before,
+                                },
+                                promoted: false,
+                                inputs: VecDeque::new(),
+                            },
+                        );
+                        if pending.record_on_match
+                            && record_terminal_interaction(
+                                &mut owner,
+                                session_id,
+                                "submit",
+                                pending.defer_ordering,
+                                send,
+                            )?
+                        {
+                            tasks_dirty = true;
+                            graph_dirty = true;
+                        }
+                    }
+                    resolved_submissions.push(session_id.clone());
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    resolved_submissions.push(session_id.clone());
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
+        retry_pending_input |= path_checked || started_shell || !resolved_submissions.is_empty();
+        for id in resolved_submissions {
+            if let Some(mut pending) = shell_submissions.remove(&id) {
+                replay_shell_inputs.append(&mut pending.following);
+            }
+        }
+        if !copies.iter().any(|(_, _, interrupt, _)| *interrupt)
+            && std::mem::take(&mut retry_pending_input)
+        {
             for _ in 0..pending_input.len() {
                 let input = pending_input.pop_front().expect("queued terminal input");
-                if sessions.contains(&input.session_id)
+                if !shell_submissions.contains_key(&input.session_id)
+                    && (sessions.contains(&input.session_id)
+                        || shell_promotions.contains_key(&input.session_id))
                     && !(foreground_sessions.contains(&input.session_id)
                         && deferred_recovery.contains(&input.session_id))
                     && owner
                         .workspace_path_state(&input.workspace_id)?
                         .is_some_and(|state| state.status == "valid")
                 {
-                    if send_input(&mut owner, input, &mut operations, send)? {
+                    if send_input(
+                        &mut owner,
+                        input,
+                        &mut shell_promotions,
+                        &mut shell_submissions,
+                        &mut operations,
+                        send,
+                    )? {
                         tasks_dirty = true;
                         graph_dirty = true;
                     }
@@ -1105,11 +1201,21 @@ fn run(
             if copies.iter().any(|(_, _, interrupt, _)| *interrupt) {
                 break;
             }
-            let command = match incoming.try_recv() {
+            let command = match replay_shell_inputs
+                .pop_front()
+                .map_or_else(|| incoming.try_recv(), Ok)
+            {
                 Ok(command) => command,
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => break 'running false,
             };
+            if let Command::Input { session_id, .. } | Command::CopySelection { session_id, .. } =
+                &command
+                && let Some(pending) = shell_submissions.get_mut(session_id)
+            {
+                pending.following.push_back(command);
+                continue;
+            }
             if matches!(
                 &command,
                 Command::CreateWorkspace { .. }
@@ -1226,6 +1332,8 @@ fn run(
                             wait_for_workers || !navigation_publications.is_empty();
                         if !disposed.is_empty() {
                             for id in &disposed {
+                                shell_submissions.remove(id);
+                                shell_promotions.remove(id);
                                 if let Some(load) = catalog_loads.remove(id) {
                                     catalog_load_errors.push(catalog_load_error(
                                         id,
@@ -1288,6 +1396,17 @@ fn run(
                             window_id,
                             &startup_deferred,
                         )?;
+                        let next_focus = graph["focusedSessionId"].as_str();
+                        if !target_changed
+                            && focused_session.as_deref() != next_focus
+                            && let Some(pending) = focused_session
+                                .as_ref()
+                                .and_then(|id| shell_submissions.get_mut(id))
+                        {
+                            // The focus switch already flushed this card's deferred ordering.
+                            pending.defer_ordering = false;
+                        }
+                        focused_session = next_focus.map(str::to_owned);
                         pending_launch = unstarted_sessions(&owner, &graph, &sessions)?;
                         pending_launch.retain(|id| {
                             !startup_deferred.contains(id)
@@ -1295,6 +1414,7 @@ fn run(
                                 && !launch_retries.contains_key(id)
                                 && !catalog_loads.contains_key(id)
                                 && !permission_changes.contains_key(id)
+                                && !shell_promotions.contains_key(id)
                         });
                         foreground_sessions = launchable_ids(&graph).map(str::to_owned).collect();
                         if (target_changed || check_target || !pending_launch.is_empty())
@@ -1458,6 +1578,7 @@ fn run(
                             .get(&session_id)
                             .is_some_and(|load| load.stopping.is_some())
                         || (!sessions.contains(&session_id)
+                            && !shell_promotions.contains_key(&session_id)
                             && !pending_launch.contains(&session_id)
                             && owner
                                 .claude_binding(&session_id)?
@@ -1482,14 +1603,22 @@ fn run(
                         bytes,
                         defer_ordering,
                     };
-                    if state.is_none()
-                        || !sessions.contains(&input.session_id)
-                        || (foreground_sessions.contains(&input.session_id)
-                            && deferred_recovery.contains(&input.session_id))
+                    if !shell_promotions.contains_key(&input.session_id)
+                        && (state.is_none()
+                            || !sessions.contains(&input.session_id)
+                            || (foreground_sessions.contains(&input.session_id)
+                                && deferred_recovery.contains(&input.session_id)))
                     {
                         checks.request(&owner, &input.workspace_id)?;
                         pending_input.push_back(input);
-                    } else if send_input(&mut owner, input, &mut operations, send)? {
+                    } else if send_input(
+                        &mut owner,
+                        input,
+                        &mut shell_promotions,
+                        &mut shell_submissions,
+                        &mut operations,
+                        send,
+                    )? {
                         tasks_dirty = true;
                         graph_dirty = true;
                     }
@@ -1556,15 +1685,26 @@ fn run(
                 } => {
                     if sessions.contains(&session_id) {
                         let (reply, receive) = mpsc::channel();
+                        // Starting/Verifying use the current PTY for copy and empty-selection interrupts.
+                        // Suppress interrupts only in Clearing/Stopping/Preparing/RollingBack/RestoringShell.
+                        let interrupt_if_empty = interrupt_if_empty
+                            && !permission_changes.contains_key(&session_id)
+                            && shell_promotions
+                                .get(&session_id)
+                                .is_none_or(ShellPromotion::attached);
                         owner.send(
                             &session_id,
                             WorkerCommand::CopySelection {
                                 reply,
-                                interrupt_if_empty: interrupt_if_empty
-                                    && !permission_changes.contains_key(&session_id),
+                                interrupt_if_empty,
                             },
                         )?;
                         copies.push((request_id, session_id, interrupt_if_empty, receive));
+                    } else if shell_promotions.contains_key(&session_id) {
+                        send.send_blocking(Event::Copied {
+                            request_id,
+                            text: String::new(),
+                        })?;
                     }
                     continue;
                 }
@@ -1656,6 +1796,7 @@ fn run(
                             !pending_launch.contains(&session_id)
                                 && !recovering.contains_key(&session_id)
                                 && !launch_retries.contains_key(&session_id)
+                                && !shell_promotions.contains_key(&session_id)
                                 && !catalog_loads.contains_key(&session_id),
                             "AI Session is already stopping or recovering"
                         );
@@ -1782,7 +1923,8 @@ fn run(
                             "Card is no longer available in this scene"
                         );
                         ensure!(
-                            !permission_changes.contains_key(&session_id),
+                            !permission_changes.contains_key(&session_id)
+                                && !shell_promotions.contains_key(&session_id),
                             "AI Session is already stopping or recovering"
                         );
                         if let Some(loading) = catalog_loads.get(&session_id) {
@@ -1863,6 +2005,7 @@ fn run(
                 | Command::StartFreshProviderSession { ref session_id } => {
                     if !foreground_sessions.contains(session_id)
                         || permission_changes.contains_key(session_id)
+                        || shell_promotions.contains_key(session_id)
                         || catalog_loads.contains_key(session_id)
                         || pending_launch.contains(session_id)
                         || launch_retries.contains_key(session_id)
@@ -1911,6 +2054,7 @@ fn run(
                     let rebuilding = matches!(command, Command::RetryRecovery { .. });
                     if catalog_loads.contains_key(session_id)
                         || permission_changes.contains_key(session_id)
+                        || shell_promotions.contains_key(session_id)
                         || launch_retries.contains_key(session_id)
                         || owner
                             .claude_binding(session_id)?
@@ -1954,6 +2098,7 @@ fn run(
                     match checks.request(&owner, &workspace_id) {
                         Ok(()) => {
                             if !rebuilding {
+                                shell_submissions.remove(session_id);
                                 deferred_recovery.remove(session_id);
                                 sessions.remove(session_id);
                                 dirty.remove(session_id);
@@ -2037,6 +2182,7 @@ fn run(
                             && !launch_retries.contains_key(id)
                             && !catalog_loads.contains_key(id)
                             && !permission_changes.contains_key(id)
+                            && !shell_promotions.contains_key(id)
                     });
                     foreground_sessions = launchable_ids(&graph).map(str::to_owned).collect();
                     if let Some(workspace_id) = &active_workspace {
@@ -2077,6 +2223,32 @@ fn run(
                 Command::TestPause { paused, resume } => {
                     paused.send(())?;
                     resume.recv_timeout(Duration::from_secs(8))?;
+                    continue;
+                }
+                #[cfg(all(test, target_os = "macos"))]
+                Command::TestPauseShellWorker {
+                    session_id,
+                    paused,
+                    resume,
+                } => {
+                    owner.send(&session_id, WorkerCommand::TestPause { paused, resume })?;
+                    continue;
+                }
+                #[cfg(all(test, target_os = "macos"))]
+                Command::TestFreezeShellWrites {
+                    session_id,
+                    frozen,
+                    reply,
+                } => {
+                    owner.send(
+                        &session_id,
+                        WorkerCommand::SetEgressFrozen { frozen, reply },
+                    )?;
+                    continue;
+                }
+                #[cfg(all(test, target_os = "macos"))]
+                Command::TestFailPromotionClear { session_id } => {
+                    owner.send(&session_id, WorkerCommand::TestFailPromotionClear)?;
                     continue;
                 }
                 Command::Shutdown => {
@@ -2382,6 +2554,76 @@ fn run(
                 }
             }
         }
+        let mut finished_promotions = Vec::new();
+        for (id, promotion) in &mut shell_promotions {
+            match promotion.advance(
+                &mut owner,
+                &options,
+                id,
+                &terminal_layouts,
+                &role_requests,
+                &mut claude_launch_targets,
+            ) {
+                Ok(ShellPromotionProgress::Pending) => continue,
+                Ok(ShellPromotionProgress::Attached) => {
+                    sessions.insert(id.clone());
+                    dirty.insert(id.clone());
+                    graph_dirty = true;
+                    continue;
+                }
+                Ok(ShellPromotionProgress::Ready) => {
+                    sessions.insert(id.clone());
+                    dirty.insert(id.clone());
+                    pending_input.append(&mut promotion.inputs);
+                    retry_pending_input = true;
+                    finished_promotions.push(id.clone());
+                    graph_dirty = true;
+                    continue;
+                }
+                Ok(ShellPromotionProgress::Detached) => {}
+                Err(error) => {
+                    eprintln!("[session.shell-promote-agent:{id}] {error:#}");
+                    claude_launch_targets.remove(id);
+                    let clearing = matches!(promotion.phase, ShellPromotionPhase::Clearing { .. });
+                    if clearing
+                        || matches!(
+                            promotion.phase,
+                            ShellPromotionPhase::RestoringShell(_)
+                                | ShellPromotionPhase::RollingBack
+                        )
+                    {
+                        owner.retire_sessions(std::slice::from_ref(id));
+                        let message = format!("Shell promotion for {id}: {error:#}");
+                        let failure = if clearing {
+                            let rebuilding = owner.has_shell_run(id)?;
+                            report_session_launch_failure(
+                                &mut owner, send, id, rebuilding, message,
+                            )?
+                        } else {
+                            report_launch_failure(send, id, true, message)?
+                        };
+                        failed_launches.insert(id.clone(), failure);
+                        pending_input.retain(|input| &input.session_id != id);
+                        finished_promotions.push(id.clone());
+                    } else {
+                        owner.retire_sessions(std::slice::from_ref(id));
+                        promotion.phase = ShellPromotionPhase::RollingBack;
+                    }
+                }
+            }
+            sessions.remove(id);
+            dirty.remove(id);
+            sequence.remove(id);
+            scroll_requests.remove(id);
+            views.remove(id);
+            awaiting_ui.remove(id);
+            operations.retain(|(session_id, _, _)| session_id != id);
+            searches.retain(|(session_id, _, _)| session_id != id);
+            graph_dirty = true;
+        }
+        for id in finished_promotions {
+            shell_promotions.remove(&id);
+        }
         let mut completed_changes = Vec::new();
         for (id, change) in &mut permission_changes {
             let terminal = terminal_layouts
@@ -2504,7 +2746,9 @@ fn run(
                             }
                         }
                     }
-                    dirty.insert(session_id.clone());
+                    if sessions.contains(session_id) {
+                        dirty.insert(session_id.clone());
+                    }
                     let _ = send.send_blocking(Event::Copied {
                         request_id: *request_id,
                         text,
@@ -2647,6 +2891,7 @@ fn run(
             dirty.remove(&session_id);
         }
     };
+    shell_promotions.retain(|id, promotion| !promotion.started_at_shutdown(&mut owner, id));
     for (id, change) in permission_changes {
         if let Err(error) = change.rollback_if_pending(&mut owner, &id) {
             eprintln!("[permission-respawn:{id}] {error:#}");
@@ -2656,7 +2901,20 @@ fn run(
     let role_worker = role_worker
         .join()
         .map_err(|_| anyhow!("Claude role assignment worker panicked"));
-    let sessions = owner.shutdown().context("stop native runtime sessions");
+    let mut sessions = owner.shutdown().context("stop native runtime sessions");
+    for (id, promotion) in shell_promotions {
+        if !promotion.promoted {
+            continue;
+        }
+        let restored = promotion.restore_kind(&mut owner, &id).and_then(|()| {
+            // The old Shell was stopped for the handoff, not an explicit exit.
+            owner.mark_shell_promotion_interrupted(&id)
+        });
+        if let Err(error) = restored {
+            eprintln!("[session.shell-promote-rollback:{id}] {error:#}");
+            sessions = sessions.and(Err(error));
+        }
+    }
     let backup = clean_exit.then(|| owner.backup_for_clean_exit(&data_root));
     drop(owner);
     shutdown_result(sessions.map(|_| ()).and(role_worker), backup)
@@ -2686,6 +2944,188 @@ static PERMISSION_STARTUP_WINDOW: LazyLock<Duration> = LazyLock::new(|| {
         .unwrap_or(150);
     Duration::from_millis(millis)
 });
+
+// Give an immediately failing child time to exit before checking it on its
+// worker. The replacement's frames can already be displayed.
+const SHELL_PROMOTION_STARTUP_WINDOW: Duration = Duration::from_millis(150);
+const SHELL_PROMOTION_SILENT_STARTUP_WINDOW: Duration = Duration::from_secs(2);
+
+struct ShellPromotion {
+    mode: &'static str,
+    phase: ShellPromotionPhase,
+    promoted: bool,
+    inputs: VecDeque<PendingInput>,
+}
+
+enum ShellPromotionPhase {
+    Clearing {
+        result: Receiver<Result<bool>>,
+        before: ShellInput,
+    },
+    Stopping(Receiver<Result<()>>),
+    Preparing(Receiver<Result<PreparedLaunch>>),
+    Starting {
+        run_id: String,
+        started_at: Instant,
+    },
+    Verifying {
+        run_id: String,
+    },
+    RollingBack,
+    RestoringShell(Receiver<Result<PreparedLaunch>>),
+}
+
+enum ShellPromotionProgress {
+    Pending,
+    Detached,
+    Attached,
+    Ready,
+}
+
+impl ShellPromotion {
+    fn advance(
+        &mut self,
+        owner: &mut ShellOwner,
+        options: &LaunchOptions,
+        session_id: &str,
+        terminal_layouts: &HashMap<String, TerminalOptions>,
+        role_requests: &Sender<RoleAssignmentsRequest>,
+        claude_launch_targets: &mut HashMap<String, Value>,
+    ) -> Result<ShellPromotionProgress> {
+        match &mut self.phase {
+            ShellPromotionPhase::Clearing { result, before } => {
+                let result = poll_promotion_result(result);
+                if result.is_err() {
+                    owner.restore_shell_input(session_id, std::mem::take(before));
+                }
+                let Some(cleared) = result? else {
+                    return Ok(ShellPromotionProgress::Pending);
+                };
+                if !cleared {
+                    return Ok(ShellPromotionProgress::Ready);
+                }
+                self.phase =
+                    ShellPromotionPhase::Stopping(owner.stop_for_provider_relaunch(session_id)?);
+                Ok(ShellPromotionProgress::Detached)
+            }
+            ShellPromotionPhase::Stopping(result) => {
+                let Some(()) = poll_promotion_result(result)? else {
+                    return Ok(ShellPromotionProgress::Pending);
+                };
+                owner.promote_shell_to_claude(session_id)?;
+                self.promoted = true;
+                self.phase = ShellPromotionPhase::Preparing(prepare_launch(
+                    owner,
+                    options,
+                    session_id,
+                    LaunchIntent::ShellPromotion(self.mode),
+                    role_requests,
+                )?);
+                Ok(ShellPromotionProgress::Pending)
+            }
+            ShellPromotionPhase::Preparing(result) => {
+                let Some(launch) = poll_promotion_result(result)? else {
+                    return Ok(ShellPromotionProgress::Pending);
+                };
+                let PreparedLaunch::ClaudeCode {
+                    launch,
+                    fork_source: None,
+                } = launch
+                else {
+                    bail!("promotion requires a fresh Claude launch");
+                };
+                let terminal = terminal_layouts
+                    .get(session_id)
+                    .copied()
+                    .unwrap_or_else(default_terminal_options);
+                claude_launch_targets
+                    .insert(session_id.to_owned(), claude_target_metadata(&launch));
+                let run_id = owner.launch_promoted_claude(session_id, terminal, launch)?;
+                self.phase = ShellPromotionPhase::Starting {
+                    run_id,
+                    started_at: Instant::now(),
+                };
+                Ok(ShellPromotionProgress::Attached)
+            }
+            ShellPromotionPhase::Starting { run_id, started_at } => {
+                let has_output = owner.check_provider_startup(session_id, run_id)?;
+                let elapsed = started_at.elapsed();
+                if elapsed < SHELL_PROMOTION_STARTUP_WINDOW
+                    || (!has_output && elapsed < SHELL_PROMOTION_SILENT_STARTUP_WINDOW)
+                {
+                    return Ok(ShellPromotionProgress::Pending);
+                }
+                owner.begin_promotion_process_check(session_id)?;
+                self.phase = ShellPromotionPhase::Verifying {
+                    run_id: run_id.clone(),
+                };
+                Ok(ShellPromotionProgress::Pending)
+            }
+            ShellPromotionPhase::Verifying { run_id } => {
+                if !owner.finish_promotion_startup(session_id, run_id)? {
+                    return Ok(ShellPromotionProgress::Pending);
+                }
+                Ok(ShellPromotionProgress::Ready)
+            }
+            ShellPromotionPhase::RollingBack => {
+                if owner.has_shell_worker(session_id) {
+                    return Ok(ShellPromotionProgress::Pending);
+                }
+                self.restore_kind(owner, session_id)?;
+                // A directory can disappear while the provider is starting. Use
+                // the usual Shell directory selection, including its fallback.
+                self.phase = ShellPromotionPhase::RestoringShell(prepare_launch(
+                    owner,
+                    options,
+                    session_id,
+                    LaunchIntent::Start,
+                    role_requests,
+                )?);
+                Ok(ShellPromotionProgress::Pending)
+            }
+            ShellPromotionPhase::RestoringShell(result) => {
+                let Some(launch) = poll_promotion_result(result)? else {
+                    return Ok(ShellPromotionProgress::Pending);
+                };
+                let PreparedLaunch::Shell(directory) = launch else {
+                    bail!("promotion rollback requires a Shell launch");
+                };
+                owner.set_shell_launch_directory(session_id, &directory)?;
+                launch_shell(owner, options, session_id, directory, terminal_layouts)?;
+                Ok(ShellPromotionProgress::Ready)
+            }
+        }
+    }
+
+    fn attached(&self) -> bool {
+        matches!(
+            self.phase,
+            ShellPromotionPhase::Starting { .. } | ShellPromotionPhase::Verifying { .. }
+        )
+    }
+
+    fn started_at_shutdown(&self, owner: &mut ShellOwner, session_id: &str) -> bool {
+        matches!(&self.phase, ShellPromotionPhase::Verifying { run_id }
+            if owner.keep_promotion_at_shutdown(session_id, run_id))
+    }
+
+    fn restore_kind(&self, owner: &mut ShellOwner, session_id: &str) -> Result<()> {
+        // RestoringShell has already rolled the kind back, but the handoff
+        // still happened and counts when shutting down that pending restart.
+        if self.promoted && !matches!(self.phase, ShellPromotionPhase::RestoringShell(_)) {
+            owner.return_promoted_claude_to_shell(session_id)?;
+        }
+        Ok(())
+    }
+}
+
+fn poll_promotion_result<T>(result: &Receiver<Result<T>>) -> Result<Option<T>> {
+    match result.try_recv() {
+        Ok(result) => result.map(Some),
+        Err(mpsc::TryRecvError::Empty) => Ok(None),
+        Err(error) => Err(error).context("Shell promotion worker disconnected"),
+    }
+}
 
 struct PermissionChange {
     mode: String,
@@ -2813,10 +3253,14 @@ impl PermissionChange {
                     if Instant::now() < until {
                         return Ok(PermissionProgress::Pending);
                     }
-                    owner.finish_permission_startup(session_id, run_id)?;
+                    owner
+                        .finish_provider_startup(session_id, run_id)
+                        .context("AI Session permission respawn failed")?;
                     *startup_until = None;
                 } else if outcome.is_none() {
-                    let running = owner.check_permission_run(session_id, run_id);
+                    let running = owner
+                        .check_provider_startup(session_id, run_id)
+                        .context("AI Session permission respawn failed");
                     if *consent_shown {
                         running
                             .context("Claude Code exited during bypass permissions confirmation")?;
@@ -3062,9 +3506,15 @@ fn report_launch_failure(
 fn send_input(
     owner: &mut ShellOwner,
     input: PendingInput,
+    promotions: &mut HashMap<String, ShellPromotion>,
+    shell_submissions: &mut HashMap<String, PendingShellSubmission>,
     operations: &mut Vec<WorkerOperation>,
     send: &async_channel::Sender<Event>,
 ) -> Result<bool> {
+    if let Some(promotion) = promotions.get_mut(&input.session_id) {
+        promotion.inputs.push_back(input);
+        return Ok(false);
+    }
     let PendingInput {
         session_id,
         bytes,
@@ -3072,31 +3522,67 @@ fn send_input(
         ..
     } = input;
     let interaction = match bytes.as_slice() {
-        [3] | [4] => Some("control"),
         [13] | [10] => Some("submit"),
+        [3] | [4] => Some("control"),
         _ => None,
     };
     let (reply, result) = mpsc::channel();
-    if let Err(error) = owner.send(&session_id, WorkerCommand::Write { bytes, reply }) {
+    let mut pending = None;
+    let request = if owner.tracks_shell_input(&session_id) {
+        let submission = if bytes.iter().any(|byte| matches!(byte, b'\r' | b'\n')) {
+            let (request, decision) = mpsc::channel();
+            pending = Some(PendingShellSubmission {
+                defer_ordering,
+                record_on_match: interaction != Some("submit"),
+                decision,
+                following: VecDeque::new(),
+            });
+            Some(request)
+        } else {
+            None
+        };
+        WorkerCommand::WriteShellInput {
+            bytes,
+            submission,
+            reply,
+        }
+    } else {
+        WorkerCommand::Write { bytes, reply }
+    };
+    if let Err(error) = owner.send(&session_id, request) {
         send.send_blocking(Event::Diagnostic(format!("{error:#}")))?;
         return Ok(false);
     }
-    // Record the interaction after queueing bytes and before a queued focus or shutdown.
-    let changed = if let Some(kind) = interaction
-        && owner.provider_allows_derivation(&session_id)
-    {
-        match owner.record_interaction(&session_id, kind, defer_ordering) {
-            Ok(_) => true,
-            Err(error) => {
-                send.send_blocking(Event::Diagnostic(format!("{error:#}")))?;
-                false
-            }
+    operations.push((session_id.clone(), result, true));
+    if let Some(pending) = pending {
+        shell_submissions.insert(session_id.clone(), pending);
+    }
+
+    // Enter or Ctrl+C is known as soon as the bytes are queued. Only a match
+    // within a larger write needs the worker's decision to count as a submit.
+    match interaction {
+        Some(kind) => record_terminal_interaction(owner, &session_id, kind, defer_ordering, send),
+        None => Ok(false),
+    }
+}
+
+fn record_terminal_interaction(
+    owner: &mut ShellOwner,
+    session_id: &str,
+    kind: &str,
+    defer_ordering: bool,
+    send: &async_channel::Sender<Event>,
+) -> Result<bool> {
+    if !owner.provider_allows_derivation(session_id) {
+        return Ok(false);
+    }
+    match owner.record_interaction(session_id, kind, defer_ordering) {
+        Ok(_) => Ok(true),
+        Err(error) => {
+            send.send_blocking(Event::Diagnostic(format!("{error:#}")))?;
+            Ok(false)
         }
-    } else {
-        false
-    };
-    operations.push((session_id, result, true));
-    Ok(changed)
+    }
 }
 
 fn workspace_is_invalid(paths: &BTreeMap<String, WorkspacePathState>, id: Option<&str>) -> bool {
@@ -3197,6 +3683,7 @@ fn claude_target_metadata(plan: &ClaudeLaunch) -> Value {
 
 enum LaunchIntent<'a> {
     Start,
+    ShellPromotion(&'a str),
     PermissionRestart {
         fresh_mode: Option<&'a str>,
         previous_target: Option<&'a Value>,
@@ -3253,12 +3740,27 @@ fn prepare_launch(
                 })?;
         }
         "claude-code" => {
-            let binding = owner.claude_binding(session_id)?;
-            let fork = owner.pending_claude_fork(session_id)?;
+            // A promoted card always starts a new conversation even if old
+            // data for this session ID includes a provider binding.
+            let (binding, fork) = if matches!(intent, LaunchIntent::ShellPromotion(_)) {
+                ensure!(
+                    owner.pending_claude_fork(session_id)?.is_none(),
+                    "Shell card has an unconfirmed fork"
+                );
+                (None, None)
+            } else {
+                (
+                    owner.claude_binding(session_id)?,
+                    owner.pending_claude_fork(session_id)?,
+                )
+            };
             let mut metadata = binding
                 .as_ref()
                 .map_or(Value::Null, |binding| binding.metadata.clone());
             let mut remembered = false;
+            if let LaunchIntent::ShellPromotion(mode) = intent {
+                metadata = json!({"permissionMode": mode});
+            }
             let resume_id = if let LaunchIntent::PermissionRestart {
                 fresh_mode: Some(mode),
                 previous_target,
@@ -3281,16 +3783,20 @@ fn prepare_launch(
                     .filter(|binding| binding.resumable)
                     .map(|binding| binding.provider_session_id)
             };
-            let assignments =
-                if fork.is_none() && resume_id.is_none() && matches!(intent, LaunchIntent::Start) {
-                    let (reply, result) = mpsc::channel();
-                    // Read in the same queue as saves so a prior save takes effect
-                    // even if the client hasn't received its reply yet.
-                    role_requests.send(RoleAssignmentsRequest::ForLaunch(reply))?;
-                    Some(result)
-                } else {
-                    None
-                };
+            let assignments = if fork.is_none()
+                && resume_id.is_none()
+                && matches!(
+                    intent,
+                    LaunchIntent::Start | LaunchIntent::ShellPromotion(_)
+                ) {
+                let (reply, result) = mpsc::channel();
+                // Read in the same queue as saves so a prior save takes effect
+                // even if the client hasn't received its reply yet.
+                role_requests.send(RoleAssignmentsRequest::ForLaunch(reply))?;
+                Some(result)
+            } else {
+                None
+            };
             let permission_fresh = matches!(
                 intent,
                 LaunchIntent::PermissionRestart {
@@ -4064,6 +4570,418 @@ mod tests {
         assert!(failed.downcast_ref::<std::io::Error>().is_some());
     }
 
+    fn open_raw_test_shell(root: &Path) -> Result<(RuntimeHost, String)> {
+        let home = root.join("home");
+        std::fs::create_dir_all(&home)?;
+        std::fs::write(
+            home.join(".zshrc"),
+            "/bin/stty raw -echo\nprintf 'MATOU_RAW_SHELL_READY\\r\\n'\nexec /bin/cat > \"$HOME/bytes\"\n",
+        )?;
+        let runtime = RuntimeHost::start(LaunchOptions {
+            data_root: root.join("data"),
+            workspace: root.join("workspace"),
+            shell_home: home,
+            shell: "/bin/zsh".into(),
+        })?;
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            match next_test_event(&runtime, deadline)? {
+                Event::Frame {
+                    session_id, screen, ..
+                } if screen.cells.chunks(screen.cols).any(|row| {
+                    row.iter()
+                        .map(|cell| cell.text.as_str())
+                        .collect::<String>()
+                        .contains("MATOU_RAW_SHELL_READY")
+                }) =>
+                {
+                    return Ok((runtime, session_id));
+                }
+                Event::Diagnostic(message) => bail!("{message}"),
+                _ => {}
+            }
+        }
+    }
+
+    fn next_test_event(runtime: &RuntimeHost, deadline: Instant) -> Result<Event> {
+        loop {
+            match runtime.events.try_recv() {
+                Ok(event) => {
+                    if let Event::Frame {
+                        session_id,
+                        sequence,
+                        ..
+                    } = &event
+                    {
+                        send_test_command(
+                            runtime,
+                            Command::Applied {
+                                session_id: session_id.clone(),
+                                sequence: *sequence,
+                            },
+                        )?;
+                    }
+                    return Ok(event);
+                }
+                Err(async_channel::TryRecvError::Empty) if Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(2));
+                }
+                Err(error) => return Err(error).context("waiting for host event"),
+            }
+        }
+    }
+
+    fn send_test_command(runtime: &RuntimeHost, command: Command) -> Result<()> {
+        runtime
+            .commands
+            .send(command)
+            .map_err(|_| anyhow!("runtime command channel closed"))
+    }
+
+    fn test_input(session: &str, bytes: &[u8]) -> Command {
+        Command::Input {
+            session_id: session.to_owned(),
+            bytes: bytes.to_vec(),
+            defer_ordering: true,
+        }
+    }
+
+    fn queue_test_batch(
+        runtime: &RuntimeHost,
+        commands: impl IntoIterator<Item = Command>,
+    ) -> Result<()> {
+        let (paused, wait_paused) = mpsc::channel();
+        let (resume, wait_resume) = mpsc::channel();
+        send_test_command(
+            runtime,
+            Command::TestPause {
+                paused,
+                resume: wait_resume,
+            },
+        )?;
+        wait_paused.recv_timeout(Duration::from_secs(8))?;
+        for command in commands {
+            send_test_command(runtime, command)?;
+        }
+        resume.send(())?;
+        Ok(())
+    }
+
+    fn assert_raw_shell_input(root: &Path, expected: &[u8]) -> Result<()> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let actual = match std::fs::read(root.join("home/bytes")) {
+                Ok(bytes) => bytes,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+                Err(error) => return Err(error.into()),
+            };
+            assert!(
+                expected.starts_with(&actual),
+                "unexpected Shell input: {actual:?}"
+            );
+            if actual == expected {
+                return Ok(());
+            }
+            ensure!(
+                Instant::now() < deadline,
+                "incomplete Shell input: {actual:?}"
+            );
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    #[test]
+    fn frozen_write_does_not_advance_the_shell_tracker() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let (mut runtime, session_id) = open_raw_test_shell(root.path())?;
+        let freeze = |frozen| -> Result<()> {
+            let (reply, result) = mpsc::channel();
+            send_test_command(
+                &runtime,
+                Command::TestFreezeShellWrites {
+                    session_id: session_id.clone(),
+                    frozen,
+                    reply,
+                },
+            )?;
+            result.recv_timeout(Duration::from_secs(3))??;
+            Ok(())
+        };
+        freeze(true)?;
+        for bytes in [&b"claude\r"[..], b"clau"] {
+            send_test_command(&runtime, test_input(&session_id, bytes))?;
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Event::Diagnostic(error) = next_test_event(&runtime, deadline)? {
+                    assert_eq!(error, "session output is frozen");
+                    break;
+                }
+            }
+        }
+        freeze(false)?;
+        send_test_command(&runtime, test_input(&session_id, b"de\r"))?;
+        assert_raw_shell_input(root.path(), b"de\r")?;
+        runtime.shutdown()?;
+        let db = startup::open_read_only(&root.path().join("data/matou.sqlite"))?;
+        let card =
+            matou_native_core::sessions::get_session(&db, &session_id)?.context("Shell card")?;
+        assert_eq!(card.kind, "shell");
+        assert_eq!(
+            matou_native_core::sessions::list_runs(&db, &session_id)?.len(),
+            1
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn storage_pause_drops_input_before_the_shell_tracker() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let BootstrapResult::Writable {
+            mut connection,
+            ownership,
+            ..
+        } = startup::open(root.path(), "storage-pause")?
+        else {
+            bail!("test database is not writable");
+        };
+        let ids = hierarchy_ids();
+        hierarchy::bootstrap_window(
+            &mut connection,
+            &CommandMetadata {
+                command_id: id(),
+                command_type: "window.bootstrap".into(),
+                request_hash: "fixture".into(),
+                causation_id: None,
+                correlation_id: None,
+            },
+            &BootstrapWindowInput {
+                window_id: "test-window".into(),
+                default_root_directory: root.path().to_string_lossy().into_owned(),
+                default_name: "Workspace".into(),
+                now: 1,
+            },
+            &ids,
+            "默认",
+            1,
+        )?;
+        let shell = root.path().join("fixture-shell");
+        std::fs::write(
+            &shell,
+            "#!/bin/sh\nprintf 'READY\\n'\nwhile IFS= read -r line; do printf '%s\\n' \"$line\"; done\n",
+        )?;
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o700))?;
+        let mut owner = ShellOwner::new(connection, ownership, id)?;
+        let session_id = ids.session_id;
+        owner.launch(
+            SessionOptions {
+                session_id: session_id.clone(),
+                launch: ShellLaunch {
+                    profile: LaunchProfile::Shell,
+                    argv: Vec::new(),
+                    executable: shell,
+                    cwd: root.path().into(),
+                    data_root: root.path().into(),
+                    inherited_env: BTreeMap::from([("HOME".into(), root.path().into())]),
+                    env: BTreeMap::new(),
+                    cols: 80,
+                    rows: 24,
+                },
+                terminal: default_terminal_options(),
+                journal: JournalOptions {
+                    max_segment_bytes: 512,
+                    ..JournalOptions::default()
+                },
+                restored_history: Vec::new(),
+                collect_history: false,
+            },
+            false,
+            "",
+        )?;
+
+        fn wait_for_owner_event(
+            owner: &mut ShellOwner,
+            found: impl Fn(&SessionEvent) -> bool,
+        ) -> Result<()> {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                for event in owner.poll(Duration::from_millis(20))? {
+                    if let OwnerEvent::Terminal(event) = event
+                        && found(&event.event)
+                    {
+                        return Ok(());
+                    }
+                }
+                ensure!(Instant::now() < deadline, "expected terminal event");
+            }
+        }
+        wait_for_owner_event(&mut owner, |event| {
+            matches!(event, SessionEvent::Output { .. })
+        })?;
+        let range = root
+            .path()
+            .join("journal")
+            .join(&session_id)
+            .join("range-index.json");
+        std::fs::create_dir(&range)?;
+        let (reply, written) = mpsc::channel();
+        owner.send(
+            &session_id,
+            WorkerCommand::Write {
+                bytes: format!("{}\n", "x".repeat(2048)).into_bytes(),
+                reply,
+            },
+        )?;
+        written.recv_timeout(Duration::from_secs(5))??;
+        wait_for_owner_event(&mut owner, |event| {
+            matches!(event, SessionEvent::StorageFault { .. })
+        })?;
+
+        let (events, _) = async_channel::unbounded();
+        let mut promotions = HashMap::new();
+        let mut submission = HashMap::new();
+        let mut operations = Vec::new();
+        let mut send_keys =
+            |owner: &mut ShellOwner, operations: &mut Vec<WorkerOperation>, bytes: &[u8]| {
+                send_input(
+                    owner,
+                    PendingInput {
+                        workspace_id: ids.workspace_id.clone(),
+                        session_id: session_id.clone(),
+                        bytes: bytes.to_vec(),
+                        defer_ordering: true,
+                    },
+                    &mut promotions,
+                    &mut submission,
+                    operations,
+                    &events,
+                )
+            };
+        send_keys(&mut owner, &mut operations, b"clau")?;
+        let (_, rejected, _) = operations.pop().context("paused write")?;
+        let error = rejected.recv_timeout(Duration::from_secs(5))?.unwrap_err();
+        assert_eq!(error.to_string(), "session storage is paused");
+
+        std::fs::remove_dir(range)?;
+        let (reply, recovered) = mpsc::channel();
+        owner.send(&session_id, WorkerCommand::RetryStorage { reply })?;
+        recovered.recv_timeout(Duration::from_secs(5))??;
+        wait_for_owner_event(&mut owner, |event| {
+            matches!(event, SessionEvent::StorageRecovered { .. })
+        })?;
+
+        send_keys(&mut owner, &mut operations, b"de\r")?;
+        let pending = submission
+            .remove(&session_id)
+            .context("resumed Shell submission")?;
+        assert!(
+            pending
+                .decision
+                .recv_timeout(Duration::from_secs(5))?
+                .is_none()
+        );
+        let (_, written, _) = operations.pop().context("resumed write")?;
+        written.recv_timeout(Duration::from_secs(5))??;
+        assert!(promotions.is_empty());
+        owner.shutdown()?;
+        Ok(())
+    }
+
+    #[test]
+    fn clearing_copy_suppresses_interrupt_and_forwards_the_failed_clear_input() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let (mut runtime, session_id) = open_raw_test_shell(root.path())?;
+        send_test_command(&runtime, test_input(&session_id, b"cla"))?;
+        assert_raw_shell_input(root.path(), b"cla")?;
+
+        // Queue Copy behind the qualifying submission and ahead of the owner's
+        // Clearing poll. The failed Ctrl+U keeps the old PTY available for inspection.
+        queue_test_batch(
+            &runtime,
+            [
+                Command::TestFailPromotionClear {
+                    session_id: session_id.clone(),
+                },
+                test_input(&session_id, b"ude\r"),
+                Command::CopySelection {
+                    session_id: session_id.clone(),
+                    request_id: 42,
+                    interrupt_if_empty: true,
+                },
+            ],
+        )?;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match next_test_event(&runtime, deadline)? {
+                Event::Copied {
+                    request_id: 42,
+                    text,
+                } => {
+                    assert_eq!(text, "");
+                    break;
+                }
+                Event::Diagnostic(error) => bail!("{error}"),
+                _ => {}
+            }
+        }
+
+        assert_raw_shell_input(root.path(), b"claude\r")?;
+        runtime.shutdown()?;
+        Ok(())
+    }
+
+    #[test]
+    fn successful_fallback_does_not_reuse_the_submitted_shell_prefix() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let (mut runtime, session_id) = open_raw_test_shell(root.path())?;
+        send_test_command(&runtime, test_input(&session_id, b"clau"))?;
+        assert_raw_shell_input(root.path(), b"clau")?;
+        send_test_command(
+            &runtime,
+            Command::TestFailPromotionClear {
+                session_id: session_id.clone(),
+            },
+        )?;
+        send_test_command(&runtime, test_input(&session_id, b"de\r"))?;
+        assert_raw_shell_input(root.path(), b"claude\r")?;
+        send_test_command(&runtime, test_input(&session_id, b"de\r"))?;
+        assert_raw_shell_input(root.path(), b"claude\rde\r")?;
+        runtime.shutdown()?;
+        let db = startup::open_read_only(&root.path().join("data/matou.sqlite"))?;
+        assert_eq!(
+            matou_native_core::sessions::list_runs(&db, &session_id)?.len(),
+            1
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn shutdown_in_clearing_has_the_same_saved_status_as_plain_shell_shutdown() -> Result<()> {
+        for clearing in [false, true] {
+            let root = tempfile::tempdir()?;
+            let (mut runtime, session_id) = open_raw_test_shell(root.path())?;
+            if clearing {
+                queue_test_batch(
+                    &runtime,
+                    [test_input(&session_id, b"claude\r"), Command::Shutdown],
+                )?;
+            }
+            runtime.shutdown()?;
+            let db = startup::open_read_only(&root.path().join("data/matou.sqlite"))?;
+            let (kind, status): (String, String) = db.query_row(
+                "SELECT kind, work_status FROM sessions WHERE id=?",
+                [&session_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            assert_eq!((kind.as_str(), status.as_str()), ("shell", "exited"));
+            assert_eq!(
+                matou_native_core::sessions::list_runs(&db, &session_id)?.len(),
+                1
+            );
+        }
+        Ok(())
+    }
+
     #[test]
     fn interaction_precedes_queued_focus_and_shutdown() -> Result<()> {
         let root = std::env::temp_dir().join(format!("matou-interaction-order-{}", id()));
@@ -4073,14 +4991,13 @@ mod tests {
         Ok(())
     }
 
-    fn check_interaction_order(root: &std::path::Path) -> Result<()> {
+    fn two_test_shells(root: &Path) -> Result<(RuntimeHost, String, String, String)> {
         let options = LaunchOptions {
             data_root: root.join("data"),
             workspace: root.join("workspace"),
             shell_home: root.join("home"),
             shell: "/bin/zsh".into(),
         };
-        let database = options.data_root.join("matou.sqlite");
         let window_id = "main-window-1";
         let (scene, first, second) = {
             let BootstrapResult::Writable {
@@ -4129,26 +5046,97 @@ mod tests {
             )
         };
 
-        let mut bridge = RuntimeHost::start(options)?;
+        let bridge = RuntimeHost::start(options)?;
         let mut ready = HashSet::new();
         let deadline = Instant::now() + Duration::from_secs(8);
         while !ready.contains(&first) || !ready.contains(&second) {
-            anyhow::ensure!(
-                Instant::now() < deadline,
-                "timed out waiting for Shell startup"
-            );
-            match bridge.events.try_recv() {
-                Ok(Event::Frame { session_id, .. }) => {
+            match next_test_event(&bridge, deadline)? {
+                Event::Frame { session_id, .. } => {
                     ready.insert(session_id);
                 }
-                Ok(Event::Diagnostic(message)) => bail!("{message}"),
-                Err(async_channel::TryRecvError::Closed) => {
-                    bail!("bridge stopped during Shell startup")
-                }
-                Err(async_channel::TryRecvError::Empty) => thread::sleep(Duration::from_millis(2)),
+                Event::Diagnostic(message) => bail!("{message}"),
                 _ => {}
             }
         }
+        Ok((bridge, scene, first, second))
+    }
+
+    #[test]
+    fn undecided_shell_submission_does_not_block_other_input_focus_or_shutdown() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let home = root.path().join("home");
+        std::fs::create_dir_all(&home)?;
+        std::fs::write(
+            home.join(".zshrc"),
+            "TRAPHUP() { if [[ $OTHER = 1 ]]; then : > \"$HOME/other-stopping\"; fi; exit 0; }\n",
+        )?;
+        let (mut bridge, scene, other, blocked) = two_test_shells(root.path())?;
+        let pause_worker = |bridge: &RuntimeHost| -> Result<Sender<()>> {
+            let (paused, wait_paused) = mpsc::channel();
+            let (resume, wait_resume) = mpsc::channel();
+            send_test_command(
+                bridge,
+                Command::TestPauseShellWorker {
+                    session_id: blocked.clone(),
+                    paused,
+                    resume: wait_resume,
+                },
+            )?;
+            wait_paused.recv_timeout(Duration::from_secs(3))?;
+            Ok(resume)
+        };
+        let await_file = |name, expected| -> Result<()> {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while std::fs::read_to_string(home.join(name)).ok().as_deref() != Some(expected) {
+                ensure!(
+                    Instant::now() < deadline,
+                    "waiting for Shell to write {name}"
+                );
+                thread::sleep(Duration::from_millis(2));
+            }
+            Ok(())
+        };
+
+        let resume = pause_worker(&bridge)?;
+        for command in [
+            test_input(&blocked, b"printf first > \"$HOME/ordered\"\r"),
+            test_input(&blocked, b"printf second >> \"$HOME/ordered\"\r"),
+            test_input(&other, b"OTHER=1; printf ready > \"$HOME/other\"\r"),
+            Command::FocusSession {
+                scene_id: scene,
+                session_id: other.clone(),
+            },
+        ] {
+            send_test_command(&bridge, command)?;
+        }
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            match next_test_event(&bridge, deadline)? {
+                Event::Navigation { graph, .. } if graph["focusedSessionId"] == other => break,
+                Event::NavigationFailed { message, .. } | Event::Diagnostic(message) => {
+                    bail!("{message}");
+                }
+                _ => {}
+            }
+        }
+        await_file("other", "ready")?;
+        assert!(!home.join("ordered").exists());
+        resume.send(())?;
+        await_file("ordered", "firstsecond")?;
+
+        let resume = pause_worker(&bridge)?;
+        send_test_command(&bridge, test_input(&blocked, b"printf queued\r"))?;
+        send_test_command(&bridge, Command::Shutdown)?;
+        // Shutdown must reach the other PTY while the first worker is still paused.
+        await_file("other-stopping", "")?;
+        resume.send(())?;
+        bridge.shutdown()?;
+        Ok(())
+    }
+
+    fn check_interaction_order(root: &Path) -> Result<()> {
+        let database = root.join("data/matou.sqlite");
+        let (mut bridge, scene, first, second) = two_test_shells(root)?;
         // Hold the owner at a test barrier so all four messages are in one batch.
         let (paused, wait_paused) = mpsc::channel();
         let (resume, wait_resume) = mpsc::channel();

@@ -19,8 +19,10 @@ use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
 pub(crate) const IDENTITY_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const HOOK_QUEUE_CAPACITY: usize = 128;
 const RETIRE_GRACE: Duration = Duration::from_secs(2);
 const REQUEST_TIMEOUT: Duration = Duration::from_millis(1500);
+const SHUTDOWN_DRAIN: Duration = Duration::from_millis(100);
 const MAX_HOOK_BYTES: usize = 1024 * 1024;
 const MAX_HEADERS: usize = 16 * 1024;
 const MAX_CONNECTIONS: usize = 8;
@@ -358,7 +360,7 @@ impl ProviderHookServer {
         let port = listener.local_addr()?.port();
         let registry = Registry::default();
         let stop = Arc::new(AtomicBool::new(false));
-        let (send, messages) = mpsc::sync_channel(128);
+        let (send, messages) = mpsc::sync_channel(HOOK_QUEUE_CAPACITY);
         let handle = {
             let registry = Arc::clone(&registry);
             let stop = Arc::clone(&stop);
@@ -436,14 +438,18 @@ impl ProviderHookServer {
     pub fn messages(&self) -> impl Iterator<Item = HookMessage> + '_ {
         self.messages.try_iter()
     }
-}
 
-impl Drop for ProviderHookServer {
-    fn drop(&mut self) {
+    pub(crate) fn finish_requests(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(listener) = self.listener.take() {
             let _ = listener.join();
         }
+    }
+}
+
+impl Drop for ProviderHookServer {
+    fn drop(&mut self) {
+        self.finish_requests();
         self.registry.lock().unwrap().clear();
     }
 }
@@ -568,8 +574,15 @@ fn listen(
     stop: &AtomicBool,
 ) {
     let mut workers: Vec<JoinHandle<()>> = Vec::new();
-    while !stop.load(Ordering::Relaxed) {
+    let mut drain_deadline = None;
+    loop {
         let now = Instant::now();
+        if stop.load(Ordering::Relaxed) {
+            let deadline = drain_deadline.get_or_insert(now + SHUTDOWN_DRAIN);
+            if now >= *deadline {
+                break;
+            }
+        }
         registry
             .lock()
             .unwrap()
@@ -582,32 +595,49 @@ fn listen(
                 index += 1;
             }
         }
-        if workers.len() < MAX_CONNECTIONS
-            && let Ok((socket, _)) = listener.accept()
-        {
-            let registry = Arc::clone(registry);
-            let send = send.clone();
-            if let Ok(worker) = thread::Builder::new()
-                .name("provider-hook-request".into())
-                .spawn(move || handle_request(socket, &registry, &send))
-            {
-                workers.push(worker);
+        if workers.len() < MAX_CONNECTIONS {
+            match listener.accept() {
+                Ok((socket, _)) => {
+                    let registry = Arc::clone(registry);
+                    let send = send.clone();
+                    if let Ok(worker) = thread::Builder::new()
+                        .name("provider-hook-request".into())
+                        .spawn(move || handle_request(socket, &registry, &send, drain_deadline))
+                    {
+                        workers.push(worker);
+                    }
+                    continue;
+                }
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                // A nonblocking accept has drained the backlog. Already
+                // accepted requests can still finish on their own sockets.
+                Err(error)
+                    if error.kind() == io::ErrorKind::WouldBlock && drain_deadline.is_some() =>
+                {
+                    break;
+                }
+                Err(_) => {}
             }
-        } else {
-            thread::sleep(Duration::from_millis(10));
         }
+        thread::sleep(Duration::from_millis(10));
     }
     for worker in workers {
         let _ = worker.join();
     }
 }
 
-fn handle_request(mut socket: TcpStream, registry: &Registry, send: &SyncSender<HookMessage>) {
+fn handle_request(
+    mut socket: TcpStream,
+    registry: &Registry,
+    send: &SyncSender<HookMessage>,
+    drain_deadline: Option<Instant>,
+) {
     // BSD can inherit non-blocking mode from the listening socket.
     if socket.set_nonblocking(false).is_err() {
         return;
     }
-    let result = read_request(&mut socket, registry, send);
+    let deadline = drain_deadline.unwrap_or_else(|| Instant::now() + REQUEST_TIMEOUT);
+    let result = read_request(&mut socket, registry, send, deadline);
     let (status, body) = match result {
         Ok(()) => ("200 OK", "{}"),
         Err(status) => (status, ""),
@@ -629,11 +659,9 @@ fn read_request(
     socket: &mut TcpStream,
     registry: &Registry,
     send: &SyncSender<HookMessage>,
+    deadline: Instant,
 ) -> HttpResult<()> {
-    let mut reader = BufReader::new(DeadlineRead {
-        socket,
-        deadline: Instant::now() + REQUEST_TIMEOUT,
-    });
+    let mut reader = BufReader::new(DeadlineRead { socket, deadline });
     let mut header_budget = MAX_HEADERS;
     let first = read_line(&mut reader, &mut header_budget)?;
     let mut fields = first.split_ascii_whitespace();
@@ -807,6 +835,54 @@ mod tests {
             .nth(1)
             .context("HTTP status")?
             .parse()?)
+    }
+
+    #[test]
+    fn shutdown_drains_a_connected_hook_that_sends_its_body_at_stop() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+        listener.set_nonblocking(true)?;
+        let (send, messages) = mpsc::sync_channel(HOOK_QUEUE_CAPACITY);
+        let mut server = ProviderHookServer {
+            port: listener.local_addr()?.port(),
+            registry: Registry::default(),
+            messages,
+            stop: Arc::new(AtomicBool::new(false)),
+            listener: None,
+        };
+        let registration = server.register(root.path(), scope("drained-run"), false)?;
+        let mut socket = TcpStream::connect((Ipv4Addr::LOCALHOST, server.port))?;
+        socket.set_nodelay(true)?;
+        socket.set_read_timeout(Some(Duration::from_secs(2)))?;
+        let body = br#"{"hook_event_name":"SessionStart","session_id":"drained-identity"}"#;
+        write!(
+            socket,
+            "POST /hooks/{} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n",
+            registration.token,
+            body.len()
+        )?;
+        // Start at the stop boundary so the connection is still in the TCP backlog.
+        server.stop.store(true, Ordering::Relaxed);
+        let registry = Arc::clone(&server.registry);
+        let stop = Arc::clone(&server.stop);
+        server.listener = Some(thread::spawn(move || {
+            listen(listener, &registry, &send, &stop)
+        }));
+        socket.write_all(body)?;
+        server.finish_requests();
+
+        let mut response = String::new();
+        BufReader::new(socket).read_line(&mut response)?;
+        assert_eq!(response, "HTTP/1.1 200 OK\r\n");
+        let mut messages = server.messages();
+        assert!(matches!(
+            messages.next(),
+            Some(HookMessage::Observed(scope, observation, _))
+                if scope.run_id == "drained-run"
+                    && observation.identity.as_deref() == Some("drained-identity")
+        ));
+        assert!(messages.next().is_none());
+        Ok(())
     }
 
     #[test]

@@ -1,6 +1,9 @@
 //! Thread-affine owner for one live Shell session.
 use std::{
-    sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError},
+    sync::{
+        Arc, Mutex, OnceLock,
+        mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError},
+    },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
@@ -12,6 +15,7 @@ use crate::{
     SessionEvent, SessionOptions,
     search::{SearchRequest, SearchResult},
     session::{Session, SessionWaker},
+    shell_input::ShellInput,
 };
 
 const MAX_POLL_WAIT: Duration = Duration::from_millis(250);
@@ -28,11 +32,25 @@ pub struct SelectionCopy {
     pub interrupted: bool,
 }
 
+pub struct ShellSubmission {
+    pub(crate) mode: &'static str,
+    pub(crate) before: ShellInput,
+    pub(crate) cleared: Receiver<Result<bool>>,
+}
+
 /// Requests can be forwarded without blocking the central owner on a busy session.
 pub enum WorkerCommand {
     Write {
         bytes: Vec<u8>,
         reply: Sender<Result<()>>,
+    },
+    WriteShellInput {
+        bytes: Vec<u8>,
+        submission: Option<Sender<Option<ShellSubmission>>>,
+        reply: Sender<Result<()>>,
+    },
+    CheckProcess {
+        result: Arc<OnceLock<Result<()>>>,
     },
     Resize {
         cols: u16,
@@ -52,6 +70,13 @@ pub enum WorkerCommand {
         frozen: bool,
         reply: Sender<Result<()>>,
     },
+    #[cfg(all(test, target_os = "macos"))]
+    TestPause {
+        paused: Sender<()>,
+        resume: Receiver<()>,
+    },
+    #[cfg(test)]
+    TestFailPromotionClear,
     Screen {
         reply: Sender<Result<Screen>>,
     },
@@ -104,6 +129,7 @@ pub struct SessionWorker {
     commands: Sender<WorkerCommand>,
     wake: SessionWaker,
     process_id: u32,
+    shell_input: Arc<Mutex<ShellInput>>,
     thread: Option<JoinHandle<Result<()>>>,
 }
 
@@ -134,6 +160,8 @@ impl SessionWorker {
     ) -> Result<Self> {
         let (commands, incoming) = mpsc::channel();
         let (started, startup) = mpsc::sync_channel(1);
+        let shell_input = Arc::new(Mutex::new(ShellInput::default()));
+        let worker_input = Arc::clone(&shell_input);
         let thread = thread::Builder::new()
             .name("matou-shell-session".into())
             .spawn(move || {
@@ -146,7 +174,14 @@ impl SessionWorker {
                         {
                             return finish(&mut session, &session_id, &run_id, &events);
                         }
-                        run(&mut session, &session_id, &run_id, &incoming, &events)
+                        run(
+                            &mut session,
+                            &session_id,
+                            &run_id,
+                            &incoming,
+                            &events,
+                            &worker_input,
+                        )
                     }
                     Err(error) => {
                         let _ = started.send(Err(error));
@@ -160,6 +195,7 @@ impl SessionWorker {
                 commands,
                 wake,
                 process_id,
+                shell_input,
                 thread: Some(thread),
             }),
             Ok(Err(error)) => {
@@ -253,6 +289,10 @@ impl SessionWorker {
             .context("Shell session worker did not respond")?
     }
 
+    pub(crate) fn restore_shell_input(&self, before: ShellInput) {
+        *self.shell_input.lock().unwrap() = before;
+    }
+
     pub fn send(&self, command: WorkerCommand) -> Result<()> {
         self.commands
             .send(command)
@@ -276,14 +316,62 @@ fn join(thread: JoinHandle<Result<()>>) -> Result<()> {
         .map_err(|_| anyhow!("Shell session worker panicked"))?
 }
 
+fn write_shell_input(
+    session: &mut Session,
+    shared: &Mutex<ShellInput>,
+    bytes: &[u8],
+    submission: Option<Sender<Option<ShellSubmission>>>,
+    write_promotion: impl FnOnce(&mut Session, &[u8]) -> Result<bool>,
+) -> Result<()> {
+    if let Some(submission) = submission {
+        session.ensure_writable()?;
+        let mut next = shared.lock().unwrap().clone();
+        if let Some(mode) = next.observe(bytes) {
+            let before = std::mem::replace(&mut *shared.lock().unwrap(), next);
+            let (reply, cleared) = mpsc::channel();
+            let _ = submission.send(Some(ShellSubmission {
+                mode,
+                before,
+                cleared,
+            }));
+            // True means the line cleared. False means the original input was forwarded.
+            let result = write_promotion(session, bytes);
+            if matches!(result, Ok(true)) {
+                *shared.lock().unwrap() = ShellInput::default();
+            }
+            let _ = reply.send(result);
+            return Ok(());
+        }
+        let _ = submission.send(None);
+        session.write(bytes)?;
+        *shared.lock().unwrap() = next;
+    } else {
+        session.write(bytes)?;
+        shared.lock().unwrap().observe(bytes);
+    }
+    Ok(())
+}
+
+fn clear_for_promotion(input: &[u8], mut write: impl FnMut(&[u8]) -> Result<()>) -> Result<bool> {
+    match write(&[0x15]) {
+        Ok(()) => Ok(true),
+        Err(clear_error) => write(input).map(|()| false).with_context(|| {
+            format!("could not forward Shell input after Ctrl+U failed: {clear_error:#}")
+        }),
+    }
+}
+
 fn run(
     session: &mut Session,
     id: &str,
     run_id: &str,
     incoming: &Receiver<WorkerCommand>,
     events: &Sender<WorkerEvent>,
+    shell_input: &Mutex<ShellInput>,
 ) -> Result<()> {
     let mut next = None;
+    #[cfg(test)]
+    let mut fail_promotion_clear = false;
     loop {
         loop {
             let command = match next.take().map_or_else(|| incoming.try_recv(), Ok) {
@@ -294,6 +382,31 @@ fn run(
             match command {
                 WorkerCommand::Write { bytes, reply } => {
                     let _ = reply.send(session.write(&bytes));
+                }
+                WorkerCommand::WriteShellInput {
+                    bytes,
+                    submission,
+                    reply,
+                } => {
+                    let result = write_shell_input(
+                        session,
+                        shell_input,
+                        &bytes,
+                        submission,
+                        |session, bytes| {
+                            clear_for_promotion(bytes, |bytes| {
+                                #[cfg(test)]
+                                if bytes == [0x15] && std::mem::take(&mut fail_promotion_clear) {
+                                    anyhow::bail!("injected Ctrl+U failure");
+                                }
+                                session.write(bytes)
+                            })
+                        },
+                    );
+                    let _ = reply.send(result);
+                }
+                WorkerCommand::CheckProcess { result } => {
+                    let _ = result.set(session.check_process());
                 }
                 WorkerCommand::Resize {
                     cols,
@@ -312,6 +425,15 @@ fn run(
                 }
                 WorkerCommand::SetEgressFrozen { frozen, reply } => {
                     let _ = reply.send(session.set_egress_frozen(frozen));
+                }
+                #[cfg(all(test, target_os = "macos"))]
+                WorkerCommand::TestPause { paused, resume } => {
+                    let _ = paused.send(());
+                    let _ = resume.recv();
+                }
+                #[cfg(test)]
+                WorkerCommand::TestFailPromotionClear => {
+                    fail_promotion_clear = true;
                 }
                 WorkerCommand::Screen { reply } => {
                     let _ = reply.send(session.screen());
@@ -350,6 +472,7 @@ fn run(
                         let interrupted = !has_selection && interrupt_if_empty;
                         if interrupted {
                             session.write(&[3])?;
+                            shell_input.lock().unwrap().clear();
                         }
                         Ok(SelectionCopy { text, interrupted })
                     })();
@@ -469,4 +592,46 @@ fn diagnostic(events: &Sender<WorkerEvent>, id: &str, run_id: &str, message: Str
         run_id,
         vec![SessionEvent::Diagnostic { message }],
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn promotion_clear_writes_no_part_of_a_matching_submission() -> Result<()> {
+        let mut attempts = Vec::new();
+        assert!(clear_for_promotion(b"touch x\rclaude\rtail", |bytes| {
+            attempts.push(bytes.to_vec());
+            Ok(())
+        })?);
+        assert_eq!(attempts, [vec![0x15]]);
+        Ok(())
+    }
+
+    #[test]
+    fn failed_promotion_clear_attempts_the_whole_original_write() {
+        let input = b"touch x\rclaude\rmore";
+        for writable in [true, false] {
+            let mut attempts = Vec::new();
+            let result = clear_for_promotion(input, |bytes| {
+                attempts.push(bytes.to_vec());
+                match bytes {
+                    [0x15] => Err(anyhow!("clear failed")),
+                    _ if writable => Ok(()),
+                    _ => Err(anyhow!("write failed")),
+                }
+            });
+            assert_eq!(attempts, [vec![0x15], input.to_vec()]);
+            if writable {
+                assert!(!result.unwrap());
+            } else {
+                let error = format!("{:#}", result.unwrap_err());
+                assert!(
+                    error.contains("clear failed") && error.contains("write failed"),
+                    "{error}"
+                );
+            }
+        }
+    }
 }
