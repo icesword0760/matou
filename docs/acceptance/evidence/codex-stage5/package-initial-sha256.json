@@ -1,0 +1,33 @@
+{
+  "sourceCommit": "60714bec788fdb034cee014e49488a1ff8768046",
+  "command": "CSC_IDENTITY_AUTO_DISCOVERY=false pnpm package:dir",
+  "exitCode": 0,
+  "signed": false,
+  "bundle": "apps/desktop/release/mac-arm64/码头.app",
+  "components": {
+    "Contents/MacOS/码头": {
+      "sha256": "221d5695ab9eb2263b9107e4a5bb3f5780adc35963530e322673d5535e8eeae5",
+      "bytes": 33968
+    },
+    "Contents/Resources/app.asar": {
+      "sha256": "bb38bb6091a6ce348b866708b46eafc9ed6eec60282f859522d65b3ff35783d7",
+      "bytes": 27723369
+    },
+    "Contents/Resources/runtime/index.cjs": {
+      "sha256": "2cc70733fcea3911ec4d579f66880ea87718833b1534b5a06a8b7feab5dcf357",
+      "bytes": 2762071
+    },
+    "Contents/Resources/runtime/mt-cli.cjs": {
+      "sha256": "a14a46139f6fabc5b9612d0fdcfd8ba772bd062f612709b4beb2e696ac4b826d",
+      "bytes": 649830
+    },
+    "Contents/Resources/runtime/control-assets/bin/mt": {
+      "sha256": "859676985a2b233e8d6dc7744e7760c3e955b59c6a56932bfcdff3f12a87bc03",
+      "bytes": 317
+    },
+    "Contents/Resources/runtime/control-assets/providers/codex-developer-instructions.md": {
+      "sha256": "585a4c6d09d3f934e4b2e66c8b0b5f09096a2ce2f07668b268c3d4bf35764b7a",
+      "bytes": 6142
+    }
+  }
+}

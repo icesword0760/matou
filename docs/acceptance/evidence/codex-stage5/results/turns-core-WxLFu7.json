@@ -1,0 +1,10 @@
+[
+  {
+    "sessionId": "a672386f-b59c-4363-b061-767d748fe0bf",
+    "providerSessionId": "01a1df0e-b3ea-7db0-9307-8e9b704fac04",
+    "turnId": "01a1df0e-bc70-7261-920d-0431bfcbd460",
+    "prompt": "Remember the codeword opal-harbor-628. Reply only ACK_1.",
+    "finalAnswer": "ACK_1",
+    "completedAnswer": "ACK_1"
+  }
+]

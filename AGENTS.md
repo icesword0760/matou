@@ -32,3 +32,10 @@
 - 源码、测试、资源路径、文档、注释和生成脚本统一使用 Matou 自有命名，或 `generic`、`legacy`、`reference` 等中性术语。
 - 历史外部终端产品与参考产品的品牌标识均属于仓库禁用标识；功能迁移、兼容和对齐说明也使用中性名称。
 - 每次提交前运行 `pnpm check:identifiers`；门禁覆盖受控文件与新增文件的路径及内容。
+
+## macOS 本地更新与权限连续性
+
+- 安装到 `/Applications/码头.app` 的构建必须使用既有 Developer ID（Team `JAKX72KQ6X`），保持 `com.matou.desktop` 和稳定的 designated requirement；不得用 ad-hoc、临时开发签名或 identifier-only requirement 替代。仅 `codesign --verify` 成功不代表签名身份连续。
+- 本地安装统一使用 `pnpm install:mac --source <绝对路径.app>`。先正常退出码头并等待相关进程结束；安装器发现仍运行时停止，不强杀用户任务，也不在运行中移动或覆盖应用。
+- 旧版备份保存为安装器生成的 ZIP，不能把原应用 `mv` 到带时间戳的 `.app`、废纸篓或其它可被 Launch Services 注册的副本路径。恢复时先退出，再解压到原安装路径。
+- 验收至少核对 Developer ID、Team、bundle ID、稳定 DR 和嵌套签名；权限连续性需记录实际文稿访问及更新前后系统授权结果，不能以编译或签名检查代替。不要重置 TCC、直接改权限数据库或要求完整磁盘访问来掩盖签名问题。

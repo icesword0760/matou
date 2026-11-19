@@ -1,0 +1,6 @@
+{
+  "fixture": "controlled rollout records; no inference or live Fork",
+  "ancestorVisibleInChild": true,
+  "ancestorSearchVisible": true,
+  "missingAncestorLabeled": true
+}

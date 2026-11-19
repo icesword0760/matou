@@ -4,9 +4,9 @@ import { startClaudeRequestGateway, type GatewayOverride } from './claude-reques
 
 const dispose: Array<() => Promise<void>> = []
 
-async function listen(handler: RequestListener): Promise<string> {
+async function listen(handler: RequestListener, port = 0): Promise<string> {
   const server: Server = http.createServer(handler)
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  await new Promise<void>((resolve, reject) => server.once('error', reject).listen(port, '127.0.0.1', resolve))
   dispose.unshift(() => new Promise<void>((resolve) => {
     server.close(() => resolve())
     server.closeAllConnections()
@@ -25,20 +25,158 @@ async function start(
   return gateway
 }
 
-async function captureRequests() {
+async function captureRequests(port?: number) {
   const requests: Array<{ url: string | undefined; headers: http.IncomingHttpHeaders; body: string }> = []
   const url = await listen(async (request, response) => {
     const chunks = []
     for await (const chunk of request) chunks.push(chunk)
     requests.push({ url: request.url, headers: request.headers, body: Buffer.concat(chunks).toString() })
     response.end('accepted')
-  })
+  }, port)
   return { url, requests }
 }
 
 afterEach(async () => {
   for (const close of dispose.splice(0)) await close()
   vi.restoreAllMocks()
+})
+
+describe('local model router recovery', () => {
+  const body = JSON.stringify({ model: 'matou-role/haiku', max_tokens: 8 })
+  const post = (baseUrl: string, path = '/v1/messages') => fetch(baseUrl + path, { method: 'POST', body })
+
+  async function deadPort() {
+    const url = await listen(() => {})
+    await dispose.shift()!()
+    return url
+  }
+
+  it.each(['/v1/messages', '/v1/messages/count_tokens'])('replays the buffered %s request once on the same port', async path => {
+    const url = await deadPort()
+    let capture: Awaited<ReturnType<typeof captureRequests>> | undefined
+    const recoverRouter = vi.fn(async () => { capture = await captureRequests(Number(new URL(url).port)) })
+    const override = vi.fn((): GatewayOverride => ({
+      baseUrl: url, routerTarget: true, model: 'router-model', headers: { authorization: 'Bearer fixture' }
+    }))
+    const gateway = await startClaudeRequestGateway({ upstreamUrl: url, env: {}, resolveOverride: override, recoverRouter })
+    dispose.unshift(gateway.close)
+
+    const response = await post(gateway.baseUrl, path)
+    expect(response.status).toBe(200)
+    expect(await response.text()).toBe('accepted')
+    expect(recoverRouter).toHaveBeenCalledOnce()
+    expect(override).toHaveBeenCalledOnce()
+    expect(capture?.requests).toHaveLength(1)
+    expect(capture?.requests[0]).toMatchObject({
+      url: path, headers: { authorization: 'Bearer fixture' },
+      body: JSON.stringify({ model: 'router-model', max_tokens: 8 })
+    })
+  })
+
+  it('follows a router that recovered on a different port for this and later requests', async () => {
+    const url = await deadPort()
+    const moved = await deadPort()
+    let capture: Awaited<ReturnType<typeof captureRequests>> | undefined
+    const recoverRouter = vi.fn(async () => {
+      capture ??= await captureRequests(Number(new URL(moved).port))
+      return moved
+    })
+    const gateway = await startClaudeRequestGateway({
+      upstreamUrl: url, env: {}, recoverRouter,
+      resolveOverride: () => ({ baseUrl: url, routerTarget: true, model: 'router-model', headers: { authorization: 'Bearer fixture' } })
+    })
+    dispose.unshift(gateway.close)
+
+    for (let i = 0; i < 2; i++) {
+      const response = await post(gateway.baseUrl)
+      expect(response.status).toBe(200)
+      expect(await response.text()).toBe('accepted')
+    }
+    expect(recoverRouter).toHaveBeenCalledOnce()
+    expect(capture?.requests).toHaveLength(2)
+    expect(capture?.requests[1]).toMatchObject({ url: '/v1/messages', headers: { authorization: 'Bearer fixture' } })
+  })
+
+  it.each([
+    ['zh-CN', true, '本地模型路由未运行，自动恢复失败。请重启码头后重试。'],
+    ['en', true, 'The local model router is not running and could not be restarted. Restart Matou and try again.'],
+    ['zh-CN', false, '本地模型路由未运行，自动恢复失败。请重启码头后重试。'],
+    ['en', false, 'The local model router is not running and could not be restarted. Restart Matou and try again.']
+  ] as const)('returns the %s action when recovery rejects=%s and never loops', async (locale, rejectRecovery, message) => {
+    const url = await deadPort()
+    const outgoing = vi.spyOn(http, 'request')
+    const recoverRouter = vi.fn(async () => { if (rejectRecovery) throw new Error('fixture failure') })
+    const gateway = await startClaudeRequestGateway({
+      upstreamUrl: url, env: { MATOU_LOCALE: locale }, resolveOverride: () => ({ routerTarget: true }), recoverRouter
+    })
+    dispose.unshift(gateway.close)
+
+    const response = await post(gateway.baseUrl)
+    expect(response.status).toBe(502)
+    expect(await response.json()).toEqual({ type: 'error', error: { type: 'api_error', message } })
+    expect(recoverRouter).toHaveBeenCalledOnce()
+    expect(outgoing).toHaveBeenCalledTimes(rejectRecovery ? 1 : 2)
+  })
+
+  it.each([{}, { authentication: { providerId: 'official', providerName: 'Official', label: 'main' } }])(
+    'preserves the original connection error for non-router targets', async override => {
+      const upstreamUrl = await deadPort()
+      const outgoing = vi.spyOn(http, 'request')
+      const recoverRouter = vi.fn()
+      const gateway = await startClaudeRequestGateway({ upstreamUrl, env: {}, resolveOverride: () => override, recoverRouter })
+      dispose.unshift(gateway.close)
+
+      const response = await post(gateway.baseUrl)
+      expect(response.status).toBe(502)
+      expect(await response.json()).toMatchObject({ error: { message: 'Claude request gateway could not reach the upstream service.' } })
+      expect(recoverRouter).not.toHaveBeenCalled()
+      expect(outgoing).toHaveBeenCalledOnce()
+    }
+  )
+
+  it('does not recover when an upstream stream already sent headers and data', async () => {
+    let dropStream!: () => void
+    const upstreamUrl = await listen((request, response) => {
+      request.resume()
+      response.writeHead(200, { 'content-type': 'text/event-stream' })
+      response.write('data: first\n\n')
+      dropStream = () => response.destroy()
+    })
+    const recoverRouter = vi.fn()
+    const gateway = await startClaudeRequestGateway({
+      upstreamUrl, env: {}, resolveOverride: () => ({ routerTarget: true }), recoverRouter
+    })
+    dispose.unshift(gateway.close)
+
+    const response = await post(gateway.baseUrl)
+    const reader = response.body!.getReader()
+    expect(new TextDecoder().decode((await reader.read()).value)).toBe('data: first\n\n')
+    dropStream()
+    await expect(reader.read()).rejects.toThrow()
+    expect(recoverRouter).not.toHaveBeenCalled()
+  })
+
+  it('closes the client connection during recovery and never sends the replay', async () => {
+    const upstreamUrl = await deadPort()
+    let signalStarted!: () => void
+    let finishRecovery!: () => void
+    const started = new Promise<void>(resolve => { signalStarted = resolve })
+    const pending = new Promise<void>(resolve => { finishRecovery = resolve })
+    const recoverRouter = vi.fn(() => { signalStarted(); return pending })
+    const outgoing = vi.spyOn(http, 'request')
+    const gateway = await startClaudeRequestGateway({
+      upstreamUrl, env: {}, resolveOverride: () => ({ routerTarget: true }), recoverRouter
+    })
+    dispose.unshift(gateway.close)
+
+    const request = post(gateway.baseUrl).catch(() => 'closed')
+    await started
+    await gateway.close()
+    expect(await request).toBe('closed')
+    finishRecovery()
+    await pending
+    expect(outgoing).toHaveBeenCalledOnce()
+  })
 })
 
 describe('Claude request gateway', () => {
@@ -112,6 +250,60 @@ describe('Claude request gateway', () => {
       expect(await response.json()).toMatchObject({ type: 'error', error: { type: 'invalid_request_error', message: expect.stringContaining('DeepSeek') } })
     }
     expect(upstream.requests).toHaveLength(0)
+  })
+
+  it('folds removals for official message and count requests while preserving other destinations', async () => {
+    const official = await captureOfficialRequests()
+    const other = await captureRequests()
+    const gateway = await start(official.official)
+    const otherGateway = await start(other.url)
+    const original = inlineRequest()
+    const body = JSON.stringify({ ...original, messages: [...original.messages, { role: 'system', content: [{ type: 'tool_removal', tool: { type: 'tool_reference', name: 'lookup' } }] }] })
+    for (const path of ['/v1/messages', '/v1/messages/count_tokens']) {
+      const response = await fetch(gateway.baseUrl + path, { method: 'POST', body, headers: { 'content-digest': 'old-digest' } })
+      expect(response.status).toBe(200)
+      await response.text()
+    }
+    expect(await (await fetch(otherGateway.baseUrl + '/v1/messages', { method: 'POST', body })).text()).toBe('accepted')
+    expect(other.requests[0]!.body).toBe(body)
+    for (const request of official.requests) {
+      const parsed = JSON.parse(request.body)
+      expect(parsed.tools).toEqual(original.tools)
+      expect(parsed.messages.flatMap((message: { content: Array<{ type: string }> }) => message.content).every((block: { type: string }) => block.type === 'text')).toBe(true)
+      expect(request.headers['content-length']).toBe(String(Buffer.byteLength(request.body)))
+      expect(request.headers['content-digest']).toBeUndefined()
+    }
+    const invalid = await fetch(gateway.baseUrl + '/v1/messages', { method: 'POST', body: JSON.stringify({ ...JSON.parse(body), tool_choice: { type: 'tool', name: 'lookup' } }) })
+    expect(invalid.status).toBe(400)
+    expect(await invalid.json()).toMatchObject({ error: { type: 'invalid_request_error', message: expect.stringContaining('tool_choice') } })
+    expect(official.requests).toHaveLength(2)
+  })
+
+  it('normalizes custom tools and unavailable discovery results even without inline events', async () => {
+    const official = await captureOfficialRequests()
+    const other = await captureRequests()
+    const gateway = await start(official.official)
+    const otherGateway = await start(other.url)
+    const source = {
+      model: 'deepseek-flash', tools: [{ ...inlineDefinition, type: 'custom' }],
+      messages: [{ role: 'user', content: [{ type: 'tool_result', tool_use_id: 'call', content: [
+        { type: 'tool_reference', tool_name: 'retired' }, { type: 'tool_reference', tool_name: 'lookup' }
+      ] }] }]
+    }
+    const body = JSON.stringify(source)
+    for (const path of ['/v1/messages', '/v1/messages/count_tokens']) {
+      expect(await (await fetch(gateway.baseUrl + path, { method: 'POST', body })).text()).toBe('accepted')
+    }
+    expect(await (await fetch(otherGateway.baseUrl + '/v1/messages', { method: 'POST', body })).text()).toBe('accepted')
+    expect(other.requests[0]!.body).toBe(body)
+    for (const request of official.requests) {
+      const parsed = JSON.parse(request.body)
+      expect(parsed.tools).toEqual([inlineDefinition])
+      expect(parsed.messages[0].content[0].content).toEqual([
+        { type: 'text', text: expect.stringContaining('"retired"') }, { type: 'tool_reference', tool_name: 'lookup' }
+      ])
+      expect(request.headers['content-length']).toBe(String(Buffer.byteLength(request.body)))
+    }
   })
 
   it('routes manual and automatic compaction separately and keeps subsequent chat on the primary model', async () => {
@@ -203,7 +395,7 @@ describe('Claude request gateway', () => {
     expect(upstream.requests.map((request) => request.body)).toEqual([body, body])
   })
 
-  it('only remaps the model for count_tokens, even with a compaction marker', async () => {
+  it('routes count_tokens to its exact target without generation overrides, even with a compaction marker', async () => {
     const primary = await captureRequests(), secondary = await captureRequests()
     const calls: boolean[] = []
     const gateway = await start(primary.url, ({ compaction }) => {
@@ -213,9 +405,9 @@ describe('Claude request gateway', () => {
     const body = { model: 'matou-api/sonnet', output_config: { effort: 'high' }, messages: [] }
     const response = await fetch(gateway.baseUrl + '/v1/messages/count_tokens', { method: 'POST', headers: { authorization: 'Bearer source', 'x-claude-code-compaction': 'manual' }, body: JSON.stringify(body) })
     expect(response.status).toBe(200)
-    expect(calls).toEqual([false]); expect(secondary.requests).toHaveLength(0)
-    expect(primary.requests[0]!.headers.authorization).toBe('Bearer source')
-    expect(JSON.parse(primary.requests[0]!.body)).toEqual({ ...body, model: 'actual-model' })
+    expect(calls).toEqual([false]); expect(primary.requests).toHaveLength(0)
+    expect(secondary.requests[0]!.headers.authorization).toBe('Bearer secondary')
+    expect(JSON.parse(secondary.requests[0]!.body)).toEqual({ ...body, model: 'actual-model' })
   })
 
   it('keeps SSE data streaming and passes through upstream HTTP errors', async () => {
@@ -321,4 +513,15 @@ describe('Claude request gateway', () => {
     await afterShutdown
     await expect(fetch(gateway.baseUrl + '/v1/models')).rejects.toThrow()
   })
+})
+
+it.each(['/v1/messages', '/v1/messages/count_tokens'])('replaces credentials even for same-origin tenant routing: %s', async path => {
+  const upstream = await captureRequests()
+  const gateway = await start(upstream.url + '/source', () => ({ baseUrl: upstream.url + '/target', headers: { 'x-api-key': 'target-fixture' }, model: 'exact' }))
+  const response = await fetch(gateway.baseUrl + path, { method: 'POST', headers: { authorization: 'Bearer source', 'x-api-key': 'source', cookie: 'source-cookie' }, body: JSON.stringify({ model: 'matou-role/opus', messages: [] }) })
+  expect(response.status).toBe(200)
+  expect(upstream.requests[0]!.url).toBe('/target' + path)
+  expect(upstream.requests[0]!.headers).toMatchObject({ 'x-api-key': 'target-fixture' })
+  expect(upstream.requests[0]!.headers.authorization).toBeUndefined()
+  expect(upstream.requests[0]!.headers.cookie).toBeUndefined()
 })

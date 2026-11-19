@@ -140,6 +140,11 @@ export class AntigravitySessionCatalog {
   readonly #root: string
   readonly #metadataCache = { mtimeMs: -1, size: -1, entries: [] as MetadataConversation[] }
   readonly #transcriptCache = new Map<string, IndexedAntigravityTranscript>()
+  readonly #indexing = new Map<string, {
+    mtimeMs: number
+    size: number
+    promise: Promise<IndexedAntigravityTranscript>
+  }>()
   readonly #searchCache = new Map<string, {
     mtimeMs: number
     size: number
@@ -359,37 +364,49 @@ export class AntigravitySessionCatalog {
     if (cached && cached.mtimeMs === fileStat.mtimeMs && cached.size === fileStat.size) {
       return cached
     }
-    const events: IndexedCatalogEvent[] = []
-    for await (const line of scanJsonLines(filePath)) {
-      if (line.length === 0) continue
-      let row: Record<string, unknown>
-      try {
-        const parsed = JSON.parse(line.source.toString('utf8')) as unknown
-        if (!isRecord(parsed)) continue
-        row = parsed
-      } catch {
-        continue
+    const inFlight = this.#indexing.get(filePath)
+    if (inFlight && inFlight.mtimeMs === fileStat.mtimeMs && inFlight.size === fileStat.size) {
+      return inFlight.promise
+    }
+    const pending = (async (): Promise<IndexedAntigravityTranscript> => {
+      const events: IndexedCatalogEvent[] = []
+      for await (const line of scanJsonLines(filePath)) {
+        if (line.length === 0) continue
+        let row: Record<string, unknown>
+        try {
+          const parsed = JSON.parse(line.source.toString('utf8')) as unknown
+          if (!isRecord(parsed)) continue
+          row = parsed
+        } catch {
+          continue
+        }
+        const event = eventFromAntigravityRow(events.length + 1, row)
+        if (!event) continue
+        events.push({
+          index: event.index,
+          kind: event.kind,
+          ...(event.role ? { role: event.role } : {}),
+          ...(event.timestamp === undefined ? {} : { timestamp: event.timestamp }),
+          ...(event.toolName ? { toolName: event.toolName } : {}),
+          offset: line.offset,
+          length: line.length
+        })
       }
-      const event = eventFromAntigravityRow(events.length + 1, row)
-      if (!event) continue
-      events.push({
-        index: event.index,
-        kind: event.kind,
-        ...(event.role ? { role: event.role } : {}),
-        ...(event.timestamp === undefined ? {} : { timestamp: event.timestamp }),
-        ...(event.toolName ? { toolName: event.toolName } : {}),
-        offset: line.offset,
-        length: line.length
-      })
-    }
-    const indexed: IndexedAntigravityTranscript = {
-      path: filePath,
-      mtimeMs: fileStat.mtimeMs,
-      size: fileStat.size,
-      events
-    }
-    this.#transcriptCache.set(filePath, indexed)
-    return indexed
+      const indexed: IndexedAntigravityTranscript = {
+        path: filePath,
+        mtimeMs: fileStat.mtimeMs,
+        size: fileStat.size,
+        events
+      }
+      this.#transcriptCache.set(filePath, indexed)
+      return indexed
+    })().finally(() => {
+      if (this.#indexing.get(filePath)?.promise === pending) {
+        this.#indexing.delete(filePath)
+      }
+    })
+    this.#indexing.set(filePath, { mtimeMs: fileStat.mtimeMs, size: fileStat.size, promise: pending })
+    return pending
   }
 
   async #searchConversation(providerSessionId: string, query: string): Promise<ClaudeSessionSearchHit[]> {

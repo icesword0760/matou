@@ -47,6 +47,7 @@ export interface ClaudeSessionPreviewEvent {
 }
 
 export interface ClaudeSessionDetail extends ClaudeSessionSummary {
+  transcriptTitle?: string
   events: ClaudeSessionPreviewEvent[]
   page: ClaudeSessionEventPageInfo
 }

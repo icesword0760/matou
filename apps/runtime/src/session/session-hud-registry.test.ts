@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, writeFile, rm } from 'node:fs/promises'
+import { appendFile, mkdir, mkdtemp, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -701,4 +701,65 @@ it('keeps default permission during real agy 1.5.8 startup model ticks before fi
   })
   expect(registry.antigravityCycleMode('agy-startup')).toBeNull()
   expect(registry.snapshot('agy-startup')?.permissionMode).toBe('ask')
+})
+
+it('keeps Codex live tools authoritative while merging hook/history execution IDs and hiding unknown fields', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'matou-codex-hud-'))
+  try {
+    const path = join(root, 'rollout.jsonl')
+    await writeFile(join(root, 'CLAUDE.md'), 'unrelated')
+    const registry = new SessionHudRegistry()
+    registry.spawn({ sessionId: 'codex', profile: 'codex', cwd: root })
+    expect(registry.snapshot('codex')).toMatchObject({ instructionFileLabel: 'AGENTS.md', configCounts: { projectInstructionFileExists: false } })
+    for (const field of ['modelStrategy', 'contextPercent', 'effort', 'subagentCount', 'agents', 'usageWindows', 'todos']) {
+      expect(registry.snapshot('codex')).not.toHaveProperty(field)
+    }
+    await writeFile(join(root, 'AGENTS.md'), 'project')
+    registry.refreshConfig('codex')
+    expect(registry.snapshot('codex')?.configCounts?.projectInstructionFileExists).toBe(true)
+    expect(registry.configWatchTargets('codex')).toEqual([{ directory: root, names: ['AGENTS.md'] }])
+    const own = { runId: 'run', currentRunId: () => 'run' }
+    const tool = (hook_event_name: string, tool_use_id: string) => registry.ingestProvider('codex', {
+      hook_event_name, tool_use_id, tool_name: 'Bash', model: 'gpt-6-astra', tool_input: { command: 'print(2)' }
+    })
+    await writeFile(path, JSON.stringify({ type: 'session_meta', payload: {} }) + '\n')
+    tool('PreToolUse', 'exec-1')
+    tool('PreToolUse', 'exec-1')
+    await registry.refreshTranscript('codex', path, own)
+    expect(registry.snapshot('codex')?.runningTools).toEqual([{ name: 'Bash', target: 'print(2)' }])
+    tool('PostToolUse', 'exec-1')
+    tool('PostToolUse', 'exec-1')
+    tool('PreToolUse', 'exec-2')
+    await appendFile(path, [
+      { type: 'turn_context', payload: { model: 'gpt-6-astra', effort: 'high' } },
+      { type: 'event_msg', payload: { type: 'item_completed', item: { type: 'CommandExecution', id: 'exec-1', status: 'completed' } } },
+      { type: 'event_msg', payload: { type: 'token_count', info: { last_token_usage: { total_tokens: 400 }, model_context_window: 1000 } } }
+    ].map(row => JSON.stringify(row)).join('\n') + '\n')
+    await registry.refreshTranscript('codex', path, own)
+    expect(registry.snapshot('codex')).toMatchObject({ model: 'gpt-6-astra', effort: 'high', contextPercent: 40,
+      toolCounts: [{ name: 'Bash', count: 1 }], runningTools: [{ name: 'Bash', target: 'print(2)' }], lastTool: { status: 'running' } })
+    tool('PostToolUse', 'exec-2')
+    expect(registry.snapshot('codex')?.toolCounts).toEqual([{ name: 'Bash', count: 2 }])
+    registry.ingestProvider('codex', { hook_event_name: 'Stop' })
+    await registry.refreshCodexTranscript('codex', own)
+    expect(registry.snapshot('codex')?.runningTools).toEqual([])
+    registry.ingestProvider('codex', { hook_event_name: 'SessionEnd' })
+    expect(await registry.refreshCodexTranscript('codex', own)).toBe(false)
+    expect(await registry.refreshTranscript('codex', path, own)).toBe(false)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+it('rejects stale Codex transcript writes after run changes', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'matou-codex-stale-'))
+  try {
+    const path = join(root, 'rollout.jsonl')
+    await writeFile(path, JSON.stringify({ type: 'turn_context', payload: { model: 'old-model' } }) + '\n')
+    const registry = new SessionHudRegistry()
+    registry.spawn({ sessionId: 'codex', profile: 'codex', model: 'new-model' })
+    let run = 'old'
+    const pending = registry.refreshTranscript('codex', path, { runId: 'old', currentRunId: () => run })
+    run = 'new'
+    expect(await pending).toBe(false)
+    expect(registry.snapshot('codex')?.model).toBe('new-model')
+  } finally { await rm(root, { recursive: true, force: true }) }
 })

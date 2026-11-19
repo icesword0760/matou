@@ -1,0 +1,152 @@
+{
+  "date": "2026-11-16",
+  "surface": "Chromium headed browser via Playwright CLI",
+  "core": [
+    {
+      "name": "首页直达替代方案",
+      "passed": true
+    },
+    {
+      "name": "来源主方案切换",
+      "passed": true
+    },
+    {
+      "name": "子分支弱网验证切换",
+      "passed": true
+    },
+    {
+      "name": "草稿恢复",
+      "passed": true
+    },
+    {
+      "name": "阅读位置恢复140px",
+      "passed": true
+    },
+    {
+      "name": "测试结果直达与返回",
+      "passed": true
+    },
+    {
+      "name": "跨画布账户恢复",
+      "passed": true
+    },
+    {
+      "name": "Escape关闭",
+      "passed": true
+    },
+    {
+      "name": "完整关系",
+      "passed": true
+    },
+    {
+      "name": "测试无继承连线",
+      "passed": true
+    }
+  ],
+  "additional": [
+    {
+      "name": "搜索空态",
+      "passed": true
+    },
+    {
+      "name": "空态恢复",
+      "passed": true
+    },
+    {
+      "name": "运行筛选",
+      "passed": true
+    },
+    {
+      "name": "按归属搜索",
+      "passed": true
+    },
+    {
+      "name": "首页宽度360",
+      "passed": true
+    },
+    {
+      "name": "对话宽度360",
+      "passed": true
+    },
+    {
+      "name": "面板宽度360",
+      "passed": true
+    },
+    {
+      "name": "面板焦点隔离360",
+      "passed": true
+    },
+    {
+      "name": "点遮罩关闭360",
+      "passed": true
+    },
+    {
+      "name": "首页宽度390",
+      "passed": true
+    },
+    {
+      "name": "对话宽度390",
+      "passed": true
+    },
+    {
+      "name": "面板宽度390",
+      "passed": true
+    },
+    {
+      "name": "面板焦点隔离390",
+      "passed": true
+    },
+    {
+      "name": "点遮罩关闭390",
+      "passed": true
+    },
+    {
+      "name": "首页宽度430",
+      "passed": true
+    },
+    {
+      "name": "对话宽度430",
+      "passed": true
+    },
+    {
+      "name": "面板宽度430",
+      "passed": true
+    },
+    {
+      "name": "面板焦点隔离430",
+      "passed": true
+    },
+    {
+      "name": "点遮罩关闭430",
+      "passed": true
+    },
+    {
+      "name": "新建直达",
+      "passed": true
+    },
+    {
+      "name": "本地发送与演示回复",
+      "passed": true
+    },
+    {
+      "name": "跨项目归属更新",
+      "passed": true
+    }
+  ],
+  "newReplyScroll": {
+    "before": 100,
+    "after": 100
+  },
+  "fileEntry": true,
+  "static": [
+    "node --check app.js",
+    "pnpm check:identifiers"
+  ],
+  "notVerified": [
+    "真实手机触控与软键盘",
+    "真实网络/远程会话",
+    "电脑休眠恢复",
+    "双端并发输入"
+  ],
+  "note": "最初检查脚本的选择器曾匹配到隐藏工作空间同名元素；修正作用域后完成。关系线检查由容器类改为实际tree-row，非产品故障。"
+}

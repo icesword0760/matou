@@ -1,0 +1,108 @@
+{
+  "model": "claude-sonnet-4-5",
+  "request": {
+    "contents": [
+      {
+        "role": "user",
+        "parts": [
+          {
+            "text": "Read both documents"
+          }
+        ]
+      },
+      {
+        "role": "model",
+        "parts": [
+          {
+            "functionCall": {
+              "id": "call-1",
+              "name": "mcp__docs__read",
+              "args": {
+                "title": "first",
+                "format": "raw"
+              }
+            }
+          },
+          {
+            "functionCall": {
+              "id": "call-2",
+              "name": "mcp__docs__read",
+              "args": {
+                "title": "second",
+                "format": "raw"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "parts": [
+          {
+            "functionResponse": {
+              "id": "call-1",
+              "name": "mcp__docs__read",
+              "response": {
+                "result": ""
+              }
+            }
+          },
+          {
+            "functionResponse": {
+              "id": "call-2",
+              "name": "mcp__docs__read",
+              "response": {
+                "error": "second failed"
+              }
+            }
+          }
+        ]
+      }
+    ],
+    "systemInstruction": {
+      "role": "user",
+      "parts": [
+        {
+          "text": "You are Antigravity, an agentic AI coding assistant.\nKeep `OpenAI` unchanged."
+        }
+      ]
+    },
+    "tools": [
+      {
+        "functionDeclarations": [
+          {
+            "name": "mcp__docs__read",
+            "description": "Read a document",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "title": {
+                  "type": "string"
+                },
+                "format": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "title"
+              ]
+            }
+          }
+        ]
+      }
+    ],
+    "generationConfig": {
+      "maxOutputTokens": 4096
+    },
+    "sessionId": "-8372392592205174678",
+    "toolConfig": {
+      "functionCallingConfig": {
+        "mode": "VALIDATED"
+      }
+    }
+  },
+  "userAgent": "antigravity",
+  "requestType": "agent",
+  "project": "test-project",
+  "requestId": "agent-883ff7b6-dfd5-405a-835b-d3358ea1332a"
+}

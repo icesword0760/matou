@@ -1,0 +1,47 @@
+{
+  "clock": "Date.now, Runtime domain event to DAG DOM mutation; same host",
+  "samples": [
+    {
+      "round": 1,
+      "status": "running",
+      "runtimeEventAtMs": 1794743902947,
+      "uiObservedAtMs": 1794743902950,
+      "runtimeToUiMs": 3
+    },
+    {
+      "round": 1,
+      "status": "idle",
+      "runtimeEventAtMs": 1794743911487,
+      "uiObservedAtMs": 1794743911490,
+      "runtimeToUiMs": 3
+    },
+    {
+      "round": 2,
+      "status": "running",
+      "runtimeEventAtMs": 1794743911832,
+      "uiObservedAtMs": 1794743911834,
+      "runtimeToUiMs": 2
+    },
+    {
+      "round": 2,
+      "status": "idle",
+      "runtimeEventAtMs": 1794743915864,
+      "uiObservedAtMs": 1794743915867,
+      "runtimeToUiMs": 3
+    },
+    {
+      "round": 3,
+      "status": "running",
+      "runtimeEventAtMs": 1794743916867,
+      "uiObservedAtMs": 1794743916869,
+      "runtimeToUiMs": 2
+    },
+    {
+      "round": 3,
+      "status": "idle",
+      "runtimeEventAtMs": 1794743920032,
+      "uiObservedAtMs": 1794743920035,
+      "runtimeToUiMs": 3
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+[
+  {
+    "sessionId": "48958459-38b8-4b93-ae85-84577fa2ddb4",
+    "providerSessionId": "01a1df2d-3635-7411-9950-5a2816d8606f",
+    "turnId": "01a1df2d-3773-77e2-b77d-7137cebb7dc1",
+    "prompt": "Reply only FRESH_OK.",
+    "finalAnswer": "FRESH_OK",
+    "completedAnswer": "FRESH_OK"
+  }
+]

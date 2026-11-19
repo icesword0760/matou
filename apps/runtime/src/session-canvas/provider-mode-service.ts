@@ -87,6 +87,7 @@ export class ProviderModeService {
       permissionMode: ClaudeSessionPermissionMode
       model?: string
       provider?: AgentProfileId
+      hasCompletedTurn?: boolean
       now: number
     }
   ): ProviderModeTransitionResult {
@@ -119,9 +120,9 @@ export class ProviderModeService {
         spawnRevision: input.now,
         // Catalog conversations already have durable history to branch from.
         // restore_state keeps Fork unavailable until the resumed identity is live.
-        canFork: true,
-        observedUserPrompt: false,
-        observedNormalStop: false
+        canFork: provider === 'codex' ? input.hasCompletedTurn === true : true,
+        observedUserPrompt: provider === 'codex' && input.hasCompletedTurn === true,
+        observedNormalStop: provider === 'codex' && input.hasCompletedTurn === true
       }
       if (existing) {
         tx.run(
@@ -350,13 +351,16 @@ export class ProviderModeService {
       const metadata = asMetadata(binding.metadata_json)
       if (input.eventName === 'UserPromptSubmit' || input.eventName === 'PreInvocation') {
         metadata.observedUserPrompt = true
+        if (provider === 'codex') metadata.observedNormalStop = false
       }
       if (input.eventName === 'Stop') metadata.observedNormalStop = true
       // A statusline payload confirms that a resumed conversation is live, but
       // it does not represent a new prompt/Stop cycle. Preserve the previously
       // earned Fork capability until a real lifecycle hook supplies new facts.
       if (input.eventName !== 'unknown') {
-        metadata.canFork = metadata.observedUserPrompt === true && metadata.observedNormalStop === true
+        if (provider !== 'codex' || metadata.canFork !== true) {
+          metadata.canFork = metadata.observedUserPrompt === true && metadata.observedNormalStop === true
+        }
       }
       metadata.lastHookEvent = input.eventName
       const workStatus = providerWorkStatus(input.eventName, session.work_status)

@@ -1,0 +1,168 @@
+{
+  "passed": 3,
+  "failed": 0,
+  "skipped": 0,
+  "retries": 0,
+  "durationMs": 91954.37,
+  "scope": "Targeted packaged UI check before the formal final suites. Final acceptance must use the later full rerun.",
+  "approval": {
+    "sid": "[isolated-test-id]",
+    "latency": [
+      {
+        "round": 1,
+        "status": "needs-input",
+        "runtimeAt": 1794766635847,
+        "uiAt": 1794766635850,
+        "latencyMs": 3,
+        "nativeAt": 1794766635745,
+        "nativeToUiMs": 105
+      },
+      {
+        "round": 2,
+        "status": "needs-input",
+        "runtimeAt": 1794766643064,
+        "uiAt": 1794766643067,
+        "latencyMs": 3,
+        "nativeAt": 1794766642960,
+        "nativeToUiMs": 107
+      },
+      {
+        "round": 3,
+        "status": "needs-input",
+        "runtimeAt": 1794766651824,
+        "uiAt": 1794766651827,
+        "latencyMs": 3,
+        "nativeAt": 1794766651720,
+        "nativeToUiMs": 107
+      }
+    ],
+    "permissionNotices": [
+      {
+        "eventType": "permission",
+        "title": "DSH",
+        "subtitle": "Permission",
+        "body": "bash requires approval",
+        "sound": true,
+        "cooldownKey": "Notification"
+      },
+      {
+        "eventType": "permission",
+        "title": "DSH",
+        "subtitle": "Permission",
+        "body": "bash requires approval",
+        "sound": true,
+        "cooldownKey": "Notification"
+      },
+      {
+        "eventType": "permission",
+        "title": "DSH",
+        "subtitle": "Permission",
+        "body": "bash requires approval",
+        "sound": true,
+        "cooldownKey": "Notification"
+      }
+    ],
+    "decisions": [
+      "allowed-once",
+      "allowed-once",
+      "rejected"
+    ],
+    "defaultModeChanged": false,
+    "nativeNotificationOsc": 0
+  },
+  "error": {
+    "fixture": "Real DSH known model with per-run loopback HTTP 400 endpoint and fixture-only API key; no profile write or fabricated events",
+    "sid": "[isolated-test-id]",
+    "latency": [
+      {
+        "round": 1,
+        "status": "error",
+        "runtimeAt": 1794766669618,
+        "uiAt": 1794766669626,
+        "latencyMs": 8,
+        "nativeAt": 1794766669611,
+        "nativeToUiMs": 15
+      },
+      {
+        "round": 2,
+        "status": "error",
+        "runtimeAt": 1794766670464,
+        "uiAt": 1794766670468,
+        "latencyMs": 4,
+        "nativeAt": 1794766670454,
+        "nativeToUiMs": 14
+      },
+      {
+        "round": 3,
+        "status": "error",
+        "runtimeAt": 1794766671341,
+        "uiAt": 1794766671344,
+        "latencyMs": 3,
+        "nativeAt": 1794766671313,
+        "nativeToUiMs": 31
+      }
+    ],
+    "requests": [
+      {
+        "method": "POST",
+        "path": "/anthropic/v1/messages"
+      },
+      {
+        "method": "POST",
+        "path": "/anthropic/v1/messages"
+      },
+      {
+        "method": "POST",
+        "path": "/anthropic/v1/messages"
+      },
+      {
+        "method": "POST",
+        "path": "/anthropic/v1/messages"
+      }
+    ],
+    "errors": [
+      {
+        "eventType": "error",
+        "title": "DSH",
+        "subtitle": "Error",
+        "body": "MATOU_NATIVE_REQUEST_ERROR",
+        "sound": true,
+        "cooldownKey": "Stop"
+      },
+      {
+        "eventType": "error",
+        "title": "DSH",
+        "subtitle": "Error",
+        "body": "MATOU_NATIVE_REQUEST_ERROR",
+        "sound": true,
+        "cooldownKey": "Stop"
+      },
+      {
+        "eventType": "error",
+        "title": "DSH",
+        "subtitle": "Error",
+        "body": "MATOU_NATIVE_REQUEST_ERROR",
+        "sound": true,
+        "cooldownKey": "Stop"
+      }
+    ],
+    "nativeReasons": [
+      "error",
+      "error",
+      "error"
+    ]
+  },
+  "recovery": {
+    "fixture": "Launcher exits only --resume while marker exists; all successful runs use real dsh",
+    "sid": "[isolated-test-id]",
+    "id": "[isolated-test-id]",
+    "fresh": "[isolated-test-id]",
+    "sameIdRetry": true,
+    "newIdStart": true,
+    "retries": 0
+  },
+  "configuration": {
+    "checked": 9,
+    "changed": []
+  }
+}

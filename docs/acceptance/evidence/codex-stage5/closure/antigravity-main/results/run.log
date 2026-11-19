@@ -1,0 +1,49 @@
+(node:32885) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+Running 1 test using 1 worker
+
+(node:32975) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+
+(node:32975) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+
+[1/1] tests/e2e/antigravity-acceptance.spec.ts:862:3 › Antigravity Packaged App Acceptance (Real agy + Controlled Error Fixtures) › PRD #2 #8 #10 + Running-Parent Fork: DAG/Badge/ParentProjection, Fork Current/Worktree/Running, SessionLoader
+  1) tests/e2e/antigravity-acceptance.spec.ts:862:3 › Antigravity Packaged App Acceptance (Real agy + Controlled Error Fixtures) › PRD #2 #8 #10 + Running-Parent Fork: DAG/Badge/ParentProjection, Fork Current/Worktree/Running, SessionLoader
+
+    Error: expect(locator).toHaveAttribute(expected) failed
+
+    Locator: locator('[data-session-card="f0c066ee-5d01-4923-b1bb-819e825432b4"] [data-testid="terminal-pane"]:visible').locator('.pane-fork:not(.pane-load-session):not(.pane-fork-sibling):not(.pane-remove)')
+    Expected: "false"
+    Error: strict mode violation: locator('[data-session-card="f0c066ee-5d01-4923-b1bb-819e825432b4"] [data-testid="terminal-pane"]:visible').locator('.pane-fork:not(.pane-load-session):not(.pane-fork-sibling):not(.pane-remove)') resolved to 2 elements:
+        1) <button title="会话历史" type="button" draggable="false" class="pane-fork pane-history" aria-label="查看“Remembering Codeword COBALT_719”的会话历史">…</button> aka getByRole('button', { name: '查看“Remembering Codeword' })
+        2) <button type="button" title="创建子分支" class="pane-fork" draggable="false" aria-disabled="false" aria-label="从“Remembering Codeword COBALT_719”创建子分支">…</button> aka getByRole('button', { name: '从“Remembering Codeword' })
+
+    Call log:
+      - Expect "toHaveAttribute" with timeout 15000ms
+      - waiting for locator('[data-session-card="f0c066ee-5d01-4923-b1bb-819e825432b4"] [data-testid="terminal-pane"]:visible').locator('.pane-fork:not(.pane-load-session):not(.pane-fork-sibling):not(.pane-remove)')
+
+
+      874 |
+      875 |       const parentPane = paneForSession(harness.page, parentId)
+    > 876 |       await expect(parentPane.locator('.pane-fork:not(.pane-load-session):not(.pane-fork-sibling):not(.pane-remove)')).toHaveAttribute('aria-disabled', 'false', { timeout: 15_000 })
+          |                                                                                                                        ^
+      877 |
+      878 |       // Fork Case A: Current Worktree (create child branch via pane header fork button)
+      879 |       await parentPane.locator('.pane-fork:not(.pane-load-session):not(.pane-fork-sibling):not(.pane-remove)').click()
+        at /Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c8/main/tests/e2e/antigravity-acceptance.spec.ts:876:120
+
+    Error Context: ../../../docs/acceptance/evidence/codex-stage5/closure/antigravity-main/playwright-artifacts/antigravity-acceptance-Ant-ce073-ktree-Running-SessionLoader/error-context.md
+
+    attachment #2: trace (application/zip) ─────────────────────────────────────────────────────────
+    ../../../docs/acceptance/evidence/codex-stage5/closure/antigravity-main/playwright-artifacts/antigravity-acceptance-Ant-ce073-ktree-Running-SessionLoader/trace.zip
+    Usage:
+
+        pnpm exec playwright show-trace ../../../docs/acceptance/evidence/codex-stage5/closure/antigravity-main/playwright-artifacts/antigravity-acceptance-Ant-ce073-ktree-Running-SessionLoader/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+  1 failed
+    tests/e2e/antigravity-acceptance.spec.ts:862:3 › Antigravity Packaged App Acceptance (Real agy + Controlled Error Fixtures) › PRD #2 #8 #10 + Running-Parent Fork: DAG/Badge/ParentProjection, Fork Current/Worktree/Running, SessionLoader

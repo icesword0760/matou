@@ -8,7 +8,7 @@ import {
   type ModelContextChoice,
   type ProviderCli, type ProviderActivationFailure, type ProviderConfigActivationResult, type ProviderConfigInput, type ProviderModelMetadata,
   type ProviderConfigSnapshot, type ProviderConfigView, type RpcMethod,
-  type SubscriptionAccountDetails, type SubscriptionProvider, type SubscriptionSettingsSnapshot
+  type SubscriptionAccountDetails, type SubscriptionModelsRefreshResult, type SubscriptionProvider, type SubscriptionSettingsSnapshot
 } from '@matou/contracts'
 
 import { APP_DISPLAY_NAME } from '../../../shared/brand'
@@ -18,7 +18,9 @@ import { SubscriptionProviderCard } from './SubscriptionProviderCard'
 import { subscriptionQuotaText, subscriptionQuotaTitle } from './subscription-settings'
 import { ProviderSetupDialog } from './ProviderSetupDialog'
 import { ClaudeTimeZoneSettings } from './ClaudeTimeZoneSettings'
+import { ClaudeRoleAssignments } from './ClaudeRoleAssignments'
 import { AgentModelSettings } from './AgentModelSettings'
+import { DispatchSettings } from './DispatchSettings'
 import { formatContextWindowBadge, providerRoleModelIds } from './context-window-ui'
 import { useLocale, useMessages } from '../i18n/LocaleProvider'
 
@@ -42,11 +44,15 @@ export function ModelSwitchSettings({ client, onClose }: {
   const [category, setCategory] = useState<SettingsCategory>('claude')
   const [snapshot, setSnapshot] = useState<ProviderConfigSnapshot>()
   const [agentSettings, setAgentSettings] = useState<AgentModelSettingsSnapshot>()
+  const [agentSettingsError, setAgentSettingsError] = useState('')
+  const agentSettingsRead = useRef(0)
   const [loading, setLoading] = useState(true)
   const [failure, setFailure] = useState('')
-  const [notice, setNotice] = useState<{ kind: 'success' | 'error' | 'info'; text: string; retry?: ProviderConfigView; recovery?: ProviderActivationFailure['recovery'] }>()
+  const [notice, setNotice] = useState<{ kind: 'success' | 'error' | 'info'; title?: string; text?: string; retry?: ProviderConfigView; recovery?: ProviderActivationFailure['recovery'] }>()
   const [editor, setEditor] = useState<{ existing?: ProviderConfigView; subscriptionProvider?: SubscriptionProvider; relogin?: boolean }>()
   const [switching, setSwitching] = useState('')
+  const [refreshingModels, setRefreshingModels] = useState('')
+  const modelsRefreshInFlight = useRef(false)
   const [transitionResult, setTransitionResult] = useState<ProviderConfigActivationResult>()
   const [showSessions, setShowSessions] = useState(false)
   const [accounts, setAccounts] = useState<Record<string, SubscriptionAccountDetails>>({})
@@ -59,6 +65,7 @@ export function ModelSwitchSettings({ client, onClose }: {
     initial: 'default', current: 'default', touched: false
   })
   const settingsCloser = useRef<() => void>(() => {})
+  const settingsLife = useRef<AbortController | undefined>(undefined)
   const requestClose = () => { settingsCloser.current(); onClose() }
   const operation = useRef(false)
   const revision = useRef(-1)
@@ -71,14 +78,19 @@ export function ModelSwitchSettings({ client, onClose }: {
   }
 
   const refreshAgentSettings = useCallback(async () => {
-    if (!client) return
+    const signal = settingsLife.current?.signal
+    if (!client || signal?.aborted) return
+    const read = ++agentSettingsRead.current
     try {
       const result = await client.request('agent-model-settings.get', {})
-      if (isAgentModelSettingsSnapshot(result)) setAgentSettings(result)
-    } catch { /* Provider list stays usable even if context metadata cannot be loaded. */ }
+      if (!isAgentModelSettingsSnapshot(result)) throw new Error('Invalid settings snapshot')
+      if(!signal?.aborted && read===agentSettingsRead.current){setAgentSettings(result);setAgentSettingsError('')}
+    } catch { if(!signal?.aborted && read===agentSettingsRead.current)setAgentSettingsError(messages().hierarchyShell.modelSettings.loadFailed) }
   }, [client])
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (syncAccountStatus = false) => {
+    const signal = settingsLife.current?.signal
+    if (signal?.aborted) return
     if (!client) {
       setLoading(false)
       setFailure(m.serviceConnecting)
@@ -86,30 +98,49 @@ export function ModelSwitchSettings({ client, onClose }: {
     }
     try {
       const next = await client.request('provider-config.snapshot', {}) as ProviderConfigSnapshot
+      if (signal?.aborted) return
       accept(next); setFailure('')
+      // Runtime notifications include current authentication status. Refresh
+      // that part of the existing details cache without another quota read.
+      if (syncAccountStatus && next.revision >= revision.current) setAccounts(current => {
+        const updated = { ...current }
+        for (const provider of next.providers['claude-code']) {
+          if (provider.subscription) {
+            const savedModels = provider.subscription.modelMetadata
+            updated[provider.id] = { ...current[provider.id], account: provider.subscription.account, models: savedModels.length ? savedModels : current[provider.id]?.models ?? [] }
+          }
+        }
+        return updated
+      })
     } catch (error) {
-      setFailure(message(error, m.loadFailed))
+      if (!signal?.aborted) setFailure(message(error, m.loadFailed))
     } finally {
-      setLoading(false)
+      if (!signal?.aborted) setLoading(false)
     }
   }, [client, m])
 
-  useEffect(() => { void refresh(); void refreshAgentSettings() }, [refresh, refreshAgentSettings])
   useEffect(() => {
-    if (!client) return
-    let live = true, closed = false
-    const close = () => { if (closed) return; closed = true; void client.request('provider-config.subscription.settings-close', {}).catch(() => {}) }
+    const life = new AbortController()
+    settingsLife.current = life
+    modelsRefreshInFlight.current = false
+    setRefreshingModels('')
+    const close = () => {
+      if (life.signal.aborted) return
+      life.abort()
+      void client?.request('provider-config.subscription.settings-close', {}).catch(() => {})
+    }
     settingsCloser.current = close
-    void client.request('provider-config.subscription.settings-read', {}).then(value => {
-      if (!live || closed) return
+    void client?.request('provider-config.subscription.settings-read', {}).then(value => {
+      if (life.signal.aborted) return
       const result = value as SubscriptionSettingsSnapshot
       if (!result.snapshot) return
       accept(result.snapshot); setAccounts(current => ({ ...result.accounts, ...current })); setRiskAccepted(current => current || result.antigravityRiskAccepted)
       void refreshAgentSettings()
     }).catch(() => { /* Quota reads never block the provider list or switching. */ })
-    return () => { live = false; close() }
+    return close
   }, [client, refreshAgentSettings])
-  useEffect(() => client?.subscribeProviderConfig?.(() => { void refresh(); void refreshAgentSettings() }), [client, refresh, refreshAgentSettings])
+  useEffect(() => { void refresh(); void refreshAgentSettings() }, [refresh, refreshAgentSettings])
+  useEffect(() => client?.subscribeProviderConfig?.(() => { void refresh(true); void refreshAgentSettings() }), [client, refresh, refreshAgentSettings])
   useEffect(() => {
     const onEscape = (event: KeyboardEvent) => {
       if (event.key !== 'Escape' || editor || operation.current) return
@@ -121,7 +152,7 @@ export function ModelSwitchSettings({ client, onClose }: {
   useEffect(() => {
     if (typeof BroadcastChannel === 'undefined') return
     const channel = new BroadcastChannel('matou-provider-config')
-    channel.onmessage = () => { void refresh(); void refreshAgentSettings() }
+    channel.onmessage = () => { void refresh(true); void refreshAgentSettings() }
     return () => channel.close()
   }, [refresh, refreshAgentSettings])
 
@@ -132,6 +163,7 @@ export function ModelSwitchSettings({ client, onClose }: {
     [rawProviders, activeId]
   )
   const official = providers.find(provider => provider.builtIn)
+  const providerBusy = Boolean(switching || refreshingModels)
 
   const initialDialogContextMode = (existing?: ProviderConfigView, subscriptionProvider?: SubscriptionProvider): ContextWindowMode => {
     if (existing && agentSettings?.preferences.contextWindows[existing.id]) {
@@ -142,6 +174,7 @@ export function ModelSwitchSettings({ client, onClose }: {
   }
 
   const openEditor = (next: { existing?: ProviderConfigView; subscriptionProvider?: SubscriptionProvider; relogin?: boolean }) => {
+    if (modelsRefreshInFlight.current) return
     const initialMode = initialDialogContextMode(next.existing, next.subscriptionProvider)
     dialogContextMode.current = { initial: initialMode, current: initialMode, touched: false }
     setEditor(next)
@@ -149,7 +182,7 @@ export function ModelSwitchSettings({ client, onClose }: {
 
   const signIn = (provider: ProviderConfigView) => {
     const current = providers.find(row => row.id === provider.id) ?? provider
-    if (!current.subscription) return
+    if (!current.subscription || editor || operation.current || modelsRefreshInFlight.current) return
     loginDetails.current = undefined
     openEditor({ existing: current, subscriptionProvider: current.subscription.provider, relogin: true })
   }
@@ -158,8 +191,36 @@ export function ModelSwitchSettings({ client, onClose }: {
     const channel = new BroadcastChannel('matou-provider-config')
     channel.postMessage({ changed: true }); channel.close()
   }
+  const refreshModels = async (providerId: string) => {
+    const signal = settingsLife.current?.signal
+    if (!client || !signal || signal.aborted || editor || operation.current || modelsRefreshInFlight.current) return
+    modelsRefreshInFlight.current = true
+    setRefreshingModels(providerId)
+    setNotice(undefined); setTransitionResult(undefined); setShowSessions(false)
+    try {
+      const result = await client.request('provider-config.subscription.models-refresh', { providerId }, { timeoutMs: 45_000 }) as SubscriptionModelsRefreshResult
+      if (signal.aborted) return
+      if (result.snapshot.revision >= revision.current) {
+        accept(result.snapshot)
+        setAccounts(current => ({ ...current, [providerId]: result.details }))
+      }
+      setNotice({ kind: 'success', title: m.modelsRefreshed(result.details.models.length) })
+      announceChange()
+      void refreshAgentSettings()
+    } catch (error) {
+      if (signal.aborted) return
+      const failure = providerActivationFailure(error)
+      setNotice({ kind: 'error', text: failure?.message[zh ? 'zh' : 'en'] ?? m.refreshModelsFailed })
+      if (failure?.status === 'needs-sign-in') void refresh(true)
+    } finally {
+      if (!signal.aborted) {
+        modelsRefreshInFlight.current = false
+        setRefreshingModels('')
+      }
+    }
+  }
   const activate = async (provider: ProviderConfigView, reapply = false) => {
-    if (!client || operation.current) return
+    if (!client || operation.current || modelsRefreshInFlight.current) return
     if (provider.id === activeId && !reapply) { setEditor(undefined); return }
     const revisionBeforeActivate = revision.current
     operation.current = true; setSwitching(provider.id); setNotice(undefined); setTransitionResult(undefined)
@@ -295,14 +356,14 @@ export function ModelSwitchSettings({ client, onClose }: {
         </>}
         {category === 'claude' && (loading ? <div className="model-settings__state" aria-busy="true">{m.loading}</div> : <>
           {notice && <section className={`provider-result is-${notice.kind}`} role={notice.kind === 'error' ? 'alert' : 'status'}>
-            <span className="provider-result__icon">{notice.kind === 'error' ? '!' : notice.kind === 'info' ? 'i' : '✓'}</span><div><strong>{notice.kind === 'error' ? t('需要检查', 'Needs attention') : notice.kind === 'info' ? t('切换结果待确认', 'Switch result pending') : transitionResult ? t('默认供应商已切换', 'Default provider switched') : t('配置已保存', 'Configuration saved')}</strong><p>{notice.text}</p>{notice.retry && <button type="button" className="provider-link" disabled={Boolean(switching)} onClick={() => { if (notice.recovery === 'sign-in') signIn(notice.retry!); else void activate(notice.retry!, true).catch(() => {}) }}>{notice.recovery === 'sign-in' ? t('重新登录', 'Sign in again') : t('重试', 'Retry')}</button>}
+            <span className="provider-result__icon">{notice.kind === 'error' ? '!' : notice.kind === 'info' ? 'i' : '✓'}</span><div><strong>{notice.title ?? (notice.kind === 'error' ? t('需要检查', 'Needs attention') : notice.kind === 'info' ? t('切换结果待确认', 'Switch result pending') : transitionResult ? t('默认供应商已切换', 'Default provider switched') : t('配置已保存', 'Configuration saved'))}</strong>{notice.text && <p>{notice.text}</p>}{notice.retry && <button type="button" className="provider-link" disabled={providerBusy} onClick={() => { if (notice.recovery === 'sign-in') signIn(notice.retry!); else void activate(notice.retry!, true).catch(() => {}) }}>{notice.recovery === 'sign-in' ? t('重新登录', 'Sign in again') : t('重试', 'Retry')}</button>}
             {Boolean(transitionResult?.sessionTransitions?.length) && <button className="provider-link" type="button" onClick={() => setShowSessions(!showSessions)}>{showSessions ? t('收起会话', 'Hide sessions') : t('查看会话', 'View sessions')} →</button>}
             {showSessions && <ul className="provider-session-results">{transitionResult?.sessionTransitions?.map(row => <li key={row.sessionId}><span>{t('会话', 'Session')} {row.sessionId}</span><b>{row.status === 'updated' ? t('已更新', 'Updated') : deferredReason(row.reason)}</b></li>)}</ul>}
             </div><button className="provider-icon-button" aria-label={t('关闭提示', 'Dismiss notice')} type="button" onClick={() => { setNotice(undefined); setShowSessions(false) }}>×</button>
           </section>}
           <div className="model-settings__toolbar">
             <h2>{m.providers} <span>{m.providerCount(providers.length)}</span></h2>
-            <button type="button" aria-label={m.newProvider} disabled={Boolean(switching)} onClick={() => { loginDetails.current = undefined; openEditor({}) }}>{m.newProviderAction}</button>
+            <button type="button" aria-label={m.newProvider} disabled={providerBusy} onClick={() => { loginDetails.current = undefined; openEditor({}) }}>{m.newProviderAction}</button>
           </div>
           {failure && !editor && <div className="model-settings__error" role="alert">{failure}<button type="button" onClick={() => void refresh()}>{t('重试', 'Retry')}</button></div>}
           <div className="model-settings__providers">
@@ -312,7 +373,9 @@ export function ModelSwitchSettings({ client, onClose }: {
               if (provider.kind === 'subscription' && provider.subscription) {
                 const cached = accounts[provider.id]
                 const details = { ...cached, account: { ...cached?.account, ...provider.subscription.account }, models: cached?.models ?? provider.subscription.modelMetadata }
-                return <SubscriptionProviderCard key={provider.id} provider={provider} details={details} quotaText={subscriptionQuotaText(provider.subscription.provider, cached, zh)} quotaTitle={subscriptionQuotaTitle(cached, zh)} windowBadge={windowBadge} current={current} switching={Boolean(switching)} subscriptionSupported={subscriptionSupported}
+                return <SubscriptionProviderCard key={provider.id} provider={provider} details={details} quotaText={subscriptionQuotaText(provider.subscription.provider, cached, zh)} quotaTitle={subscriptionQuotaTitle(cached, zh)} windowBadge={windowBadge} current={current} switching={providerBusy} activating={switching === provider.id} subscriptionSupported={subscriptionSupported}
+                  refreshingModels={refreshingModels === provider.id} refreshModelsDisabled={Boolean(editor)}
+                  onRefreshModels={() => { void refreshModels(provider.id) }}
                   onEdit={() => { loginDetails.current = undefined; openEditor({ existing: provider, subscriptionProvider: provider.subscription!.provider }) }}
                   onSignIn={() => signIn(provider)}
                   onActivate={() => { void activate(provider).catch(() => {}) }}
@@ -324,8 +387,8 @@ export function ModelSwitchSettings({ client, onClose }: {
                 <div className="model-provider__name"><strong>{provider.name}{current && <i>{m.inUse}</i>}{windowBadge && <i className="model-provider__window-badge">{windowBadge}</i>}</strong><span>{shortEndpoint(provider.endpoint)}</span></div>
                 <div className="model-provider__model"><strong>{selectedMetadata?.displayName ?? modelLabel(provider.model, m.cliDefaultModel)}</strong><span>{selectedMetadata?.displayName ? `${provider.model} · ` : ''}{m.defaultModel}{provider.hasApiKey ? m.keyConfigured : ''}</span></div>
                 <div className="model-provider__actions">
-                  <button type="button" disabled={Boolean(switching)} onClick={() => openEditor({ existing: provider })}>{m.edit}</button>
-                  <button className="primary" type="button" disabled={current || Boolean(switching)}
+                  <button type="button" disabled={providerBusy} onClick={() => openEditor({ existing: provider })}>{m.edit}</button>
+                  <button className="primary" type="button" disabled={current || providerBusy}
                     aria-label={current ? m.currentConfigurationOf(provider.name) : m.switchTo(provider.name)}
                     onClick={() => { void activate(provider).catch(() => {}) }}>{switching === provider.id ? t('切换中…', 'Switching…') : current ? t('默认使用', 'Default') : m.switchAction}</button>
                 </div>
@@ -333,7 +396,9 @@ export function ModelSwitchSettings({ client, onClose }: {
             })}
           </div>
           <p className="model-settings__impact"><span>ⓘ</span><span><b>{m.impactTitle(APP_DISPLAY_NAME)}</b> {m.impactBody}</span></p>
+          <ClaudeRoleAssignments client={client} providers={providers} activeProviderId={activeId} accounts={accounts} snapshot={agentSettings} signingInProviderId={editor?.relogin ? editor.existing?.id : undefined} onSignIn={signIn} loadError={failure || agentSettingsError} onRetry={()=>{void refresh(true);void refreshAgentSettings()}} onSaved={value=>{agentSettingsRead.current++;setAgentSettings(value);setAgentSettingsError('')}} />
           <AgentModelSettings client={client} providerRevision={snapshot?.revision} activeProviderId={activeId} />
+          <DispatchSettings client={client} />
         </>)}
       </main>
     </div>

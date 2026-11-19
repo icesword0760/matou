@@ -2,7 +2,8 @@
 import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { ProviderActivationFailure, ProviderConfigSnapshot, ProviderConfigView, SubscriptionAccountDetails, SubscriptionLoginView } from '@matou/contracts'
+import { DISPATCH_DEFAULTS } from '@matou/contracts'
+import type { ProviderActivationFailure, ProviderConfigSnapshot, ProviderConfigView, SubscriptionAccountDetails, SubscriptionLoginView, SubscriptionModelsRefreshResult } from '@matou/contracts'
 import { ModelSwitchSettings, type ProviderConfigClient } from './ModelSwitchSettings'
 import { LocaleProvider } from '../i18n/LocaleProvider'
 import { setCurrentLocale } from '../i18n/current'
@@ -23,6 +24,8 @@ function fakeClient(rows: ProviderConfigView[] = [], accepted = false, activeId 
   let listener: (() => void) | undefined
   const request = vi.fn<ProviderConfigClient['request']>(async (method, payload) => {
     if (method === 'provider-config.snapshot') return state
+    if (method === 'agent-model-settings.get') return { preferences: { contextWindows: {}, compaction: { mode: 'follow', effort: 'follow' } }, providers: [] }
+    if (method === 'dispatch-config.snapshot') return { exists: false, path: '/fixture/dispatch-config.json', defaults: DISPATCH_DEFAULTS }
     if (method === 'provider-config.subscription.settings-read') return { snapshot: subscriptionSupported === undefined ? state : { ...state, subscriptionSupported }, accounts: readAccounts ?? Object.fromEntries(rows.map(row => [row.id, details])), antigravityRiskAccepted: accepted }
     if (method === 'provider-config.subscription.login-start' || method === 'provider-config.subscription.login-status') return { attemptId: 'attempt', provider: 'codex', status: 'ready', details } satisfies SubscriptionLoginView
     if (method === 'provider-config.subscription.login-cancel') return { attemptId: 'attempt', provider: 'codex', status: 'cancelled', reason: '登录已取消（runtime）' }
@@ -38,18 +41,142 @@ function fakeClient(rows: ProviderConfigView[] = [], accepted = false, activeId 
   })
   return { request, subscribeProviderConfig: (callback: () => void) => { listener = callback; return () => { listener = undefined } }, changed: () => listener?.(), setRows: (next: ProviderConfigView[]) => { state = { ...state, revision: state.revision + 1, providers: { ...state.providers, 'claude-code': [state.providers['claude-code'][0]!, ...next] } } } }
 }
+const providerName = { selector: 'article .model-provider__name strong' }
+const setup = () => within(screen.getByRole('dialog'))
 async function openAccount(user: ReturnType<typeof userEvent.setup>, kind = 'ChatGPT', locale: 'zh-CN' | 'en' = 'zh-CN') {
-  await screen.findByText('Anthropic 官方')
+  await screen.findByText('Anthropic 官方', providerName)
   await user.click(screen.getByRole('button', { name: locale === 'zh-CN' ? '新增供应商' : 'New provider' }))
   await user.click(screen.getByRole('button', { name: new RegExp(`${kind} ${locale === 'zh-CN' ? '账号' : 'account'}`) }))
   await user.click(screen.getByRole('button', { name: locale === 'zh-CN' ? '下一步' : 'Next' }))
 }
 async function openProviderPicker(user: ReturnType<typeof userEvent.setup>, locale: 'zh-CN' | 'en' = 'zh-CN') {
-  await screen.findByText('Anthropic 官方')
+  await screen.findByText('Anthropic 官方', providerName)
   await user.click(screen.getByRole('button', { name: locale === 'zh-CN' ? '新增供应商' : 'New provider' }))
+}
+function pendingRefresh() {
+  let resolve!: (result: SubscriptionModelsRefreshResult) => void
+  const promise = new Promise<SubscriptionModelsRefreshResult>(done => { resolve = done })
+  return { promise, resolve }
 }
 
 describe('subscription settings', () => {
+  it('refreshes the saved card with one request and no login', async () => {
+    const row = subscription(), second = { ...row, id: 'second', name: 'Second account' }, client = fakeClient([row, second])
+    const request = client.request.getMockImplementation()!
+    const pending = pendingRefresh()
+    client.request.mockImplementation((method, payload) =>
+      method === 'provider-config.subscription.models-refresh' ? pending.promise : request(method, payload))
+    const user = userEvent.setup()
+    render(<ModelSwitchSettings client={client} onClose={vi.fn()} />)
+    const card = within((await screen.findByText(row.name, providerName)).closest('article')!)
+    const button = card.getByRole('button', { name: '刷新模型' })
+    expect(button.parentElement?.nextElementSibling).toBe(card.getByRole('button', { name: '编辑' }))
+    expect(client.request.mock.calls.filter(([method]) => method === 'provider-config.subscription.models-refresh')).toHaveLength(0)
+    await user.click(button)
+    expect(card.getByRole('button', { name: '刷新中…' })).toHaveProperty('disabled', true)
+    const other = screen.getByRole('button', { name: '刷新模型' })
+    expect(other).toHaveProperty('disabled', true)
+    await user.click(button)
+    await user.click(other)
+    expect(client.request.mock.calls.filter(([method]) => method === 'provider-config.subscription.models-refresh')).toHaveLength(1)
+    expect(client.request).toHaveBeenCalledWith('provider-config.subscription.models-refresh', { providerId: row.id }, expect.anything())
+
+    const next = { ...details, models: [{ id: 'gpt-6-astra', displayName: 'Updated primary model' }, { id: 'new-model' }] }
+    const saved = { ...row, subscription: { ...row.subscription!, modelMetadata: next.models } }
+    client.setRows([saved, second])
+    const snapshot = await request('provider-config.snapshot', {}) as ProviderConfigSnapshot
+    await act(async () => { pending.resolve({ snapshot, details: next }); await pending.promise })
+    expect(await screen.findByText('模型列表已更新（2 个模型）')).toBeTruthy()
+    const name = card.getByText('Updated primary model')
+    expect(name.parentElement?.title).toContain('new-model')
+    expect(card.getByRole('button', { name: '刷新模型' })).toHaveProperty('disabled', false)
+    expect(client.request.mock.calls.filter(([method]) => method === 'provider-config.subscription.settings-read')).toHaveLength(1)
+    expect(client.request.mock.calls.some(([method]) => method.startsWith('provider-config.subscription.login-'))).toBe(false)
+  })
+
+  it('keeps the old card and selection on failure and disables refresh during an edit', async () => {
+    const row = subscription(), client = fakeClient([row]), user = userEvent.setup()
+    const request = client.request.getMockImplementation()!
+    client.request.mockImplementation(async (method, payload) => {
+      if (method === 'provider-config.subscription.models-refresh') throw new Error('Fixture read failure')
+      return request(method, payload)
+    })
+    render(<ModelSwitchSettings client={client} onClose={vi.fn()} />)
+    const button = await screen.findByRole('button', { name: '刷新模型' })
+    await user.click(button)
+    expect(await screen.findByText('模型列表未能读取，请重试。')).toBeTruthy()
+    expect(screen.getByText('GPT-6 Astra')).toBeTruthy()
+    await user.click(within(button.closest('article')!).getByRole('button', { name: '编辑' }))
+    const dialog = await screen.findByRole('dialog')
+    expect(within(dialog).getByRole('combobox', { name: 'Opus 模型' })).toHaveProperty('value', row.modelMapping!.opus)
+    expect(button).toHaveProperty('disabled', true)
+    expect(client.request.mock.calls.some(([method]) => method === 'provider-config.upsert')).toBe(false)
+  })
+
+  it('reports the sign-in requirement from a refresh and disables the button once the account has expired', async () => {
+    const row = subscription(), client = fakeClient([row]), user = userEvent.setup()
+    const request = client.request.getMockImplementation()!
+    client.request.mockImplementation(async (method, payload) => {
+      if (method === 'provider-config.subscription.models-refresh') {
+        client.setRows([subscription('needs-sign-in')])
+        const providerFailure: ProviderActivationFailure = {
+          status: 'needs-sign-in', message: { zh: '需要重新登录', en: 'Sign in again' }, recovery: 'sign-in'
+        }
+        throw Object.assign(new Error(providerFailure.message.zh), { providerFailure })
+      }
+      return request(method, payload)
+    })
+    render(<ModelSwitchSettings client={client} onClose={vi.fn()} />)
+    const button = await screen.findByRole('button', { name: '刷新模型' })
+    await user.click(button)
+    expect((await screen.findByText('需要检查')).closest('[role="alert"]')?.textContent).toContain('需要重新登录')
+    expect(await screen.findByRole('button', { name: `重新登录 ${row.name}` })).toBeTruthy()
+    expect(button).toHaveProperty('disabled', true)
+    expect(button.getAttribute('aria-description')).toBe('需要重新登录后才能刷新模型')
+    expect(screen.getByText('GPT-6 Astra')).toBeTruthy()
+  })
+
+  it('ignores a completed refresh when settings was closed during the request', async () => {
+    const row = subscription(), client = fakeClient([row]), user = userEvent.setup(), onClose = vi.fn()
+    const request = client.request.getMockImplementation()!
+    const pending = pendingRefresh()
+    client.request.mockImplementation((method, payload) =>
+      method === 'provider-config.subscription.models-refresh' ? pending.promise : request(method, payload))
+    render(<ModelSwitchSettings client={client} onClose={onClose} />)
+    await user.click(await screen.findByRole('button', { name: '刷新模型' }))
+    await user.click(screen.getByRole('button', { name: '关闭设置' }))
+    expect(onClose).toHaveBeenCalledOnce()
+    const snapshot = await request('provider-config.snapshot', {}) as ProviderConfigSnapshot
+    const reads = client.request.mock.calls.filter(([method]) => method === 'agent-model-settings.get').length
+    await act(async () => { pending.resolve({ snapshot, details: { ...details, models: [{ id: 'new' }] } }); await pending.promise })
+    expect(client.request.mock.calls.filter(([method]) => method === 'agent-model-settings.get')).toHaveLength(reads)
+    expect(screen.queryByText('模型列表已更新（1 个模型）')).toBeNull()
+    expect(screen.getByText('GPT-6 Astra')).toBeTruthy()
+  })
+
+  it('shows switching only on the target card while other providers are disabled', async () => {
+    const gateway: ProviderConfigView = { id: 'gateway', cli: 'claude-code', name: 'DeepSeek fixture', endpoint: 'https://example.invalid', model: 'deepseek-flash', hasApiKey: true }
+    const client = fakeClient([gateway, subscription(), { ...subscription(), id: 'second', name: 'Second account' }])
+    const base = client.request.getMockImplementation()!
+    let finish!: () => void
+    const gate = new Promise<void>(resolve => { finish = resolve })
+    client.request.mockImplementation(async (method, payload) => {
+      if (method === 'provider-config.activate') await gate
+      return base(method, payload)
+    })
+    render(<ModelSwitchSettings client={client} onClose={vi.fn()} />)
+    await userEvent.setup().click(await screen.findByRole('button', { name: '切换到 DeepSeek fixture' }))
+    expect(screen.getAllByText('切换中…')).toHaveLength(1)
+    for (const name of ['ChatGPT · a@b.com', 'Second account']) {
+      const button = screen.getByRole('button', { name: `切换到 ${name}` }) as HTMLButtonElement
+      expect(button.disabled).toBe(true)
+      expect(button.textContent).toBe('切换')
+    }
+    for (const button of screen.getAllByRole('button', { name: '刷新模型' })) expect(button).toHaveProperty('disabled', true)
+    await act(async () => { finish(); await gate })
+    await screen.findByText('默认供应商已切换')
+  })
+
   it('adds subscription groups only to Claude Code, then signs in and saves with real model choices', async () => {
     const client = fakeClient(), user = userEvent.setup()
     render(<ModelSwitchSettings client={client} onClose={vi.fn()} />)
@@ -60,7 +187,7 @@ describe('subscription settings', () => {
     expect(within(dialog).queryByLabelText('API 地址')).toBeNull()
     expect(within(dialog).getByLabelText('供应商名称')).toHaveProperty('value', 'ChatGPT')
     await waitFor(() => expect(document.activeElement).toBe(within(dialog).getByLabelText('供应商名称')))
-    expect(screen.getAllByRole('combobox', { name: /模型|model/ }).map(select => (select as HTMLSelectElement).value)).toEqual(['gpt-6-astra', 'gpt-6.1-sol', 'gpt-6-luna'])
+    expect(setup().getAllByRole('combobox', { name: /模型|model/ }).map(select => (select as HTMLSelectElement).value)).toEqual(['gpt-6-astra', 'gpt-6.1-sol', 'gpt-6-luna'])
     expect(screen.queryByRole('option', { name: 'gpt-image-2' })).toBeNull()
     expect(screen.queryByRole('option', { name: 'gpt-video-1' })).toBeNull()
     expect(screen.queryByRole('option', { name: 'codex-auto-review' })).toBeNull()
@@ -125,7 +252,7 @@ describe('subscription settings', () => {
     expect(officialLink).toHaveProperty('disabled', false)
     await user.click(officialLink)
     expect(client.request).toHaveBeenCalledWith('provider-config.activate', { cli: 'claude-code', providerId: 'official' })
-    await waitFor(() => expect(screen.getByText('Anthropic 官方').closest('article')?.classList.contains('is-current')).toBe(true))
+    await waitFor(() => expect(screen.getByText('Anthropic 官方', providerName).closest('article')?.classList.contains('is-current')).toBe(true))
     // The activation result is a storage-only snapshot without the capability;
     // the remembered false must survive it.
     await user.click(screen.getByRole('button', { name: zh ? '新增供应商' : 'New provider' }))
@@ -145,7 +272,7 @@ describe('subscription settings', () => {
     await user.click(switchButton)
     expect(client.request.mock.calls.some(([method]) => method === 'provider-config.activate')).toBe(false)
     await user.click(edit)
-    expect(screen.getAllByRole('combobox', { name: /模型|model/ })).toHaveLength(3)
+    expect(setup().getAllByRole('combobox', { name: /模型|model/ })).toHaveLength(3)
     expect(screen.queryByLabelText('API Key')).toBeNull()
   })
   it('keeps subscription options enabled and hides the requirement when the runtime supports them', async () => {
@@ -175,14 +302,14 @@ describe('subscription settings', () => {
     await openAccount(user, 'ChatGPT', locale)
     await user.click(screen.getByRole('button', { name: copy.signIn }))
     expect(await screen.findByText(copy.empty)).toBeTruthy()
-    expect(screen.queryAllByRole('combobox')).toHaveLength(0)
+    expect(setup().queryAllByRole('combobox')).toHaveLength(0)
     expect(screen.getByRole('button', { name: copy.retry })).toHaveProperty('disabled', false)
-    expect(screen.getByRole('button', { name: copy.save })).toHaveProperty('disabled', true)
+    expect(setup().getByRole('button', { name: copy.save })).toHaveProperty('disabled', true)
     expect(screen.getByRole('button', { name: copy.saveSwitch })).toHaveProperty('disabled', true)
     await user.click(screen.getByRole('button', { name: copy.retry }))
-    await waitFor(() => expect(screen.getAllByRole('combobox', { name: /模型|model/ })).toHaveLength(3))
-    expect(screen.getAllByRole('combobox', { name: /模型|model/ }).map(select => (select as HTMLSelectElement).value)).toEqual(['gpt-6-astra', 'gpt-6.1-sol', 'gpt-6-luna'])
-    expect(screen.getByRole('button', { name: copy.save })).toHaveProperty('disabled', false)
+    await waitFor(() => expect(setup().getAllByRole('combobox', { name: /模型|model/ })).toHaveLength(3))
+    expect(setup().getAllByRole('combobox', { name: /模型|model/ }).map(select => (select as HTMLSelectElement).value)).toEqual(['gpt-6-astra', 'gpt-6.1-sol', 'gpt-6-luna'])
+    expect(setup().getByRole('button', { name: copy.save })).toHaveProperty('disabled', false)
     expect(screen.getByRole('button', { name: copy.saveSwitch })).toHaveProperty('disabled', false)
     expect(client.request.mock.calls.filter(([method]) => method === 'provider-config.subscription.models-read')).toEqual([['provider-config.subscription.models-read', { attemptId: 'attempt' }]])
     expect(client.request.mock.calls.filter(([method]) => method === 'provider-config.subscription.login-start')).toHaveLength(1)
@@ -214,16 +341,16 @@ describe('subscription settings', () => {
     await waitFor(() => expect(reads).toBe(1))
     expect(screen.getByText(copy.empty)).toBeTruthy()
     expect(screen.getByRole('button', { name: copy.retry })).toHaveProperty('disabled', false)
-    expect(screen.queryAllByRole('combobox')).toHaveLength(0)
+    expect(setup().queryAllByRole('combobox')).toHaveLength(0)
     await user.click(screen.getByRole('button', { name: copy.retry }))
     expect(await screen.findByText(copy.failure)).toBeTruthy()
     expect(screen.getByText(copy.empty)).toBeTruthy()
-    expect(screen.queryAllByRole('combobox')).toHaveLength(0)
+    expect(setup().queryAllByRole('combobox')).toHaveLength(0)
     expect(screen.getByRole('button', { name: copy.retry })).toHaveProperty('disabled', false)
-    expect(screen.getByRole('button', { name: copy.save })).toHaveProperty('disabled', true)
+    expect(setup().getByRole('button', { name: copy.save })).toHaveProperty('disabled', true)
     expect(screen.getByRole('button', { name: copy.saveSwitch })).toHaveProperty('disabled', true)
     await user.click(screen.getByRole('button', { name: copy.retry }))
-    await waitFor(() => expect(screen.getAllByRole('combobox', { name: /模型|model/ })).toHaveLength(3))
+    await waitFor(() => expect(setup().getAllByRole('combobox', { name: /模型|model/ })).toHaveLength(3))
     expect(reads).toBe(3)
     expect(client.request.mock.calls.filter(([method]) => method === 'provider-config.subscription.models-read')).toEqual([
       ['provider-config.subscription.models-read', { attemptId: 'attempt' }],
@@ -242,12 +369,12 @@ describe('subscription settings', () => {
     await screen.findByText('a@b.com · Plus')
     await user.click(within(screen.getByText('a@b.com · Plus').closest('article')!).getByRole('button', { name: '编辑' }))
     expect(screen.getByText('没有读到可用的模型')).toBeTruthy()
-    expect(screen.queryAllByRole('combobox')).toHaveLength(0)
-    expect(screen.getByRole('button', { name: '保存' })).toHaveProperty('disabled', true)
+    expect(setup().queryAllByRole('combobox')).toHaveLength(0)
+    expect(setup().getByRole('button', { name: '保存' })).toHaveProperty('disabled', true)
     expect(screen.getByRole('button', { name: '保存并切换' })).toHaveProperty('disabled', true)
     await user.click(screen.getByRole('button', { name: '重试' }))
-    await waitFor(() => expect(screen.getAllByRole('combobox', { name: /模型|model/ })).toHaveLength(3))
-    expect(screen.getAllByRole('combobox', { name: /模型|model/ }).map(select => (select as HTMLSelectElement).value)).toEqual(['gpt-6-astra', 'gpt-6.1-sol', 'gpt-6-luna'])
+    await waitFor(() => expect(setup().getAllByRole('combobox', { name: /模型|model/ })).toHaveLength(3))
+    expect(setup().getAllByRole('combobox', { name: /模型|model/ }).map(select => (select as HTMLSelectElement).value)).toEqual(['gpt-6-astra', 'gpt-6.1-sol', 'gpt-6-luna'])
     expect(screen.getByLabelText('供应商名称')).toHaveProperty('value', 'ChatGPT · a@b.com')
     expect(client.request.mock.calls.filter(([method]) => method === 'provider-config.subscription.models-read')).toEqual([['provider-config.subscription.models-read', { providerId: 'chatgpt' }]])
     expect(client.request.mock.calls.some(([method]) => method === 'provider-config.subscription.login-start')).toBe(false)
@@ -339,11 +466,11 @@ describe('subscription settings', () => {
     client.request.mockImplementation((method, payload) => method === 'provider-config.subscription.login-start' ? Promise.resolve({ attemptId: 'attempt', provider: 'codex', status: 'waiting' }) : base(method, payload))
     render(<ModelSwitchSettings client={client} onClose={vi.fn()} />)
     await openAccount(user); await user.click(screen.getByRole('button', { name: '在浏览器中登录' }))
-    await user.click(screen.getByRole('button', { name: '取消' }))
+    await user.click(setup().getByRole('button', { name: '取消' }))
     expect(await screen.findByText('登录已取消（runtime）')).toBeTruthy()
     await user.click(screen.getByRole('button', { name: '重试' }))
     window.dispatchEvent(new Event('blur')); window.dispatchEvent(new Event('focus'))
-    await waitFor(() => expect(screen.getAllByRole('combobox', { name: /模型|model/ })).toHaveLength(3), { timeout: 2000 })
+    await waitFor(() => expect(setup().getAllByRole('combobox', { name: /模型|model/ })).toHaveLength(3), { timeout: 2000 })
   })
   it('reopens the same login attempt, blocks repeated clicks, and keeps one login', async () => {
     const client = fakeClient(), user = userEvent.setup(), base = client.request.getMockImplementation()!
@@ -381,7 +508,7 @@ describe('subscription settings', () => {
     render(<ModelSwitchSettings client={client} onClose={vi.fn()} />)
     await openAccount(user); await user.click(screen.getByRole('button', { name: '在浏览器中登录' }))
     await user.click(screen.getByRole('button', { name: '重新打开浏览器' }))
-    await waitFor(() => expect(screen.getAllByRole('combobox', { name: /模型|model/ })).toHaveLength(3), { timeout: 2000 })
+    await waitFor(() => expect(setup().getAllByRole('combobox', { name: /模型|model/ })).toHaveLength(3), { timeout: 2000 })
     await act(async () => reject(new Error('迟到的重开错误')))
     expect(screen.queryByRole('alert')).toBeNull()
     expect(screen.getByLabelText('供应商名称')).toHaveProperty('value', 'ChatGPT')
@@ -399,7 +526,7 @@ describe('subscription settings', () => {
     render(<ModelSwitchSettings client={client} onClose={vi.fn()} />)
     await openAccount(user); await user.click(screen.getByRole('button', { name: '在浏览器中登录' }))
     await user.click(screen.getByRole('button', { name: '重新打开浏览器' }))
-    await user.click(screen.getByRole('button', { name: '取消' }))
+    await user.click(setup().getByRole('button', { name: '取消' }))
     await user.click(screen.getByRole('button', { name: '重试' }))
     const reopen = screen.getByRole('button', { name: '重新打开浏览器' })
     expect(reopen).toHaveProperty('disabled', false)
@@ -440,7 +567,7 @@ describe('subscription settings', () => {
     // The reopened attempt returns to waiting; the original status chain is
     // what carries it to ready, so no second login is started or polled.
     expect(await screen.findByLabelText(copy.name, undefined, { timeout: 5000 })).toHaveProperty('value', 'ChatGPT')
-    expect(screen.getAllByRole('combobox', { name: /模型|model/ })).toHaveLength(3)
+    expect(setup().getAllByRole('combobox', { name: /模型|model/ })).toHaveLength(3)
     expect(client.request.mock.calls.filter(([method]) => method === 'provider-config.subscription.login-start')).toHaveLength(1)
     expect(client.request.mock.calls.some(([method]) => method === 'provider-config.subscription.login-cancel')).toBe(false)
     expect(screen.queryByText(copy.reason)).toBeNull()
@@ -516,13 +643,13 @@ describe('subscription settings', () => {
     expect(screen.getByText('已有该类账号，重新登录会替换它，模型设置会保留。')).toBeTruthy()
     await user.click(screen.getByRole('button', { name: '在浏览器中登录' }))
     expect(screen.getByLabelText('供应商名称')).toHaveProperty('value', '我的订阅')
-    expect(screen.getAllByRole('combobox', { name: /模型|model/ }).map(select => (select as HTMLSelectElement).value)).toEqual(['gpt-6-luna', 'gpt-6-astra', 'gpt-6.1-sol'])
-    await user.click(screen.getByRole('button', { name: '保存' }))
+    expect(setup().getAllByRole('combobox', { name: /模型|model/ }).map(select => (select as HTMLSelectElement).value)).toEqual(['gpt-6-luna', 'gpt-6-astra', 'gpt-6.1-sol'])
+    await user.click(setup().getByRole('button', { name: '保存' }))
     expect(client.request).toHaveBeenCalledWith('provider-config.upsert', { provider: expect.objectContaining({ id: 'chatgpt' }) })
-    await user.click(within(screen.getByText('我的订阅').closest('article')!).getByRole('button', { name: '编辑' }))
+    await user.click(within(screen.getByText('我的订阅', providerName).closest('article')!).getByRole('button', { name: '编辑' }))
     expect(screen.queryByLabelText('API 地址')).toBeNull()
     expect(screen.queryByLabelText('API Key')).toBeNull()
-    expect(screen.getAllByRole('combobox', { name: /模型|model/ })).toHaveLength(3)
+    expect(setup().getAllByRole('combobox', { name: /模型|model/ })).toHaveLength(3)
     expect(screen.queryByText('没有读到可用的模型')).toBeNull()
     expect(client.request.mock.calls.some(([method]) => method === 'provider-config.subscription.models-read')).toBe(false)
   })
@@ -539,13 +666,13 @@ describe('subscription settings', () => {
     render(<LocaleProvider initialLocale={locale}><ModelSwitchSettings client={client} onClose={vi.fn()} /></LocaleProvider>)
     const action = await screen.findByRole('button', { name: locale === 'zh-CN' ? '切回 Anthropic 官方' : 'Switch back to Anthropic official' })
     expect(action.classList.contains('provider-link')).toBe(true)
-    const inactiveCard = within(screen.getByText('Antigravity').closest('article')!)
+    const inactiveCard = within(screen.getByText('Antigravity', providerName).closest('article')!)
     expect(inactiveCard.queryByRole('button', { name: /切回 Anthropic 官方|Switch back to Anthropic official/ })).toBeNull()
     expect(inactiveCard.getByText(locale === 'zh-CN' ? '账号不可用' : 'Account unavailable')).toBeTruthy()
     expect(inactiveCard.getByText('服务方拒绝此账号')).toBeTruthy()
     await user.click(action)
     expect(client.request).toHaveBeenCalledWith('provider-config.activate', { cli: 'claude-code', providerId: 'official' })
-    await waitFor(() => expect(screen.getByText('Anthropic 官方').closest('article')?.classList.contains('is-current')).toBe(true))
+    await waitFor(() => expect(screen.getByText('Anthropic 官方', providerName).closest('article')?.classList.contains('is-current')).toBe(true))
     expect(await screen.findByRole('status')).toBeTruthy()
     expect(screen.queryByRole('button', { name: /切回 Anthropic 官方|Switch back to Anthropic official/ })).toBeNull()
   })
@@ -572,7 +699,7 @@ describe('subscription settings', () => {
     render(<ModelSwitchSettings client={client} onClose={vi.fn()} />)
     await openAccount(user); await user.click(screen.getByRole('button', { name: '在浏览器中登录' }))
     await user.type(screen.getByLabelText('供应商名称'), ' updated')
-    await user.click(screen.getByRole('button', { name: '保存' }))
+    await user.click(setup().getByRole('button', { name: '保存' }))
     expect(await screen.findByText('账号采用失败，请重试')).toBeTruthy()
     expect(screen.getByLabelText('供应商名称')).toHaveProperty('value', 'ChatGPT updated')
     await user.keyboard('{Escape}')

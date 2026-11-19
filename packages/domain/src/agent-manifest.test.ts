@@ -16,11 +16,12 @@ import {
 
 describe('agent-manifest', () => {
   it('registers all launchable agent profiles with consistent lookup helpers', () => {
-    expect(LAUNCHABLE_AGENT_PROFILES).toEqual(['claude-code', 'codex', 'antigravity'])
+    expect(LAUNCHABLE_AGENT_PROFILES).toEqual(['claude-code', 'codex', 'antigravity', 'dsh'])
     expect(listAgentManifests().map((manifest) => manifest.id)).toEqual([
       'claude-code',
       'codex',
-      'antigravity'
+      'antigravity',
+      'dsh'
     ])
 
     for (const id of LAUNCHABLE_AGENT_PROFILES) {
@@ -38,7 +39,7 @@ describe('agent-manifest', () => {
     expect(getAgentManifest('unknown')).toBeUndefined()
   })
 
-  it('preserves exact baseline capabilities for claude-code and codex', () => {
+  it('preserves Claude baseline and exposes only stage-three Codex capabilities', () => {
     const claude = AGENT_MANIFESTS['claude-code']
     expect(claude.displayName).toBe('Claude Code')
     expect(claude.shortName).toBe('Claude')
@@ -67,26 +68,28 @@ describe('agent-manifest', () => {
     expect(codex.displayName).toBe('Codex')
     expect(codex.shortName).toBe('Codex')
     expect(codex.capabilities).toMatchObject({
-      fork: false,
-      sessionLoader: false,
-      autoTitle: false,
+      fork: true,
+      sessionLoader: true,
+      autoTitle: true,
       providerConfig: true,
       accountSwitching: false,
       agentTeam: false,
       claudeTimeZone: false,
-      autoRestore: false,
+      autoRestore: true,
       permissionSwitchMode: 'respawn-only',
       permissionModes: ['default', 'acceptEdits', 'plan', 'bypassPermissions']
     })
-    expect(codex.hud.showAccountControl).toBe(true)
+    expect(codex.hud.showAccountControl).toBe(false)
+    expect(codex.hud).toMatchObject({ hideEmptyQuotaPlaceholder: true, supportsTodos: false,
+      supportsAgentsCount: false, supportsMcpSummary: false, supportsHooksCount: false, supportsQuotaWindows: false })
     expect(codex.instructionFiles).toEqual({
-      candidates: ['CLAUDE.md'],
-      buttonLabel: 'ClaudeMd'
+      candidates: ['AGENTS.md'],
+      buttonLabel: 'AGENTS.md'
     })
   })
 
-  it('lists only auto-restore providers cleanly without codex', () => {
-    expect(listAutoRestoreAgentIds()).toEqual(['claude-code', 'antigravity'])
+  it('includes Codex in the auto-restore provider list', () => {
+    expect(listAutoRestoreAgentIds()).toEqual(['claude-code', 'codex', 'antigravity', 'dsh'])
   })
 
   it('declares antigravity manifest according to finalized product decisions', () => {

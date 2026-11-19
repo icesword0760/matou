@@ -29,6 +29,8 @@ export interface MtIo {
 export interface MtEnvironment {
   MATOU_CONTROL_ENDPOINT?: string
   MATOU_CONTROL_TOKEN?: string
+  /** Official DSH shell-env explicit forwarding after its ambient credential scrub. */
+  DSH_MATOU_CONTROL_TOKEN?: string
 }
 
 export type MtRequest = (method: HostControlScope, params: unknown) => Promise<unknown>
@@ -200,7 +202,7 @@ function normalizeDependencies(
 
 function requestFromEnvironment(environment: MtEnvironment): MtRequest {
   const endpoint = environment.MATOU_CONTROL_ENDPOINT
-  const token = environment.MATOU_CONTROL_TOKEN
+  const token = environment.MATOU_CONTROL_TOKEN || environment.DSH_MATOU_CONTROL_TOKEN
   if (!endpoint || !token) {
     throw new HostControlClientError(
       'CAPABILITY_DENIED',
@@ -230,7 +232,11 @@ async function parseCreateCommand(
         ? '--task'
         : '--canvas'
   allowedValues[requiredTargetFlag] = 'target'
-  if (entity === 'session') allowedValues['--profile'] = 'profile'
+  if (entity === 'session') {
+    allowedValues['--profile'] = 'profile'
+    allowedValues['--cwd'] = 'cwd'
+    allowedValues['--permission-mode'] = 'permissionMode'
+  }
   const options = parseOptions(argv.slice(1), allowedValues, ['--enter', '--json'])
   const targetText = requiredOption(options, 'target', requiredTargetFlag)
   const submissionKey = options.values.submissionKey ?? randomUUID()
@@ -266,10 +272,18 @@ async function parseCreateCommand(
   if (!isSessionRunProfile(profile)) {
     throw new MtUsageError(`--profile 需要 ${SESSION_RUN_PROFILES.join('、')}`)
   }
+  const permissionMode = options.values.permissionMode
+  if (permissionMode !== undefined && !['default', 'acceptEdits', 'plan', 'bypassPermissions'].includes(permissionMode)) {
+    throw new MtUsageError('--permission-mode 需要 default、acceptEdits、plan 或 bypassPermissions')
+  }
   return {
     method: 'structure.create.session',
     params: {
-      canvas: await parseActionTarget(targetText, request, 'canvas'), profile, ...common
+      canvas: await parseActionTarget(targetText, request, 'canvas'),
+      profile,
+      ...(options.values.cwd === undefined ? {} : { cwd: options.values.cwd }),
+      ...(permissionMode === undefined ? {} : { permissionMode }),
+      ...common
     },
     json: options.booleans.has('--json')
   }

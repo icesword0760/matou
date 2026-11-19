@@ -358,8 +358,12 @@ export function projectSceneGraphFrom(
       source.all<{ cwd: string; count: number }>(
         `SELECT sessions.cwd, COUNT(*) AS count
          FROM sessions
-         JOIN session_canvas_memberships AS membership ON membership.session_id = sessions.id
-         WHERE membership.scene_id = ? AND sessions.archived_at IS NULL
+         JOIN tasks ON tasks.id = sessions.task_id
+         WHERE tasks.workspace_id = (
+           SELECT task.workspace_id
+           FROM scenes JOIN tasks AS task ON task.id = scenes.task_id
+           WHERE scenes.id = ?
+         ) AND sessions.archived_at IS NULL
          GROUP BY sessions.cwd`,
         sceneId
       ).map((row) => [row.cwd, row.count] as const)
@@ -369,6 +373,7 @@ export function projectSceneGraphFrom(
       const counts = childCounts.get(row.session_id)
       const environment = mapEnvironment(row)
       const git = mapGitState(row)
+      const sharedSessionCount = Math.max(1, cwdUseCounts.get(row.cwd) ?? 0)
       const forkProjection = row.fork_operation_id && row.fork_submission_key && row.fork_stage &&
         row.fork_completed_steps !== null && row.fork_total_steps !== null &&
         row.fork_operation_attempt !== null
@@ -415,12 +420,13 @@ export function projectSceneGraphFrom(
         ...(environment === undefined ? {} : { environment }),
         hasOwnedWorktree: row.managed_worktree_id !== null,
         ...(git === undefined ? {} : { git }),
-        sharedWorkingDirectory: (cwdUseCounts.get(row.cwd) ?? 0) > 1,
+        sharedWorkingDirectory: sharedSessionCount > 1,
+        sharedSessionCount,
         ...(row.worktree_path === null || row.branch_name === null ? {} : {
           worktree: {
             branch: row.branch_name,
             path: row.worktree_path,
-            shared: (cwdUseCounts.get(row.cwd) ?? 0) > 1
+            shared: sharedSessionCount > 1
           }
         }),
         activeChildCount: counts?.active_count ?? 0,

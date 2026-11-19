@@ -66,3 +66,24 @@ it('sends the shared Codex agent and originator on both ChatGPT probes', async (
   await client.setHeaders('codex.json', { Originator: CODEX_CLIENT_ORIGINATOR })
   expect(calls[2]).toEqual({ path: '/v8/management/credentials/fields', body: { name: 'codex.json', headers: { Originator: CODEX_CLIENT_ORIGINATOR } } })
 })
+
+it('uses connection-scoped client version for dynamic codex discovery and pushes extra_models', async () => {
+  const calls: Array<{ path: string; body: Record<string, unknown> }> = []
+  const server = createServer(async (request, response) => {
+    const chunks: Buffer[] = []; for await (const chunk of request) chunks.push(Buffer.from(chunk))
+    calls.push({ path: request.url ?? '', body: JSON.parse(Buffer.concat(chunks).toString()) })
+    response.setHeader('Content-Type', 'application/json')
+    response.end(JSON.stringify({ status_code: 200, header: {}, body: '{}' }))
+  }); servers.push(server)
+  await new Promise<void>(done => server.listen(0, '127.0.0.1', done))
+  const client = new RouterManagementClient({
+    baseUrl: `http://127.0.0.1:${(server.address() as { port: number }).port}`,
+    clientKey: 'fixture', managementKey: 'fixture', pid: process.pid,
+    codexClient: { version: '0.169.1', userAgent: 'codex-tui/0.169.1 (Mac OS 26.4.0; arm64) iTerm.app/3.6.11 (codex-tui; 0.169.1)' }
+  })
+  await client.apiCall('chatgpt-models', { id: 'codex', name: 'codex.json', provider: 'codex', auth_index: 'codex' })
+  expect(calls[0]!.body.url).toBe('https://chatgpt.com/backend-api/codex/models?client_version=0.169.1')
+  expect((calls[0]!.body.header as Record<string, string>)['User-Agent']).toContain('codex-tui/0.169.1')
+  await client.setExtraModels('codex.json', [{ id: 'gpt-6.2-sol', display_name: 'GPT-6.2-Sol' }])
+  expect(calls[1]).toEqual({ path: '/v8/management/credentials/fields', body: { name: 'codex.json', extra_models: [{ id: 'gpt-6.2-sol', display_name: 'GPT-6.2-Sol' }] } })
+})

@@ -34,7 +34,7 @@ describe('parseTrace', () => {
 })
 
 describe('probeTrace', () => {
-  it('requests https://<host>/cdn-cgi/trace with default 5000ms timeout and returns parsed sample', async () => {
+  it('requests https://<host>/cdn-cgi/trace with default 10000ms timeout and returns parsed sample', async () => {
     const request = vi.fn(async () => 'fl=1\nh=api.anthropic.com\nip=169.128.1.2\nloc=US\n')
 
     const sample = await probeTrace('api.anthropic.com', 'http://127.0.0.1:7890', { request })
@@ -42,13 +42,31 @@ describe('probeTrace', () => {
     expect(request).toHaveBeenCalledWith(
       'https://api.anthropic.com/cdn-cgi/trace',
       'http://127.0.0.1:7890',
-      5000
+      10_000
     )
     expect(sample).toEqual({
       host: 'api.anthropic.com',
       ip: '169.128.1.2',
       country: 'US'
     })
+  })
+
+  it('marks samples slower than 5000ms as slow when they still succeed', async () => {
+    const nowSpy = vi.spyOn(Date, 'now')
+      .mockReturnValueOnce(1_000)
+      .mockReturnValueOnce(6_700)
+    const request = vi.fn(async () => 'ip=5.34.216.82\nloc=US\n')
+
+    try {
+      await expect(probeTrace('chatgpt.com', undefined, { request })).resolves.toEqual({
+        host: 'chatgpt.com',
+        ip: '5.34.216.82',
+        country: 'US',
+        slow: true
+      })
+    } finally {
+      nowSpy.mockRestore()
+    }
   })
 
   it('maps ETIMEDOUT and timeout errors to timeout', async () => {

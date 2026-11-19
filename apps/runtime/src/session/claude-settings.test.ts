@@ -107,3 +107,15 @@ it('allows reading in storage recovery mode but blocks saving', async () => {
   await expect(router.handle('claude-settings.get', {})).resolves.toMatchObject({ timeZone: 'auto' })
   await expect(router.handle('claude-settings.set', { timeZone: 'UTC' })).rejects.toThrow()
 })
+
+
+it('applies the existing automatic time-zone policy to native Antigravity without provider configuration', () => {
+  const settings = new ClaudeSettings(database, { systemTimeZone: () => 'Asia/Shanghai' })
+  expect(settings.environment('antigravity', { official: true })).toEqual({ TZ: 'Asia/Singapore' })
+  expect(settings.environment('antigravity', { official: true, exitCountry: 'TW' })).toEqual({ TZ: 'Asia/Taipei' })
+  expect(settings.environment('antigravity', { official: false })).toEqual({})
+  settings.set('America/Los_Angeles')
+  expect(settings.environment('antigravity', { official: true })).toEqual({ TZ: 'Asia/Singapore' })
+  const overseas = new ClaudeSettings(database, { systemTimeZone: () => 'Europe/Berlin' })
+  expect(overseas.environment('antigravity', { official: true })).toEqual({})
+})

@@ -1,0 +1,68 @@
+[
+  {
+    "timestamp": "2026-11-15T13:19:50.371Z",
+    "ordinal": 1,
+    "type": "event_msg",
+    "payload": {
+      "type": "task_started",
+      "turn_attribution": {
+        "turn_id": "01a1df5d-363e-76f3-8483-8e35d256a959",
+        "turn_trigger": "user",
+        "parent_turn_id": null,
+        "initiating_agent_path": null,
+        "root_turn_id": "01a1df5d-363e-76f3-8483-8e35d256a959"
+      },
+      "turn_id": "01a1df5d-363e-76f3-8483-8e35d256a959",
+      "root_turn_id": "01a1df5d-363e-76f3-8483-8e35d256a959",
+      "started_at": 1794748790,
+      "model_context_window": 258400,
+      "collaboration_mode_kind": "default"
+    }
+  },
+  {
+    "timestamp": "2026-11-15T13:19:50.442Z",
+    "ordinal": 9,
+    "type": "event_msg",
+    "payload": {
+      "type": "item_completed",
+      "thread_id": "01a1df5d-34d8-7353-80cf-a50dd627cbe4",
+      "turn_id": "01a1df5d-363e-76f3-8483-8e35d256a959",
+      "item": {
+        "type": "UserMessage",
+        "id": "01a1df5d-36a9-7fd0-8024-b37a35898f09",
+        "client_id": "f77dcb92-8cff-4eee-9c56-b16e5559e2e7",
+        "content": [
+          {
+            "type": "text",
+            "text": "Reply only READY.",
+            "text_elements": []
+          }
+        ]
+      },
+      "started_at_ms": 1794748790442,
+      "completed_at_ms": 1794748790442
+    }
+  },
+  {
+    "timestamp": "2026-11-15T13:19:50.448Z",
+    "ordinal": 10,
+    "type": "event_msg",
+    "payload": {
+      "type": "task_complete",
+      "root_turn_id": "01a1df5d-363e-76f3-8483-8e35d256a959",
+      "turn_id": "01a1df5d-363e-76f3-8483-8e35d256a959",
+      "last_agent_message": null,
+      "error": {
+        "message": "unexpected status 404 Not Found: The model matou-probe-missing does not exist, url: http://127.0.0.1:51707/v1/responses",
+        "codex_error_info": {
+          "http_connection_failed": {
+            "http_status_code": 404
+          }
+        }
+      },
+      "started_at": 1794748790,
+      "completed_at": 1794748790,
+      "duration_ms": 112
+    }
+  }
+]

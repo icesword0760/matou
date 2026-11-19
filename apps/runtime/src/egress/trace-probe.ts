@@ -4,7 +4,8 @@ import type { EgressHostError, EgressHostSample } from '@matou/contracts'
 import { HttpsProxyAgent } from 'https-proxy-agent'
 import { SocksProxyAgent } from 'socks-proxy-agent'
 
-const DEFAULT_TIMEOUT_MS = 5000
+const DEFAULT_TIMEOUT_MS = 10_000
+const SLOW_THRESHOLD_MS = 5_000
 const MAX_TRACE_BYTES = 4096
 
 class TraceInvalidError extends Error {
@@ -58,19 +59,26 @@ export async function probeTrace(
   const request = options?.request ?? defaultTraceRequester
   const url = `https://${host}/cdn-cgi/trace`
 
+  const startedAt = Date.now()
   let body: string
   try {
     body = await request(url, proxyUrl, timeoutMs)
   } catch (error) {
     return { host, error: classifyRequestError(error) }
   }
+  const elapsedMs = Date.now() - startedAt
 
   const parsed = parseTrace(body)
   if (!parsed.ip || !parsed.country) {
     return { host, error: 'invalid' }
   }
 
-  return { host, ip: parsed.ip, country: parsed.country }
+  return {
+    host,
+    ip: parsed.ip,
+    country: parsed.country,
+    ...(elapsedMs > SLOW_THRESHOLD_MS ? { slow: true } : {})
+  }
 }
 
 function createAgent(proxyUrl: string | undefined): https.Agent | false {

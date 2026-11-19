@@ -3,7 +3,7 @@ import { cleanup, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { CLI_DEFAULT_MODEL, type ProviderConfigSnapshot } from '@matou/contracts'
+import { CLI_DEFAULT_MODEL, DISPATCH_DEFAULTS, type ProviderConfigSnapshot } from '@matou/contracts'
 
 import { LocaleProvider } from '../i18n/LocaleProvider'
 import { setCurrentLocale } from '../i18n/current'
@@ -61,6 +61,7 @@ function fakeClient(): ProviderConfigClient {
   }
   return {
     request: vi.fn(async (method: string) => {
+      if (method === 'dispatch-config.snapshot') return { exists: false, path: '/test/.claude/agent-foreman/config.json', defaults: { ...DISPATCH_DEFAULTS } }
       if (method === 'provider-config.snapshot') return state
       throw new Error(`unexpected provider config method ${method}`)
     })

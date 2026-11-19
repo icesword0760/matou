@@ -1,0 +1,159 @@
+{
+  "scope": "isolated production component with synthetic RPC; no desktop app or real account",
+  "wide": [
+    {
+      "columns": "76px 361.609px 344.391px",
+      "fields": [
+        {
+          "x": 135,
+          "y": 169.140625,
+          "width": 361.609375
+        },
+        {
+          "x": 512.609375,
+          "y": 169.140625,
+          "width": 344.390625
+        }
+      ]
+    },
+    {
+      "columns": "76px 361.609px 344.391px",
+      "fields": [
+        {
+          "x": 135,
+          "y": 270.28125,
+          "width": 361.609375
+        },
+        {
+          "x": 512.609375,
+          "y": 270.28125,
+          "width": 344.390625
+        }
+      ]
+    },
+    {
+      "columns": "76px 361.609px 344.391px",
+      "fields": [
+        {
+          "x": 135,
+          "y": 371.421875,
+          "width": 361.609375
+        },
+        {
+          "x": 512.609375,
+          "y": 371.421875,
+          "width": 344.390625
+        }
+      ]
+    },
+    {
+      "columns": "76px 361.609px 344.391px",
+      "fields": [
+        {
+          "x": 135,
+          "y": 472.5625,
+          "width": 361.609375
+        },
+        {
+          "x": 512.609375,
+          "y": 472.5625,
+          "width": 344.390625
+        }
+      ]
+    }
+  ],
+  "narrow": [
+    {
+      "columns": "474px",
+      "fields": [
+        {
+          "x": 43,
+          "y": 163.9375,
+          "width": 474
+        },
+        {
+          "x": 43,
+          "y": 245.9375,
+          "width": 474
+        }
+      ]
+    },
+    {
+      "columns": "474px",
+      "fields": [
+        {
+          "x": 43,
+          "y": 380.875,
+          "width": 474
+        },
+        {
+          "x": 43,
+          "y": 462.875,
+          "width": 474
+        }
+      ]
+    },
+    {
+      "columns": "474px",
+      "fields": [
+        {
+          "x": 43,
+          "y": 597.8125,
+          "width": 474
+        },
+        {
+          "x": 43,
+          "y": 679.8125,
+          "width": 474
+        }
+      ]
+    },
+    {
+      "columns": "474px",
+      "fields": [
+        {
+          "x": 43,
+          "y": 814.75,
+          "width": 474
+        },
+        {
+          "x": 43,
+          "y": 881.75,
+          "width": 474
+        }
+      ]
+    }
+  ],
+  "save": {
+    "scrollBefore": 556,
+    "scrollAfter": 556,
+    "focusRetained": true,
+    "patches": [
+      {
+        "method": "agent-model-settings.patch-assignments",
+        "payload": {
+          "assignments": {
+            "opus": {
+              "providerId": "api",
+              "model": "a"
+            },
+            "sonnet": {
+              "providerId": "api",
+              "model": "a"
+            },
+            "haiku": {
+              "providerId": "api",
+              "model": "a"
+            }
+          },
+          "webSearch": {
+            "providerId": "api",
+            "model": "b"
+          }
+        }
+      }
+    ]
+  },
+  "english": true,
+  "pageErrors": []
+}

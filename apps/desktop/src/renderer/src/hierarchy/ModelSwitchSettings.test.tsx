@@ -3,7 +3,12 @@ import { act, cleanup, render, screen, waitFor, within } from '@testing-library/
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import { DISPATCH_DEFAULTS } from '@matou/contracts'
+
 import type {
+  AgentModelSettingsSnapshot,
+  ClaudeAssignmentsPatch,
+  SubscriptionAccountDetails,
   ProviderActivationFailure,
   ProviderConfigView,
   ProviderConfigSnapshot,
@@ -20,6 +25,7 @@ describe('ModelSwitchSettings', () => {
 
     expect((await screen.findAllByText('Anthropic 官方')).length).toBeGreaterThan(0)
     expect(screen.queryByRole('heading', { name: '设置' })).toBeNull()
+    expect(await screen.findByRole('heading', { name: '派活' })).toBeTruthy()
     expect(screen.queryByRole('tab', { name: 'Codex' })).toBeNull()
     expect(screen.queryByText('OpenAI 官方')).toBeNull()
     expect(screen.queryByText('PackyCode')).toBeNull()
@@ -47,7 +53,7 @@ describe('ModelSwitchSettings', () => {
     const user = userEvent.setup()
     render(<ModelSwitchSettings client={client} onClose={vi.fn()} />)
     await screen.findAllByText('Team Gateway')
-    const currentCard = screen.getByText('Team Gateway').closest('article')!
+    const currentCard = screen.getByText('Team Gateway', { selector: '.model-provider__name strong' }).closest('article')!
     await user.click(within(currentCard).getByRole('button', { name: '编辑' }))
     const dialog = screen.getByRole('dialog', { name: '编辑供应商' })
     await user.click(within(dialog).getByRole('button', { name: '保存并切换' }))
@@ -58,7 +64,7 @@ describe('ModelSwitchSettings', () => {
     expect(client.request).toHaveBeenCalledWith('provider-config.activate', {
       cli: 'claude-code', providerId: 'team-claude'
     })
-    expect(await screen.findByText('已切换为 Team Gateway；1 个 Claude Code 会话已更新，1 个会话暂缓并保持原配置')).toBeTruthy()
+    expect(await screen.findByText('已切换为 Team Gateway；1 个 Claude Code 会话已更新，1 个会话等待就绪后自动切换')).toBeTruthy()
   })
 
   it('does not re-apply the active provider after save-only', async () => {
@@ -74,7 +80,7 @@ describe('ModelSwitchSettings', () => {
     const user = userEvent.setup()
     render(<ModelSwitchSettings client={client} onClose={vi.fn()} />)
     await screen.findAllByText('Team Gateway')
-    const currentCard = screen.getByText('Team Gateway').closest('article')!
+    const currentCard = screen.getByText('Team Gateway', { selector: '.model-provider__name strong' }).closest('article')!
     await user.click(within(currentCard).getByRole('button', { name: '编辑' }))
     const dialog = screen.getByRole('dialog', { name: '编辑供应商' })
     await user.click(within(dialog).getByRole('button', { name: '保存' }))
@@ -101,7 +107,7 @@ describe('ModelSwitchSettings', () => {
     const user = userEvent.setup()
     render(<ModelSwitchSettings client={client} onClose={vi.fn()} />)
     await screen.findAllByText('Team Gateway')
-    const currentCard = screen.getByText('Team Gateway').closest('article')!
+    const currentCard = screen.getByText('Team Gateway', { selector: '.model-provider__name strong' }).closest('article')!
     await user.click(within(currentCard).getByRole('button', { name: '编辑' }))
     const dialog = screen.getByRole('dialog', { name: '编辑供应商' })
     await user.click(within(dialog).getByRole('button', { name: '保存并切换' }))
@@ -142,7 +148,7 @@ describe('ModelSwitchSettings', () => {
     expect(screen.getByText('默认窗口')).toBeTruthy()
 
     const user = userEvent.setup()
-    const teamCard = screen.getByText('Team Gateway').closest('article')!
+    const teamCard = screen.getByText('Team Gateway', { selector: '.model-provider__name strong' }).closest('article')!
     await user.click(within(teamCard).getByRole('button', { name: '编辑' }))
     const dialog = screen.getByRole('dialog', { name: '编辑供应商' })
     await user.click(within(dialog).getByRole('radio', { name: /512K/ }))
@@ -186,6 +192,7 @@ describe('ModelSwitchSettings', () => {
     const settingsRead = new Promise<unknown>(resolve => { resolveSettingsRead = resolve })
     const client: ProviderConfigClient = {
       request: vi.fn((method, payload) => {
+        if (method === 'dispatch-config.snapshot') return Promise.resolve({ exists: false, path: '/test/.claude/agent-foreman/config.json', defaults: { ...DISPATCH_DEFAULTS } })
         if (method === 'provider-config.snapshot') return Promise.resolve(initialSnapshot)
         if (method === 'provider-config.subscription.settings-read') return settingsRead
         if (method === 'provider-config.subscription.settings-close') return Promise.resolve({})
@@ -228,7 +235,7 @@ describe('ModelSwitchSettings', () => {
     await screen.findAllByText('Anthropic 官方')
 
     const user = userEvent.setup()
-    const teamCard = screen.getByText('Team Gateway').closest('article')!
+    const teamCard = screen.getByText('Team Gateway', { selector: '.model-provider__name strong' }).closest('article')!
     await user.click(within(teamCard).getByRole('button', { name: '编辑' }))
     const dialog = screen.getByRole('dialog', { name: '编辑供应商' })
     expect(within(dialog).getByRole('radio', { name: /默认窗口/ })).toHaveProperty('checked', true)
@@ -275,7 +282,7 @@ describe('ModelSwitchSettings', () => {
     })
   })
 
-  it('reports Sessions that keep their old provider while activation is deferred', async () => {
+  it('reports that deferred Sessions switch automatically when ready', async () => {
     const client = fakeClient([
       { sessionId: 'session-updated', status: 'updated' },
       {
@@ -293,7 +300,7 @@ describe('ModelSwitchSettings', () => {
     await userEvent.setup().click(screen.getByRole('button', { name: '切换到 Team Gateway' }))
 
     expect(await screen.findByText(
-      '已切换为 Team Gateway；1 个 Claude Code 会话已更新，2 个会话暂缓并保持原配置'
+      '已切换为 Team Gateway；1 个 Claude Code 会话已更新，2 个会话等待就绪后自动切换'
     )).toBeTruthy()
     await userEvent.setup().click(screen.getByRole('button', { name: /查看会话/ }))
     expect(screen.getByText('会话存储待恢复')).toBeTruthy()
@@ -383,6 +390,20 @@ describe('ModelSwitchSettings', () => {
   })
 })
 
+it('retries allocation metadata without repeating the existing subscription settings reader', async () => {
+  const original=fakeClient();let failed=true
+  const request=vi.fn<ProviderConfigClient['request']>(async(method,payload)=>{
+    if(method==='agent-model-settings.get' && failed)throw Error('fixture read failed')
+    return original.request(method,payload)
+  })
+  render(<ModelSwitchSettings client={{request}} onClose={vi.fn()}/> )
+  const region=(await screen.findByRole('heading',{name:'模型分配'})).closest('.model-allocation') as HTMLElement
+  await within(region).findByRole('alert')
+  failed=false;await userEvent.setup().click(within(region).getByRole('button',{name:'重试'}))
+  await waitFor(()=>expect(within(region).queryByRole('alert')).toBeNull())
+  expect(request.mock.calls.filter(([method])=>method==='provider-config.subscription.settings-read')).toHaveLength(1)
+})
+
 function fakeClient(
   sessionTransitions: ProviderSessionActivationTransition[] = [],
   activeProviderId: 'anthropic' | 'team-claude' = 'anthropic'
@@ -409,6 +430,8 @@ function fakeClient(
   }
   return {
     request: vi.fn(async (method: string, payload: unknown) => {
+      if (method === 'agent-model-settings.get') return { preferences: { contextWindows: {}, compaction: { mode: 'follow', effort: 'follow' } }, providers: [] }
+      if (method === 'dispatch-config.snapshot') return { exists: false, path: '/test/.claude/agent-foreman/config.json', defaults: { ...DISPATCH_DEFAULTS } }
       if (method === 'provider-config.snapshot') return state
       if (method === 'provider-config.activate') {
         const input = payload as { cli: 'claude-code' | 'codex'; providerId: string }
@@ -423,3 +446,132 @@ function fakeClient(
     })
   }
 }
+
+function searchSettingsClient(status: 'ready' | 'needs-sign-in' = 'ready') {
+ const provider:ProviderConfigView={id:'search-sub',cli:'claude-code',kind:'subscription',name:'Search ChatGPT',endpoint:'',model:'gpt',hasApiKey:false,modelMapping:{opus:'gpt',sonnet:'gpt',haiku:'gpt'},subscription:{provider:'codex',account:{status:'ready',email:'search@matou.invalid'},modelMetadata:[{id:'gpt'},{id:'gpt-search'}]}}
+ let state:ProviderConfigSnapshot={revision:1,activeProviderIds:{'claude-code':'official',codex:''},providers:{'claude-code':[{id:'official',cli:'claude-code',name:'Official Fixture',builtIn:true,endpoint:'https://api.anthropic.com',model:'opus',hasApiKey:false},provider],codex:[]}}
+ let agent:AgentModelSettingsSnapshot={preferences:{contextWindows:{},compaction:{mode:'follow',effort:'follow'},claudeWebSearch:{providerId:provider.id,model:'gpt'}},providers:[{id:provider.id,name:provider.name,cli:'claude-code',compactionAvailable:true,models:[{id:'gpt',name:'gpt',fixedTokens:512000},{id:'gpt-search',name:'gpt-search',fixedTokens:512000}]}]}
+ let details:SubscriptionAccountDetails={account:{status,email:'search@matou.invalid'},models:provider.subscription!.modelMetadata}
+ let listener=()=>{}
+ const request=vi.fn<ProviderConfigClient['request']>(async(method,payload)=>{
+  if(method==='provider-config.snapshot')return structuredClone(state)
+  if(method==='agent-model-settings.get')return structuredClone(agent)
+  if(method==='provider-config.subscription.settings-read')return {snapshot:structuredClone(state),accounts:{[provider.id]:details},antigravityRiskAccepted:false}
+  if(method==='provider-config.subscription.models-refresh'){
+   details={...details,models:[{id:'gpt-search',displayName:'Search model'},{id:'gpt-new',displayName:'New model'}]}
+   state={...state,revision:state.revision+1,providers:{...state.providers,'claude-code':state.providers['claude-code'].map(p=>p.id===provider.id?{...p,subscription:{...p.subscription!,modelMetadata:details.models}}:p)}}
+   agent={...agent,providers:agent.providers.map(p=>p.id===provider.id?{...p,models:details.models.map(model=>({id:model.id,name:model.displayName ?? model.id,fixedTokens:512000}))}:p)}
+   return {snapshot:structuredClone(state),details:structuredClone(details)}
+  }
+  if(method==='provider-config.subscription.login-start')return {attemptId:'fixture-login',provider:'codex',status:'ready',details:{...details,account:{...details.account,status:'ready'}}}
+  if(method==='provider-config.upsert'){
+   details={...details,account:{...details.account,status:'ready'}}
+   state={...state,revision:state.revision+1,providers:{...state.providers,'claude-code':state.providers['claude-code'].map(p=>p.id===provider.id?{...p,subscription:{...p.subscription!,account:details.account}}:p)}}
+   return {provider:state.providers['claude-code'].find(p=>p.id===provider.id)}
+  }
+  if(method==='agent-model-settings.patch-assignments'){
+   const patch=payload as ClaudeAssignmentsPatch
+   agent={...agent,preferences:{...agent.preferences,claudeRoleAssignments:patch.assignments}}
+   if(patch.webSearch)agent.preferences.claudeWebSearch=patch.webSearch;else delete agent.preferences.claudeWebSearch
+   return structuredClone(agent)
+  }
+  if(method==='dispatch-config.snapshot')return {exists:false,path:'/fixture/config.json',defaults:{...DISPATCH_DEFAULTS}}
+  return {}
+ })
+ return {request,subscribeProviderConfig:(callback:()=>void)=>{listener=callback;return ()=>{listener=()=>{}}},expire:()=>{
+  details={...details,account:{...details.account,status:'needs-sign-in'}}
+  state={...state,providers:{...state.providers,'claude-code':state.providers['claude-code'].map(p=>p.id===provider.id?{...p,subscription:{...p.subscription!,account:details.account}}:p)}}
+  listener()
+ }}
+}
+it('refreshes model assignment options and keeps an unavailable existing choice selected',async()=>{
+ const client=searchSettingsClient(), user=userEvent.setup()
+ render(<ModelSwitchSettings client={client} onClose={vi.fn()}/>)
+ const model=await screen.findByLabelText('网页搜索 模型')
+ await waitFor(()=>expect(model).toHaveProperty('value','gpt'))
+ expect(within(model).queryByRole('option',{name:'New model'})).toBeNull()
+ await user.click(screen.getByRole('button',{name:'刷新模型'}))
+ expect(await screen.findByText('模型列表已更新（2 个模型）')).toBeTruthy()
+ expect(await within(model).findByRole('option',{name:'New model'})).toBeTruthy()
+ expect(within(model).getByRole('option',{name:'gpt · 不可用'})).toBeTruthy()
+ expect(model).toHaveProperty('value','gpt')
+ expect(model.getAttribute('aria-invalid')).toBe('true')
+ expect(client.request).not.toHaveBeenCalledWith('agent-model-settings.patch-assignments',expect.anything())
+ await user.selectOptions(model,'gpt-new')
+ expect(model.getAttribute('aria-invalid')).toBe('false')
+ const card=within(screen.getByText('Search ChatGPT',{selector:'.model-provider__name strong'}).closest('article')!)
+ expect(card.getByText('默认模型 · 不可用')).toBeTruthy()
+ await user.click(card.getByRole('button',{name:'编辑'}))
+ const editor=within(screen.getByRole('dialog'))
+ const mapping=editor.getByRole('combobox',{name:'Opus 模型'})
+ expect(mapping).toHaveProperty('value','gpt')
+ expect(mapping.getAttribute('aria-invalid')).toBe('true')
+ expect(within(mapping).getByRole('option',{name:'New model'})).toBeTruthy()
+})
+it('integrates a search-only edit, saves to the existing patch and reads null as unassigned',async()=>{
+ const client=searchSettingsClient();const user=userEvent.setup()
+ const view=render(<ModelSwitchSettings client={client} onClose={vi.fn()}/> )
+ await waitFor(()=>expect(screen.getByLabelText('网页搜索 供应商')).toHaveProperty('value','search-sub'))
+ await user.selectOptions(screen.getByLabelText('网页搜索 模型'),'gpt-search')
+ await user.click(screen.getByRole('button',{name:'保存分配'}))
+ expect(client.request).toHaveBeenCalledWith('agent-model-settings.patch-assignments',{assignments:{},webSearch:{providerId:'search-sub',model:'gpt-search'}})
+ await user.selectOptions(screen.getByLabelText('网页搜索 供应商'),'')
+ await user.click(screen.getByRole('button',{name:'保存分配'}))
+ expect(client.request).toHaveBeenLastCalledWith('agent-model-settings.patch-assignments',{assignments:{},webSearch:null})
+ view.unmount();render(<ModelSwitchSettings client={client} onClose={vi.fn()}/> )
+ expect(await screen.findByLabelText('网页搜索 供应商')).toHaveProperty('value','')
+ expect(client.request).not.toHaveBeenCalledWith('provider-config.activate',expect.anything())
+})
+it('opens the existing login flow from the inline action, preserves edits and becomes saveable without restarting sessions',async()=>{
+ const client=searchSettingsClient('needs-sign-in');const user=userEvent.setup()
+ render(<ModelSwitchSettings client={client} onClose={vi.fn()}/> )
+ await waitFor(()=>expect(screen.getByLabelText('网页搜索 供应商')).toHaveProperty('value','search-sub'))
+ await user.selectOptions(screen.getByLabelText('网页搜索 模型'),'gpt-search')
+ const row=screen.getByLabelText('网页搜索 供应商').closest('.model-allocation__row') as HTMLElement
+ await user.click(within(row).getByRole('button',{name:'重新登录'}))
+ expect(within(row).getByRole('button')).toHaveProperty('disabled',true)
+ const dialog=screen.getByRole('dialog',{name:'重新登录'})
+ await user.click(within(dialog).getByRole('button',{name:'在浏览器中登录'}))
+ await user.click(await within(dialog).findByRole('button',{name:/^保存$/}))
+ await waitFor(()=>expect(screen.queryByRole('dialog',{name:'重新登录'})).toBeNull())
+ expect(screen.getByLabelText('网页搜索 模型')).toHaveProperty('value','gpt-search')
+ expect(within(row).queryByRole('alert')).toBeNull()
+ expect(within(row).queryByRole('button',{name:'重新登录'})).toBeNull()
+ expect(screen.getByRole('button',{name:'保存分配'})).toHaveProperty('disabled',false)
+ await user.click(screen.getByRole('button',{name:'保存分配'}))
+ expect(client.request).toHaveBeenCalledWith('agent-model-settings.patch-assignments',{assignments:{},webSearch:{providerId:'search-sub',model:'gpt-search'}})
+ expect(client.request.mock.calls.filter(([method])=>method==='provider-config.subscription.login-start')).toHaveLength(1)
+ expect(client.request).not.toHaveBeenCalledWith('provider-config.activate',expect.anything())
+})
+it('refreshes inline account status from provider notifications without starting another quota read',async()=>{
+ const client=searchSettingsClient();render(<ModelSwitchSettings client={client} onClose={vi.fn()}/> )
+ await waitFor(()=>expect(screen.getByLabelText('网页搜索 供应商')).toHaveProperty('value','search-sub'))
+ const row=screen.getByLabelText('网页搜索 供应商').closest('.model-allocation__row') as HTMLElement
+ expect(within(row).queryByRole('alert')).toBeNull()
+ await act(async()=>client.expire())
+ expect(await within(row).findByRole('button',{name:'重新登录'})).toBeTruthy()
+ expect(within(row).getByRole('alert').textContent).toContain('账号已失效')
+ expect(client.request.mock.calls.filter(([method])=>method==='provider-config.subscription.settings-read')).toHaveLength(1)
+})
+it('keeps the inline account error and search draft after a failed login',async()=>{
+ const original=searchSettingsClient('needs-sign-in');const user=userEvent.setup()
+ const request=vi.fn<ProviderConfigClient['request']>(async(method,payload,options)=>{
+  if(method==='provider-config.subscription.login-start')throw Error('Fixture sign-in failed')
+  return original.request(method,payload,options)
+ })
+ render(<ModelSwitchSettings client={{...original,request}} onClose={vi.fn()}/> )
+ await waitFor(()=>expect(screen.getByLabelText('网页搜索 供应商')).toHaveProperty('value','search-sub'))
+ await user.selectOptions(screen.getByLabelText('网页搜索 模型'),'gpt-search')
+ const row=screen.getByLabelText('网页搜索 供应商').closest('.model-allocation__row') as HTMLElement
+ await user.click(within(row).getByRole('button',{name:'重新登录'}))
+ const dialog=screen.getByRole('dialog',{name:'重新登录'})
+ await user.click(within(dialog).getByRole('button',{name:'在浏览器中登录'}))
+ expect(await within(dialog).findByText('Fixture sign-in failed')).toBeTruthy()
+ await user.click(within(dialog).getByRole('button',{name:'取消'}))
+ expect(within(row).getByRole('button',{name:'重新登录'})).toHaveProperty('disabled',false)
+ expect(within(row).getByRole('alert').textContent).toContain('账号已失效')
+ expect(screen.getByLabelText('网页搜索 模型')).toHaveProperty('value','gpt-search')
+ expect(screen.getByRole('button',{name:'保存分配'})).toHaveProperty('disabled',true)
+ expect(request).not.toHaveBeenCalledWith('provider-config.activate',expect.anything())
+ expect(request).not.toHaveBeenCalledWith('agent-model-settings.patch-assignments',expect.anything())
+})

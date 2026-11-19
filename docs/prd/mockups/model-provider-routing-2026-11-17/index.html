@@ -1,0 +1,732 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
+<title>码头 · Claude Code 模型分配（本地交互原型）</title>
+<!--
+  本地交互原型：在基准供应商列表与「对话压缩模型」之间加入「模型分配」。
+  所有账号、模型和额度均为演示数据；无网络、无真实配置写入，刷新即重置。
+  源码视觉与文案来源：
+  - apps/desktop/src/renderer/src/hierarchy/ModelSwitchSettings.tsx:268-339
+  - apps/desktop/src/renderer/src/hierarchy/hierarchy.css:1-25,1064-1125,1173-1189
+  - apps/desktop/src/renderer/src/hierarchy/provider-setup.css:4-10,111-137,157,173-182
+  - apps/desktop/src/renderer/src/hierarchy/SubscriptionProviderCard.tsx:42-64
+  - apps/desktop/src/renderer/src/hierarchy/AgentModelSettings.tsx:165-258
+  - apps/desktop/src/renderer/src/hierarchy/agent-model-settings.css:1-38
+  - apps/desktop/src/renderer/src/hierarchy/DispatchSettings.tsx:221-295
+  - apps/desktop/src/renderer/src/hierarchy/dispatch-settings.css:1-38
+  - apps/desktop/src/renderer/src/i18n/messages/hierarchyShell.ts:156-267
+  新增「模型分配」的区域规则沿用上述设置区块的 11/12/13px 字号、10px 圆角、workspace token、
+  34px 控件高度与既有按钮/错误样式；仅本原型使用，未写入产品源码。
+-->
+<style>
+:root {
+  --terminal-shell-bg: #f4f5f5;
+  --terminal-bg: #1b1b1b;
+  --terminal-chrome-bg: #151515;
+  --terminal-active-bg: #2c2c2c;
+  --terminal-border-color: #262626;
+  --terminal-muted-color: #7b7b7b;
+  --workspace-canvas: #f7f8fa;
+  --workspace-panel: #fff;
+  --workspace-panel-muted: #fbfcfd;
+  --workspace-line: rgba(66,75,88,.1);
+  --workspace-line-strong: rgba(66,75,88,.16);
+  --workspace-text: #303744;
+  --workspace-muted: #7e8794;
+  --workspace-faint: #a3aab4;
+  --workspace-accent: #347fd6;
+  --workspace-accent-soft: rgba(52,127,214,.11);
+  --workspace-accent-line: rgba(52,127,214,.28);
+  --workspace-shadow: 0 1px 2px rgba(28,38,52,.03),0 9px 24px rgba(44,58,77,.045);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
+}
+*, *::before, *::after { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  overflow: hidden;
+  color: var(--workspace-text);
+  background: var(--workspace-canvas);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
+  -webkit-font-smoothing: antialiased;
+}
+button, input, select { font: inherit; }
+button { -webkit-app-region: no-drag; }
+[hidden] { display: none !important; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+.app-stage { position: relative; flex: 1 1 auto; min-width: 0; min-height: 0; }
+.provider-settings, .provider-setup-layer {
+  --provider-inline-error-text: #a13d39;
+  --provider-inline-error-bg: #fff2f1;
+  --provider-inline-error-line: #f4d4d1;
+  --provider-confirm-bg: #fff7e8;
+  --provider-confirm-line: #ebd6af;
+}
+
+/* hierarchy.css:1064-1125 — settings surface, frame, navigation, header and provider list. */
+.model-settings { position: absolute; z-index: 25; inset: 0; display: grid; min-width: 0; min-height: 0; padding: 0; place-items: stretch; color: var(--workspace-text); background: var(--workspace-canvas); animation: workspace-surface-in .18s ease-out both; }
+.model-settings__frame { display: grid; width: 100%; min-width: 0; min-height: 0; grid-template-columns: 176px minmax(0,1fr); overflow: hidden; border: 0; border-radius: 0; background: transparent; box-shadow: none; }
+.model-settings__nav { padding: 22px 10px; border-right: 1px solid var(--workspace-line); background: var(--workspace-panel-muted); }
+.model-settings__section-label { display: block; margin: 0 9px 7px; color: var(--workspace-muted); font-size: 9px; font-weight: 700; letter-spacing: .08em; }
+.model-settings__nav-item { display: flex; width: 100%; height: 33px; align-items: center; gap: 8px; padding: 0 10px; border: 0; border-radius: 7px; color: #5f6976; background: transparent; cursor: pointer; font-size: 11px; font-weight: 650; }
+.model-settings__nav-item.is-active { color: var(--workspace-accent); background: var(--workspace-accent-soft); }
+.model-settings__nav p { margin: 9px 9px 0; color: var(--workspace-muted); font-size: 9px; line-height: 1.55; }
+.model-settings__main { min-width: 0; min-height: 0; padding: 24px 28px 28px; overflow: auto; color: var(--workspace-text); }
+.model-settings__heading { display: flex; align-items: flex-start; justify-content: space-between; }
+.model-settings__heading h1 { margin: 0; color: var(--workspace-text); font-size: 19px; font-weight: 680; letter-spacing: -.35px; }
+.model-settings__heading p { margin: 4px 0 0; color: var(--workspace-muted); font-size: 10px; }
+.model-settings__heading > button { display: grid; width: 28px; height: 28px; place-items: center; border: 0; border-radius: 7px; color: var(--workspace-muted); background: rgba(90,103,120,.055); cursor: pointer; font-size: 16px; }
+.model-settings__heading > button:hover { color: var(--workspace-text); background: rgba(90,103,120,.1); }
+.model-settings__heading > button:focus-visible, .model-settings__nav-item:focus-visible, .model-settings__tabs button:focus-visible, .model-provider button:focus-visible { outline: 2px solid var(--workspace-accent-line); outline-offset: 1px; }
+.model-settings__toolbar { display: flex; align-items: center; justify-content: space-between; margin: 19px 0 8px; }
+.model-settings__toolbar h2 { margin: 0; color: var(--workspace-text); font-size: 12px; }
+.model-settings__toolbar h2 span { margin-left: 4px; color: var(--workspace-muted); font-size: 9px; font-weight: 500; }
+.model-settings__toolbar button { height: 29px; padding: 0 11px; border: 1px solid rgba(38,112,197,.18); border-radius: 7px; color: #fff; background: var(--workspace-accent); box-shadow: 0 4px 11px rgba(53,123,204,.13); cursor: pointer; font-size: 9px; font-weight: 650; }
+.model-settings__toolbar button:hover { filter: brightness(.98); }
+.model-settings__providers { display: flex; flex-direction: column; gap: 0; overflow: hidden; border: 1px solid var(--workspace-line); border-radius: 10px; background: var(--workspace-panel-muted); box-shadow: 0 1px 2px rgba(34,45,60,.02); }
+.model-provider { display: grid; min-width: 0; min-height: 62px; grid-template-columns: 34px minmax(150px,1.2fr) minmax(130px,1fr) auto; align-items: center; gap: 11px; padding: 0 12px; border: 0; border-bottom: 1px solid var(--workspace-line); border-radius: 0; background: transparent; transition: background 120ms ease; }
+.model-provider:last-child { border-bottom: 0; }
+.model-provider:hover { background: #fff; }
+.model-provider.is-current { background: #f5f8fc; box-shadow: inset 2px 0 var(--workspace-accent); }
+.model-provider__logo { display: grid; width: 32px; height: 32px; place-items: center; border-radius: 8px; color: #fff !important; background: linear-gradient(145deg,#4a95e6,#337ed1); font-size: 12px !important; font-weight: 750; }
+.model-provider__logo.tone-anthropic { background: linear-gradient(145deg,#c98559,#ae6740); }
+.model-provider__logo.tone-openai { background: linear-gradient(145deg,#198875,#087363); }
+.model-provider__logo.tone-custom { background: linear-gradient(145deg,#4a96e5,#7169df); }
+.model-provider__name, .model-provider__model { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
+.model-provider__name strong, .model-provider__model strong { overflow: hidden; color: #414a57; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.model-provider__name span, .model-provider__model span { overflow: hidden; color: var(--workspace-muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.model-provider__name i { margin-left: 5px; padding: 2px 5px; border-radius: 999px; color: var(--workspace-accent); background: var(--workspace-accent-soft); font-size: 8px; font-style: normal; font-weight: 500; }
+.model-provider__actions { display: flex; gap: 5px; }
+.model-provider__actions button { height: 27px; padding: 0 9px; border: 1px solid var(--workspace-line-strong); border-radius: 6px; color: #525d6a; background: rgba(255,255,255,.82); cursor: pointer; font-size: 9px; font-weight: 650; }
+.model-provider__actions button:hover { background: #fff; }
+.model-provider__actions button.primary { border-color: var(--workspace-accent-line); color: var(--workspace-accent); background: var(--workspace-accent-soft); }
+.model-provider__actions button:disabled { border-color: transparent; color: var(--workspace-faint); background: rgba(222,226,232,.58); cursor: default; }
+.model-settings__impact { display: flex; align-items: center; gap: 5px; margin: 11px 2px 0; color: var(--workspace-muted); font-size: 9px; line-height: 1.5; }
+.model-settings__impact b { color: #6a7481; }
+
+/* provider-setup.css:111-137,157,173-182 — the light settings skin used by Claude Code. */
+.provider-settings .model-settings__providers { gap: 12px; container-type: inline-size; }
+.provider-settings .model-provider { min-height: 80px; padding: 14px; border-radius: 11px; }
+.provider-settings .model-provider.is-current { background: #edf5ff; border-color: #6aa1ee; }
+.provider-settings .model-provider__name strong { font-size: 13px; }
+.provider-settings .model-provider__name span, .provider-settings .model-provider__model span { font-size: 11px; }
+.provider-settings .model-provider__model strong { font-size: 12px; overflow-wrap: anywhere; }
+.provider-settings .model-provider__actions button { font-size: 12px; min-height: 34px; }
+.provider-settings .model-provider:not(.model-provider--subscription) .model-provider__name strong { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; overflow: visible; text-overflow: clip; white-space: normal; overflow-wrap: anywhere; line-height: 1.35; }
+.provider-settings .model-provider:not(.model-provider--subscription) .model-provider__name span,
+.provider-settings .model-provider:not(.model-provider--subscription) .model-provider__model strong,
+.provider-settings .model-provider:not(.model-provider--subscription) .model-provider__model span { overflow: visible; text-overflow: clip; white-space: normal; overflow-wrap: anywhere; line-height: 1.4; }
+.provider-settings .model-provider:not(.model-provider--subscription) .model-provider__actions { flex: none; }
+.provider-settings .model-provider:not(.model-provider--subscription) .model-provider__actions button { flex: none; white-space: nowrap; }
+.provider-settings .model-settings__toolbar h2 { font-size: 13px; }
+.provider-settings .model-settings__toolbar button { font-size: 12px; min-height: 34px; }
+.provider-settings .model-settings__impact { font-size: 11px; line-height: 1.7; }
+.provider-settings .model-provider__window-badge { margin-left: 5px; padding: 2px 6px; border-radius: 6px; color: #276cc0; background: rgba(52, 127, 214, 0.09); border: 1px solid rgba(52, 127, 214, 0.22); font-size: 10px; font-style: normal; font-weight: 600; white-space: nowrap; }
+.provider-settings .model-provider--subscription { min-height: 80px; align-items: start; padding-top: 13px; padding-bottom: 13px; }
+.provider-settings .model-provider--subscription .model-provider__logo { margin-top: 1px; }
+.provider-settings .model-provider--subscription .model-provider__name strong { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; white-space: normal; }
+.provider-settings .model-provider--subscription .model-provider__actions { align-self: start; margin-top: 1px; }
+.provider-settings .model-provider--subscription .model-provider__quota { font-size: 10px; font-variant-numeric: tabular-nums; }
+@container (max-width: 640px) {
+  .provider-settings .model-provider:not(.model-provider--subscription) { grid-template-columns: 32px minmax(0,1fr) auto; grid-template-rows: auto auto; column-gap: 11px; row-gap: 3px; }
+  .provider-settings .model-provider:not(.model-provider--subscription) .model-provider__logo { grid-column: 1; grid-row: 1 / span 2; align-self: center; }
+  .provider-settings .model-provider:not(.model-provider--subscription) .model-provider__name { grid-column: 2; grid-row: 1; align-self: end; }
+  .provider-settings .model-provider:not(.model-provider--subscription) .model-provider__model { display: flex; grid-column: 2; grid-row: 2; align-self: start; }
+  .provider-settings .model-provider:not(.model-provider--subscription) .model-provider__actions { grid-column: 3; grid-row: 1 / span 2; align-self: center; justify-self: end; }
+}
+
+/* agent-model-settings.css — compaction section. */
+.agent-model-settings { display: grid; gap: 14px; margin-top: 22px; padding-top: 20px; border-top: 1px solid var(--workspace-line); color: var(--workspace-text); }
+.agent-model-settings__section { display: grid; gap: 10px; }
+.agent-model-settings__header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.agent-model-settings__header > div { display: grid; gap: 4px; }
+.agent-model-settings h2 { margin: 0; color: var(--workspace-text); font-size: 13px; font-weight: 680; }
+.agent-model-settings p { margin: 0; color: var(--workspace-muted); font-size: 11px; line-height: 1.65; }
+.agent-model-settings__card { display: grid; gap: 12px; padding: 14px; border: 1px solid var(--workspace-line); border-radius: 10px; background: var(--workspace-panel-muted); }
+.agent-model-settings__fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
+.agent-model-settings__choices { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.agent-model-settings__choice { display: flex; align-items: flex-start; gap: 8px; min-width: 0; padding: 10px 12px; border: 1px solid var(--workspace-line-strong); border-radius: 8px; background: var(--workspace-panel); cursor: pointer; }
+.agent-model-settings__choice.is-selected { border-color: var(--workspace-accent); background: color-mix(in srgb, var(--workspace-accent) 8%, var(--workspace-panel)); }
+.agent-model-settings__choice:focus-within { outline: 2px solid var(--workspace-accent); outline-offset: 2px; }
+.agent-model-settings__choice input[type="radio"] { width: auto; min-height: 0; flex: none; margin: 2px 0 0; padding: 0; border: 0; background: transparent; accent-color: var(--workspace-accent); }
+.agent-model-settings__choice span { display: grid; gap: 2px; min-width: 0; }
+.agent-model-settings__choice strong { font-size: 12px; font-weight: 650; }
+.agent-model-settings__choice small { color: var(--workspace-muted); font-size: 10px; line-height: 1.45; }
+
+/* dispatch-settings.css — dispatch section. */
+.dispatch-settings { display: grid; gap: 14px; margin-top: 22px; padding-top: 20px; border-top: 1px solid var(--workspace-line); color: var(--workspace-text); }
+.dispatch-settings__section { display: grid; gap: 10px; }
+.dispatch-settings__header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.dispatch-settings__header > div { display: grid; gap: 4px; }
+.dispatch-settings h2 { margin: 0; color: var(--workspace-text); font-size: 13px; font-weight: 680; }
+.dispatch-settings p { margin: 0; color: var(--workspace-muted); font-size: 11px; line-height: 1.65; }
+.dispatch-settings__card { padding: 2px 14px; border: 1px solid var(--workspace-line); border-radius: 10px; background: var(--workspace-panel-muted); }
+.dispatch-settings__row { display: grid; grid-template-columns: minmax(112px, 168px) minmax(0, 1fr); gap: 4px 16px; align-items: start; padding: 10px 0; border-bottom: 1px solid var(--workspace-line); }
+.dispatch-settings__row-label { padding-top: 9px; font-size: 11px; font-weight: 650; line-height: 1.4; }
+.dispatch-settings__row-body { display: grid; gap: 5px; min-width: 0; max-width: 280px; }
+.dispatch-settings select, .dispatch-settings input:not([type="number"]) { width: 100%; min-height: 34px; padding: 6px 9px; border: 1px solid var(--workspace-line-strong); border-radius: 7px; color: inherit; background: var(--workspace-panel); font: inherit; font-size: 12px; }
+.dispatch-settings select:focus-visible, .dispatch-settings input:focus-visible, .dispatch-settings button:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: 2px; }
+.dispatch-settings select:disabled, .dispatch-settings input:disabled { opacity: .55; }
+.dispatch-settings__number { display: flex; align-items: center; gap: 8px; }
+.dispatch-settings__number input { width: 88px; min-height: 34px; padding: 6px 9px; border: 1px solid var(--workspace-line-strong); border-radius: 7px; color: inherit; background: var(--workspace-panel); font: inherit; font-size: 12px; }
+.dispatch-settings__unit { color: var(--workspace-muted); font-size: 11px; white-space: nowrap; }
+.dispatch-settings__actions { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; padding: 12px 0; }
+.dispatch-settings__actions button { min-height: 32px; padding: 0 14px; border: 1px solid var(--workspace-line-strong); border-radius: 7px; color: var(--workspace-text); background: var(--workspace-panel); font-size: 11px; font-weight: 650; cursor: pointer; }
+.dispatch-settings__actions button:hover:not(:disabled) { border-color: var(--workspace-accent); color: var(--workspace-accent); }
+.dispatch-settings__actions button:disabled { opacity: .5; cursor: default; }
+.dispatch-settings__scope { margin-top: 2px !important; }
+.dispatch-settings__path { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px; }
+.dispatch-settings__path code { padding: 1px 5px; border: 1px solid var(--workspace-line); border-radius: 4px; color: var(--workspace-text); background: var(--workspace-panel-muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; }
+
+@keyframes workspace-surface-in { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
+@media (max-width: 940px) {
+  .model-settings { padding: 0; }
+  .model-settings__frame { grid-template-columns: 146px minmax(0,1fr); }
+  .model-settings__main { padding: 21px 18px; }
+  .model-provider { grid-template-columns: 34px minmax(120px,1fr) auto; }
+  .model-provider__model { display: none; }
+}
+@media (max-width: 680px) {
+  .model-settings__frame { grid-template-columns: 1fr; }
+  .model-settings__nav { display: none; }
+  .model-settings__main { padding: 18px 14px; }
+  .model-settings__heading p { max-width: 360px; }
+}
+@media (max-width: 640px) {
+  .agent-model-settings__choices { grid-template-columns: 1fr; }
+  .dispatch-settings__row { grid-template-columns: 1fr; gap: 5px; }
+  .dispatch-settings__row-label { padding-top: 0; }
+  .dispatch-settings__row-body { max-width: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .model-settings { animation-duration: 1ms; }
+}
+
+/* 新增「模型分配」区域：复用 workspace token、11/12/13px 字号、10px 卡圆角、
+   34px 控件高度与现有设置按钮样式；不引入新主题。 */
+.model-allocation { display: grid; gap: 14px; margin-top: 22px; padding-top: 20px; border-top: 1px solid var(--workspace-line); color: var(--workspace-text); }
+.model-allocation__section { display: grid; gap: 10px; }
+.model-allocation__header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.model-allocation__header > div { display: grid; gap: 4px; }
+.model-allocation h2 { margin: 0; color: var(--workspace-text); font-size: 13px; font-weight: 680; }
+.model-allocation p { margin: 0; color: var(--workspace-muted); font-size: 11px; line-height: 1.65; }
+.model-allocation__card { padding: 2px 14px 0; border: 1px solid var(--workspace-line); border-radius: 10px; background: var(--workspace-panel-muted); }
+.model-allocation__head, .model-allocation__row { display: grid; grid-template-columns: 76px minmax(0,1.05fr) minmax(0,1fr); gap: 4px 16px; align-items: start; }
+.model-allocation__head { padding: 10px 0 8px; border-bottom: 1px solid var(--workspace-line); color: var(--workspace-muted); font-size: 10px; font-weight: 650; }
+.model-allocation__row { padding: 12px 0; border-bottom: 1px solid var(--workspace-line); }
+.model-allocation__row:last-of-type { border-bottom: 0; }
+.model-allocation__role { padding-top: 9px; font-size: 12px; font-weight: 650; line-height: 1.4; }
+.model-allocation__field { display: grid; gap: 5px; min-width: 0; }
+.model-allocation__field select { width: 100%; min-height: 34px; padding: 6px 9px; border: 1px solid var(--workspace-line-strong); border-radius: 7px; color: inherit; background: var(--workspace-panel); font: inherit; font-size: 12px; }
+.model-allocation__field select:focus-visible, .model-allocation__actions button:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: 2px; }
+.model-allocation__field select:disabled { opacity: .55; }
+.model-allocation__account { color: var(--workspace-muted); font-size: 10px; line-height: 1.5; overflow-wrap: anywhere; }
+.model-allocation__target { grid-column: 2 / -1; font-size: 10px; line-height: 1.55; }
+.model-allocation__error { grid-column: 2 / -1; color: #b34d47 !important; font-size: 11px; line-height: 1.55; }
+.model-allocation__privacy { padding: 0 2px; }
+.model-allocation__actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding: 2px 0 14px; }
+.model-allocation__actions button { min-height: 32px; padding: 0 14px; border: 1px solid var(--workspace-line-strong); border-radius: 7px; color: var(--workspace-text); background: var(--workspace-panel); font-size: 11px; font-weight: 650; cursor: pointer; }
+.model-allocation__actions button:hover:not(:disabled):not([aria-disabled="true"]) { border-color: var(--workspace-accent); color: var(--workspace-accent); }
+.model-allocation__actions button.primary { border-color: var(--workspace-accent); color: #fff; background: var(--workspace-accent); }
+.model-allocation__actions button.primary:hover:not(:disabled):not([aria-disabled="true"]) { color: #fff; filter: brightness(.98); }
+.model-allocation__actions button:disabled, .model-allocation__actions button[aria-disabled="true"] { opacity: .5; cursor: default; }
+.model-allocation__status { display: inline-flex; align-items: center; padding: 3px 9px; border-radius: 999px; background: rgba(34,150,90,.12); color: #16794b; font-size: 11px; font-weight: 600; line-height: 1.5; }
+.model-allocation__row.is-invalid, .model-allocation__row[aria-invalid="true"] { background: color-mix(in srgb, var(--provider-inline-error-bg) 48%, transparent); }
+.model-allocation__row.is-invalid .model-allocation__role, .model-allocation__row[aria-invalid="true"] .model-allocation__role { color: #a13d39; }
+.model-allocation__row.is-invalid select, .model-allocation__row[aria-invalid="true"] select { border-color: #b34d47; }
+.model-allocation select[aria-invalid="true"] { border-color: #b34d47; background: var(--provider-inline-error-bg); }
+.model-allocation__row.is-invalid .model-allocation__error, .model-allocation__row[aria-invalid="true"] .model-allocation__error { display: block; }
+
+@media (max-width: 640px) {
+  .model-allocation__head { display: none; }
+  .model-allocation__row { grid-template-columns: 1fr; gap: 9px; padding: 14px 0; }
+  .model-allocation__role { padding-top: 0; }
+  .model-allocation__field::before { content: attr(data-label); color: var(--workspace-muted); font-size: 10px; font-weight: 650; }
+  .model-allocation__target, .model-allocation__error { grid-column: 1 / -1; }
+}
+
+/* 独立原型演示 footer：使用同一 workspace token，但位于 app-stage 之外。 */
+.prototype-demo { flex: none; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 16px; padding: 10px 16px; border-top: 1px solid var(--workspace-line-strong); background: var(--workspace-panel); color: var(--workspace-muted); font-size: 11px; line-height: 1.5; }
+.prototype-demo__label { display: inline-flex; align-items: center; gap: 7px; min-width: 0; }
+.prototype-demo__badge { padding: 2px 7px; border-radius: 999px; color: var(--workspace-accent); background: var(--workspace-accent-soft); font-size: 10px; font-weight: 650; white-space: nowrap; }
+.prototype-demo__control { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.prototype-demo__control label { color: var(--workspace-muted); font-size: 10px; font-weight: 650; }
+.prototype-demo select { min-height: 30px; padding: 4px 9px; border: 1px solid var(--workspace-line-strong); border-radius: 7px; color: var(--workspace-text); background: var(--workspace-panel); font: inherit; font-size: 11px; }
+.prototype-demo select:focus-visible, .prototype-demo button:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: 2px; }
+.prototype-demo button { min-height: 30px; padding: 0 12px; border: 1px solid var(--workspace-line-strong); border-radius: 7px; color: var(--workspace-text); background: var(--workspace-panel-muted); font-size: 11px; font-weight: 650; cursor: pointer; }
+.prototype-demo button:hover { border-color: var(--workspace-accent); color: var(--workspace-accent); }
+</style>
+</head>
+<body>
+<div class="app-stage">
+  <section class="model-settings provider-settings" aria-label="模型切换设置">
+    <div class="model-settings__frame">
+      <nav class="model-settings__nav" aria-label="设置分类">
+        <span class="model-settings__section-label">AI 服务</span>
+        <button class="model-settings__nav-item is-active" type="button" aria-current="true">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></svg>
+          <span>Claude Code</span>
+        </button>
+        <span class="model-settings__section-label">通用</span>
+        <button class="model-settings__nav-item" type="button">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c2.4 2.3 3.6 5.2 3.6 8.5s-1.2 6.2-3.6 8.5c-2.4-2.3-3.6-5.2-3.6-8.5S9.6 5.8 12 3.5Z"/></svg>
+          <span>语言与时区</span>
+        </button>
+        <p>供应商与上下文配置将同步影响所有 码头 窗口。</p>
+      </nav>
+      <main class="model-settings__main">
+        <header class="model-settings__heading">
+          <div>
+            <h1>Claude Code</h1>
+            <p>配置 Claude Code 的服务供应商、各通道上下文窗口与对话压缩模型。</p>
+          </div>
+          <button type="button" aria-label="关闭设置">×</button>
+        </header>
+
+        <div class="model-settings__toolbar">
+          <h2>服务供应商 <span>3 个配置</span></h2>
+          <button type="button">＋ 新增供应商</button>
+        </div>
+
+        <div class="model-settings__providers">
+          <article class="model-provider is-current">
+            <span class="model-provider__logo tone-anthropic" aria-hidden="true">C</span>
+            <div class="model-provider__name">
+              <strong>Claude 官方<i>使用中</i><i class="model-provider__window-badge">默认 1M 窗口</i></strong>
+              <span>api.anthropic.com</span>
+            </div>
+            <div class="model-provider__model">
+              <strong>CLI 默认</strong>
+              <span>默认模型</span>
+            </div>
+            <div class="model-provider__actions">
+              <button type="button">编辑</button>
+              <button class="primary" type="button" disabled>默认使用</button>
+            </div>
+          </article>
+
+          <article class="model-provider model-provider--subscription">
+            <span class="model-provider__logo tone-openai" aria-hidden="true">C</span>
+            <div class="model-provider__name">
+              <strong>ChatGPT 演示账号<i class="model-provider__window-badge">512K 窗口</i></strong>
+              <span class="model-provider__account" id="demo-account-summary">demo@matou.invalid · Plus · 已登录</span>
+              <span class="model-provider__quota" id="demo-account-quota" title="演示数据，不读取真实账号">已登录 · 演示额度未读取</span>
+            </div>
+            <div class="model-provider__model">
+              <strong>GPT 演示模型 A</strong>
+              <span>默认模型</span>
+            </div>
+            <div class="model-provider__actions">
+              <button type="button">编辑</button>
+              <button class="primary" type="button">切换</button>
+            </div>
+          </article>
+
+          <article class="model-provider">
+            <span class="model-provider__logo tone-custom" aria-hidden="true">D</span>
+            <div class="model-provider__name">
+              <strong>DeepSeek<i class="model-provider__window-badge">默认窗口</i></strong>
+              <span>api.deepseek.com/anthropic</span>
+            </div>
+            <div class="model-provider__model">
+              <strong>DeepSeek 演示模型 A</strong>
+              <span>默认模型 · Key 已配置</span>
+            </div>
+            <div class="model-provider__actions">
+              <button type="button">编辑</button>
+              <button class="primary" type="button">切换</button>
+            </div>
+          </article>
+        </div>
+
+        <p class="model-settings__impact">
+          <span aria-hidden="true">ⓘ</span>
+          <span><b>切换会影响所有 码头 窗口。</b> 所有 Claude Code 会话跟随全局供应商；暂缓会话就绪后自动切换，旧会话再次打开时也会应用，历史保留。上下文窗口可在「编辑」中设置。</span>
+        </p>
+
+        <section class="model-allocation" aria-label="模型分配">
+          <section class="model-allocation__section" aria-labelledby="model-allocation-heading">
+            <header class="model-allocation__header">
+              <div>
+                <h2 id="model-allocation-heading">模型分配</h2>
+                <p>为不同档位指定供应商和模型，未指定时沿用默认供应商。</p>
+              </div>
+            </header>
+            <div class="model-allocation__card">
+              <div class="model-allocation__head" aria-hidden="true">
+                <span>档位</span>
+                <span>供应商 / 账号</span>
+                <span>模型</span>
+              </div>
+              <div class="model-allocation__row" id="opus-row">
+                <div class="model-allocation__role"><strong>Opus</strong></div>
+                <div class="model-allocation__field" data-label="供应商 / 账号">
+                  <select id="opus-provider" aria-label="Opus 供应商" aria-describedby="opus-target opus-error">
+                    <option value="follow">沿用默认供应商</option>
+                    <option value="official">Claude 官方</option>
+                    <option value="chatgpt" selected>ChatGPT 演示账号</option>
+                    <option value="deepseek">DeepSeek</option>
+                  </select>
+                  <span class="model-allocation__account" id="opus-account">demo@matou.invalid · Plus · 已登录</span>
+                </div>
+                <div class="model-allocation__field" data-label="模型">
+                  <select id="opus-model" aria-label="Opus 模型" aria-describedby="opus-target opus-error">
+                    <option value="gpt-demo-a" selected>GPT 演示模型 A</option>
+                    <option value="gpt-demo-b">GPT 演示模型 B</option>
+                  </select>
+                </div>
+                <p class="model-allocation__target" id="opus-target">当前目标：ChatGPT 演示账号 · GPT 演示模型 A（演示数据）</p>
+                <p class="model-allocation__error" id="opus-error" role="alert" hidden></p>
+              </div>
+              <div class="model-allocation__row" id="sonnet-row">
+                <div class="model-allocation__role"><strong>Sonnet</strong></div>
+                <div class="model-allocation__field" data-label="供应商 / 账号">
+                  <select id="sonnet-provider" aria-label="Sonnet 供应商" aria-describedby="sonnet-target sonnet-error">
+                    <option value="follow">沿用默认供应商</option>
+                    <option value="official">Claude 官方</option>
+                    <option value="chatgpt">ChatGPT 演示账号</option>
+                    <option value="deepseek" selected>DeepSeek</option>
+                  </select>
+                  <span class="model-allocation__account" id="sonnet-account">api.deepseek.com · 演示 Key 已配置</span>
+                </div>
+                <div class="model-allocation__field" data-label="模型">
+                  <select id="sonnet-model" aria-label="Sonnet 模型" aria-describedby="sonnet-target sonnet-error">
+                    <option value="deepseek-demo-a" selected>DeepSeek 演示模型 A</option>
+                    <option value="deepseek-demo-b">DeepSeek 演示模型 B</option>
+                  </select>
+                </div>
+                <p class="model-allocation__target" id="sonnet-target">当前目标：DeepSeek · DeepSeek 演示模型 A（演示数据）</p>
+                <p class="model-allocation__error" id="sonnet-error" role="alert" hidden></p>
+              </div>
+              <div class="model-allocation__row" id="haiku-row">
+                <div class="model-allocation__role"><strong>Haiku</strong></div>
+                <div class="model-allocation__field" data-label="供应商 / 账号">
+                  <select id="haiku-provider" aria-label="Haiku 供应商" aria-describedby="haiku-target haiku-error">
+                    <option value="follow" selected>沿用默认供应商</option>
+                    <option value="official">Claude 官方</option>
+                    <option value="chatgpt">ChatGPT 演示账号</option>
+                    <option value="deepseek">DeepSeek</option>
+                  </select>
+                  <span class="model-allocation__account" id="haiku-account">Claude 官方 · 默认供应商</span>
+                </div>
+                <div class="model-allocation__field" data-label="模型">
+                  <select id="haiku-model" aria-label="Haiku 模型" aria-describedby="haiku-target haiku-error" disabled>
+                    <option value="follow" selected>Haiku 默认模型</option>
+                  </select>
+                </div>
+                <p class="model-allocation__target" id="haiku-target">最终：Claude 官方（当前默认供应商） · Haiku 默认模型</p>
+                <p class="model-allocation__error" id="haiku-error" role="alert" hidden></p>
+              </div>
+            </div>
+            <p class="model-allocation__privacy">使用指定供应商时，请求所需的对话内容会发送给该供应商。</p>
+            <div class="model-allocation__footer">
+              <p class="model-allocation__scope">拟定：新会话使用此分配，正在运行的会话不受影响</p>
+              <div class="model-allocation__actions">
+                <button type="button" id="restore-allocation">恢复默认</button>
+                <button type="button" class="primary" id="save-allocation" disabled>保存分配</button>
+                <span class="model-allocation__status" id="allocation-status" role="status" hidden></span>
+              </div>
+            </div>
+          </section>
+        </section>
+
+        <section class="agent-model-settings" aria-label="对话压缩模型设置">
+          <section class="agent-model-settings__section" aria-labelledby="agent-compaction-heading">
+            <div class="agent-model-settings__header">
+              <div>
+                <h2 id="agent-compaction-heading">对话压缩模型</h2>
+                <p>长对话触发 /compact 时，默认跟随会话模型；也可单独指定轻量快模型生成摘要，减少高推理档位下的等待。</p>
+              </div>
+            </div>
+            <div class="agent-model-settings__card">
+              <fieldset class="agent-model-settings__fieldset">
+                <legend class="visually-hidden">压缩配置</legend>
+                <div class="agent-model-settings__choices agent-model-settings__choices--two">
+                  <label class="agent-model-settings__choice is-selected">
+                    <input type="radio" name="agent-compaction-mode" value="follow" checked>
+                    <span><strong>跟随会话</strong><small>使用会话当前的模型和推理强度</small></span>
+                  </label>
+                  <label class="agent-model-settings__choice">
+                    <input type="radio" name="agent-compaction-mode" value="custom">
+                    <span><strong>独立配置</strong><small>仅影响压缩请求，不改变工作模型</small></span>
+                  </label>
+                </div>
+              </fieldset>
+            </div>
+          </section>
+        </section>
+
+        <section class="dispatch-settings" aria-label="派活设置">
+          <section class="dispatch-settings__section" aria-labelledby="dispatch-settings-heading">
+            <header class="dispatch-settings__header">
+              <div>
+                <h2 id="dispatch-settings-heading">派活</h2>
+                <p>设置新派任务的全局默认执行者、模型、时限与重试次数。</p>
+              </div>
+            </header>
+            <div class="dispatch-settings__card">
+              <div class="dispatch-settings__row">
+                <label class="dispatch-settings__row-label" for="dispatch-agent">默认执行者</label>
+                <div class="dispatch-settings__row-body">
+                  <select id="dispatch-agent" aria-label="默认执行者">
+                    <option value="codex" selected>Codex</option>
+                    <option value="agy">Antigravity</option>
+                    <option value="dsh">DSH</option>
+                  </select>
+                </div>
+              </div>
+              <div class="dispatch-settings__row">
+                <label class="dispatch-settings__row-label" for="dispatch-model">默认模型</label>
+                <div class="dispatch-settings__row-body">
+                  <select id="dispatch-model" aria-label="默认模型">
+                    <option value="sol" selected>sol</option>
+                    <option value="best">best</option>
+                    <option value="astra">astra</option>
+                    <option value="terra">terra</option>
+                    <option value="luna">luna</option>
+                  </select>
+                </div>
+              </div>
+              <div class="dispatch-settings__row">
+                <label class="dispatch-settings__row-label" for="dispatch-effort">推理档位</label>
+                <div class="dispatch-settings__row-body">
+                  <select id="dispatch-effort" aria-label="推理档位">
+                    <option value="low">低</option>
+                    <option value="medium">中</option>
+                    <option value="high" selected>高</option>
+                    <option value="xhigh">超高</option>
+                  </select>
+                </div>
+              </div>
+              <div class="dispatch-settings__row">
+                <label class="dispatch-settings__row-label" for="dispatch-idleMin">没动静判卡</label>
+                <div class="dispatch-settings__row-body">
+                  <div class="dispatch-settings__number">
+                    <input id="dispatch-idleMin" type="number" inputmode="decimal" step="any" min="1" max="60" aria-label="没动静判卡" value="10">
+                    <span class="dispatch-settings__unit">分钟</span>
+                  </div>
+                </div>
+              </div>
+              <div class="dispatch-settings__row">
+                <label class="dispatch-settings__row-label" for="dispatch-maxMin">单轮最长</label>
+                <div class="dispatch-settings__row-body">
+                  <div class="dispatch-settings__number">
+                    <input id="dispatch-maxMin" type="number" inputmode="decimal" step="any" min="5" max="180" aria-label="单轮最长" value="45">
+                    <span class="dispatch-settings__unit">分钟</span>
+                  </div>
+                </div>
+              </div>
+              <div class="dispatch-settings__row">
+                <label class="dispatch-settings__row-label" for="dispatch-askWaitMin">等回答</label>
+                <div class="dispatch-settings__row-body">
+                  <div class="dispatch-settings__number">
+                    <input id="dispatch-askWaitMin" type="number" inputmode="decimal" step="any" min="1" max="60" aria-label="等回答" value="10">
+                    <span class="dispatch-settings__unit">分钟</span>
+                  </div>
+                </div>
+              </div>
+              <div class="dispatch-settings__row">
+                <label class="dispatch-settings__row-label" for="dispatch-retries">重试次数</label>
+                <div class="dispatch-settings__row-body">
+                  <div class="dispatch-settings__number">
+                    <input id="dispatch-retries" type="number" inputmode="numeric" step="1" min="0" max="5" aria-label="重试次数" value="3">
+                  </div>
+                </div>
+              </div>
+              <div class="dispatch-settings__actions">
+                <button type="button">恢复默认</button>
+              </div>
+            </div>
+            <p class="dispatch-settings__scope">只影响新派的任务；单个任务仍可用命令行参数覆盖。</p>
+            <p class="dispatch-settings__path">
+              <span>配置文件</span>
+              <code title="~/.claude/agent-foreman/config.json">~/.claude/agent-foreman/config.json</code>
+            </p>
+          </section>
+        </section>
+      </main>
+    </div>
+  </section>
+</div>
+
+<footer class="prototype-demo" aria-label="本地交互原型控制">
+  <div class="prototype-demo__label">
+    <span class="prototype-demo__badge" aria-hidden="true">演示</span>
+    <span>本地交互原型 · 所有账号及模型为演示数据</span>
+  </div>
+  <div class="prototype-demo__control">
+    <label for="demo-scenario">演示状态</label>
+    <select id="demo-scenario" aria-label="演示状态">
+      <option value="normal" selected>正常</option>
+      <option value="account-expired">ChatGPT 账号失效</option>
+      <option value="model-unavailable">DeepSeek 模型不可用</option>
+    </select>
+    <button type="button" id="reset-demo">重置演示</button>
+  </div>
+</footer>
+<script>
+(() => {
+  'use strict';
+
+  // This prototype keeps demonstration choices in page memory only.
+  const tiers = ['opus', 'sonnet', 'haiku'];
+  const labels = { opus: 'Opus', sonnet: 'Sonnet', haiku: 'Haiku' };
+  const providers = {
+    follow: { name: 'Claude 官方（当前默认供应商）', models: [] },
+    official: { name: 'Claude 官方', models: [
+      ['claude-demo-a', 'Claude 演示模型 A'], ['claude-demo-b', 'Claude 演示模型 B']
+    ] },
+    chatgpt: { name: 'ChatGPT 演示账号', models: [
+      ['gpt-demo-a', 'GPT 演示模型 A'], ['gpt-demo-b', 'GPT 演示模型 B']
+    ] },
+    deepseek: { name: 'DeepSeek', models: [
+      ['deepseek-demo-a', 'DeepSeek 演示模型 A'], ['deepseek-demo-b', 'DeepSeek 演示模型 B']
+    ] }
+  };
+  const initial = {
+    opus: { provider: 'chatgpt', model: 'gpt-demo-a' },
+    sonnet: { provider: 'deepseek', model: 'deepseek-demo-a' },
+    haiku: { provider: 'follow', model: 'follow' }
+  };
+  const copy = value => Object.fromEntries(tiers.map(tier => [tier, { ...value[tier] }]));
+  const byId = id => {
+    const element = document.getElementById(id);
+    if (!element) throw new Error(`Prototype element missing: ${id}`);
+    return element;
+  };
+  const fields = Object.fromEntries(tiers.map(tier => [tier, {
+    provider: byId(`${tier}-provider`),
+    model: byId(`${tier}-model`),
+    target: byId(`${tier}-target`),
+    account: byId(`${tier}-account`),
+    error: byId(`${tier}-error`),
+    row: byId(`${tier}-row`)
+  }]));
+  const save = byId('save-allocation');
+  const restore = byId('restore-allocation');
+  const status = byId('allocation-status');
+  const scenarioSelect = byId('demo-scenario');
+  let draft = copy(initial);
+  let saved = copy(initial);
+  let scenario = 'normal';
+  let notice = '';
+
+  function validation(tier) {
+    const choice = draft[tier];
+    if (!providers[choice.provider]) return { field: 'provider', text: '请选择供应商。' };
+    if (choice.provider === 'follow') return null;
+    if (scenario === 'account-expired' && choice.provider === 'chatgpt') {
+      return { field: 'provider', text: '演示账号已失效，原选择已保留。请重新选择可用供应商后再保存。' };
+    }
+    if (!providers[choice.provider].models.some(([id]) => id === choice.model)) {
+      return { field: 'model', text: '请选择模型后再保存。' };
+    }
+    if (scenario === 'model-unavailable' && choice.provider === 'deepseek' && choice.model === 'deepseek-demo-a') {
+      return { field: 'model', text: '演示模型不可用，原选择已保留。请改选模型或供应商后再保存。' };
+    }
+    return null;
+  }
+
+  function render() {
+    let invalid = false;
+    for (const tier of tiers) {
+      const choice = draft[tier];
+      const field = fields[tier];
+      const provider = providers[choice.provider];
+      field.provider.value = choice.provider;
+      const catalogKey = choice.provider;
+      if (field.model.dataset.catalog !== catalogKey) {
+        const options = choice.provider === 'follow'
+          ? [new Option(`${labels[tier]} 默认模型`, 'follow')]
+          : [new Option('请选择模型', ''), ...provider.models.map(([id, name]) => new Option(name, id))];
+        if (choice.provider !== 'follow') options[0].disabled = true;
+        field.model.replaceChildren(...options);
+        field.model.dataset.catalog = catalogKey;
+      }
+      field.model.value = choice.model;
+      field.model.disabled = choice.provider === 'follow';
+      field.account.textContent = choice.provider === 'follow'
+        ? 'Claude 官方 · 当前默认供应商'
+        : choice.provider === 'chatgpt'
+          ? scenario === 'account-expired'
+            ? 'demo@matou.invalid · 演示账号已失效'
+            : 'demo@matou.invalid · Plus · 已登录（演示）'
+          : choice.provider === 'deepseek' ? '演示 Key 已配置' : 'Claude 官方 · 演示配置';
+      const modelName = provider.models.find(([id]) => id === choice.model)?.[1];
+      field.target.textContent = choice.provider === 'follow'
+        ? `最终：Claude 官方（当前默认供应商） · ${labels[tier]} 默认模型`
+        : `目标：${provider.name} · ${modelName || '待选择模型'}`;
+      const error = validation(tier);
+      invalid ||= Boolean(error);
+      field.error.textContent = error?.text || '';
+      field.error.hidden = !error;
+      field.row.classList.toggle('is-invalid', Boolean(error));
+      for (const key of ['provider', 'model']) {
+        field[key].setAttribute('aria-invalid', String(error?.field === key));
+        field[key].setAttribute('aria-describedby', `${tier}-target${error ? ` ${tier}-error` : ''}`);
+      }
+    }
+    const unchanged = JSON.stringify(draft) === JSON.stringify(saved);
+    // Keep the focused success action in place; its handler still rejects repeats.
+    // Initial and invalid choices use the native disabled state.
+    save.disabled = invalid || (unchanged && !notice);
+    save.setAttribute('aria-disabled', String(invalid || unchanged));
+    status.textContent = notice;
+    status.hidden = !notice;
+    scenarioSelect.value = scenario;
+    byId('demo-account-summary').textContent = scenario === 'account-expired'
+      ? 'demo@matou.invalid · 演示账号已失效'
+      : 'demo@matou.invalid · Plus · 已登录';
+    byId('demo-account-quota').textContent = scenario === 'account-expired'
+      ? '演示失效状态 · 账号选择已保留'
+      : '已登录 · 演示额度未读取';
+  }
+
+  for (const tier of tiers) {
+    fields[tier].provider.addEventListener('change', event => {
+      const provider = event.target.value;
+      draft[tier] = { provider, model: provider === 'follow' ? 'follow' : '' };
+      notice = '';
+      render();
+    });
+    fields[tier].model.addEventListener('change', event => {
+      draft[tier].model = event.target.value;
+      notice = '';
+      render();
+    });
+  }
+  save.addEventListener('click', () => {
+    if (tiers.some(tier => validation(tier))) { notice = ''; render(); return; }
+    if (JSON.stringify(draft) === JSON.stringify(saved)) return;
+    saved = copy(draft);
+    notice = '演示配置已保存，未修改真实设置';
+    render();
+  });
+  restore.addEventListener('click', () => {
+    draft = Object.fromEntries(tiers.map(tier => [tier, { provider: 'follow', model: 'follow' }]));
+    notice = '';
+    render();
+  });
+  scenarioSelect.addEventListener('change', event => {
+    scenario = event.target.value;
+    notice = '';
+    render();
+  });
+  byId('reset-demo').addEventListener('click', () => {
+    draft = copy(initial);
+    saved = copy(initial);
+    scenario = 'normal';
+    notice = '';
+    render();
+  });
+  render();
+})();
+</script>
+</body>
+</html>

@@ -7,7 +7,8 @@ describe('session environment RPC contracts', () => {
     'session.environment-open',
     'session.environment-restore',
     'session.environment-locate',
-    'session.environment-handoff'
+    'session.environment-handoff',
+    'session.environment-isolate'
   ] as const)('accepts %s as a renderer RPC method', (method) => {
     expect(parseRendererMessage({
       type: 'rpc.request',

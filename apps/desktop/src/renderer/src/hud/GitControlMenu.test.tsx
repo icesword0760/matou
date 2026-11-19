@@ -1,11 +1,12 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, within } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import type { GitRepositoryStatus, RpcMethod } from '@matou/contracts'
 
 import { GitControlMenu, type GitRequestClient } from './GitControlMenu'
+import { LocaleProvider } from '../i18n/LocaleProvider'
 
 afterEach(() => {
   cleanup()
@@ -55,6 +56,127 @@ describe('GitControlMenu', () => {
     expect(request).toHaveBeenCalledWith('git.checkout', expect.objectContaining({
       input: expect.objectContaining({ branch: 'feature/one' })
     }), { timeoutMs: 120_000 })
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+  })
+
+  it('warns for shared local sessions and leaves Git untouched on every cancellation path', async () => {
+    const user = userEvent.setup()
+    const { client, request } = clientFor(status({ stagedCount: 1, unstagedCount: 1, untrackedCount: 1 }))
+    const onClose = vi.fn()
+    render(<GitControlMenu client={client} cwd="/Users/me/projects/team/repo" sessionId="session-1"
+      environmentKind="local" sharedWorkingDirectory sharedSessionCount={3} onClose={onClose} />)
+
+    const search = await screen.findByPlaceholderText('搜索 matou 分支')
+    await user.type(search, '{ArrowDown}{Enter}')
+    const dialog = screen.getByRole('alertdialog', { name: '切换分支会影响其他会话' })
+    expect(within(dialog).getByText(
+      '这个会话和另外 2 个会话共用 …/projects/team/repo。直接切换会把它们一起带到「feature/one」，未提交的修改也会一起过去。'
+    )).toBeTruthy()
+    expect(within(dialog).getByText('当前有 3 个未提交文件，新建 Worktree 后它们会留在原目录。')).toBeTruthy()
+    const buttons = within(dialog).getAllByRole('button')
+    expect(buttons.map((button) => button.textContent)).toEqual([
+      '取消', '切换整个目录', '新建独立 Worktree 并切换'
+    ])
+    expect(buttons[0]).toBe(document.activeElement)
+    await user.tab({ shift: true })
+    expect(buttons[2]).toBe(document.activeElement)
+    await user.tab()
+    expect(buttons[0]).toBe(document.activeElement)
+    await user.keyboard('{Escape}')
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    expect(document.activeElement).toBe(search)
+
+    const branch = screen.getByRole('option', { name: 'feature/one' })
+    await user.click(branch)
+    const overlay = screen.getByRole('alertdialog').parentElement!
+    fireEvent.pointerDown(overlay)
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    await user.click(branch)
+    await user.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: '取消' }))
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    expect(onClose).not.toHaveBeenCalled()
+    expect(request.mock.calls.map(([method]) => method)).toEqual(['git.status'])
+  })
+
+  it('performs whole-directory checkout only after confirmation and skips the prompt after committing', async () => {
+    const user = userEvent.setup()
+    const initial = status({ unstagedCount: 1, dirty: true })
+    const { client, request } = clientFor(initial)
+    request.mockImplementationOnce(async () => initial).mockImplementationOnce(async () => ({
+      kind: 'blocked-by-working-tree-changes', targetBranch: 'feature/one',
+      conflictingPaths: ['README.md'], status: initial
+    }))
+    render(<GitControlMenu client={client} cwd="/repo" sessionId="session-1" environmentKind="local"
+      sharedWorkingDirectory sharedSessionCount={2} onClose={vi.fn()} />)
+
+    await user.click(await screen.findByRole('option', { name: 'feature/one' }))
+    await user.click(screen.getByRole('button', { name: '切换整个目录' }))
+    await user.click(await screen.findByRole('button', { name: /填写提交/ }))
+    await user.click(screen.getByRole('button', { name: '提交' }))
+
+    expect(request.mock.calls.filter(([method]) => method !== 'git.status').map(([method]) => method))
+      .toEqual(['git.checkout', 'git.commit', 'git.checkout'])
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+  })
+
+  it('keeps the menu open on isolation failure and refreshes an occupied branch into a disabled row', async () => {
+    const user = userEvent.setup()
+    const initial = status()
+    const { client, request } = clientFor(initial)
+    const onClose = vi.fn()
+    request.mockImplementationOnce(async () => initial).mockImplementationOnce(async () => ({
+      kind: 'rejected', reason: 'branch-checked-out', message: '目标分支已在 /repo-other 检出',
+      status: status({ branches: initial.branches.map((branch) => branch.name === 'feature/one'
+        ? { ...branch, checkedOutPath: '/repo-other' } : branch) })
+    }))
+    render(<GitControlMenu client={client} cwd="/repo" sessionId="session-1" environmentKind="local"
+      sharedWorkingDirectory sharedSessionCount={2} onClose={onClose} />)
+
+    await user.click(await screen.findByRole('option', { name: 'feature/one' }))
+    await user.click(screen.getByRole('button', { name: '新建独立 Worktree 并切换' }))
+
+    expect(request).toHaveBeenCalledWith('session.environment-isolate', expect.objectContaining({
+      input: { sessionId: 'session-1', branch: 'feature/one', now: expect.any(Number) }
+    }), { timeoutMs: 120_000 })
+    expect(await screen.findByText('目标分支已在 /repo-other 检出')).toBeTruthy()
+    expect(screen.getByRole('option', { name: /feature\/one/ })).toHaveProperty('disabled', true)
+    expect(screen.getByRole('button', { name: '刷新' })).toBeTruthy()
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    expect(onClose).not.toHaveBeenCalled()
+  })
+
+  it.each(['local', 'worktree'] as const)('switches directly with an isolated %s environment', async (kind) => {
+    const user = userEvent.setup()
+    const { client, request } = clientFor(status())
+    render(<GitControlMenu client={client} cwd="/repo" sessionId="session-1" environmentKind={kind}
+      sharedWorkingDirectory={kind === 'worktree'} sharedSessionCount={kind === 'worktree' ? 2 : 1}
+      onClose={vi.fn()} />)
+
+    await user.click(await screen.findByRole('option', { name: 'feature/one' }))
+
+    expect(request.mock.calls.map(([method]) => method)).toEqual(['git.status', 'git.checkout'])
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+  })
+
+  it('uses the specified English copy and one highlighted isolation action', async () => {
+    const user = userEvent.setup()
+    const { client } = clientFor(status({ untrackedCount: 2 }))
+    render(<LocaleProvider initialLocale="en"><GitControlMenu client={client} cwd="/repo" sessionId="session-1"
+      environmentKind="local" sharedWorkingDirectory sharedSessionCount={3} onClose={vi.fn()} /></LocaleProvider>)
+
+    await user.click(await screen.findByRole('option', { name: 'feature/one' }))
+    const dialog = screen.getByRole('alertdialog', { name: 'Switching branches affects other sessions' })
+    expect(within(dialog).getByText(
+      'This session shares /repo with 2 other sessions. Switching here takes all of them to “feature/one”, including uncommitted changes.'
+    )).toBeTruthy()
+    expect(within(dialog).getByText(
+      'Create a separate worktree for this session to switch only this one; other sessions stay as they are. This session restarts in the new directory.'
+    )).toBeTruthy()
+    expect(within(dialog).getByText('2 uncommitted files will stay in the original directory when the worktree is created.')).toBeTruthy()
+    const buttons = within(dialog).getAllByRole('button')
+    expect(buttons.map((button) => button.textContent))
+      .toEqual(['Cancel', 'Switch the whole directory', 'Create worktree and switch'])
+    expect(buttons.filter((button) => button.classList.contains('dialog-primary'))).toEqual([buttons[2]])
   })
 
   it('creates a branch from the inline second-level view', async () => {

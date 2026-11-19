@@ -1,0 +1,44 @@
+(node:58573) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+Running 2 tests using 1 worker
+
+(node:58587) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+
+(node:58587) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+
+[1/2] tests/e2e/codex-acceptance.spec.ts:653:3 › Codex packaged acceptance — real CLI and explicit controlled fixtures › known issues: a real Codex model error notifies once and marks the card error; startup upgrade is disabled
+  1) tests/e2e/codex-acceptance.spec.ts:653:3 › Codex packaged acceptance — real CLI and explicit controlled fixtures › known issues: a real Codex model error notifies once and marks the card error; startup upgrade is disabled
+
+    Error: expect(received).toBe(expected) // Object.is equality
+
+    Expected: true
+    Received: false
+
+    Call Log:
+    - Timeout 20000ms exceeded while waiting on the predicate
+
+      678 |       const providerId = await waitForProviderSessionId(h.dataDir, sid)
+      679 |       await expect.poll(async () => (await rolloutEvents(h, providerId))
+    > 680 |         .some(e => e.type === 'event_msg' && e.payload?.type === 'task_complete' && e.payload.error), { timeout: 20_000 }).toBe(true)
+          |                                                                                                                            ^
+      681 |       await expect.poll(() => readCurrentWorkStatus(h.dataDir, sid)?.status, { timeout: 10_000 }).toBe('error')
+      682 |       await waitForDagNodeStatus(dagPage, sid, 'status-error')
+      683 |       await expect(paneForSession(h.page, sid)).toHaveClass(/has-notification/)
+        at /Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tests/e2e/codex-acceptance.spec.ts:680:124
+
+    Error Context: .cache/c10/playwright-results/codex-acceptance-Codex-pac-add21-startup-upgrade-is-disabled/error-context.md
+
+
+(node:62351) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+
+(node:62351) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+
+[2/2] tests/e2e/codex-acceptance.spec.ts:705:3 › Codex packaged acceptance — real CLI and explicit controlled fixtures › known issues: history_base ancestor appears in preview and search; missing parent is labeled
+  1 failed
+    tests/e2e/codex-acceptance.spec.ts:653:3 › Codex packaged acceptance — real CLI and explicit controlled fixtures › known issues: a real Codex model error notifies once and marks the card error; startup upgrade is disabled
+  1 passed (33.3s)

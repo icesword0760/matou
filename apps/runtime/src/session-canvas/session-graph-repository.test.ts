@@ -92,6 +92,7 @@ describe('SessionGraphRepository', () => {
     ]))
     expect(graph.nodes.find(({ sessionId }) => sessionId === 'parent')).toMatchObject({
       sharedWorkingDirectory: true,
+      sharedSessionCount: 4,
       activeChildCount: 2,
       stoppedChildCount: 1,
       childModeCounts: { shell: 1, claudeCode: 1 }
@@ -378,6 +379,29 @@ describe('SessionGraphRepository', () => {
       expect(graph.nodes.find(({ sessionId }) => sessionId === id))
         .toMatchObject({ sharedWorkingDirectory: true })
     }
+  })
+
+  it('counts sessions in another task of the same workspace and excludes archived sessions', () => {
+    database.run(
+      `INSERT INTO tasks (id, workspace_id, execution_context_id, title, status, created_at, updated_at)
+       VALUES ('other-task', 'workspace', 'context', 'Other task', 'active', 1, 1)`
+    )
+    database.run(
+      `INSERT INTO scenes (id, task_id, name, mode, created_at, updated_at, title_pinned, sort_key, layout_revision)
+       VALUES ('other-scene', 'other-task', 'Other scene', 'tile', 1, 1, 0, 'a', 1)`
+    )
+    database.run("UPDATE sessions SET task_id = 'other-task' WHERE id = 'new-session'")
+    database.run(
+      `INSERT INTO session_canvas_memberships
+       (session_id, scene_id, sibling_created_seq, last_user_interaction_seq, created_at, updated_at)
+       VALUES ('new-session', 'other-scene', 5, 0, 1, 1)`
+    )
+
+    expect(graphs.projectSceneGraph('other-scene').nodes).toEqual([
+      expect.objectContaining({ sessionId: 'new-session', sharedWorkingDirectory: true, sharedSessionCount: 4 })
+    ])
+    expect(graphs.projectSceneGraph('scene').nodes.find(({ sessionId }) => sessionId === 'parent'))
+      .toMatchObject({ sharedWorkingDirectory: true, sharedSessionCount: 4 })
   })
 
   it('allocates persistent sequences and creates one membership with its Outbox event', () => {

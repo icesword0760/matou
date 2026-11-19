@@ -1,0 +1,29 @@
+{
+  "scope": "Read-only cross-check of this continuation run successful intents, validated provider bindings and actual native session_meta / forked_from_id. No native IDs or private content copied.",
+  "children": [
+    {
+      "mode": "current",
+      "intentSucceeded": true,
+      "bindingValidated": true,
+      "bindingDistinctFromParent": true,
+      "nativeIdMatchesBinding": true,
+      "nativeForkedFromMatchesParent": true,
+      "cwdMatchesNativeMetadata": true,
+      "cwdRelationMatchesMode": true,
+      "inheritedMemoryRecalled": true
+    },
+    {
+      "mode": "new",
+      "intentSucceeded": true,
+      "bindingValidated": true,
+      "bindingDistinctFromParent": true,
+      "nativeIdMatchesBinding": true,
+      "nativeForkedFromMatchesParent": true,
+      "cwdMatchesNativeMetadata": true,
+      "cwdRelationMatchesMode": true,
+      "inheritedMemoryRecalled": true
+    }
+  ],
+  "parentLoadedAgainAndRemembered": true,
+  "rawProof": ".cache/dsh-continuation/codex/evidence/results/fork-loader.json"
+}

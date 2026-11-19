@@ -1,0 +1,107 @@
+{
+  "requests": [
+    {
+      "target": "opus",
+      "path": "/v1/messages",
+      "key": "local-a",
+      "model": "gpt-local"
+    },
+    {
+      "target": "opus",
+      "path": "/v1/messages/count_tokens",
+      "key": "local-a",
+      "model": "gpt-local"
+    },
+    {
+      "target": "sonnet",
+      "path": "/v1/messages",
+      "key": "local-b",
+      "model": "deepseek-local"
+    },
+    {
+      "target": "sonnet",
+      "path": "/v1/messages/count_tokens",
+      "key": "local-b",
+      "model": "deepseek-local"
+    },
+    {
+      "target": "haiku",
+      "path": "/v1/messages",
+      "key": "local-c",
+      "model": "haiku-local"
+    },
+    {
+      "target": "haiku",
+      "path": "/v1/messages/count_tokens",
+      "key": "local-c",
+      "model": "haiku-local"
+    },
+    {
+      "target": "sonnet",
+      "path": "/v1/messages",
+      "key": "local-b",
+      "model": "deepseek-local"
+    }
+  ],
+  "result": {
+    "pid": 53494,
+    "results": [
+      {
+        "role": "OPUS",
+        "path": "/v1/messages",
+        "status": 200
+      },
+      {
+        "role": "OPUS",
+        "path": "/v1/messages/count_tokens",
+        "status": 200
+      },
+      {
+        "role": "SONNET",
+        "path": "/v1/messages",
+        "status": 200
+      },
+      {
+        "role": "SONNET",
+        "path": "/v1/messages/count_tokens",
+        "status": 200
+      },
+      {
+        "role": "HAIKU",
+        "path": "/v1/messages",
+        "status": 200
+      },
+      {
+        "role": "HAIKU",
+        "path": "/v1/messages/count_tokens",
+        "status": 200
+      },
+      {
+        "compact": true,
+        "status": 200
+      },
+      {
+        "invalid": true,
+        "status": 502,
+        "body": "{\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"Unknown Claude model role\"}}"
+      }
+    ]
+  },
+  "pid": 53494,
+  "persisted": {
+    "claudeRoleAssignments": {},
+    "contextWindows": {
+      "anthropic-official": "default",
+      "caa7d59b-ba91-4c18-93a2-f32ac4f6c44e": "512k",
+      "6a62f172-7ff7-4e7b-b658-2323012c7d30": "default",
+      "b3372c19-c9ed-4ef5-93e8-31d181af9c78": "default",
+      "openai-official": "512k"
+    },
+    "compaction": {
+      "mode": "custom",
+      "effort": "follow",
+      "providerId": "caa7d59b-ba91-4c18-93a2-f32ac4f6c44e",
+      "model": "gpt-local"
+    }
+  }
+}

@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { PROTOCOL_VERSION, type EgressStatusWire } from '@matou/contracts'
 import { RuntimeClient, type RuntimeClientPort } from '../runtime/RuntimeClient'
 import { chipCopy } from './egress-copy'
-import { findEgressFamily, sessionEgressFamily, useEgressSelector, useEgressStatus } from './use-egress-status'
+import { findEgressFamily, sessionEgressFamily, isSessionEgressFrozen, selectSessionEgressBannerView, useEgressSelector, useEgressStatus } from './use-egress-status'
 
 afterEach(cleanup)
 
@@ -200,4 +200,17 @@ describe('useEgressStatus', () => {
 
     client.dispose()
   })
+})
+
+it('Task3 shows and blocks the abnormal member even when the legacy primary member is overridden', () => {
+ const status=makeStatus({ sessionFamilySets:{'session-1':['anthropic','openai']} })
+ status.families[0]!.frozenSessionIds=['session-1']
+ status.families.push({ family:'openai',state:'abnormal',violation:'mainland',hosts:[],overridden:false,frozenSessionIds:['session-1'],recovering:true })
+ expect(sessionEgressFamily(status,'session-1')).toBe('openai')
+ status.families[0]!.overridden=true
+ expect(isSessionEgressFrozen(status,'session-1')).toBe(true)
+ expect(selectSessionEgressBannerView(status,'session-1')).toMatchObject({kind:'frozen',family:'openai'})
+ status.families[1]!.frozenSessionIds=[];status.families[1]!.state='ok'
+ status.lastTransition={id:'recovery',kind:'resumed',family:'openai',sessionCount:1,at:1}
+ expect(selectSessionEgressBannerView(status,'session-1')).toMatchObject({kind:'resumed',transitionId:'recovery'})
 })

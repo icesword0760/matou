@@ -1,10 +1,12 @@
+import { CLI_DEFAULT_MODEL } from '@matou/contracts'
+import { claudeRequestRole, claudeRoleLaunchDigest, prepareClaudeRoleLaunch, type PreparedClaudeRoleLaunch } from './session/claude-role-launch'
 import { SubscriptionLaunchError, SubscriptionPlatformError, type PreparedSubscriptionLaunch, type SubscriptionAccounts, type SubscriptionConnection } from './model-router/subscription-accounts'
 import { mapSubscriptionLoginFailure, sanitizeProviderReason } from './model-router/errors'
 import type { SubscriptionLoginStartInput, SubscriptionModelsReadInput, SubscriptionProviderConfigInput } from '@matou/contracts'
 import { ExternalAgentStatusMonitor } from './session/external-agent-status'
 import { AntigravityPluginInstaller } from './agents/antigravity-plugin-installer'
 import type { ClaudeAccountSession, ClaudeAccountRuntimeAction } from '@matou/contracts'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { constants, watch, mkdirSync, rmSync, type FSWatcher } from 'node:fs'
 import { access, readFile, readlink, stat } from 'node:fs/promises'
@@ -64,6 +66,7 @@ import {
   type HostNavigationRegistration
 } from './control/host-navigation-broker'
 import { RpcFault, RuntimeRpcRouter } from './rpc/runtime-rpc-router'
+import { GatewayRoutingError } from './session/claude-request-gateway'
 import { egressPlanForLaunch, type EgressMonitor } from './egress/egress-monitor'
 import { PtySession, SessionEgressFrozenError } from './session/pty-session'
 import { restoredProviderModel, roleEffort } from './session/claude-model-routing'
@@ -96,6 +99,7 @@ import type {
 import { SessionRepository, type ProviderPermissionMode } from './domain/session-repository'
 import { SessionEnvironmentRepository } from './session/session-environment-repository'
 import { SessionEnvironmentService } from './session/session-environment-service'
+import { GitWorkspaceService } from './git/git-workspace-service'
 import { DomainTransactionManager } from './storage/domain-transaction'
 import type { RuntimeDatabase } from './storage/database'
 import { StorageReadOnlyError } from './storage/database'
@@ -339,6 +343,7 @@ export class RuntimeServer {
   readonly #sessionRepository: SessionRepository
   readonly #forkIntents: SessionForkIntentRepository
   readonly #gitStates: SessionGitStateRepository
+  readonly #gitWorkspace: GitWorkspaceService
   readonly #environments: SessionEnvironmentRepository
   readonly #environmentService: SessionEnvironmentService
   readonly #worktreeHealth: WorktreeHealthService
@@ -357,6 +362,7 @@ export class RuntimeServer {
   readonly #cwdTimers = new Map<string, ReturnType<typeof setTimeout>>()
   readonly #providerResumeTimers = new Map<string, ReturnType<typeof setTimeout>>()
   readonly #providerLaunchRunIds = new Map<string, string>()
+  readonly #providerActivationRuns = new Map<string, { runId: string; token: string }>()
   readonly #providerIdentityMismatches = new Map<string, ProviderIdentityMismatch>()
   readonly #providerRecoveryWaiters = new Map<string, Set<ProviderRecoveryWaiter>>()
   readonly #spawnDescriptors = new Map<string, TerminalSpawnMessage>()
@@ -444,6 +450,7 @@ export class RuntimeServer {
     this.#sessionRepository = new SessionRepository(database, new DomainTransactionManager(database))
     this.#forkIntents = new SessionForkIntentRepository(database)
     this.#gitStates = new SessionGitStateRepository(database)
+    this.#gitWorkspace = new GitWorkspaceService({ database, dataRoot })
     this.#environments = new SessionEnvironmentRepository(database)
     this.#worktreeHealth = new WorktreeHealthService()
     const worktrees = new WorktreeService(database, transactions, {
@@ -574,7 +581,9 @@ export class RuntimeServer {
     }
     const providerRecovery = getAgentManifest(job.profile)?.capabilities.autoRestore === true &&
       this.#sessionRepository.getResumeBinding(job.sessionId, job.profile as AgentProfileId)
-      ? this.#waitForProviderRecovery(job.sessionId)
+      // Queue readiness only mounts an interactive terminal. The binding stays
+      // restoring and provider-derived state remains gated until its real hook.
+      ? this.#waitForProviderRecovery(job.sessionId, job.profile !== 'dsh')
       : undefined
     try {
       await this.#spawnSerialized({
@@ -589,7 +598,14 @@ export class RuntimeServer {
       if (!this.#sessions.has(job.sessionId) && !this.#hasParkedProviderRestoreFailure(job.sessionId)) {
         throw new Error(`Session ${job.sessionId} did not reach a running state`)
       }
-      await providerRecovery?.promise
+      try {
+        await providerRecovery?.promise
+      } catch (error) {
+        // A parked DSH resume failure has its own retry / fresh-start banner.
+        // Finish mounting the card so the generic recovery overlay cannot lock
+        // those actions. The binding stays failed; no identity is confirmed.
+        if (job.profile !== 'dsh' || !this.#hasParkedProviderRestoreFailure(job.sessionId)) throw error
+      }
     } finally {
       providerRecovery?.cancel()
     }
@@ -613,6 +629,7 @@ export class RuntimeServer {
   }
 
   publishRecovery(snapshot: readonly RecoveryJobSnapshot[]): void {
+    if (snapshot.some(job => job.state === 'ready')) void this.#sessions.drainProviderActivations()
     if (this.#closed || !this.#handshakeComplete) return
     for (const job of snapshot) {
       this.#port.postMessage({
@@ -628,6 +645,7 @@ export class RuntimeServer {
   }
 
   publishRecoverySnapshot(snapshot: readonly RecoveryJobSnapshot[]): void {
+    if (snapshot.some(job => job.state === 'ready')) void this.#sessions.drainProviderActivations()
     if (this.#closed || !this.#handshakeComplete) return
     this.#port.postMessage({
       type: 'session.recovery-snapshot',
@@ -666,9 +684,16 @@ export class RuntimeServer {
     const launchMatches = this.#providerLaunchRunIds.get(sessionId) === runId ||
       this.#sessions.get(sessionId)?.runId === runId
     if (!launchMatches) return
+    const activation = this.#providerActivationRuns.get(sessionId)
+    if (activation?.runId === runId && this.#sessions.get(sessionId)?.runId === runId &&
+        this.#sessionRepository.getProviderSettingsBinding(sessionId, 'claude-code')) {
+      this.#writeProviderActivationToken(`provider.claude.applied.${sessionId}`, activation.token)
+      this.#providerActivationRuns.delete(sessionId)
+    }
     const pendingFork = this.#pendingAntigravityForkRuns.get(sessionId)
     if (pendingFork?.runId === runId) this.#pendingAntigravityForkRuns.delete(sessionId)
     this.#confirmProviderDerivedOutput(sessionId, runId)
+    void this.#sessions.drainProviderActivations()
     if (this.#providerResumeTimers.has(sessionId)) {
       this.#clearProviderResumeTimer(sessionId)
       this.#providerLaunchRunIds.delete(sessionId)
@@ -730,6 +755,7 @@ export class RuntimeServer {
     const disposalErrors: unknown[] = []
     for (const recovery of recoveryCoordinators) recovery.cancel(unique)
     for (const sessionId of unique) {
+      this.#sessions.cancelProviderActivation(sessionId)
       await this.#sessions.runExclusive(sessionId, async () => {
         try {
           await this.#disposeProviderHooks(sessionId)
@@ -783,12 +809,14 @@ export class RuntimeServer {
     this.#subscriptionUnsubscribe?.()
     this.#portClosed = true
     RuntimeServer.#instances.delete(this)
+    if (![...RuntimeServer.#instances].some(server => server.#sessions === this.#sessions)) this.#sessions.clearProviderActivations()
     for (const timer of this.#cwdTimers.values()) clearTimeout(timer)
     this.#cwdTimers.clear()
     for (const timer of this.#providerResumeTimers.values()) clearTimeout(timer)
     this.#providerResumeTimers.clear()
     this.#closeAllHudFileWatchers()
     this.#providerLaunchRunIds.clear()
+    this.#providerActivationRuns.clear()
     this.#pendingAntigravityForkRuns.clear()
     this.#providerIdentityMismatches.clear()
     this.#rejectAllProviderRecoveries(
@@ -809,6 +837,7 @@ export class RuntimeServer {
     this.#unregisterNavigationWindow()
     this.#portClosed = true
     RuntimeServer.#instances.delete(this)
+    if (![...RuntimeServer.#instances].some(server => server.#sessions === this.#sessions)) this.#sessions.clearProviderActivations()
     this.#subscriptions.clear()
     this.#rejectAllProviderRecoveries(
       new Error('Runtime connection closed during provider recovery')
@@ -886,6 +915,7 @@ export class RuntimeServer {
         if (!session) break
         try {
           await session.retryDurability()
+          void this.#sessions.drainProviderActivations()
         } catch {
           // PtySession publishes the authoritative scoped fault again. Keep
           // this connection and every other Session live while the user fixes
@@ -1228,7 +1258,7 @@ export class RuntimeServer {
     }
   }
 
-  async #handleSubscriptionRpc(method: string, payload: unknown): Promise<unknown> {
+  async #handleSubscriptionRpc(method: string, payload: unknown, isCancelled: () => boolean): Promise<unknown> {
     const connection = this.#subscriptionConnection!, accounts = this.#subscriptionAccounts!
     const input = isRecord(payload) ? payload : {}
     if (method === 'provider-config.snapshot') return accounts.snapshot()
@@ -1244,6 +1274,10 @@ export class RuntimeServer {
     }
     if (method === 'provider-config.subscription.settings-read') return connection.settings()
     if (method === 'provider-config.subscription.models-read') return connection.models(input as unknown as SubscriptionModelsReadInput)
+    if (method === 'provider-config.subscription.models-refresh') {
+      if (typeof input.providerId !== 'string' || !input.providerId.trim()) throw new RpcFault('INVALID_REQUEST', 'Invalid subscription provider ID')
+      return connection.refreshModels(input.providerId, isCancelled)
+    }
     if (method === 'provider-config.subscription.settings-close') { await connection.closeSettings(); return { closed: true } }
     if (method === 'provider-config.subscription.risk-confirm') return connection.confirmRisk(input.accepted === true)
     throw new Error('Unknown subscription operation')
@@ -1304,7 +1338,7 @@ export class RuntimeServer {
             : this.#subscriptionConnection && this.#subscriptionAccounts && (message.method.startsWith('provider-config.subscription.') ||
                 message.method === 'provider-config.snapshot' || message.method === 'provider-config.delete' ||
                 (message.method === 'provider-config.upsert' && isRecord(message.payload) && isRecord(message.payload.provider) && message.payload.provider.kind === 'subscription'))
-              ? await this.#handleSubscriptionRpc(message.method, message.payload)
+              ? await this.#handleSubscriptionRpc(message.method, message.payload, () => this.#cancelledRequests.has(message.requestId) || Date.now() > message.deadlineAt)
               : await this.#router.handle(message.method, message.payload)
       if (message.method === 'provider-config.activate') {
         const input = isRecord(message.payload) ? message.payload : undefined
@@ -1312,6 +1346,8 @@ export class RuntimeServer {
         const providerId = typeof input?.providerId === 'string' ? input.providerId : undefined
         let sessionTransitions: ProviderSessionActivationTransition[] = []
         if (cli === 'claude-code' && providerId) {
+          const selection = await this.#providerConfigs.launchSelection(cli)
+          this.#writeProviderActivationToken('provider.claude.activation', await this.#providerLaunchDigest(selection))
           sessionTransitions = await RuntimeServer.#restartProviderSessions(
             this.#sessions,
             cli,
@@ -1357,12 +1393,13 @@ export class RuntimeServer {
       if (error instanceof SubscriptionPlatformError) {
         const locale = (message.payload as { locale?: string } | undefined)?.locale ?? process.env.MATOU_LOCALE
         this.#sendRpcError(message.requestId, 'INTERNAL_ERROR', error.messageLocalized[locale === 'en' ? 'en' : 'zh'], false, undefined, error.messageLocalized)
-      } else if ((message.method.startsWith('provider-config.subscription.login-') || message.method === 'provider-config.subscription.models-read') && !(error instanceof RpcFault)) {
-        const localized = message.method === 'provider-config.subscription.models-read'
+      } else if ((message.method.startsWith('provider-config.subscription.login-') || message.method === 'provider-config.subscription.models-read' ||
+          (message.method === 'provider-config.subscription.models-refresh' && !(error instanceof SubscriptionLaunchError))) && !(error instanceof RpcFault)) {
+        const localized = message.method.includes('.models-')
           ? { zh: '模型列表未能读取，请重试。', en: 'The model list could not be read. Try again.' }
           : mapSubscriptionLoginFailure(errorMessage(error))
         const locale = (message.payload as { locale?: string } | undefined)?.locale ?? process.env.MATOU_LOCALE
-        console.error(`[subscription.${message.method.endsWith('models-read') ? 'models' : 'login'}] ${sanitizeProviderReason(errorMessage(error)) ?? 'Request failed'}`)
+        console.error(`[subscription.${message.method.includes('.models-') ? 'models' : 'login'}] ${sanitizeProviderReason(errorMessage(error)) ?? 'Request failed'}`)
         this.#sendRpcError(message.requestId, 'INTERNAL_ERROR', localized[locale === 'en' ? 'en' : 'zh'], true, undefined, localized)
       } else if (error instanceof SubscriptionLaunchError) {
         this.#sendRpcError(message.requestId, 'INTERNAL_ERROR', error.message, error.providerFailure.recovery === 'retry', error.providerFailure)
@@ -1500,8 +1537,57 @@ export class RuntimeServer {
         }
         return this.#environmentService.handoff({ sessionId, target: input.target, now })
       }
+      if (method === 'session.environment-isolate') {
+        if (typeof input.branch !== 'string' || !input.branch.trim()) {
+          throw new RpcFault('INVALID_REQUEST', 'branch is required')
+        }
+        const previous = this.#sessionRepository.getSession(sessionId)
+        const result = await this.#environmentService.isolate(this.#gitWorkspace, {
+          sessionId, branch: input.branch.trim(), now,
+          resumeSession: (id, target) => this.#resumeAfterEnvironmentTransition(id, target === 'worktree')
+        })
+        if (result.kind === 'switched') {
+          const contextId = result.environment.environment.kind === 'worktree'
+            ? result.environment.environment.worktreeExecutionContextId : undefined
+          if (contextId) await this.#gitStates.refresh(contextId).catch(() => undefined)
+          await RuntimeServer.#refreshAttachedSessionHud(sessionId)
+          if (previous) this.#publishIsolatedEnvironment(sessionId, previous.cwd, now)
+        }
+        return result
+      }
       throw new RpcFault('INVALID_REQUEST', `unsupported environment method ${method}`)
     })
+  }
+
+  #publishIsolatedEnvironment(sessionId: string, previousCwd: string, now: number): void {
+    const session = this.#sessionRepository.getSession(sessionId)
+    const workspaceId = this.#environments.getActiveWorkspaceId(sessionId)
+    if (!session || !workspaceId) return
+    const commandId = randomUUID()
+    this.#transactions.execute({
+      commandId, commandType: 'session.environment-isolated', requestHash: commandId
+    }, ({ tx, emit }) => {
+      const scenes = tx.all<{ scene_id: string }>(
+        `SELECT DISTINCT membership.scene_id
+         FROM session_canvas_memberships AS membership
+         JOIN sessions ON sessions.id = membership.session_id
+         JOIN tasks ON tasks.id = sessions.task_id
+         WHERE tasks.workspace_id = ? AND sessions.archived_at IS NULL
+           AND (sessions.id = ? OR sessions.cwd = ?)`,
+        workspaceId, sessionId, previousCwd
+      )
+      for (const { scene_id: sceneId } of scenes) {
+        emit({
+          eventId: `${commandId}:${sceneId}`,
+          eventType: 'session.environment-isolated',
+          aggregateType: 'session', aggregateId: sessionId, sessionId, workspaceId,
+          occurredAt: now,
+          payload: { session, graph: projectSceneGraphFrom(tx, sceneId) }
+        })
+      }
+      return null
+    })
+    RuntimeServer.#flushSemanticEventsForAll()
   }
 
   async #replay(message: Extract<RendererMessage, { type: 'terminal.replay-request' }>): Promise<void> {
@@ -2107,11 +2193,13 @@ export class RuntimeServer {
     if (persistOrdinaryShellHistory && attachView) {
       this.#publishShellHistory(message.sessionId)
     }
+    let preparedRoleLaunch: PreparedClaudeRoleLaunch | undefined
     let providerProcessStarted = false
     let hookRegistration: ProviderHookRegistration | undefined
     let hookRunId: string | undefined
     try {
       const runId = forkAuthority?.runId ?? randomUUID()
+      const providerRunStartedAt = Date.now()
       hookRunId = runId
       const shellBlockCollector = persistOrdinaryShellHistory
         ? new ShellCommandBlockCollector()
@@ -2119,7 +2207,7 @@ export class RuntimeServer {
       const cwdTracker = new TerminalCwdTracker()
       const workStatusTracker = message.profile === 'shell'
         ? new TerminalWorkStatusTracker()
-        : message.profile === 'claude-code' || message.profile === 'antigravity'
+        : message.profile === 'claude-code' || message.profile === 'antigravity' || message.profile === 'codex'
           ? new TerminalWorkStatusTracker({ provider: message.profile })
           : undefined
       const permissionModeTracker = message.profile === 'claude-code'
@@ -2129,29 +2217,52 @@ export class RuntimeServer {
         forkLaunch?.permissionMode ??
         permissionModeFromMetadata(providerSettingsBinding?.metadata) ??
         permissionModeFromMetadata(resumeBinding?.metadata)
-      const providerSelection = getAgentManifest(message.profile)?.capabilities.providerConfig
-        ? await this.#providerConfigs.launchSelection(
-            message.profile as ProviderCli,
-            boundProviderSettings.providerConfigId
-          )
-        : undefined
-      if (providerSelection?.subscription && !this.#subscriptionAccounts) throw new SubscriptionLaunchError('Subscription launch service is unavailable')
       const modelSettings = new AgentModelSettings(this.#database, this.#providerConfigs)
-      const providerView = providerSelection ? (await this.#providerConfigs.snapshot()).providers[message.profile as ProviderCli]?.find(p => p.id === providerSelection.providerConfigId) : undefined
-      const providerModel = restoredProviderModel(boundProviderSettings.model, providerSelection?.model, providerView, modelSettings.preferences())
+      const modelPreferences = modelSettings.preferences()
+      const activationToken = message.profile === 'claude-code' ? this.#readProviderActivationToken('provider.claude.activation') : undefined
+      if (message.profile === 'claude-code') {
+        preparedRoleLaunch = await prepareClaudeRoleLaunch({ preferences: modelPreferences, store: this.#providerConfigs, env: { ...process.env }, ...(this.#subscriptionAccounts ? { accounts: this.#subscriptionAccounts } : {}), isClosed: () => this.#closed })
+      }
+      const sourceId = preparedRoleLaunch?.providers.activeProviderIds['claude-code']
+      const providerSelection = preparedRoleLaunch
+        ? { providerConfigId: sourceId!, model: preparedRoleLaunch.sourceModel === CLI_DEFAULT_MODEL ? '' : preparedRoleLaunch.sourceModel, env: preparedRoleLaunch.sourceEnvironment }
+        : getAgentManifest(message.profile)?.capabilities.providerConfig
+          ? await this.#providerConfigs.launchSelection(message.profile as ProviderCli, message.profile === 'claude-code' ? undefined : boundProviderSettings.providerConfigId)
+          : undefined
+      const appliedActivation = message.profile === 'claude-code' ? this.#readProviderActivationToken(`provider.claude.applied.${message.sessionId}`) : undefined
+      const followsGlobalModel = message.profile === 'claude-code' && (
+        boundProviderSettings.providerConfigId !== providerSelection?.providerConfigId ||
+        activationToken !== undefined && appliedActivation !== activationToken
+      )
+      if (providerSelection?.subscription && !this.#subscriptionAccounts) throw new SubscriptionLaunchError('Subscription launch service is unavailable')
+      const providerView = preparedRoleLaunch
+        ? preparedRoleLaunch.providers.providers['claude-code'].find(p => p.id === sourceId)
+        : providerSelection ? (await this.#providerConfigs.snapshot()).providers[message.profile as ProviderCli]?.find(p => p.id === providerSelection.providerConfigId) : undefined
+      const launchDigest = message.profile === 'claude-code' && providerSelection ? preparedRoleLaunch?.digest ?? await this.#providerLaunchDigest(providerSelection) : undefined
+      const providerModel = followsGlobalModel && !providerSelection?.model && boundProviderSettings.model !== undefined
+        ? 'default'
+        : restoredProviderModel(followsGlobalModel ? undefined : boundProviderSettings.model, providerSelection?.model, providerView, modelPreferences)
       const providerLaunch = providerSelection === undefined
         ? { env: {} as Record<string, string> }
         : {
             ...(providerModel ? { model: providerModel } : {}),
             env: providerSelection.env
           }
-      const egressPlan = egressPlanForLaunch(
+      const legacyEgressPlan = egressPlanForLaunch(
         message.profile,
         providerLaunch.env,
-        providerSelection?.subscription?.subscription.provider
+        preparedRoleLaunch ? providerView?.subscription?.provider : providerSelection?.subscription?.subscription.provider
       )
-      const egressFamily = egressPlan.family
-      const egressCountry = egressPlan.exitFamily ? this.#egress?.exitCountry(egressPlan.exitFamily) : undefined
+      const legacyCompactionProvider = !preparedRoleLaunch && message.profile === 'claude-code' && modelPreferences.compaction.mode === 'custom'
+        ? (await this.#providerConfigs.snapshot()).providers['claude-code'].find(p => p.id === modelPreferences.compaction.providerId) : undefined
+      const legacyCompactionPlan = legacyCompactionProvider ? egressPlanForLaunch('claude-code', { ANTHROPIC_BASE_URL: legacyCompactionProvider.endpoint }, legacyCompactionProvider.subscription?.provider) : undefined
+      const egressFamilies = preparedRoleLaunch ? preparedRoleLaunch.snapshot.officialFamilies : [...new Set([legacyEgressPlan.family, legacyCompactionPlan?.family].filter((f): f is import('@matou/contracts').EgressFamily => f !== undefined))]
+      const hideTimeZone = preparedRoleLaunch
+        ? [...Object.values(preparedRoleLaunch.snapshot.roles), ...(preparedRoleLaunch.snapshot.webSearchTarget ? [preparedRoleLaunch.snapshot.webSearchTarget] : []), ...(preparedRoleLaunch.snapshot.compactionTarget ? [preparedRoleLaunch.snapshot.compactionTarget] : [])].some(t => t.hideTimeZone)
+        : legacyEgressPlan.hideTimeZone || legacyCompactionPlan?.hideTimeZone === true
+      // Multi-target sessions use the existing hidden-zone policy, never the
+      // default third-party provider's apparent exit country.
+      const egressCountry = preparedRoleLaunch ? undefined : legacyEgressPlan.exitFamily ? this.#egress?.exitCountry(legacyEgressPlan.exitFamily) : undefined
       if (!this.#hud.snapshot(message.sessionId)) {
         this.#hud.spawn({
           sessionId: message.sessionId,
@@ -2166,7 +2277,7 @@ export class RuntimeServer {
       }
       const resumeMonitor = providerSessionId === undefined
         ? undefined
-        : new ProviderResumeMonitor(providerSessionId)
+        : new ProviderResumeMonitor(providerSessionId, { requireIdentity: message.profile === 'codex' || message.profile === 'dsh' })
       // A mounted idle Session can be restored lazily by the Renderer after the
       // startup recovery queue has already settled. Scope this to any real
       // provider resume so the long-session choice behaves the same regardless
@@ -2230,6 +2341,7 @@ export class RuntimeServer {
       }
       if (providerSettingsBinding && providerSelection && (
         boundProviderSettings.providerConfigId !== providerSelection.providerConfigId ||
+        followsGlobalModel ||
         boundProviderSettings.model === undefined ||
         permissionModeFromMetadata(providerSettingsBinding.metadata) === undefined
       )) {
@@ -2269,7 +2381,9 @@ export class RuntimeServer {
         const antigravitySystemMessage = antigravityAssetPath && this.#controlAssetRoot
           ? await readFile(join(this.#controlAssetRoot, antigravityAssetPath), 'utf8').catch(() => undefined)
           : undefined
-        hookRegistration = message.profile === 'claude-code'
+        hookRegistration = message.profile === 'dsh'
+          ? await this.#providerHooks.registerSession('dsh', providerHookInput)
+          : message.profile === 'claude-code'
           ? await this.#providerHooks.registerClaudeSession({
               ...providerHookInput,
               // A fresh Claude process that replaces an invalid resume is already live
@@ -2277,7 +2391,10 @@ export class RuntimeServer {
               acceptStatuslineIdentity: providerSessionId !== undefined || supersedesRestoreFailure
             })
           : message.profile === 'codex'
-            ? await this.#providerHooks.registerCodexSession(providerHookInput)
+            ? await this.#providerHooks.registerCodexSession({
+                ...providerHookInput,
+                ...(forkLaunch ? { forkSourceProviderSessionId: forkLaunch.sourceProviderSessionId } : {})
+              })
             : message.profile === 'antigravity'
               ? await this.#providerHooks.registerAntigravitySession({
                   ...providerHookInput,
@@ -2381,7 +2498,7 @@ export class RuntimeServer {
         this.#workStatusTrackers.set(message.sessionId, workStatusTracker)
       }
       if (message.profile !== 'shell') this.#hud.providerStarted(message.sessionId)
-      const contextWindow = ['claude-code', 'codex'].includes(message.profile) ? await modelSettings.launchWindow(providerView, launchModelOverride ?? providerLaunch.model) : undefined
+      const contextWindow = preparedRoleLaunch ? preparedRoleLaunch.contextWindow : ['claude-code', 'codex'].includes(message.profile) ? await modelSettings.launchWindow(providerView, launchModelOverride ?? providerLaunch.model, modelPreferences) : undefined
       const firstRunGrid = message.profile === 'shell' ? undefined : this.#database.get<{ cols: number; rows: number }>(
         'SELECT cols, rows FROM session_runs WHERE session_id = ? ORDER BY ordinal ASC LIMIT 1',
         message.sessionId
@@ -2394,6 +2511,11 @@ export class RuntimeServer {
         if (spawnPublished) this.#sendToPort(frame)
         else pendingSpawnMessages.push(frame)
       }
+      const launchModel = preparedRoleLaunch ? preparedRoleLaunch.resolveMainModel(launchModelOverride ?? providerLaunch.model) : launchModelOverride ?? providerLaunch.model
+      const launchRole = preparedRoleLaunch && launchModel ? claudeRequestRole(launchModel, preparedRoleLaunch.snapshot.nativeRoleModels) : undefined
+      const launchReasoningEffort = preparedRoleLaunch
+        ? (launchRole ? preparedRoleLaunch.snapshot.roles[launchRole].effort : roleEffort(providerView, launchModel ?? 'default'))
+        : (message.profile === 'claude-code' ? roleEffort(providerView, providerModel ?? 'default') : providerView?.reasoningEffort)
       const session = await PtySession.create({
         sessionId: message.sessionId,
         executionContextId: message.executionContextId,
@@ -2414,9 +2536,13 @@ export class RuntimeServer {
           }
         }),
         contextWindow: contextWindow ?? null,
-        ...((message.profile === 'claude-code' ? roleEffort(providerView, providerModel ?? 'default') : providerView?.reasoningEffort) ? { reasoningEffort: (message.profile === 'claude-code' ? roleEffort(providerView, providerModel ?? 'default') : providerView?.reasoningEffort)! } : {}),
+        ...(launchReasoningEffort && launchReasoningEffort !== 'follow' ? { reasoningEffort: launchReasoningEffort } : {}),
         ...(message.profile === 'claude-code' ? { modelRouting: {
-          preferences: modelSettings.preferences(), ...(providerView ? { provider: providerView } : {}), store: this.#providerConfigs,
+          ...(this.#egress ? { assertTargetAllowed: (family?: import('@matou/contracts').EgressFamily) => {
+            try { this.#egress!.assertTargetAllowed(preparedRoleLaunch ? family : family ?? legacyEgressPlan.family) }
+            catch { throw new GatewayRoutingError('出口异常，已暂停。请在网络检查中恢复出口或明确豁免后重试。 Network egress protection is active.') }
+          } } : {}),
+          preferences: modelPreferences, ...(preparedRoleLaunch ? { roleSnapshot: preparedRoleLaunch.snapshot, ...(preparedRoleLaunch.sourceConnection ? { sourceConnection: preparedRoleLaunch.sourceConnection } : {}), releaseTargets: preparedRoleLaunch.close, isClosed: () => this.#closed } : {}), ...(providerView ? { provider: providerView } : {}), store: this.#providerConfigs,
           ...(this.#subscriptionAccounts ? { accounts: this.#subscriptionAccounts } : {})
         } } : {}),
         ...(providerSessionId === undefined ? {} : { providerSessionId }),
@@ -2430,7 +2556,7 @@ export class RuntimeServer {
         ...(this.#controlAssetRoot === undefined ? {} : {
           controlAssetRoot: this.#controlAssetRoot
         }),
-        ...((launchModelOverride ?? providerLaunch.model) === undefined ? {} : { model: launchModelOverride ?? providerLaunch.model }),
+        ...(launchModel === undefined ? {} : { model: launchModel }),
         ...(providerSelection?.subscription && this.#subscriptionAccounts ? { subscription: { accounts: this.#subscriptionAccounts, providerConfigId: providerSelection.providerConfigId } } : {}),
         ...(runId === undefined ? {} : { runId }),
         env: {
@@ -2438,9 +2564,9 @@ export class RuntimeServer {
           ...controlEnvironment,
           ...new ClaudeSettings(this.#database).environment(message.profile, {
             ...(egressCountry === undefined ? {} : { exitCountry: egressCountry }),
-            official: egressPlan.hideTimeZone
+            official: hideTimeZone
           }),
-          ...(message.profile === 'antigravity' && hookRegistration ? {
+          ...((message.profile === 'antigravity' || message.profile === 'dsh') && hookRegistration ? {
             MATOU_PROVIDER_HOOK_URL: hookRegistration.hookUrl,
             MATOU_PROVIDER_HOOK_TOKEN: hookRegistration.hookToken,
             ...(hookRegistration.systemMessagePath
@@ -2483,7 +2609,8 @@ export class RuntimeServer {
             // Claude release delays or omits its statusline HTTP hook.
             // A short startup message alone can precede a failed process exit
             // and must not report a successful account restart.
-            this.#settleProviderRecovery(message.sessionId, undefined, !resumeMonitor.isSettled)
+            this.#settleProviderRecovery(message.sessionId, undefined,
+              message.profile === 'codex' || message.profile === 'dsh' || !resumeMonitor.isSettled)
           }
         },
         onExit: (exited, exitCode, signal, exitReason) => {
@@ -2588,7 +2715,8 @@ export class RuntimeServer {
                 exited.runId,
                 { exitCode, ...(signal === undefined ? {} : { signal }), now: Date.now() }
               )
-              this.#setWorkStatus(message.sessionId, shellStartupFailure ? 'error' : 'exited')
+              this.#setWorkStatus(message.sessionId,
+                shellStartupFailure || (resumeExitFallback && (exited.profile === 'codex' || exited.profile === 'dsh')) ? 'error' : 'exited')
             } catch (error) {
               console.error(`[session.run-exit] ${errorMessage(error)}`)
             }
@@ -2607,6 +2735,7 @@ export class RuntimeServer {
             return false
           }
           if (resumeExitFallback) {
+            this.#settleProviderRecovery(message.sessionId, new Error(`provider resume exited with code ${exitCode}`))
             return false
           }
           if (naturalAgentFallback) {
@@ -2635,6 +2764,7 @@ export class RuntimeServer {
           if (forkFailure) return false
         }
       })
+      if (preparedRoleLaunch && this.#closed) { session.dispose({ notifyExit: false }); await session.whenClosed(); throw new Error('Session closed during model launch') }
       providerProcessStarted = message.profile !== 'shell'
       if (runId) {
         try {
@@ -2671,8 +2801,8 @@ export class RuntimeServer {
           slashSent: false
         })
       }
-      if (egressFamily && this.#egress) {
-        const { bornFrozen } = this.#egress.registerSession(message.sessionId, egressFamily)
+      if (egressFamilies.length && this.#egress) {
+        const { bornFrozen } = this.#egress.registerSession(message.sessionId, egressFamilies.length === 1 ? egressFamilies[0]! : egressFamilies)
         if (bornFrozen) {
           await session.setEgressFrozen(true)
         }
@@ -2723,12 +2853,24 @@ export class RuntimeServer {
           forkAuthority,
           message.profile === 'antigravity'
             ? Math.min(this.#forkProviderIdentityTimeoutMs, this.#antigravityForkNewIdTimeoutMs)
+            : undefined,
+          message.profile === 'codex' && hookRegistration?.discoverCodexFork
+            ? isCurrent => hookRegistration!.discoverCodexFork!({ cwd, startedAt: providerRunStartedAt, isCurrent })
             : undefined
         )
       } else if (resumeMonitor && resumeBinding) {
         this.#scheduleProviderResumeTimeout(message, session, resumeBinding.id, resumeMonitor)
       }
+      if (message.profile === 'claude-code') {
+        if (launchDigest !== undefined) this.#sessions.recordProviderLaunchDigest(message.sessionId, runId, launchDigest)
+        if (launchDigest !== undefined) {
+          if (providerSettingsBinding) this.#writeProviderActivationToken(`provider.claude.applied.${message.sessionId}`, launchDigest)
+          else this.#providerActivationRuns.set(message.sessionId, { runId, token: launchDigest })
+        }
+        if (this.#readProviderActivationToken('provider.claude.activation') !== activationToken) this.#queueProviderActivation(message.sessionId)
+      }
     } catch (error) {
+      preparedRoleLaunch?.close()
       if (hookRunId) this.#control?.tokens.revokeRun(hookRunId)
       this.#rejectProviderDerivedOutput(message.sessionId)
       await this.#disposeProviderHook(message.sessionId, hookRunId, hookRegistration)
@@ -2758,7 +2900,7 @@ export class RuntimeServer {
     message: Extract<RendererMessage, { type: 'terminal.spawn' }>,
     session: PtySession,
     reason: string,
-    authority?: ForkExecutionAuthority
+    authority?: ForkExecutionAuthorityInput
   ): void {
     if (this.#sessions.get(message.sessionId) !== session) return
     const pendingFork = this.#pendingAntigravityForkRuns.get(message.sessionId)
@@ -2819,7 +2961,7 @@ export class RuntimeServer {
   #failFork(
     sessionId: string,
     reason: string,
-    authority?: ForkExecutionAuthority
+    authority?: ForkExecutionAuthorityInput
   ): boolean {
     const now = Date.now()
     const operation = authority
@@ -2843,8 +2985,11 @@ export class RuntimeServer {
       commandType: 'session.fork-failed',
       requestHash: `${operation.identity.operationId}:${reason}:${now}`
     }, ({ tx, emit }) => {
-      const failed = authority
-        ? this.#forkIntents.failOperation({
+      const failed = authority && operation.progress.stage === 'succeeded'
+        ? this.#forkIntents.rejectDiscoveredCodexIdentity({
+            ...authority, sessionId, error: reason, now
+          }, tx).kind === 'applied'
+        : authority ? this.#forkIntents.failOperation({
             operationId: authority.operationId,
             lease: authority.lease,
             error: reason,
@@ -2956,6 +3101,29 @@ export class RuntimeServer {
     const session = this.#sessions.get(sessionId)
     const message = this.#spawnDescriptors.get(sessionId)
     if (!mismatch || !session || !message || session.runId !== mismatch.runId) return false
+    // A discovered child may be restarted before its first turn emits a hook.
+    // Its durable candidate fence must still be revocable in that new run.
+    const discovered = mismatch.provider === 'codex' && !mismatch.forkAuthority
+      ? this.#database.get<{ operation_id: string; run_id: string; lease_token: string; lease_fence: number }>(
+          `SELECT fork.operation_id, fork.lease_token, fork.lease_fence,
+             json_extract(binding.metadata_json, '$.forkRunId') AS run_id
+           FROM provider_bindings binding JOIN session_fork_intents fork ON fork.session_id = binding.session_id
+           WHERE binding.session_id = ? AND binding.provider = 'codex' AND binding.provider_session_id = ?
+             AND json_extract(binding.metadata_json, '$.codexForkAwaitingHook') = 1
+             AND json_extract(binding.metadata_json, '$.forkOperationId') = fork.operation_id
+             AND json_extract(binding.metadata_json, '$.forkLeaseFence') = fork.lease_fence
+             AND fork.stage = 'succeeded' AND fork.lease_token IS NOT NULL`,
+          sessionId, mismatch.expectedProviderSessionId
+        ) : undefined
+    const forkAuthority = mismatch.forkAuthority ?? (discovered ? {
+      operationId: discovered.operation_id, runId: discovered.run_id,
+      lease: { token: discovered.lease_token, fence: discovered.lease_fence }
+    } : undefined)
+    if (mismatch.provider === 'codex' && forkAuthority) {
+      this.#providerIdentityMismatches.delete(sessionId)
+      this.#beginForkFailure(message, session, runtimeMessages().server.providerIdentityMismatch, forkAuthority)
+      return true
+    }
     const binding = this.#database.get<{ id: string }>(
       `SELECT id FROM provider_bindings
        WHERE session_id = ? AND provider = ? AND provider_session_id = ?
@@ -2988,7 +3156,7 @@ export class RuntimeServer {
     this.#clearProviderResumeTimer(message.sessionId)
     this.#providerResumeTimers.set(message.sessionId, setTimeout(() => {
       this.#providerResumeTimers.delete(message.sessionId)
-      const reason = monitor.timeout()
+      const reason = monitor.timeout() ?? (message.profile === 'dsh' ? runtimeMessages().server.dshResumeIdentityTimeout : undefined)
       if (this.#sessions.get(message.sessionId) !== session) return
       if (!reason) {
         // The deadline only bounds the startup queue. Keep a silent PTY alive
@@ -3004,21 +3172,30 @@ export class RuntimeServer {
     message: Extract<RendererMessage, { type: 'terminal.spawn' }>,
     session: PtySession,
     authority?: ForkExecutionAuthority,
-    timeoutMs: number = this.#forkProviderIdentityTimeoutMs
+    timeoutMs: number = this.#forkProviderIdentityTimeoutMs,
+    discoverIdentity?: (isCurrent: () => boolean) => Promise<boolean>
   ): void {
     if (this.#consumeProviderIdentityConfirmation(message.sessionId, session.runId)) return
     this.#clearProviderResumeTimer(message.sessionId)
-    this.#providerResumeTimers.set(message.sessionId, setTimeout(() => {
+    const timer = setTimeout(() => {
       this.#providerResumeTimers.delete(message.sessionId)
       if (this.#sessions.get(message.sessionId) !== session) return
-      this.#beginForkFailure(
-        message,
-        session,
-        runtimeMessages().server.forkIdentityTimeout,
-        authority
-      )
+      this.#beginForkFailure(message, session, runtimeMessages().server.forkIdentityTimeout, authority)
       this.flushSemanticEvents()
-    }, timeoutMs))
+    }, timeoutMs)
+    this.#providerResumeTimers.set(message.sessionId, timer)
+    if (!discoverIdentity) return
+    const isCurrent = (): boolean => !this.#closed && this.#sessions.get(message.sessionId) === session &&
+      this.#providerResumeTimers.get(message.sessionId) === timer &&
+      !this.#sessions.providerIdentityConfirmed(session.runId ?? '')
+    const poll = async (): Promise<void> => {
+      if (!isCurrent()) return
+      try { if (await discoverIdentity(isCurrent)) return } catch { /* Wait for the real hook on inconclusive files. */ }
+      // Keep the original deadline independent of a slow metadata scan. Every
+      // write rechecks this same run/timer fence, including after an async read.
+      if (isCurrent()) setTimeout(() => { void poll() }, 200).unref()
+    }
+    void poll()
   }
 
   #clearProviderResumeTimer(sessionId: string): void {
@@ -3284,6 +3461,7 @@ export class RuntimeServer {
   }
 
   async #disposeSession(sessionId: string): Promise<void> {
+    this.#sessions.cancelProviderActivation(sessionId)
     this.#clearProviderResumeTimer(sessionId)
     const cwdTimer = this.#cwdTimers.get(sessionId)
     if (cwdTimer) clearTimeout(cwdTimer)
@@ -3477,7 +3655,7 @@ export class RuntimeServer {
     this.publishSessionHud(sessionId)
   }
 
-  async #resumeAfterEnvironmentTransition(sessionId: string): Promise<void> {
+  async #resumeAfterEnvironmentTransition(sessionId: string, requireStarted = false): Promise<void> {
     const descriptor = this.#environmentResumeDescriptors.get(sessionId)
     if (!descriptor) return
     const authority = this.#database.get<{
@@ -3494,6 +3672,9 @@ export class RuntimeServer {
       profile: authority.kind === 'agent-team-member' ? 'claude-code' : authority.kind,
       spawnRevision: (descriptor.spawnRevision ?? 0) + 1
     })
+    if (requireStarted && this.#sessions.get(sessionId)?.executionContextId !== authority.execution_context_id) {
+      throw new Error(runtimeMessages().git.worktreeRestartFailed)
+    }
     this.#environmentResumeDescriptors.delete(sessionId)
   }
 
@@ -3643,6 +3824,13 @@ export class RuntimeServer {
     } else {
       gitDirectory = await resolveGitDirectory(current.cwd)
     }
+    if (current.provider === 'codex') {
+      const runId = this.#sessions.get(sessionId)?.runId
+      if (runId) await this.#hud.refreshCodexTranscript(sessionId, {
+        runId, currentRunId: () => this.#closed ? undefined : this.#sessions.get(sessionId)?.runId
+      })
+      if (this.#closed) return
+    }
     this.#hud.refreshConfig(sessionId)
     this.#hud.updateEnvironment(sessionId, {
       cwd: current.cwd,
@@ -3783,7 +3971,7 @@ export class RuntimeServer {
     if (method !== 'session.set-permission-mode') return
     const target = typeof input.permissionMode === 'string' ? input.permissionMode : ''
     const respawn = input.respawn === true
-    if (respawn) {
+    if (respawn || session?.profile === 'codex') {
       await this.#respawnWithPermission(sessionId, target as HudPermissionMode)
     } else if (session?.profile === 'antigravity') {
       this.#hud.updatePermission(sessionId, target)
@@ -4002,6 +4190,7 @@ export class RuntimeServer {
         transitions[index] = owner
           ? await owner.server.#activateProviderForSession(sessionId, owner.descriptor, selection, peers)
           : { sessionId, status: 'deferred', reason: 'restart-unavailable' }
+        if (transitions[index]?.status === 'deferred' && owner) owner.server.#queueProviderActivation(sessionId)
       }
     }
     const workerCount = Math.min(MAX_CONCURRENT_PROVIDER_RESTARTS, liveSessionIds.length)
@@ -4009,13 +4198,86 @@ export class RuntimeServer {
     return transitions
   }
 
+  #readProviderActivationToken(key: string): string | undefined {
+    const row = this.#database.get<{ value_json: string }>('SELECT value_json FROM preferences WHERE key = ?', key)
+    if (!row) return undefined
+    try { const token: unknown = JSON.parse(row.value_json); return typeof token === 'string' ? token : undefined }
+    catch { return undefined }
+  }
+
+  #writeProviderActivationToken(key: string, token: string): void {
+    this.#database.run(
+      `INSERT INTO preferences (key, value_json, updated_at) VALUES (?, ?, ?)
+       ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at`,
+      key, JSON.stringify(token), Date.now()
+    )
+  }
+
+  async #providerLaunchDigest(selection: ProviderLaunchSelection): Promise<string> {
+    const snapshot = await this.#providerConfigs.snapshot()
+    const preferences = new AgentModelSettings(this.#database, this.#providerConfigs).preferences()
+    if (Object.keys(preferences.claudeRoleAssignments ?? {}).length || preferences.claudeWebSearch) return claudeRoleLaunchDigest(preferences, await this.#providerConfigs.captureClaudeRouting())
+    const providerFields = (providerId: string) => {
+      const provider = snapshot.providers['claude-code'].find(value => value.id === providerId)
+      return provider && {
+        modelMapping: provider.modelMapping,
+        effortMapping: provider.effortMapping,
+        reasoningEffort: provider.reasoningEffort,
+        contextWindow: preferences.contextWindows[providerId],
+        // Catalog labels, quota and account status are display data, not launch settings.
+        modelLimits: (provider.subscription?.modelMetadata ?? provider.modelMetadata)?.map(model => ({
+          id: model.id, resolvedModel: 'resolvedModel' in model ? model.resolvedModel : undefined,
+          contextWindow: model.contextWindow, maxContextWindow: model.maxContextWindow, maxOutputTokens: model.maxOutputTokens
+        })),
+        subscription: provider.subscription?.provider
+      }
+    }
+    const compact = preferences.compaction
+    let compaction: unknown = compact
+    if (compact.mode === 'custom' && compact.providerId) {
+      const target = await this.#providerConfigs.launchSelection('claude-code', compact.providerId)
+      compaction = { settings: compact, target: { id: target.providerConfigId, model: target.model, env: target.env }, provider: providerFields(compact.providerId) }
+    }
+    const canonical = (value: unknown): unknown => {
+      if (Array.isArray(value)) return value.map(canonical)
+      if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, entry]) => [key, canonical(entry)]))
+      return value
+    }
+    // Only the digest is persisted; provider credentials never leave this process.
+    return createHash('sha256').update(JSON.stringify(canonical({
+      providerId: selection.providerConfigId, model: selection.model, env: selection.env,
+      provider: providerFields(selection.providerConfigId), compaction
+    }))).digest('hex')
+  }
+
+  #queueProviderActivation(sessionId: string): void {
+    if (!RuntimeServer.#instances.has(this) || this.#closed) return
+    const sessions = this.#sessions
+    sessions.queueProviderActivation(sessionId, async () => {
+      const peers = [...RuntimeServer.#instances].filter(server => server.#sessions === sessions)
+      const session = sessions.get(sessionId)
+      if (!session || session.profile !== 'claude-code') return true
+      const owner = peers.filter(server => server.#spawnDescriptors.get(sessionId)?.profile === 'claude-code')
+        .sort((left, right) => (right.#spawnDescriptors.get(sessionId)?.spawnRevision ?? 0) - (left.#spawnDescriptors.get(sessionId)?.spawnRevision ?? 0))[0]
+      if (!owner) return peers.length === 0
+      const token = owner.#readProviderActivationToken('provider.claude.activation')
+      const transition = await owner.#activateProviderForSession(sessionId, owner.#spawnDescriptors.get(sessionId)!, undefined, peers)
+      return transition.status === 'updated' && owner.#readProviderActivationToken('provider.claude.activation') === token
+    })
+  }
+
   async #activateProviderForSession(
     sessionId: string,
     descriptor: TerminalSpawnMessage,
-    selection: ProviderLaunchSelection,
+    _selection: ProviderLaunchSelection | undefined,
     peers: RuntimeServer[]
   ): Promise<ProviderSessionActivationTransition> {
     return this.#sessions.runExclusive(sessionId, async () => {
+      if (this.#closed || !RuntimeServer.#instances.has(this) || !this.#sessions.has(sessionId)) return { sessionId, status: 'deferred', reason: 'session-not-running' }
+      const activationVersion = this.#sessions.providerActivationVersion(sessionId)
+      // Resolve inside the Session lock: a newer global activation supersedes queued work.
+      const activationToken = this.#readProviderActivationToken('provider.claude.activation')
+      const selection = await this.#providerConfigs.launchSelection('claude-code')
       const session = this.#sessions.get(sessionId)
       const binding = session?.profile === descriptor.profile && descriptor.profile !== 'shell'
         ? this.#sessionRepository.getResumeBinding(
@@ -4024,9 +4286,15 @@ export class RuntimeServer {
           )
         : undefined
       const previousSettings = providerLaunchSettingsFromMetadata(binding?.metadata)
-      const launchModel = !selection.subscription && !selection.model && previousSettings.model?.startsWith('matou-')
-        ? 'default'
-        : selection.model
+      const desiredDigest = await this.#providerLaunchDigest(selection)
+      if (this.#sessions.providerLaunchDigest(sessionId) === desiredDigest) {
+        try {
+          if (activationToken !== undefined) this.#writeProviderActivationToken(`provider.claude.applied.${sessionId}`, activationToken)
+        } catch {
+          return { sessionId, status: 'deferred', reason: 'binding-update-failed' }
+        }
+        return { sessionId, status: 'updated' }
+      }
       const deferredReason = this.#providerActivationDeferredReason(
         sessionId,
         descriptor.profile,
@@ -4080,11 +4348,20 @@ export class RuntimeServer {
         this.#unregisterSession(sessionId, active)
         active.dispose({ notifyExit: false })
         await active.whenClosed()
+        if (this.#closed || !RuntimeServer.#instances.has(this) ||
+            this.#sessions.providerActivationVersion(sessionId) !== activationVersion) {
+          return { sessionId, status: 'deferred', reason: 'session-not-running' }
+        }
 
         // This reset belongs only to the provider transition. Persisting
         // "default" would suppress a later native /model choice on every resume.
-        await this.#spawn(descriptor, undefined, undefined, wasAttached, launchModel)
+        await this.#spawn(descriptor, undefined, undefined, wasAttached)
         const replacement = this.#sessions.get(sessionId)
+        if (this.#closed || !RuntimeServer.#instances.has(this) ||
+            this.#sessions.providerActivationVersion(sessionId) !== activationVersion) {
+          if (replacement && replacement !== active) await this.#disposeSession(sessionId)
+          return { sessionId, status: 'deferred', reason: 'session-not-running' }
+        }
         if (!replacement || replacement === active || replacement.profile !== descriptor.profile) {
           throw new Error('provider Session restart did not produce a matching process')
         }
@@ -4095,32 +4372,23 @@ export class RuntimeServer {
         if (this.#sessions.get(sessionId) !== replacement) {
           throw new Error('provider Session replacement exited during startup')
         }
-        this.#hud.updateProviderModel(sessionId, selection.model)
+        const appliedToken = this.#readProviderActivationToken(`provider.claude.applied.${sessionId}`)
+        if (this.#readProviderActivationToken('provider.claude.activation') !== appliedToken) {
+          this.#queueProviderActivation(sessionId)
+          return { sessionId, status: 'deferred', reason: 'restart-unavailable' }
+        }
+        const actualSettings = providerLaunchSettingsFromMetadata(this.#sessionRepository.getProviderSettingsBinding(sessionId, 'claude-code')?.metadata)
+        this.#hud.updateProviderModel(sessionId, actualSettings.model ?? '')
         RuntimeServer.#publishAttachedSessionHud(sessionId)
+        if (this.#readProviderActivationToken('provider.claude.activation') !== activationToken) this.#queueProviderActivation(sessionId)
         return { sessionId, status: 'updated' }
       } catch (error) {
         if (!bindingUpdated) {
           console.error(`[provider-config.activate] ${errorMessage(error)}`)
           return { sessionId, status: 'deferred', reason: 'binding-update-failed' }
         }
-        try {
-          this.#sessionRepository.updateProviderLaunchSettings({
-            commandId: `provider-config-rollback-${sessionId}-${randomUUID()}`,
-            commandType: 'provider-binding.launch-settings',
-            requestHash: `${sessionId}:${previousSettings.providerConfigId}:${previousSettings.model}`
-          }, {
-            bindingId: currentBinding.id,
-            providerConfigId: previousSettings.providerConfigId!,
-            model: previousSettings.model ?? '',
-            permissionMode: previousPermission,
-            now: Date.now()
-          })
-          if (!this.#sessions.has(sessionId)) {
-            await this.#spawn(descriptor, undefined, undefined, wasAttached)
-          }
-        } catch (rollbackError) {
-          console.error(`[provider-config.rollback] ${errorMessage(rollbackError)}`)
-        }
+        // Keep the requested binding durable. A later restore must not silently
+        // fall back to the previous provider after a failed replacement launch.
         console.error(`[provider-config.activate] ${errorMessage(error)}`)
         return { sessionId, status: 'deferred', reason: 'restart-unavailable' }
       }
@@ -4190,6 +4458,7 @@ export class RuntimeServer {
         if (!replacement || replacement.profile !== launch.profile) {
           throw new Error(`${launch.profile} process did not start`)
         }
+        if (launch.profile === 'codex') RuntimeServer.#flushSemanticEventsForAll()
         return true
       } catch (error) {
         console.error(`[session.shell-promote-agent] ${errorMessage(error)}`)
@@ -4455,7 +4724,8 @@ function isSessionEnvironmentRpc(method: RpcMethod): boolean {
   return method === 'session.environment-open' ||
     method === 'session.environment-restore' ||
     method === 'session.environment-locate' ||
-    method === 'session.environment-handoff'
+    method === 'session.environment-handoff' ||
+    method === 'session.environment-isolate'
 }
 
 type EgressRpcMethod = Extract<
@@ -4621,6 +4891,9 @@ async function resolveInteractiveAgentLaunch(
     return { profile: 'claude-code', permissionMode: 'bypassPermissions' }
   }
   if (normalized === 'cc') return configuredCcLaunch()
+  if (normalized === 'dsh' || normalized === 'dsh dsh-tui' || normalized === 'dsh --profile dsh-tui') {
+    return { profile: 'dsh', permissionMode: 'default' }
+  }
   if (normalized === 'codex') return { profile: 'codex', permissionMode: 'default' }
   if (normalized === 'codex --dangerously-bypass-approvals-and-sandbox') {
     return { profile: 'codex', permissionMode: 'bypassPermissions' }
@@ -4667,6 +4940,7 @@ function configuredCcLaunch(): Promise<InteractiveAgentLaunch | undefined> {
     if (alias === 'claude --dangerously-skip-permissions') {
       return { profile: 'claude-code' as const, permissionMode: 'bypassPermissions' as const }
     }
+    configuredCcLaunches.delete(key)
     return undefined
   })
   configuredCcLaunches.set(key, pending)
@@ -4719,7 +4993,7 @@ async function configuredShellAlias(name: string): Promise<string | undefined> {
   try {
     const { stdout } = await execFileAsync(shell, [
       '-ic', 'alias "$1"', 'matou-alias', name
-    ], { timeout: 10_000, maxBuffer: 64 * 1024 })
+    ], { timeout: 15_000, maxBuffer: 64 * 1024 })
     const prefix = `${name}=`
     const line = stdout.split('\n').map((value) => value.trim())
       .find((value) => value.startsWith(prefix) || value.startsWith(`alias ${prefix}`))

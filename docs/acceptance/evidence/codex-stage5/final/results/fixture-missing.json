@@ -1,0 +1,118 @@
+{
+  "fixture": "nonexistent executable",
+  "db": {
+    "bindings": [],
+    "events": [
+      {
+        "seq": 14,
+        "event_type": "session.graph-summary-changed",
+        "session_id": "4b04c81f-db4f-4b76-acf9-deadd581a02b",
+        "payload_json": "{\"sessionId\":\"4b04c81f-db4f-4b76-acf9-deadd581a02b\",\"sceneId\":\"eb4fe84c-dfcf-4b98-ac25-8087e1aa14c6\",\"previousStatus\":\"running\",\"workStatus\":\"idle\",\"graph\":{\"sceneId\":\"eb4fe84c-dfcf-4b98-ac25-8087e1aa14c6\",\"layoutRevision\":2,\"nodes\":[{\"sessionId\":\"4b04c81f-db4f-4b76-acf9-deadd581a02b\",\"sceneId\":\"eb4fe84c-dfcf-4b98-ac25-8087e1aa14c6\",\"currentMode\":\"shell\",\"workStatus\":\"idle\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/final-codex/missing-lFsubT/repo\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/final-codex/missing-lFsubT/repo\",\"localExecutionContextId\":\"e2542bbc-b5d5-4cf8-9e66-2c7e13247756\"},\"hasOwnedWorktree\":false,\"git\":{\"state\":\"ready\",\"branch\":\"main\",\"dirty\":false},\"sharedWorkingDirectory\":true,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[\"nvas current --profile codex --enter && mt focus right\",\"已创建会话：窗口 主窗口 / 工作空间 repo（/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/final-codex/missing-lFsubT/repo） / 事项 默认 / 画布 Shell · /Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/final-codex/missing-lFsubT/repo / 会话 Codex\",\"当前焦点：窗口 主窗口 / 工作空间 repo（/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/final-codex/missing-lFsubT/repo） / 事项 默认 / 画布 Shell · /Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/final-codex/missing-lFsubT/repo / 会话 Codex\",\"已切换到：窗口 1 / 工作空间 repo / 事项 默认 / 画布 Shell · /Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/final-codex/missing-lFsubT/repo / 会话 2（Codex）\"],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":1,\"lastActivityAt\":1794745654917},{\"sessionId\":\"94855d43-faf0-4606-b240-1fb64c27ead8\",\"sceneId\":\"eb4fe84c-dfcf-4b98-ac25-8087e1aa14c6\",\"currentMode\":\"codex\",\"workStatus\":\"idle\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Codex\",\"cwd\":\"/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/final-codex/missing-lFsubT/repo\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/final-codex/missing-lFsubT/repo\",\"localExecutionContextId\":\"e2542bbc-b5d5-4cf8-9e66-2c7e13247756\"},\"hasOwnedWorktree\":false,\"git\":{\"state\":\"ready\",\"branch\":\"main\",\"dirty\":false},\"sharedWorkingDirectory\":true,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":2,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1794745655014}],\"edges\":[]}}",
+        "occurred_at": 1794745655171
+      },
+      {
+        "seq": 13,
+        "event_type": "session.graph-summary-changed",
+        "session_id": "94855d43-faf0-4606-b240-1fb64c27ead8",
+        "payload_json": "{\"graph\":{\"sceneId\":\"eb4fe84c-dfcf-4b98-ac25-8087e1aa14c6\",\"layoutRevision\":2,\"nodes\":[{\"sessionId\":\"4b04c81f-db4f-4b76-acf9-deadd581a02b\",\"sceneId\":\"eb4fe84c-dfcf-4b98-ac25-8087e1aa14c6\",\"currentMode\":\"shell\",\"workStatus\":\"running\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/final-codex/missing-lFsubT/repo\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/final-codex/missing-lFsubT/repo\",\"localExecutionContextId\":\"e2542bbc-b5d5-4cf8-9e66-2c7e13247756\"},\"hasOwnedWorktree\":false,\"git\":{\"state\":\"ready\",\"branch\":\"main\",\"dirty\":false},\"sharedWorkingDirectory\":true,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[\"icesword@icesworddeMacBook-Pro repo % mmt c\",\"icesword@icesworddeMacBook-Pro repo % mt create session --ca\",\"n\",\"nvas current --profile codex --enter && mt focus r\"],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":1,\"lastActivityAt\":1794745654917},{\"sessionId\":\"94855d43-faf0-4606-b240-1fb64c27ead8\",\"sceneId\":\"eb4fe84c-dfcf-4b98-ac25-8087e1aa14c6\",\"currentMode\":\"codex\",\"workStatus\":\"idle\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Codex\",\"cwd\":\"/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/final-codex/missing-lFsubT/repo\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/final-codex/missing-lFsubT/repo\",\"localExecutionContextId\":\"e2542bbc-b5d5-4cf8-9e66-2c7e13247756\"},\"hasOwnedWorktree\":false,\"git\":{\"state\":\"ready\",\"branch\":\"main\",\"dirty\":false},\"sharedWorkingDirectory\":true,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":2,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1794745655014}],\"edges\":[],\"focusedSessionId\":\"94855d43-faf0-4606-b240-1fb64c27ead8\"},\"sourceSessionId\":\"4b04c81f-db4f-4b76-acf9-deadd581a02b\"}",
+        "occurred_at": 1794745655014
+      },
+      {
+        "seq": 12,
+        "event_type": "session.canvas-membership-created",
+        "session_id": "94855d43-faf0-4606-b240-1fb64c27ead8",
+        "payload_json": "{\"membership\":{\"sessionId\":\"94855d43-faf0-4606-b240-1fb64c27ead8\",\"sceneId\":\"eb4fe84c-dfcf-4b98-ac25-8087e1aa14c6\",\"siblingCreatedSeq\":2,\"lastUserInteractionSeq\":0,\"createdAt\":1794745655014,\"updatedAt\":1794745655014}}",
+        "occurred_at": 1794745655014
+      },
+      {
+        "seq": 11,
+        "event_type": "scene.session-mounted",
+        "session_id": "94855d43-faf0-4606-b240-1fb64c27ead8",
+        "payload_json": "{\"id\":\"1213ac34-41db-4e6e-a896-2fa516ce0046\",\"sceneId\":\"eb4fe84c-dfcf-4b98-ac25-8087e1aa14c6\",\"sceneNodeId\":\"bea6ab63-3cc2-471d-b4be-6e51483e08df\",\"sessionId\":\"94855d43-faf0-4606-b240-1fb64c27ead8\",\"createdAt\":1794745655014}",
+        "occurred_at": 1794745655014
+      },
+      {
+        "seq": 10,
+        "event_type": "session.created",
+        "session_id": "94855d43-faf0-4606-b240-1fb64c27ead8",
+        "payload_json": "{\"id\":\"94855d43-faf0-4606-b240-1fb64c27ead8\",\"taskId\":\"5623a69f-ee56-41fc-a0d0-042686f1c7ba\",\"executionContextId\":\"e2542bbc-b5d5-4cf8-9e66-2c7e13247756\",\"kind\":\"codex\",\"status\":\"created\",\"title\":\"Codex\",\"titleSource\":\"default\",\"cwd\":\"/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/final-codex/missing-lFsubT/repo\",\"createdAt\":1794745655014,\"updatedAt\":1794745655014,\"lastActivityAt\":1794745655014,\"version\":1}",
+        "occurred_at": 1794745655014
+      },
+      {
+        "seq": 9,
+        "event_type": "session.user-interacted",
+        "session_id": "4b04c81f-db4f-4b76-acf9-deadd581a02b",
+        "payload_json": "{\"sessionId\":\"4b04c81f-db4f-4b76-acf9-deadd581a02b\",\"sceneId\":\"eb4fe84c-dfcf-4b98-ac25-8087e1aa14c6\",\"taskId\":\"5623a69f-ee56-41fc-a0d0-042686f1c7ba\",\"workspaceId\":\"3827a896-61ee-4500-b4c7-ddcacbbb92c7\",\"interactionKind\":\"submit\",\"sequence\":1,\"graph\":{\"sceneId\":\"eb4fe84c-dfcf-4b98-ac25-8087e1aa14c6\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"4b04c81f-db4f-4b76-acf9-deadd581a02b\",\"sceneId\":\"eb4fe84c-dfcf-4b98-ac25-8087e1aa14c6\",\"currentMode\":\"shell\",\"workStatus\":\"running\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/final-codex/missing-lFsubT/repo\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/final-codex/missing-lFsubT/repo\",\"localExecutionContextId\":\"e2542bbc-b5d5-4cf8-9e66-2c7e13247756\"},\"hasOwnedWorktree\":false,\"git\":{\"state\":\"ready\",\"branch\":\"main\",\"dirty\":false},\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[\"icesword@icesworddeMacBook-Pro repo % mmt c\",\"icesword@icesworddeMacBook-Pro repo % mt create session --ca\",\"n\",\"nvas current --profile codex --enter && mt focus r\"],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1794745654917}],\"edges\":[],\"focusedSessionId\":\"4b04c81f-db4f-4b76-acf9-deadd581a02b\"}}",
+        "occurred_at": 1794745654917
+      },
+      {
+        "seq": 8,
+        "event_type": "session.graph-summary-changed",
+        "session_id": "4b04c81f-db4f-4b76-acf9-deadd581a02b",
+        "payload_json": "{\"sessionId\":\"4b04c81f-db4f-4b76-acf9-deadd581a02b\",\"sceneId\":\"eb4fe84c-dfcf-4b98-ac25-8087e1aa14c6\",\"previousStatus\":\"idle\",\"workStatus\":\"running\",\"graph\":{\"sceneId\":\"eb4fe84c-dfcf-4b98-ac25-8087e1aa14c6\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"4b04c81f-db4f-4b76-acf9-deadd581a02b\",\"sceneId\":\"eb4fe84c-dfcf-4b98-ac25-8087e1aa14c6\",\"currentMode\":\"shell\",\"workStatus\":\"running\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/final-codex/missing-lFsubT/repo\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/final-codex/missing-lFsubT/repo\",\"localExecutionContextId\":\"e2542bbc-b5d5-4cf8-9e66-2c7e13247756\"},\"hasOwnedWorktree\":false,\"git\":{\"state\":\"ready\",\"branch\":\"main\",\"dirty\":false},\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[\"icesword@icesworddeMacBook-Pro repo % mmt c\",\"icesword@icesworddeMacBook-Pro repo % mt create session --ca\",\"n\",\"nvas current --profile codex --enter && mt focus r\"],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1794745653894}],\"edges\":[]}}",
+        "occurred_at": 1794745654916
+      },
+      {
+        "seq": 7,
+        "event_type": "session.run-started",
+        "session_id": "4b04c81f-db4f-4b76-acf9-deadd581a02b",
+        "payload_json": "{\"run\":{\"id\":\"9414c7ba-e445-446c-b704-f0ed3b2e742e\",\"sessionId\":\"4b04c81f-db4f-4b76-acf9-deadd581a02b\",\"ordinal\":1,\"runtimeGeneration\":\"d68f9713-04cf-417c-a62d-5fe3636e4586\",\"profile\":\"shell\",\"pid\":50691,\"status\":\"running\",\"cols\":80,\"rows\":24,\"startedAt\":1794745653894}}",
+        "occurred_at": 1794745653894
+      },
+      {
+        "seq": 6,
+        "event_type": "workspace.path-status-changed",
+        "session_id": null,
+        "payload_json": "{\"workspaceId\":\"3827a896-61ee-4500-b4c7-ddcacbbb92c7\",\"status\":\"valid\",\"reason\":\"\",\"checkedAt\":1794745653835,\"validationGeneration\":1}",
+        "occurred_at": 1794745653835
+      },
+      {
+        "seq": 5,
+        "event_type": "scene.session-mounted",
+        "session_id": "4b04c81f-db4f-4b76-acf9-deadd581a02b",
+        "payload_json": "{\"id\":\"6854c71f-d8bc-413a-ac59-0b4d0b4892e5\",\"sceneId\":\"eb4fe84c-dfcf-4b98-ac25-8087e1aa14c6\",\"sceneNodeId\":\"c8f81188-6318-4966-ad17-7d5bda4761fa\",\"sessionId\":\"4b04c81f-db4f-4b76-acf9-deadd581a02b\",\"createdAt\":1794745653831}",
+        "occurred_at": 1794745653831
+      },
+      {
+        "seq": 4,
+        "event_type": "session.created",
+        "session_id": "4b04c81f-db4f-4b76-acf9-deadd581a02b",
+        "payload_json": "{\"id\":\"4b04c81f-db4f-4b76-acf9-deadd581a02b\",\"taskId\":\"5623a69f-ee56-41fc-a0d0-042686f1c7ba\",\"executionContextId\":\"e2542bbc-b5d5-4cf8-9e66-2c7e13247756\",\"kind\":\"shell\",\"status\":\"created\",\"title\":\"Shell\",\"titleSource\":\"default\",\"cwd\":\"/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/final-codex/missing-lFsubT/repo\",\"createdAt\":1794745653831,\"updatedAt\":1794745653831,\"lastActivityAt\":1794745653831,\"version\":1}",
+        "occurred_at": 1794745653831
+      },
+      {
+        "seq": 3,
+        "event_type": "scene.created",
+        "session_id": null,
+        "payload_json": "{\"id\":\"eb4fe84c-dfcf-4b98-ac25-8087e1aa14c6\",\"taskId\":\"5623a69f-ee56-41fc-a0d0-042686f1c7ba\",\"name\":\"Shell · /Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/final-codex/missing-lFsubT/repo\",\"mode\":\"tile\",\"rootNodeId\":\"c8f81188-6318-4966-ad17-7d5bda4761fa\",\"titlePinned\":false,\"sortKey\":\"a0\",\"layoutRevision\":1,\"createdAt\":1794745653831,\"updatedAt\":1794745653831}",
+        "occurred_at": 1794745653831
+      },
+      {
+        "seq": 2,
+        "event_type": "task.created",
+        "session_id": null,
+        "payload_json": "{\"id\":\"5623a69f-ee56-41fc-a0d0-042686f1c7ba\",\"workspaceId\":\"3827a896-61ee-4500-b4c7-ddcacbbb92c7\",\"title\":\"默认\",\"status\":\"planned\",\"executionContextId\":\"e2542bbc-b5d5-4cf8-9e66-2c7e13247756\",\"sortKey\":\"a0\",\"isPinned\":false,\"pinSortKey\":\"\",\"lastOpenedAt\":1794745653831,\"createdAt\":1794745653831,\"updatedAt\":1794745653831,\"version\":1}",
+        "occurred_at": 1794745653831
+      },
+      {
+        "seq": 1,
+        "event_type": "workspace.created",
+        "session_id": null,
+        "payload_json": "{\"id\":\"3827a896-61ee-4500-b4c7-ddcacbbb92c7\",\"name\":\"repo\",\"rootDirectory\":\"/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/final-codex/missing-lFsubT/repo\",\"pathIdentity\":\"path:/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/final-codex/missing-lFsubT/repo\",\"taskOrder\":[\"5623a69f-ee56-41fc-a0d0-042686f1c7ba\"],\"isDefault\":true,\"isPinned\":true,\"pinSortKey\":\"a0\",\"lastOpenedAt\":1794745653831,\"createdAt\":1794745653831,\"updatedAt\":1794745653831,\"version\":2}",
+        "occurred_at": 1794745653831
+      }
+    ],
+    "sessions": [
+      {
+        "id": "4b04c81f-db4f-4b76-acf9-deadd581a02b",
+        "title": "Shell",
+        "kind": "shell"
+      },
+      {
+        "id": "94855d43-faf0-4606-b240-1fb64c27ead8",
+        "title": "Codex",
+        "kind": "codex"
+      }
+    ]
+  }
+}

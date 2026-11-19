@@ -1,0 +1,17 @@
+{
+  "command": [
+    "pnpm",
+    "--filter",
+    "@matou/runtime",
+    "exec",
+    "vitest",
+    "run",
+    "src/cli/mt-cli.test.ts",
+    "--maxWorkers=1",
+    "-t",
+    "transports exactly 1 MiB"
+  ],
+  "exitCode": 0,
+  "durationSeconds": 0.67,
+  "environmentCorrection": "TMPDIR is authorized project root for this one socket test; endpoint 103 bytes; temporary directory removed by test"
+}

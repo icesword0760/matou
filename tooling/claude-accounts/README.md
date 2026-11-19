@@ -37,6 +37,8 @@ arm64 sidecar in an x64 or universal app.
 
 The official CLI performs authorization with a per-attempt config directory. Its normal browser opener is suppressed for that child only. `isolated_browser.py` accepts only official authorization endpoints and opens an installed Chrome, Edge or Brave executable with a unique temporary user-data directory and incognito mode. It does not implement OAuth. No ordinary-browser fallback is used.
 
+When desktop detects Mantle, each operation receives its executable, the latest egress-country time zone, and the shared persisted fingerprint seed. The browser selector uses it only when all three values are valid and the kernel is executable; otherwise the existing Chrome/Edge/Brave selection and arguments are unchanged. Safe-kernel launches pass the authorization URL directly as the final process argument and create no redirect HTML. The ordinary-browser fallback retains its existing private temporary redirect HTML. Neither path forwards browser output or these environment values to app logs.
+
 Run `pnpm test:accounts` for upstream and isolated-browser contracts. Run `uv run --frozen --project tooling/claude-accounts python tooling/claude-accounts/browser_smoke.py` for two real concurrent Chromium windows against synthetic localhost cookies; no accounts are used.
 
 ## Manual authorization code (0.2.6)

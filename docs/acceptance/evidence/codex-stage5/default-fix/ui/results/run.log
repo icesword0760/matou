@@ -1,0 +1,13 @@
+(node:11893) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+Running 1 test using 1 worker
+
+(node:12006) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+
+(node:12006) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+
+[1/1] tests/e2e/codex-acceptance.spec.ts:650:3 › Codex packaged acceptance — real CLI and explicit controlled fixtures › closure PRD 5: Default restores user permissions after Bypass and Plan
+  1 passed (1.0m)

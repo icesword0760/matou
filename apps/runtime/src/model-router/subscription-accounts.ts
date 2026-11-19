@@ -6,15 +6,17 @@ import { setTimeout as delay } from 'node:timers/promises'
 import type {
   ProviderCli, ProviderConfigSnapshot, ProviderConfigView,
   SubscriptionAccountDetails, SubscriptionAccountSummary, SubscriptionLoginStartInput,
-  SubscriptionLoginView, SubscriptionModelsReadInput, SubscriptionModel, SubscriptionProvider,
+  SubscriptionLoginView, SubscriptionModelsReadInput, SubscriptionModelsRefreshResult, SubscriptionModel, SubscriptionProvider,
   SubscriptionProviderConfigInput, SubscriptionSettingsSnapshot, ProviderActivationFailure
 } from '@matou/contracts'
-import { ProviderConfigStore } from '../provider-config/provider-config-store'
+import { ProviderConfigStore, type StoredSubscriptionProvider } from '../provider-config/provider-config-store'
 import { ModelRouterManager, type RouterLease } from './manager'
 import { RouterManagementClient, type RouterCredential } from './management-client'
 import { OAuthLoopbackFlow, type OAuthOutcome } from './oauth'
 import { ANTIGRAVITY_CLIENT_USER_AGENT, credentialCarriesAntigravityIdentity } from './antigravity-client'
 import { CODEX_CLIENT_HEADERS, credentialCarriesCodexIdentity } from './codex-client'
+import { SubscriptionAccountBindingError } from './subscription-account-binding'
+import { validateClaudeTargetId } from '../session/claude-role-assignments'
 import { buildClaudeLaunch, toClientModelId, FABLE_FALLBACK_ALIAS, type ClaudeLaunchInput, type ModelAlias } from './claude-launch'
 import {
   parseCredentialSummary, parseChatGptPlan, readChatGptUsage, readChatGptModels,
@@ -25,6 +27,17 @@ import { mapAccountStatus, mapSubscriptionLaunchFailure, mapSubscriptionLoginFai
 export interface PreparedSubscriptionLaunch {
   lease: RouterLease
   input: Omit<ClaudeLaunchInput, 'inheritedEnvNames'>
+}
+/** Runtime-only connection; never expose through settings RPC. */
+export interface PreparedSubscriptionModelTarget {
+  lease: RouterLease
+  baseUrl: string
+  headers: Record<string, string>
+  model: string
+  metadata: SubscriptionModel
+  readonly accountIdentity: string
+  readonly targetSignal: AbortSignal
+  assertActive(): void
 }
 /** A platform requirement is final for this runtime, not a router retry. */
 export class SubscriptionPlatformError extends Error {
@@ -43,6 +56,13 @@ export class SubscriptionLaunchError extends Error {
     super(message[locale])
     this.providerFailure = { status: kind === 'needs-sign-in' ? 'needs-sign-in' : 'router-start-failed', message, recovery: kind === 'needs-sign-in' ? 'sign-in' : 'retry', ...(detail ? { reason: detail[locale], reasonLocalized: detail } : {}) }
     console.error(`[subscription.prepare] ${kind}: ${sanitizeProviderReason(diagnostic) ?? 'No diagnostic detail'}`)
+  }
+}
+
+/** Stable runtime diagnostic: an unreadable directory is not proof of deletion. */
+export class SubscriptionModelTargetError extends SubscriptionLaunchError {
+  constructor(readonly targetFailure: 'catalog-model-missing' | 'registered-model-missing' | 'directory-unavailable') {
+    super(`Subscription target: ${targetFailure}`, targetFailure === 'directory-unavailable' ? 'router-start-failed' : 'models-not-ready')
   }
 }
 
@@ -73,6 +93,7 @@ export interface SubscriptionConnection {
   reopen(attemptId: string): Promise<SubscriptionLoginView>
   cancel(attemptId: string): Promise<SubscriptionLoginView>
   models(input: SubscriptionModelsReadInput): Promise<SubscriptionAccountDetails>
+  refreshModels(providerId: string, isCancelled?: () => boolean): Promise<SubscriptionModelsRefreshResult>
   settings(): Promise<SubscriptionSettingsSnapshot>
   closeSettings(): Promise<void>
   confirmRisk(accepted: boolean): Promise<{ accepted: true }>
@@ -106,11 +127,13 @@ export class SubscriptionAccounts {
   readonly #detailsAt = new Map<string, number>()
   readonly #detailsIdentity = new Map<string, string>()
   readonly #detailsTtlMs: number
+  readonly #syncedExtraModels = new Map<string, string>()
   readonly #credentialStatus = new Map<string, SubscriptionAccountSummary>()
   #queue: Promise<unknown> = Promise.resolve()
   #startup: Promise<void> | undefined
   #closed = false
   #routerUnavailable = false
+  readonly #targetBindings = new Map<string, Set<() => void>>()
   readonly #changeListeners = new Set<() => void>()
   readonly #unsubscribeRouter: () => void
   constructor(options: Options) {
@@ -130,12 +153,102 @@ export class SubscriptionAccounts {
   onChange(listener: () => void): () => void { this.#changeListeners.add(listener); return () => this.#changeListeners.delete(listener) }
   #notifyChanged(): void { for (const listener of this.#changeListeners) listener() }
 
+  /** Returns the router base URL, which may differ from the URL a session launched with. */
+  async ensureRouterRunning(): Promise<string> {
+    if (this.#closed) throw new Error('Subscription accounts are closed')
+    const lease = await this.#options.manager.acquire('request-recovery')
+    lease.release()
+    return lease.connection.baseUrl
+  }
+
   /** Shared preflight for activation and every final Claude spawn. The returned
    * lease belongs to the caller until process exit (or preparation failure).
    * No provider model/quota request is made here.
    */
   async prepareLaunch(providerConfigId: string, scope = 'subscription-session'): Promise<PreparedSubscriptionLaunch> {
+    return this.#prepareSubscription(providerConfigId, scope, async (row, lease, client) => {
+      const provider = row.subscription.provider
+      const aliases = aliasesFor(provider, row.modelMapping, row.subscription.modelMetadata)
+      // Rewriting an identical prefix/config still wakes the engine watcher.
+      // Activation and final spawn both prepare; keep the second pass read-only
+      // when the first one has already registered this exact configuration.
+      const [registered, registeredModels] = await Promise.all([client.aliases(provider), client.models(row.subscription.credentialRef.name)])
+      if (!sameAliases(registered, aliases)) await client.setAliases(provider, aliases)
+      // v8's credential list omits prefix. The published model IDs are the
+      // authoritative proof that this credential has adopted its prefix.
+      const modelsReady = hasAliases(registeredModels, prefixFor(provider), aliases)
+      if (!modelsReady) await client.setPrefix(row.subscription.credentialRef.name, prefixFor(provider))
+      if (!modelsReady || !sameAliases(registered, aliases)) await waitForAliases(client, row.subscription.credentialRef.name, prefixFor(provider), aliases)
+      const models = Object.fromEntries(roles.map(role => [role, row.subscription.modelMetadata.find(model => model.id === row.modelMapping[role])])) as ClaudeLaunchInput['models']
+      const input: PreparedSubscriptionLaunch['input'] = {
+        subscription: provider === 'codex' ? 'chatgpt' : 'antigravity',
+        accountPrefix: prefixFor(provider) as ClaudeLaunchInput['accountPrefix'],
+        routerUrl: lease.connection.baseUrl, clientKey: lease.connection.clientKey,
+        models, mainRole: 'opus', providerName: row.name
+      }
+      const projected = buildClaudeLaunch(input)
+      if (!projected.ok) throw new SubscriptionLaunchError(`Subscription launch configuration: ${projected.error}`, projected.error === 'unsupported-context-window' ? 'unsupported-context-window' : 'router-start-failed')
+      this.#options.manager.rememberModelAliases(provider, aliases)
+      return { lease, input }
+    })
+  }
+
+  async prepareModelTarget(providerConfigId: string, model: string, scope = 'subscription-model-target'): Promise<PreparedSubscriptionModelTarget> {
+    model = validateClaudeTargetId(model, 240)
+    return this.#prepareSubscription(providerConfigId, scope, async (row, lease, client, file) => {
+      const metadata = row.subscription.modelMetadata.find(item => item.id === model)
+      if (!metadata) throw new SubscriptionModelTargetError('catalog-model-missing')
+      const routedModel = `${prefixFor(row.subscription.provider)}/${model}`
+      let registered: Array<Record<string, unknown>>
+      try { registered = await client.models(row.subscription.credentialRef.name) }
+      catch { throw new SubscriptionModelTargetError('directory-unavailable') }
+      if (!registered.some(item => item.id === routedModel)) {
+        let updated = false
+        if (registered.some(item => item.id === model)) {
+          // A never-activated account can still publish raw IDs. Adopt only its
+          // existing prefix; role aliases remain untouched for other processes.
+          await client.setPrefix(row.subscription.credentialRef.name, prefixFor(row.subscription.provider))
+          updated = true
+        } else if (row.subscription.modelMetadata.length > 0) {
+          updated = await this.#syncExtraModels(client, row.subscription.credentialRef.name, row.subscription.modelMetadata, [], row.subscription.provider)
+        }
+        if (updated) {
+          const deadline = Date.now() + 8_000
+          do {
+            if (this.#closed) throw new Error('Subscription accounts are closed')
+            try { registered = await client.models(row.subscription.credentialRef.name) }
+            catch { throw new SubscriptionModelTargetError('directory-unavailable') }
+            if (registered.some(item => item.id === routedModel)) break
+            await delay(50)
+          } while (Date.now() < deadline)
+        }
+      }
+      if (!registered.some(item => item.id === routedModel)) throw new SubscriptionModelTargetError('registered-model-missing')
+      if (this.#closed) throw new Error('Subscription accounts are closed')
+      const controller = new AbortController()
+      const name = row.subscription.credentialRef.name
+      const bindings = this.#targetBindings.get(name) ?? new Set<() => void>()
+      this.#targetBindings.set(name, bindings)
+      let released = false
+      const targetLease: RouterLease = { ...lease, release: () => {
+        if (released) return
+        released = true
+        bindings.delete(targetLease.release)
+        if (this.#targetBindings.get(name) === bindings && !bindings.size) this.#targetBindings.delete(name)
+        controller.abort(new SubscriptionAccountBindingError())
+        lease.release()
+      } }
+      bindings.add(targetLease.release)
+      return { lease: targetLease, accountIdentity: JSON.stringify([name, file.auth_index]), targetSignal: controller.signal,
+        assertActive: () => { if (controller.signal.aborted) throw new SubscriptionAccountBindingError() },
+        baseUrl: lease.connection.baseUrl, headers: { authorization: `Bearer ${lease.connection.clientKey}` }, model: routedModel, metadata: structuredClone(metadata) }
+    })
+  }
+
+  /** Both launch modes use the same exact-account adoption and lease lifetime. */
+  async #prepareSubscription<T>(providerConfigId: string, scope: string, project: (row: StoredSubscriptionProvider, lease: RouterLease, client: RouterManagementClient, file: RouterCredential) => Promise<T>): Promise<T> {
     this.#assertSupported()
+    providerConfigId = validateClaudeTargetId(providerConfigId, 256)
     let lease: RouterLease | undefined
     try {
       await this.initialize()
@@ -143,11 +256,14 @@ export class SubscriptionAccounts {
         if (this.#closed) throw new Error('Subscription accounts are closed')
         const row = (await this.#options.store.subscriptions()).find(row => row.id === providerConfigId)
         if (!row) throw new Error('Subscription provider does not exist')
+        if (this.#credentialStatus.get(row.subscription.credentialRef.name)?.status === 'needs-sign-in') {
+          throw new SubscriptionLaunchError('Subscription sign-in is required before preparing another target', 'needs-sign-in')
+        }
         const provider = row.subscription.provider
         lease = await this.#options.manager.acquire(scope)
         const client = new RouterManagementClient(lease.connection)
         const file = (await client.credentials()).find(file => file.name === row.subscription.credentialRef.name && file.provider === provider)
-        if (!file || credentialNeedsSignIn(file)) {
+        if (!file || !credentialMatches(row, file) || credentialNeedsSignIn(file)) {
           this.#markNeedsSignIn(row.subscription.credentialRef.name, row.subscription.account)
           throw new SubscriptionLaunchError('Subscription credential is missing or no longer valid', 'needs-sign-in')
         }
@@ -167,38 +283,41 @@ export class SubscriptionAccounts {
           }
           throw error
         }
-        const aliases = aliasesFor(provider, row.modelMapping, row.subscription.modelMetadata)
-        // Rewriting an identical prefix/config still wakes the engine watcher.
-        // Activation and final spawn both prepare; keep the second pass read-only
-        // when the first one has already registered this exact configuration.
-        const [registered, registeredModels] = await Promise.all([client.aliases(provider), client.models(file.name)])
-        if (!sameAliases(registered, aliases)) await client.setAliases(provider, aliases)
-        // v8's credential list omits prefix. The published model IDs are the
-        // authoritative proof that this credential has adopted its prefix.
-        const modelsReady = hasAliases(registeredModels, prefixFor(provider), aliases)
-        if (!modelsReady) await client.setPrefix(file.name, prefixFor(provider))
-        if (!modelsReady || !sameAliases(registered, aliases)) await waitForAliases(client, file.name, prefixFor(provider), aliases)
-        const models = Object.fromEntries(roles.map(role => [role, row.subscription.modelMetadata.find(model => model.id === row.modelMapping[role])])) as ClaudeLaunchInput['models']
-        const input: PreparedSubscriptionLaunch['input'] = {
-          subscription: provider === 'codex' ? 'chatgpt' : 'antigravity',
-          accountPrefix: prefixFor(provider) as ClaudeLaunchInput['accountPrefix'],
-          routerUrl: lease.connection.baseUrl, clientKey: lease.connection.clientKey,
-          models, mainRole: 'opus', providerName: row.name
-        }
-        const projected = buildClaudeLaunch(input)
-        if (!projected.ok) throw new SubscriptionLaunchError(`Subscription launch configuration: ${projected.error}`, projected.error === 'unsupported-context-window' ? 'unsupported-context-window' : 'router-start-failed')
-        this.#options.manager.rememberModelAliases(provider, aliases)
+        const result = await project(row, lease, client, file)
+        // close() marks closed before waiting for this serial preparation.
+        if (this.#closed) throw new Error('Subscription accounts are closed')
         if (this.#credentialStatus.get(file.name)?.status === 'needs-sign-in') {
           this.#credentialStatus.set(file.name, { ...row.subscription.account, status: 'ready' })
           this.#notifyChanged()
         }
-        return { lease, input }
+        return result
       })
     } catch (error) {
       lease?.release()
       if (error instanceof SubscriptionLaunchError) throw error
       throw new SubscriptionLaunchError(error instanceof Error ? error.message : 'Subscription launch could not be prepared')
     }
+  }
+  #revokeTargets(name: string): void {
+    const bindings = this.#targetBindings.get(name)
+    this.#targetBindings.delete(name)
+    for (const release of bindings ?? []) release()
+  }
+  /** Runtime inference failure; do not mutate credentials or revoke active processes. */
+  async markNeedsSignIn(providerConfigId: string, accountIdentity?: string): Promise<void> {
+    await this.#serial(async () => {
+      if (this.#closed) return
+      const row = (await this.#options.store.subscriptions()).find(row => row.id === providerConfigId)
+      if (!row) return // Native OAuth has no managed subscription row.
+      const ref = row.subscription.credentialRef
+      if (accountIdentity) {
+        let identity: unknown
+        try { identity = JSON.parse(accountIdentity) } catch { return }
+        if (!Array.isArray(identity) || identity[0] !== ref.name || ref.authIndex && identity[1] !== ref.authIndex) return
+      }
+      if (this.#credentialStatus.get(ref.name)?.status === 'needs-sign-in') return
+      this.#markNeedsSignIn(ref.name, row.subscription.account)
+    })
   }
   #markNeedsSignIn(name: string, account: SubscriptionAccountSummary): void {
     const { reason: _reason, ...summary } = account
@@ -213,7 +332,8 @@ export class SubscriptionAccounts {
   async #ensureClientIdentity(client: RouterManagementClient, file: RouterCredential): Promise<void> {
     try {
       if (file.provider === 'antigravity') {
-        if (!await credentialCarriesAntigravityIdentity(this.#options.dataRoot, file)) await client.setUserAgent(file.name, ANTIGRAVITY_CLIENT_USER_AGENT)
+        const expectedAgent = client.connection?.antigravityUserAgent ?? ANTIGRAVITY_CLIENT_USER_AGENT
+        if (!await credentialCarriesAntigravityIdentity(this.#options.dataRoot, file, expectedAgent)) await client.setUserAgent(file.name, expectedAgent)
       } else if (file.provider === 'codex') {
         if (!await credentialCarriesCodexIdentity(this.#options.dataRoot, file)) await client.setHeaders(file.name, CODEX_CLIENT_HEADERS)
       }
@@ -278,6 +398,7 @@ export class SubscriptionAccounts {
       }) },
       cancel: attemptId => { assertOpen(); return this.#serial(() => this.#cancel(this.#attempt(id, attemptId))) },
       models: input => { assertOpen(); return this.#reloadModels(id, input) },
+      refreshModels: (providerId, isCancelled) => { assertOpen(); return this.#refreshModels(id, providerId, isCancelled) },
       settings: () => { assertOpen(); return this.#settings(id) },
       closeSettings: () => { assertOpen(); return this.#closeSettings(id) },
       confirmRisk: accepted => { assertOpen(); if (accepted !== true) throw new Error('Risk confirmation is required'); return this.#options.store.confirmAntigravityRisk() },
@@ -514,10 +635,16 @@ export class SubscriptionAccounts {
         const aliases = aliasesFor(provider, selected, details.models)
         const oldAliases = await client.aliases(provider)
         const oldRef = previous?.subscription.credentialRef.name
-        const replacing = oldRef && oldRef !== file.name
+        const credentialNameChanged = oldRef && oldRef !== file.name
+        const identityChanged = oldRef && (oldRef !== file.name ||
+          (previous.subscription.credentialRef.authIndex && file.auth_index && previous.subscription.credentialRef.authIndex !== file.auth_index) ||
+          (previous.subscription.account.email && details.account.email && previous.subscription.account.email !== details.account.email))
         let committed = false
         try {
-          if (replacing) await client.setDisabled(oldRef, true)
+          // Invalidate before any shared routing mutation. Rollback must never
+          // revive these captured connections; preparation rechecks identity.
+          if (identityChanged) this.#revokeTargets(oldRef)
+          if (credentialNameChanged) await client.setDisabled(oldRef, true)
           await client.setAliases(provider, aliases)
           await client.setPrefix(file.name, prefixFor(provider))
           await client.setDisabled(file.name, false)
@@ -535,12 +662,12 @@ export class SubscriptionAccounts {
           this.#rememberDetails(file.name, credentialFingerprint(file), details)
           this.#credentialStatus.set(file.name, details.account)
           if (attempt) { attempt.view.status = 'saved'; attempt.lease.release() }
-          if (replacing) await client.deleteCredential(oldRef).catch(() => undefined)
+          if (credentialNameChanged) await client.deleteCredential(oldRef).catch(() => undefined)
           return result
         } catch (error) {
           if (!committed) {
             await client.setAliases(provider, oldAliases).catch(() => undefined)
-            if (replacing) await client.setDisabled(oldRef, false).catch(() => undefined)
+            if (credentialNameChanged) await client.setDisabled(oldRef, false).catch(() => undefined)
             if (!oldRef || oldRef !== file.name) { await client.setDisabled(file.name, true).catch(() => undefined); await client.setPrefix(file.name, '').catch(() => undefined) }
           }
           throw error
@@ -560,6 +687,7 @@ export class SubscriptionAccounts {
       const client = new RouterManagementClient(lease.connection)
       try {
         const credentialExists = (await client.credentials()).some(file => file.name === saved.subscription.credentialRef.name)
+        this.#revokeTargets(saved.subscription.credentialRef.name)
         if (credentialExists) await client.setDisabled(saved.subscription.credentialRef.name, true)
         let result: ProviderConfigSnapshot
         try { result = await this.#options.store.delete(cli, providerId) }
@@ -596,20 +724,25 @@ export class SubscriptionAccounts {
         await Promise.all(rows.map(async row => {
           const file = credentials.find(file => file.name === row.subscription.credentialRef.name)
           const statusAtRead = this.#credentialStatus.get(row.subscription.credentialRef.name)
+          const detailsAtRead = file ? this.#details.get(file.name) : undefined
           const cachedDetails = file ? this.#freshDetails(file) : undefined
           // Settings only needs plan/quota. Reuse the in-memory model list, then
           // the list saved at login, so fetchAvailableModels is not repeated.
-          const knownModels = file && this.#details.get(file.name)?.models.length
-            ? this.#details.get(file.name)!.models
-            : row.subscription.modelMetadata
+          const knownModels = detailsAtRead?.models.length ? detailsAtRead.models : row.subscription.modelMetadata
           const details = file
             ? cachedDetails ?? await this.#readDetails(client, file, knownModels.length === 0, knownModels)
-            : { account: { ...row.subscription.account, status: 'needs-sign-in' as const }, models: [] }
-          if (file && !cachedDetails) this.#rememberDetails(file.name, credentialFingerprint(file), details)
-          round.accounts.set(row.id, { ref: row.subscription.credentialRef.name, details })
-          if (details.models.length) await this.#options.store.cacheSubscriptionModels(row.id, row.subscription.credentialRef.name, details.models)
-          // A slow settings read must not erase a newer activation failure.
-          if (this.#credentialStatus.get(row.subscription.credentialRef.name) === statusAtRead) this.#credentialStatus.set(row.subscription.credentialRef.name, details.account)
+            : { account: { ...row.subscription.account, status: 'needs-sign-in' as const }, models: row.subscription.modelMetadata }
+          await this.#serial(async () => {
+            const ref = row.subscription.credentialRef.name
+            const latest = this.#details.get(ref)
+            // A settings read started before a manual refresh must not write its old catalog back.
+            const current = latest && latest !== detailsAtRead ? { ...details, models: latest.models } : details
+            if (file && !cachedDetails) this.#rememberDetails(file.name, credentialFingerprint(file), current)
+            round.accounts.set(row.id, { ref, details: current })
+            if (file && current.models.length) await this.#options.store.cacheSubscriptionModels(row.id, ref, current.models)
+            // A slow settings read must not erase a newer activation failure.
+            if (statusAtRead?.status !== 'needs-sign-in' && this.#credentialStatus.get(ref) === statusAtRead) this.#credentialStatus.set(ref, current.account)
+          })
         }))
       })().catch(async () => {
         for (const row of await this.#options.store.subscriptions()) {
@@ -626,7 +759,7 @@ export class SubscriptionAccounts {
     const accounts = Object.fromEntries(rows.map(row => {
       const cached = round.accounts.get(row.id)
       const details = cached?.ref === row.subscription.credentialRef.name ? cached.details : this.#details.get(row.subscription.credentialRef.name)
-      return [row.id, details ?? { account: row.subscription.account, models: [] }]
+      return [row.id, { ...(details ?? { account: row.subscription.account, models: [] }), account: { ...(details?.account ?? row.subscription.account), ...this.#credentialStatus.get(row.subscription.credentialRef.name) } }]
     }))
     return structuredClone({ snapshot: await this.snapshot(), accounts, antigravityRiskAccepted: await this.#options.store.antigravityRiskAccepted() })
   }
@@ -663,14 +796,99 @@ export class SubscriptionAccounts {
       })
     } finally { lease.release() }
   }
-  async #readModels(client: RouterManagementClient, file: RouterCredential, project?: string): Promise<SubscriptionModel[]> {
+  async #refreshModels(owner: string, providerId: string, isCancelled?: () => boolean): Promise<SubscriptionModelsRefreshResult> {
+    this.#assertSupported()
+    const row = (await this.#options.store.subscriptions()).find(row => row.id === providerId)
+    const name = row?.subscription.credentialRef?.name
+    if (!row || !name) throw new SubscriptionLaunchError('Subscription credential is missing', 'needs-sign-in')
+    const needsSignIn = () => (this.#credentialStatus.get(name)?.status ?? row.subscription.account.status) === 'needs-sign-in'
+    if (needsSignIn()) throw new SubscriptionLaunchError('Subscription sign-in is required', 'needs-sign-in')
+
+    const files = await readdir(join(this.#options.dataRoot, 'model-router/credentials')).catch(error => {
+      if (error.code === 'ENOENT') return [] as string[]
+      throw error
+    })
+    const signInRequired = () => {
+      this.#markNeedsSignIn(name, row.subscription.account)
+      return new SubscriptionLaunchError('Subscription credential is missing or no longer valid', 'needs-sign-in')
+    }
+    if (!files.includes(name)) throw signInRequired()
+
+    const lease = await this.#options.manager.acquire('subscription-models-refresh').catch(error => {
+      throw new SubscriptionLaunchError(error instanceof Error ? error.message : 'Model router is not running')
+    })
+    try {
+      const client = new RouterManagementClient(lease.connection)
+      const file = (await client.credentials()).find(file => file.name === name && file.provider === row.subscription.provider)
+      if (!file || !credentialMatches(row, file) || credentialNeedsSignIn(file)) throw signInRequired()
+      const models = await this.#readModels(client, file, typeof file.project_id === 'string' ? file.project_id : undefined, true)
+      return await this.#serial(async () => {
+        if (this.#owners.get(owner)?.closed !== false || this.#closed || isCancelled?.()) throw new Error('Subscription model refresh was cancelled')
+        const current = (await this.#options.store.subscriptions()).find(row => row.id === providerId)
+        const ref = current?.subscription.credentialRef
+        if (ref?.name !== name || ref.authIndex !== row.subscription.credentialRef.authIndex) throw new Error('Subscription credential changed during refresh')
+        if (needsSignIn()) throw new SubscriptionLaunchError('Subscription sign-in is required', 'needs-sign-in')
+        if (isCancelled?.()) throw new Error('Subscription model refresh was cancelled')
+
+        await this.#options.store.cacheSubscriptionModels(providerId, name, models)
+        const previous = this.#details.get(name)
+        const account = { ...row.subscription.account, ...previous?.account, ...this.#credentialStatus.get(name) }
+        if (account.status === 'router-not-running') account.status = 'ready'
+        const details: SubscriptionAccountDetails = { ...previous, account, models }
+        // Refreshing the catalog does not make an older plan/quota read fresh.
+        this.#details.set(name, details)
+        this.#credentialStatus.set(name, account)
+        for (const owner of this.#owners.values()) owner.round?.accounts.set(providerId, { ref: name, details })
+        return structuredClone({ snapshot: await this.snapshot(), details })
+      })
+    } catch (error) {
+      if (!(error instanceof SubscriptionLaunchError) && this.#routerUnavailable) throw new SubscriptionLaunchError('Model router is not running')
+      throw error
+    } finally { lease.release() }
+  }
+  async #syncExtraModels(
+    client: RouterManagementClient,
+    credentialName: string,
+    models: SubscriptionModel[],
+    registered: Array<Record<string, unknown>>,
+    provider: SubscriptionProvider
+  ): Promise<boolean> {
+    const prefix = `${prefixFor(provider)}/`
+    const known = new Set(
+      registered
+        .map(item => typeof item.id === 'string' ? (item.id.startsWith(prefix) ? item.id.slice(prefix.length) : item.id) : '')
+        .filter(Boolean)
+    )
+    const extra = models
+      .filter(model => !known.has(model.id))
+      .map(model => ({
+        id: model.id,
+        ...(model.displayName ? { display_name: model.displayName } : {}),
+        ...(model.ownedBy ? { owned_by: model.ownedBy } : {}),
+        ...(model.contextWindow ? { context_length: model.contextWindow } : {}),
+        ...(model.maxOutputTokens ? { max_completion_tokens: model.maxOutputTokens } : {}),
+        ...(model.supportedEfforts?.length ? { thinking_levels: model.supportedEfforts } : {})
+      }))
+    if (!extra.length) return false
+    const signature = JSON.stringify(extra)
+    if (this.#syncedExtraModels.get(credentialName) === signature) return false
+    try {
+      await client.setExtraModels(credentialName, extra)
+      this.#syncedExtraModels.set(credentialName, signature)
+      return true
+    } catch { /* Older routers or mocked tests without extra_models keep working for mapped aliases. */ return false }
+  }
+  async #readModels(client: RouterManagementClient, file: RouterCredential, project?: string, requireAccountCatalog = false): Promise<SubscriptionModel[]> {
     const safe = <T>(operation: Promise<T>) => operation.catch(() => undefined)
     const [response, registered] = await Promise.all([
       safe(client.apiCall(file.provider === 'codex' ? 'chatgpt-models' : 'antigravity-models', file, project)),
       safe(client.modelDefinitions(file.provider))
     ])
     const models = readChatGptModels(response)
-    return availableModels(models.ok ? models.value : undefined, registered ?? [], file.provider)
+    const available = availableModels(models.ok ? models.value : undefined, registered ?? [], file.provider)
+    if (requireAccountCatalog && (!models.ok || available.length === 0)) throw new Error('Model list could not be read')
+    if (available.length) await this.#syncExtraModels(client, file.name, available, registered ?? [], file.provider)
+    return available
   }
   async #readDetails(client: RouterManagementClient, file: RouterCredential, includeModels = true, cachedModels = this.#details.get(file.name)?.models): Promise<SubscriptionAccountDetails> {
     const parsed = parseCredentialSummary(file)
@@ -707,7 +925,14 @@ export class SubscriptionAccounts {
   }
   async #reconcile(): Promise<void> {
     const rows = await this.#options.store.subscriptions()
-    for (const row of rows) this.#options.manager.rememberModelAliases(row.subscription.provider, aliasesFor(row.subscription.provider, row.modelMapping, row.subscription.modelMetadata))
+    const aliases = new Map<string, ModelAlias[]>()
+    for (const row of rows) {
+      // Keep the saved selection editable when an upstream model is retired.
+      if (!roles.every(role => row.subscription.modelMetadata.some(model => model.id === row.modelMapping[role]))) continue
+      const models = aliasesFor(row.subscription.provider, row.modelMapping, row.subscription.modelMetadata)
+      aliases.set(row.id, models)
+      this.#options.manager.rememberModelAliases(row.subscription.provider, models)
+    }
     const files = await readdir(join(this.#options.dataRoot, 'model-router/credentials')).catch(() => [] as string[])
     if (!rows.length && !files.some(file => file.endsWith('.json'))) return
     const lease = await this.#options.manager.acquire('subscription-reconciliation')
@@ -721,7 +946,10 @@ export class SubscriptionAccounts {
           await client.deleteCredential(file.name).catch(() => undefined)
         } else {
           await client.setPrefix(file.name, prefixFor(row.subscription.provider))
-          await client.setAliases(row.subscription.provider, aliasesFor(row.subscription.provider, row.modelMapping, row.subscription.modelMetadata))
+          const defs = await client.modelDefinitions(row.subscription.provider).catch(() => [])
+          await this.#syncExtraModels(client, file.name, row.subscription.modelMetadata, defs, row.subscription.provider)
+          const models = aliases.get(row.id)
+          if (models) await client.setAliases(row.subscription.provider, models)
           await client.setDisabled(file.name, false)
         }
       }
@@ -730,6 +958,7 @@ export class SubscriptionAccounts {
   }
   async close(): Promise<void> {
     this.#closed = true
+    for (const name of this.#targetBindings.keys()) this.#revokeTargets(name)
     this.#unsubscribeRouter()
     this.#changeListeners.clear()
     for (const owner of this.#owners.values()) owner.closed = true
@@ -740,22 +969,27 @@ export class SubscriptionAccounts {
   }
 }
 
+const NON_CHAT_MODEL = /image|video|codex-auto-review|embedding|rerank|moderation|(?:^|[-_/])(?:tts|whisper|transcribe)(?:$|[-_/])/i
+
 function availableModels(models: SubscriptionModel[] | undefined, registered: Array<Record<string, unknown>>, provider: SubscriptionProvider): SubscriptionModel[] {
   const prefix = `${prefixFor(provider)}/`
   const parsed = parseChatGptModels({ models: registered.map(model => ({ ...model, id: typeof model.id === 'string' && model.id.startsWith(prefix) ? model.id.slice(prefix.length) : model.id })) })
-  if (!parsed.ok) return []
-  const definitions = new Map(parsed.value.filter(model => !/image|video|codex-auto-review|embedding|rerank|moderation|(?:^|[-_/])(?:tts|whisper|transcribe)(?:$|[-_/])/i.test(model.id)).map(model => [model.id, model]))
-  const candidates = models ?? [...definitions.values()]
-  return candidates.filter(model => definitions.has(model.id)).map(model => {
-    const definition = definitions.get(model.id)!
-    // Codex definitions are the routing engine's capability contract. The
-    // account endpoint may carry different limits and lengthy instructions.
-    const metadata = provider === 'codex' ? definition : model
-    const displayName = metadata.displayName ?? definition.displayName
-    const contextWindow = metadata.contextWindow ?? definition.contextWindow
-    const maxContextWindow = metadata.maxContextWindow ?? model.maxContextWindow ?? definition.maxContextWindow
-    const supportedEfforts = metadata.supportedEfforts ?? model.supportedEfforts ?? definition.supportedEfforts
-    const maxOutputTokens = metadata.maxOutputTokens ?? definition.maxOutputTokens
+  const definitions = new Map(
+    (parsed.ok ? parsed.value : [])
+      .filter(model => !NON_CHAT_MODEL.test(model.id))
+      .map(model => [model.id, model])
+  )
+  const candidates = (models ?? [...definitions.values()]).filter(model => !NON_CHAT_MODEL.test(model.id))
+  return candidates.map(model => {
+    const definition = definitions.get(model.id)
+    // Codex definitions are the routing engine's capability contract for known
+    // models. Newly discovered account models fall back to the live catalog.
+    const metadata = provider === 'codex' && definition ? definition : model
+    const displayName = metadata.displayName ?? definition?.displayName
+    const contextWindow = metadata.contextWindow ?? definition?.contextWindow
+    const maxContextWindow = metadata.maxContextWindow ?? model.maxContextWindow ?? definition?.maxContextWindow
+    const supportedEfforts = metadata.supportedEfforts ?? model.supportedEfforts ?? definition?.supportedEfforts
+    const maxOutputTokens = metadata.maxOutputTokens ?? definition?.maxOutputTokens
     return {
       id: model.id, ...(displayName ? { displayName } : {}),
       ...(metadata.ownedBy ? { ownedBy: provider === 'antigravity' && metadata.ownedBy === 'Codex' ? 'Antigravity' : metadata.ownedBy } : {}),
@@ -795,6 +1029,12 @@ async function waitForAliases(client: RouterManagementClient, name: string, pref
 function credentialNeedsSignIn(file: RouterCredential): boolean {
   const parsed = parseCredentialSummary(file)
   return mapAccountStatus({ ...(parsed.ok ? parsed.value : {}), source: 'credential' }).status === 'needs-sign-in'
+}
+function credentialMatches(row: StoredSubscriptionProvider, file: RouterCredential): boolean {
+  const { credentialRef, account } = row.subscription
+  if (credentialRef.authIndex && credentialRef.authIndex !== file.auth_index) return false
+  const summary = parseCredentialSummary(file)
+  return !account.email || !summary.ok || !summary.value.email || account.email === summary.value.email
 }
 function credentialFingerprint(file: RouterCredential): string {
   return JSON.stringify([file.auth_index, file.updated_at, file.modtime, file.adopted_at, file.access_token_expires_at, file.size])

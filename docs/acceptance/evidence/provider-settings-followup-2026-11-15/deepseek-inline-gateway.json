@@ -1,0 +1,9 @@
+{
+  "status": 200,
+  "model": "deepseek-flash",
+  "effort": "high (gateway override)",
+  "text": [
+    "OK"
+  ],
+  "boundary": "Synthetic inline-tool request through production gateway; real DeepSeek API; no user conversation sent"
+}

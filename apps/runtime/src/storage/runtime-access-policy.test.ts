@@ -8,6 +8,7 @@ import { RuntimeAccessPolicy } from './runtime-access-policy'
 const READ_ONLY_RPC_METHODS = [
   'projection.snapshot',
   'provider-config.snapshot',
+  'dispatch-config.snapshot',
   'claude-settings.get',
   'egress.status',
   'hierarchy.get-scene-session-graph',

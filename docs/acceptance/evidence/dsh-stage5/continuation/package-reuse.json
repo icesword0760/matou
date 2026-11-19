@@ -1,0 +1,13 @@
+{
+  "appPath": "apps/desktop/release/mac-arm64/码头.app",
+  "regularFilesChecked": 604,
+  "changedFiles": [],
+  "committedProductMatchesPackagedSource": true,
+  "sourceCommit": "479e620",
+  "manifest": "../followup/bundle-files.sha256",
+  "bundleManifestSHA256": "278eace7af708014831f422a50a67540ce838db21343205b1d6edfec61c9a26a",
+  "reason": "Product source unchanged since existing acceptance bundle; this round reuses the same verified unsigned bundle.",
+  "verifiedAgainAfterAllThreeSuites": true,
+  "changedFilesAfterTests": [],
+  "regularFilesAfterTests": 604
+}

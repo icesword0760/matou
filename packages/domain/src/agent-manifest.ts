@@ -1,4 +1,4 @@
-export const LAUNCHABLE_AGENT_PROFILES = ['claude-code', 'codex', 'antigravity'] as const
+export const LAUNCHABLE_AGENT_PROFILES = ['claude-code', 'codex', 'antigravity', 'dsh'] as const
 export type AgentProfileId = (typeof LAUNCHABLE_AGENT_PROFILES)[number]
 
 export const SESSION_RUN_PROFILES = ['shell', ...LAUNCHABLE_AGENT_PROFILES] as const
@@ -29,8 +29,8 @@ export interface AgentManifest {
   displayName: string
   shortName: string
   executable: {
-    envVar: 'MATOU_CLAUDE_COMMAND' | 'MATOU_CODEX_COMMAND' | 'MATOU_ANTIGRAVITY_COMMAND'
-    defaultCommand: 'claude' | 'codex' | 'agy'
+    envVar: 'MATOU_CLAUDE_COMMAND' | 'MATOU_CODEX_COMMAND' | 'MATOU_ANTIGRAVITY_COMMAND' | 'MATOU_DSH_COMMAND'
+    defaultCommand: 'claude' | 'codex' | 'agy' | 'dsh'
     interactiveAliases: readonly string[]
   }
   launch: {
@@ -157,6 +157,8 @@ export const AGENT_MANIFESTS: Record<AgentProfileId, AgentManifest> = {
       modelFlag: '--model',
       permissionFlags: {
         default: [],
+        acceptEdits: ['--ask-for-approval', 'on-request', '--sandbox', 'workspace-write'],
+        plan: ['--ask-for-approval', 'on-request', '--sandbox', 'read-only'],
         bypassPermissions: ['--dangerously-bypass-approvals-and-sandbox']
       }
     },
@@ -172,32 +174,47 @@ export const AGENT_MANIFESTS: Record<AgentProfileId, AgentManifest> = {
       assetRelativePath: 'providers/codex-developer-instructions.md'
     },
     instructionFiles: {
-      candidates: ['CLAUDE.md'],
-      buttonLabel: 'ClaudeMd'
+      candidates: ['AGENTS.md'],
+      buttonLabel: 'AGENTS.md'
     },
     hud: {
-      stripClaudeModelPrefix: true,
-      showAccountControl: true,
-      hideEmptyQuotaPlaceholder: false,
-      supportsTodos: true,
-      supportsAgentsCount: true,
-      supportsMcpSummary: true,
-      supportsHooksCount: true,
-      supportsQuotaWindows: true
+      stripClaudeModelPrefix: false,
+      showAccountControl: false,
+      hideEmptyQuotaPlaceholder: true,
+      supportsTodos: false,
+      supportsAgentsCount: false,
+      supportsMcpSummary: false,
+      supportsHooksCount: false,
+      supportsQuotaWindows: false
     },
     capabilities: {
-      fork: false,
-      sessionLoader: false,
-      autoTitle: false,
+      fork: true,
+      sessionLoader: true,
+      autoTitle: true,
       permissionModes: ['default', 'acceptEdits', 'plan', 'bypassPermissions'],
       permissionSwitchMode: 'respawn-only',
       providerConfig: true,
       accountSwitching: false,
       agentTeam: false,
       claudeTimeZone: false,
-      autoRestore: false,
-      forkRequiresCompletedTurn: false
+      autoRestore: true,
+      forkRequiresCompletedTurn: true
     }
+  },
+  dsh: {
+    id: 'dsh', displayName: 'DSH', shortName: 'DSH',
+    executable: { envVar: 'MATOU_DSH_COMMAND', defaultCommand: 'dsh', interactiveAliases: ['dsh'] },
+    launch: { resumeFlag: '--resume', forkStrategy: 'none', permissionFlags: { default: [] } },
+    events: { lifecycleSource: 'http-hook', statusLineSource: 'none',
+      identitySource: 'hook-or-statusline', transcriptPathSource: 'none', forkIdentityRule: 'immediate-new-id' },
+    mtInjection: { mode: 'session-start-system-message', assetRelativePath: 'providers/dsh-system-message.md' },
+    instructionFiles: { candidates: [] },
+    hud: { stripClaudeModelPrefix: false, showAccountControl: false, hideEmptyQuotaPlaceholder: true,
+      supportsTodos: false, supportsAgentsCount: false, supportsMcpSummary: false,
+      supportsHooksCount: false, supportsQuotaWindows: false },
+    capabilities: { fork: false, sessionLoader: true, autoTitle: true, permissionModes: [],
+      permissionSwitchMode: 'none', providerConfig: false, accountSwitching: false,
+      agentTeam: false, claudeTimeZone: false, autoRestore: true, forkRequiresCompletedTurn: true }
   },
   antigravity: {
     id: 'antigravity',

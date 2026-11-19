@@ -33,6 +33,8 @@ export interface SessionHudWire {
   gitBranch?: string
   gitDirty?: boolean
   startedAt: number
+  /** Native read-only permission label, provided only by DSH. */
+  providerPermissionLabel?: string
   permissionMode?: HudPermissionMode
   modelStrategy?: HudModelStrategy
   model?: string

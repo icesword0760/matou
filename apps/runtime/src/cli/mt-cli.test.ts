@@ -120,6 +120,14 @@ describe('mt CLI', () => {
         canvas: { kind: 'current', entity: 'canvas' }, profile: 'codex',
         title: '会话甲', submissionKey: 'create-s'
       }
+    },
+    {
+      argv: ['create', 'session', '--canvas', 'current', '--profile', 'claude-code', '--cwd', '/tmp/work', '--permission-mode', 'bypassPermissions', '--enter', '--submission-key', 'create-cc', '--json'],
+      method: 'structure.create.session' as const,
+      params: {
+        canvas: { kind: 'current', entity: 'canvas' }, profile: 'claude-code',
+        cwd: '/tmp/work', permissionMode: 'bypassPermissions', enter: true, submissionKey: 'create-cc'
+      }
     }
   ])('parses $method with exact titles and revision-bearing targets', async ({ argv, method, params }) => {
     const fixture = ioFixture()
@@ -386,6 +394,25 @@ describe('mt CLI', () => {
     expect(large.err[0]).toContain('超过 5 个')
     expect(large.err[0]).toContain('补充筛选条件')
     expect(large.err[0]).not.toContain('候选 1')
+  })
+
+  it.each(['fallback', 'original-first', 'original-invalid', 'missing', 'revoked'] as const)('authenticates DSH shell-env identity with %s precedence', async scenario => {
+    const root = await mkdtemp(join(tmpdir(), 'mt-dsh-')), endpoint = controlEndpointForPlatform(root)
+    const tokens = new CapabilityTokenService('dsh-test-runtime')
+    const token = tokens.issue({ runId: 'dsh-test-run', sessionId: 'dsh-card' }, ['host.identify'], Date.now() + 10000)
+    const backend = hostControlBackend(async () => { throw new Error('unexpected host action') })
+    const server = new HostControlServer({ socketPath: endpoint, tokenService: tokens, backend })
+    await server.start()
+    try {
+      const fixture = ioFixture()
+      if (scenario === 'revoked') tokens.revokeRun('dsh-test-run')
+      const environment = { MATOU_CONTROL_ENDPOINT: endpoint,
+        ...(scenario === 'original-first' ? { MATOU_CONTROL_TOKEN: token } : scenario === 'original-invalid' ? { MATOU_CONTROL_TOKEN: 'invalid-original' } : {}),
+        ...(scenario === 'missing' ? {} : { DSH_MATOU_CONTROL_TOKEN: scenario === 'original-first' ? 'invalid-fallback' : token }) }
+      const result = await runMt(['identify', '--json'], environment, fixture.io)
+      expect(result).toBe(scenario === 'missing' || scenario === 'revoked' || scenario === 'original-invalid' ? 4 : 0)
+      expect([...fixture.out, ...fixture.err].join('')).not.toContain(token)
+    } finally { await server.stop(); await rm(root, { recursive: true, force: true }) }
   })
 
   it('transports exactly 1 MiB of stdin JSON through the real client and server envelope', async () => {

@@ -1,0 +1,33 @@
+{
+  "sid": "717e2a3f-f857-4fc0-8116-1a14b449a426",
+  "peerId": "9910f9b5-1369-4460-b00c-b2ef42a30d9f",
+  "providerId": "01a1df6f-d104-7913-9d61-e1245e663dc8",
+  "status": "error",
+  "failedTurn": {
+    "timestamp": "2026-11-15T13:40:10.619Z",
+    "ordinal": 10,
+    "type": "event_msg",
+    "payload": {
+      "type": "task_complete",
+      "root_turn_id": "01a1df6f-d30b-70f0-a91c-e37b1d33e6f0",
+      "turn_id": "01a1df6f-d30b-70f0-a91c-e37b1d33e6f0",
+      "last_agent_message": null,
+      "error": {
+        "message": "unexpected status 404 Not Found: The model matou-probe-missing does not exist, url: http://127.0.0.1:55062/v1/responses",
+        "codex_error_info": {
+          "http_connection_failed": {
+            "http_status_code": 404
+          }
+        }
+      },
+      "started_at": 1794750010,
+      "completed_at": 1794750010,
+      "duration_ms": 494
+    }
+  },
+  "notificationCount": 1,
+  "notificationTitle": "Codex",
+  "startupUpgradePrompt": false,
+  "wrapperDisablesUpdates": false,
+  "configDisablesUpdates": false
+}

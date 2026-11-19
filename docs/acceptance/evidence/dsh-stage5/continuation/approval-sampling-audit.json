@@ -1,0 +1,16 @@
+{
+  "failingAttempt": 0,
+  "round": 2,
+  "assertionLine": 187,
+  "storedNativeToUiMs": 7240,
+  "storedNativeTimestampEqualsPreviousRound": true,
+  "storedNativeAt": 1794768307227,
+  "actualRound2NativeAt": 1794768314361,
+  "actualUiAt": 1794768314467,
+  "actualRuntimeToUiMs": 3,
+  "recomputedNativeToUiMsForDiagnosisOnly": 106,
+  "nativeAskedCountBeforeCleanup": 2,
+  "nativeDecidedCountBeforeCleanup": 1,
+  "stepsNotReached": "First attempt stopped at round 2 latency assertion; round 2 decision and all round 3 / final recovery steps were not executed. Retry independently completed all three rounds and final recovery.",
+  "conclusion": "The sampler read the prior approval/asked before the second event was flushed to the native journal. The original failed assertion and retry classification remain unchanged; corrected timing is explanatory evidence only. The sampling race remains unresolved; no spec mutation or extra rerun occurred."
+}

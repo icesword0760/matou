@@ -4,6 +4,7 @@ import {
   type AgentProfileId,
   type SessionRunProfile
 } from '@matou/domain'
+import { parseDshHud } from './dsh-hud-payload'
 import { sortAgents } from './external-agent-status'
 import { AccountUsageTracker } from './account-usage-tracker'
 import { existsSync, readFileSync } from 'node:fs'
@@ -41,6 +42,7 @@ export interface SessionHudSnapshot {
   gitBranch?: string
   gitDirty?: boolean
   startedAt: number
+  providerPermissionLabel?: string
   permissionMode?: HudPermissionMode
   modelStrategy?: HudModelStrategy
   model?: string
@@ -67,6 +69,8 @@ export interface SessionHudSnapshot {
 }
 
 interface MutableHud extends SessionHudSnapshot {
+  dshIdentity?: string
+  codexCompletedTools: Map<string, string>
   activeTools: Map<string, { name: string; target?: string }>
   completedToolCounts: Map<string, number>
   failedMcpServers: Set<string>
@@ -123,7 +127,7 @@ export class SessionHudRegistry {
     const modelStrategy = normalizeModelStrategy(input.modelStrategy ?? input.model)
     const instructionCandidates = getAgentManifest(provider)?.instructionFiles.candidates
     const configCounts = mode === 'agent' && input.cwd
-      ? inspectProviderConfig(input.cwd, this.#configDir, instructionCandidates) : undefined
+      ? inspectProviderConfig(input.cwd, this.#configDir, instructionCandidates, provider) : undefined
     this.#states.set(input.sessionId, {
       sessionId: input.sessionId,
       mode,
@@ -133,12 +137,12 @@ export class SessionHudRegistry {
       startedAt: previous?.startedAt ?? input.startedAt ?? this.#now(),
       ...(mode === 'agent' ? {
         permissionMode: permissionMode ?? 'default',
-        ...(provider !== 'antigravity'
+        ...(provider === 'claude-code'
           ? { modelStrategy: modelStrategy ?? 'opusplan' }
           : modelStrategy
             ? { modelStrategy }
             : {}),
-        ...(provider === 'antigravity' && getAgentManifest(provider)?.instructionFiles.buttonLabel
+        ...(provider !== 'claude-code' && getAgentManifest(provider)?.instructionFiles.buttonLabel
           ? { instructionFileLabel: getAgentManifest(provider)!.instructionFiles.buttonLabel! }
           : {}),
         ...(input.model ? { model: input.model } : {}),
@@ -153,6 +157,7 @@ export class SessionHudRegistry {
         todos: [],
         resumable: input.resumable ?? previous?.resumable ?? false
       } : {}),
+      codexCompletedTools: new Map(),
       activeTools: new Map(),
       completedToolCounts: new Map(),
       failedMcpServers: new Set(),
@@ -188,6 +193,7 @@ export class SessionHudRegistry {
       ...(current.cwd ? { cwd: current.cwd } : {}),
       ...(current.gitBranch ? { gitBranch: current.gitBranch, gitDirty: current.gitDirty === true } : {}),
       startedAt: current.startedAt,
+      codexCompletedTools: new Map(),
       activeTools: new Map(),
       completedToolCounts: new Map(),
       failedMcpServers: new Set(),
@@ -269,9 +275,9 @@ export class SessionHudRegistry {
     if (current?.mode === 'agent' && normalized) current.sessionName = normalized.slice(0, 120)
   }
 
-  markResumable(sessionId: string): void {
+  markResumable(sessionId: string, resumable = true): void {
     const current = this.#states.get(sessionId)
-    if (current?.mode === 'agent') current.resumable = true
+    if (current?.mode === 'agent') current.resumable = resumable
   }
 
   antigravityCycleMode(sessionId: string): string | null | undefined {
@@ -295,6 +301,24 @@ export class SessionHudRegistry {
     const current = this.#states.get(sessionId)
     if (!current || current.mode !== 'agent') return
 
+    if (current.provider === 'dsh') {
+      const identity = text(payload.dsh_session_id)
+      if (identity && current.dshIdentity !== identity) {
+        current.dshIdentity = identity
+        delete current.model; delete current.effort; delete current.contextPercent; delete current.contextWindowSize
+        delete current.providerPermissionLabel; delete current.runningTools; delete current.toolCounts; delete current.lastTool
+      }
+      const observed = parseDshHud(payload.dsh_hud)
+      if (observed) {
+        delete current.model; delete current.effort; delete current.contextPercent; delete current.contextWindowSize
+        delete current.providerPermissionLabel; delete current.runningTools; delete current.toolCounts; delete current.lastTool
+        Object.assign(current, observed)
+      }
+      const status = payload.dsh_work_status
+      if (status === 'idle' || status === 'running' || status === 'needs-input' || status === 'error') current.taskStatus = status
+      return
+    }
+
     const cwd = text(payload.cwd)
     if (cwd) current.cwd = cwd
     const configCwd = cwd ?? current.cwd
@@ -305,7 +329,8 @@ export class SessionHudRegistry {
       current.configCounts = inspectProviderConfig(
         configCwd,
         this.#configDir,
-        getAgentManifest(current.provider)?.instructionFiles.candidates
+        getAgentManifest(current.provider)?.instructionFiles.candidates,
+        current.provider
       )
       current.configCwd = configCwd
       current.configCheckedAt = this.#now()
@@ -335,10 +360,11 @@ export class SessionHudRegistry {
       }
     }
 
-    const baseModel = nestedText(payload.model, 'display_name') ??
+    const baseModel = (current.provider === 'codex' ? text(payload.model) : undefined) ?? nestedText(payload.model, 'display_name') ??
       nestedText(payload.model, 'displayName') ??
       nestedText(payload.model, 'id')
     if (baseModel) {
+      if (current.provider === 'codex' && current.model !== baseModel) delete current.effort
       const effort = current.provider === 'antigravity' ? nestedText(payload.model, 'effort') : undefined
       current.model = effort && !baseModel.toLowerCase().includes(effort.toLowerCase())
         ? `${baseModel} (${effort})`
@@ -371,7 +397,7 @@ export class SessionHudRegistry {
       current.usageWindows = resolved.usageWindows
       current.allUsageWindows = resolved.allUsageWindows
       this.accountUsage.observe(sessionId, payload, resolved.usageWindows)
-    } else {
+    } else if (current.provider !== 'codex') {
       const usageWindows = usageWindowsFromPayload(payload)
       if (usageWindows) current.usageWindows = usageWindows
       this.accountUsage.observe(sessionId, payload, usageWindows)
@@ -391,7 +417,10 @@ export class SessionHudRegistry {
       }
       return
     }
-    if (eventName === 'SessionStart') current.sessionEnded = false
+    if (eventName === 'SessionStart') {
+      current.sessionEnded = false
+      if (current.provider === 'codex') current.taskStatus = 'idle'
+    }
     const toolCall = object(payload.toolCall)
     const toolName = text(payload.tool_name) ?? text(payload.toolName) ?? text(toolCall?.name)
     const toolId = text(payload.tool_use_id) ?? text(payload.toolUseId) ?? text(toolCall?.id) ??
@@ -400,6 +429,8 @@ export class SessionHudRegistry {
       object(toolCall?.args) ?? {}
 
     if (eventName === 'UserPromptSubmit' || eventName === 'PreInvocation' || eventName === 'PreToolUse') {
+      current.taskStatus = 'running'
+    } else if (current.provider === 'codex' && eventName === 'PostToolUse') {
       current.taskStatus = 'running'
     } else if (eventName === 'PermissionRequest') {
       current.taskStatus = 'needs-input'
@@ -420,11 +451,13 @@ export class SessionHudRegistry {
       current.activeTools.clear()
     }
 
-    if (eventName === 'PreToolUse' && toolName) {
-      if (toolName === 'TodoWrite') current.todos = todosFromInput(toolInput.todos)
-      if (toolName === 'TaskCreate') current.todos = applyTaskCreate(current.todos ?? [], toolInput)
-      if (toolName === 'TaskUpdate') current.todos = applyTaskUpdate(current.todos ?? [], toolInput)
-      if (toolName === 'Agent') {
+    const trackTool = current.provider !== 'codex' || Boolean(text(payload.tool_use_id) ?? text(payload.toolUseId))
+    if (eventName === 'PreToolUse' && toolName && trackTool &&
+        !(current.provider === 'codex' && current.codexCompletedTools.has(toolId))) {
+      if (current.provider !== 'codex' && toolName === 'TodoWrite') current.todos = todosFromInput(toolInput.todos)
+      if (current.provider !== 'codex' && toolName === 'TaskCreate') current.todos = applyTaskCreate(current.todos ?? [], toolInput)
+      if (current.provider !== 'codex' && toolName === 'TaskUpdate') current.todos = applyTaskUpdate(current.todos ?? [], toolInput)
+      if (current.provider !== 'codex' && toolName === 'Agent') {
         current.optimisticAgents.set(
           toolId,
           { id: toolId, label: subagentLabel(toolInput, current.observedSubagents.size + current.optimisticAgents.size + 1), source: 'claude', state: 'running', startedAt: this.#now() }
@@ -436,10 +469,11 @@ export class SessionHudRegistry {
       })
       current.lastTool = { name: toolName, ...targetForTool(toolName, toolInput), status: 'running' }
     }
-    if ((eventName === 'PostToolUse' || eventName === 'PostToolUseFailure') && toolName) {
+    if ((eventName === 'PostToolUse' || eventName === 'PostToolUseFailure') && toolName && trackTool) {
       const active = current.activeTools.get(toolId)
       const status = eventName === 'PostToolUseFailure' || Boolean(text(payload.error)) ? 'error' : 'completed'
-      current.completedToolCounts.set(toolName, (current.completedToolCounts.get(toolName) ?? 0) + 1)
+      if (current.provider === 'codex') current.codexCompletedTools.set(toolId, toolName)
+      else current.completedToolCounts.set(toolName, (current.completedToolCounts.get(toolName) ?? 0) + 1)
       current.lastTool = { name: toolName, ...(active?.target ? { target: active.target } : {}), status }
       const mcpServer = mcpServerName(toolName)
       if (mcpServer) {
@@ -449,6 +483,12 @@ export class SessionHudRegistry {
       current.activeTools.delete(toolId)
     }
     current.runningTools = [...current.activeTools.values()]
+    if (current.provider === 'codex') {
+      current.completedToolCounts.clear()
+      for (const name of current.codexCompletedTools.values()) {
+        current.completedToolCounts.set(name, (current.completedToolCounts.get(name) ?? 0) + 1)
+      }
+    }
     current.toolCounts = [...current.completedToolCounts.entries()].map(([name, count]) => ({ name, count }))
     current.mcpErrors = [...current.failedMcpServers]
   }
@@ -459,11 +499,33 @@ export class SessionHudRegistry {
     ownership: SessionHudRunOwnership
   ): Promise<boolean> {
     const current = this.#states.get(sessionId)
-    if (!current || current.mode !== 'agent' || !ownsCurrentRun(ownership)) return false
+    if (!current || current.mode !== 'agent' || !ownsCurrentRun(ownership) ||
+        (current.provider === 'codex' && current.sessionEnded)) return false
     const history = await this.#transcripts.read(transcriptPath)
     // Transcript I/O can outlive the provider process that requested it. Recheck
     // both run ownership and HUD object identity immediately before any write.
     if (!history || !ownsCurrentRun(ownership) || this.#states.get(sessionId) !== current) return false
+    if (current.provider === 'codex') {
+      if (current.sessionEnded) return false
+      current.transcriptPath = transcriptPath
+      if (history.model) current.model = history.model
+      if (history.effort) current.effort = history.effort
+      else delete current.effort
+      if (history.contextPercent !== undefined) current.contextPercent = history.contextPercent
+      else delete current.contextPercent
+      if (history.contextWindowSize !== undefined) current.contextWindowSize = history.contextWindowSize
+      else delete current.contextWindowSize
+      for (const { id, name } of history.completedToolCalls ?? []) {
+        if (!current.codexCompletedTools.has(id)) current.codexCompletedTools.set(id, name)
+        current.activeTools.delete(id)
+      }
+      const counts = new Map<string, number>()
+      for (const name of current.codexCompletedTools.values()) counts.set(name, (counts.get(name) ?? 0) + 1)
+      current.toolCounts = [...counts].map(([name, count]) => ({ name, count }))
+      current.runningTools = [...current.activeTools.values()]
+      if (!current.runningTools.length && history.lastTool) current.lastTool = history.lastTool
+      return true
+    }
     if (history.sessionName) current.sessionName = history.sessionName.slice(0, 120)
     if (history.startedAt !== undefined) current.startedAt = Math.min(current.startedAt, history.startedAt)
     const permission = normalizePermission(history.permissionMode)
@@ -483,13 +545,20 @@ export class SessionHudRegistry {
     return true
   }
 
+  async refreshCodexTranscript(sessionId: string, ownership: SessionHudRunOwnership): Promise<boolean> {
+    const state = this.#states.get(sessionId)
+    if (state?.provider !== 'codex' || !state.transcriptPath || state.sessionEnded) return false
+    return this.refreshTranscript(sessionId, state.transcriptPath, ownership)
+  }
+
   refreshConfig(sessionId: string): boolean {
     const current = this.#states.get(sessionId)
     if (!current || current.mode !== 'agent' || !current.cwd) return false
     const next = inspectProviderConfig(
       current.cwd,
       this.#configDir,
-      getAgentManifest(current.provider)?.instructionFiles.candidates
+      getAgentManifest(current.provider)?.instructionFiles.candidates,
+      current.provider
     )
     const previous = current.configCounts
     current.configCounts = next
@@ -508,7 +577,8 @@ export class SessionHudRegistry {
     return providerConfigWatchTargets(
       current.cwd,
       this.#configDir,
-      getAgentManifest(current.provider)?.instructionFiles.candidates
+      getAgentManifest(current.provider)?.instructionFiles.candidates,
+      current.provider
     )
   }
 
@@ -521,6 +591,8 @@ export class SessionHudRegistry {
     const state = this.#states.get(sessionId)
     if (!state) return undefined
     const {
+      dshIdentity: _dshIdentity,
+      codexCompletedTools: _codexCompletedTools,
       activeTools: _activeTools, observedSubagents: _observedSubagents,
       providerStartedAt: _providerStartedAt, optimisticAgents: _optimisticAgents, externalAgents: _externalAgents, transcriptPath: _transcriptPath, sessionEnded: _sessionEnded,
       completedToolCounts: _completedToolCounts, failedMcpServers: _failedMcpServers,
@@ -532,7 +604,7 @@ export class SessionHudRegistry {
       antigravityCycleMode: _antigravityCycleMode,
       ...snapshot
     } = state
-    if (state.mode === 'agent') {
+    if (state.mode === 'agent' && state.provider !== 'codex') {
       const cached = state.transcriptPath && this.#transcripts.cached(state.transcriptPath)
       const providerAgents = new Map([...(cached ? cached.agents : state.observedSubagents.values()), ...state.optimisticAgents.values()].map(agent => [agent.id, agent]))
       const agents = state.sessionEnded ? [] : sortAgents([...providerAgents.values(), ...state.externalAgents].filter(agent =>
@@ -540,6 +612,22 @@ export class SessionHudRegistry {
       snapshot.agents = agents
       snapshot.subagentCount = agents.length
       snapshot.subagents = agents.map(agent => agent.label)
+    }
+    if (state.provider === 'codex' || state.provider === 'dsh') {
+      delete snapshot.modelStrategy
+      delete snapshot.subagentCount
+      delete snapshot.subagents
+      delete snapshot.agents
+      delete snapshot.usageWindows
+      delete snapshot.allUsageWindows
+      delete snapshot.todos
+      delete snapshot.mcpErrors
+    }
+    if (state.provider === 'dsh') {
+      delete snapshot.permissionMode; delete snapshot.configCounts; delete snapshot.instructionFileLabel
+      delete snapshot.teamRole; delete snapshot.teamStatus
+      // Spawn defaults are not observations of native tool activity.
+      if (!state.dshIdentity) { delete snapshot.runningTools; delete snapshot.toolCounts; delete snapshot.lastTool }
     }
     return structuredClone(snapshot)
   }
@@ -559,8 +647,14 @@ function ownsCurrentRun(ownership: SessionHudRunOwnership): boolean {
 export function inspectProviderConfig(
   cwd: string,
   configDir: string,
-  instructionCandidates: readonly string[] = ['CLAUDE.md']
+  instructionCandidates: readonly string[] = ['CLAUDE.md'],
+  provider?: AgentProfileId
 ): HudConfigCounts {
+  if (provider === 'codex') {
+    const exists = existsSync(join(cwd, 'AGENTS.md'))
+    return { instructionFiles: exists ? 1 : 0, projectInstructionFileExists: exists,
+      mcpServers: 0, hooks: 0, mcpServerNames: [], hookNames: [] }
+  }
   let instructionFiles = 0
   const projectInstructionFileExists = instructionCandidates.some((name) =>
     existsSync(join(cwd, name))
@@ -612,8 +706,10 @@ export function inspectProviderConfig(
 export function providerConfigWatchTargets(
   cwd: string,
   configDir: string,
-  instructionCandidates: readonly string[] = []
+  instructionCandidates: readonly string[] = [],
+  provider?: AgentProfileId
 ): HudConfigWatchTarget[] {
+  if (provider === 'codex') return [{ directory: cwd, names: ['AGENTS.md'] }]
   const targets = new Map<string, Set<string>>()
   const append = (directory: string, names: string[]) => {
     const current = targets.get(directory) ?? new Set<string>()

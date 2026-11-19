@@ -28,7 +28,8 @@ describe('EGRESS_HOSTS', () => {
     expect(EGRESS_HOSTS).toEqual({
       anthropic: { api: 'api.anthropic.com', login: 'claude.ai' },
       openai: { api: 'api.openai.com', login: 'chatgpt.com' },
-      'chatgpt-subscription': { api: 'chatgpt.com', login: 'auth.openai.com' }
+      'chatgpt-subscription': { api: 'chatgpt.com', login: 'auth.openai.com' },
+      google: { api: 'www.cloudflare.com', login: 'accounts.google.com' }
     })
   })
 })
@@ -219,7 +220,8 @@ describe('evaluateEgress', () => {
     ).toEqual({
       id: 'login-api-match',
       family: 'openai',
-      result: 'unknown'
+      result: 'unknown',
+      facts: { error: 'invalid', host: 'chatgpt.com' }
     })
   })
 
@@ -254,5 +256,112 @@ describe('evaluateEgress', () => {
     })
     expect(result.families.find((f) => f.family === 'anthropic')?.state).toBe('ok')
     expect(result.families.find((f) => f.family === 'openai')?.state).toBe('ok')
+  })
+})
+
+
+describe('Google generic egress', () => {
+  function googleSample(country = 'US', ip = '203.0.113.20'): EgressSample {
+    return makeBaseSample({ hosts: { google: {
+      api: { host: EGRESS_HOSTS.google.api, ip, country },
+      login: { host: EGRESS_HOSTS.google.login, notApplicable: true }
+    } } })
+  }
+
+  it('marks Google CN api abnormal with mainland violation', () => {
+    const result = evaluateEgress(googleSample('CN'), { mode: 'country', baselines: {} })
+    expect(result.state).toBe('abnormal')
+    expect(result.families[0]).toMatchObject({ family: 'google', state: 'abnormal', violation: 'mainland' })
+  })
+
+  it.each([{ notApplicable: true as const }, { error: 'timeout' as const }, {}])(
+    'keeps Google and overall status ok with an unmeasured login and only two checks: %s', (login) => {
+      const sample = googleSample()
+      sample.hosts.google!.login = { host: EGRESS_HOSTS.google.login, ...login }
+      const result = evaluateEgress(sample, { mode: 'country', baselines: {} })
+      expect(result.state).toBe('ok')
+      expect(result.families[0]?.state).toBe('ok')
+      expect(result.checks.filter((check) => check.family === 'google')).toEqual([
+        { id: 'mainland', family: 'google', result: 'pass' },
+        { id: 'exit-rule', family: 'google', result: 'pass' }
+      ])
+    }
+  )
+
+  it('still reports unknown when the Google generic API probe fails', () => {
+    const sample = googleSample()
+    sample.hosts.google!.api = { host: EGRESS_HOSTS.google.api, error: 'timeout' }
+    const result = evaluateEgress(sample, { mode: 'country', baselines: {} })
+    expect(result.families[0]).toEqual({ family: 'google', state: 'unknown' })
+    expect(result.state).toBe('warning')
+  })
+
+  it.each(['country', 'ip'] as const)('enforces saved Google %s rule', (mode) => {
+    const result = evaluateEgress(googleSample('JP', '203.0.113.21'), {
+      mode, baselines: { google: { ip: '203.0.113.20', country: 'US' } }
+    })
+    expect(result.families[0]).toMatchObject({ state: 'abnormal', violation: 'rule' })
+  })
+
+  it.each(['JP', 'CN'])('ignores Google login data even when its country is %s', (country) => {
+    const sample = googleSample()
+    sample.hosts.google!.login = { host: EGRESS_HOSTS.google.login, ip: '203.0.113.21', country }
+    const result = evaluateEgress(sample, { mode: 'country', baselines: {} })
+    expect(result.state).toBe('ok')
+    expect(result.families[0]).toMatchObject({ state: 'ok' })
+    expect(result.families[0]?.violation).toBeUndefined()
+  })
+})
+
+
+describe('provider login checks', () => {
+  it.each(['anthropic', 'openai', 'chatgpt-subscription'] as const)(
+    'preserves matching, mismatching, unknown and mainland login checks for %s', (family) => {
+      const hosts = EGRESS_HOSTS[family]
+      const sample = makeBaseSample({ hosts: { [family]: {
+        api: { host: hosts.api, ip: '203.0.113.20', country: 'US' },
+        login: { host: hosts.login, ip: '203.0.113.20', country: 'US' }
+      } } })
+      const evaluate = () => evaluateEgress(sample, { mode: 'country', baselines: {} })
+      const loginCheck = () => evaluate().checks.find((check) => check.id === 'login-api-match')
+      expect(loginCheck()?.result).toBe('pass')
+      sample.hosts[family]!.login.ip = '203.0.113.21'
+      expect(loginCheck()?.result).toBe('warn')
+      expect(evaluate().families[0]?.state).toBe('warning')
+      sample.hosts[family]!.login = { host: hosts.login, error: 'timeout' }
+      expect(loginCheck()?.result).toBe('unknown')
+      sample.hosts[family]!.login = { host: hosts.login, ip: '223.5.5.5', country: 'CN' }
+      expect(evaluate().families[0]).toMatchObject({ state: 'abnormal', violation: 'mainland' })
+    }
+  )
+
+  it('records host/error facts on unknown checks and slowHost on slow passing checks', () => {
+    const sample = makeBaseSample({
+      hosts: {
+        openai: {
+          api: { host: 'api.openai.com', ip: '5.34.216.82', country: 'US' },
+          login: { host: 'chatgpt.com', error: 'unreachable' }
+        },
+        'chatgpt-subscription': {
+          api: { host: 'chatgpt.com', ip: '5.34.216.82', country: 'US', slow: true },
+          login: { host: 'auth.openai.com', ip: '5.34.216.82', country: 'US' }
+        }
+      }
+    })
+    const result = evaluateEgress(sample, { mode: 'country', baselines: {} })
+    expect(result.checks.find((c) => c.family === 'openai' && c.id === 'login-api-match')).toEqual({
+      id: 'login-api-match',
+      family: 'openai',
+      result: 'unknown',
+      facts: { error: 'unreachable', host: 'chatgpt.com' }
+    })
+    expect(
+      result.checks.find((c) => c.family === 'chatgpt-subscription' && c.id === 'exit-rule')
+    ).toEqual({
+      id: 'exit-rule',
+      family: 'chatgpt-subscription',
+      result: 'pass',
+      facts: { slowHost: 'chatgpt.com' }
+    })
   })
 })

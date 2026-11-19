@@ -99,8 +99,9 @@ export function parseChatGptModels(value: unknown): ReadResult<AccountModel[]> {
   const models = new Map<string, AccountModel>();
   const push = (entry: unknown, fallback?: string) => {
     const obj = object(entry);
+    if (obj && (obj.visibility === 'hide' || obj.isInternal === true || obj.internal === true)) return;
     const id = str(typeof entry === 'string' ? entry : undefined) ?? (obj ? field(obj, fallback ? ['slug', 'id'] : ['slug', 'id', 'model', 'name']) : undefined) ?? str(fallback);
-    if (!id || models.has(id)) return;
+    if (!id || models.has(id) || /^(?:chat_|tab_)/i.test(id)) return;
     const displayName = obj && field(obj, ['display_name', 'displayName', 'name']);
     const ownedBy = (obj && field(obj, ['owned_by', 'ownedBy', 'provider', 'vendor', 'category', 'owner'])) || 'Codex';
     const context = obj?.context_window ?? obj?.contextWindow ?? obj?.context_length ?? obj?.maxTokens;

@@ -37,10 +37,18 @@ export class TerminalWorkStatusTracker {
           : 'error')
     }
     this.#buffer = combined.slice(consumedThrough).slice(this.#provider ? -8_192 : -512)
+    if (this.#provider === 'codex' &&
+      /(?:^|[\r\n])\s*(?:■\s*)?Conversation interrupted\b/.test(visibleTerminalText(this.#buffer))) {
+      // Codex emits no Stop hook for the observed Esc interruption. Consume
+      // this exact TUI message once; all other lifecycle states come from hooks.
+      this.#buffer = ''
+      statuses.push('interrupted')
+      return statuses
+    }
     const lastLifecycleStatus = statuses.at(-1)
     const completed = lastLifecycleStatus === 'idle' ||
       lastLifecycleStatus === 'error' || lastLifecycleStatus === 'interrupted'
-    if (!completed && isProviderOrBlockingPrompt(this.#buffer, this.#provider)) {
+    if (!completed && this.#provider !== 'codex' && isProviderOrBlockingPrompt(this.#buffer, this.#provider)) {
       statuses.push('needs-input')
     }
     return statuses

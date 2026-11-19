@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, it } from 'vitest'
-import { ANTIGRAVITY_CLIENT_USER_AGENT, credentialCarriesAntigravityIdentity } from './antigravity-client'
+import { ANTIGRAVITY_CLIENT_USER_AGENT, antigravityClientUserAgentForVersion, credentialCarriesAntigravityIdentity, resolveAntigravityClientUserAgent } from './antigravity-client'
 
 const roots: string[] = []
 afterEach(async () => { while (roots.length) await rm(roots.pop()!, { recursive: true, force: true }) })
@@ -40,4 +40,14 @@ it('reads the reported credential path and refuses paths outside the credential 
   await writeFile(outside, JSON.stringify({ user_agent: ANTIGRAVITY_CLIENT_USER_AGENT }))
   await expect(credentialCarriesAntigravityIdentity(root, { name: 'agy.json', path: outside })).resolves.toBe(false)
   await expect(credentialCarriesAntigravityIdentity(root, { name: '../outside.json' })).resolves.toBe(false)
+})
+
+it('follows a newer local Antigravity.app Info.plist without claiming a stale changelist', async () => {
+  const { root } = await fixture()
+  const plist = join(root, 'Info.plist')
+  await writeFile(plist, '<?xml version="1.0"?><plist><dict><key>CFBundleShortVersionString</key><string>2.32.2</string></dict></plist>')
+  const resolved = await resolveAntigravityClientUserAgent({ plistPaths: [plist] })
+  expect(resolved).toBe(antigravityClientUserAgentForVersion('2.32.2'))
+  expect(resolved).not.toContain('cl=')
+  await expect(resolveAntigravityClientUserAgent({ plistPaths: [join(root, 'missing.plist')] })).resolves.toBe(ANTIGRAVITY_CLIENT_USER_AGENT)
 })

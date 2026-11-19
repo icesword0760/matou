@@ -1030,6 +1030,124 @@ describe('Terminal pane', () => {
 
     client.dispose()
   })
+
+  it('shows the original session title, cwd and latest replies on a deferred card', async () => {
+    const request = vi.fn().mockResolvedValue({
+      provider: 'claude-code',
+      providerSessionId: 'claude-1',
+      title: '排查模型分配档位异常',
+      cwd: '/Users/icesword/Documents/AIProjects/matou',
+      updatedAt: Date.UTC(2026, 10, 18, 12, 15),
+      permissionMode: 'default',
+      eventCount: 12,
+      matchCount: 0,
+      hits: [],
+      availability: 'loaded-here',
+      page: { startEventIndex: 7, endEventIndex: 12, total: 12, hasEarlier: true, hasLater: false },
+      events: [
+        { index: 7, kind: 'user', role: 'user', text: '最早的问题', matched: false },
+        { index: 8, kind: 'assistant', role: 'assistant', text: '最初的回复', matched: false },
+        { index: 9, kind: 'tool', text: 'Read file.ts', toolName: 'Read', matched: false },
+        { index: 10, kind: 'user', role: 'user', text: 'DeepSeek 改成高档位', matched: false },
+        { index: 11, kind: 'assistant', role: 'assistant', text: '已加上档位选择并保存', matched: false },
+        { index: 12, kind: 'assistant', role: 'assistant', text: '单测全部通过', matched: false }
+      ]
+    })
+    mockEgressRuntimeClient = { request } as unknown as RuntimeClient
+    const props = fixture()
+    const viewHistory = vi.fn()
+
+    render(<TerminalPane {...props}
+      session={{ ...props.session, title: 'Claude · /Users/icesword...', titleSource: 'default' }}
+      cwd="/Users/icesword/Documents/AIProjects/matou"
+      recoveryState="deferred"
+      onRetryRecovery={vi.fn()}
+      onViewHistory={viewHistory} />)
+
+    await waitFor(() => {
+      expect(request).toHaveBeenCalledWith('claude-sessions.detail', {
+        sessionId: 'session-1',
+        current: true,
+        provider: 'claude-code',
+        limit: 200
+      })
+    })
+    const card = screen.getByTestId('session-deferred-recovery')
+    expect(card.textContent).toContain('排查模型分配档位异常')
+    expect(card.textContent).toContain('/Users/icesword/Documents/AIProjects/matou')
+    expect(card.textContent).toContain('DeepSeek 改成高档位')
+    expect(card.textContent).toContain('已加上档位选择并保存')
+    expect(card.textContent).toContain('单测全部通过')
+    expect(card.textContent).not.toContain('最早的问题')
+    expect(card.textContent).not.toContain('Read file.ts')
+
+    fireEvent.click(card.querySelector('.session-deferred-card__secondary')!)
+    expect(viewHistory).toHaveBeenCalledWith('session-1')
+  })
+
+  it('retains manual title with provider subtitle and tolerates unavailable detail on deferred cards', async () => {
+    const request = vi.fn().mockRejectedValue(new Error('not bound'))
+    mockEgressRuntimeClient = { request } as unknown as RuntimeClient
+    const props = fixture()
+
+    render(<TerminalPane {...props}
+      session={{
+        ...props.session,
+        title: '自定义排查卡片',
+        titleSource: 'manual',
+        providerTitle: '原始自动汇总标题'
+      }}
+      latestLines={['上次终端输出片段']}
+      recoveryState="deferred"
+      onRetryRecovery={vi.fn()} />)
+
+    await waitFor(() => expect(request).toHaveBeenCalled())
+    const card = screen.getByTestId('session-deferred-recovery')
+    expect(card.textContent).toContain('自定义排查卡片')
+    expect(card.textContent).toContain('原始自动汇总标题')
+    expect(card.textContent).toContain('上次终端输出片段')
+  })
+
+  it('filters synthetic XML notifications and API errors while showing transcript and task titles on deferred cards', async () => {
+    const request = vi.fn().mockResolvedValue({
+      providerSessionId: 'claude-noisy-1',
+      title: 'Claude',
+      transcriptTitle: '请接手 Matou 原生迁移任务',
+      cwd: '/Users/icesword/Documents/AIProjects/matou',
+      updatedAt: Date.parse('2026-11-17T02:07:00.000Z'),
+      permissionMode: 'default',
+      eventCount: 6,
+      page: { startEventIndex: 1, endEventIndex: 6, total: 6, hasEarlier: false, hasLater: false },
+      events: [
+        { index: 1, kind: 'user', role: 'user', text: '<local-command-caveat>ignore</local-command-caveat>', matched: false },
+        { index: 2, kind: 'user', role: 'user', text: '<command-name>/model</command-name><command-args></command-args>', matched: false },
+        { index: 3, kind: 'user', role: 'user', text: '继续追踪像素对照差异', matched: false },
+        { index: 4, kind: 'assistant', role: 'assistant', text: 'Metal 候选也未通过五组严格对照。', matched: false },
+        { index: 5, kind: 'user', role: 'user', text: '<task-notification> <task-id>bmtn2fj0z</task-id>', matched: false },
+        { index: 6, kind: 'assistant', role: 'assistant', text: 'Prompt is too long · automatic compaction failed: API Error: Request rejected (429)', matched: false }
+      ]
+    })
+    mockEgressRuntimeClient = { request } as unknown as RuntimeClient
+    const props = fixture()
+
+    render(<TerminalPane {...props}
+      taskName="迁移原生"
+      session={{ ...props.session, title: 'Claude', titleSource: 'default' }}
+      latestLines={['Prompt is too long']}
+      recoveryState="deferred"
+      onRetryRecovery={vi.fn()} />)
+
+    await waitFor(() => {
+      const card = screen.getByTestId('session-deferred-recovery')
+      expect(card.textContent).toContain('请接手 Matou 原生迁移任务')
+      expect(card.textContent).toContain('迁移原生')
+      expect(card.textContent).toContain('继续追踪像素对照差异')
+      expect(card.textContent).toContain('Metal 候选也未通过五组严格对照。')
+      expect(card.textContent).not.toContain('task-notification')
+      expect(card.textContent).not.toContain('Prompt is too long')
+      expect(card.textContent).not.toContain('local-command-caveat')
+    })
+  })
 })
 
 function fixture() {
@@ -1068,3 +1186,14 @@ function worktreeEnvironment(
   if (state === 'missing' || state === 'failed') return { ...base, state, error: 'path-missing' }
   return { ...base, state }
 }
+
+it('offers restore Codex automatic title for a manually named card without enabling Fork', async () => {
+  const props = fixture()
+  const onRestoreAutoTitle = vi.fn()
+  render(<TerminalPane {...props} session={{ ...props.session, kind: 'codex', titleSource: 'manual' }}
+    onRestoreAutoTitle={onRestoreAutoTitle} onFork={vi.fn()} />)
+  await userEvent.setup().pointer({ keys: '[MouseRight]', target: screen.getByRole('banner') })
+  await userEvent.setup().click(screen.getByRole('menuitem', { name: '恢复 Codex 自动标题' }))
+  expect(onRestoreAutoTitle).toHaveBeenCalledWith('session-1')
+  expect(screen.queryByRole('menuitem', { name: '⑂ Fork 会话' })).toBeNull()
+})

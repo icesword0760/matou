@@ -3,6 +3,29 @@ import { describe, expect, it } from 'vitest'
 import { TerminalWorkStatusTracker } from './terminal-work-status-tracker'
 
 describe('TerminalWorkStatusTracker', () => {
+  it('recognizes the observed Codex Esc message once across PTY chunks and clears it for the next attempt', () => {
+    const tracker = new TerminalWorkStatusTracker({ provider: 'codex' })
+    expect(tracker.ingest('\u001b]133;D;127\u0007')).toEqual([])
+    expect(tracker.ingest('\r\n\u001b[31m■ Conversation inter')).toEqual([])
+    expect(tracker.ingest('rupted\u001b[0m - tell the model what to do differently.\r\n')).toEqual(['interrupted'])
+    expect(tracker.ingest('idle repaint')).toEqual([])
+    tracker.beginAttempt()
+    expect(tracker.ingest('new attempt output')).toEqual([])
+    expect(tracker.ingest('\r\nConversation interrupted\r\n')).toEqual(['interrupted'])
+  })
+
+  it('does not infer Codex errors, approvals or translated cancellations from unverified output', () => {
+    for (const output of [
+      'Error: command not found', 'API Error: 529', 'Permission required:',
+      'Password: ', '对话已中断', 'The log says Conversation interrupted', '"Conversation interrupted"'
+    ]) {
+      expect(new TerminalWorkStatusTracker({ provider: 'codex' }).ingest(output)).toEqual([])
+    }
+    for (const provider of ['claude-code', 'antigravity'] as const) {
+      expect(new TerminalWorkStatusTracker({ provider }).ingest('Conversation interrupted')).toEqual([])
+    }
+  })
+
   it('maps real shell command boundaries to user-visible work states', () => {
     const tracker = new TerminalWorkStatusTracker()
 

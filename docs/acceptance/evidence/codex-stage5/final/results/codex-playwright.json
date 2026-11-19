@@ -1,0 +1,382 @@
+{
+  "config": {
+    "argv": [
+      "/Users/icesword/.nvm/versions/node/v22.16.0/bin/node",
+      "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/node_modules/@playwright/test/cli.js",
+      "test",
+      "tests/e2e/codex-acceptance.spec.ts",
+      "--retries=1",
+      "--reporter=line,json",
+      "--output=.cache/c5/final-codex-test-results",
+      "--trace=retain-on-failure"
+    ],
+    "configFile": "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/playwright.config.ts",
+    "rootDir": "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tests/e2e",
+    "failOnFlakyTests": false,
+    "forbidOnly": false,
+    "fullyParallel": false,
+    "globalSetup": null,
+    "globalTeardown": null,
+    "globalTimeout": 0,
+    "grep": {},
+    "grepInvert": null,
+    "maxFailures": 0,
+    "metadata": {
+      "actualWorkers": 1
+    },
+    "preserveOutput": "always",
+    "projects": [
+      {
+        "outputDir": "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/final-codex-test-results",
+        "repeatEach": 1,
+        "retries": 1,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "",
+        "name": "",
+        "testDir": "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tests/e2e",
+        "testIgnore": [],
+        "testMatch": [
+          "**/*.@(spec|test).?(c|m)[jt]s?(x)"
+        ],
+        "timeout": 30000
+      }
+    ],
+    "quiet": false,
+    "reporter": [
+      [
+        "line"
+      ],
+      [
+        "json"
+      ]
+    ],
+    "reportSlowTests": {
+      "max": 5,
+      "threshold": 300000
+    },
+    "shard": null,
+    "tags": [],
+    "updateSnapshots": "missing",
+    "updateSourceMethod": "patch",
+    "version": "1.62.1",
+    "workers": 1,
+    "webServer": null
+  },
+  "suites": [
+    {
+      "title": "codex-acceptance.spec.ts",
+      "file": "codex-acceptance.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [],
+      "suites": [
+        {
+          "title": "Codex packaged acceptance — real CLI and explicit controlled fixtures",
+          "file": "codex-acceptance.spec.ts",
+          "line": 533,
+          "column": 6,
+          "specs": [
+            {
+              "title": "PRD 1–6, 8, 10: lifecycle, HUD, notifications, title, modes, restart and latency 3x",
+              "ok": false,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 300000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "failed",
+                      "duration": 108010,
+                      "error": {
+                        "message": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBe\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m) // Object.is equality\u001b[22m\n\nExpected: \u001b[32mtrue\u001b[39m\nReceived: \u001b[31mfalse\u001b[39m\n\nCall Log:\n- Timeout 40000ms exceeded while waiting on the predicate",
+                        "stack": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBe\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m) // Object.is equality\u001b[22m\n\nExpected: \u001b[32mtrue\u001b[39m\nReceived: \u001b[31mfalse\u001b[39m\n\nCall Log:\n- Timeout 40000ms exceeded while waiting on the predicate\n    at changeMode (/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tests/e2e/codex-acceptance.spec.ts:529:27)\n    at /Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tests/e2e/codex-acceptance.spec.ts:612:31",
+                        "location": {
+                          "file": "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tests/e2e/codex-acceptance.spec.ts",
+                          "column": 27,
+                          "line": 529
+                        },
+                        "snippet": "  527 |     after = Number(await paneForSession(h.page, sid).locator('.terminal-surface').getAttribute('data-pid'))\n  528 |     return after > 0 && after !== before\n> 529 |   }, { timeout: 40_000 }).toBe(true)\n      |                           ^\n  530 |   return { before, after }\n  531 | }\n  532 |"
+                      },
+                      "errors": [
+                        {
+                          "location": {
+                            "file": "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tests/e2e/codex-acceptance.spec.ts",
+                            "column": 27,
+                            "line": 529
+                          },
+                          "message": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBe\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m) // Object.is equality\u001b[22m\n\nExpected: \u001b[32mtrue\u001b[39m\nReceived: \u001b[31mfalse\u001b[39m\n\nCall Log:\n- Timeout 40000ms exceeded while waiting on the predicate\n\n  527 |     after = Number(await paneForSession(h.page, sid).locator('.terminal-surface').getAttribute('data-pid'))\n  528 |     return after > 0 && after !== before\n> 529 |   }, { timeout: 40_000 }).toBe(true)\n      |                           ^\n  530 |   return { before, after }\n  531 | }\n  532 |\n    at changeMode (/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tests/e2e/codex-acceptance.spec.ts:529:27)\n    at /Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tests/e2e/codex-acceptance.spec.ts:612:31"
+                        }
+                      ],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-11-15T12:21:09.613Z",
+                      "annotations": [],
+                      "attachments": [
+                        {
+                          "name": "error-context",
+                          "contentType": "text/markdown",
+                          "path": "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/final-codex-test-results/codex-acceptance-Codex-pac-70b9e-odes-restart-and-latency-3x/error-context.md"
+                        },
+                        {
+                          "name": "trace",
+                          "contentType": "application/zip",
+                          "path": "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/final-codex-test-results/codex-acceptance-Codex-pac-70b9e-odes-restart-and-latency-3x/trace.zip"
+                        }
+                      ],
+                      "errorLocation": {
+                        "file": "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tests/e2e/codex-acceptance.spec.ts",
+                        "column": 27,
+                        "line": 529
+                      }
+                    },
+                    {
+                      "workerIndex": 1,
+                      "parallelIndex": 0,
+                      "status": "failed",
+                      "duration": 100146,
+                      "error": {
+                        "message": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBe\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m) // Object.is equality\u001b[22m\n\nExpected: \u001b[32mtrue\u001b[39m\nReceived: \u001b[31mfalse\u001b[39m\n\nCall Log:\n- Timeout 40000ms exceeded while waiting on the predicate",
+                        "stack": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBe\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m) // Object.is equality\u001b[22m\n\nExpected: \u001b[32mtrue\u001b[39m\nReceived: \u001b[31mfalse\u001b[39m\n\nCall Log:\n- Timeout 40000ms exceeded while waiting on the predicate\n    at changeMode (/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tests/e2e/codex-acceptance.spec.ts:529:27)\n    at /Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tests/e2e/codex-acceptance.spec.ts:612:31",
+                        "location": {
+                          "file": "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tests/e2e/codex-acceptance.spec.ts",
+                          "column": 27,
+                          "line": 529
+                        },
+                        "snippet": "  527 |     after = Number(await paneForSession(h.page, sid).locator('.terminal-surface').getAttribute('data-pid'))\n  528 |     return after > 0 && after !== before\n> 529 |   }, { timeout: 40_000 }).toBe(true)\n      |                           ^\n  530 |   return { before, after }\n  531 | }\n  532 |"
+                      },
+                      "errors": [
+                        {
+                          "location": {
+                            "file": "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tests/e2e/codex-acceptance.spec.ts",
+                            "column": 27,
+                            "line": 529
+                          },
+                          "message": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBe\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m) // Object.is equality\u001b[22m\n\nExpected: \u001b[32mtrue\u001b[39m\nReceived: \u001b[31mfalse\u001b[39m\n\nCall Log:\n- Timeout 40000ms exceeded while waiting on the predicate\n\n  527 |     after = Number(await paneForSession(h.page, sid).locator('.terminal-surface').getAttribute('data-pid'))\n  528 |     return after > 0 && after !== before\n> 529 |   }, { timeout: 40_000 }).toBe(true)\n      |                           ^\n  530 |   return { before, after }\n  531 | }\n  532 |\n    at changeMode (/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tests/e2e/codex-acceptance.spec.ts:529:27)\n    at /Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tests/e2e/codex-acceptance.spec.ts:612:31"
+                        }
+                      ],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 1,
+                      "startTime": "2026-11-15T12:22:57.954Z",
+                      "annotations": [],
+                      "attachments": [
+                        {
+                          "name": "error-context",
+                          "contentType": "text/markdown",
+                          "path": "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/final-codex-test-results/codex-acceptance-Codex-pac-70b9e-odes-restart-and-latency-3x-retry1/error-context.md"
+                        },
+                        {
+                          "name": "trace",
+                          "contentType": "application/zip",
+                          "path": "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/final-codex-test-results/codex-acceptance-Codex-pac-70b9e-odes-restart-and-latency-3x-retry1/trace.zip"
+                        }
+                      ],
+                      "errorLocation": {
+                        "file": "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tests/e2e/codex-acceptance.spec.ts",
+                        "column": 27,
+                        "line": 529
+                      }
+                    }
+                  ],
+                  "status": "unexpected"
+                }
+              ],
+              "id": "b33e2b54a6e36ead1596-ecafb4e2589679600e4e",
+              "file": "codex-acceptance.spec.ts",
+              "line": 536,
+              "column": 3
+            },
+            {
+              "title": "PRD 7, 9: current/new Worktree Fork, parent-child isolation, loader search and resume",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 300000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 2,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 67062,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-11-15T12:24:38.429Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "b33e2b54a6e36ead1596-f90ee3de3883358acab8",
+              "file": "codex-acceptance.spec.ts",
+              "line": 642,
+              "column": 3
+            },
+            {
+              "title": "PRD 1, 11: mt creates a Codex card and real Codex reads its sibling",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 300000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 2,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 22043,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-11-15T12:25:45.507Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "b33e2b54a6e36ead1596-49f2b29e89a6bf26aa3f",
+              "file": "codex-acceptance.spec.ts",
+              "line": 709,
+              "column": 3
+            },
+            {
+              "title": "PRD 2, 3: real approval, waiting notification, continue and interrupted turn",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 300000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 2,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 38925,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-11-15T12:26:07.554Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "b33e2b54a6e36ead1596-298ca338c8866a5a4446",
+              "file": "codex-acceptance.spec.ts",
+              "line": 741,
+              "column": 3
+            },
+            {
+              "title": "PRD 2, 8: real missing local rollout, recovery failure, retry and new conversation",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 300000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 2,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 46811,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-11-15T12:26:46.484Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "b33e2b54a6e36ead1596-2f1b22067f53f8b4cf31",
+              "file": "codex-acceptance.spec.ts",
+              "line": 773,
+              "column": 3
+            },
+            {
+              "title": "controlled fixtures: missing CLI and unauthenticated sign-in; no real login is revoked",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 300000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 2,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 9773,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-11-15T12:27:33.299Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "b33e2b54a6e36ead1596-28384dc607d08d04f327",
+              "file": "codex-acceptance.spec.ts",
+              "line": 824,
+              "column": 3
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "errors": [],
+  "stats": {
+    "startTime": "2026-11-15T12:21:09.211Z",
+    "duration": 393876.25,
+    "expected": 5,
+    "skipped": 0,
+    "unexpected": 1,
+    "flaky": 0
+  }
+}

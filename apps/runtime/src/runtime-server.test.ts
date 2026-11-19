@@ -1,6 +1,10 @@
+import { createServer } from 'node:http'
+import * as officialRoleAccount from './session/claude-official-account'
+import * as nativeRoleCatalog from './session/native-model-catalog'
+import { AgentModelSettings } from './session/agent-model-settings'
 import { EventEmitter } from 'node:events'
 import { execFile } from 'node:child_process'
-import { chmod, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rm, stat, unlink, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
@@ -37,6 +41,7 @@ import { RuntimeSessionRegistry } from './session/runtime-session-registry'
 import { RuntimeRpcRouter } from './rpc/runtime-rpc-router'
 import { SessionHudRegistry } from './session/session-hud-registry'
 import { ProviderHookServer } from './session/provider-hook-server'
+import { CodexSessionCatalog } from './session/codex-session-catalog'
 import { createProviderHudPayloadHandler } from './session/provider-hud-payload-handler'
 import type { ProviderTranscriptHudSnapshot } from './session/provider-transcript-hud'
 import { SessionRepository } from './domain/session-repository'
@@ -906,12 +911,12 @@ sleep 30
       expect((await readFile(join(root, 'control-claude-session.args'), 'utf8')).trim().split('\n'))
         .toEqual([
           '--plugin-dir', join(controlAssetRoot, 'providers', 'claude-plugin'),
-          '--model', 'claude-code-persisted', '--resume', 'provider-claude-code',
+          '--model', 'claude-control-model', '--resume', 'provider-claude-code',
           '--dangerously-skip-permissions'
         ])
       expect((await readFile(join(root, 'control-codex-session.args'), 'utf8')).trim().split('\n'))
         .toEqual([
-          '-c', 'model_context_window=512000', '-c', 'model_auto_compact_token_limit=460800', '-c', 'model_auto_compact_token_limit_scope="total"',
+          '-c', 'check_for_update_on_startup=false', '-c', 'model_context_window=512000', '-c', 'model_auto_compact_token_limit=460800', '-c', 'model_auto_compact_token_limit_scope="total"',
           '-c', 'developer_instructions="Task 8 fixture\\n"',
           '--model', 'codex-persisted', '--dangerously-bypass-approvals-and-sandbox',
           'resume', 'provider-codex'
@@ -923,7 +928,7 @@ sleep 30
         {
           id: 'binding-claude-code',
           metadata: {
-            permissionMode: 'bypassPermissions', model: 'claude-code-persisted',
+            permissionMode: 'bypassPermissions', model: 'claude-control-model',
             providerConfigId: providerSnapshot.activeProviderIds['claude-code']
           }
         },
@@ -957,6 +962,7 @@ sleep 30
     const log = join(root, 'provider-config-invocations.txt')
     await writeFile(executable, [
       '#!/bin/sh',
+      'if [ "$1" = "--settings" ]; then shift 2; fi',
       `printf '%s|%s|%s|%s\n' "$*" "$ANTHROPIC_BASE_URL" "$ANTHROPIC_API_KEY" "$ANTHROPIC_AUTH_TOKEN" >> ${JSON.stringify(log)}`,
       "printf '\\033[2J\\033[Hsession output: %s' \"$ANTHROPIC_BASE_URL\"",
       'sleep 30',
@@ -1452,34 +1458,7 @@ sleep 30
           model: { id: 'claude-fresh-a' }, cwd: root
         })
       })).status).toBe(200)
-      await waitUntil(() => repository.getResumeBinding(
-        'provider-config-fresh-identity', 'claude-code'
-      ) !== undefined)
-      expect(repository.getResumeBinding(
-        'provider-config-fresh-identity', 'claude-code'
-      )).toMatchObject({
-        providerSessionId: 'fresh-provider-identity',
-        metadata: expect.objectContaining({
-          providerConfigId: providerA.id, model: 'claude-fresh-a'
-        })
-      })
-      expect(sessions.providerIdentityConfirmed(firstSession.runId!)).toBe(true)
-
-      freshPort.receive({
-        type: 'rpc.request', protocolVersion: PROTOCOL_VERSION,
-        requestId: 'provider-config-fresh-activate-after-identity',
-        method: 'provider-config.activate', capability: 'renderer',
-        deadlineAt: Date.now() + 2_000,
-        payload: { cli: 'claude-code', providerId: providerB.id }
-      })
-      await waitUntil(() => freshPort.findRpcResponse(
-        'provider-config-fresh-activate-after-identity'
-      ) !== undefined)
-      expect((freshPort.findRpcResponse('provider-config-fresh-activate-after-identity') as {
-        result: { sessionTransitions: unknown[] }
-      }).result.sessionTransitions).toContainEqual({
-        sessionId: 'provider-config-fresh-identity', status: 'updated'
-      })
+      await waitUntil(() => Boolean(sessions.get('provider-config-fresh-identity')) && sessions.get('provider-config-fresh-identity')!.pid !== firstPid)
       expect(sessions.get('provider-config-fresh-identity')?.pid).not.toBe(firstPid)
       expect(repository.getResumeBinding(
         'provider-config-fresh-identity', 'claude-code'
@@ -1618,6 +1597,12 @@ sleep 30
       expect(hud.snapshot('provider-config-write-failure')).toMatchObject({
         model: 'claude-write-a', contextPercent: 37, taskStatus: 'running'
       })
+      updateSpy.mockRestore()
+      await sessions.drainProviderActivations()
+      await waitUntil(() => Boolean(sessions.get('provider-config-write-failure')) && sessions.get('provider-config-write-failure')!.pid !== firstPid)
+      expect(providerBindingMetadata('binding-provider-config-write-failure')).toMatchObject({
+        providerConfigId: providerB.id, model: 'claude-write-b', permissionMode: 'plan'
+      })
     } finally {
       updateSpy?.mockRestore()
       await sessions.shutdownAll()
@@ -1627,7 +1612,7 @@ sleep 30
     }
   })
 
-  it('restores a Session with its bound provider configuration and model after global defaults change', async () => {
+  it('restores an unopened Claude Session with the current global provider while preserving history identity', async () => {
     const executable = join(root, 'provider-bound-restore.sh')
     const log = join(root, 'provider-bound-restore-invocations.txt')
     await writeFile(executable, [
@@ -1681,8 +1666,8 @@ sleep 30
       await waitUntilAsync(async () => Boolean((await readFile(log, 'utf8').catch(() => '')).trim()))
 
       expect((await readFile(log, 'utf8')).trim()).toBe(
-        '--model session-frozen-model --resume provider-context-bound ' +
-        '--dangerously-skip-permissions|https://bound.example|KEY_A'
+        '--model later-provider-model --resume provider-context-bound ' +
+        '--dangerously-skip-permissions|https://later.example|KEY_B'
       )
     } finally {
       restorePort.receive({
@@ -1691,6 +1676,176 @@ sleep 30
       })
       await settle()
       restoreServer.close()
+      restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
+    }
+  })
+
+  it('keeps matched provider sessions running on repeat activation and restarts only for changed launch settings', async () => {
+    const executable = join(root, 'provider-idempotent.sh')
+    await writeFile(executable, '#!/bin/sh\nsleep 30\n')
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    const providerConfigs = new ProviderConfigStore(root)
+    const provider = await providerConfigs.upsert({ cli: 'claude-code', name: 'Matching provider', endpoint: 'https://matching.example', model: 'claude-match', apiKey: 'KEY_A' })
+    await providerConfigs.activate('claude-code', provider.id)
+    registerSession(database, 'provider-matched', 'claude-code')
+    database.run(`INSERT INTO provider_bindings (id, session_id, provider, provider_session_id, resume_state, metadata_json, created_at, updated_at, validated_at)
+      VALUES ('binding-provider-matched', 'provider-matched', 'claude-code', 'matched-history', 'available', ?, 1, 1, 1)`,
+    JSON.stringify({ providerConfigId: provider.id, model: 'claude-native-choice', permissionMode: 'default' }))
+    const sessions = createTestSessionRegistry()
+    const matchPort = new MockPort()
+    const matchServer = new RuntimeServer(matchPort, root, database, new RuntimeRpcRouter(database, undefined, { providerConfigs }), undefined, sessions, undefined, undefined, { providerConfigs })
+    matchPort.receive({ type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'matching' })
+    const activate = async (id: string) => {
+      matchPort.receive({ type: 'rpc.request', protocolVersion: PROTOCOL_VERSION, requestId: id, method: 'provider-config.activate', capability: 'renderer', deadlineAt: Date.now() + 2000, payload: { cli: 'claude-code', providerId: provider.id } })
+      await waitUntil(() => matchPort.findRpcResponse(id) !== undefined)
+    }
+    try {
+      await matchServer.startOrResumeSession({ sessionId: 'provider-matched', executionContextId: 'replay-context', profile: 'claude-code', cols: 80, rows: 24 })
+      const initial = sessions.get('provider-matched')!
+      matchServer.providerIdentityRecorded('provider-matched', initial.runId!)
+      await activate('matching-first')
+      await activate('matching-repeat')
+      expect(sessions.get('provider-matched')).toBe(initial)
+      expect(providerBindingMetadata('binding-provider-matched').model).toBe('claude-native-choice')
+      await providerConfigs.upsert({ id: provider.id, cli: 'claude-code', name: 'Display name only', endpoint: provider.endpoint, model: provider.model })
+      await activate('matching-display-change')
+      expect(sessions.get('provider-matched')).toBe(initial)
+      await providerConfigs.upsert({ id: provider.id, cli: 'claude-code', name: provider.name, endpoint: provider.endpoint, model: provider.model, apiKey: 'KEY_B', reasoningEffort: 'high' })
+      expect(sessions.get('provider-matched')).toBe(initial)
+      await activate('matching-effective-change')
+      expect(sessions.get('provider-matched')?.pid).not.toBe(initial.pid)
+      expect(providerBindingMetadata('binding-provider-matched')).toMatchObject({ providerConfigId: provider.id, model: provider.model })
+      expect(database.get<{ provider_session_id: string }>("SELECT provider_session_id FROM provider_bindings WHERE id = 'binding-provider-matched'")?.provider_session_id).toBe('matched-history')
+    } finally {
+      matchServer.close()
+      await sessions.shutdownAll()
+      restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
+    }
+  })
+
+  it('reapplies changed provider settings to dormant sessions while ordinary resume preserves native model choices', async () => {
+    const executable = join(root, 'provider-dormant-reactivate.sh')
+    const log = join(root, 'provider-dormant-reactivate.txt')
+    await writeFile(executable, `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(log)}\nsleep 30\n`)
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    const providerConfigs = new ProviderConfigStore(root)
+    const provider = await providerConfigs.upsert({ cli: 'claude-code', name: 'Dormant same provider', endpoint: 'https://dormant.example', model: 'claude-global-fixed', apiKey: 'KEY' })
+    await providerConfigs.activate('claude-code', provider.id)
+    registerSession(database, 'provider-dormant', 'claude-code')
+    database.run(`INSERT INTO provider_bindings (id, session_id, provider, provider_session_id, resume_state, metadata_json, created_at, updated_at, validated_at)
+      VALUES ('binding-provider-dormant', 'provider-dormant', 'claude-code', 'dormant-history', 'available', ?, 1, 1, 1)`,
+    JSON.stringify({ providerConfigId: provider.id, model: 'claude-native-choice', permissionMode: 'plan' }))
+    let sessions = createTestSessionRegistry()
+    const dormantPort = new MockPort()
+    const dormantServer = new RuntimeServer(dormantPort, root, database, new RuntimeRpcRouter(database, undefined, { providerConfigs }), undefined, sessions, undefined, undefined, { providerConfigs })
+    dormantPort.receive({ type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'dormant' })
+    const descriptor = { sessionId: 'provider-dormant', executionContextId: 'replay-context', profile: 'claude-code' as const, cols: 80, rows: 24 }
+    let restoredServer: RuntimeServer | undefined
+    try {
+      await dormantServer.startOrResumeSession(descriptor)
+      await waitUntilAsync(async () => (await readFile(log, 'utf8').catch(() => '')).includes('claude-native-choice'))
+      dormantPort.receive({ type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION, sessionId: descriptor.sessionId })
+      await waitUntil(() => !sessions.has(descriptor.sessionId))
+      await providerConfigs.upsert({ id: provider.id, cli: 'claude-code', name: provider.name, endpoint: provider.endpoint, model: 'claude-global-updated' })
+      dormantPort.receive({ type: 'rpc.request', protocolVersion: PROTOCOL_VERSION, requestId: 'dormant-reactivate', method: 'provider-config.activate', capability: 'renderer', deadlineAt: Date.now() + 2000, payload: { cli: 'claude-code', providerId: provider.id } })
+      await waitUntil(() => dormantPort.findRpcResponse('dormant-reactivate') !== undefined)
+      await sessions.shutdownAll()
+      dormantServer.close()
+      sessions = createTestSessionRegistry()
+      restoredServer = new RuntimeServer(new MockPort(), root, database, undefined, undefined, sessions, undefined, undefined, { providerConfigs: new ProviderConfigStore(root) })
+      await restoredServer.startOrResumeSession(descriptor)
+      await waitUntilAsync(async () => (await readFile(log, 'utf8').catch(() => '')).trim().split('\n').length === 2)
+      expect((await readFile(log, 'utf8')).trim().split('\n')[1]).toContain('--model claude-global-updated --resume dormant-history --permission-mode plan')
+      expect(providerBindingMetadata('binding-provider-dormant')).toMatchObject({ providerConfigId: provider.id, model: 'claude-global-updated' })
+      expect(database.get<{ provider_session_id: string }>("SELECT provider_session_id FROM provider_bindings WHERE id = 'binding-provider-dormant'")?.provider_session_id).toBe('dormant-history')
+    } finally {
+      await sessions.shutdownAll()
+      dormantServer.close()
+      restoredServer?.close()
+      restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
+    }
+  })
+
+  it('resets a removed provider model to the official default without losing the resume identity', async () => {
+    const executable = join(root, 'provider-official-default.sh')
+    const log = join(root, 'provider-official-default.txt')
+    await writeFile(executable, `#!/bin/sh\nprintf '%s\\n' "$*" > ${JSON.stringify(log)}\nsleep 30\n`)
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    const providerConfigs = new ProviderConfigStore(root)
+    registerSession(database, 'removed-provider-session', 'claude-code')
+    database.run(`INSERT INTO provider_bindings (id, session_id, provider, provider_session_id, resume_state, metadata_json, created_at, updated_at, validated_at)
+      VALUES ('binding-removed-provider', 'removed-provider-session', 'claude-code', 'preserved-identity', 'available', ?, 1, 1, 1)`,
+    JSON.stringify({ providerConfigId: 'deleted-provider', model: 'deepseek-flash', permissionMode: 'default' }))
+    const sessions = createTestSessionRegistry()
+    const restorePort = new MockPort()
+    const restoreServer = new RuntimeServer(restorePort, root, database, undefined, undefined, sessions, undefined, undefined, { providerConfigs })
+    try {
+      await restoreServer.startOrResumeSession({ sessionId: 'removed-provider-session', executionContextId: 'replay-context', profile: 'claude-code', cols: 80, rows: 24 })
+      await waitUntilAsync(async () => (await readFile(log, 'utf8').catch(() => '')).includes('--model default --resume preserved-identity'))
+      expect(providerBindingMetadata('binding-removed-provider')).toMatchObject({ providerConfigId: 'anthropic-official', model: 'default' })
+    } finally {
+      await sessions.shutdownAll()
+      restoreServer.close()
+      restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
+    }
+  })
+
+  it('automatically applies a provider activated while the first Claude spawn is still preparing', async () => {
+    const executable = join(root, 'provider-first-spawn-race.sh')
+    const log = join(root, 'provider-first-spawn-race.txt')
+    await writeFile(executable, `#!/bin/sh\nprintf '%s|%s\\n' "$*" "$ANTHROPIC_BASE_URL" >> ${JSON.stringify(log)}\nsleep 30\n`)
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    const providerConfigs = new ProviderConfigStore(root)
+    const first = await providerConfigs.upsert({ cli: 'claude-code', name: 'Preparing A', endpoint: 'https://preparing-a.example', model: 'claude-preparing-a', apiKey: 'A' })
+    const latest = await providerConfigs.upsert({ cli: 'claude-code', name: 'Preparing B', endpoint: 'https://preparing-b.example', model: 'claude-preparing-b', apiKey: 'B' })
+    await providerConfigs.activate('claude-code', first.id)
+    registerSession(database, 'provider-preparing', 'claude-code')
+    database.run(`INSERT INTO provider_bindings (id, session_id, provider, provider_session_id, resume_state, metadata_json, created_at, updated_at, validated_at)
+      VALUES ('binding-provider-preparing', 'provider-preparing', 'claude-code', 'preparing-history', 'available', ?, 1, 1, 1)`,
+    JSON.stringify({ providerConfigId: first.id, model: first.model, permissionMode: 'default' }))
+    const sessions = createTestSessionRegistry()
+    const racePort = new MockPort()
+    const raceServer = new RuntimeServer(racePort, root, database, new RuntimeRpcRouter(database, undefined, { providerConfigs }), undefined, sessions, undefined, undefined, { providerConfigs })
+    racePort.receive({ type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'preparing' })
+    const originalSelection = providerConfigs.launchSelection.bind(providerConfigs)
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    let preparing = false
+    const selection = vi.spyOn(providerConfigs, 'launchSelection').mockImplementationOnce(async (...args) => {
+      const selected = await originalSelection(...args)
+      preparing = true
+      await gate
+      return selected
+    })
+    const launch = raceServer.startOrResumeSession({ sessionId: 'provider-preparing', executionContextId: 'replay-context', profile: 'claude-code', cols: 80, rows: 24 })
+    try {
+      await waitUntil(() => preparing)
+      racePort.receive({ type: 'rpc.request', protocolVersion: PROTOCOL_VERSION, requestId: 'preparing-activate', method: 'provider-config.activate', capability: 'renderer', deadlineAt: Date.now() + 2000, payload: { cli: 'claude-code', providerId: latest.id } })
+      await waitUntil(() => racePort.findRpcResponse('preparing-activate') !== undefined)
+      release()
+      await launch
+      await waitUntilAsync(async () => (await readFile(log, 'utf8').catch(() => '')).includes('--model claude-preparing-a --resume preparing-history|https://preparing-a.example'))
+      const initial = sessions.get('provider-preparing')!
+      raceServer.providerIdentityRecorded('provider-preparing', initial.runId!)
+      await waitUntil(() => Boolean(sessions.get('provider-preparing')) && sessions.get('provider-preparing')!.pid !== initial.pid)
+      await sessions.runExclusive('provider-preparing', async () => undefined)
+      expect(providerBindingMetadata('binding-provider-preparing')).toMatchObject({ providerConfigId: latest.id, model: latest.model })
+      await waitUntilAsync(async () => (await readFile(log, 'utf8').catch(() => '')).trim().split('\n').length === 2)
+      expect((await readFile(log, 'utf8')).trim().split('\n')[1]).toContain('--model claude-preparing-b --resume preparing-history|https://preparing-b.example')
+    } finally {
+      release()
+      await launch
+      selection.mockRestore()
+      raceServer.close()
+      await sessions.shutdownAll()
       restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
     }
   })
@@ -1769,10 +1924,10 @@ sleep 30
       await waitUntilAsync(async () => Boolean((await readFile(log, 'utf8').catch(() => '')).trim()))
 
       expect((await readFile(log, 'utf8')).trim()).toBe(
-        '-c model_context_window=512000 -c model_auto_compact_token_limit=460800 ' +
+        '-c check_for_update_on_startup=false -c model_context_window=512000 -c model_auto_compact_token_limit=460800 ' +
         '-c model_auto_compact_token_limit_scope="total" ' +
         '--model codex-session-frozen-model --dangerously-bypass-approvals-and-sandbox ' +
-        'fork codex-source-context|https://bound-codex.example/v1|KEY_A'
+        '-c tui.resume_cwd="current" fork codex-source-context|https://bound-codex.example/v1|KEY_A'
       )
     } finally {
       forkPort.receive({
@@ -2083,7 +2238,7 @@ sleep 30
         payload: { cli: 'claude-code', providerId }
       })
       await waitUntil(() => providerPort.findRpcResponse('provider-config-storage-activate') !== undefined)
-      await waitUntil(() => sessions.get('provider-config-healthy')?.pid !== healthyPid)
+      await waitUntil(() => Boolean(sessions.get('provider-config-healthy')) && sessions.get('provider-config-healthy')!.pid !== healthyPid)
 
       const activation = providerPort.findRpcResponse('provider-config-storage-activate') as {
         result: { sessionTransitions: unknown[] }
@@ -2103,6 +2258,10 @@ sleep 30
       })
       expect(sessions.get('provider-config-faulted')?.pid).toBe(faultedPid)
       expect(sessions.get('provider-config-healthy')?.pid).not.toBe(healthyPid)
+      writable = true
+      providerPort.receive({ type: 'terminal.storage-retry', protocolVersion: PROTOCOL_VERSION, sessionId: 'provider-config-faulted' })
+      await waitUntil(() => Boolean(sessions.get('provider-config-faulted')) && sessions.get('provider-config-faulted')!.pid !== faultedPid)
+      expect(providerBindingMetadata('binding-provider-config-faulted')).toMatchObject({ providerConfigId: providerId, model: 'claude-team' })
     } finally {
       writable = true
       await sessions.shutdownAll()
@@ -2126,6 +2285,10 @@ sleep 30
     const providerB = await providerConfigs.upsert({
       cli: 'claude-code', name: 'Pending identity provider B',
       endpoint: 'https://pending-b.example/', model: 'claude-pending-b', apiKey: 'KEY_B'
+    })
+    const providerC = await providerConfigs.upsert({
+      cli: 'claude-code', name: 'Pending identity provider C',
+      endpoint: 'https://pending-c.example/', model: 'claude-pending-c', apiKey: 'KEY_C'
     })
     await providerConfigs.activate('claude-code', providerA.id)
     registerSession(database, 'provider-config-pending-identity', 'claude-code')
@@ -2178,6 +2341,11 @@ sleep 30
       })
       expect(providerBindingMetadata('binding-provider-config-pending-identity')).toEqual(bindingBefore)
       expect(sessions.get('provider-config-pending-identity')?.pid).toBe(originalPid)
+      pendingPort.receive({ type: 'rpc.request', protocolVersion: PROTOCOL_VERSION, requestId: 'provider-config-pending-activate-last', method: 'provider-config.activate', capability: 'renderer', deadlineAt: Date.now() + 2000, payload: { cli: 'claude-code', providerId: providerC.id } })
+      await waitUntil(() => pendingPort.findRpcResponse('provider-config-pending-activate-last') !== undefined)
+      pendingServer.providerIdentityRecorded('provider-config-pending-identity', sessions.get('provider-config-pending-identity')!.runId!)
+      await waitUntil(() => Boolean(sessions.get('provider-config-pending-identity')) && sessions.get('provider-config-pending-identity')!.pid !== originalPid)
+      expect(providerBindingMetadata('binding-provider-config-pending-identity')).toMatchObject({ providerConfigId: providerC.id, model: 'claude-pending-c' })
     } finally {
       await sessions.shutdownAll()
       pendingServer.close()
@@ -2199,6 +2367,8 @@ sleep 30
     process.env.MATOU_CODEX_COMMAND = executable
     registerSession(database, 'provider-config-codex-running', 'codex')
     registerSession(database, 'provider-config-codex-next', 'codex')
+    const previousCodexHome = process.env.CODEX_HOME
+    process.env.CODEX_HOME = join(root, 'missing-codex-default-config')
     try {
       port.receive({
         type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
@@ -2247,13 +2417,14 @@ sleep 30
         return Boolean(text.trim()) && text.trim().split('\n').length === 2
       })
       expect((await readFile(log, 'utf8')).trim().split('\n')[1])
-        .toBe('-c model_context_window=512000 -c model_auto_compact_token_limit=460800 -c model_auto_compact_token_limit_scope="total" --model gpt-team|https://codex.example/v1|OPENAI_TOKEN')
+        .toBe('-c check_for_update_on_startup=false -c model_context_window=512000 -c model_auto_compact_token_limit=460800 -c model_auto_compact_token_limit_scope="total" --model gpt-team --ask-for-approval on-request --sandbox workspace-write|https://codex.example/v1|OPENAI_TOKEN')
     } finally {
       for (const sessionId of ['provider-config-codex-running', 'provider-config-codex-next']) {
         port.receive({ type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION, sessionId })
       }
       await settle()
       restoreEnv('MATOU_CODEX_COMMAND', previousCommand)
+      restoreEnv('CODEX_HOME', previousCodexHome)
     }
   })
 
@@ -2299,6 +2470,62 @@ sleep 30
       hasMoreAfter: false
     })
   })
+
+  it('isolates two simultaneous requests to one new Worktree and restarts only the requested PTY', async () => {
+    const repository = join(root, 'isolation-repository')
+    const branch = 'feature/isolation'
+    await execFileAsync('git', ['init', '-b', 'main', repository])
+    await execFileAsync('git', ['-C', repository, 'config', 'user.name', 'Matou Test'])
+    await execFileAsync('git', ['-C', repository, 'config', 'user.email', 'matou@example.test'])
+    await writeFile(join(repository, 'README.md'), 'original\n')
+    await execFileAsync('git', ['-C', repository, 'add', 'README.md'])
+    await execFileAsync('git', ['-C', repository, 'commit', '-m', 'initial'])
+    await execFileAsync('git', ['-C', repository, 'branch', branch])
+    await writeFile(join(repository, 'README.md'), 'local edits\n')
+    database.run("UPDATE execution_contexts SET cwd = ? WHERE id = 'replay-context'", repository)
+    database.run("UPDATE workspaces SET root_directory = ? WHERE id = 'replay-workspace'", repository)
+    const sessionIds = ['isolate-current', 'isolate-peer']
+    for (const sessionId of sessionIds) {
+      registerCanvasSession(database, sessionId)
+      database.run('UPDATE sessions SET cwd = ? WHERE id = ?', repository, sessionId)
+    }
+    const previousShell = process.env.SHELL
+    process.env.SHELL = '/bin/sh'
+    try {
+      for (const sessionId of sessionIds) {
+        port.receive({
+          type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+          sessionId, executionContextId: 'replay-context', profile: 'shell', cols: 80, rows: 24
+        })
+        await waitUntil(() => port.last('terminal.spawned')?.sessionId === sessionId)
+      }
+      const input = { sessionId: 'isolate-current', branch, cwd: '/ignored-renderer-path', now: Date.now() }
+      port.receive({ ...rpc('isolation', 'session.environment-isolate', input), deadlineAt: Date.now() + 10_000 })
+      port.receive({ ...rpc('isolation-duplicate', 'session.environment-isolate', input), deadlineAt: Date.now() + 10_000 })
+      await waitUntil(() => port.findRpcResponse('isolation-duplicate') !== undefined, 12_000)
+
+      expect(port.findRpcResponse('isolation')).toMatchObject({
+        result: { kind: 'switched', environment: { activeTarget: 'worktree', state: 'ready' }, status: { currentBranch: branch } }
+      })
+      expect(port.findRpcResponse('isolation-duplicate')).toMatchObject({
+        result: { kind: 'rejected', reason: 'environment-not-local' }
+      })
+      const worktree = database.get<{ cwd: string }>("SELECT cwd FROM sessions WHERE id = 'isolate-current'")
+      expect(worktree?.cwd).toContain(join(root, 'worktrees', 'replay-workspace'))
+      expect(await readFile(join(worktree!.cwd, 'README.md'), 'utf8')).toBe('original\n')
+      expect(await readFile(join(repository, 'README.md'), 'utf8')).toBe('local edits\n')
+      expect((await execFileAsync('git', ['-C', repository, 'branch', '--show-current'])).stdout.trim()).toBe('main')
+      expect(database.get("SELECT cwd FROM sessions WHERE id = 'isolate-peer'")).toEqual({ cwd: repository })
+      expect(port.sent.filter((message) => message.type === 'terminal.spawned').map((message) => message.sessionId))
+        .toEqual(['isolate-current', 'isolate-peer', 'isolate-current'])
+      expect(database.get('SELECT COUNT(*) AS count FROM worktrees WHERE branch_name = ?', branch)).toEqual({ count: 1 })
+      expect(database.get(
+        "SELECT COUNT(*) AS count FROM domain_events WHERE event_type = 'session.environment-isolated'"
+      )).toEqual({ count: 2 })
+    } finally {
+      restoreEnv('SHELL', previousShell)
+    }
+  }, 15_000)
 
   it('hands one real PTY from Local to its owned Worktree and keeps the Session identity', async () => {
     const repositoryRoot = join(root, 'handoff-repository')
@@ -3954,6 +4181,47 @@ sleep 30
     await waitUntil(() => terminalText(port).includes('__ORDERED_INPUT__'))
   })
 
+  it('updates a Codex card to interrupted from the observed TUI message and resumes on the next submission', async () => {
+    const executable = join(root, 'codex-interrupt-fixture.sh')
+    await writeFile(executable, [
+      '#!/bin/sh',
+      "printf 'CODEX_INTERRUPT_READY\\n'",
+      'while IFS= read -r line; do',
+      '  case "$line" in',
+      "    interrupt) printf '\\nConversation interrupted\\n' ;;",
+      "    next) printf 'CODEX_NEXT_ATTEMPT\\n' ;;",
+      '  esac',
+      'done',
+      ''
+    ].join('\n'))
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CODEX_COMMAND
+    process.env.MATOU_CODEX_COMMAND = executable
+    try {
+      registerCanvasSession(database, 'codex-interruption', 'codex')
+      port.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'codex-interruption', executionContextId: 'replay-context',
+        profile: 'codex', cols: 80, rows: 24
+      })
+      await waitUntil(() => terminalText(port).includes('CODEX_INTERRUPT_READY'))
+      port.receive({
+        type: 'terminal.input', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'codex-interruption', data: 'interrupt\r'
+      })
+      await waitUntil(() => workStatus('codex-interruption') === 'interrupted')
+      port.receive({
+        type: 'terminal.input', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'codex-interruption', data: 'next\r'
+      })
+      await waitUntil(() => terminalText(port).includes('CODEX_NEXT_ATTEMPT'))
+      expect(workStatus('codex-interruption')).toBe('running')
+      expect(port.sent.filter((message) => message.type === 'protocol.error')).toEqual([])
+    } finally {
+      restoreEnv('MATOU_CODEX_COMMAND', previousCommand)
+    }
+  })
+
   it('tracks real Shell commands as running, idle, error, and interrupted work', async () => {
     const previousShell = process.env.SHELL
     process.env.SHELL = '/bin/zsh'
@@ -4567,7 +4835,7 @@ sleep 30
       })
 
       await waitUntilAsync(async () => (await readFile(argumentFile, 'utf8').catch(() => '')) !== '')
-      expect((await readFile(argumentFile, 'utf8')).trim().split('\n')).toEqual([
+      expect(capturedClaudeArguments(await readFile(argumentFile, 'utf8'))).toEqual([
         '--resume', 'provider-session-42', '--dangerously-skip-permissions'
       ])
       providerPort.receive({
@@ -5124,7 +5392,7 @@ sleep 30
       })
 
       await waitUntilAsync(async () => (await readFile(argumentFile, 'utf8').catch(() => '')) !== '')
-      expect((await readFile(argumentFile, 'utf8')).trim().split('\n')).toEqual([
+      expect(capturedClaudeArguments(await readFile(argumentFile, 'utf8'))).toEqual([
         '--resume', 'provider-source-42', '--fork-session',
         '--dangerously-skip-permissions'
       ])
@@ -5165,7 +5433,7 @@ sleep 30
         profile: 'claude-code', cols: 80, rows: 24
       })
       await waitUntilAsync(async () => (await readFile(argumentFile, 'utf8').catch(() => '')) !== '')
-      expect((await readFile(argumentFile, 'utf8')).trim().split('\n')).toEqual([
+      expect(capturedClaudeArguments(await readFile(argumentFile, 'utf8'))).toEqual([
         '--resume', 'provider-derived-43'
       ])
       restoredPort.receive({
@@ -5247,7 +5515,7 @@ sleep 30
         lease: decision.lease
       })).resolves.toMatchObject({ kind: 'started' })
       await waitUntilAsync(async () => (await readFile(argumentFile, 'utf8').catch(() => '')) !== '')
-      expect((await readFile(argumentFile, 'utf8')).trim().split('\n')).toEqual([
+      expect(capturedClaudeArguments(await readFile(argumentFile, 'utf8'))).toEqual([
         '--resume', 'provider-source-durable', '--fork-session',
         '--dangerously-skip-permissions'
       ])
@@ -5270,7 +5538,7 @@ sleep 30
       // only the later Renderer attach publishes a visible spawn event.
       expect(forkPort.sent.filter(({ type }) => type === 'terminal.spawned')).toHaveLength(1)
       expect(sessions.get('fork-durable-derived')?.runId).toBe('run-renderer-gate')
-      expect((await readFile(argumentFile, 'utf8')).trim().split('\n')).toEqual([
+      expect(capturedClaudeArguments(await readFile(argumentFile, 'utf8'))).toEqual([
         '--resume', 'provider-source-durable', '--fork-session',
         '--dangerously-skip-permissions'
       ])
@@ -5740,6 +6008,93 @@ sleep 30
     }
   })
 
+  it('respawns every Codex HUD permission change with the same identity even when the UI requests an in-place switch', async () => {
+    const executable = join(root, 'codex-permission-respawn.sh')
+    const argumentFile = join(root, 'codex-permission-respawn-args.txt')
+    await writeFile(executable, '#!/bin/sh\nprintf "%s\\n" "$@" > "$MATOU_TEST_ARGUMENT_FILE"\nwhile :; do sleep 0.05; done\n')
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CODEX_COMMAND
+    const previousArguments = process.env.MATOU_TEST_ARGUMENT_FILE
+    process.env.MATOU_CODEX_COMMAND = executable
+    process.env.MATOU_TEST_ARGUMENT_FILE = argumentFile
+    const sessions = createTestSessionRegistry()
+    const modePort = new MockPort()
+    const sid = 'codex-hud-mode-respawn'
+    registerCanvasSession(database, sid, 'codex')
+    database.run(`INSERT INTO provider_bindings (
+      id, session_id, provider, provider_session_id, resume_state, metadata_json,
+      created_at, updated_at, validated_at
+    ) VALUES (?, ?, 'codex', ?, 'available', ?, 1, 1, 1)`,
+    'codex-mode-binding', sid, '11111111-1111-4111-8111-111111111111', JSON.stringify({ permissionMode: 'default' }))
+    const modeServer = new RuntimeServer(modePort, root, database, undefined, undefined, sessions)
+    const previousCodexHome = process.env.CODEX_HOME
+    process.env.CODEX_HOME = join(root, 'missing-codex-default-config')
+    try {
+      modePort.receive({ type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'codex-mode-renderer' })
+      modePort.receive({ type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION, sessionId: sid,
+        executionContextId: 'replay-context', profile: 'codex', cols: 80, rows: 24 })
+      await waitUntil(() => sessions.has(sid))
+      for (const [index, permissionMode] of ['acceptEdits', 'plan', 'bypassPermissions', 'default'].entries()) {
+        modeServer.providerIdentityRecorded(sid, sessions.get(sid)!.runId!)
+        const before = sessions.get(sid)!.pid
+        const requestId = `codex-mode-${index}`
+        modePort.receive(rpc(requestId, 'session.set-permission-mode', {
+          sessionId: sid, provider: 'codex', permissionMode, respawn: false, now: 2 + index
+        }))
+        await waitUntil(() => modePort.findRpcResponse(requestId) !== undefined, 5000)
+        expect(modePort.findRpcError(requestId)).toBeUndefined()
+        expect(sessions.get(sid)?.pid).not.toBe(before)
+        await waitUntilAsync(async () => (await readFile(argumentFile, 'utf8').catch(() => '')).includes('resume'))
+        const args = (await readFile(argumentFile, 'utf8')).trim().split('\n')
+        expect(args.slice(-2)).toEqual(['resume', '11111111-1111-4111-8111-111111111111'])
+        const expected = permissionMode === 'acceptEdits'
+          ? ['--ask-for-approval', 'on-request', '--sandbox', 'workspace-write']
+          : permissionMode === 'plan'
+            ? ['--ask-for-approval', 'on-request', '--sandbox', 'read-only']
+            : permissionMode === 'bypassPermissions' ? ['--dangerously-bypass-approvals-and-sandbox'] : ['--ask-for-approval', 'on-request', '--sandbox', 'workspace-write']
+        expect(args.slice(0, 2)).toEqual(['-c', 'check_for_update_on_startup=false'])
+        expect(args.slice(8, -2)).toEqual(expected)
+      }
+    } finally {
+      await sessions.shutdownAll()
+      modeServer.close()
+      restoreEnv('MATOU_CODEX_COMMAND', previousCommand)
+      restoreEnv('MATOU_TEST_ARGUMENT_FILE', previousArguments)
+      restoreEnv('CODEX_HOME', previousCodexHome)
+    }
+  })
+
+  it('keeps a failed Codex recovery in error after the unconfirmed process exits', async () => {
+    const executable = join(root, 'codex-failed-recovery.sh')
+    await writeFile(executable, '#!/bin/sh\nsleep 0.05\nexit 1\n')
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CODEX_COMMAND
+    process.env.MATOU_CODEX_COMMAND = executable
+    const sid = 'codex-failed-recovery'
+    registerCanvasSession(database, sid, 'codex')
+    database.run(`INSERT INTO provider_bindings (
+      id, session_id, provider, provider_session_id, resume_state, metadata_json,
+      created_at, updated_at, validated_at
+    ) VALUES (?, ?, 'codex', ?, 'available', '{}', 1, 1, 1)`,
+    'codex-failed-recovery-binding', sid, '22222222-2222-4222-8222-222222222222')
+    const sessions = createTestSessionRegistry()
+    const failurePort = new MockPort()
+    const failureServer = new RuntimeServer(failurePort, root, database, undefined, undefined, sessions)
+    try {
+      failurePort.receive({ type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'codex-failure-renderer' })
+      failurePort.receive({ type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION, sessionId: sid,
+        executionContextId: 'replay-context', profile: 'codex', cols: 80, rows: 24 })
+      await waitUntil(() => database.get<{ restore_state: string }>(
+        'SELECT restore_state FROM provider_bindings WHERE id = ?', 'codex-failed-recovery-binding')?.restore_state === 'failed')
+      await waitUntil(() => !sessions.has(sid))
+      expect(workStatus(sid)).toBe('error')
+    } finally {
+      await sessions.shutdownAll()
+      failureServer.close()
+      restoreEnv('MATOU_CODEX_COMMAND', previousCommand)
+    }
+  })
+
   it('switches live permission modes in place and respawns across the Bypass boundary', async () => {
     const executable = join(root, 'provider-live-permission.sh')
     const argumentFile = join(root, 'provider-live-permission-arguments.txt')
@@ -5811,11 +6166,11 @@ sleep 30
         sessionId: 'provider-live-permission', provider: 'claude-code',
         permissionMode: 'bypassPermissions', respawn: true, now: 3
       }))
-      await waitUntil(() => sessions.get('provider-live-permission')?.pid !== firstPid)
+      await waitUntil(() => Boolean(sessions.get('provider-live-permission')) && sessions.get('provider-live-permission')!.pid !== firstPid)
       await waitUntil(() => livePort.findRpcResponse('permission-bypass-live') !== undefined)
       await waitUntilAsync(async () => (await readFile(argumentFile, 'utf8').catch(() => '')).includes('--dangerously-skip-permissions'))
 
-      expect((await readFile(argumentFile, 'utf8')).trim().split('\n')).toEqual([
+      expect(capturedClaudeArguments(await readFile(argumentFile, 'utf8'))).toEqual([
         '--model', 'claude-sonnet-4-6', '--resume', 'provider-live-42',
         '--dangerously-skip-permissions'
       ])
@@ -6046,7 +6401,7 @@ sleep 30
     }
   })
 
-  it('restores a successful Session model change instead of a later global default', async () => {
+  it('restores a Session after a process restart with the latest global provider instead of its previous native model', async () => {
     server.close()
     const executable = join(root, 'session-model-restart.sh')
     const launchLog = join(root, 'session-model-restart-launches.txt')
@@ -6140,12 +6495,12 @@ sleep 30
         .trim().split('\n').length === 2)
 
       expect((await readFile(launchLog, 'utf8')).trim().split('\n')[1]).toBe(
-        '--model claude-sonnet-4-6 --resume provider-model-restart|' +
-        'https://restart-a.example|KEY_A'
+        '--model claude-haiku-c --resume provider-model-restart|' +
+        'https://restart-c.example|KEY_C'
       )
       expect(restoredPort.last('terminal.hud')).toMatchObject({
         hud: {
-          modelStrategy: 'claude-sonnet-4-6', model: 'claude-sonnet-4-6',
+          modelStrategy: 'opusplan', model: 'claude-haiku-c',
           permissionMode: 'default'
         }
       })
@@ -6314,7 +6669,7 @@ sleep 30
         permissionMode: 'bypassPermissions', respawn: true, now: 2
       }))
       await waitUntil(() => ownerPort.findRpcResponse('cross-window-owner-bypass') !== undefined)
-      await waitUntil(() => sessions.get('provider-cross-window')?.pid !== beforeOwnerRespawn)
+      await waitUntil(() => Boolean(sessions.get('provider-cross-window')) && sessions.get('provider-cross-window')!.pid !== beforeOwnerRespawn)
       const firstPendingPid = sessions.get('provider-cross-window')!.pid
 
       secondaryPort.receive(rpc('cross-window-secondary-plan', 'session.set-permission-mode', {
@@ -6339,7 +6694,7 @@ sleep 30
         permissionMode: 'bypassPermissions', respawn: true, now: 5
       }))
       await waitUntil(() => ownerPort.findRpcResponse('cross-window-owner-bypass-again') !== undefined)
-      await waitUntil(() => sessions.get('provider-cross-window')?.pid !== afterSecondaryPermissionPid)
+      await waitUntil(() => Boolean(sessions.get('provider-cross-window')) && sessions.get('provider-cross-window')!.pid !== afterSecondaryPermissionPid)
       const secondPendingPid = sessions.get('provider-cross-window')!.pid
       const secondPendingRunId = sessions.get('provider-cross-window')!.runId!
 
@@ -6366,7 +6721,10 @@ sleep 30
       })
       await waitUntil(() => secondaryPort.last('terminal.spawned')?.pid === secondPendingPid)
       secondaryServer.providerIdentityRecorded('provider-cross-window', secondPendingRunId)
+      await waitUntil(() => Boolean(sessions.get('provider-cross-window')) && sessions.get('provider-cross-window')!.pid !== secondPendingPid)
+      secondaryServer.providerIdentityRecorded('provider-cross-window', sessions.get('provider-cross-window')!.runId!)
       expect(sessions.providerIdentityPending('provider-cross-window')).toBe(false)
+      await sessions.runExclusive('provider-cross-window', async () => undefined)
 
       const takeoverSession = sessions.get('provider-cross-window')!
       const beforeTakeoverOutput = secondaryPort.sent.length
@@ -6432,9 +6790,9 @@ sleep 30
       }))
 
       await waitUntil(() => freshPort.findRpcResponse('fresh-permission-bypass') !== undefined)
-      await waitUntil(() => sessions.get('provider-fresh-permission')?.pid !== firstPid)
+      await waitUntil(() => Boolean(sessions.get('provider-fresh-permission')) && sessions.get('provider-fresh-permission')!.pid !== firstPid)
       await waitUntilAsync(async () => (await readFile(argumentFile, 'utf8').catch(() => '')).length > 0)
-      expect((await readFile(argumentFile, 'utf8')).trim().split('\n')).toEqual([
+      expect(capturedClaudeArguments(await readFile(argumentFile, 'utf8'))).toEqual([
         '--dangerously-skip-permissions'
       ])
       expect(freshPort.findRpcError('fresh-permission-bypass')).toBeUndefined()
@@ -6598,7 +6956,7 @@ sleep 30
       await waitUntil(() => sessions.get('shell-promoted-provider')?.profile === 'claude-code', 6_000)
       expect(Date.now() - submittedAt).toBeLessThan(750)
       await waitUntilAsync(async () => (await readFile(argumentFile, 'utf8').catch(() => '')).length > 0, 6_000)
-      expect((await readFile(argumentFile, 'utf8')).trim().split('\n')).toEqual([
+      expect(capturedClaudeArguments(await readFile(argumentFile, 'utf8'))).toEqual([
         '--dangerously-skip-permissions'
       ])
       await waitUntilAsync(async () => (await readFile(sizeFile, 'utf8').catch(() => '')).trim() === '43 132', 6_000)
@@ -6637,25 +6995,35 @@ sleep 30
     const sessions = createTestSessionRegistry()
     const port = new MockPort()
     const managed = new RuntimeServer(port, root, database, undefined, undefined, sessions)
+    const previousCodexHome = process.env.CODEX_HOME
+    process.env.CODEX_HOME = join(root, 'missing-codex-default-config')
     try {
       registerSession(database, 'codex-context-shell', 'shell')
       port.receive({ type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'codex-context' })
       port.receive({ type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
         sessionId: 'codex-context-shell', executionContextId: 'replay-context', profile: 'shell', cols: 80, rows: 24 })
       await waitUntil(() => sessions.get('codex-context-shell')?.profile === 'shell')
+      port.receive({ type: 'events.subscribe', protocolVersion: PROTOCOL_VERSION,
+        consumerId: 'already-open-codex-dag', afterSequence: 0, batchSize: 100 })
+      await settle()
       port.receive({ type: 'terminal.input', protocolVersion: PROTOCOL_VERSION,
         sessionId: 'codex-context-shell', data: 'codex\r' })
       await waitUntil(() => sessions.get('codex-context-shell')?.profile === 'codex')
       await waitUntilAsync(async () => (await readFile(argumentsPath, 'utf8').catch(() => '')).length > 0)
       expect((await readFile(argumentsPath, 'utf8')).trim().split('\n')).toEqual([
-        '-c', 'model_context_window=512000', '-c', 'model_auto_compact_token_limit=460800',
-        '-c', 'model_auto_compact_token_limit_scope="total"'
+        '-c', 'check_for_update_on_startup=false', '-c', 'model_context_window=512000', '-c', 'model_auto_compact_token_limit=460800',
+        '-c', 'model_auto_compact_token_limit_scope="total"',
+        '--ask-for-approval', 'on-request', '--sandbox', 'workspace-write'
       ])
       expect(database.get<{ kind: string }>('SELECT kind FROM sessions WHERE id = ?', 'codex-context-shell')?.kind).toBe('codex')
+      expect(port.sent.filter((message) => message.type === 'events.batch').flatMap((message) => message.events))
+        .toEqual(expect.arrayContaining([expect.objectContaining({ eventType: 'session.updated',
+          payload: expect.objectContaining({ session: expect.objectContaining({ kind: 'codex' }) }) })]))
     } finally {
       await sessions.shutdownAll()
       managed.close()
       restoreEnv('MATOU_CODEX_COMMAND', previous)
+      restoreEnv('CODEX_HOME', previousCodexHome)
     }
   })
 
@@ -7225,6 +7593,7 @@ sleep 30
       interactivePort, root, database, undefined, undefined, sessions, undefined, undefined,
       { providerResumeTimeoutMs: 2_000 }
     )
+    let recovery: Promise<void> | undefined
     try {
       registerSession(database, 'provider-interactive-session', 'claude-code')
       database.run(
@@ -7239,11 +7608,12 @@ sleep 30
         clientId: 'provider-interactive-renderer'
       })
       let recoverySettled = false
-      const recovery = interactiveServer.ensureSessionRunning({
+      recovery = interactiveServer.ensureSessionRunning({
         sessionId: 'provider-interactive-session', sceneId: 'scene-provider-interactive',
         executionContextId: 'replay-context', profile: 'claude-code',
         priority: 'active-session', enqueueSequence: 1
       }).then(() => { recoverySettled = true })
+      void recovery.catch(() => undefined)
       await waitUntil(() => sessions.has('provider-interactive-session'))
       await waitUntil(() => recoverySettled, 500)
       await recovery
@@ -7273,6 +7643,7 @@ sleep 30
       })
       await settle()
       interactiveServer.close()
+      await recovery?.catch(() => undefined)
       restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
     }
   })
@@ -7846,6 +8217,105 @@ describe('RuntimeServer egress monitoring', () => {
     }
   }
 
+  it.each([true,false])('Task3 registers actual families with a third-party default and blocks custom compaction (role assigned: %s)', async roleAssigned => {
+    vi.spyOn(nativeRoleCatalog,'nativeClaudeModels').mockResolvedValue([{id:'default',resolvedModel:'claude-sonnet-fixture'},{id:'sonnet',resolvedModel:'claude-sonnet-fixture'},{id:'opus',resolvedModel:'claude-opus-fixture'}])
+    vi.spyOn(officialRoleAccount,'officialHeaders').mockResolvedValue({authorization:'Bearer fixture'})
+    vi.spyOn(officialRoleAccount,'captureOfficialClaudeAccount').mockResolvedValue({kind:'oauth',baseUrl:'https://api.anthropic.com',identity:'fixture-account',readHeaders:async()=>({identity:'fixture-account',headers:{authorization:'Bearer fixture'}})})
+    const requests: string[]=[]
+    const upstream=createServer(async(req,res)=>{const chunks=[];for await(const c of req)chunks.push(c);requests.push(JSON.parse(Buffer.concat(chunks).toString()).model);res.end('{"input_tokens":1}')})
+    await new Promise<void>(r=>upstream.listen(0,'127.0.0.1',r))
+    const endpoint=`http://127.0.0.1:${(upstream.address() as {port:number}).port}`
+    const providers=new ProviderConfigStore(root)
+    const api=await providers.upsert({cli:'claude-code',name:'Third party',endpoint,apiKey:'third-key',model:'sonnet',modelMapping:{opus:'same',sonnet:'same',haiku:'same'}})
+    await providers.activate('claude-code',api.id)
+    const official=(await providers.snapshot()).providers['claude-code'].find(p=>p.builtIn)!
+    const sub=await providers.adoptSubscription({name:'ChatGPT fixture',modelMapping:{opus:'gpt',sonnet:'gpt',haiku:'gpt'},subscription:{provider:'codex',credentialRef:{name:'fixture.json'},account:{status:'ready'},modelMetadata:[{id:'gpt'}]}})
+    let leases=0
+    const accounts={onChange:()=>()=>{},prepareModelTarget:async()=>{leases++;return{accountIdentity:'fixture-account',assertActive:()=>{},lease:{release:()=>{leases--}},baseUrl:endpoint,headers:{authorization:'Bearer sub-key'},model:'matou-chatgpt/gpt',metadata:{id:'gpt'}}}} as unknown as SubscriptionAccounts
+    const models=new AgentModelSettings(database,providers)
+    if(roleAssigned) await models.patchAssignments({assignments:{opus:{providerId:sub.id,model:'gpt'}}})
+    await models.set({contextWindows:{},compaction:{mode:'custom',providerId:official.id,model:'opus',effort:'follow'}})
+    const sample=okSample();sample.hosts['chatgpt-subscription']={api:{host:EGRESS_HOSTS['chatgpt-subscription'].api,ip:'203.0.113.51',country:'US'},login:{host:EGRESS_HOSTS['chatgpt-subscription'].login,ip:'203.0.113.51',country:'US'}}
+    const h=createHarness(sample,{providerConfigs:providers,subscriptionAccounts:accounts})
+    await h.monitor.recheck()
+    const previous=process.env.MATOU_CLAUDE_COMMAND,previousTz=process.env.TZ,capture=join(root,'task3-egress.json'),executable=join(root,'task3-egress.cjs')
+    await writeFile(executable,`#!/usr/bin/env node
+require('fs').writeFileSync(${JSON.stringify(capture)},JSON.stringify({base:process.env.ANTHROPIC_BASE_URL,tz:process.env.TZ}));console.log('READY');setInterval(()=>{},1000)
+`);await chmod(executable,0o755);process.env.MATOU_CLAUDE_COMMAND=executable;process.env.TZ='Asia/Shanghai'
+    registerSession(database,'task3-egress','claude-code')
+    try {
+      h.testPort.receive({type:'terminal.spawn',protocolVersion:PROTOCOL_VERSION,sessionId:'task3-egress',executionContextId:'replay-context',profile:'claude-code',cols:80,rows:24})
+      await waitUntil(()=>h.sessions.has('task3-egress'),5000)
+      await waitUntilAsync(async()=>{try{return Boolean(JSON.parse(await readFile(capture,'utf8')).base)}catch{return false}},5000)
+      const launched=JSON.parse(await readFile(capture,'utf8'))
+      expect(launched.tz).not.toBe('Asia/Shanghai')
+      expect(h.monitor.status().sessionFamilySets?.['task3-egress']).toEqual(roleAssigned ? ['chatgpt-subscription','anthropic'] : ['anthropic'])
+      const send=(model:string,path='/v1/messages',compact=false)=>fetch(launched.base+path,{method:'POST',headers:compact?{'x-claude-code-compaction':'manual'}:{},body:JSON.stringify({model,messages:[]})})
+      const mainModel=roleAssigned?'matou-role/opus':'matou-api/opus'
+      expect((await send(mainModel)).status).toBe(200);expect(requests).toEqual([roleAssigned?'matou-chatgpt/gpt':'same'])
+      const bad=structuredClone(sample)
+      for(const family of ['anthropic','chatgpt-subscription'] as const){bad.hosts[family]!.api.country='CN';bad.hosts[family]!.login.country='CN'}
+      h.setSample(bad);await h.monitor.recheck()
+      expect(h.sessions.get('task3-egress')!.egressFrozen).toBe(true)
+      const protectedRequests=roleAssigned ? [['/v1/messages',false],['/v1/messages/count_tokens',false],['/v1/messages',true]] as const : [['/v1/messages',true]] as const
+      for(const [path,compact] of protectedRequests){
+        const denied=await send(mainModel,path,compact);expect(denied.status).toBe(502);expect(await denied.text()).toMatch(/出口异常.*网络检查/)
+      }
+      expect(requests).toHaveLength(1)
+      await h.monitor.override('chatgpt-subscription');expect(h.sessions.get('task3-egress')!.egressFrozen).toBe(true)
+      await models.patchAssignments({assignments:{opus:{providerId:api.id,model:'same'}}})
+      expect(h.monitor.status().sessionFamilySets?.['task3-egress']).toEqual(roleAssigned ? ['chatgpt-subscription','anthropic'] : ['anthropic'])
+      await h.monitor.setProtection(false);expect(h.sessions.get('task3-egress')!.egressFrozen).toBe(false)
+      expect((await send(mainModel,'/v1/messages/count_tokens')).status).toBe(200);expect(requests).toHaveLength(2)
+      await h.sessions.shutdownAll();expect(leases).toBe(0)
+      expect(h.monitor.status().sessionFamilySets?.['task3-egress']).toBeUndefined()
+    } finally {restoreEnv('MATOU_CLAUDE_COMMAND',previous);restoreEnv('TZ',previousTz);h.cleanup();await h.sessions.shutdownAll();upstream.closeAllConnections();await new Promise<void>(r=>upstream.close(()=>r()));vi.restoreAllMocks()}
+  })
+
+  it('registers native antigravity with Google protection, exit TZ and actual PTY freeze', async () => {
+    const sample = okSample()
+    sample.hosts.google = {
+      api: { host: EGRESS_HOSTS.google.api, ip: '203.0.113.55', country: 'TW' },
+      login: { host: EGRESS_HOSTS.google.login, error: 'invalid' }
+    }
+    const harness = createHarness(sample)
+    await harness.monitor.recheck()
+    const tzFile = join(root, 'antigravity-tz.txt')
+    const executable = join(root, 'antigravity-egress-stub.sh')
+    await writeFile(executable, `#!/bin/sh\nprintf "%s" "$TZ" > '${tzFile}'\nsleep 30\n`)
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_ANTIGRAVITY_COMMAND
+    const previousTz = process.env.TZ
+    process.env.MATOU_ANTIGRAVITY_COMMAND = executable
+    process.env.TZ = 'Asia/Shanghai'
+    try {
+      registerCanvasSession(database, 'egress-native-ag', 'antigravity')
+      harness.testPort.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'egress-native-ag', executionContextId: 'replay-context',
+        profile: 'antigravity', cols: 80, rows: 24
+      })
+      await waitUntil(() => harness.testPort.last('terminal.spawned')?.sessionId === 'egress-native-ag')
+      await waitUntilAsync(async () => (await readFile(tzFile, 'utf8').catch(() => '')) === 'Asia/Taipei')
+      expect(harness.monitor.status().sessionFamilies['egress-native-ag']).toBe('google')
+      const cnSample = okSample()
+      cnSample.hosts.google = {
+        api: { host: EGRESS_HOSTS.google.api, ip: '223.5.5.5', country: 'CN' },
+        login: { host: EGRESS_HOSTS.google.login, error: 'invalid' }
+      }
+      harness.setSample(cnSample)
+      await harness.monitor.recheck()
+      expect(harness.sessions.get('egress-native-ag')?.egressFrozen).toBe(true)
+      harness.testPort.receive({ type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION, sessionId: 'egress-native-ag' })
+      await waitUntil(() => !harness.sessions.has('egress-native-ag'))
+      expect(harness.monitor.status().sessionFamilies['egress-native-ag']).toBeUndefined()
+    } finally {
+      harness.cleanup()
+      restoreEnv('MATOU_ANTIGRAVITY_COMMAND', previousCommand)
+      restoreEnv('TZ', previousTz)
+    }
+  })
+
   it('registers official claude-code sessions with exitCountry TZ and unregisters on exit', async () => {
     const harness = createHarness(okSample('TW', '203.0.113.55'))
     await harness.monitor.recheck()
@@ -8080,7 +8550,7 @@ describe('RuntimeServer egress monitoring', () => {
 
       // Invalid params -> INVALID_REQUEST
       sendRpc(harness.testPort, 'bad-rule', 'egress.set-rule', { mode: 'asn' })
-      sendRpc(harness.testPort, 'bad-family', 'egress.accept-current', { family: 'google' })
+      sendRpc(harness.testPort, 'bad-family', 'egress.accept-current', { family: 'unsupported' })
       sendRpc(harness.testPort, 'bad-override', 'egress.override', { family: 123 })
       sendRpc(harness.testPort, 'bad-prot', 'egress.set-protection', { enabled: 'yes' })
       await waitUntil(() => harness.testPort.findRpcError('bad-prot') !== undefined)
@@ -8213,7 +8683,7 @@ describe('RuntimeServer egress monitoring', () => {
         profile: 'claude-code', cols: 80, rows: 24
       })
       await waitUntil(() => harness.testPort.last('terminal.spawned')?.sessionId === 'egress-chatgpt-sub')
-      await waitUntilAsync(async () => (await readFile(captureFile, 'utf8').catch(() => '')) === 'Asia/Taipei|http://127.0.0.1:12345')
+      await waitUntilAsync(async () => /^Asia\/Taipei\|http:\/\/127\.0\.0\.1:\d+\//.test(await readFile(captureFile, 'utf8').catch(() => '')))
 
       expect(registerSpy).toHaveBeenCalledWith('egress-chatgpt-sub', 'chatgpt-subscription')
       expect(registerSpy).not.toHaveBeenCalledWith('egress-chatgpt-sub', 'anthropic')
@@ -8322,7 +8792,7 @@ describe('RuntimeServer egress monitoring', () => {
       })
       await waitUntil(() => harness.testPort.last('terminal.spawned')?.sessionId === 'egress-ag-sub' || harness.testPort.last('protocol.error') !== undefined, 10_000)
       expect(harness.testPort.last('protocol.error')).toBeUndefined()
-      await waitUntilAsync(async () => (await readFile(captureFile, 'utf8').catch(() => '')) === 'Asia/Singapore|http://127.0.0.1:12346')
+      await waitUntilAsync(async () => /^Asia\/Singapore\|http:\/\/127\.0\.0\.1:\d+\//.test(await readFile(captureFile, 'utf8').catch(() => '')))
 
       expect(registerSpy).not.toHaveBeenCalled()
       expect(harness.monitor.status().sessionFamilies['egress-ag-sub']).toBeUndefined()
@@ -8335,6 +8805,19 @@ describe('RuntimeServer egress monitoring', () => {
     }
   })
 })
+
+function capturedClaudeArguments(text: string): string[] {
+  const args = text.trim().split('\n')
+  if (args[0] !== '--settings') return args
+  for (let end = 2; end <= args.length; end++) {
+    let settings: { env?: Record<string, string> }
+    try { settings = JSON.parse(args.slice(1, end).join('\n')) } catch { continue }
+    expect(settings.env?.ANTHROPIC_BASE_URL).toMatch(/^http:\/\/127\.0\.0\.1:\d+\//)
+    expect(settings.env?.CLAUDE_CODE_GATEWAY_HINT_HEADERS).toBe('1')
+    return args.slice(end)
+  }
+  throw new Error('Invalid captured Claude gateway settings')
+}
 
 class PollingSpyWorkspacePathService extends WorkspacePathService {
   startCount = 0
@@ -8439,7 +8922,7 @@ function seedReplayAuthority(database: RuntimeDatabase, root: string): void {
 function registerSession(
   database: RuntimeDatabase,
   sessionId: string,
-  kind: 'shell' | 'claude-code' | 'codex' = 'shell'
+  kind: 'shell' | 'claude-code' | 'codex' | 'antigravity' | 'dsh' = 'shell'
 ): void {
   database.run(
     `INSERT INTO sessions (
@@ -8453,7 +8936,7 @@ function registerSession(
 function registerCanvasSession(
   database: RuntimeDatabase,
   sessionId: string,
-  kind: 'shell' | 'claude-code' | 'codex' = 'shell'
+  kind: 'shell' | 'claude-code' | 'codex' | 'antigravity' | 'dsh' = 'shell'
 ): void {
   registerSession(database, sessionId, kind)
   database.run(
@@ -8609,7 +9092,7 @@ it('continues structural disposal when status directory deletion fails', async (
   } finally { await chmod(directory, 0o700) }
 })
 
-it('treats Codex session.set-permission-mode as ephemeral like main even when a codex binding exists', async () => {
+it('persists Codex permission changes against its resumable binding', async () => {
   const executable = join(root, 'codex-ephemeral-perm.sh')
   await writeFile(executable, '#!/bin/sh\nsleep 30\n')
   await chmod(executable, 0o755)
@@ -8647,7 +9130,7 @@ it('treats Codex session.set-permission-mode as ephemeral like main even when a 
           requestHash: 'hash-codex-perm-1'
         },
         input: {
-          sessionId: 'codex-ephemeral-session', provider: 'claude-code',
+          sessionId: 'codex-ephemeral-session', provider: 'codex',
           permissionMode: 'bypassPermissions', now: 2
         }
       }
@@ -8655,24 +9138,23 @@ it('treats Codex session.set-permission-mode as ephemeral like main even when a 
     await waitUntil(() => testPort.findRpcResponse('codex-perm-1') !== undefined)
     expect(testPort.findRpcResponse('codex-perm-1')).toMatchObject({
       requestId: 'codex-perm-1',
-      result: {
-        sessionId: 'codex-ephemeral-session',
-        permissionMode: 'bypassPermissions',
-        persisted: false
-      }
+      result: { result: {
+        sessionId: 'codex-ephemeral-session', provider: 'codex',
+        metadata: { permissionMode: 'bypassPermissions' }
+      } }
     })
     expect(JSON.parse(database.get<{ metadata_json: string }>(
       `SELECT metadata_json FROM provider_bindings WHERE id = 'binding-codex-ephemeral'`
-    )?.metadata_json ?? '{}')).toMatchObject({ permissionMode: 'default' })
+    )?.metadata_json ?? '{}')).toMatchObject({ permissionMode: 'bypassPermissions' })
   } finally {
     testServer.close()
     restoreEnv('MATOU_CODEX_COMMAND', previousCommand)
   }
 })
 
-it('does not wait for provider recovery or block on failed bindings during Codex ensureSessionRunning', async () => {
+it('keeps Codex restore starting after a live full screen until the real identity is confirmed', async () => {
   const executable = join(root, 'codex-recovery-parity.sh')
-  await writeFile(executable, '#!/bin/sh\nsleep 30\n')
+  await writeFile(executable, '#!/bin/sh\nprintf \'%2300s\' x\nsleep 30\n')
   await chmod(executable, 0o755)
   const previousCommand = process.env.MATOU_CODEX_COMMAND
   process.env.MATOU_CODEX_COMMAND = executable
@@ -8680,31 +9162,404 @@ it('does not wait for provider recovery or block on failed bindings during Codex
   const testPort = new MockPort()
   const testServer = new RuntimeServer(testPort, root, database, undefined, undefined, sessions)
   try {
-    registerSession(database, 'codex-recover-session', 'codex')
+    registerCanvasSession(database, 'codex-recover-session', 'codex')
     database.run(
       `INSERT INTO provider_bindings (
          id, session_id, provider, provider_session_id, resume_state, restore_state, metadata_json,
          created_at, updated_at, validated_at
-       ) VALUES (?, ?, 'codex', ?, 'available', 'none', '{}', 1, 1, 1)`,
+       ) VALUES (?, ?, 'codex', ?, 'available', 'restoring', '{}', 1, 1, 1)`,
       'binding-codex-recover', 'codex-recover-session', 'codex-thread-recover'
     )
 
-    await expect(testServer.ensureSessionRunning({
+    let recovered = false
+    const recovery = testServer.ensureSessionRunning({
       sessionId: 'codex-recover-session',
       executionContextId: 'replay-context',
       profile: 'codex',
       sceneId: 'scene-1',
       priority: 'active-session',
       enqueueSequence: 1
-    })).resolves.toBeUndefined()
-
-    expect(sessions.has('codex-recover-session')).toBe(true)
-    testServer.providerIdentityRecorded('codex-recover-session', 'run-1')
+    }).then(() => { recovered = true })
+    await waitUntil(() => sessions.has('codex-recover-session'))
+    await new Promise(resolve => setTimeout(resolve, 80))
+    await recovery
+    expect(recovered).toBe(true)
+    expect(database.get<{ restore_state: string }>(
+      `SELECT restore_state FROM provider_bindings WHERE id = 'binding-codex-recover'`
+    )?.restore_state).toBe('restoring')
+    const runId = sessions.get('codex-recover-session')!.runId!
+    expect(sessions.providerIdentityConfirmed(runId)).toBe(false)
+    testServer.providerIdentityRecorded('codex-recover-session', runId)
+    await recovery
+    expect(recovered).toBe(true)
     expect(database.get<{ restore_state: string }>(
       `SELECT restore_state FROM provider_bindings WHERE id = 'binding-codex-recover'`
     )?.restore_state).toBe('none')
   } finally {
     testServer.close()
     restoreEnv('MATOU_CODEX_COMMAND', previousCommand)
+  }
+})
+
+it.each(['parent', 'missing', 'unique', 'ambiguous', 'mismatch', 'parent-after-discovery', 'recovery-mismatch', 'slow-discovery'] as const)('settles a managed Codex Fork with %s identity without touching its parent', async returned => {
+  const sourceId = '01a1ddd6-4064-70e1-a006-000000000001'
+  const source = 'codex-fenced-parent-stage4'; const child = 'codex-fenced-child-stage4'
+  registerCanvasSession(database, source, 'codex'); registerCanvasSession(database, child, 'codex')
+  const repository = new SessionRepository(database, new DomainTransactionManager(database))
+  repository.recordResumableProviderIdentity({ commandId: 'bind-codex-parent-stage4', commandType: 'test', requestHash: 'bind-parent' }, {
+    id: 'codex-parent-stage4', sessionId: source, provider: 'codex', providerSessionId: sourceId, metadata: { canFork: true }, now: 1
+  })
+  const beforeParent = repository.getResumeBinding(source, 'codex')
+  const intents = new SessionForkIntentRepository(database); const now = Date.now()
+  intents.accept({ operationId: 'codex-fenced-stage4', submissionKey: 'codex-fenced-stage4', sessionId: child,
+    sourceSessionId: source, sourceProvider: 'codex', sourceProviderSessionId: sourceId, permissionMode: 'default', displayName: 'Child',
+    worktreeMode: 'current', totalSteps: 2, now })
+  const lease = intents.acquireLease({ operationId: 'codex-fenced-stage4', owner: 'test', now, ttlMs: 60_000 })
+  if (lease.kind !== 'acquired') throw new Error('Missing test lease')
+  intents.advanceStage({ operationId: 'codex-fenced-stage4', lease: lease.lease, stage: 'restoring-provider', now })
+  const executable = join(root, 'codex-fork-stage4.sh'); await writeFile(executable, '#!/bin/sh\nexec sleep 30\n'); await chmod(executable, 0o755)
+  const previous = process.env.MATOU_CODEX_COMMAND; process.env.MATOU_CODEX_COMMAND = executable
+  const registry = createTestSessionRegistry(); const testPort = new MockPort()
+  let active: RuntimeServer
+  const hookServer = new ProviderHookServer(root, repository, { codexRoot: join(root, 'empty-codex'),
+    currentRunId: sessionId => registry.get(sessionId)?.runId,
+    onIdentityRecorded: event => active.providerIdentityRecorded(event.sessionId, event.runId),
+    onIdentityMismatch: event => active.providerIdentityMismatch(event) })
+  await hookServer.start()
+  const originalRegister = hookServer.registerCodexSession.bind(hookServer)
+  let hookUrl = ''
+  vi.spyOn(hookServer, 'registerCodexSession').mockImplementation(async input => {
+    const registration = await originalRegister(input); hookUrl = registration.hookUrl; return registration
+  })
+  let releaseSlowDiscovery: (() => void) | undefined
+  const slowDiscovery = returned === 'slow-discovery'
+    ? vi.spyOn(CodexSessionCatalog.prototype, 'forkCandidates').mockImplementation(() => new Promise(resolve => {
+        releaseSlowDiscovery = () => resolve([{ providerSessionId: '01a1ddd6-4064-70e1-a006-000000000002', path: 'unused' }])
+      })) : undefined
+  active = new RuntimeServer(testPort, root, database, undefined, undefined, registry,
+    hookServer, undefined, { forkProviderIdentityTimeoutMs: ['missing', 'ambiguous', 'slow-discovery'].includes(returned) ? 500 : 5000 })
+  try {
+    testPort.receive({ type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'codex-stage4-client' })
+    await active.startOrResumeSession({ sessionId: child, executionContextId: 'replay-context', profile: 'codex', cols: 80, rows: 24 }, {
+      operationId: 'codex-fenced-stage4', runId: 'codex-fenced-stage4-run', lease: lease.lease
+    })
+    const childId = '01a1ddd6-4064-70e1-a006-000000000002'
+    const otherId = '01a1ddd6-4064-70e1-a006-000000000003'
+    const discovered = ['unique', 'mismatch', 'parent-after-discovery', 'recovery-mismatch'].includes(returned)
+    if (discovered || returned === 'ambiguous') {
+      // Publish all candidates at once so polling never observes half a fixture.
+      const staged = join(root, 'staged-sessions'); await mkdir(staged)
+      for (const id of returned === 'ambiguous' ? [childId, otherId] : [childId]) {
+        await writeFile(join(staged, `rollout-${id}.jsonl`), JSON.stringify({ type: 'session_meta', payload: {
+          id, cwd: root, timestamp: new Date(Date.now() + 1).toISOString(), forked_from_id: sourceId
+        } }) + '\n')
+      }
+      await mkdir(join(root, 'empty-codex'), { recursive: true })
+      await rename(staged, join(root, 'empty-codex', 'sessions'))
+    }
+    if (discovered) {
+      await waitUntil(() => intents.state(child) === 'succeeded', 2000)
+      expect(repository.getResumeBinding(child, 'codex')).toMatchObject({ providerSessionId: childId, metadata: { codexForkAwaitingHook: true } })
+      // Real hook confirmation/rejection remains valid after the launch lease expires.
+      database.run(`UPDATE session_fork_intents SET lease_expires_at = 0 WHERE session_id = ?`, child)
+    }
+    if (returned === 'recovery-mismatch') {
+      hookUrl = (await originalRegister({ runId: 'codex-fenced-stage4-run', sessionId: child, expectedProviderSessionId: childId })).hookUrl
+    }
+    await fetch(hookUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+      hook_event_name: 'SessionStart',
+      ...(returned === 'parent' || returned === 'parent-after-discovery' ? { session_id: sourceId }
+        : ['mismatch', 'recovery-mismatch'].includes(returned) ? { session_id: otherId } : returned === 'unique' ? { session_id: childId } : {})
+    }) })
+    if (returned === 'unique') {
+      expect(intents.state(child)).toBe('succeeded')
+      expect(repository.getResumeBinding(child, 'codex')).toMatchObject({ providerSessionId: childId, metadata: { codexForkAwaitingHook: false } })
+      expect(registry.has(child)).toBe(true)
+    } else {
+      await waitUntil(() => intents.state(child) === 'failed', 2000)
+      if (releaseSlowDiscovery) { releaseSlowDiscovery(); await new Promise(resolve => setTimeout(resolve, 20)) }
+      if (discovered) expect(repository.getProviderSettingsBinding(child, 'codex')).toMatchObject({ providerSessionId: childId, resumeState: 'failed' })
+      else expect(repository.getResumeBinding(child, 'codex')).toBeUndefined()
+      expect(registry.has(child)).toBe(false)
+    }
+    expect(repository.getResumeBinding(source, 'codex')).toEqual(beforeParent)
+  } finally {
+    slowDiscovery?.mockRestore(); await registry.shutdownAll(); active.close(); await hookServer.stop(); restoreEnv('MATOU_CODEX_COMMAND', previous)
+  }
+})
+
+it.each(['confirmed', 'mismatch', 'timeout-retry', 'timeout-fresh', 'exit-retry'] as const)(
+  'requires the real DSH ready identity for restart recovery: %s', async outcome => {
+    const id = 'dsh-stage3-recovery'
+    registerCanvasSession(database, id, 'dsh')
+    database.run(
+      `INSERT INTO provider_bindings (
+         id, session_id, provider, provider_session_id, resume_state, restore_state, metadata_json,
+         created_at, updated_at, validated_at
+       ) VALUES ('dsh-stage3-binding', ?, 'dsh', 'native-original', 'available', 'restoring', '{}', 1, 1, 1)`, id
+    )
+    const executable = join(root, 'dsh-stage3-stub.cjs'), argsFile = join(root, 'dsh-stage3-argv.json')
+    await writeFile(executable, `#!/usr/bin/env node
+const fs = require('node:fs');
+if (process.argv.includes('--dump-config')) {
+  console.log('- id: dsh-tui\\n  inject:\\n    - agents\\n  config:\\n    model: native-model');
+} else {
+  fs.writeFileSync(${JSON.stringify(argsFile)}, JSON.stringify(process.argv.slice(2)));
+  console.log('x'.repeat(2400));
+  if (${outcome === 'exit-retry'} && !fs.existsSync(${JSON.stringify(argsFile + '.retry')})) setTimeout(() => process.exit(1), 400);
+  else setInterval(() => {}, 1000);
+}
+`)
+    await chmod(executable, 0o755)
+    const previous = process.env.MATOU_DSH_COMMAND
+    process.env.MATOU_DSH_COMMAND = executable
+    const registry = createTestSessionRegistry(), repository = new SessionRepository(database, new DomainTransactionManager(database))
+    let active: RuntimeServer | undefined
+    const hooks = new ProviderHookServer(root, repository, {
+      currentRunId: sessionId => registry.get(sessionId)?.runId,
+      onIdentityRecorded: event => active?.providerIdentityRecorded(event.sessionId, event.runId),
+      onIdentityMismatch: event => active?.providerIdentityMismatch(event)
+    })
+    await hooks.start()
+    active = new RuntimeServer(new MockPort(), root, database, undefined, undefined, registry, hooks, undefined,
+      { providerResumeTimeoutMs: outcome === 'exit-retry' ? 2000 : 700, controlAssetRoot: join(root, 'control-assets') })
+    const binding = () => database.get<{ restore_state: string; restore_error: string | null; provider_session_id: string }>(
+      `SELECT restore_state, restore_error, provider_session_id FROM provider_bindings WHERE id = 'dsh-stage3-binding'`
+    )!
+    const job = { sessionId: id, executionContextId: 'replay-context', profile: 'dsh' as const,
+      sceneId: `scene-${id}`, priority: 'active-session' as const, enqueueSequence: 1 }
+    const launch = () => active!.ensureSessionRunning(job).then(() => 'queue-ready', error => String(error))
+    const observer = async () => {
+      // Bound fixture process startup separately from the resume-identity deadline.
+      // Full-suite PTY load can exceed the generic two-second helper limit.
+      await waitUntil(() => registry.has(id), 5000)
+      let args: string[] = [], patch = '', runId = ''
+      await waitUntilAsync(async () => {
+        try {
+          args = JSON.parse(await readFile(argsFile, 'utf8')) as string[]
+          patch = await readFile(args[args.indexOf('--patch') + 1]!, 'utf8')
+          runId = JSON.parse(/^\s+runId: (.+)$/m.exec(patch)![1]!) as string
+          return runId === registry.get(id)?.runId
+        } catch { return false }
+      })
+      const url = JSON.parse(/^\s+hookUrl: (.+)$/m.exec(patch)![1]!) as string
+      let sequence = 0
+      return { args, runId, ready: (nativeId: string, persisted = true) => fetch(url, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+          dsh_observation: 1, run_id: runId, sequence: ++sequence, generation: 1,
+          session_id: nativeId, foreground: true, event_type: 'ready', event_data: {}, ready: true,
+          persisted, cwd: root, agent_status: 'idle'
+        })
+      }) }
+    }
+    try {
+      let settled = false
+      const coordinator = new RuntimeRecoveryCoordinator({
+        concurrency: 1, jobs: [job], start: recoveryJob => active!.ensureSessionRunning(recoveryJob)
+      })
+      coordinator.start()
+      const recovering = coordinator.whenIdle().then(() => {
+        settled = true
+        return coordinator.snapshot()[0]?.state
+      })
+      const first = await observer()
+      expect(first.args.slice(-2)).toEqual(['--resume', 'native-original'])
+      await new Promise(resolve => setTimeout(resolve, 60))
+      expect(settled).toBe(false)
+      expect(binding().restore_state).toBe('restoring')
+      expect(registry.providerIdentityConfirmed(first.runId)).toBe(false)
+      if (outcome === 'confirmed') {
+        await first.ready('native-original', false)
+        expect(settled).toBe(false)
+        await first.ready('native-original')
+        expect(await recovering).toBe('ready')
+        expect(binding().restore_state).toBe('none')
+        expect(registry.providerIdentityConfirmed(first.runId)).toBe(true)
+      } else {
+        if (outcome === 'mismatch') await first.ready('native-other')
+        // The terminal queue releases its overlay while the provider-specific
+        // failure remains authoritative and exposes retry / fresh-start.
+        expect(await recovering).toBe('ready')
+        expect(binding()).toMatchObject({ restore_state: 'failed', provider_session_id: 'native-original' })
+        expect(registry.providerIdentityConfirmed(first.runId)).toBe(false)
+        expect(binding().restore_error).toBeTruthy()
+        expect(registry.has(id)).toBe(false)
+        if (outcome !== 'mismatch') {
+          if (outcome === 'exit-retry') {
+            // A failed early exit must release the queue and leave the UI retryable.
+            expect(database.get<{ work_status: string }>('SELECT work_status FROM sessions WHERE id = ?', id)?.work_status).toBe('error')
+            await writeFile(argsFile + '.retry', '')
+          }
+          await first.ready('native-original')
+          expect(binding().restore_state).toBe('failed')
+          const method = outcome !== 'timeout-fresh' ? 'hierarchy.retry-provider-restore' : 'hierarchy.start-fresh-provider'
+          const router = new RuntimeRpcRouter(database)
+          await router.handle(method, { command: { commandId: method, commandType: method, requestHash: method }, input: { sessionId: id, now: Date.now() } })
+          const next = launch()
+          const second = await observer()
+          expect(second.runId).not.toBe(first.runId)
+          await first.ready('native-original')
+          expect(registry.providerIdentityConfirmed(second.runId)).toBe(false)
+          if (outcome !== 'timeout-fresh') {
+            expect(second.args.slice(-2)).toEqual(['--resume', 'native-original'])
+            await second.ready('native-original')
+          } else {
+            expect(second.args).not.toContain('--resume')
+            await second.ready('native-new', false)
+          }
+          expect(await next).toBe('queue-ready')
+          expect(repository.getProviderSettingsBinding(id, 'dsh')?.providerSessionId).toBe(outcome !== 'timeout-fresh' ? 'native-original' : 'native-new')
+        }
+      }
+    } finally {
+      active.close(); await registry.shutdownAll(); await hooks.stop(); restoreEnv('MATOU_DSH_COMMAND', previous)
+    }
+  }, 15_000
+)
+
+it.each(['roles','search'] as const)('keeps a live PID and %s target snapshot across saves, then captures changes on the next process', async mode => {
+  vi.spyOn(nativeRoleCatalog, 'nativeClaudeModels').mockResolvedValue([{ id: 'default', resolvedModel: 'claude-sonnet-fixture' }, { id: 'sonnet', resolvedModel: 'claude-sonnet-fixture' }])
+  const requests: Array<{ path: string; key?: string; model: string }> = []
+  const upstream = createServer(async (req, res) => { const chunks = []; for await (const c of req) chunks.push(c); const body = JSON.parse(Buffer.concat(chunks).toString()); requests.push({ path: req.url!, key: String(req.headers['x-api-key'] ?? ''), model: body.model }); res.end('{"input_tokens":1}') })
+  await new Promise<void>(r => upstream.listen(0, '127.0.0.1', r))
+  const endpoint = `http://127.0.0.1:${(upstream.address() as {port:number}).port}`
+  const previous = process.env.MATOU_CLAUDE_COMMAND
+  const capture = join(root, 'role-capture.json'), executable = join(root, 'role-fixture.cjs')
+  await writeFile(executable, `#!/usr/bin/env node
+const fs=require('fs');const args=process.argv.slice(2);fs.writeFileSync(${JSON.stringify(capture)},JSON.stringify({pid:process.pid,args}));console.log('READY');
+require('readline').createInterface({input:process.stdin}).on('line',async line=>{try{const data=JSON.parse(line);await fetch(process.env.ANTHROPIC_BASE_URL+data.path,{method:'POST',headers:{'x-api-key':process.env.ANTHROPIC_API_KEY||'source'},body:JSON.stringify({model:process.env.ANTHROPIC_DEFAULT_OPUS_MODEL||'same',max_tokens:1000,messages:[]${mode === 'search' ? ',tools:[{type:"web_search_20250305",name:"web_search"}]' : ''}})});console.log('DONE')}catch(e){console.log('FIXTURE_ERROR')}})
+`); await chmod(executable, 0o755); process.env.MATOU_CLAUDE_COMMAND = executable
+  const registry = createTestSessionRegistry(), providers = new ProviderConfigStore(root)
+  const a = await providers.upsert({ cli: 'claude-code', name: 'A', endpoint, apiKey: 'a', model: 'sonnet', modelMapping: {opus:'same',sonnet:'same',haiku:'same'} })
+  const b = await providers.upsert({ cli: 'claude-code', name: 'B', endpoint, apiKey: 'b', model: 'same' })
+  await providers.activate('claude-code', a.id)
+  const settings = new AgentModelSettings(database, providers)
+  await settings.patchAssignments(mode === 'roles' ? { assignments: { opus: { providerId: b.id, model: 'same' } } } : { assignments: {}, webSearch: { providerId: b.id, model: 'same' } })
+  server.close(); port = new MockPort(); server = new RuntimeServer(port,root,database,undefined,undefined,registry,undefined,undefined,{providerConfigs:providers})
+  port.receive({type:'protocol.hello',protocolVersion:PROTOCOL_VERSION,clientId:'role-fixture'})
+  registerSession(database,'role-live','claude-code')
+  const spawn = {type:'terminal.spawn',protocolVersion:PROTOCOL_VERSION,sessionId:'role-live',executionContextId:'replay-context',profile:'claude-code',cols:80,rows:24}
+  try {
+    port.receive(spawn); await waitUntil(()=>registry.has('role-live'),5000)
+    await waitUntilAsync(async()=>{try{return JSON.parse(await readFile(capture,'utf8')).pid===registry.get('role-live')!.pid}catch{return false}},5000)
+    const first = registry.get('role-live')!, firstPid = first.pid
+    expect(JSON.parse(await readFile(capture,'utf8')).args).toContain('matou-role/sonnet')
+    first.write(JSON.stringify({path:'/v1/messages'})+'\n');await waitUntil(()=>requests.length===1,5000)
+    expect(requests[0]).toMatchObject({key:'b',model:'same'})
+    await providers.upsert({id:b.id,cli:'claude-code',name:'B',endpoint,apiKey:'changed-b',model:'same'})
+    port.receive({...rpc('role-patch','agent-model-settings.patch-assignments',{}),payload:mode === 'roles' ? {assignments:{opus:{providerId:a.id,model:'same'}}} : {assignments:{},webSearch:{providerId:a.id,model:'same'}}})
+    await waitUntil(()=>port.sent.some(m=>m.type==='rpc.response'&&m.requestId==='role-patch'),5000)
+    port.receive(spawn); await settle()
+    expect(registry.get('role-live')!.pid).toBe(firstPid)
+    first.write(JSON.stringify({path:'/v1/messages/count_tokens'})+'\n');await waitUntil(()=>requests.length===2,5000)
+    expect(requests[1]).toMatchObject({key:'b',model:'same'})
+    await registry.shutdownAll()
+    database.run(`INSERT INTO provider_bindings (id,session_id,provider,provider_session_id,resume_state,restore_state,metadata_json,created_at,updated_at,validated_at) VALUES ('role-resume','role-live','claude-code','native-role-fixture','available','none',?,1,1,1)`,JSON.stringify({providerConfigId:a.id,model:'matou-role/sonnet'}))
+    port.receive(spawn);await waitUntil(()=>registry.has('role-live')&&registry.get('role-live')!.pid!==firstPid,5000)
+    await waitUntilAsync(async()=>{try{return JSON.parse(await readFile(capture,'utf8')).pid===registry.get('role-live')!.pid}catch{return false}},5000)
+    registry.get('role-live')!.write(JSON.stringify({path:'/v1/messages'})+'\n');await waitUntil(()=>requests.length===3,5000)
+    expect(requests[2]).toMatchObject({key:'a',model:'same'})
+    expect(JSON.parse(await readFile(capture,'utf8')).args).toEqual(expect.arrayContaining(['--resume','native-role-fixture','matou-role/sonnet']))
+  } finally { restoreEnv('MATOU_CLAUDE_COMMAND',previous);await registry.shutdownAll();upstream.closeAllConnections();await new Promise<void>(r=>upstream.close(()=>r()));vi.restoreAllMocks() }
+})
+
+
+it('Task3 starts all assigned targets without an unused official login and rejects late unbound source selection', async () => {
+  vi.spyOn(nativeRoleCatalog,'nativeClaudeModels').mockResolvedValue([{id:'default',resolvedModel:'claude-sonnet-fixture'},{id:'sonnet',resolvedModel:'claude-sonnet-fixture'}])
+  const captureAccount=vi.spyOn(officialRoleAccount,'captureOfficialClaudeAccount').mockRejectedValue(Error('fixture not logged in'))
+  const requests: string[]=[]
+  const upstream=createServer(async(req,res)=>{const chunks=[];for await(const c of req)chunks.push(c);requests.push(JSON.parse(Buffer.concat(chunks).toString()).model);res.end('{"ok":true}')})
+  await new Promise<void>(r=>upstream.listen(0,'127.0.0.1',r))
+  const endpoint=`http://127.0.0.1:${(upstream.address() as {port:number}).port}`
+  const previous=process.env.MATOU_CLAUDE_COMMAND, executable=join(root,'task3-all.cjs'),capture=join(root,'task3-all.json')
+  await writeFile(executable,`#!/usr/bin/env node
+require('fs').writeFileSync(${JSON.stringify(capture)},JSON.stringify({base:process.env.ANTHROPIC_BASE_URL,key:process.env.ANTHROPIC_API_KEY,args:process.argv.slice(2)}));console.log('READY');setInterval(()=>{},1000)
+`);await chmod(executable,0o755);process.env.MATOU_CLAUDE_COMMAND=executable
+  const registry=createTestSessionRegistry(), providers=new ProviderConfigStore(root)
+  const a=await providers.upsert({cli:'claude-code',name:'Assigned',endpoint,apiKey:'fixture-a',model:'same'})
+  const target={providerId:a.id,model:'same'}
+  const assignedModels=new AgentModelSettings(database,providers)
+  await assignedModels.patchAssignments({assignments:{opus:target,sonnet:target,haiku:target}})
+  await assignedModels.set({contextWindows:{},compaction:{mode:'custom',providerId:a.id,model:'same',effort:'follow'}})
+  server.close();port=new MockPort();server=new RuntimeServer(port,root,database,undefined,undefined,registry,undefined,undefined,{providerConfigs:providers})
+  port.receive({type:'protocol.hello',protocolVersion:PROTOCOL_VERSION,clientId:'task3'})
+  registerSession(database,'task3-all','claude-code')
+  try {
+    port.receive({type:'terminal.spawn',protocolVersion:PROTOCOL_VERSION,sessionId:'task3-all',executionContextId:'replay-context',profile:'claude-code',cols:80,rows:24})
+    await waitUntil(()=>registry.has('task3-all'),5000)
+    await waitUntilAsync(async()=>{try{return Boolean(JSON.parse(await readFile(capture,'utf8')).base)}catch{return false}},5000)
+    const launched=JSON.parse(await readFile(capture,'utf8'))
+    expect(launched.key).toBeTruthy();expect(launched.args).toContain('matou-role/sonnet');expect(captureAccount).not.toHaveBeenCalled()
+    const send=(model:string)=>fetch(launched.base+'/v1/messages',{method:'POST',body:JSON.stringify({model,messages:[]})})
+    expect((await send('matou-role/opus')).status).toBe(200)
+    expect(requests).toEqual(['same'])
+    const denied=await send('literal-source-custom');expect(denied.status).toBe(502);expect(await denied.text()).toMatch(/not bound at startup/)
+    expect(requests).toEqual(['same']);expect(captureAccount).not.toHaveBeenCalled()
+  } finally {restoreEnv('MATOU_CLAUDE_COMMAND',previous);await registry.shutdownAll();upstream.closeAllConnections();await new Promise<void>(r=>upstream.close(()=>r()));vi.restoreAllMocks()}
+})
+
+it('passes main role --effort to Claude CLI and routes mapped API startup models with assigned effort', async () => {
+  vi.spyOn(nativeRoleCatalog, 'nativeClaudeModels').mockResolvedValue([
+    { id: 'default', resolvedModel: 'claude-sonnet-fixture' },
+    { id: 'opus', resolvedModel: 'claude-opus-fixture' },
+    { id: 'sonnet', resolvedModel: 'claude-sonnet-fixture' },
+    { id: 'haiku', resolvedModel: 'claude-haiku-fixture' }
+  ])
+  const bodies: any[] = []
+  const upstream = createServer(async (req, res) => {
+    const chunks: Buffer[] = []
+    for await (const c of req) chunks.push(c)
+    bodies.push(JSON.parse(Buffer.concat(chunks).toString()))
+    res.end('{"ok":true}')
+  })
+  await new Promise<void>(r => upstream.listen(0, '127.0.0.1', r))
+  const endpoint = `http://127.0.0.1:${(upstream.address() as { port: number }).port}`
+  const previous = process.env.MATOU_CLAUDE_COMMAND, executable = join(root, 'role-effort-cli.cjs'), capture = join(root, 'role-effort-capture.json')
+  await writeFile(executable, `#!/usr/bin/env node
+require('fs').writeFileSync(${JSON.stringify(capture)},JSON.stringify({base:process.env.ANTHROPIC_BASE_URL,args:process.argv.slice(2)}));console.log('READY');setInterval(()=>{},1000)
+`)
+  await chmod(executable, 0o755)
+  process.env.MATOU_CLAUDE_COMMAND = executable
+  const registry = createTestSessionRegistry(), providers = new ProviderConfigStore(root)
+  const ds = await providers.upsert({
+    cli: 'claude-code', name: 'DeepSeek', endpoint, apiKey: 'ds-key', model: 'deepseek-flash',
+    modelMapping: { opus: 'deepseek-flash', sonnet: 'deepseek-flash', haiku: 'deepseek-flash' },
+    modelMetadata: [{ id: 'deepseek-flash', supportedEfforts: ['low', 'high', 'max'] }],
+    effortMapping: { opus: 'max' }
+  })
+  await providers.activate('claude-code', ds.id)
+  const assignedModels = new AgentModelSettings(database, providers)
+  await assignedModels.patchAssignments({
+    assignments: {
+      opus: { providerId: ds.id, model: 'deepseek-flash', effort: 'high' },
+      sonnet: { providerId: ds.id, model: 'deepseek-flash', effort: 'high' },
+      haiku: { providerId: ds.id, model: 'deepseek-flash', effort: 'low' }
+    }
+  })
+  server.close(); port = new MockPort()
+  server = new RuntimeServer(port, root, database, undefined, undefined, registry, undefined, undefined, { providerConfigs: providers })
+  port.receive({ type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'effort-test' })
+  registerSession(database, 'role-effort-session', 'claude-code')
+  try {
+    port.receive({ type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION, sessionId: 'role-effort-session', executionContextId: 'replay-context', profile: 'claude-code', cols: 80, rows: 24 })
+    await waitUntil(() => registry.has('role-effort-session'), 5000)
+    await waitUntilAsync(async () => { try { return Boolean(JSON.parse(await readFile(capture, 'utf8')).base) } catch { return false } }, 5000)
+    const launched = JSON.parse(await readFile(capture, 'utf8'))
+    expect(launched.args).toContain('--model')
+    expect(launched.args[launched.args.indexOf('--model') + 1]).toBe('matou-role/opus')
+    expect(launched.args).toContain('--effort')
+    expect(launched.args[launched.args.indexOf('--effort') + 1]).toBe('high')
+    const response = await fetch(launched.base + '/v1/messages', {
+      method: 'POST',
+      body: JSON.stringify({ model: 'matou-role/opus', output_config: { effort: 'xhigh' }, messages: [] })
+    })
+    expect(response.status).toBe(200)
+    expect(bodies[0]).toMatchObject({ model: 'deepseek-flash', output_config: { effort: 'high' } })
+  } finally {
+    restoreEnv('MATOU_CLAUDE_COMMAND', previous)
+    await registry.shutdownAll()
+    upstream.closeAllConnections()
+    await new Promise<void>(r => upstream.close(() => r()))
+    vi.restoreAllMocks()
   }
 })

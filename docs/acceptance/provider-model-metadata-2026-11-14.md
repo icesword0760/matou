@@ -92,3 +92,43 @@
 已从菜单正常退出并重新启动本机安装版，真实用户配置页确认 GPT 卡片最大 872K，Antigravity 压缩下拉完整显示 11 个模型。为展示而切换的“独立配置 / Antigravity”仍为未保存草稿，实际压缩设置保持跟随会话；没有替用户选择新压缩模型。DeepSeek 当前会话未重新执行“保存并切换”，不宣称历史 Pro 会话已迁移或真实请求已改成 Flash/high。
 
 一张冗余 PNG 的压缩二进制字节偶然匹配命名门禁，恢复先前已入库的截图并去掉重复生成语句，最终结果以签名应用截图与请求 JSON 为准；未更改或绕过门禁规则。
+
+## 2026-11-15：旧会话实际重新应用及内联工具兼容
+
+用户明确要求旧会话应用 DeepSeek Flash/high。通过真实界面“保存并切换”更新13个已绑定旧会话；启动参数全部为 `--model deepseek-flash --effort high`，保留原 resume ID。3个没有 provider binding、状态 starting 的窗口由产品暂缓；没有强改数据库。当前会话底栏显示 Flash。
+
+用户随后实际发送“继续”遇到422：旧历史 system 消息 tool_addition 内含 tool_definition。检查故障会话发现4处，对应具名客户端工具。使用合成最小请求实际复现422；将内联定义提升为 deferred tools、消息内保留 tool_reference 后真实接口返回200。兼容修改仅针对最终目标 api.deepseek.com/anthropic 的 messages/count_tokens，不改磁盘历史、不增加LLM步骤、不递归改工具参数。不同schema同名定义或无法无损处理的情况明确拒绝，不静默丢历史或工具。type:custom 提升时移除，适配DeepSeek客户端工具格式。
+
+运行时定点测试：三个文件25项首次通过，追加custom类型回归后helper7项通过（合计26项覆盖）；runtime typecheck和生产构建、命名门禁及差异检查通过。实际生产请求层对 DeepSeek Flash/high 的合成内联工具请求返回200/OK，详见 `deepseek-inline-gateway.json`。本次仅替换runtime index与source map，签名与安装校验通过；旧应用备份 `/Users/icesword/.matou/backups/deepseek-inline-tools-n4549n43/previous.app`。真实旧会话复验继续进行，不以合成请求替代。
+
+首次直接复制运行时产物遗漏打包脚本中的 node-pty 相对路径转换，真实启动检查暴露未能恢复工作区；已按现有 prepare-package-resources 逻辑修正，并通过 assertRuntimePackageImports、签名包隔离启动及安装后依赖检查。没有修改原历史或数据库。隔离复验脚本曾尝试保存未变化配置（按钮正常禁用）而超时，修正验收动作后签名包启动和设置读取通过。
+
+最终真实验证完成：重启后的13个已绑定旧会话全部以 `deepseek-flash/high` 恢复。此前422的原会话（resume ID未变）发送仅连接验证、禁止工具/文件操作的消息后，实际回复“配置检查通过”；响应记录 model 为 deepseek-flash，新增工具调用0，真实界面底栏同时显示 deepseek-flash (1M context)。旧历史内联定义未删除，发送时转换。证据 `live-session-verified.json`。相关Electron端到端流程回归通过（10.6秒）。未代用户继续原开发任务，3个未绑定starting窗口未强制迁移；未执行全仓测试或所有旧会话的逐条推理。
+
+## 2026-11-15 下午：tool_removal 及请求兼容补查
+
+用户在另一旧会话执行“开启codex”时，收到 messages[518] tool_removal 不受支持的422。上轮仅验证工具定义与纯文字回复不足以覆盖该会话。检查13个已绑定旧会话：69次tool_addition、6次tool_removal、61个工具结果内tool_reference；其余顶层类型为text/thinking/tool_use/tool_result/image。没有发现同名工具定义在这些历史中发生schema变化。
+
+| 已确认问题 | 证据 | 处理 |
+| --- | --- | --- |
+| 内联tool_definition | 原会话及真实最小请求422 | 转为声明及引用；上轮已实现 |
+| tool_removal | 用户真实旧会话422 | 对含移除的历史按顺序计算当前工具集合；历史增删转同位置说明，调用/结果不改，已移除工具不重新开放 |
+| 顶层type:custom | 合成真实接口422 | 仅合法客户端定义移除该类型，服务工具类型保留 |
+| 失效嵌套tool_reference | 真实接口：声明存在200、缺失400 | 工具结果中失效引用转同位置历史说明，不伪造定义；有声明引用及图片/文字不改 |
+
+确定性转换不新增模型请求。工具集合前缀发生变化可能导致首次请求缓存重新计算；后续相同历史转换稳定。只作用于最终目标为官方DeepSeek的messages/count_tokens，别家及切出DeepSeek的压缩请求保持原语义；没有改写磁盘历史。
+
+29项helper/gateway定点测试、runtime类型检查与构建通过。最初一项fixture缺少properties导致类型检查失败，修正fixture后重跑通过。真实生产gateway两轮请求同时覆盖add/remove/re-add、顶层custom、失效历史引用：Flash/high返回current_probe调用，回传结果后返回TOOL_CHECK_OK。合成工具执行未触碰用户文件。证据 `deepseek-extra-probes.json`、`deepseek-expanded-compatibility.json`。
+
+已知边界：DeepSeek思考开启时不接受强制tool_choice指定工具，当前CLI场景未见触发，不自动降低高推理或改成任意工具。无移除历史的同名不一致定义仍明确报错；本次13会话未发现该条件。无法映射的服务工具/MCP结构、未知系统引用等仍明确拒绝，不声明完整支持Anthropic全部协议。尚未进行全仓测试或所有13会话逐条推理验证。
+
+
+### 完整工具定义追加核验
+
+原会话真实重试进一步暴露 Artifact 参数约束中的空字节正则转义不被 DeepSeek 的校验器接受，返回400。已从该会话实际请求记录提取29个工具定义、11个正则约束；整套实测仅该约束需要等价转换。新增确定性 schema 遍历，仅将适用的空字节转义改为十六进制等价写法，不改默认值、示例、描述、用户输入、八进制转义或其他正则。已有工具及历史提升后的工具均覆盖。
+
+最终四个相关测试文件42项通过，runtime typecheck与构建通过，命名门禁及差异检查通过。包含完整29个实际工具定义的生产gateway双轮请求成功，实际模型均为deepseek-flash，使用high；工具调用结果返回后收到TOOL_CHECK_OK。此项仍为合成测试工具执行，不替代原会话。证据：`evidence/provider-settings-followup-2026-11-15/deepseek-full-tools-compatibility.json`。
+
+原日志519条请求引用中138条缺少对应正文blob，因此没有伪造缺失历史做所谓“完整离线重放”。改由已安装应用恢复原会话后发起只读工具验证。新增签名版本备份：`/Users/icesword/.matou/backups/deepseek-tool-lifecycle-tvuews4j/previous.app`；打包副本启动、安装目录严格签名校验通过。
+
+最终原会话实测通过（2026-11-15 13:30，本机安装版）：`matou多Agent支持改造` 保留原resume ID及历史，真实执行一次 Bash `pwd`，工具结果为项目目录，随后返回“工具验证通过”和目录。响应模型 deepseek-flash，实际进程参数 --effort high；已查看真实窗口中的成功回复及底栏 Flash。只执行该只读检查，没有执行历史“开启codex”开发任务。脱敏证据：`evidence/provider-settings-followup-2026-11-15/original-session-tool-verified.json`。旧错误仍作为历史显示，不代表本次失败。源码未提交、推送或发布；不宣称全部协议或所有旧会话逐项调用均已验证。

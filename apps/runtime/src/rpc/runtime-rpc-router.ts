@@ -5,7 +5,7 @@ import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 
 import { REMOVE_NODE_SCOPES, type RpcMethod } from '@matou/contracts'
-import type { ProviderModelsInput, ProviderCli, ProviderConfigInput } from '@matou/contracts'
+import type { ClaudeAssignmentsPatch, ProviderModelsInput, ProviderCli, ProviderConfigInput } from '@matou/contracts'
 import {
   AGENT_PERMISSION_MODES,
   getAgentManifest,
@@ -42,11 +42,15 @@ import { DomainTransactionManager } from '../storage/domain-transaction'
 import { RuntimeAccessPolicy } from '../storage/runtime-access-policy'
 import { NotificationProjection } from '../product/experience-foundation'
 import { GitWorkspaceService } from '../git/git-workspace-service'
+import { DshSessionCatalog, defaultDshSessionRoot } from '../session/dsh-session-catalog'
+import { CodexSessionCatalog, defaultCodexRoot } from '../session/codex-session-catalog'
 import { ClaudeSessionCatalog } from '../session/claude-session-catalog'
 import { AntigravitySessionCatalog, defaultAntigravityRoot } from '../session/antigravity-session-catalog'
 import { SessionGitStateRepository } from '../session/session-git-state-repository'
 import type { WorktreeSetupStep } from '../worktrees/worktree-service'
 import { ProviderConfigStore } from '../provider-config/provider-config-store'
+import { DispatchConfig, DispatchConfigValidationError } from './dispatch-config'
+import type { SubscriptionAccounts } from '../model-router/subscription-accounts'
 import { AgentModelSettings } from '../session/agent-model-settings'
 import { ClaudeSettings, isClaudeTimeZone } from '../session/claude-settings'
 
@@ -90,23 +94,30 @@ export class RuntimeRpcRouter {
   readonly #forkWorkflows: ForkWorkflowService
   readonly #git: GitWorkspaceService
   readonly #gitStates: SessionGitStateRepository
+  readonly #dshSessions: DshSessionCatalog
+  readonly #codexSessions: CodexSessionCatalog
   readonly #claudeSessions: ClaudeSessionCatalog
   readonly #antigravitySessions: AntigravitySessionCatalog
   readonly #accessPolicy: RuntimeAccessPolicy
   readonly #providerConfigs: ProviderConfigStore
+  readonly #modelAccounts: Pick<SubscriptionAccounts, 'snapshot'> | undefined
 
   constructor(
     database: RuntimeDatabase,
     notifications = new NotificationProjection(),
     options: {
+      dshSessionsRoot?: string
+      codexRoot?: string
       projectsRoot?: string
       antigravityRoot?: string
       accessPolicy?: RuntimeAccessPolicy
       setupPolicyForWorkspace?: (workspaceId: string) => WorktreeSetupStep[]
       providerConfigs?: ProviderConfigStore
+      modelAccounts?: Pick<SubscriptionAccounts, 'snapshot'>
     } = {}
   ) {
     this.#database = database
+    this.#modelAccounts = options.modelAccounts
     const transactions = new DomainTransactionManager(database)
     this.#workspaces = new WorkspaceTaskRepository(database, transactions)
     this.#sessions = new SessionRepository(database, transactions)
@@ -135,6 +146,8 @@ export class RuntimeRpcRouter {
     )
     this.#git = new GitWorkspaceService({ database, dataRoot: dirname(database.path) })
     this.#gitStates = new SessionGitStateRepository(database)
+    this.#dshSessions = new DshSessionCatalog(options.dshSessionsRoot ?? defaultDshSessionRoot())
+    this.#codexSessions = new CodexSessionCatalog(options.codexRoot ?? defaultCodexRoot())
     this.#claudeSessions = new ClaudeSessionCatalog(
       options.projectsRoot ?? process.env.MATOU_CLAUDE_PROJECTS_ROOT ??
         resolve(homedir(), '.claude', 'projects')
@@ -168,8 +181,18 @@ export class RuntimeRpcRouter {
   }
 
   async #dispatch(method: RpcMethod, payload: unknown): Promise<unknown> {
-    if (method === 'agent-model-settings.get') return new AgentModelSettings(this.#database, this.#providerConfigs).snapshot()
-    if (method === 'agent-model-settings.set') return new AgentModelSettings(this.#database, this.#providerConfigs).set(payload)
+    if (method === 'dispatch-config.snapshot') return new DispatchConfig().snapshot()
+    if (method === 'dispatch-config.save') {
+      try {
+        return await new DispatchConfig().save(record(payload).defaults)
+      } catch (error) {
+        if (error instanceof DispatchConfigValidationError) throw new RpcFault('INVALID_REQUEST', error.message)
+        throw error
+      }
+    }
+    if (method === 'agent-model-settings.get') return new AgentModelSettings(this.#database, this.#providerConfigs, this.#modelAccounts).snapshot()
+    if (method === 'agent-model-settings.set') return new AgentModelSettings(this.#database, this.#providerConfigs, this.#modelAccounts).set(payload)
+    if (method === 'agent-model-settings.patch-assignments') return new AgentModelSettings(this.#database, this.#providerConfigs, this.#modelAccounts).patchAssignments(record(payload) as unknown as ClaudeAssignmentsPatch)
     if (method === 'claude-settings.get') return new ClaudeSettings(this.#database).snapshot()
     if (method === 'claude-settings.set') {
       const { timeZone } = record(payload)
@@ -290,7 +313,7 @@ export class RuntimeRpcRouter {
       const result = await this.#sessionCatalog(provider).list({
         cwd: this.#sessionCwd(sessionId),
         titleForSession: (providerSessionId) =>
-          this.#providerConversationUsage(providerSessionId, sessionId, provider).loadedSessionTitle,
+          this.#providerConversationUsage(providerSessionId, sessionId, provider).overrideTitle,
         query: optionalString(input.query),
         searchScope: input.searchScope === 'metadata' ? 'metadata' : 'all',
         offset: optionalInteger(input.offset, 0, 'offset', 0),
@@ -298,14 +321,16 @@ export class RuntimeRpcRouter {
       })
       const sessions = result.sessions
         .map((session) => {
-          const usage = this.#providerConversationUsage(session.providerSessionId, sessionId, provider)
+          const { overrideTitle, ...usage } = this.#providerConversationUsage(
+            session.providerSessionId, sessionId, provider
+          )
           return {
             ...session,
             ...usage,
-            ...(usage.loadedSessionTitle ? { title: usage.loadedSessionTitle } : {})
+            ...(overrideTitle ? { title: overrideTitle } : {})
           }
         })
-      return { ...result, ...(provider === 'antigravity' ? { provider } : {}), sessions }
+      return { ...result, ...(provider !== 'claude-code' ? { provider } : {}), sessions }
     }
     if (method === 'claude-sessions.detail') {
       const input = record(payload)
@@ -331,11 +356,12 @@ export class RuntimeRpcRouter {
         }),
         limit: optionalInteger(input.limit, 200)
       })
-      const usage = this.#providerConversationUsage(providerSessionId, sessionId, provider)
+      const { overrideTitle, ...usage } = this.#providerConversationUsage(providerSessionId, sessionId, provider)
       return {
         ...detail,
         ...usage,
-        ...(usage.loadedSessionTitle ? { title: usage.loadedSessionTitle } : {})
+        transcriptTitle: detail.title,
+        ...(overrideTitle ? { title: overrideTitle } : {})
       }
     }
     if (method === 'claude-sessions.search') {
@@ -365,6 +391,9 @@ export class RuntimeRpcRouter {
         const result = this.#providerModes.loadClaudeSession(command, {
           sessionId,
           bindingId: randomUUID(),
+          ...(provider === 'codex' ? { hasCompletedTurn: await this.#codexSessions.hasCompletedTurn({
+            cwd: this.#sessionCwd(sessionId), providerSessionId
+          }) } : {}),
           provider,
           providerSessionId,
           title: detail.title,
@@ -375,7 +404,7 @@ export class RuntimeRpcRouter {
         return {
           ...result,
           load: {
-            ...(provider === 'antigravity' ? { provider } : {}),
+            ...(provider !== 'claude-code' ? { provider } : {}),
             sessionId, providerSessionId, permissionMode: detail.permissionMode
           }
         }
@@ -1018,36 +1047,38 @@ export class RuntimeRpcRouter {
     }
   }
 
-  #sessionCatalogProvider(value: unknown): 'claude-code' | 'antigravity' {
+  #sessionCatalogProvider(value: unknown): 'claude-code' | 'antigravity' | 'codex' | 'dsh' {
     return value === undefined
       ? 'claude-code'
-      : enumeration(value, ['claude-code', 'antigravity'] as const, 'provider')
+      : enumeration(value, ['claude-code', 'antigravity', 'codex', 'dsh'] as const, 'provider')
   }
 
-  #sessionCatalog(provider: 'claude-code' | 'antigravity') {
-    return provider === 'antigravity' ? this.#antigravitySessions : this.#claudeSessions
+  #sessionCatalog(provider: 'claude-code' | 'antigravity' | 'codex' | 'dsh') {
+    return provider === 'dsh' ? this.#dshSessions : provider === 'codex' ? this.#codexSessions : provider === 'antigravity' ? this.#antigravitySessions : this.#claudeSessions
   }
 
   #providerConversationUsage(
     providerSessionId: string,
     targetSessionId: string,
-    provider: 'claude-code' | 'antigravity' = 'claude-code'
+    provider: 'claude-code' | 'antigravity' | 'codex' | 'dsh' = 'claude-code'
   ): {
     availability: 'available' | 'loaded-here' | 'loaded-elsewhere'
     loadedSessionId?: string
     loadedSessionTitle?: string
+    overrideTitle?: string
   } {
     const { workspaceId } = this.#sessionOwner(targetSessionId)
     const bindings = this.#database.all<{
       session_id: string
       title: string
+      title_source: string | null
       kind: SessionKind
       archived_at: number | null
       task_archived_at: number | null
       resume_state: string
       invalidated_at: number | null
     }>(
-      `SELECT binding.session_id, owner.title, owner.kind, owner.archived_at,
+      `SELECT binding.session_id, owner.title, owner.title_source, owner.kind, owner.archived_at,
               tasks.archived_at AS task_archived_at,
               binding.resume_state, binding.invalidated_at
        FROM provider_bindings AS binding
@@ -1069,10 +1100,12 @@ export class RuntimeRpcRouter {
       ['unknown', 'available', 'resuming', 'resumed'].includes(binding.resume_state))
     const binding = bindings.find(({ session_id }) => session_id === targetSessionId) ?? bindings[0]
     if (!binding) return { availability: 'available' }
+    const overrideTitle = binding.title_source !== 'default' ? binding.title : undefined
     return {
       availability: binding.session_id === targetSessionId ? 'loaded-here' : 'loaded-elsewhere',
       loadedSessionId: binding.session_id,
-      loadedSessionTitle: binding.title
+      loadedSessionTitle: binding.title,
+      ...(overrideTitle ? { overrideTitle } : {})
     }
   }
 

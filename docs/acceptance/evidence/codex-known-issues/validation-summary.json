@@ -1,0 +1,68 @@
+{
+  "sourceCommit": "cc2b1db",
+  "focusedTests": {
+    "files": 3,
+    "passed": 79
+  },
+  "adjacentRegression": {
+    "files": 4,
+    "passed": 87
+  },
+  "runtimeCodex": {
+    "selected": 17,
+    "initialPassed": 13,
+    "initialFailed": 4,
+    "failureCause": "Exact launch argument assertions did not yet include the newly required startup-upgrade flag. Only Codex assertions changed.",
+    "targetRecheckPassed": 4,
+    "initialUnselected": 144
+  },
+  "uniqueTestsPassed": 184,
+  "workspaceTypecheck": "passed",
+  "identifierGate": "passed before product commit",
+  "liveHistoryCatalog": "two unmodified real Fork rollouts passed preview/search/list; see history-live.json",
+  "newDependencies": [],
+  "newRuntimeLlmRequests": 0,
+  "storageFormatChanges": false,
+  "userConfigWritesByProduct": false,
+  "packagedUi": {
+    "uniqueScenariosPassed": 2,
+    "ancestorHistory": {
+      "attempts": 1,
+      "seconds": 5.133,
+      "passed": true,
+      "type": "controlled rollout fixture in real packaged UI"
+    },
+    "realCodexModelError": {
+      "attempts": 4,
+      "seconds": [
+        27.376,
+        26.26,
+        21.167,
+        8.034
+      ],
+      "finalExitCode": 0,
+      "type": "real Codex CLI with controlled local HTTP 404; no external inference",
+      "initialFailureCauses": [
+        "single pending response overwritten by parallel request",
+        "same pending response issue; request log confirmed it",
+        "terminal locator followed focus to Shell"
+      ],
+      "finalChecks": [
+        "same turn task_complete.error",
+        "one Codex notification and correct body",
+        "DB/card/DAG error",
+        "Codex TUI 404",
+        "999 version seed shows no upgrade prompt"
+      ],
+      "automaticRetries": 0
+    },
+    "productRebuiltForTestFixes": false,
+    "productCommit": "cc2b1dbc0e5956960bda2d2b17cf6709bb5410ed"
+  },
+  "managedLaunchRegression": {
+    "selected": 1,
+    "passed": 1,
+    "unselected": 160,
+    "reason": "The managed-profile control test also asserts Codex argv; added the startup-upgrade flag only to its Codex expectation. Claude expectation unchanged."
+  }
+}

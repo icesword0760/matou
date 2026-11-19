@@ -12,6 +12,69 @@ export class RuntimeSessionRegistry {
   readonly #operations = new Map<string, Promise<void>>()
   readonly #pendingProviderRuns = new Map<string, PendingProviderIdentity>()
   readonly #confirmedProviderRuns = new Set<string>()
+  readonly #pendingProviderActivations = new Map<string, () => Promise<boolean>>()
+  readonly #activatingProviders = new Set<string>()
+  #providerActivationTimer: ReturnType<typeof setTimeout> | undefined
+  #providerActivationGeneration = 0
+  readonly #providerActivationVersions = new Map<string, number>()
+  readonly #providerLaunchDigests = new Map<string, { runId: string; digest: string }>()
+
+  recordProviderLaunchDigest(sessionId: string, runId: string, digest: string): void {
+    if (this.#sessions.get(sessionId)?.runId === runId) this.#providerLaunchDigests.set(sessionId, { runId, digest })
+  }
+  providerLaunchDigest(sessionId: string): string | undefined {
+    const launch = this.#providerLaunchDigests.get(sessionId)
+    return launch?.runId === this.#sessions.get(sessionId)?.runId ? launch?.digest : undefined
+  }
+
+  providerActivationVersion(sessionId: string): string {
+    return `${this.#providerActivationGeneration}:${this.#providerActivationVersions.get(sessionId) ?? 0}`
+  }
+
+  queueProviderActivation(sessionId: string, retry: () => Promise<boolean>): void {
+    this.#pendingProviderActivations.set(sessionId, retry)
+    this.#scheduleProviderActivations()
+  }
+  cancelProviderActivation(sessionId: string): void {
+    this.#providerActivationVersions.set(sessionId, (this.#providerActivationVersions.get(sessionId) ?? 0) + 1)
+    this.#pendingProviderActivations.delete(sessionId)
+    if (!this.#pendingProviderActivations.size) {
+      clearTimeout(this.#providerActivationTimer)
+      this.#providerActivationTimer = undefined
+    }
+  }
+  async drainProviderActivations(): Promise<void> {
+    const candidates = [...this.#pendingProviderActivations.entries()]
+      .filter(([id]) => !this.#activatingProviders.has(id))
+    let index = 0
+    await Promise.all(Array.from({ length: Math.max(0, Math.min(4 - this.#activatingProviders.size, candidates.length)) }, async () => {
+      while (index < candidates.length) {
+        const [id, retry] = candidates[index++]!
+        if (this.#pendingProviderActivations.get(id) !== retry || this.#activatingProviders.has(id)) continue
+        this.#activatingProviders.add(id)
+        try {
+          if (await retry() && this.#pendingProviderActivations.get(id) === retry) this.cancelProviderActivation(id)
+        } catch { /* A pending transition remains eligible after recovery. */ }
+        finally { this.#activatingProviders.delete(id) }
+      }
+    }))
+    this.#scheduleProviderActivations()
+  }
+  clearProviderActivations(): void {
+    this.#providerActivationGeneration++
+    this.#providerActivationVersions.clear()
+    this.#pendingProviderActivations.clear()
+    clearTimeout(this.#providerActivationTimer)
+    this.#providerActivationTimer = undefined
+  }
+  #scheduleProviderActivations(): void {
+    if (!this.#pendingProviderActivations.size || this.#providerActivationTimer) return
+    this.#providerActivationTimer = setTimeout(() => {
+      this.#providerActivationTimer = undefined
+      void this.drainProviderActivations()
+    }, 1000)
+    this.#providerActivationTimer.unref()
+  }
 
   get(sessionId: string): PtySession | undefined { return this.#sessions.get(sessionId) }
   has(sessionId: string): boolean { return this.#sessions.has(sessionId) }
@@ -32,6 +95,7 @@ export class RuntimeSessionRegistry {
   set(session: PtySession): void { this.#sessions.set(session.sessionId, session) }
   delete(sessionId: string, expected?: PtySession): boolean {
     if (expected && this.#sessions.get(sessionId) !== expected) return false
+    this.#providerLaunchDigests.delete(sessionId)
     return this.#sessions.delete(sessionId)
   }
   values(): IterableIterator<PtySession> { return this.#sessions.values() }
@@ -88,11 +152,14 @@ export class RuntimeSessionRegistry {
     }
   }
   disposeAll(): void {
+    this.clearProviderActivations()
+    this.#providerLaunchDigests.clear()
     for (const session of this.#sessions.values()) session.dispose()
     this.#sessions.clear()
     this.#rejectAllProviderIdentities()
   }
   async shutdownAll(): Promise<void> {
+    this.clearProviderActivations()
     const sessions = [...this.#sessions.values()]
     await Promise.all(sessions.map((session) => session.shutdownForRuntime()))
     for (const session of sessions) this.delete(session.sessionId, session)

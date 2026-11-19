@@ -3,7 +3,7 @@ import { access, readFile, realpath } from 'node:fs/promises'
 import { isAbsolute, join, relative, sep } from 'node:path'
 import { createInterface } from 'node:readline'
 
-export type RouterProcessEvent = { state: 'spawned'; pid: number; restarts: number } | { state: 'failed'; reason: string }
+export type RouterProcessEvent = { state: 'spawned'; pid: number; restarts: number; reason?: string } | { state: 'failed'; reason: string }
 export interface RouterProcessControl {
   start(): Promise<void>
   stop(): Promise<void>
@@ -50,17 +50,25 @@ export class RouterProcessOwner implements RouterProcessControl {
     // stay in model-router/logs, with mode 600 inherited from supervisor umask.
     child.stderr.resume()
     const lines = createInterface({ input: child.stdout })
+    let failureReason: string | undefined
     lines.on('line', line => {
       if (line.length > 1024) return
       try {
         const event = JSON.parse(line) as RouterProcessEvent
-        if ((event.state === 'spawned' && Number.isSafeInteger(event.pid) && event.pid > 0) || event.state === 'failed') this.#emit(event)
+        if (event.state === 'spawned' && Number.isSafeInteger(event.pid) && event.pid > 0) this.#emit(event)
+        if (event.state === 'failed' && typeof event.reason === 'string') failureReason = event.reason
       } catch { /* Ignore malformed child output, readiness remains authenticated. */ }
     })
+    // Drain stdout before reporting an unexpected exit so we retain the
+    // supervisor's actual failure reason and emit a single event.
+    let expectedExit = false
     child.once('exit', () => {
-      lines.close()
+      expectedExit = this.#stop !== undefined
       if (this.#child === child) this.#child = undefined
-      if (!this.#stop) this.#emit({ state: 'failed', reason: 'supervisor-exited' })
+    })
+    child.once('close', (code, signal) => {
+      if (expectedExit || this.#child && this.#child !== child) return
+      this.#emit({ state: 'failed', reason: failureReason ?? (signal ? `supervisor terminated by ${signal}` : `supervisor exited with code ${code}`) })
     })
     await new Promise<void>((resolve, reject) => { child.once('spawn', resolve); child.once('error', () => { this.#child = undefined; reject(new Error('Model router supervisor failed to start')) }) })
   }

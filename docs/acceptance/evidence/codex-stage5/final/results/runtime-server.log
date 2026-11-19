@@ -1,0 +1,10 @@
+
+ RUN  v4.1.11 /Users/icesword/Documents/AIProjects/matou-multi-agent-codex/apps/runtime
+
+(node:87729) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+ Test Files  1 passed (1)
+      Tests  161 passed (161)
+   Start at  20:29:26
+   Duration  58.98s (transform 704ms, setup 0ms, import 914ms, tests 57.99s, environment 0ms)

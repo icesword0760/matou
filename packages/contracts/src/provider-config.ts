@@ -130,6 +130,10 @@ export interface SubscriptionProviderConfigInput {
 export type ProviderConfigInput = ApiKeyProviderConfigInput | SubscriptionProviderConfigInput
 export interface SubscriptionLoginStartInput { provider: SubscriptionProvider; locale?: 'zh-CN' | 'en' }
 export type SubscriptionModelsReadInput = { attemptId: string; providerId?: never } | { providerId: string; attemptId?: never }
+export interface SubscriptionModelsRefreshResult {
+  snapshot: ProviderConfigSnapshot
+  details: SubscriptionAccountDetails
+}
 export interface SubscriptionLoginView {
   attemptId: string
   provider: SubscriptionProvider

@@ -272,6 +272,8 @@ export class RuntimeHostActionFacade {
       sourceSessionId: this.#canvasAnchor(target.windowId, target.sceneId),
       profile: request.profile,
       ...(request.title === undefined ? {} : { title: request.title }),
+      ...(request.cwd === undefined ? {} : { cwd: request.cwd }),
+      ...(request.permissionMode === undefined ? {} : { permissionMode: request.permissionMode }),
       navigation: request.enter === true ? 'activate' : 'preserve',
       now: this.#now()
     })

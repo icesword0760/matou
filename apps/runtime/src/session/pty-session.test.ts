@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process'
-import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
@@ -111,6 +111,19 @@ setInterval(() => {}, 1_000)
       if (previousShell === undefined) delete process.env.SHELL
       else process.env.SHELL = previousShell
     }
+  })
+})
+
+describe('Codex executable preflight', () => {
+  it.skipIf(process.platform === 'win32')('rejects a missing executable before starting a short-lived PTY', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'matou-codex-missing-'))
+    roots.push(root)
+    const previous = process.env.MATOU_CODEX_COMMAND
+    process.env.MATOU_CODEX_COMMAND = join(root, 'does-not-exist')
+    try {
+      await expect(PtySession.create({ sessionId: 'missing-codex', executionContextId: 'local-default',
+        profile: 'codex', cols: 80, rows: 24, cwd: root, dataRoot: root })).rejects.toMatchObject({ code: 'ENOENT' })
+    } finally { restoreEnv('MATOU_CODEX_COMMAND', previous) }
   })
 })
 
@@ -638,6 +651,37 @@ describe('PtySession egress freeze', () => {
       releaseBlockedWrite()
       await session?.shutdownForRuntime({ gracePeriodMs: 200, hardKillWaitMs: 1_000 })
       restoreEnv('SHELL', previousShell)
+    }
+  })
+})
+
+
+describe('Codex Default config at the final process boundary', () => {
+  it.each(['new', 'resume', 'fork'] as const)('reads the launch config for %s without writing it', async kind => {
+    const root = await mkdtemp(join(tmpdir(), 'matou-codex-config-')); roots.push(root)
+    const configRoot = join(root, 'codex-home'); await mkdir(configRoot)
+    const configPath = join(configRoot, 'config.toml')
+    const config = '# unchanged user policy\napproval_policy = "never"\nsandbox_mode = "read-only"\n'
+    await writeFile(configPath, config)
+    const executable = join(root, 'codex-fixture.cjs')
+    await writeFile(executable, '#!/usr/bin/env node\nconsole.log("ARGV_RESULT="+JSON.stringify(process.argv.slice(2)));setInterval(()=>{},1000)\n')
+    await chmod(executable, 0o755)
+    const previous = process.env.MATOU_CODEX_COMMAND; process.env.MATOU_CODEX_COMMAND = executable
+    let session: PtySession | undefined, output = ''
+    try {
+      session = await PtySession.create({ sessionId: `codex-config-${kind}`, executionContextId: 'local-default',
+        cwd: root, dataRoot: join(root, 'data'), cols: 100, rows: 24, profile: 'codex', permissionMode: 'default',
+        ...(kind === 'new' ? {} : { providerSessionId: 'source', forkSession: kind === 'fork' }),
+        env: { CODEX_HOME: configRoot }, onOutput: data => { output += data } })
+      await waitUntil(() => /ARGV_RESULT=([^\r\n]+)/.test(output))
+      const args = JSON.parse(/ARGV_RESULT=([^\r\n]+)/.exec(output)![1]!) as string[]
+      expect(args[args.indexOf('--ask-for-approval') + 1]).toBe('never')
+      expect(args[args.indexOf('--sandbox') + 1]).toBe('read-only')
+      if (kind !== 'new') expect(args.slice(-2)).toEqual([kind, 'source'])
+      expect(await readFile(configPath, 'utf8')).toBe(config)
+    } finally {
+      await session?.shutdownForRuntime({ gracePeriodMs: 100, hardKillWaitMs: 1000 })
+      restoreEnv('MATOU_CODEX_COMMAND', previous)
     }
   })
 })

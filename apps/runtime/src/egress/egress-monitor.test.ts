@@ -189,6 +189,7 @@ function createHarness(overrides?: {
   const clock = new FakeClock()
   let currentFull = makeSample()
   const currentLight: Record<EgressFamily, EgressHostSample> = {
+    google: { host: EGRESS_HOSTS.google.api, ip: '203.0.113.20', country: 'US' },
     anthropic: {
       host: EGRESS_HOSTS.anthropic.api,
       ip: '169.128.1.1',
@@ -886,7 +887,7 @@ describe('EgressMonitor', () => {
   it('omits chatgpt-subscription from checking and evaluated status when disabled', async () => {
     const harness = createHarness()
     expect(harness.monitor.status().state).toBe('checking')
-    expect(harness.monitor.status().families.map((f) => f.family)).toEqual(['anthropic', 'openai'])
+    expect(harness.monitor.status().families.map((f) => f.family)).toEqual(['anthropic', 'openai', 'google'])
 
     harness.monitor.start()
     await harness.clock.flushMicrotasks()
@@ -952,6 +953,10 @@ describe('EgressMonitor', () => {
 })
 
 describe('egressFamilyForLaunch', () => {
+  it('registers antigravity launches as google', () => {
+    expect(egressFamilyForLaunch('antigravity', {})).toBe('google')
+  })
+
   it('maps official claude-code and codex launches and excludes third-party or shell profiles', () => {
     expect(egressFamilyForLaunch('claude-code', {})).toBe('anthropic')
     expect(
@@ -980,6 +985,12 @@ describe('egressFamilyForLaunch', () => {
 })
 
 describe('egressPlanForLaunch', () => {
+  it('protects antigravity with Google exit and existing time-zone policy', () => {
+    expect(egressPlanForLaunch('antigravity', {})).toEqual({
+      family: 'google', exitFamily: 'google', hideTimeZone: true
+    })
+  })
+
   it('classifies subscription, official, third-party, and shell launches accurately', () => {
     expect(egressPlanForLaunch('claude-code', {}, 'codex')).toEqual({
       family: 'chatgpt-subscription',
@@ -1019,4 +1030,91 @@ describe('egressPlanForLaunch', () => {
       hideTimeZone: false
     })
   })
+})
+
+
+describe('Google session protection', () => {
+  function googleSample(country: string): EgressSample {
+    const sample = makeSample()
+    sample.hosts.google = {
+      api: { host: EGRESS_HOSTS.google.api, ip: country === 'CN' ? '223.5.5.5' : '203.0.113.20', country },
+      login: { host: EGRESS_HOSTS.google.login, error: 'invalid' }
+    }
+    return sample
+  }
+
+  it('freezes only Google sessions and auto-resumes after the existing recovery confirmations', async () => {
+    const h = createHarness()
+    h.setFullSample(googleSample('CN'))
+    h.monitor.registerSession('ag-1', 'google')
+    h.monitor.registerSession('claude-1', 'anthropic')
+    h.monitor.registerSession('codex-1', 'openai')
+    h.monitor.start()
+    await h.clock.flushMicrotasks()
+    expect(h.frozenCalls).toEqual(['ag-1'])
+    expect(h.monitor.status().sessionFamilies['ag-1']).toBe('google')
+    expect(h.monitor.registerSession('ag-2', 'google')).toEqual({ bornFrozen: true })
+    h.setFullSample(googleSample('US'))
+    await h.clock.advanceBy(15_000)
+    expect(h.thawedCalls).toEqual([])
+    await h.clock.advanceBy(5_000)
+    expect(h.thawedCalls).toEqual(['ag-1', 'ag-2'])
+    expect(h.monitor.status().lastTransition).toMatchObject({ kind: 'resumed', family: 'google' })
+    h.monitor.stop()
+  })
+
+  it('light-samples an active Google session on the existing one-minute timer', async () => {
+    const h = createHarness()
+    h.setFullSample(googleSample('US'))
+    h.monitor.registerSession('ag-1', 'google')
+    h.monitor.start()
+    await h.clock.flushMicrotasks()
+    await h.clock.advanceBy(60_000)
+    expect(h.sampleLightSpy.mock.calls).toEqual([['google']])
+    h.monitor.stop()
+  })
+})
+
+it('Task3 keeps a multi-target session frozen across another family recovery and individual overrides', async () => {
+  const h = createHarness()
+  const cn = { ip: '223.5.5.5', country: 'CN' }
+  h.monitor.registerSession('mixed', ['anthropic', 'openai', 'anthropic'])
+  h.setFullSample(makeSample({ anthropicApi: cn, anthropicLogin: cn }))
+  await h.monitor.recheck()
+  expect(h.frozenCalls).toEqual(['mixed'])
+  expect(h.monitor.status().sessionFamilySets).toEqual({ mixed: ['anthropic', 'openai'] })
+  expect(h.monitor.status().sessionFamilies).toEqual({ mixed: 'anthropic' })
+  h.setFullSample(makeSample({ openaiApi: cn, openaiLogin: cn }))
+  await h.monitor.recheck(); await h.monitor.recheck()
+  expect(h.thawedCalls).toEqual([])
+  await h.monitor.override('anthropic')
+  expect(h.thawedCalls).toEqual([])
+  expect(() => h.monitor.assertTargetAllowed('openai')).toThrow(/出口|egress/i)
+  await h.monitor.override('openai')
+  expect(h.thawedCalls).toEqual(['mixed'])
+  expect(() => h.monitor.assertTargetAllowed('openai')).not.toThrow()
+  h.monitor.unregisterSession('mixed')
+  expect(h.monitor.status().sessionFamilySets).toEqual({})
+  expect(h.monitor.status().families.every(f => f.frozenSessionIds.length === 0)).toBe(true)
+  h.monitor.stop()
+})
+it('Task3 waits for both recovery confirmations, disables protection once, and samples all memberships', async () => {
+  const h = createHarness(), cn = { ip: '223.5.5.5', country: 'CN' }
+  h.monitor.registerSession('mixed', ['anthropic', 'openai'])
+  h.setFullSample(makeSample({ anthropicApi: cn, anthropicLogin: cn, openaiApi: cn, openaiLogin: cn }))
+  await h.monitor.recheck()
+  expect(h.frozenCalls).toEqual(['mixed'])
+  await h.monitor.override('anthropic')
+  expect(h.thawedCalls).toEqual([])
+  h.setFullSample(makeSample()); await h.monitor.recheck()
+  expect(h.thawedCalls).toEqual([])
+  await h.monitor.recheck(); expect(h.thawedCalls).toEqual(['mixed'])
+  h.setFullSample(makeSample({ anthropicApi: cn, anthropicLogin: cn, openaiApi: cn, openaiLogin: cn }))
+  await h.monitor.recheck()
+  await h.monitor.setProtection(false)
+  expect(h.thawedCalls).toEqual(['mixed', 'mixed'])
+  expect(() => h.monitor.assertTargetAllowed('anthropic')).not.toThrow()
+  h.monitor.start(); await h.clock.advanceBy(EGRESS_LIGHT_SAMPLE_INTERVAL_MS)
+  expect(h.sampleLightSpy.mock.calls.map(c => c[0])).toEqual(expect.arrayContaining(['anthropic', 'openai']))
+  h.monitor.stop()
 })

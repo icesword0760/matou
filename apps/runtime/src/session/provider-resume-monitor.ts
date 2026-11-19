@@ -93,12 +93,14 @@ export class ClaudeWorkspaceTrustPromptMonitor {
 
 export class ProviderResumeMonitor {
   readonly #expectedProviderSessionId: string
+  readonly #requireIdentity: boolean
   #recentOutput = ''
   #failed = false
   #settled = false
 
-  constructor(expectedProviderSessionId: string) {
+  constructor(expectedProviderSessionId: string, options: { requireIdentity?: boolean } = {}) {
     this.#expectedProviderSessionId = expectedProviderSessionId.trim().toLowerCase()
+    this.#requireIdentity = options.requireIdentity === true
   }
 
   get isMonitoring(): boolean {
@@ -127,7 +129,7 @@ export class ProviderResumeMonitor {
       this.#failed = true
       return 'provider session not found'
     }
-    if (this.#recentOutput.length > 2_000) {
+    if (!this.#requireIdentity && this.#recentOutput.length > 2_000) {
       this.#settled = true
       this.#recentOutput = ''
     }
@@ -142,7 +144,7 @@ export class ProviderResumeMonitor {
     // for the user's answer. A silent process can still be loading hooks,
     // credentials, or remote state, so the readiness deadline must not turn
     // an inconclusive wait into a permanent restore failure.
-    if (this.#recentOutput.length > 0) {
+    if (!this.#requireIdentity && this.#recentOutput.length > 0) {
       this.#settled = true
       this.#recentOutput = ''
       return undefined

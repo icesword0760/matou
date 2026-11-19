@@ -2,7 +2,7 @@
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { GitRepositoryStatus, RpcMethod } from '@matou/contracts'
+import type { GitRepositoryStatus, RpcMethod, SessionEnvironmentIsolateResult } from '@matou/contracts'
 
 import { LocaleProvider } from '../i18n/LocaleProvider'
 import { setCurrentLocale } from '../i18n/current'
@@ -413,6 +413,72 @@ describe('PRD 02 bottom HUD', () => {
     expect(request).not.toHaveBeenCalled()
   })
 
+  it('keeps isolation feedback during restart and shows the new directory and branch on success', async () => {
+    const user = userEvent.setup()
+    const path = '/tmp/project'
+    const worktreePath = '/tmp/matou/worktree'
+    const hud: SessionHudView = {
+      sessionId: 'session-1', mode: 'shell', cwd: path, gitBranch: 'main', startedAt: Date.now()
+    }
+    const initial: GitRepositoryStatus = {
+      repositoryRoot: path, cwd: path, currentBranch: 'main',
+      dirty: false, stagedCount: 0, unstagedCount: 0, untrackedCount: 0,
+      additions: 0, deletions: 0, ahead: 0, behind: 0, hasRemote: false, canPush: false,
+      branches: [{ name: 'feature/next', current: false, commitTimestamp: 1 }], worktrees: []
+    }
+    const worktreeEnvironment = {
+      kind: 'worktree', state: 'ready', path: worktreePath,
+      localExecutionContextId: 'local-context', worktreeId: 'worktree-1',
+      worktreeExecutionContextId: 'worktree-context'
+    } as const
+    let resolveIsolation!: (result: SessionEnvironmentIsolateResult) => void
+    const isolation = new Promise<SessionEnvironmentIsolateResult>((resolve) => { resolveIsolation = resolve })
+    const request = vi.fn(async (method: RpcMethod, _payload: unknown) =>
+      method === 'session.environment-isolate' ? isolation : initial
+    )
+    const runtimeClient: GitRequestClient = {
+      request: async function<T>(method: RpcMethod, payload: unknown): Promise<T> {
+        return await request(method, payload) as T
+      }
+    }
+    const localEnvironment = {
+      kind: 'local', state: 'ready', path, localExecutionContextId: 'local-context'
+    } as const
+    const props = {
+      sessionId: 'session-1', runtimeClient, sharedWorkingDirectory: true, sharedSessionCount: 2
+    }
+    const view = render(<TerminalHud {...props} hud={hud} environment={localEnvironment} />)
+
+    await user.click(screen.getByRole('button', { name: '打开 Git' }))
+    await user.click(await screen.findByRole('button', { name: 'feature/next' }))
+    await user.click(screen.getByRole('button', { name: '新建独立 Worktree 并切换' }))
+    view.rerender(<TerminalHud {...props} hud={undefined} environment={{ ...localEnvironment, state: 'handoff' }}
+      disabledReason="正在切换会话环境" />)
+
+    expect(screen.getByText('正在创建独立 Worktree…')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'feature/next' })).toHaveProperty('disabled', true)
+    await user.keyboard('{Escape}')
+    expect(screen.getByRole('dialog', { name: 'Git 与 Worktree' })).toBeTruthy()
+    expect(request.mock.calls.filter(([method]) => method === 'session.environment-isolate')).toHaveLength(1)
+
+    await act(async () => {
+      view.rerender(<TerminalHud {...props} hud={{ ...hud, cwd: worktreePath, gitBranch: 'feature/next' }}
+        environment={worktreeEnvironment} hasOwnedWorktree />)
+      resolveIsolation({
+        kind: 'switched', status: { ...initial, cwd: worktreePath, currentBranch: 'feature/next' },
+        worktree: { id: 'worktree-1', path: worktreePath, branch: 'feature/next' },
+        environment: {
+          sessionId: 'session-1', environment: worktreeEnvironment, activeTarget: 'worktree',
+          state: 'ready', localExecutionContextId: 'local-context', managedWorktreeId: 'worktree-1', updatedAt: 1
+        }
+      })
+    })
+    expect(screen.queryByRole('dialog', { name: 'Git 与 Worktree' })).toBeNull()
+    expect(screen.getByRole('button', { name: '打开 Git' }).textContent).toBe('feature/next')
+    expect(screen.getByTitle(worktreePath)).toBeTruthy()
+    expect(screen.getByText('已在独立 Worktree 中切换到「feature/next」')).toBeTruthy()
+  })
+
   it('keeps detached Git visible while omitting the ordinary Local environment label', () => {
     const actions = environmentActions()
     render(<TerminalHud hud={undefined} sessionId="session-1"
@@ -686,8 +752,8 @@ it('keeps hooks details in the original plain list shell', () => {
   expect(tooltip.querySelector('li')?.className).toBe('')
 })
 
-describe('main parity for Codex HUD controls', () => {
-  it('renders ClaudeAccountsControl, empty quota placeholder, ClaudeMd button, and all 4 permission options on Codex cards', async () => {
+describe('Codex HUD controls', () => {
+  it('hides unsupported controls, shows AGENTS.md and preserves all 4 permission options on Codex cards', async () => {
     const user = userEvent.setup()
     const win = window as unknown as { matouDesktop: Record<string, unknown> | undefined }
     const previousBridge = win.matouDesktop
@@ -710,9 +776,10 @@ describe('main parity for Codex HUD controls', () => {
           onPermissionMode={vi.fn()}
         />
       )
-      expect(screen.getByRole('button', { name: 'Claude 账户' })).toBeTruthy()
-      expect(screen.getByRole('status').textContent).toBe('—')
-      expect(screen.getByRole('button', { name: '编辑 ClaudeMd' }).textContent).toBe('ClaudeMd')
+      expect(screen.queryByRole('button', { name: 'Claude 账户' })).toBeNull()
+      expect(screen.queryByRole('status')).toBeNull()
+      expect(screen.getByRole('button', { name: 'AGENTS.md' }).textContent).toBe('AGENTS.md')
+      expect(screen.queryByRole('button', { name: '编辑 ClaudeMd' })).toBeNull()
 
       await user.click(screen.getByRole('button', { name: /当前权限模式：Default/ }))
       expect(screen.getByRole('menuitem', { name: /^Default/ })).toBeTruthy()
@@ -853,4 +920,40 @@ describe('Antigravity agent-aware HUD copy', () => {
     await user.click(screen.getByRole('menuitem', { name: 'Default' }))
     expect(onPermissionMode).toHaveBeenCalledWith('session-1', 'default', false, 'antigravity')
   })
+})
+
+it('renders Codex actual model/effort while hiding unsupported or unavailable telemetry, and saves AGENTS.md', async () => {
+  const user = userEvent.setup()
+  const request = vi.fn(async (method: RpcMethod, payload: unknown) => ({
+    path: '/repo/AGENTS.md', content: method === 'session.instructions-read' ? '# Initial' : (payload as { content: string }).content, exists: true
+  }))
+  const runtimeClient: GitRequestClient = { request: async function<T>(method: RpcMethod, payload: unknown): Promise<T> {
+    return await request(method, payload) as T
+  } }
+  const hud: SessionHudView = {
+    sessionId: 'codex-ui', provider: 'codex', mode: 'agent', startedAt: 1,
+    model: 'gpt-6-astra', effort: 'medium', contextWindowSize: 258400,
+    usageWindows: [{ label: '5h', percent: 20 }], allUsageWindows: [{ label: 'Weekly', percent: 30 }],
+    configCounts: { instructionFiles: 1, projectInstructionFileExists: true, hooks: 2, mcpServers: 3 },
+    subagentCount: 4, todos: [{ content: 'Unsupported plan', status: 'pending' }]
+  }
+  const { container, rerender } = render(<TerminalHud hud={hud} runtimeClient={runtimeClient} />)
+  expect(container.querySelector('.status-model')?.textContent).toContain('gpt-6-astra (medium)')
+  expect(container.querySelector('.status-usage')).toBeNull()
+  expect(container.textContent).not.toMatch(/Waiting|等待|5h|Weekly|MCPs|hooks|Agents|Unsupported plan|opusplan|0%/)
+  await user.click(screen.getByRole('button', { name: 'AGENTS.md' }))
+  const editor = await screen.findByRole('textbox', { name: 'AGENTS.md 内容' })
+  await user.clear(editor)
+  await user.type(editor, '# Updated')
+  await user.click(screen.getByRole('button', { name: '保存' }))
+  expect(request).toHaveBeenCalledWith('session.instructions-write', { sessionId: 'codex-ui', content: '# Updated' })
+  const withoutEffort = { ...hud, contextPercent: 13 }
+  delete withoutEffort.effort
+  rerender(<TerminalHud hud={withoutEffort} runtimeClient={runtimeClient} />)
+  expect(container.querySelector('.status-model')?.textContent).not.toContain('medium')
+  expect(screen.getByText('13%')).toBeTruthy()
+  const withoutModel: SessionHudView = { ...withoutEffort, modelStrategy: 'opusplan' }
+  delete withoutModel.model
+  rerender(<TerminalHud hud={withoutModel} runtimeClient={runtimeClient} />)
+  expect(container.querySelector('.status-model')).toBeNull()
 })

@@ -1,0 +1,36 @@
+
+ RUN  v4.1.11 /Users/icesword/Documents/AIProjects/matou-multi-agent-codex/apps/runtime
+
+(node:19310) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:22189) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:22810) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/cli/mt-cli.test.ts (109 tests | 1 failed) 37ms
+     × transports exactly 1 MiB of stdin JSON through the real client and server envelope 9ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/cli/mt-cli.test.ts > mt CLI > transports exactly 1 MiB of stdin JSON through the real client and server envelope
+Error: ENOENT: no such file or directory, chmod '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.c5/t/matou-mt-frame-4kyYsn/control/runtime.sock'
+ ❯ HostControlServer.start src/control/host-control-server.ts:222:48
+    220|       })
+    221|     })
+    222|     if (!isWindowsNamedPipe(this.#socketPath)) await chmod(this.#socke…
+       |                                                ^
+    223|   }
+    224|
+ ❯ src/cli/mt-cli.test.ts:409:5
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed | 5 passed (6)
+      Tests  1 failed | 217 passed (218)
+   Start at  20:31:52
+   Duration  17.80s (transform 656ms, setup 0ms, import 1.12s, tests 16.30s, environment 0ms)
+
+undefined
+/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/apps/runtime:
+ ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL  Command failed with exit code 1: vitest run --testTimeout=15000 --maxWorkers=1 src/antigravity-runtime.test.ts src/cli/mt-cli.test.ts src/control/host-control-client.test.ts src/control/host-control-server.test.ts src/storage/runtime-database-bootstrap.test.ts src/session/claude-resume-notices.test.ts

@@ -42,9 +42,9 @@ describe('PRD 04 provider launch plan', () => {
     })).toEqual({
       file: '/fixture/codex',
       args: [
-        '-c', 'model_context_window=512000', '-c', 'model_auto_compact_token_limit=460800', '-c', 'model_auto_compact_token_limit_scope="total"',
+        '-c', 'check_for_update_on_startup=false', '-c', 'model_context_window=512000', '-c', 'model_auto_compact_token_limit=460800', '-c', 'model_auto_compact_token_limit_scope="total"',
         '-c', 'developer_instructions="第一行\\n第二行有 \\"引号\\" 和 \\\\ 路径"',
-        'resume', 'codex-session-1'
+        '--ask-for-approval', 'on-request', '--sandbox', 'workspace-write', 'resume', 'codex-session-1'
       ],
       resuming: true
     })
@@ -57,7 +57,7 @@ describe('PRD 04 provider launch plan', () => {
     expect(resolvePtyCommand({
       contextWindow: 512_000, profile: 'codex', executable: '/fixture/codex', model: 'gpt-team',
       providerSessionId: 'codex-session-1'
-    }).args).toEqual(['-c', 'model_context_window=512000', '-c', 'model_auto_compact_token_limit=460800', '-c', 'model_auto_compact_token_limit_scope="total"', '--model', 'gpt-team', 'resume', 'codex-session-1'])
+    }).args).toEqual(['-c', 'check_for_update_on_startup=false', '-c', 'model_context_window=512000', '-c', 'model_auto_compact_token_limit=460800', '-c', 'model_auto_compact_token_limit_scope="total"', '--model', 'gpt-team', '--ask-for-approval', 'on-request', '--sandbox', 'workspace-write', 'resume', 'codex-session-1'])
   })
 
   it('opens an ordinary login Shell without any provider resume arguments', () => {
@@ -104,9 +104,9 @@ describe('PRD 04 provider launch plan', () => {
     })).toEqual({
       file: '/fixture/codex',
       args: [
-        '-c', 'model_context_window=512000', '-c', 'model_auto_compact_token_limit=460800', '-c', 'model_auto_compact_token_limit_scope="total"',
+        '-c', 'check_for_update_on_startup=false', '-c', 'model_context_window=512000', '-c', 'model_auto_compact_token_limit=460800', '-c', 'model_auto_compact_token_limit_scope="total"',
         '-c', 'developer_instructions="Use mt."',
-        'fork', 'codex-source-1'
+        '--ask-for-approval', 'on-request', '--sandbox', 'workspace-write', '-c', 'tui.resume_cwd="current"', 'fork', 'codex-source-1'
       ],
       resuming: true
     })
@@ -118,9 +118,10 @@ describe('PRD 04 provider launch plan', () => {
       contextWindow: 512_000, profile: 'codex', executable: '/fixture/codex',
       codexHooksConfig
     }).args).toEqual([
-      '-c', 'model_context_window=512000', '-c', 'model_auto_compact_token_limit=460800', '-c', 'model_auto_compact_token_limit_scope="total"',
+      '-c', 'check_for_update_on_startup=false', '-c', 'model_context_window=512000', '-c', 'model_auto_compact_token_limit=460800', '-c', 'model_auto_compact_token_limit_scope="total"',
       '-c', `hooks=${codexHooksConfig}`,
-      '--dangerously-bypass-hook-trust'
+      '--dangerously-bypass-hook-trust',
+      '--ask-for-approval', 'on-request', '--sandbox', 'workspace-write'
     ])
   })
 
@@ -131,7 +132,7 @@ describe('PRD 04 provider launch plan', () => {
     })).toEqual({
       file: '/fixture/codex',
       args: [
-        '-c', 'model_context_window=512000', '-c', 'model_auto_compact_token_limit=460800', '-c', 'model_auto_compact_token_limit_scope="total"',
+        '-c', 'check_for_update_on_startup=false', '-c', 'model_context_window=512000', '-c', 'model_auto_compact_token_limit=460800', '-c', 'model_auto_compact_token_limit_scope="total"',
         '-c', 'developer_instructions="Use mt."',
         '--dangerously-bypass-approvals-and-sandbox'
       ],
@@ -184,7 +185,7 @@ describe('PRD 04 provider launch plan', () => {
       forkSession: boolean
     ) {
       const args = [
-        '-c', 'model_context_window=512000',
+        '-c', 'check_for_update_on_startup=false', '-c', 'model_context_window=512000',
         '-c', 'model_auto_compact_token_limit=460800',
         '-c', 'model_auto_compact_token_limit_scope="total"',
         '-c', 'hooks={}',
@@ -192,9 +193,16 @@ describe('PRD 04 provider launch plan', () => {
         '-c', 'developer_instructions="Use mt."',
         '--model', 'gpt-x'
       ]
+      if (permissionMode === undefined || permissionMode === 'default') {
+        args.push('--ask-for-approval', 'on-request', '--sandbox', 'workspace-write')
+      }
       if (permissionMode === 'bypassPermissions') {
         args.push('--dangerously-bypass-approvals-and-sandbox')
       }
+      if (permissionMode === 'acceptEdits' || permissionMode === 'plan') {
+        args.push('--ask-for-approval', 'on-request', '--sandbox', permissionMode === 'plan' ? 'read-only' : 'workspace-write')
+      }
+      if (providerSessionId && forkSession) args.push('-c', 'tui.resume_cwd="current"')
       if (providerSessionId) args.push(forkSession ? 'fork' : 'resume', providerSessionId)
       return { file: '/fixture/codex', args, resuming: Boolean(providerSessionId) }
     }
@@ -275,9 +283,60 @@ describe('PRD 04 provider launch plan', () => {
   })
 })
 
-it('keeps the CLI default when no budget is configured and applies a selected maximum and effort independently', () => {
-  expect(resolvePtyCommand({ profile: 'codex', executable: 'codex' }).args).toEqual([])
+it('applies explicit Default permissions independently of context budget and effort', () => {
+  expect(resolvePtyCommand({ profile: 'codex', executable: 'codex' }).args).toEqual(['-c', 'check_for_update_on_startup=false', '--ask-for-approval', 'on-request', '--sandbox', 'workspace-write'])
   expect(resolvePtyCommand({ profile: 'codex', executable: 'codex', contextWindow: 872000, reasoningEffort: 'high', providerSessionId: 'same', forkSession: true }).args).toEqual([
-    '-c', 'model_context_window=872000', '-c', 'model_auto_compact_token_limit=784800', '-c', 'model_auto_compact_token_limit_scope="total"', '-c', 'model_reasoning_effort="high"', 'fork', 'same'
+    '-c', 'check_for_update_on_startup=false', '-c', 'model_context_window=872000', '-c', 'model_auto_compact_token_limit=784800', '-c', 'model_auto_compact_token_limit_scope="total"', '-c', 'model_reasoning_effort="high"', '--ask-for-approval', 'on-request', '--sandbox', 'workspace-write', '-c', 'tui.resume_cwd="current"', 'fork', 'same'
   ])
+})
+
+
+describe('Codex Default explicitly replaces inherited permissions', () => {
+  it.each([
+    { kind: 'new', providerSessionId: undefined, forkSession: false },
+    { kind: 'resume', providerSessionId: 'source', forkSession: false },
+    { kind: 'fork', providerSessionId: 'source', forkSession: true }
+  ])('uses configured Default for $kind instead of native resume inheritance', ({ providerSessionId, forkSession }) => {
+    const command = resolvePtyCommand({ profile: 'codex', executable: 'codex', permissionMode: 'default',
+      ...(providerSessionId ? { providerSessionId } : {}), forkSession,
+      codexDefaultPermissions: { approvalPolicy: 'never', sandboxMode: 'read-only' } })
+    expect(command.args.slice(2, 6)).toEqual(['--ask-for-approval', 'never', '--sandbox', 'read-only'])
+    if (providerSessionId) expect(command.args.slice(-2)).toEqual([forkSession ? 'fork' : 'resume', 'source'])
+  })
+
+  it.each(['bypassPermissions', 'plan'])('replaces %s flags on Default resume and fork', previous => {
+    for (const forkSession of [false, true]) {
+      const input = { profile: 'codex' as const, executable: 'codex', providerSessionId: 'same', forkSession }
+      const prior = resolvePtyCommand({ ...input, permissionMode: previous }).args
+      const next = resolvePtyCommand({ ...input, permissionMode: 'default' }).args
+      expect(prior).not.toEqual(next)
+      expect(next.slice(2, 6)).toEqual(['--ask-for-approval', 'on-request', '--sandbox', 'workspace-write'])
+      expect(next).not.toContain('--dangerously-bypass-approvals-and-sandbox')
+      expect(next).not.toContain('read-only')
+      expect(next.slice(-2)).toEqual([forkSession ? 'fork' : 'resume', 'same'])
+    }
+  })
+})
+
+ it.each([
+   { providerSessionId: undefined, forkSession: false },
+   { providerSessionId: 'same', forkSession: false },
+   { providerSessionId: 'same', forkSession: true }
+ ])('disables embedded Codex startup upgrades for every launch kind: %o', options => {
+   const command = resolvePtyCommand({ profile: 'codex', executable: 'codex', forkSession: options.forkSession,
+     ...(options.providerSessionId ? { providerSessionId: options.providerSessionId } : {}) })
+   expect(command.args.slice(0, 2)).toEqual(['-c', 'check_for_update_on_startup=false'])
+   expect(command.args.filter(arg => arg.startsWith('check_for_update_on_startup='))).toHaveLength(1)
+   for (const profile of ['claude-code', 'antigravity'] as const) {
+     expect(resolvePtyCommand({ profile, executable: profile }).args.join(' ')).not.toContain('check_for_update_on_startup')
+   }
+ })
+
+describe('DSH managed launch', () => {
+  it('starts the DSH TUI profile with a per-run patch and an explicit resume ID', () => {
+    expect(resolvePtyCommand({ profile: 'dsh', executable: '/bin/dsh', settingsPath: '/run/observer.patch.yml', providerSessionId: 'session-explicit' })).toEqual({
+      file: '/bin/dsh', args: ['dsh-tui', '--patch', '/run/observer.patch.yml', '--resume', 'session-explicit'], resuming: true
+    })
+    expect(resolvePtyCommand({ profile: 'dsh', executable: 'dsh' })).toEqual({ file: 'dsh', args: ['dsh-tui'], resuming: false })
+  })
 })

@@ -1,0 +1,161 @@
+{
+  "stage": 4,
+  "date": "2026-11-16",
+  "branch": "feat/multi-agent-dsh",
+  "versions": {
+    "launcher": "0.2.2-rc.1",
+    "tui": "0.19.0"
+  },
+  "mode": {
+    "safeMatouSwitching": false,
+    "manifestSwitchMode": "none",
+    "permissionModes": [],
+    "decision": "Read-only native HUD badge; no Matou switching menu. Approved in answer 6.",
+    "reason": "Native permission preset events persist a global TUI preference. Complete native mode switching conflicts with the no-global-configuration-write constraint.",
+    "nativeCommands": [
+      {
+        "name": "plan",
+        "available": true
+      },
+      {
+        "name": "permission",
+        "available": true
+      },
+      {
+        "name": "mode",
+        "available": false
+      },
+      {
+        "name": "sandbox",
+        "available": false
+      }
+    ],
+    "nativeTransitions": [
+      {
+        "phase": "before",
+        "preset": "workspace-write",
+        "planActive": false,
+        "agentStatus": "idle"
+      },
+      {
+        "phase": "plan-on-command",
+        "preset": "workspace-write",
+        "planActive": true,
+        "agentStatus": "idle"
+      },
+      {
+        "phase": "plan-off-command",
+        "preset": "workspace-write",
+        "planActive": false,
+        "agentStatus": "idle"
+      },
+      {
+        "phase": "preset-read-only-api",
+        "preset": "read-only",
+        "planActive": false,
+        "agentStatus": "idle"
+      },
+      {
+        "phase": "preset-restore-api",
+        "preset": "workspace-write",
+        "planActive": false,
+        "agentStatus": "idle"
+      }
+    ],
+    "invalidFirstProbe": "The extra argument in /plan on started a model request. Discarded; valid probe used /plan and /plan off.",
+    "probePreferenceCleanup": {
+      "authorizedBy": "answer 6",
+      "creationTime": "2026-11-15 23:39:40",
+      "value": "workspace-write",
+      "removed": [
+        "permission.json"
+      ],
+      "added": [],
+      "otherChanged": []
+    }
+  },
+  "mt": {
+    "section": "matou:host-control",
+    "nativeApi": "agent.ctx systemPrompt.section",
+    "literalWithoutInterpolation": true,
+    "rulesBytes": 6140,
+    "shellIdentity": "Official shellEnv.register after native ambient-secret scrub; only exact live foreground top-level agent.",
+    "scopeTests": [
+      "foreground accepted",
+      "background rejected before next poll",
+      "subagent rejected",
+      "same-id different-object rejected",
+      "old run rejected",
+      "disposed run rejected",
+      "original token takes precedence",
+      "invalid original does not retry fallback",
+      "revoked run rejected"
+    ],
+    "defaultSandbox": "workspace-write",
+    "sandboxRelaxed": false,
+    "newStorageOrControlEndpoint": false,
+    "extraRuntimeModelRequests": 0,
+    "live": {
+      "passed": true,
+      "calls": [
+        "identify",
+        "listTargets",
+        "listTargets",
+        "readCurrent"
+      ],
+      "screenReadBack": true,
+      "nativeToolScreenContainsMarker": true,
+      "assistantContainsMarker": true,
+      "nativeSectionRecords": 1,
+      "credentialValueFoundInNativeLog": false,
+      "notifications": [
+        "completed"
+      ]
+    },
+    "initialSandboxFailure": "Native secret scrub removed ambient MATOU_CONTROL_TOKEN. Resolved using the official shell environment provider under answer 7; sandbox unchanged.",
+    "invalidFixtureRuns": [
+      "UDS path too long",
+      "Temporary cwd not initialized as a Git repo",
+      "Preserve-navigation create result referred to active session; corrected to created.session.id. File-derived marker in that failed run is not evidence of screen read."
+    ]
+  },
+  "configuration": {
+    "checked": 40,
+    "unchanged": 34,
+    "runtimeDataChanged": [
+      "workspace registry",
+      "last-used",
+      "last-run",
+      "session-index",
+      "session-mounts",
+      "usage"
+    ],
+    "newPreferenceFiles": [],
+    "profileAndProtectedPreferenceChanges": [],
+    "projectInstructionFilesWritten": false
+  },
+  "validation": {
+    "runtimeRelatedUniqueTests": 215,
+    "runtimeRelatedFiles": 13,
+    "desktopDshHudTests": 5,
+    "domainTests": 12,
+    "packageImportTests": 2,
+    "workspaceTypecheck": "passed",
+    "runtimeFinalTypecheck": "passed",
+    "identifiers": "passed",
+    "diffCheck": "passed",
+    "livePtyTests": 1
+  },
+  "notVerified": [
+    "Real Electron UI and packaged app",
+    "Visual focus, scrolling, feedback and interaction performance",
+    "Native Fork child loading not re-tested in this stage",
+    "Full test suite"
+  ],
+  "notPerformed": [
+    "Packaging",
+    "Push",
+    "Release",
+    "Account or provider changes"
+  ]
+}

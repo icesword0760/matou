@@ -1,4 +1,4 @@
-export const EGRESS_FAMILIES = ['anthropic', 'openai', 'chatgpt-subscription'] as const
+export const EGRESS_FAMILIES = ['anthropic', 'openai', 'chatgpt-subscription', 'google'] as const
 export type EgressFamily = (typeof EGRESS_FAMILIES)[number]
 export type EgressCheckId =
   | 'mainland'
@@ -19,8 +19,12 @@ export interface EgressExit {
 
 export interface EgressHostSample {
   host: string
+  /** This host is intentionally not probed, rather than a failed request. */
+  notApplicable?: true
   ip?: string
   country?: string
+  /** True when the probe succeeded but took longer than 5 seconds. */
+  slow?: true
   error?: EgressHostError
 }
 
@@ -50,6 +54,8 @@ export interface EgressStatusWire {
   ruleMode: 'country' | 'ip'
   protectionEnabled: boolean
   sessionFamilies: Record<string, EgressFamily>
+  /** Complete membership for multi-target sessions; older runtimes omit it. */
+  sessionFamilySets?: Record<string, EgressFamily[]>
   checkedAt?: number
   lastTransition?: {
     id: string

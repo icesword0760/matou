@@ -68,6 +68,61 @@ describe('WorktreeService', () => {
     ])
   })
 
+  it.each(['available', 'occupied', 'missing'] as const)(
+    'checks out an existing branch only when it is %s',
+    async (branchState) => {
+      const branch = 'feature/existing'
+      const path = join(root, 'worktrees', 'new-checkout')
+      const occupiedPath = join(root, 'worktrees', 'occupied')
+      if (branchState === 'available') {
+        await exec('git', ['-C', repositoryRoot, 'branch', branch])
+      } else if (branchState === 'occupied') {
+        await exec('git', ['-C', repositoryRoot, 'worktree', 'add', '-b', branch, occupiedPath])
+      }
+      const create = service.create(command('existing-branch'), {
+        id: 'existing-worktree', executionContextId: 'existing-context', workspaceId: 'workspace-1',
+        repositoryRoot, path, branch, branchMode: 'checkout-existing', baseRef: 'HEAD',
+        setupPolicy: [], now: 10
+      })
+
+      if (branchState === 'available') {
+        const revision = (await exec('git', ['-C', repositoryRoot, 'rev-parse', branch])).stdout.trim()
+        await expect(create).resolves.toMatchObject({ state: 'ready', branch, baseRevision: revision })
+        expect(database.get("SELECT base_ref FROM worktrees WHERE id = 'existing-worktree'"))
+          .toEqual({ base_ref: branch })
+        expect((await exec('git', ['-C', path, 'symbolic-ref', 'HEAD'])).stdout.trim())
+          .toBe(`refs/heads/${branch}`)
+      } else {
+        await expect(create).rejects.toThrow(branchState === 'occupied'
+          ? `branch-checked-out:${await realpath(occupiedPath)}` : 'branch-missing')
+        expect((await exec('git', ['-C', repositoryRoot, 'worktree', 'list', '--porcelain'])).stdout)
+          .not.toContain('new-checkout')
+      }
+    }
+  )
+
+  it('retries an existing branch at the recorded revision when the checkout path is gone', async () => {
+    const branch = 'feature/retry-existing'
+    const path = join(root, 'worktrees', 'retry-existing')
+    await exec('git', ['-C', repositoryRoot, 'branch', branch])
+    const input = {
+      id: 'retry-existing', executionContextId: 'retry-context', workspaceId: 'workspace-1',
+      repositoryRoot, path, branch, branchMode: 'checkout-existing' as const, baseRef: branch,
+      setupPolicy: [], now: 10
+    }
+    await expect(service.create(command('interrupted-existing'), {
+      ...input,
+      onCheckpoint() { throw new Error('interrupted before ready') }
+    })).rejects.toThrow('interrupted before ready')
+    const revision = service.get(input.id)?.baseRevision
+    expect(revision).toEqual(expect.any(String))
+    await exec('git', ['-C', repositoryRoot, 'worktree', 'remove', path])
+
+    await expect(service.create(command('retry-existing'), input)).resolves.toMatchObject({
+      state: 'ready', branch, baseRevision: revision
+    })
+  })
+
   it('retains a dirty worktree instead of deleting user changes', async () => {
     const path = join(root, 'worktrees', 'dirty')
     await service.create(command('create-dirty'), {

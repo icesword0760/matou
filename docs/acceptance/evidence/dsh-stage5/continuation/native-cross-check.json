@@ -1,0 +1,31 @@
+{
+  "approval": {
+    "asked": 3,
+    "decisions": [
+      "allowed-once",
+      "allowed-once",
+      "rejected"
+    ],
+    "notices": 3,
+    "nativeEndReasons": [
+      "completed",
+      "completed",
+      "aborted",
+      "completed"
+    ],
+    "completionAndNativeAbortVerified": true
+  },
+  "error": {
+    "nativeErrorEnds": 3,
+    "notices": 3,
+    "httpPostRequests": 4
+  },
+  "mt": {
+    "markerInNativeToolResult": true,
+    "markerInAnswer": true
+  },
+  "recovery": {
+    "sameIdRetry": true,
+    "freshIdDistinct": true
+  }
+}

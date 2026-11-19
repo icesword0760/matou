@@ -49,6 +49,7 @@ export interface SessionGraphNodeView {
   cwd: string
   git?: SessionGitState
   sharedWorkingDirectory?: boolean
+  sharedSessionCount?: number
   worktree?: { branch: string; path: string; shared: boolean }
   environment?: SessionEnvironment
   hasOwnedWorktree?: boolean
@@ -100,8 +101,11 @@ export interface SessionHudView {
   gitDirty?: boolean
   startedAt: number
   permissionMode?: HudPermissionMode
+  /** Authoritative native mode text for providers without a Claude permission mode. */
+  providerPermissionLabel?: string
   modelStrategy?: HudModelStrategy
   model?: string
+  effort?: string
   sessionName?: string
   contextPercent?: number
   contextWindowSize?: number
@@ -225,7 +229,7 @@ export interface HierarchyCommands {
   startFreshProvider(sessionId: string): unknown
   listClaudeSessions(
     sessionId: string, query: string, searchScope?: 'metadata' | 'all', offset?: number, limit?: number,
-    provider?: 'claude-code' | 'antigravity'
+    provider?: 'claude-code' | 'antigravity' | 'codex' | 'dsh'
   ): Promise<ClaudeSessionListResult>
   getClaudeSessionDetail(
     sessionId: string, providerSessionId: string,
@@ -233,15 +237,15 @@ export interface HierarchyCommands {
       beforeEventIndex?: number
       aroundEventIndex?: number
       limit?: number
-      provider?: 'claude-code' | 'antigravity'
+      provider?: 'claude-code' | 'antigravity' | 'codex' | 'dsh'
     }
   ): Promise<ClaudeSessionDetail>
   searchClaudeSession(
     sessionId: string, providerSessionId: string, query: string, offset?: number, limit?: number,
-    provider?: 'claude-code' | 'antigravity'
+    provider?: 'claude-code' | 'antigravity' | 'codex' | 'dsh'
   ): Promise<ClaudeSessionSearchResult>
   loadClaudeSession(
-    sessionId: string, providerSessionId: string, provider?: 'claude-code' | 'antigravity'
+    sessionId: string, providerSessionId: string, provider?: 'claude-code' | 'antigravity' | 'codex' | 'dsh'
   ): Promise<ClaudeSessionLoadResult>
   restartStoppedSession?(sessionId: string): unknown
   removeSessionBranch?(sceneId: string, sessionId: string, scope: RemoveNodeScope): unknown
