@@ -4,6 +4,8 @@ use gpui::{prelude::*, *};
 use std::ops::Range;
 use unicode_segmentation::UnicodeSegmentation;
 
+use crate::terminal_input::read_clipboard_text;
+
 pub fn trim_name(value: &str) -> &str {
     value.trim_matches(|c: char| c.is_whitespace() && c != '\u{0085}' || c == '\u{feff}')
 }
@@ -267,7 +269,7 @@ impl RenameInput {
             }
             "v" if shortcut => {
                 self.typing = false;
-                if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                if let Some(text) = read_clipboard_text(cx) {
                     self.replace(self.selection.clone(), &text, false, cx);
                 }
             }
