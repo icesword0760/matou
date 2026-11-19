@@ -10,7 +10,7 @@ use matou_native_core::{
     backup::{BackupService, CLEAN_EXIT_BACKUP_TIMEOUT},
     hierarchy::{
         self, HierarchyIds, HierarchyResult, Scene, Session as StoredSession, Task, Workspace,
-        canvas, tabs, tasks, workspaces,
+        canvas, cards, tabs, tasks, workspaces,
     },
     ownership::DatabaseOwner,
     session_graph,
@@ -478,6 +478,51 @@ impl ShellOwner {
         let disposed: Vec<String> = serde_json::from_value(result["disposedSessionIds"].clone())?;
         self.retire_sessions(&disposed);
         Ok(disposed)
+    }
+
+    pub fn close_session_card(
+        &mut self,
+        command: &CommandMetadata,
+        input: &cards::CloseSessionCardInput,
+        replacement_ids: &HierarchyIds,
+        committed_at: i64,
+    ) -> Result<Value> {
+        // The owner serializes writes between the shortcut check and the workflow.
+        if cards::close_shortcut_is_last(&self.connection, &input.scene_id, &input.session_id)? {
+            return Ok(serde_json::json!({
+                "outcome": "hide-window",
+                "disposedSessionIds": [],
+                "rebuildCanvas": false,
+            }));
+        }
+        let run_id = self
+            .shells
+            .get(&input.session_id)
+            .filter(|shell| !shell.retiring && !shell.ended)
+            .map(|shell| shell.run_id.as_str());
+        let result = cards::close_card(
+            &mut self.connection,
+            command,
+            input,
+            replacement_ids,
+            "默认",
+            run_id,
+            committed_at,
+        )?;
+        self.retire_sessions(std::slice::from_ref(&input.session_id));
+        Ok(result)
+    }
+
+    pub fn remove_session_branch(
+        &mut self,
+        command: &CommandMetadata,
+        input: &cards::RemoveSessionBranchInput,
+        committed_at: i64,
+    ) -> Result<Value> {
+        let result = cards::remove_branch(&mut self.connection, command, input, committed_at)?;
+        let disposed: Vec<String> = serde_json::from_value(result["disposedSessionIds"].clone())?;
+        self.retire_sessions(&disposed);
+        Ok(result)
     }
 
     /// Stop runs without blocking the other sessions. The stable sessions remain in storage.

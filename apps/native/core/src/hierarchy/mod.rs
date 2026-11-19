@@ -1,4 +1,5 @@
 pub mod canvas;
+pub mod cards;
 mod model;
 mod navigation;
 pub mod tabs;

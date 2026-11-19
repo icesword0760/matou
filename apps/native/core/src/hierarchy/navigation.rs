@@ -109,18 +109,7 @@ fn focus_task(
         return Ok(());
     };
 
-    let scene_id: Option<String> = connection
-        .query_row(
-            "SELECT scenes.id FROM scenes
-         LEFT JOIN window_task_focus focus
-           ON focus.window_id = ? AND focus.task_id = scenes.task_id
-         WHERE scenes.task_id = ? AND scenes.archived_at IS NULL
-         ORDER BY (scenes.id = focus.active_scene_id) DESC, scenes.sort_key, scenes.created_at
-         LIMIT 1",
-            [window_id, &task_id],
-            |row| row.get(0),
-        )
-        .optional()?;
+    let scene_id = preferred_scene(connection, window_id, task_id)?;
     connection.execute(
         "INSERT INTO window_task_focus (window_id, task_id, active_scene_id, updated_at)
          VALUES (?, ?, ?, ?)
@@ -135,13 +124,31 @@ fn focus_task(
     focus_preferred_session(connection, window_id, &scene_id, now)
 }
 
-fn focus_preferred_session(
+pub(super) fn preferred_scene(
+    connection: &Connection,
+    window_id: &str,
+    task_id: &str,
+) -> Result<Option<String>> {
+    Ok(connection
+        .query_row(
+            "SELECT scenes.id FROM scenes
+         LEFT JOIN window_task_focus focus
+           ON focus.window_id = ? AND focus.task_id = scenes.task_id
+         WHERE scenes.task_id = ? AND scenes.archived_at IS NULL
+         ORDER BY (scenes.id = focus.active_scene_id) DESC, scenes.sort_key, scenes.created_at
+         LIMIT 1",
+            [window_id, task_id],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
+pub(super) fn preferred_session(
     connection: &Connection,
     window_id: &str,
     scene_id: &str,
-    now: i64,
-) -> Result<()> {
-    let session_id: Option<String> = connection
+) -> Result<Option<String>> {
+    Ok(connection
         .query_row(
             "SELECT sessions.id FROM session_mounts
          JOIN sessions ON sessions.id = session_mounts.session_id
@@ -153,7 +160,16 @@ fn focus_preferred_session(
             [window_id, scene_id],
             |row| row.get(0),
         )
-        .optional()?;
+        .optional()?)
+}
+
+fn focus_preferred_session(
+    connection: &Connection,
+    window_id: &str,
+    scene_id: &str,
+    now: i64,
+) -> Result<()> {
+    let session_id = preferred_session(connection, window_id, scene_id)?;
     connection.execute(
         "INSERT INTO window_scene_focus (window_id, scene_id, active_session_id, updated_at)
          VALUES (?, ?, ?, ?)

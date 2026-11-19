@@ -721,3 +721,245 @@ fn host_failure_is_not_successful_closed_and_does_not_join_blocked_stdin() -> Re
     );
     Ok(())
 }
+
+#[test]
+fn card_commands_retire_only_the_target_before_publishing_navigation() -> Result<()> {
+    use matou_native_core::hierarchy::cards::RemoveScope;
+    use serde_json::{Value, json};
+
+    for scope in [
+        Some(RemoveScope::NodeOnly),
+        Some(RemoveScope::NodeAndDescendants),
+        None,
+    ] {
+        let root = tempfile::tempdir()?;
+        let mut child = RuntimeChild::spawn(root.path())?;
+        child.hello()?;
+        let survivor = child.session.clone();
+        let survivor_pid = child.shell_pid()?;
+        let marker = child.workspace.join("project-file");
+        fs::write(&marker, "keep")?;
+        child.send(Command::CreateShellSibling {
+            scene_id: child.scene.clone(),
+            source_session_id: survivor.clone(),
+            parent_session_id: Some(survivor.clone()),
+        })?;
+        let deadline = Instant::now() + TIMEOUT;
+        let target = loop {
+            match child.event(deadline, true)? {
+                Event::Navigation {
+                    hierarchy, graph, ..
+                } => {
+                    let target = hierarchy.session.context("sibling focus")?.id;
+                    assert_ne!(target, survivor);
+                    assert_eq!(graph["focusedSessionId"], target);
+                    break target;
+                }
+                Event::NavigationFailed { message, .. } | Event::Diagnostic(message) => {
+                    bail!("{message}")
+                }
+                _ => {}
+            }
+        };
+        loop {
+            match child.event(deadline, true)? {
+                Event::Frame {
+                    session_id, screen, ..
+                } if session_id == target && screen_has_line(&screen, PROMPT) => break,
+                Event::Diagnostic(message) => bail!("{message}"),
+                _ => {}
+            }
+        }
+
+        let db = Connection::open_with_flags(
+            child.data.join("matou.sqlite"),
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+        let target_pid: i64 = db.query_row(
+            "SELECT pid FROM session_runs WHERE session_id = ? AND status = 'running'",
+            [&target],
+            |row| row.get(0),
+        )?;
+        child.send(Command::CloseSessionCard {
+            scene_id: child.scene.clone(),
+            session_id: survivor.clone(),
+            confirmed_intent: Some(format!("delete-session:{target}")),
+            preserve_scene_on_last_session: false,
+        })?;
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            match child.event(deadline, true)? {
+                Event::NavigationFailed { message, .. } => {
+                    assert_eq!(message, "Session deletion intent is stale");
+                    break;
+                }
+                Event::ScenesDisposed(ids) => bail!("failed close disposed {ids:?}"),
+                Event::Diagnostic(message) => bail!("{message}"),
+                _ => {}
+            }
+        }
+        assert_eq!(
+            db.query_row(
+                "SELECT COUNT(*) FROM session_runs WHERE status = 'running'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?,
+            2
+        );
+
+        child.send(match scope {
+            Some(scope) => Command::RemoveSessionBranch {
+                scene_id: child.scene.clone(),
+                session_id: target.clone(),
+                scope,
+            },
+            None => Command::CloseSessionCard {
+                scene_id: child.scene.clone(),
+                session_id: target.clone(),
+                confirmed_intent: None,
+                preserve_scene_on_last_session: false,
+            },
+        })?;
+        // Submit traffic to the other Shell immediately, even if the worker
+        // being removed is still finishing its journal.
+        child.input("printf 'SURVIVOR_%s\\n' OK")?;
+        let deadline = Instant::now() + TIMEOUT;
+        let mut disposed = false;
+        let mut published = false;
+        let mut survivor_output = false;
+        while !(published && survivor_output) {
+            match child.event(deadline, true)? {
+                Event::ScenesDisposed(ids) => {
+                    assert_eq!(ids, [target.clone()]);
+                    assert!(!disposed);
+                    disposed = true;
+                    assert!(
+                        !ProcessCommand::new("ps")
+                            .args(["-p", &target_pid.to_string(), "-o", "pid="])
+                            .output()?
+                            .status
+                            .success(),
+                        "target still alive at disposal event"
+                    );
+                }
+                Event::Navigation {
+                    hierarchy, graph, ..
+                } => {
+                    assert!(disposed, "graph published before disposal");
+                    let action = &graph["sessionCardAction"];
+                    assert_eq!(action["sessionId"], target);
+                    assert_eq!(action["disposedSessionIds"], json!([target]));
+                    assert_eq!(graph["focusedSessionId"], survivor);
+                    assert_eq!(hierarchy.session.context("surviving focus")?.id, survivor);
+                    if let Some(scope) = scope {
+                        assert_eq!(action["action"], "remove-session-branch");
+                        assert_eq!(action["scope"], serde_json::to_value(scope)?);
+                        assert_eq!(action["removedSessionIds"], json!([target]));
+                        assert_eq!(graph["nodes"].as_array().unwrap().len(), 1);
+                    } else {
+                        assert_eq!(action["action"], "close-session-card");
+                        assert_eq!(action["outcome"], "scene-remains");
+                        assert_eq!(action["rebuildCanvas"], false);
+                        assert_eq!(graph["nodes"].as_array().unwrap().len(), 2);
+                        assert!(graph["nodes"].as_array().unwrap().iter().any(|node| {
+                            node["sessionId"] == target && !node["archivedAt"].is_null()
+                        }));
+                    }
+                    published = true;
+                }
+                Event::Frame {
+                    session_id, screen, ..
+                } if session_id == survivor => {
+                    survivor_output |= screen_has_line(&screen, "SURVIVOR_OK");
+                }
+                Event::NavigationFailed { message, .. } | Event::Diagnostic(message) => {
+                    bail!("{message}")
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(
+            db.query_row(
+                "SELECT status FROM sessions WHERE id = ?",
+                [&target],
+                |row| row.get::<_, String>(0),
+            )?,
+            "archived"
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT status FROM session_runs WHERE session_id = ?",
+                [&target],
+                |row| row.get::<_, String>(0),
+            )?,
+            "exited"
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT pid FROM session_runs WHERE session_id = ? AND status = 'running'",
+                [&survivor],
+                |row| row.get::<_, u32>(0),
+            )?,
+            survivor_pid
+        );
+        assert_eq!(fs::read_to_string(&marker)?, "keep");
+
+        let before = card_write_count(&db)?;
+        child.send(Command::CloseSessionCard {
+            scene_id: child.scene.clone(),
+            session_id: survivor.clone(),
+            confirmed_intent: Some(format!("delete-session:{survivor}")),
+            preserve_scene_on_last_session: false,
+        })?;
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            match child.event(deadline, true)? {
+                Event::Graph(graph) if !graph["sessionCardAction"].is_null() => {
+                    let action: &Value = &graph["sessionCardAction"];
+                    assert_eq!(action["outcome"], "hide-window");
+                    assert_eq!(action["notice"]["confirmLabel"], "我知道了");
+                    assert_eq!(action["disposedSessionIds"], json!([]));
+                    assert_eq!(action["rebuildCanvas"], false);
+                    assert_eq!(graph["focusedSessionId"], survivor);
+                    break;
+                }
+                Event::ScenesDisposed(ids) => bail!("last card disposed {ids:?}"),
+                Event::NavigationFailed { message, .. } | Event::Diagnostic(message) => {
+                    bail!("{message}")
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(card_write_count(&db)?, before);
+        assert_eq!(
+            db.query_row(
+                "SELECT archived_at FROM sessions WHERE id = ?",
+                [&survivor],
+                |row| row.get::<_, Option<i64>>(0),
+            )?,
+            None
+        );
+
+        child.send(Command::Shutdown)?;
+        assert!(child.closed()?.is_empty());
+        let (status, stderr) = child.wait()?;
+        ensure!(status.success(), "runtime shutdown: {stderr}");
+        assert_shell_gone(survivor_pid)?;
+    }
+    Ok(())
+}
+
+fn screen_has_line(screen: &Screen, expected: &str) -> bool {
+    screen.cells.chunks(screen.cols).any(|cells| {
+        let line: String = cells.iter().map(|cell| cell.text.as_str()).collect();
+        line.trim_end() == expected
+    })
+}
+
+fn card_write_count(db: &Connection) -> Result<(i64, i64)> {
+    Ok(db.query_row(
+        "SELECT (SELECT COUNT(*) FROM command_deduplication WHERE command_type = 'hierarchy.delete-session'),
+                (SELECT COUNT(*) FROM domain_events WHERE event_type = 'session.archived')",
+        [], |row| Ok((row.get(0)?, row.get(1)?)),
+    )?)
+}
