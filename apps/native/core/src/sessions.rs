@@ -255,7 +255,10 @@ pub fn claude_binding(db: &Connection, session_id: &str) -> Result<Option<Claude
     Ok(db
         .query_row(
             "SELECT id, provider_session_id, metadata_json, restore_state,
-                (resume_state = 'available' AND validated_at IS NOT NULL
+                (resume_state = 'available' AND (validated_at IS NOT NULL
+                    OR CASE WHEN json_valid(metadata_json)
+                       THEN json_extract(metadata_json, '$.loadedFromCatalog') = 1
+                       ELSE 0 END IS TRUE)
                     AND invalidated_at IS NULL AND user_exited_at IS NULL
                     AND restore_state <> 'failed' AND provider_session_id <> '') AS resumable
          FROM provider_bindings WHERE session_id = ? AND provider = 'claude-code'
@@ -282,6 +285,128 @@ pub enum ClaudeRestore<'a> {
     Fail { binding_id: &'a str, error: &'a str },
     Retry,
     Fresh,
+}
+
+pub struct ClaudeCatalogLoad<'a> {
+    pub binding_id: &'a str,
+    pub session_id: &'a str,
+    pub scene_id: &'a str,
+    pub cwd: &'a str,
+    pub provider_session_id: &'a str,
+    pub title: &'a str,
+    pub model: Option<&'a str>,
+    pub permission_mode: &'a str,
+}
+
+pub fn load_claude_catalog_binding(
+    db: &mut Connection,
+    command: &CommandMetadata,
+    input: &ClaudeCatalogLoad<'_>,
+    now: i64,
+) -> Result<DomainCommit> {
+    execute(db, command, now, |tx, events| {
+        let session = require_session(tx, input.session_id)?;
+        let in_scene: bool = tx.query_row(
+            "SELECT EXISTS (SELECT 1 FROM session_canvas_memberships AS member
+                JOIN scenes ON scenes.id = member.scene_id AND scenes.archived_at IS NULL
+                WHERE member.session_id = ? AND member.scene_id = ?)",
+            params![input.session_id, input.scene_id],
+            |row| row.get(0),
+        )?;
+        ensure!(
+            session.archived_at.is_none()
+                && in_scene
+                && session.cwd == input.cwd
+                && matches!(session.kind.as_str(), "shell" | "claude-code"),
+            "Card is no longer available in this scene and working directory"
+        );
+        let running: bool = tx.query_row(
+            "SELECT EXISTS (SELECT 1 FROM session_runs
+                WHERE session_id = ? AND status IN ('starting', 'running'))",
+            [input.session_id],
+            |row| row.get(0),
+        )?;
+        ensure!(!running, "Card already has a running process");
+
+        let existing: Option<(String, String)> = tx
+            .query_row(
+                "SELECT id, metadata_json FROM provider_bindings
+                 WHERE session_id = ? AND provider = 'claude-code' AND provider_session_id = ?",
+                params![input.session_id, input.provider_session_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let revision: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(CASE WHEN json_valid(metadata_json)
+                THEN CAST(json_extract(metadata_json, '$.spawnRevision') AS INTEGER) END), 0)
+             FROM provider_bindings WHERE session_id = ? AND provider = 'claude-code'",
+            [input.session_id],
+            |row| row.get(0),
+        )?;
+        let binding_id = existing.as_ref().map_or(input.binding_id, |(id, _)| id);
+        let mut metadata: serde_json::Map<String, Value> = existing
+            .as_ref()
+            .and_then(|(_, metadata)| serde_json::from_str(metadata).ok())
+            .unwrap_or_default();
+        metadata.remove("invalidationReason");
+        metadata.remove("provisional");
+        metadata.remove("lastHookEvent");
+        if let Some(model) = input.model {
+            metadata.insert("model".into(), json!(model));
+        } else {
+            metadata.remove("model");
+        }
+        let revision = revision.saturating_add(1);
+        metadata.extend([
+            ("permissionMode".into(), json!(input.permission_mode)),
+            ("loadedFromCatalog".into(), json!(true)),
+            ("spawnRevision".into(), json!(revision)),
+            ("observedUserPrompt".into(), json!(false)),
+            ("observedNormalStop".into(), json!(false)),
+        ]);
+        tx.execute(
+            "UPDATE provider_bindings SET resume_state = 'expired', restore_state = 'none',
+                restore_error = NULL, invalidated_at = COALESCE(invalidated_at, ?), updated_at = ?
+             WHERE session_id = ? AND provider = 'claude-code' AND id <> ?",
+            params![now, now, input.session_id, binding_id],
+        )?;
+        tx.execute(
+            "INSERT INTO provider_bindings (id, session_id, provider, provider_session_id,
+                resume_state, restore_state, metadata_json, created_at, updated_at)
+             VALUES (?, ?, 'claude-code', ?, 'available', 'none', ?, ?, ?)
+             ON CONFLICT(session_id, provider, provider_session_id) DO UPDATE SET
+                resume_state = 'available', restore_state = 'none', restore_error = NULL,
+                invalidated_at = NULL, user_exited_at = NULL, validated_at = NULL,
+                metadata_json = excluded.metadata_json, updated_at = excluded.updated_at",
+            params![
+                binding_id,
+                input.session_id,
+                input.provider_session_id,
+                serde_json::to_string(&metadata)?,
+                now,
+                now
+            ],
+        )?;
+        tx.execute(
+            "UPDATE sessions SET kind = 'claude-code', title = ?, status = 'starting',
+                 work_status = 'starting', updated_at = ?, last_activity_at = ?, version = version + 1
+             WHERE id = ?",
+            params![input.title, now, now, input.session_id],
+        )?;
+        let payload = json!({
+            "sessionId": input.session_id, "provider": "claude-code", "bindingId": binding_id,
+            "providerSessionId": input.provider_session_id, "restoreState": "none",
+            "restoreError": null, "spawnRevision": revision,
+        });
+        events.push(session_event(
+            command,
+            "session.mode-changed",
+            &session,
+            now,
+            payload.clone(),
+        ));
+        Ok(payload)
+    })
 }
 
 pub fn change_claude_restore(
@@ -509,6 +634,7 @@ pub fn record_claude_identity(
             "providerConfigId",
             "model",
             "permissionMode",
+            "loadedFromCatalog",
             "cwd",
             "lastHookEvent",
             "observedUserPrompt",

@@ -630,6 +630,58 @@ impl ShellOwner {
         sessions::claude_binding(&self.connection, session_id)
     }
 
+    pub(crate) fn load_claude_catalog_binding(
+        &mut self,
+        input: &sessions::ClaudeCatalogLoad<'_>,
+    ) -> Result<i64> {
+        let id = (self.next_id)();
+        let commit = sessions::load_claude_catalog_binding(
+            &mut self.connection,
+            &command(id.clone(), "session.load-provider-catalog", id),
+            input,
+            now(),
+        )?;
+        let revision = commit.result["spawnRevision"]
+            .as_i64()
+            .context("catalog binding is missing its spawn revision")?;
+        self.pending.push(OwnerEvent::Domain(commit));
+        Ok(revision)
+    }
+
+    pub(crate) fn catalog_binding_owners(
+        &self,
+        provider_ids: &[&str],
+    ) -> Result<HashMap<String, Value>> {
+        let mut query = self.connection.prepare(
+            "SELECT binding.provider_session_id, session.id, session.title
+             FROM provider_bindings AS binding
+             JOIN sessions AS session ON session.id = binding.session_id
+             JOIN tasks ON tasks.id = session.task_id
+             JOIN workspaces ON workspaces.id = tasks.workspace_id
+             WHERE binding.provider = 'claude-code' AND binding.resume_state = 'available'
+               AND binding.invalidated_at IS NULL AND binding.user_exited_at IS NULL
+               AND session.kind = 'claude-code' AND session.archived_at IS NULL
+               AND tasks.archived_at IS NULL AND workspaces.archived_at IS NULL
+               AND binding.provider_session_id IN (SELECT value FROM json_each(?))
+             ORDER BY binding.updated_at DESC, session.id",
+        )?;
+        let rows = query.query_map([serde_json::to_string(provider_ids)?], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut owners = HashMap::new();
+        for row in rows {
+            let (provider_id, session_id, title) = row?;
+            owners
+                .entry(provider_id)
+                .or_insert_with(|| json!({"sessionId": session_id, "title": title}));
+        }
+        Ok(owners)
+    }
+
     pub(crate) fn startup_provider_restores(
         &self,
         scene_id: Option<&str>,
