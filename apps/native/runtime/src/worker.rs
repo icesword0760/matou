@@ -107,6 +107,25 @@ pub struct SessionWorker {
     thread: Option<JoinHandle<Result<()>>>,
 }
 
+pub(crate) struct PendingShutdown {
+    reply: Result<Receiver<Result<()>>>,
+    thread: JoinHandle<Result<()>>,
+}
+
+impl PendingShutdown {
+    pub(crate) fn wait(self) -> Result<()> {
+        let result = self.reply.and_then(|reply| {
+            reply
+                .recv()
+                .context("Shell session worker did not report shutdown")?
+        });
+        // The join result can retain an earlier fatal poll error even if
+        // the worker stopped before receiving this shutdown command.
+        join(self.thread)?;
+        result
+    }
+}
+
 impl SessionWorker {
     pub fn spawn(
         options: SessionOptions,
@@ -206,21 +225,16 @@ impl SessionWorker {
     }
 
     pub fn shutdown(&mut self) -> Result<()> {
-        let Some(thread) = self.thread.take() else {
-            return Ok(());
-        };
-        let (reply, result) = mpsc::channel();
-        let requested = self.send(WorkerCommand::Shutdown { reply: Some(reply) });
-        let result = requested.and_then(|()| {
-            result
-                .recv()
-                .context("Shell session worker did not report shutdown")?
-        });
-        let exited = join(thread);
-        // The join result can retain an earlier fatal poll error even if
-        // the worker stopped before receiving this shutdown command.
-        exited?;
-        result
+        self.begin_shutdown().map_or(Ok(()), PendingShutdown::wait)
+    }
+
+    pub(crate) fn begin_shutdown(&mut self) -> Option<PendingShutdown> {
+        let thread = self.thread.take()?;
+        let (reply, receive) = mpsc::channel();
+        let reply = self
+            .send(WorkerCommand::Shutdown { reply: Some(reply) })
+            .map(|()| receive);
+        Some(PendingShutdown { reply, thread })
     }
 
     pub(crate) fn is_finished(&self) -> bool {

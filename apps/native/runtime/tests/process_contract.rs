@@ -33,16 +33,21 @@ struct RuntimeChild {
     data: PathBuf,
     workspace: PathBuf,
     task: String,
+    scene: String,
     session: String,
 }
 
 impl RuntimeChild {
     fn spawn(root: &Path) -> Result<Self> {
+        Self::spawn_with_zshrc(root, &format!("PROMPT='{PROMPT} '\n"))
+    }
+
+    fn spawn_with_zshrc(root: &Path, zshrc: &str) -> Result<Self> {
         let data = root.join("数据 空间");
         let workspace = root.join("工作 区");
         let home = root.join("Shell 家目录");
         fs::create_dir_all(&home)?;
-        fs::write(home.join(".zshrc"), format!("PROMPT='{PROMPT} '\n"))?;
+        fs::write(home.join(".zshrc"), zshrc)?;
         let mut child = ProcessCommand::new(env!("CARGO_BIN_EXE_matou-native-runtime"))
             .arg("--data-root")
             .arg(&data)
@@ -79,6 +84,7 @@ impl RuntimeChild {
             data,
             workspace,
             task: String::new(),
+            scene: String::new(),
             session: String::new(),
         })
     }
@@ -112,6 +118,7 @@ impl RuntimeChild {
             match self.event(deadline, true)? {
                 Event::Ready { hierarchy, .. } => {
                     self.task = hierarchy.task.context("Ready task")?.id;
+                    self.scene = hierarchy.scene.context("Ready scene")?.id;
                     self.session = hierarchy.session.context("Ready Shell")?.id;
                     ensure!(
                         self.data.join("matou.sqlite").is_file(),
@@ -480,6 +487,85 @@ fn real_pipe_owner_pty_ack_scroll_fifo_and_explicit_shutdown() -> Result<()> {
     println!(
         "verified one clean exit snapshot, newest seven retained, standalone SQLite contains committed rename and terminal summary"
     );
+    assert_runtime_released(&child.data)?;
+    Ok(())
+}
+
+#[test]
+fn clean_shutdown_signals_both_shells_before_waiting() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let zshrc = format!(
+        r#"PROMPT='{PROMPT} '
+TRAPHUP() {{
+    : > "$HOME/stopping-$$"
+    local -a stopping
+    until (( ${{#stopping}} == 2 )); do
+        stopping=("$HOME"/stopping-*(N))
+        /bin/sleep 0.01
+    done
+    printf '\nPARALLEL_SHUTDOWN_%s\n' "$$"
+    exit 0
+}}
+printf '\nREADY_PID=%s\n' "$$"
+"#
+    );
+    let mut child = RuntimeChild::spawn_with_zshrc(root.path(), &zshrc)?;
+    child.hello()?;
+    let first_pid = child.shell_pid()?;
+    child.send(Command::CreateShellSibling {
+        scene_id: child.scene.clone(),
+        source_session_id: child.session.clone(),
+        parent_session_id: None,
+    })?;
+    let deadline = Instant::now() + TIMEOUT;
+    let mut shells = std::collections::BTreeMap::from([(child.session.clone(), first_pid)]);
+    while shells.len() < 2 {
+        match child.event(deadline, true)? {
+            Event::Frame {
+                session_id, screen, ..
+            } => {
+                if let Some(pid) = screen.cells.chunks(screen.cols).find_map(|cells| {
+                    let row: String = cells.iter().map(|cell| cell.text.as_str()).collect();
+                    row.trim_end().strip_prefix("READY_PID=")?.parse().ok()
+                }) {
+                    shells.insert(session_id, pid);
+                }
+            }
+            Event::Diagnostic(error) => bail!("host diagnostic: {error}"),
+            Event::NavigationFailed { message, .. } => bail!("create sibling: {message}"),
+            Event::Closed => bail!("host closed while waiting for both Shells"),
+            _ => {}
+        }
+    }
+
+    child.send(Command::Shutdown)?;
+    let diagnostics = child.closed()?;
+    let (status, stderr) = child.wait()?;
+    ensure!(status.success(), "clean shutdown: {stderr}");
+    assert!(
+        diagnostics.is_empty(),
+        "shutdown diagnostics: {diagnostics:?}"
+    );
+    let backups: Vec<_> = BackupService::new(&child.data)?
+        .list_valid()?
+        .into_iter()
+        .filter(|backup| backup.reason == BackupReason::CleanExit)
+        .collect();
+    assert_eq!(backups.len(), 1);
+    let snapshot = Connection::open_with_flags(&backups[0].path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    for (session, pid) in shells {
+        assert_shell_gone(pid)?;
+        let summary: String = snapshot.query_row(
+            "SELECT latest_lines_json FROM session_graph_summaries WHERE session_id = ?",
+            [&session],
+            |row| row.get(0),
+        )?;
+        // Sequential shutdown forces one Shell to exit before the other enters its HUP trap.
+        assert!(
+            summary.contains(&format!("PARALLEL_SHUTDOWN_{pid}")),
+            "Shell {pid} did not observe both shutdown signals: {summary}"
+        );
+    }
     assert_runtime_released(&child.data)?;
     Ok(())
 }

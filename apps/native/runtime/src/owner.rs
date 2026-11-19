@@ -1007,13 +1007,24 @@ impl ShellOwner {
 
     pub fn shutdown(&mut self) -> Result<Vec<OwnerEvent>> {
         self.closing = true;
+        // Request every active Shell to stop before waiting for any worker.
+        let shutdowns: Vec<_> = self
+            .shells
+            .values_mut()
+            .filter(|shell| !shell.retiring)
+            .filter_map(|shell| shell.worker.begin_shutdown())
+            .collect();
+        let retiring = self
+            .shells
+            .values_mut()
+            .filter(|shell| shell.retiring)
+            .map(|shell| shell.worker.join_after_shutdown());
         let mut first_error = None;
-        for shell in self.shells.values_mut() {
-            let result = if shell.retiring {
-                shell.worker.join_after_shutdown()
-            } else {
-                shell.worker.shutdown()
-            };
+        for result in shutdowns
+            .into_iter()
+            .map(|shutdown| shutdown.wait())
+            .chain(retiring)
+        {
             if let Err(error) = result {
                 first_error.get_or_insert(error);
             }
