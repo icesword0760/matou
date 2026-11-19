@@ -10,6 +10,7 @@ import type { RouterLease } from '../model-router/manager'
 import { nativeClaudeModels } from './native-model-catalog'
 import { GatewayRoutingError, type GatewayOverride } from './claude-request-gateway'
 import { isDeepSeekMessagesDestination } from './deepseek-inline-tools'
+import type { SessionContextUsageSnapshot } from './deepseek-token-usage'
 
 export interface ClaudeModelRoutingOptions {
   preferences: AgentModelPreferences
@@ -18,6 +19,7 @@ export interface ClaudeModelRoutingOptions {
   accounts?: SubscriptionAccounts
   roleSnapshot?: ResolvedClaudeRoleSnapshot
   sourceConnection?: PreparedClaudeRoleLaunch['sourceConnection']
+  readContextUsage?: () => SessionContextUsageSnapshot | undefined
   releaseTargets?: () => void
   isClosed?: () => boolean
   assertTargetAllowed?: (family?: EgressFamily) => void | Promise<void>
@@ -87,10 +89,14 @@ export function claudeModelRouting(options: ClaudeModelRoutingOptions, env: Node
           const compactEffort = snapshot.preferences.compaction.effort
           const effort = custom && compactEffort !== 'follow' ? compactEffort : custom && role ? snapshot.roles[role].effort : selected.effort
           if (effort && effort !== 'follow' && selected.metadata?.supportedEfforts && !selected.metadata.supportedEfforts.includes(effort)) throw new Error('Unsupported effort')
+          const mode = snapshot.preferences.contextWindows[selected.providerId] ?? 'default'
+          const rawWindow = mode === 'maximum' ? selected.metadata?.maxContextWindow ?? selected.metadata?.contextWindow : selected.metadata?.contextWindow
+          const contextWindow = rawWindow === undefined ? undefined : mode === '512k' ? Math.min(512_000, rawWindow) : rawWindow
           return { ...base,
             effort: effort && effort !== 'follow' ? effort : 'omit' as const,
             thinking: effort && effort !== 'follow' && /^claude-/.test(selected.model) ? 'adaptive' as const : 'omit' as const,
-            ...(selected.metadata?.maxOutputTokens ? { maxOutputTokens: selected.metadata.maxOutputTokens } : {}) }
+            ...(selected.metadata?.maxOutputTokens ? { maxOutputTokens: selected.metadata.maxOutputTokens } : {}),
+            ...(contextWindow ? { contextWindow } : {}) }
         } catch (error) { throw new GatewayRoutingError(error instanceof SubscriptionAccountBindingError ? error.message : `${label}: model target or reasoning effort is unavailable`) }
       }
       const compact = options.preferences.compaction
@@ -106,8 +112,21 @@ export function claudeModelRouting(options: ClaudeModelRoutingOptions, env: Node
       const effort = roleEffort(options.provider, input.model)
       const apiRole = /^matou-api\/(opus|sonnet|haiku)$/.exec(input.model)?.[1] as 'opus' | 'sonnet' | 'haiku' | undefined
       const model = apiRole && !options.provider?.subscription ? options.provider?.modelMapping?.[apiRole] : undefined
+      const resolvedModelId = (model ?? input.model).replace(/\[1m\]$/i, '')
+      const metadata = options.provider?.modelMetadata?.find(entry => entry.id === resolvedModelId)
+      const mode = options.provider ? options.preferences.contextWindows[options.provider.id] ?? 'default' : 'default'
+      const rawWindow = mode === 'maximum' ? metadata?.maxContextWindow ?? metadata?.contextWindow : metadata?.contextWindow
+      const contextWindow = rawWindow === undefined ? undefined : mode === '512k' ? Math.min(512_000, rawWindow) : rawWindow
       const auth = authentication(claudeRequestRole(input.model) ?? 'main')
-      return auth || model || effort && effort !== 'follow' ? { ...(options.provider?.subscription ? { routerTarget: true } : {}), ...(auth ? { authentication: auth } : {}), ...(model ? { model } : {}), ...(effort && effort !== 'follow' ? { effort } : {}) } : undefined
+      return auth || model || contextWindow || effort && effort !== 'follow'
+        ? {
+            ...(options.provider?.subscription ? { routerTarget: true } : {}),
+            ...(auth ? { authentication: auth } : {}),
+            ...(model ? { model } : {}),
+            ...(effort && effort !== 'follow' ? { effort } : {}),
+            ...(contextWindow ? { contextWindow } : {})
+          }
+        : undefined
     },
     close() { if (closed) return; closed = true; lease?.release(); lease = undefined; options.releaseTargets?.() }
   }

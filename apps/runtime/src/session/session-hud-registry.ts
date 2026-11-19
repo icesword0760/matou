@@ -83,6 +83,8 @@ interface MutableHud extends SessionHudSnapshot {
   providerPermissionObserved: boolean
   pendingPermissionMode?: HudPermissionMode
   providerModelObserved: boolean
+  providerContextObserved?: boolean
+  contextUsedTokens?: number
   configCheckedAt?: number
   configCwd?: string
   antigravityQuota?: Record<string, unknown>
@@ -209,6 +211,16 @@ export class SessionHudRegistry {
   delete(sessionId: string): void {
     this.accountUsage.delete(sessionId)
     this.#states.delete(sessionId)
+  }
+
+  contextUsage(sessionId: string): { usedTokens?: number; contextWindowSize?: number } | undefined {
+    const current = this.#states.get(sessionId)
+    if (!current || current.mode !== 'agent') return undefined
+    if (current.contextUsedTokens === undefined && current.contextWindowSize === undefined) return undefined
+    return {
+      ...(current.contextUsedTokens === undefined ? {} : { usedTokens: current.contextUsedTokens }),
+      ...(current.contextWindowSize === undefined ? {} : { contextWindowSize: current.contextWindowSize })
+    }
   }
 
   updateEnvironment(sessionId: string, input: {
@@ -373,18 +385,26 @@ export class SessionHudRegistry {
       current.providerModelObserved = true
     }
     const contextWindow = object(payload.context_window) ?? object(payload.contextWindow)
+    const contextWindowSize = numeric(nested(payload.context_window, 'context_window_size')) ??
+      numeric(nested(payload.contextWindow, 'contextWindowSize'))
+    if (contextWindowSize !== undefined && contextWindowSize > 0) current.contextWindowSize = contextWindowSize
+    const contextUsedTokens = extractContextUsedTokens(payload, current.contextWindowSize)
     const contextPercent = numeric(contextWindow?.used_percentage) ??
       numeric(contextWindow?.usedPercentage) ?? derivedContextPercent(payload)
     if (contextPercent !== undefined) {
       current.contextPercent = Math.round(contextPercent)
+      current.providerContextObserved = true
+      if (contextUsedTokens !== undefined) current.contextUsedTokens = contextUsedTokens
     } else if (contextWindow && [
       'used_percentage', 'usedPercentage', 'current_usage', 'currentUsage'
     ].some((key) => Object.prototype.hasOwnProperty.call(contextWindow, key) && contextWindow[key] === null)) {
       delete current.contextPercent
+      delete current.contextUsedTokens
+      current.providerContextObserved = true
+    } else if (contextUsedTokens !== undefined) {
+      current.contextUsedTokens = contextUsedTokens
+      current.providerContextObserved = true
     }
-    const contextWindowSize = numeric(nested(payload.context_window, 'context_window_size')) ??
-      numeric(nested(payload.contextWindow, 'contextWindowSize'))
-    if (contextWindowSize !== undefined && contextWindowSize > 0) current.contextWindowSize = contextWindowSize
     const duration = numeric(nested(payload.cost, 'total_duration_ms')) ??
       numeric(nested(payload.cost, 'totalDurationMs'))
     if (duration !== undefined && duration > Math.max(0, this.#now() - current.startedAt)) {
@@ -531,6 +551,10 @@ export class SessionHudRegistry {
     const permission = normalizePermission(history.permissionMode)
     if (permission && !current.providerPermissionObserved) current.permissionMode = permission
     if (history.model && !current.providerModelObserved) current.model = history.model
+    if (!current.providerContextObserved) {
+      if (history.contextUsedTokens !== undefined) current.contextUsedTokens = history.contextUsedTokens
+      else delete current.contextUsedTokens
+    }
     if (!current.sessionEnded) {
       current.optimisticAgents.clear()
       current.transcriptPath = transcriptPath
@@ -779,6 +803,22 @@ function modelNameForStrategy(strategy: HudModelStrategy): string {
   if (strategy === 'claude-sonnet-4-6') return 'Claude Sonnet 4.6'
   if (strategy === 'claude-opus-4-6') return 'Claude Opus 4.6'
   return 'Opus Plan'
+}
+
+function extractContextUsedTokens(payload: Record<string, unknown>, fallbackWindowSize?: number): number | undefined {
+  const window = object(payload.context_window) ?? object(payload.contextWindow)
+  const usage = object(window?.current_usage) ?? object(window?.currentUsage)
+  if (usage) {
+    const used = ['input_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens', 'output_tokens']
+      .reduce((sum, key) => sum + Math.max(0, Math.floor(numeric(usage[key]) ?? 0)), 0)
+    if (used > 0) return used
+  }
+  const percent = numeric(window?.used_percentage) ?? numeric(window?.usedPercentage)
+  const size = numeric(window?.context_window_size) ?? numeric(window?.contextWindowSize) ?? fallbackWindowSize
+  if (percent !== undefined && percent > 0 && size !== undefined && size > 0) {
+    return Math.round(percent / 100 * size)
+  }
+  return undefined
 }
 
 function derivedContextPercent(payload: Record<string, unknown>): number | undefined {

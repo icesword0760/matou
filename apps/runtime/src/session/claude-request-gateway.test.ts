@@ -241,6 +241,126 @@ describe('Claude request gateway', () => {
     expect(JSON.parse(official.requests[0]!.body).messages[0].content[0].tool.type).toBe('tool_reference')
   })
 
+  it('injects observed token usage only into DeepSeek /v1/messages requests and leaves non-DeepSeek roles untouched', async () => {
+    const deepseekRequests: Array<{ url: string | undefined; body: string }> = []
+    const deepseekServer = await listen(async (request, response) => {
+      const chunks: Buffer[] = []
+      for await (const chunk of request) chunks.push(Buffer.from(chunk))
+      deepseekRequests.push({ url: request.url, body: Buffer.concat(chunks).toString('utf8') })
+      response.writeHead(200, { 'content-type': 'text/event-stream' })
+      response.end([
+        'event: message_start',
+        'data: {"type":"message_start","message":{"id":"ds_1","role":"assistant","content":[],"usage":{"input_tokens":500,"cache_creation_input_tokens":0,"cache_read_input_tokens":400000,"output_tokens":1}}}',
+        '',
+        'event: content_block_start',
+        'data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call_ds_1","name":"Bash","input":{}}}',
+        '',
+        'event: message_delta',
+        'data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":500}}',
+        '',
+        ''
+      ].join('\n'))
+    })
+    const localDeepSeek = new URL(deepseekServer)
+    const originalRequest = http.request
+    vi.spyOn(http, 'request').mockImplementation(((url: URL, ...args: unknown[]) => {
+      if (url instanceof URL && url.hostname === 'api.deepseek.com') {
+        url = new URL(url)
+        url.hostname = localDeepSeek.hostname
+        url.port = localDeepSeek.port
+      }
+      return Reflect.apply(originalRequest, http, [url, ...args])
+    }) as typeof http.request)
+
+    const haikuRequests: Array<{ url: string | undefined; body: string }> = []
+    const haikuServer = await listen(async (request, response) => {
+      const chunks: Buffer[] = []
+      for await (const chunk of request) chunks.push(Buffer.from(chunk))
+      haikuRequests.push({ url: request.url, body: Buffer.concat(chunks).toString('utf8') })
+      response.writeHead(200, { 'content-type': 'application/json' })
+      response.end(JSON.stringify({
+        id: 'hk_1',
+        type: 'message',
+        role: 'assistant',
+        content: [{ type: 'tool_use', id: 'call_hk_2', name: 'Bash', input: {} }],
+        usage: { input_tokens: 1000, cache_creation_input_tokens: 0, cache_read_input_tokens: 420000, output_tokens: 300 }
+      }))
+    })
+
+    const gateway = await startClaudeRequestGateway({
+      upstreamUrl: haikuServer,
+      env: {},
+      contextWindow: 872_000,
+      resolveOverride: ({ model }) => model === 'matou-role/opus'
+        ? { baseUrl: 'http://api.deepseek.com/anthropic', model: 'deepseek-flash', contextWindow: 1_048_576 }
+        : { baseUrl: haikuServer, model: 'gemini-4-neon-high', contextWindow: 1_048_576 }
+    })
+    dispose.unshift(gateway.close)
+
+    // Turn 1 on Opus (DeepSeek): no prior assistant message -> untouched
+    await (await fetch(gateway.baseUrl + '/v1/messages', {
+      method: 'POST',
+      body: JSON.stringify({
+        model: 'matou-role/opus',
+        max_tokens: 32_000,
+        messages: [{ role: 'user', content: 'start' }]
+      })
+    })).text()
+    expect(JSON.parse(deepseekRequests[0]!.body).messages).toEqual([{ role: 'user', content: 'start' }])
+
+    // Turn 2 on Opus (DeepSeek): gets exact observed usage (401000 / 840000; 439000 remaining)
+    const turn2History = [
+      { role: 'user', content: 'start' },
+      { role: 'assistant', content: [{ type: 'tool_use', id: 'call_ds_1', name: 'Bash', input: {} }] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'call_ds_1', content: 'done' }] }
+    ]
+    await (await fetch(gateway.baseUrl + '/v1/messages', {
+      method: 'POST',
+      body: JSON.stringify({ model: 'matou-role/opus', max_tokens: 32_000, messages: turn2History })
+    })).text()
+    const opusTurn2 = JSON.parse(deepseekRequests[1]!.body)
+    expect(opusTurn2.messages[2].content).toEqual([
+      { type: 'tool_result', tool_use_id: 'call_ds_1', content: 'done' },
+      { type: 'text', text: '<system-reminder>\nToken usage: 401000/840000; 439000 remaining\n</system-reminder>' }
+    ])
+
+    // count_tokens and compaction on Opus (DeepSeek) are NOT injected
+    await (await fetch(gateway.baseUrl + '/v1/messages/count_tokens', {
+      method: 'POST',
+      body: JSON.stringify({ model: 'matou-role/opus', messages: turn2History })
+    })).text()
+    expect(JSON.parse(deepseekRequests[2]!.body).messages).toEqual(turn2History)
+
+    await (await fetch(gateway.baseUrl + '/v1/messages', {
+      method: 'POST',
+      headers: { 'x-claude-code-compaction': 'auto' },
+      body: JSON.stringify({ model: 'matou-role/opus', max_tokens: 32_000, messages: turn2History })
+    })).text()
+    expect(JSON.parse(deepseekRequests[3]!.body).messages).toEqual(turn2History)
+
+    // Turn 3 switched to Haiku (non-DeepSeek): NOT injected at all
+    await (await fetch(gateway.baseUrl + '/v1/messages', {
+      method: 'POST',
+      body: JSON.stringify({ model: 'matou-role/haiku', max_tokens: 32_000, messages: turn2History })
+    })).text()
+    expect(JSON.parse(haikuRequests[0]!.body).messages).toEqual(turn2History)
+
+    // Turn 4 switched back from Haiku to Opus (DeepSeek): immediately injects Haiku turn's observed usage (421300)
+    const turn4History = [
+      ...turn2History,
+      { role: 'assistant', content: [{ type: 'tool_use', id: 'call_hk_2', name: 'Bash', input: {} }] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'call_hk_2', content: 'ok' }] }
+    ]
+    await (await fetch(gateway.baseUrl + '/v1/messages', {
+      method: 'POST',
+      body: JSON.stringify({ model: 'matou-role/opus', max_tokens: 32_000, messages: turn4History })
+    })).text()
+    expect(JSON.parse(deepseekRequests[4]!.body).messages[4].content[1]).toEqual({
+      type: 'text',
+      text: '<system-reminder>\nToken usage: 421300/840000; 418700 remaining\n</system-reminder>'
+    })
+  })
+
   it('reports incompatible inline tools as a client error before sending upstream', async () => {
     const upstream = await captureOfficialRequests()
     const gateway = await start(upstream.official)

@@ -10,6 +10,7 @@ import { SocksProxyAgent } from 'socks-proxy-agent'
 import { resolveProxyForUrl } from '../egress/proxy-route'
 import { sessionEn, sessionZhCN } from '../i18n/messages/session'
 import { convertDeepSeekInlineTools, DeepSeekInlineToolCompatibilityError, isDeepSeekMessagesDestination } from './deepseek-inline-tools'
+import { DeepSeekContextUsageTracker, type SessionContextUsageSnapshot } from './deepseek-token-usage'
 
 const MAX_REQUEST_BYTES = 64 * 1024 * 1024
 const HOP_BY_HOP_HEADERS = [
@@ -41,11 +42,14 @@ export interface GatewayOverride {
   effort?: 'omit' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
   thinking?: 'adaptive' | 'omit'
   maxOutputTokens?: number
+  contextWindow?: number
 }
 
 interface GatewayOptions {
   upstreamUrl: string
   env: NodeJS.ProcessEnv
+  contextWindow?: number | null
+  readContextUsage?: () => SessionContextUsageSnapshot | undefined
   assertTargetAllowed?: (family?: EgressFamily) => void | Promise<void>
   onAuthenticationFailure?: (target: GatewayAuthenticationTarget) => void | Promise<void>
   /** Restarts the shared router when needed and returns its current base URL. */
@@ -67,6 +71,7 @@ export async function startClaudeRequestGateway(options: GatewayOptions): Promis
   // Sessions keep the router URL captured at launch; after a recovery that had
   // to move ports, every later router request follows the recovered origin.
   const router: RouterOrigin = {}
+  const usageTracker = new DeepSeekContextUsageTracker()
   const getAgent = (destination: URL) => {
     const loopback = ['127.0.0.1', 'localhost', '[::1]'].includes(destination.hostname)
     const proxyUrl = loopback ? undefined : resolveProxyForUrl(options.env, destination.href)
@@ -86,7 +91,7 @@ export async function startClaudeRequestGateway(options: GatewayOptions): Promis
       active.delete(controller)
       if (!response.writableFinished || !request.complete) controller.abort()
     })
-    void forwardRequest(request, response, controller, prefix, upstream, getAgent, options, router).catch((error: unknown) => {
+    void forwardRequest(request, response, controller, prefix, upstream, getAgent, options, router, usageTracker).catch((error: unknown) => {
       if (controller.signal.aborted) return
       if (error instanceof GatewayRoutingError) {
         sendError(response, 502, error.message)
@@ -131,8 +136,9 @@ async function forwardRequest(
   prefix: string,
   upstream: URL,
   getAgent: (destination: URL) => http.Agent,
-  { resolveOverride, assertTargetAllowed, onAuthenticationFailure, recoverRouter, env }: GatewayOptions,
-  router: RouterOrigin
+  { resolveOverride, assertTargetAllowed, onAuthenticationFailure, recoverRouter, env, contextWindow, readContextUsage }: GatewayOptions,
+  router: RouterOrigin,
+  usageTracker: DeepSeekContextUsageTracker
 ): Promise<void> {
   const locale = env.MATOU_LOCALE
   const route = readRoute(request.url, prefix)
@@ -145,13 +151,15 @@ async function forwardRequest(
   let body: Buffer | undefined
   let override: GatewayOverride | undefined
   let rewritten = false
+  let compactionMarked = false
   let message: Record<string, unknown> | undefined
   if (request.method === 'POST' && ['/v1/messages', '/v1/messages/count_tokens'].includes(route.path)) {
     body = await readBody(request)
     message = parseMessage(body)
     if (message && typeof message.model === 'string') {
       const marker = request.headers['x-claude-code-compaction']
-      const compactionMarked = marker === 'manual' || marker === 'auto'
+      compactionMarked = marker === 'manual' || marker === 'auto'
+      if (route.path === '/v1/messages' && compactionMarked) usageTracker.noteCompaction()
       const webSearch = !compactionMarked && Array.isArray(message.tools) && message.tools.length > 0 &&
         message.tools.every(tool => typeof object(tool)?.type === 'string' && (object(tool)!.type as string).startsWith('web_search_'))
       override = await resolveOverride({
@@ -190,7 +198,15 @@ async function forwardRequest(
   const followRouter = () => { if (override?.routerTarget === true && router.origin) destination.host = new URL(router.origin).host }
   followRouter()
   if (message && isDeepSeekMessagesDestination(destination)) {
-    const converted = convertDeepSeekInlineTools(message)
+    let converted = convertDeepSeekInlineTools(message)
+    if (route.path === '/v1/messages' && !compactionMarked) {
+      const sessionUsage = readContextUsage?.()
+      converted = usageTracker.attach(converted, {
+        ...(contextWindow !== undefined ? { sessionContextWindow: contextWindow } : {}),
+        ...(override?.contextWindow !== undefined ? { overrideContextWindow: override.contextWindow } : {}),
+        ...(sessionUsage ? { sessionUsage } : {})
+      })
+    }
     if (converted !== message) {
       body = Buffer.from(JSON.stringify(converted))
       rewritten = true
@@ -237,6 +253,10 @@ async function forwardRequest(
         sendError(response, 502, 'Claude request gateway could not read the upstream response.')
       })
       return
+    }
+    if (request.method === 'POST' && route.path === '/v1/messages' && !compactionMarked &&
+        (incoming.statusCode ?? 0) >= 200 && (incoming.statusCode ?? 0) < 300) {
+      usageTracker.observeResponse(incoming)
     }
     response.writeHead(incoming.statusCode ?? 502, endToEndHeaders(incoming.headers))
     incoming.pipe(response)

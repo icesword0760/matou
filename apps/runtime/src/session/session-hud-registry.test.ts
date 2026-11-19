@@ -763,3 +763,36 @@ it('rejects stale Codex transcript writes after run changes', async () => {
     expect(registry.snapshot('codex')?.model).toBe('new-model')
   } finally { await rm(root, { recursive: true, force: true }) }
 })
+
+it('exposes Claude context token usage from resumed transcripts and live statusLine updates', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'matou-claude-usage-'))
+  try {
+    const path = join(root, 'session.jsonl')
+    await writeFile(path, [
+      { type: 'assistant', message: { role: 'assistant', usage: { input_tokens: 500, cache_creation_input_tokens: 0, cache_read_input_tokens: 760_000, output_tokens: 300 } } },
+      { type: 'system', subtype: 'compact_boundary' },
+      { type: 'assistant', message: { role: 'assistant', usage: { input_tokens: 368, cache_creation_input_tokens: 0, cache_read_input_tokens: 417_408, output_tokens: 89 } } },
+      { type: 'assistant', isSidechain: true, message: { role: 'assistant', usage: { input_tokens: 1200, output_tokens: 100 } } }
+    ].map(row => JSON.stringify(row)).join('\n') + '\n')
+
+    const registry = new SessionHudRegistry()
+    registry.spawn({ sessionId: 'claude-s1', profile: 'claude-code' })
+    const own = { runId: 'run-1', currentRunId: () => 'run-1' }
+    await registry.refreshTranscript('claude-s1', path, own)
+    expect(registry.contextUsage('claude-s1')).toEqual({ usedTokens: 417_865 })
+
+    registry.ingestProvider('claude-s1', {
+      context_window: {
+        used_percentage: 48,
+        context_window_size: 872_000,
+        current_usage: { input_tokens: 400, cache_creation_input_tokens: 0, cache_read_input_tokens: 418_000, output_tokens: 100 }
+      }
+    })
+    expect(registry.contextUsage('claude-s1')).toEqual({ usedTokens: 418_500, contextWindowSize: 872_000 })
+
+    registry.ingestProvider('claude-s1', {
+      context_window: { used_percentage: null, current_usage: null, context_window_size: 872_000 }
+    })
+    expect(registry.contextUsage('claude-s1')).toEqual({ contextWindowSize: 872_000 })
+  } finally { await rm(root, { recursive: true, force: true }) }
+})

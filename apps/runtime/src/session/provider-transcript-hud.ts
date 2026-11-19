@@ -8,6 +8,7 @@ export interface ProviderTranscriptHudSnapshot {
   effort?: string
   contextPercent?: number
   contextWindowSize?: number
+  contextUsedTokens?: number
   completedToolCalls?: Array<{ id: string; name: string }>
   sessionName?: string
   startedAt?: number
@@ -28,6 +29,7 @@ interface TranscriptState {
   effort?: string
   contextPercent?: number
   contextWindowSize?: number
+  contextUsedTokens?: number
   offset: number
   remainder: string
   fileMtimeMs: number
@@ -140,6 +142,10 @@ function ingestLine(state: TranscriptState, line: string): void {
   }
   if (ingestCodexLine(state, row)) return
   if (row.type === 'queue-operation') return
+  if (row.type === 'system' && row.subtype === 'compact_boundary') {
+    delete state.contextUsedTokens
+    return
+  }
   const timestamp = timestampMs(row.timestamp)
   if (timestamp !== undefined) state.startedAt = Math.min(state.startedAt ?? timestamp, timestamp)
   const customTitle = text(row.customTitle)
@@ -153,6 +159,14 @@ function ingestLine(state: TranscriptState, line: string): void {
 
   const message = isRecord(row.message) ? row.message : undefined
   if (!message) return
+  if (row.isSidechain !== true && message.role === 'assistant' && isRecord(message.usage)) {
+    const used = ['input_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens', 'output_tokens']
+      .reduce((sum, key) => {
+        const value = message.usage && isRecord(message.usage) ? message.usage[key] : undefined
+        return sum + (typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.floor(value) : 0)
+      }, 0)
+    if (used > 0) state.contextUsedTokens = used
+  }
   const messagePermission = text(message.permissionMode)
   const model = text(message.model)
   if (messagePermission) state.permissionMode = messagePermission
@@ -282,7 +296,9 @@ function snapshot(state: TranscriptState, now: number): ProviderTranscriptHudSna
       ...(state.contextPercent === undefined ? {} : { contextPercent: state.contextPercent }),
       ...(state.contextWindowSize === undefined ? {} : { contextWindowSize: state.contextWindowSize }),
       completedToolCalls: [...state.completedTools].map(id => ({ id, name: 'Bash' }))
-    } : {}),
+    } : {
+      ...(state.contextUsedTokens === undefined ? {} : { contextUsedTokens: state.contextUsedTokens })
+    }),
     ...(sessionName ? { sessionName } : {}),
     ...(state.startedAt === undefined ? {} : { startedAt: state.startedAt }),
     ...(state.permissionMode ? { permissionMode: state.permissionMode } : {}),

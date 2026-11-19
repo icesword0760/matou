@@ -2542,7 +2542,7 @@ export class RuntimeServer {
             try { this.#egress!.assertTargetAllowed(preparedRoleLaunch ? family : family ?? legacyEgressPlan.family) }
             catch { throw new GatewayRoutingError('出口异常，已暂停。请在网络检查中恢复出口或明确豁免后重试。 Network egress protection is active.') }
           } } : {}),
-          preferences: modelPreferences, ...(preparedRoleLaunch ? { roleSnapshot: preparedRoleLaunch.snapshot, ...(preparedRoleLaunch.sourceConnection ? { sourceConnection: preparedRoleLaunch.sourceConnection } : {}), releaseTargets: preparedRoleLaunch.close, isClosed: () => this.#closed } : {}), ...(providerView ? { provider: providerView } : {}), store: this.#providerConfigs,
+          preferences: modelPreferences, readContextUsage: () => this.#hud.contextUsage(message.sessionId), ...(preparedRoleLaunch ? { roleSnapshot: preparedRoleLaunch.snapshot, ...(preparedRoleLaunch.sourceConnection ? { sourceConnection: preparedRoleLaunch.sourceConnection } : {}), releaseTargets: preparedRoleLaunch.close, isClosed: () => this.#closed } : {}), ...(providerView ? { provider: providerView } : {}), store: this.#providerConfigs,
           ...(this.#subscriptionAccounts ? { accounts: this.#subscriptionAccounts } : {})
         } } : {}),
         ...(providerSessionId === undefined ? {} : { providerSessionId }),

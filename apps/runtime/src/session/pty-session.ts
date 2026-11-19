@@ -364,6 +364,8 @@ export class PtySession {
         const gateway = await startClaudeRequestGateway({
           upstreamUrl: finalEnvironment.ANTHROPIC_BASE_URL || 'https://api.anthropic.com',
           env: finalEnvironment, resolveOverride: routing.resolveOverride,
+          contextWindow,
+          ...(options.modelRouting.readContextUsage ? { readContextUsage: options.modelRouting.readContextUsage } : {}),
           ...(accounts ? {
             onAuthenticationFailure: target => accounts.markNeedsSignIn(target.providerId, target.accountIdentity),
             recoverRouter: () => accounts.ensureRouterRunning()
