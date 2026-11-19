@@ -6,7 +6,10 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use matou_native_core::{provider_launch::prepare_claude_launch, pty::ShellLaunch};
+use matou_native_core::{
+    provider_launch::{attach_claude_settings, prepare_claude_launch},
+    pty::ShellLaunch,
+};
 use serde_json::{Value, json};
 
 const MARKERS: [&str; 13] = [
@@ -44,7 +47,7 @@ fn prepare(root: &Path, binding: Value, overrides: &[(&str, &str)]) -> Result<Sh
             .iter()
             .map(|&(key, value)| (OsString::from(key), OsString::from(value))),
     );
-    prepare_claude_launch(root, root, &binding, inherited, 80, 24)
+    Ok(prepare_claude_launch(root, root, &binding, inherited, 80, 24)?.launch)
 }
 
 fn assert_env(launch: &ShellLaunch, name: &str, expected: &str) {
@@ -269,7 +272,42 @@ fn isolated_path_resolution_never_reads_login_rc() -> Result<()> {
     assert!(!marker.exists());
 
     let launch = prepare_claude_launch(root, root, &Value::Null, environment(false), 80, 24)?;
-    assert_eq!(launch.executable, Path::new("/usr/bin/true"));
+    assert_eq!(launch.launch.executable, Path::new("/usr/bin/true"));
     assert!(marker.exists());
+    Ok(())
+}
+
+#[test]
+fn settings_precede_existing_flags_and_bypass_only_loopback() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut launch = prepare(
+        temp.path(),
+        json!({"model": "fixture-model", "permissionMode": "plan"}),
+        &[
+            ("HTTPS_PROXY", "http://localhost:1234"),
+            ("NO_PROXY", "example.invalid"),
+        ],
+    )?;
+    let settings = temp.path().join("private settings.json");
+    attach_claude_settings(&mut launch, &settings)?;
+    assert_eq!(
+        &launch.argv[..2],
+        ["--settings", settings.to_str().unwrap()]
+    );
+    assert_eq!(
+        &launch.argv[2..],
+        ["--model", "fixture-model", "--permission-mode", "plan"]
+    );
+    assert_env(&launch, "HTTPS_PROXY", "http://localhost:1234");
+    #[cfg(not(windows))]
+    for name in ["NO_PROXY", "no_proxy"] {
+        assert_env(&launch, name, "example.invalid,127.0.0.1");
+    }
+    #[cfg(windows)]
+    assert!(launch.env.iter().any(|(key, value)| {
+        key.to_str()
+            .is_some_and(|key| key.eq_ignore_ascii_case("no_proxy"))
+            && value == "example.invalid,127.0.0.1"
+    }));
     Ok(())
 }

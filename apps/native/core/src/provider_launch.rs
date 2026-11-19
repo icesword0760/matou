@@ -20,8 +20,7 @@ const ROLES: [&str; 3] = ["opus", "sonnet", "haiku"];
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Provider {
-    #[serde(rename = "id")]
-    _id: String,
+    id: String,
     endpoint: String,
     model: String,
     api_key: Option<String>,
@@ -34,6 +33,56 @@ struct Provider {
     effort_mapping: BTreeMap<String, String>,
 }
 
+pub struct ClaudeLaunch {
+    pub launch: ShellLaunch,
+    pub provider_config_id: String,
+    pub model: String,
+    pub permission_mode: String,
+}
+
+/// Put the private run settings before all provider selection flags.
+pub fn attach_claude_settings(launch: &mut ShellLaunch, path: &Path) -> Result<()> {
+    let path = path
+        .to_str()
+        .context("provider settings path is not UTF-8")?;
+    launch.argv.splice(..0, ["--settings".into(), path.into()]);
+    let has_proxy = [
+        "HTTP_PROXY",
+        "http_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+    ]
+    .into_iter()
+    .any(|name| get_var(&launch.env, name).is_some_and(|value| !value.is_empty()));
+    if has_proxy {
+        // Node and curl recognize different case variants. Keep existing
+        // exclusions and make the run's private URL a direct request for both.
+        let fallback = get_var(&launch.env, "NO_PROXY")
+            .or_else(|| get_var(&launch.env, "no_proxy"))
+            .map(OsStr::to_owned)
+            .unwrap_or_default();
+        for name in ["NO_PROXY", "no_proxy"] {
+            let mut exclusions = get_var(&launch.env, name)
+                .map(OsStr::to_owned)
+                .unwrap_or_else(|| fallback.clone());
+            if !exclusions
+                .to_string_lossy()
+                .split(',')
+                .any(|entry| matches!(entry.trim(), "*" | "127.0.0.1"))
+            {
+                if !exclusions.is_empty() {
+                    exclusions.push(",");
+                }
+                exclusions.push("127.0.0.1");
+            }
+            set_var(&mut launch.env, name.into(), exclusions);
+        }
+    }
+    Ok(())
+}
+
 pub fn prepare_claude_launch(
     data_root: &Path,
     cwd: &Path,
@@ -41,7 +90,7 @@ pub fn prepare_claude_launch(
     mut environment: BTreeMap<OsString, OsString>,
     cols: u16,
     rows: u16,
-) -> Result<ShellLaunch> {
+) -> Result<ClaudeLaunch> {
     validate_cwd(cwd)?;
     let provider = read_provider(data_root, binding)?;
     if provider.kind.as_deref() == Some("subscription")
@@ -90,16 +139,25 @@ pub fn prepare_claude_launch(
     #[cfg(unix)]
     set_var(&mut environment, "PWD".into(), cwd.as_os_str().into());
 
-    Ok(ShellLaunch {
-        profile: LaunchProfile::ClaudeCode,
-        executable,
-        argv,
-        cwd: cwd.to_owned(),
-        data_root: data_root.to_owned(),
-        inherited_env: BTreeMap::new(),
-        env: environment,
-        cols,
-        rows,
+    let permission_mode = match binding["permissionMode"].as_str() {
+        Some(mode @ ("auto" | "acceptEdits" | "plan" | "bypassPermissions")) => mode,
+        _ => "default",
+    };
+    Ok(ClaudeLaunch {
+        launch: ShellLaunch {
+            profile: LaunchProfile::ClaudeCode,
+            executable,
+            argv,
+            cwd: cwd.to_owned(),
+            data_root: data_root.to_owned(),
+            inherited_env: BTreeMap::new(),
+            env: environment,
+            cols,
+            rows,
+        },
+        provider_config_id: provider.id,
+        model: model.trim().to_owned(),
+        permission_mode: permission_mode.to_owned(),
     })
 }
 
@@ -157,7 +215,7 @@ fn read_provider(data_root: &Path, binding: &Value) -> Result<Provider> {
     let Some(providers) = providers else {
         ensure!(bound_id.is_none_or(|id| id == OFFICIAL_ID), "{missing}");
         return Ok(Provider {
-            _id: OFFICIAL_ID.into(),
+            id: OFFICIAL_ID.into(),
             endpoint: "https://api.anthropic.com".into(),
             ..Provider::default()
         });

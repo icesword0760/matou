@@ -13,6 +13,7 @@ use matou_native_core::{
         canvas, cards, tabs, tasks, workspaces,
     },
     ownership::DatabaseOwner,
+    provider_launch::{ClaudeLaunch, attach_claude_settings},
     pty::LaunchProfile,
     session_graph,
     sessions::{self, SessionRun, StartRunInput},
@@ -20,11 +21,15 @@ use matou_native_core::{
     storage::{CommandMetadata, DomainCommit},
 };
 use rusqlite::{Connection, OptionalExtension, params};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::{
     SessionEvent, SessionOptions,
     derived::{CwdTracker, WorkStatusTracker, terminal_summary_lines, utf16_tail},
+    provider_hook::{
+        HookMessage, HookSetup, IDENTITY_TIMEOUT, Observation, ProviderHookServer, Registration,
+        Scope,
+    },
     worker::{SessionWorker, WorkerCommand, WorkerEvent},
 };
 
@@ -40,6 +45,17 @@ struct RunningShell {
     ended: bool,
     retiring: bool,
     cwd_capture: Option<(Instant, bool)>,
+    hook: Option<RunHook>,
+}
+
+struct RunHook {
+    _registration: Registration,
+    launch_metadata: Value,
+    secrets: Vec<String>,
+    deadline: Option<Instant>,
+    last_observation: Option<Observation>,
+    rejected: bool,
+    reported_missing: bool,
 }
 
 #[derive(Default)]
@@ -53,6 +69,7 @@ pub enum OwnerEvent {
     Terminal(WorkerEvent),
     /// The event range is committed before consumers refresh their graph views.
     Domain(DomainCommit),
+    ProviderIdentity(Value),
     Diagnostic {
         session_id: String,
         message: String,
@@ -71,6 +88,7 @@ pub struct ShellOwner {
     _lease: DatabaseOwner,
     generation: String,
     next_id: Box<dyn FnMut() -> String>,
+    hook_server: Option<ProviderHookServer>,
     closing: bool,
 }
 
@@ -98,6 +116,7 @@ impl ShellOwner {
             _lease: lease,
             generation,
             next_id: Box::new(next_id),
+            hook_server: None,
             closing: false,
         };
         let runs = {
@@ -539,6 +558,7 @@ impl ShellOwner {
                 && !shell.retiring
             {
                 shell.retiring = true;
+                shell.hook = None;
                 shell.cwd_capture = None;
                 // Keep the run registered until its final exit record is handled.
                 // If the channel already closed, poll will reap and report the worker.
@@ -621,9 +641,67 @@ impl ShellOwner {
     /// on the runtime thread; subsequent session requests are forwarded without waiting.
     pub fn launch(
         &mut self,
+        options: SessionOptions,
+        restore_history: bool,
+        divider: &str,
+    ) -> Result<()> {
+        ensure!(
+            options.launch.profile == LaunchProfile::Shell,
+            "Provider launch requires a hook registration"
+        );
+        self.launch_run(options, restore_history, divider, None)
+    }
+
+    pub(crate) fn launch_claude(
+        &mut self,
+        session_id: String,
+        terminal: matou_native_terminal::TerminalOptions,
+        plan: ClaudeLaunch,
+    ) -> Result<()> {
+        let mut launch = plan.launch;
+        launch.cols = terminal.cols;
+        launch.rows = terminal.rows;
+        let secrets = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"]
+            .into_iter()
+            .filter_map(|name| {
+                launch
+                    .env
+                    .iter()
+                    .find(|(key, _)| {
+                        key.to_str()
+                            .is_some_and(|key| key.eq_ignore_ascii_case(name))
+                    })
+                    .and_then(|(_, value)| value.to_str())
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned)
+            })
+            .collect::<Vec<_>>();
+        let safe = |value: &str| safe_hook_text(value, &secrets).unwrap_or("").to_owned();
+        let metadata = json!({
+            "providerConfigId": safe(&plan.provider_config_id), "model": safe(&plan.model),
+            "permissionMode": safe(&plan.permission_mode), "cwd": safe(&launch.cwd.to_string_lossy()),
+        });
+        self.launch_run(
+            SessionOptions {
+                session_id,
+                terminal,
+                launch,
+                journal: Default::default(),
+                restored_history: Vec::new(),
+                collect_history: false,
+            },
+            false,
+            "",
+            Some((metadata, secrets)),
+        )
+    }
+
+    fn launch_run(
+        &mut self,
         mut options: SessionOptions,
         restore_history: bool,
         divider: &str,
+        provider: Option<(Value, Vec<String>)>,
     ) -> Result<()> {
         ensure!(!self.closing, "Runtime is shutting down");
         if let Some(previous) = self.shells.get(&options.session_id) {
@@ -669,6 +747,22 @@ impl ShellOwner {
         let cols = options.launch.cols.into();
         let rows = options.launch.rows.into();
         let run_id = (self.next_id)();
+        let hook = if let Some((launch_metadata, secrets)) = provider {
+            let registration = self
+                .register_hook(&mut options, &run_id)
+                .context(HookSetup)?;
+            Some(RunHook {
+                _registration: registration,
+                launch_metadata,
+                secrets,
+                deadline: Some(Instant::now() + IDENTITY_TIMEOUT),
+                last_observation: None,
+                rejected: false,
+                reported_missing: false,
+            })
+        } else {
+            None
+        };
         let mut worker = SessionWorker::spawn(options, self.send.clone(), run_id.clone())?;
         let time = now();
         let commit = sessions::start_run(
@@ -696,6 +790,9 @@ impl ShellOwner {
                 return Err(error);
             }
         };
+        if hook.is_some() {
+            self.summaries.remove(&session_id);
+        }
         self.shells.insert(
             session_id,
             RunningShell {
@@ -710,10 +807,32 @@ impl ShellOwner {
                 ended: false,
                 retiring: false,
                 cwd_capture: None,
+                hook,
             },
         );
         self.pending.push(OwnerEvent::Domain(commit));
         Ok(())
+    }
+
+    fn register_hook(
+        &mut self,
+        options: &mut SessionOptions,
+        run_id: &str,
+    ) -> Result<Registration> {
+        if self.hook_server.is_none() {
+            self.hook_server = Some(ProviderHookServer::start()?);
+        }
+        let registration = self.hook_server.as_ref().unwrap().register(
+            &options.launch.data_root,
+            Scope {
+                session_id: options.session_id.clone(),
+                run_id: run_id.to_owned(),
+                generation: self.generation.clone(),
+                expected_id: None,
+            },
+        )?;
+        attach_claude_settings(&mut options.launch, &registration.settings_path)?;
+        Ok(registration)
     }
 
     pub fn send(&self, session_id: &str, command: WorkerCommand) -> Result<()> {
@@ -787,9 +906,147 @@ impl ShellOwner {
             }
             false
         });
+        self.poll_provider_hooks(&mut events);
         self.flush_due_summaries(&mut events);
         self.start_due_cwd_captures();
         Ok(events)
+    }
+
+    fn poll_provider_hooks(&mut self, events: &mut Vec<OwnerEvent>) {
+        let Some(server) = &self.hook_server else {
+            return;
+        };
+        for shell in self.shells.values_mut() {
+            if shell.hook.is_some() && shell.worker.is_finished() {
+                shell.hook = None;
+            }
+        }
+        let hooks: Vec<_> = server.messages().take(64).collect();
+        for hook in hooks {
+            match hook {
+                HookMessage::Observed(scope, observation) => {
+                    self.apply_hook(scope, observation, events)
+                }
+                HookMessage::Retired(scope) => reject_identity(events, &scope, "retired-run"),
+            }
+        }
+        for (session_id, shell) in &mut self.shells {
+            if let Some(hook) = &mut shell.hook
+                && hook
+                    .deadline
+                    .is_some_and(|deadline| deadline <= Instant::now())
+            {
+                hook.deadline = None;
+                events.push(OwnerEvent::ProviderIdentity(json!({
+                    "result": "timed-out", "sessionId": session_id, "runId": shell.run_id,
+                    "provider": "claude-code",
+                })));
+            }
+        }
+    }
+
+    fn apply_hook(
+        &mut self,
+        scope: Scope,
+        mut observation: Observation,
+        events: &mut Vec<OwnerEvent>,
+    ) {
+        let Some(hook) = self
+            .shells
+            .get_mut(&scope.session_id)
+            .filter(|shell| {
+                !self.closing
+                    && !shell.ended
+                    && !shell.retiring
+                    && shell.run_id == scope.run_id
+                    && scope.generation == self.generation
+            })
+            .and_then(|shell| shell.hook.as_mut())
+        else {
+            reject_identity(events, &scope, "retired-run");
+            return;
+        };
+        if hook.rejected || observation.event == "SessionEnd" {
+            return;
+        }
+        let safe = |value: Option<String>| {
+            value.filter(|value| safe_hook_text(value, &hook.secrets).is_some())
+        };
+        observation.identity = safe(observation.identity);
+        let Some(identity) = observation.identity.as_deref() else {
+            if !hook.reported_missing {
+                hook.reported_missing = true;
+                reject_identity(events, &scope, "missing-identity");
+            }
+            return;
+        };
+        if observation.event == "unknown" {
+            return;
+        }
+        if scope
+            .expected_id
+            .as_deref()
+            .is_some_and(|expected| expected != identity)
+            && hook.last_observation.is_none()
+        {
+            hook.rejected = true;
+            hook.deadline = None;
+            reject_identity(events, &scope, "identity-mismatch");
+            return;
+        }
+        observation.model = safe(observation.model);
+        observation.permission_mode = safe(observation.permission_mode);
+        observation.cwd = safe(observation.cwd)
+            .filter(|cwd| Path::new(cwd).is_absolute() && Path::new(cwd).is_dir());
+        if hook.last_observation.as_ref() == Some(&observation) {
+            return;
+        }
+        let confirms = hook
+            .last_observation
+            .as_ref()
+            .is_none_or(|last| last.identity != observation.identity);
+        let observed = [
+            ("model", &observation.model),
+            ("permissionMode", &observation.permission_mode),
+            ("cwd", &observation.cwd),
+        ]
+        .into_iter()
+        .filter_map(|(key, value)| value.as_ref().map(|value| (key.to_owned(), json!(value))))
+        .collect();
+        let id = (self.next_id)();
+        let commit = sessions::record_claude_identity(
+            &mut self.connection,
+            &command(
+                format!("provider-hook-{}-{id}", scope.run_id),
+                "provider-hook.identity",
+                id.clone(),
+            ),
+            &sessions::ClaudeIdentity {
+                binding_id: &id,
+                session_id: &scope.session_id,
+                run_id: &scope.run_id,
+                generation: &scope.generation,
+                provider_session_id: identity,
+                launch_metadata: &hook.launch_metadata,
+                observed_metadata: &Value::Object(observed),
+                event_name: observation.event,
+                first_for_run: confirms,
+            },
+            now(),
+        );
+        match commit {
+            Ok(commit) => {
+                hook.deadline = None;
+                hook.last_observation = Some(observation);
+                if confirms {
+                    let mut payload = commit.result.clone();
+                    payload["result"] = json!("confirmed");
+                    events.push(OwnerEvent::ProviderIdentity(payload));
+                }
+                events.push(OwnerEvent::Domain(commit));
+            }
+            Err(_) => reject_identity(events, &scope, "binding-write-failed"),
+        }
     }
 
     fn apply(&mut self, event: WorkerEvent, events: &mut Vec<OwnerEvent>) {
@@ -883,7 +1140,12 @@ impl ShellOwner {
     ) {
         let shell = self.shells.get_mut(id).expect("registered session output");
         shell.emitted_output = true;
-        if !shell.is_shell {
+        if !shell.is_shell
+            && shell
+                .hook
+                .as_ref()
+                .is_none_or(|hook| hook.last_observation.is_none())
+        {
             return;
         }
         let summary = self.summaries.entry(id.to_owned()).or_default();
@@ -892,6 +1154,9 @@ impl ShellOwner {
         summary
             .deadline
             .get_or_insert_with(|| Instant::now() + Duration::from_millis(180));
+        if !shell.is_shell {
+            return;
+        }
         let mut completed = false;
         if shell.restore_history {
             for block in blocks {
@@ -1011,11 +1276,16 @@ impl ShellOwner {
             return Ok(());
         }
         shell.ended = true;
+        let had_identity = shell
+            .hook
+            .take()
+            .is_some_and(|hook| hook.last_observation.is_some());
         shell.cwd_capture = None;
         let shutdown = disposed && self.closing && !retiring;
         let run = shell.run_id.clone();
         let pid = shell.worker.process_id();
-        let startup_failed = !shell.emitted_output && !shutdown && !retiring;
+        let startup_failed =
+            !shell.emitted_output && !shutdown && !retiring && (shell.is_shell || had_identity);
         if shutdown {
             let work: String = self.connection.query_row(
                 "SELECT work_status FROM sessions WHERE id=?",
@@ -1122,6 +1392,9 @@ impl ShellOwner {
 
     pub fn shutdown(&mut self) -> Result<Vec<OwnerEvent>> {
         self.closing = true;
+        for shell in self.shells.values_mut() {
+            shell.hook = None;
+        }
         // Request every active Shell to stop before waiting for any worker.
         let shutdowns: Vec<_> = self
             .shells
@@ -1153,6 +1426,7 @@ impl ShellOwner {
             self.flush_summary(&id, &mut events);
         }
         self.shells.clear();
+        self.hook_server = None;
         if let Some(error) = first_error {
             return Err(error);
         }
@@ -1177,6 +1451,21 @@ impl Drop for ShellOwner {
         }
     }
 }
+
+fn safe_hook_text<'a>(value: &'a str, secrets: &[String]) -> Option<&'a str> {
+    (value.len() <= 4096
+        && !value.chars().any(char::is_control)
+        && !secrets.iter().any(|secret| value.contains(secret)))
+    .then_some(value)
+}
+
+fn reject_identity(events: &mut Vec<OwnerEvent>, scope: &Scope, reason: &str) {
+    events.push(OwnerEvent::ProviderIdentity(json!({
+        "result": "rejected", "sessionId": scope.session_id, "runId": scope.run_id,
+        "provider": "claude-code", "reason": reason,
+    })));
+}
+
 fn command(command_id: String, kind: &str, request_hash: String) -> CommandMetadata {
     CommandMetadata {
         command_id,
@@ -1225,4 +1514,226 @@ fn process_working_directory(pid: u32) -> Option<String> {
     }
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     Path::new(&cwd).is_dir().then_some(cwd)
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod provider_tests {
+    use super::*;
+    use matou_native_core::{
+        pty::ShellLaunch,
+        startup::{self, BootstrapResult},
+    };
+    use matou_native_terminal::TerminalOptions;
+    use std::{
+        fs,
+        io::{Read, Write},
+        net::TcpStream,
+        os::unix::fs::PermissionsExt,
+        thread,
+    };
+
+    #[test]
+    fn current_provider_run_alone_can_project_identity() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let cwd = root.path().join("workspace");
+        fs::create_dir(&cwd)?;
+        let BootstrapResult::Writable {
+            mut connection,
+            ownership,
+            ..
+        } = startup::open(root.path(), "runtime-generation")?
+        else {
+            anyhow::bail!("expected writable database");
+        };
+        let session = "provider-session";
+        hierarchy::bootstrap_window(
+            &mut connection,
+            &command("bootstrap".into(), "window.bootstrap", "fixture".into()),
+            &hierarchy::BootstrapWindowInput {
+                window_id: "window".into(),
+                default_root_directory: cwd.to_string_lossy().into(),
+                default_name: "Workspace".into(),
+                now: 1,
+            },
+            &HierarchyIds {
+                workspace_id: "workspace".into(),
+                execution_context_id: "context".into(),
+                task_id: "task".into(),
+                scene_id: "scene".into(),
+                root_node_id: "node".into(),
+                session_id: session.into(),
+                mount_id: "mount".into(),
+            },
+            "默认",
+            1,
+        )?;
+        connection.execute(
+            "UPDATE sessions SET kind='claude-code', cwd=?, work_status='needs-input' WHERE id=?",
+            params![cwd.to_string_lossy(), session],
+        )?;
+        let mut owner =
+            ShellOwner::new(connection, ownership, || uuid::Uuid::new_v4().to_string())?;
+        let executable = root.path().join("test-provider");
+        fs::write(
+            &executable,
+            "#!/bin/sh\nprintf 'provider output before identity\\n'\nread -r line\n",
+        )?;
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700))?;
+        let plan = || ClaudeLaunch {
+            launch: ShellLaunch {
+                profile: LaunchProfile::ClaudeCode,
+                executable: executable.clone(),
+                argv: Vec::new(),
+                cwd: cwd.clone(),
+                data_root: root.path().to_owned(),
+                inherited_env: Default::default(),
+                env: Default::default(),
+                cols: 80,
+                rows: 24,
+            },
+            provider_config_id: "fixture-config".into(),
+            model: "fixture-model".into(),
+            permission_mode: "default".into(),
+        };
+        let terminal = TerminalOptions::new(80, 24, 7, 14);
+        let blocked_directory = root.path().join("provider-hooks");
+        fs::write(&blocked_directory, "")?;
+        let failure = owner
+            .launch_claude(session.into(), terminal, plan())
+            .unwrap_err();
+        assert!(failure.downcast_ref::<HookSetup>().is_some());
+        assert!(!owner.has_shell_run(session)?);
+        fs::remove_file(blocked_directory)?;
+        owner.launch_claude(session.into(), terminal, plan())?;
+        assert!(
+            owner
+                .launch_claude(session.into(), terminal, plan())
+                .is_err()
+        );
+        let scope = Scope {
+            session_id: session.into(),
+            run_id: owner.shells[session].run_id.clone(),
+            generation: owner.generation.clone(),
+            expected_id: None,
+        };
+        let observation = |event, identity: Option<&str>| Observation {
+            event,
+            identity: identity.map(str::to_owned),
+            model: None,
+            permission_mode: None,
+            cwd: None,
+        };
+        let mut events = Vec::new();
+        for (event, id) in [
+            ("SessionEnd", Some("end-id")),
+            ("unknown", Some("statusline-id")),
+            ("UserPromptSubmit", None),
+            ("Stop", None),
+        ] {
+            owner.apply_hook(scope.clone(), observation(event, id), &mut events);
+        }
+        let count = |owner: &ShellOwner| {
+            owner
+                .connection
+                .query_row("SELECT COUNT(*) FROM provider_bindings", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+        };
+        assert_eq!(count(&owner)?, 0);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], OwnerEvent::ProviderIdentity(value)
+                         if value["reason"] == "missing-identity"));
+        owner.apply_output(session, "dropped terminal text", &[], &mut events);
+        assert!(!owner.summaries.contains_key(session));
+        owner
+            .shells
+            .get_mut(session)
+            .unwrap()
+            .hook
+            .as_mut()
+            .unwrap()
+            .deadline = Some(Instant::now());
+        owner.poll_provider_hooks(&mut events);
+        assert!(
+            matches!(&events[1], OwnerEvent::ProviderIdentity(value) if value["result"] == "timed-out")
+        );
+        let registration = &owner.shells[session].hook.as_ref().unwrap()._registration;
+        let config: Value = serde_json::from_slice(&fs::read(&registration.settings_path)?)?;
+        let url = url::Url::parse(
+            config["hooks"]["UserPromptSubmit"][0]["hooks"][0]["url"]
+                .as_str()
+                .unwrap(),
+        )?;
+        thread::scope(|threads| -> Result<()> {
+            let post = || -> Result<()> {
+                let mut socket = TcpStream::connect(("127.0.0.1", url.port().unwrap()))?;
+                socket.set_read_timeout(Some(Duration::from_secs(3)))?;
+                let body = r#"{"hook_event_name":"UserPromptSubmit","session_id":"first-id"}"#;
+                write!(
+                    socket,
+                    "POST {} HTTP/1.1\r\nContent-Length: {}\r\n\r\n{body}",
+                    url.path(),
+                    body.len()
+                )?;
+                let mut response = String::new();
+                socket.read_to_string(&mut response)?;
+                assert!(response.starts_with("HTTP/1.1 200"));
+                Ok(())
+            };
+            let first = threads.spawn(post);
+            let second = threads.spawn(post);
+            first.join().unwrap()?;
+            second.join().unwrap()?;
+            Ok(())
+        })?;
+        owner.poll_provider_hooks(&mut events);
+        assert_eq!(count(&owner)?, 1);
+        assert_eq!(
+            owner.connection.query_row(
+                "SELECT COUNT(*) FROM domain_events WHERE event_type='provider-binding.recorded'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?,
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, OwnerEvent::ProviderIdentity(value)
+            if value["result"] == "confirmed"))
+                .count(),
+            1
+        );
+        owner.apply_output(session, "accepted terminal text", &[], &mut events);
+        assert_eq!(owner.summaries[session].raw, "accepted terminal text");
+
+        owner.retire_sessions(&[session.into()]);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while owner.has_shell_worker(session) && Instant::now() < deadline {
+            owner.poll(Duration::from_millis(25))?;
+        }
+        assert!(!owner.has_shell_worker(session));
+        owner.launch_claude(session.into(), terminal, plan())?;
+        let current = Scope {
+            run_id: owner.shells[session].run_id.clone(),
+            ..scope.clone()
+        };
+        owner.apply_hook(
+            current,
+            observation("UserPromptSubmit", Some("current-id")),
+            &mut events,
+        );
+        owner.apply_hook(scope, observation("Stop", Some("late-id")), &mut events);
+        assert_eq!(count(&owner)?, 2);
+        assert!(
+            matches!(events.last(), Some(OwnerEvent::ProviderIdentity(value)) if value["reason"] == "retired-run")
+        );
+        owner.shutdown()?;
+        assert!(
+            fs::read_dir(root.path().join("provider-hooks"))?
+                .next()
+                .is_none()
+        );
+        Ok(())
+    }
 }

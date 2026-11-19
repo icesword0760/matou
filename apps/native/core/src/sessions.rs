@@ -175,7 +175,9 @@ pub fn start_run(
         )?;
         tx.execute(
             "UPDATE sessions
-             SET status = 'running', work_status = 'idle', updated_at = ?, last_activity_at = ?,
+             SET status = 'running',
+                 work_status = CASE WHEN kind = 'claude-code' THEN work_status ELSE 'idle' END,
+                 updated_at = ?, last_activity_at = ?,
                  version = version + 1
              WHERE id = ?",
             params![input.now, input.now, input.session_id],
@@ -204,6 +206,14 @@ pub fn finish_run(
     execute(db, command, committed_at, |tx, events| {
         let before = require_run(tx, run_id)?;
         let session = require_session(tx, &before.session_id)?;
+        let owns_work_status = before.profile != "claude-code"
+            || tx
+                .prepare(
+                    "SELECT 1 FROM domain_events WHERE session_id = ?
+                 AND event_type = 'provider-binding.recorded'
+                 AND json_extract(payload_json, '$.runId') = ?",
+                )?
+                .exists(params![before.session_id, run_id])?;
         tx.execute(
             "UPDATE session_runs SET status = 'exited', ended_at = ?, exit_code = ?, signal = ?
              WHERE id = ?",
@@ -212,10 +222,11 @@ pub fn finish_run(
         tx.execute(
             "UPDATE sessions
              SET status = CASE WHEN archived_at IS NULL THEN 'exited' ELSE 'archived' END,
-                 work_status = 'exited', updated_at = ?, last_activity_at = ?,
+                 work_status = CASE WHEN ? THEN 'exited' ELSE work_status END,
+                 updated_at = ?, last_activity_at = ?,
                  version = version + 1
              WHERE id = ?",
-            params![now, now, before.session_id],
+            params![owns_work_status, now, now, before.session_id],
         )?;
         let run = serde_json::to_value(require_run(tx, run_id)?)?;
         events.push(session_event(
@@ -226,6 +237,183 @@ pub fn finish_run(
             json!({"run": run}),
         ));
         Ok(run)
+    })
+}
+
+pub struct ClaudeIdentity<'a> {
+    pub binding_id: &'a str,
+    pub session_id: &'a str,
+    pub run_id: &'a str,
+    pub generation: &'a str,
+    pub provider_session_id: &'a str,
+    pub launch_metadata: &'a Value,
+    pub observed_metadata: &'a Value,
+    pub event_name: &'a str,
+    pub first_for_run: bool,
+}
+
+pub fn record_claude_identity(
+    db: &mut Connection,
+    command: &CommandMetadata,
+    input: &ClaudeIdentity<'_>,
+    now: i64,
+) -> Result<DomainCommit> {
+    let provider_session_id = trim(input.provider_session_id);
+    ensure!(
+        !provider_session_id.is_empty(),
+        "Provider session identity must not be empty"
+    );
+    execute(db, command, now, |tx, events| {
+        let session = require_session(tx, input.session_id)?;
+        let run = tx
+            .query_row(
+                "SELECT id, runtime_generation, status, profile FROM session_runs
+             WHERE session_id = ? ORDER BY ordinal DESC LIMIT 1",
+                [input.session_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        ensure!(
+            session.archived_at.is_none()
+                && session.kind == "claude-code"
+                && run
+                    .as_ref()
+                    .is_some_and(|(id, generation, status, profile)| {
+                        id == input.run_id
+                            && generation == input.generation
+                            && status == "running"
+                            && profile == "claude-code"
+                    }),
+            "Provider hook no longer owns its SessionRun"
+        );
+        let existing: Option<(String, String)> = tx
+            .query_row(
+                "SELECT id, metadata_json FROM provider_bindings
+             WHERE session_id = ? AND provider = 'claude-code' AND provider_session_id = ?",
+                params![input.session_id, provider_session_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let binding_id = existing.as_ref().map_or(input.binding_id, |(id, _)| id);
+        let mut metadata: serde_json::Map<String, Value> = existing
+            .as_ref()
+            .and_then(|(_, metadata)| serde_json::from_str(metadata).ok())
+            .unwrap_or_default();
+        for (key, value) in input.launch_metadata.as_object().into_iter().flatten() {
+            if key == "providerConfigId" {
+                metadata.insert(key.clone(), value.clone());
+            } else {
+                metadata.entry(key.clone()).or_insert_with(|| value.clone());
+            }
+        }
+        metadata.extend(
+            input
+                .observed_metadata
+                .as_object()
+                .into_iter()
+                .flatten()
+                .map(|(key, value)| (key.clone(), value.clone())),
+        );
+        metadata.remove("invalidationReason");
+        metadata.remove("provisional");
+        metadata.insert("lastHookEvent".into(), json!(input.event_name));
+        for (key, observed) in [
+            ("observedUserPrompt", input.event_name == "UserPromptSubmit"),
+            ("observedNormalStop", input.event_name == "Stop"),
+        ] {
+            metadata.insert(
+                key.into(),
+                Value::Bool(observed || metadata.get(key).and_then(Value::as_bool) == Some(true)),
+            );
+        }
+        tx.execute(
+            "INSERT INTO provider_bindings (
+                 id, session_id, provider, provider_session_id, resume_state,
+                 metadata_json, created_at, updated_at, validated_at
+             ) VALUES (?, ?, 'claude-code', ?, 'available', ?, ?, ?, ?)
+             ON CONFLICT(session_id, provider, provider_session_id) DO UPDATE SET
+                 resume_state = 'available', metadata_json = excluded.metadata_json,
+                 updated_at = excluded.updated_at, validated_at = excluded.validated_at,
+                 invalidated_at = NULL, restore_state = 'none', restore_error = NULL",
+            params![
+                binding_id,
+                input.session_id,
+                provider_session_id,
+                serde_json::to_string(&metadata)?,
+                now,
+                now,
+                now
+            ],
+        )?;
+        // Publish only the fields owned by this observation. Existing binding
+        // metadata can contain fields from other versions of the runtime.
+        let mut public_metadata = serde_json::Map::new();
+        for key in [
+            "providerConfigId",
+            "model",
+            "permissionMode",
+            "cwd",
+            "lastHookEvent",
+            "observedUserPrompt",
+            "observedNormalStop",
+        ] {
+            if let Some(value) = metadata.get(key) {
+                public_metadata.insert(key.into(), value.clone());
+            }
+        }
+        let payload = json!({
+            "sessionId": input.session_id, "runId": input.run_id,
+            "provider": "claude-code", "providerSessionId": provider_session_id,
+            "bindingId": binding_id, "metadata": public_metadata,
+        });
+        events.push(session_event(
+            command,
+            "provider-binding.recorded",
+            &session,
+            now,
+            payload.clone(),
+        ));
+        let previous_work_status: String = tx.query_row(
+            "SELECT work_status FROM sessions WHERE id = ?",
+            [input.session_id],
+            |row| row.get(0),
+        )?;
+        let work_status = match input.event_name {
+            "UserPromptSubmit" | "PreToolUse" => "running",
+            "PermissionRequest" | "Notification" => "needs-input",
+            "Stop" => "idle",
+            _ => &previous_work_status,
+        };
+        let cwd = input.observed_metadata["cwd"]
+            .as_str()
+            .unwrap_or(&session.cwd);
+        let changed = work_status != previous_work_status || cwd != session.cwd;
+        if changed {
+            tx.execute(
+                "UPDATE sessions SET work_status = ?, cwd = ?, updated_at = ?, version = version + 1
+                 WHERE id = ?",
+                params![work_status, cwd, now, input.session_id],
+            )?;
+        }
+        if changed || input.first_for_run {
+            let mut event = session_event(
+                command,
+                "session.mode-changed",
+                &session,
+                now,
+                json!({"runId": input.run_id, "provider": "claude-code", "workStatus": work_status}),
+            );
+            event.event_id.push_str(":mode");
+            events.push(event);
+        }
+        Ok(payload)
     })
 }
 
