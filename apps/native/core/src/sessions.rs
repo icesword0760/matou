@@ -176,7 +176,8 @@ pub fn start_run(
         tx.execute(
             "UPDATE session_fork_intents
              SET state = 'starting', stage = 'restoring-provider', completed_steps = 1,
-                 attempt = 1, attempt_count = 1, started_at = ?, updated_at = ?
+                 attempt = MAX(attempt, 1), attempt_count = MAX(attempt_count, 1),
+                 started_at = ?, updated_at = ?
              WHERE session_id = ? AND operation_id = ? || session_id AND state = 'pending'",
             params![input.now, input.now, input.session_id, NATIVE_FORK_PREFIX],
         )?;
