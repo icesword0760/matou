@@ -18,6 +18,10 @@ use matou_native_runtime::history_worker::{HistoryReply, HistoryRequest};
 use matou_native_terminal::Theme;
 use serde_json::Value;
 
+mod session_levels {
+    include!("session_levels.rs");
+}
+
 use crate::{
     carousel_motion::{
         Curve, Transition, centered_scroll, focus_scroll_step, fully_visible_scroll,
@@ -83,6 +87,12 @@ struct CardMotion {
     lift: Transition,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LevelFocusRequest {
+    OpenChildren,
+    ReturnParent,
+}
+
 struct WorkspaceDragMotion {
     scale: Transition,
     opacity: Transition,
@@ -127,6 +137,7 @@ const CONTROLS: &[&str] = &[
     "split",
     "update",
     "account",
+    "session-return-parent",
 ];
 
 struct ArchivedMatches {
@@ -245,6 +256,9 @@ pub struct Workspace {
     geometry_sequence: u64,
     geometry_writes: HashMap<String, (u64, u8)>,
     graph: Value,
+    level_parent_by_scene: HashMap<String, Option<String>>,
+    carousel_owner: Option<String>,
+    hovered_child_badge: Option<String>,
     terminals: HashMap<String, Entity<TerminalSurface>>,
     recovery: HashMap<String, RecoveryState>,
     recovery_controls: HashMap<String, FocusHandle>,
@@ -257,6 +271,7 @@ pub struct Workspace {
     order: Vec<String>,
     focused: Option<String>,
     pending_focus: Option<(String, String)>,
+    level_focus_request: Option<LevelFocusRequest>,
     copy_request_id: u64,
     resize_revisions: HashMap<String, u64>,
     fault: Option<String>,
@@ -1016,6 +1031,9 @@ impl Workspace {
             geometry_sequence: 0,
             geometry_writes: HashMap::new(),
             graph: Value::Null,
+            level_parent_by_scene: HashMap::new(),
+            carousel_owner: None,
+            hovered_child_badge: None,
             terminals: HashMap::new(),
             recovery: HashMap::new(),
             recovery_controls: HashMap::new(),
@@ -1028,6 +1046,7 @@ impl Workspace {
             order: Vec::new(),
             focused: None,
             pending_focus: None,
+            level_focus_request: None,
             copy_request_id: 0,
             resize_revisions: HashMap::new(),
             fault: None,
@@ -1075,6 +1094,7 @@ impl Workspace {
             session_id,
         } = &command
         {
+            self.level_focus_request = None;
             self.pending_focus = Some((scene_id.clone(), session_id.clone()));
         }
         if self
@@ -1083,6 +1103,7 @@ impl Workspace {
             .is_err()
         {
             self.pending_focus = None;
+            self.level_focus_request = None;
             // Offline/reconnecting rejection is expected; do not stack a fault per key.
             cx.notify();
         }
@@ -1103,6 +1124,9 @@ impl Workspace {
         self.geometry_writes.clear();
         self.last_geometry_write.clear();
         self.pending_focus = None;
+        self.level_focus_request = None;
+        self.level_parent_by_scene.clear();
+        self.refresh_level(cx);
         self.pending_close = None;
         self.creating_workspace = false;
         self.search_after_restore = self.search.as_ref().is_some_and(|search| search.open);
@@ -1188,8 +1212,15 @@ impl Workspace {
             else {
                 continue;
             };
-            // This is the only owner produced by save_geometry; no new owner algorithm.
-            if update.owner_key != format!("session-group:{}:root", scene.id) {
+            let prefix = format!("session-group:{}:", scene.id);
+            if !update
+                .owner_key
+                .strip_prefix(&prefix)
+                .is_some_and(|owner| owner == "root" || self.graph_node(owner).is_some())
+            {
+                self.geometry_dirty.remove(&update.owner_key);
+                self.reconnect_geometry.remove(&update.owner_key);
+                self.geometry.remove(&update.owner_key);
                 continue;
             }
             if authority.iter().any(|saved| {
@@ -1432,13 +1463,18 @@ impl Workspace {
                 let next_focus = hierarchy.session.as_ref().map(|session| session.id.clone());
                 let focus_changed = self.focused != next_focus;
                 let initializing = self.hierarchy.is_none();
-                if scene_changed
-                    || self.pending_focus.as_ref().is_some_and(|(scene, session)| {
+                let focus_confirmed =
+                    self.pending_focus.as_ref().is_some_and(|(scene, session)| {
                         Some(scene) == next_scene && Some(session) == next_focus.as_ref()
-                    })
-                {
+                    });
+                let level_focus_request = if scene_changed || focus_confirmed {
                     self.pending_focus = None;
-                }
+                    self.level_focus_request.take().filter(|_| focus_confirmed)
+                } else {
+                    None
+                };
+                let return_to_terminal =
+                    level_focus_request == Some(LevelFocusRequest::ReturnParent);
                 if scene_changed {
                     #[cfg(target_os = "macos")]
                     self.retain_recovery_water(window, cx, |_, _| false);
@@ -1448,18 +1484,8 @@ impl Workspace {
                             self.geometry.insert(saved.owner_key.clone(), saved.clone());
                         }
                     }
-                    self.restore_geometry = true;
-                    self.column_capacity = None;
-                    self.stop_edge_browse(false);
-                    self.pointer_position = None;
-                    self.card_motion.clear();
-                    self.hovered = None;
-                    self.hover_follow_until = None;
-                    self.hover_baseline = None;
-                    self.hover_restore_at = None;
-                    self.carousel_scroll.set_offset(point(px(0.), px(0.)));
                 }
-                if !scene_changed && focus_changed {
+                if !scene_changed && focus_changed && level_focus_request.is_none() {
                     self.restore_geometry = false;
                 }
                 if scene_changed || focus_changed {
@@ -1515,8 +1541,12 @@ impl Workspace {
                 if fresh_ready {
                     self.session_frames.clear();
                     self.recovery.clear();
-                    for id in &self.order {
-                        self.recovery.insert(id.clone(), RecoveryState::Restoring);
+                    for id in session_levels::nodes(&self.graph)
+                        .iter()
+                        .filter_map(|node| node["sessionId"].as_str())
+                    {
+                        self.recovery
+                            .insert(id.to_owned(), RecoveryState::Restoring);
                     }
                     self.resend_terminal_sizes(cx);
                     self.close_invalid_dialog(window, cx);
@@ -1533,14 +1563,17 @@ impl Workspace {
                 {
                     self.tab_scroll.scroll_to_item(index);
                 }
-                if (initializing || scene_changed || focus_changed)
+                if level_focus_request != Some(LevelFocusRequest::OpenChildren)
+                    && (initializing || scene_changed || focus_changed || return_to_terminal)
                     && self.dialog.is_none()
                     && self.active_path_valid()
-                    && self
-                        .focused
-                        .as_ref()
-                        .is_none_or(|id| !self.recovery_blocked(id))
-                    && (window.focused(cx).is_none()
+                    && (return_to_terminal
+                        || self
+                            .focused
+                            .as_ref()
+                            .is_none_or(|id| !self.recovery_blocked(id)))
+                    && (return_to_terminal
+                        || window.focused(cx).is_none()
                         || (workspace_changed
                             && self
                                 .workspace_controls
@@ -1555,8 +1588,11 @@ impl Workspace {
                             .terminals
                             .values()
                             .any(|terminal| terminal.read(cx).focus.is_focused(window)))
-                    && let Some(terminal) =
-                        self.focused.as_ref().and_then(|id| self.terminals.get(id))
+                    && let Some(terminal) = self
+                        .focused
+                        .as_ref()
+                        .filter(|id| self.order.contains(id))
+                        .and_then(|id| self.terminals.get(id))
                 {
                     window.focus(&terminal.read(cx).focus);
                 }
@@ -1668,6 +1704,7 @@ impl Workspace {
             } => {
                 if attempted_focus.is_some() && self.pending_focus == attempted_focus {
                     self.pending_focus = None;
+                    self.level_focus_request = None;
                 }
                 self.fault = Some(message);
             }
@@ -1679,7 +1716,9 @@ impl Workspace {
             Event::ClipboardWrite { session_id, text } => {
                 // The active card belongs to the visible scene even while the
                 // OS window is obscured or a dialog owns keyboard focus.
-                if self.focused.as_ref() == Some(&session_id) && self.order.contains(&session_id) {
+                if self.focused.as_ref() == Some(&session_id)
+                    && self.graph_node(&session_id).is_some()
+                {
                     cx.write_to_clipboard(ClipboardItem::new_string(text));
                 }
             }
@@ -1728,6 +1767,7 @@ impl Workspace {
                     // The reference live-output callback restores only an unclaimed
                     // active terminal; dialogs and focused controls retain ownership.
                     if self.focused.as_ref() == Some(&session_id)
+                        && self.order.contains(&session_id)
                         && self.dialog.is_none()
                         && self.active_path_valid()
                         && !self.recovery_blocked(&session_id)
@@ -1789,28 +1829,11 @@ impl Workspace {
     }
 
     fn refresh_terminals(&mut self, cx: &mut Context<Self>) {
-        let Some(nodes) = self.graph["nodes"].as_array() else {
-            return;
-        };
-        self.order = nodes
+        self.refresh_level(cx);
+        for id in session_levels::nodes(&self.graph)
             .iter()
-            .filter_map(|node| node["sessionId"].as_str().map(str::to_owned))
-            .collect();
-        let now = self.motion_clock.elapsed().as_secs_f64() * 1000.;
-        for id in &self.order {
-            let selected = if self.focused.as_ref() == Some(id) {
-                1.
-            } else {
-                0.
-            };
-            let motion = self
-                .card_motion
-                .entry(id.clone())
-                .or_insert_with(|| CardMotion {
-                    width: Transition::new(selected),
-                    lift: Transition::new(selected),
-                });
-            motion.lift.retarget(selected, now, 180., Curve::Lift);
+            .filter_map(|node| node["sessionId"].as_str())
+        {
             if self.terminals.contains_key(id) {
                 continue;
             }
@@ -1822,15 +1845,15 @@ impl Workspace {
                 surface
             });
             self.card_controls
-                .insert(id.clone(), cx.focus_handle().tab_stop(true));
-            let session_id = id.clone();
+                .insert(id.to_owned(), cx.focus_handle().tab_stop(true));
+            let session_id = id.to_owned();
             self.subscriptions.push(cx.subscribe(
                 &terminal,
                 move |this, _, event: &SurfaceEvent, cx| {
                     this.handle_surface_event(&session_id, event, cx)
                 },
             ));
-            self.terminals.insert(id.clone(), terminal);
+            self.terminals.insert(id.to_owned(), terminal);
         }
     }
 
@@ -1957,7 +1980,7 @@ impl Workspace {
         self.geometry_timer += 1;
         if let Some(update) = self.pending_geometry.take() {
             self.last_geometry_write.insert(
-                update.scene_id.clone(),
+                update.owner_key.clone(),
                 self.motion_clock.elapsed().as_secs_f64() * 1000.,
             );
             self.write_geometry(update, 0, cx);
@@ -2022,7 +2045,7 @@ impl Workspace {
         let Some(scene) = self.hierarchy.as_ref().and_then(|h| h.scene.as_ref()) else {
             return;
         };
-        let owner_key = format!("session-group:{}:root", scene.id);
+        let owner_key = session_levels::owner_key(&scene.id, self.level_parent());
         let mut geometry = serde_json::json!({"scrollLeft":scroll});
         if let Some(id) = &focused {
             geometry["focusedSessionId"] = id.clone().into();
@@ -2052,7 +2075,7 @@ impl Workspace {
         };
         let elapsed = self
             .last_geometry_write
-            .get(&scene.id)
+            .get(&owner_key)
             .map(|last| self.motion_clock.elapsed().as_secs_f64() * 1000. - last)
             .unwrap_or(f64::INFINITY);
         self.geometry_dirty.insert(owner_key.clone());
@@ -2100,7 +2123,7 @@ impl Workspace {
         let over_terminal = self
             .order
             .iter()
-            .filter(|id| !narrow || self.focused.as_ref() == Some(id))
+            .filter(|id| !narrow || self.level_focus() == Some(id.as_str()))
             .any(|id| {
                 self.terminals
                     .get(id)
@@ -2135,7 +2158,12 @@ impl Workspace {
             (f64::from(f32::from(self.carousel_scroll.offset().x + amount))).clamp(-max_scroll, 0.);
         self.carousel_scroll
             .set_offset(point(px(next as f32), px(0.)));
-        self.capture_geometry(self.geometry_focus().map(str::to_owned), true, window, cx);
+        let focused = self
+            .geometry_focus()
+            .filter(|id| self.order.iter().any(|card| card == id))
+            .or_else(|| self.level_focus())
+            .map(str::to_owned);
+        self.capture_geometry(focused, true, window, cx);
         // A horizontal gesture retargets visual expansion under the pointer,
         // while its own wheel deltas continue to own the viewport.
         if let Some(position) = self.pointer_position {
@@ -3553,11 +3581,25 @@ impl Workspace {
         if let (Some(scene_id), Some(source_session_id)) =
             (self.active_scene_id(), self.focused.as_ref())
         {
+            let parent = self.level_parent();
+            // The runtime derives the structural parent from the source when
+            // parent_session_id is None. A root split needs an active root source.
+            let source_session_id = if parent.is_none() && !self.order.contains(source_session_id) {
+                let Some(source) = self.order.iter().find(|id| {
+                    self.graph_node(id)
+                        .is_some_and(|node| node["archivedAt"].is_null())
+                }) else {
+                    return;
+                };
+                source
+            } else {
+                source_session_id
+            };
             self.send(
                 Command::CreateShellSibling {
                     scene_id: scene_id.to_owned(),
                     source_session_id: source_session_id.clone(),
-                    parent_session_id: None,
+                    parent_session_id: parent.map(str::to_owned),
                 },
                 cx,
             );
@@ -3570,6 +3612,153 @@ impl Workspace {
             .scene
             .as_ref()
             .map(|scene| scene.id.as_str())
+    }
+
+    fn graph_node(&self, id: &str) -> Option<&Value> {
+        session_levels::node(session_levels::nodes(&self.graph), id)
+    }
+
+    fn level_parent(&self) -> Option<&str> {
+        let explicit_parent = self
+            .active_scene_id()
+            .and_then(|scene_id| self.level_parent_by_scene.get(scene_id))
+            .map(Option::as_deref);
+        session_levels::level_parent(
+            session_levels::nodes(&self.graph),
+            explicit_parent,
+            self.focused.as_deref(),
+        )
+    }
+
+    fn level_focus(&self) -> Option<&str> {
+        self.focused
+            .as_ref()
+            .filter(|id| self.order.contains(id))
+            .or_else(|| self.order.first())
+            .map(String::as_str)
+    }
+
+    fn breadcrumb_labels(&self) -> (String, String) {
+        let label = self
+            .level_parent()
+            .and_then(|id| self.graph_node(id))
+            .and_then(|node| node["title"].as_str())
+            .filter(|title| !title.is_empty())
+            .map_or_else(|| "根会话".into(), |title| format!("{title} 的子会话"));
+        (label, format!("· {} 个会话", self.order.len()))
+    }
+
+    fn child_badge(&self, id: &str) -> Option<session_levels::ChildBadge> {
+        session_levels::child_badge(session_levels::children_of(
+            session_levels::nodes(&self.graph),
+            Some(id),
+        ))
+    }
+
+    fn refresh_level(&mut self, cx: &mut Context<Self>) {
+        if let Some(scene) = self.active_scene_id()
+            && let Some(Some(parent)) = self.level_parent_by_scene.get(scene)
+            && self.graph_node(parent).is_none()
+        {
+            eprintln!(
+                "Session level parent {parent} is missing in scene {scene}; returning to root"
+            );
+            self.level_parent_by_scene.insert(scene.to_owned(), None);
+        }
+        let parent = self.level_parent();
+        let owner = self
+            .active_scene_id()
+            .map(|scene| session_levels::owner_key(scene, parent));
+        self.order = session_levels::children_of(session_levels::nodes(&self.graph), parent)
+            .filter_map(|node| node["sessionId"].as_str().map(str::to_owned))
+            .collect();
+        let now = self.motion_clock.elapsed().as_secs_f64() * 1000.;
+        if self.carousel_owner != owner {
+            self.flush_geometry(cx);
+            self.carousel_owner = owner;
+            self.restore_geometry = true;
+            self.focus_follow_until = (!self.order.is_empty()).then_some(now + 440.);
+            self.stop_edge_browse(false);
+            self.pointer_position = None;
+            self.card_motion.clear();
+            self.card_geometry.clear();
+            self.hovered = None;
+            self.hovered_child_badge = None;
+            self.hover_follow_until = None;
+            self.hover_baseline = None;
+            self.hover_restore_at = None;
+            self.carousel_scroll.set_offset(point(px(0.), px(0.)));
+        }
+        let focus = self.level_focus().map(str::to_owned);
+        for id in &self.order {
+            let selected = if focus.as_ref() == Some(id) { 1. } else { 0. };
+            let motion = self
+                .card_motion
+                .entry(id.clone())
+                .or_insert_with(|| CardMotion {
+                    width: Transition::new(selected),
+                    lift: Transition::new(selected),
+                });
+            motion.lift.retarget(selected, now, 180., Curve::Lift);
+        }
+    }
+
+    fn open_child_level(&mut self, id: &str, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(scene) = self.active_scene_id().map(str::to_owned) else {
+            return;
+        };
+        let nodes = session_levels::nodes(&self.graph);
+        if self.graph_node(id).is_none() || !self.order.iter().any(|card| card == id) {
+            return;
+        }
+        let children = || session_levels::children_of(nodes, Some(id));
+        if children().next().is_none() {
+            return;
+        }
+        let preferred = session_levels::preferred_child(children()).map(str::to_owned);
+        self.level_parent_by_scene
+            .insert(scene.clone(), Some(id.to_owned()));
+        self.refresh_level(cx);
+        if let Some(session_id) = preferred {
+            self.send(
+                Command::FocusSession {
+                    scene_id: scene,
+                    session_id,
+                },
+                cx,
+            );
+            if self.pending_focus.is_some() {
+                self.level_focus_request = Some(LevelFocusRequest::OpenChildren);
+            }
+        }
+        cx.notify();
+    }
+
+    fn return_to_parent(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(scene) = self.active_scene_id().map(str::to_owned) else {
+            return;
+        };
+        let Some(parent) = self.level_parent().map(str::to_owned) else {
+            return;
+        };
+        let ancestor = self
+            .graph_node(&parent)
+            .and_then(session_levels::parent_id)
+            .filter(|id| self.graph_node(id).is_some())
+            .map(str::to_owned);
+        self.level_parent_by_scene.insert(scene.clone(), ancestor);
+        self.refresh_level(cx);
+        self.send(
+            Command::FocusSession {
+                scene_id: scene,
+                session_id: parent,
+            },
+            cx,
+        );
+        if self.pending_focus.is_some() {
+            self.level_focus_request = Some(LevelFocusRequest::ReturnParent);
+        }
+        cx.notify();
     }
 
     fn jump_to_scene(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -3620,22 +3809,29 @@ impl Workspace {
     }
 
     fn step_session(&mut self, offset: isize, cx: &mut Context<Self>) {
-        if self.order.len() <= 1 {
+        let sessions = self
+            .order
+            .iter()
+            .filter(|id| {
+                self.graph_node(id)
+                    .is_some_and(|node| node["archivedAt"].is_null())
+            })
+            .collect::<Vec<_>>();
+        if sessions.len() <= 1 {
             return;
         }
         let Some(scene_id) = self.active_scene_id() else {
             return;
         };
-        let current = self
-            .order
+        let current = sessions
             .iter()
-            .position(|id| Some(id) == self.focused.as_ref())
+            .position(|id| Some(*id) == self.focused.as_ref())
             .unwrap_or(0);
-        let next = (current as isize + offset).rem_euclid(self.order.len() as isize) as usize;
+        let next = (current as isize + offset).rem_euclid(sessions.len() as isize) as usize;
         self.send(
             Command::FocusSession {
                 scene_id: scene_id.to_owned(),
-                session_id: self.order[next].clone(),
+                session_id: sessions[next].clone(),
             },
             cx,
         );
@@ -4571,7 +4767,97 @@ impl Workspace {
         None
     }
 
-    fn footer(&self) -> Div {
+    fn child_badge_button(
+        &self,
+        id: &str,
+        badge: session_levels::ChildBadge,
+        badge_bounds: Entity<Option<Bounds<Pixels>>>,
+        focus: &FocusHandle,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let click_id = id.to_owned();
+        let hover_id = id.to_owned();
+        let (text_color, border_color, background) = if badge.is_idle {
+            (0x777f89, 0xd7dbe1, 0xf3f4f6)
+        } else {
+            (0x2666b1, 0xb9d6ff, 0xe8f2ff)
+        };
+        self.focus_control(
+            div()
+                .id(SharedString::from(format!("child-session-badge-{id}")))
+                .relative()
+                .h(px(24.))
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(5.))
+                .max_w(relative(1.))
+                .px(px(8.))
+                .border_1()
+                .border_color(rgb(border_color))
+                .rounded(px(999.))
+                .bg(rgb(background))
+                .text_color(rgb(text_color))
+                .text_size(px(10.))
+                .font_weight(FontWeight(650.))
+                .whitespace_nowrap()
+                .cursor_pointer()
+                .on_hover(cx.listener(move |this, hovered, _, cx| {
+                    if *hovered {
+                        this.hovered_child_badge = Some(hover_id.clone());
+                    } else if this.hovered_child_badge.as_deref() == Some(hover_id.as_str()) {
+                        this.hovered_child_badge = None;
+                    }
+                    cx.notify();
+                }))
+                .on_mouse_down(MouseButton::Left, |_, window, cx| {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                })
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.open_child_level(&click_id, window, cx);
+                }))
+                .child(icon("layers", 14., text_color))
+                .child(
+                    div()
+                        .size(px(6.))
+                        .flex_none()
+                        .rounded_full()
+                        .bg(rgb(badge.dot_color)),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .child(badge.summary),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_size(px(13.))
+                        .line_height(px(13.))
+                        .child("›"),
+                )
+                .child(
+                    canvas(
+                        |_, _, _| (),
+                        move |bounds, _, _, cx| {
+                            badge_bounds.update(cx, |slot, _| *slot = Some(bounds));
+                        },
+                    )
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full(),
+                ),
+            focus,
+        )
+    }
+
+    fn footer(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         let recovering = self
             .focused
             .as_ref()
@@ -4587,6 +4873,95 @@ impl Workspace {
             })
             .and_then(|n| n["cwd"].as_str())
             .unwrap_or("");
+        struct ReturnParentTooltip;
+        impl Render for ReturnParentTooltip {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .px(px(9.))
+                    .py(px(7.))
+                    .border_1()
+                    .border_color(rgb(0xd6dae1))
+                    .rounded(px(7.))
+                    .bg(rgb(0xffffff))
+                    .text_color(rgb(0x333b47))
+                    .text_size(px(10.))
+                    .line_height(px(15.))
+                    .whitespace_nowrap()
+                    .shadow(vec![shadow(0x1f2837, 0.16, 8., 24.)])
+                    .child("返回父会话")
+            }
+        }
+
+        let (label, count) = self.breadcrumb_labels();
+        let content = div()
+            .min_w_0()
+            .flex_1()
+            .flex()
+            .items_center()
+            .child(
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(label),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .ml(px(4.))
+                    .text_color(rgba(0x00000061))
+                    .child(count),
+            );
+        let breadcrumb = div()
+            .h_full()
+            .min_w_0()
+            .max_w(px(
+                (f32::from(window.viewport_size().width) * 0.44).min(520.)
+            ))
+            .flex()
+            .items_center()
+            .text_size(px(11.))
+            .text_color(rgba(0x000000ad));
+        let breadcrumb = if self.level_parent().is_some() {
+            breadcrumb.child(
+                self.button(
+                    div()
+                        .id("session-return-parent")
+                        .h(px(26.))
+                        .min_w_0()
+                        .flex()
+                        .items_center()
+                        .px(px(8.))
+                        .rounded(px(6.))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgba(0x00000014)).text_color(rgb(0x2f3547)))
+                        .child(div().flex_none().mr(px(6.)).text_size(px(13.)).child("←"))
+                        .child(content),
+                    &self.control_focus["session-return-parent"],
+                    |this, window, cx| this.return_to_parent(window, cx),
+                    cx,
+                )
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                    if matches!(event.keystroke.key.as_str(), "left" | "up") {
+                        cx.stop_propagation();
+                        this.return_to_parent(window, cx);
+                    }
+                }))
+                .tooltip(|_, cx| cx.new(|_| ReturnParentTooltip).into()),
+            )
+        } else {
+            breadcrumb.child(
+                div()
+                    .h(px(26.))
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .px(px(8.))
+                    .child(content),
+            )
+        };
         div()
             .h(px(38.))
             .flex_none()
@@ -4599,17 +4974,7 @@ impl Workspace {
             .bg(rgb(0xffffff))
             .text_size(px(10.))
             .text_color(rgb(0x606572))
-            .child(
-                div()
-                    .text_size(px(11.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child("根会话"),
-            )
-            .child(
-                div()
-                    .text_color(rgb(0x999999))
-                    .child(format!("· {} 个会话", self.order.len())),
-            )
+            .child(breadcrumb)
             .when(!recovering, |footer| {
                 footer.child(
                     div()
@@ -4648,6 +5013,7 @@ impl Workspace {
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         const CARD_RADIUS: Pixels = px(12.);
+        let level_focus = self.level_focus().map(str::to_owned);
         let viewport_width = f64::from(f32::from(window.viewport_size().width)) - 260.;
         let content_width = viewport_width - 20.;
         let columns = (((viewport_width + 12.) / 292.).floor()).clamp(1., 4.);
@@ -4730,7 +5096,7 @@ impl Render for Workspace {
         let width_duration = if reduced_motion() { 1. } else { 380. };
         for id in &self.order {
             let expanded =
-                self.focused.as_ref() == Some(id) || (!narrow && self.hovered.as_ref() == Some(id));
+                level_focus.as_ref() == Some(id) || (!narrow && self.hovered.as_ref() == Some(id));
             let motion = self.card_motion.get_mut(id).expect("mounted card motion");
             motion.width.retarget(
                 if expanded { 1. } else { 0. },
@@ -4742,7 +5108,7 @@ impl Render for Workspace {
             widths.insert(id.clone(), width);
             positions.insert(id.clone(), left);
             self.card_geometry.push((id.clone(), left, width));
-            if self.focused.as_ref() == Some(id) {
+            if level_focus.as_ref() == Some(id) {
                 active_geometry = Some((left, width));
             }
             if self.hovered.as_ref() == Some(id) {
@@ -4784,10 +5150,9 @@ impl Render for Workspace {
         if self.restore_geometry {
             self.restore_geometry = moving;
             if let Some(saved) = self
-                .hierarchy
+                .carousel_owner
                 .as_ref()
-                .and_then(|h| h.scene.as_ref())
-                .and_then(|s| self.geometry.get(&format!("session-group:{}:root", s.id)))
+                .and_then(|owner| self.geometry.get(owner))
             {
                 let value = &saved.geometry;
                 let anchor = value["anchorSessionId"]
@@ -4847,13 +5212,14 @@ impl Render for Workspace {
             && self.focus_follow_until.is_none()
             && !self.restore_geometry
             && self.pending_focus.is_none()
+            && level_focus.is_some()
         {
             let scroll =
                 f64::from(-f32::from(self.carousel_scroll.offset().x)).clamp(0., max_scroll);
             self.save_geometry(
                 scroll,
                 active_geometry.map(|(left, _)| left),
-                self.focused.clone(),
+                level_focus.clone(),
                 false,
                 cx,
             );
@@ -4884,6 +5250,7 @@ impl Render for Workspace {
             .on_hover(cx.listener(|this, hovered, window, cx| {
                 if !hovered {
                     this.pointer_position = None;
+                    this.hovered_child_badge = None;
                     this.stop_edge_browse(false);
                     this.hover_card(None, cx);
                 } else {
@@ -4899,10 +5266,67 @@ impl Render for Workspace {
             f64::from(-f32::from(self.carousel_scroll.offset().x)).clamp(0., max_scroll);
         #[cfg(target_os = "macos")]
         let mut mounted_water = HashSet::new();
+        let mut badge_tooltip = None;
         for id in &self.order {
             let Some(terminal) = self.terminals.get(id) else {
                 continue;
             };
+            let selected = level_focus.as_ref() == Some(id);
+            // Narrow, non-selected cards only paint the frozen compact summary.
+            // They have no badge, tooltip or badge hit area from earlier frames.
+            let compact = narrow && !selected;
+            // The badge measures its painted bounds so pointer-down can be
+            // excluded from the card's capture-phase activation even before
+            // the first hover event reaches the freshly rendered badge.
+            let badge_bounds = if compact {
+                None
+            } else {
+                Some(window.use_keyed_state(
+                    SharedString::from(format!("child-session-badge-bounds-{id}")),
+                    cx,
+                    |_, _| None::<Bounds<Pixels>>,
+                ))
+            };
+            let badge_bounds_for_capture = badge_bounds.clone();
+            let badge = badge_bounds.as_ref().and_then(|badge_bounds| {
+                let badge = self.child_badge(id)?;
+                let focus = window.use_keyed_state(
+                    SharedString::from(format!("child-session-badge-focus-{id}")),
+                    cx,
+                    |_, cx| cx.focus_handle().tab_stop(true),
+                );
+                let focus = focus.read(cx).clone();
+                if self.dialog.is_none()
+                    && let Some(bounds) = *badge_bounds.read(cx)
+                    && ((self.hovered_child_badge.as_ref() == Some(id)
+                        && bounds.contains(&window.mouse_position()))
+                        || (self.keyboard_focus && focus.is_focused(window)))
+                {
+                    badge_tooltip = Some(
+                        anchored()
+                            .anchor(Corner::TopRight)
+                            .position(bounds.bottom_right() + point(px(0.), px(7.)))
+                            .snap_to_window()
+                            .child(
+                                div()
+                                    .max_w((window.viewport_size().width - px(24.)).min(px(460.)))
+                                    .px(px(9.))
+                                    .py(px(7.))
+                                    .border_1()
+                                    .border_color(rgb(0xd6dae1))
+                                    .rounded(px(7.))
+                                    .bg(rgb(0xffffff))
+                                    .text_color(rgb(0x333b47))
+                                    .text_size(px(10.))
+                                    .line_height(px(15.))
+                                    .whitespace_nowrap()
+                                    .shadow(vec![shadow(0x1f2837, 0.16, 8., 24.)])
+                                    .child(badge.detail.clone()),
+                            ),
+                    );
+                }
+                Some(self.child_badge_button(id, badge, badge_bounds.clone(), &focus, cx))
+            });
             let node = self.graph["nodes"]
                 .as_array()
                 .and_then(|nodes| nodes.iter().find(|node| node["sessionId"] == *id));
@@ -4924,7 +5348,6 @@ impl Render for Workspace {
                 .as_ref()
                 .and_then(|h| h.scene.as_ref())
                 .map(|s| s.id.clone());
-            let selected = self.focused.as_ref() == Some(id);
             let width = widths[id] as f32;
             let lift = -4. * self.card_motion[id].lift.value(now) as f32;
             #[cfg(target_os = "macos")]
@@ -4983,6 +5406,18 @@ impl Render for Workspace {
                 }))
                 .capture_any_mouse_down(cx.listener(
                     move |this, event: &MouseDownEvent, window, cx| {
+                        // Compact cards mount no badge bounds, so a stale hit
+                        // area can never swallow their ordinary activation.
+                        if let Some(badge_bounds) = &badge_bounds_for_capture
+                            && badge_bounds
+                                .read(cx)
+                                .as_ref()
+                                .is_some_and(|bounds| bounds.contains(&event.position))
+                        {
+                            // The badge handles its own pointer-down and stops
+                            // propagation in the bubble phase.
+                            return;
+                        }
                         #[cfg(target_os = "macos")]
                         if this.recovery_water.contains_key(&scrollbar_session)
                             && let Some(index) =
@@ -5046,7 +5481,8 @@ impl Render for Workspace {
                         }
                     }),
                 );
-            let card = if let Some(RecoveryState::Failed(error)) = self.recovery.get(id) {
+            let card = if !compact && let Some(RecoveryState::Failed(error)) = self.recovery.get(id)
+            {
                 let retry_id = id.clone();
                 card.child(
                     div()
@@ -5111,10 +5547,14 @@ impl Render for Workspace {
                                 ),
                         ),
                 )
-            } else if narrow && !selected {
+                .children(badge.map(|badge| badge.absolute().top(px(8.)).right(px(8.))))
+            } else if compact {
                 let status = node
                     .and_then(|node| node["workStatus"].as_str())
                     .unwrap_or("idle");
+                let active_child_count = node
+                    .and_then(|node| node["activeChildCount"].as_u64())
+                    .unwrap_or(0);
                 let summary = node
                     .and_then(|node| node["latestLines"].as_array())
                     .map(|lines| {
@@ -5172,6 +5612,13 @@ impl Render for Workspace {
                                     _ => "空闲",
                                 }),
                         )
+                        .children((active_child_count > 0).then(|| {
+                            div()
+                                .text_size(px(9.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(0xe8ae48))
+                                .child(format!("子会话 {active_child_count}"))
+                        }))
                         .child(
                             div()
                                 .text_size(px(9.))
@@ -5198,10 +5645,17 @@ impl Render for Workspace {
                                 .child(title.to_owned()),
                         )
                         .child(div().flex_1())
-                        .child(self.focus_control(
-                            div().child(icon("folder-input", 16., 0x687d92)),
-                            &self.card_controls[id],
-                        )),
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.))
+                                .children(badge)
+                                .child(self.focus_control(
+                                    div().child(icon("folder-input", 16., 0x687d92)),
+                                    &self.card_controls[id],
+                                )),
+                        ),
                 )
                 .when(!path_valid, |card| {
                     card.child(
@@ -5261,6 +5715,19 @@ impl Render for Workspace {
                 card
             };
             carousel = carousel.child(card);
+        }
+        if self.order.is_empty() {
+            carousel = carousel.child(
+                div()
+                    .flex_1()
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(12.))
+                    .text_color(rgb(0x8a919b))
+                    .child("当前画布没有活跃会话"),
+            );
         }
         #[cfg(target_os = "macos")]
         {
@@ -5399,7 +5866,7 @@ impl Render for Workspace {
                     .child(self.topbar(window, cx))
                     .child(carousel)
                     .children(self.search_bar(cx))
-                    .child(self.footer()),
+                    .child(self.footer(window, cx)),
             )
             .child(
                 canvas(
@@ -5431,6 +5898,7 @@ impl Render for Workspace {
                 .absolute()
                 .size(px(0.)),
             )
+            .children(badge_tooltip)
             .children(toast)
             .children(overlay)
     }
