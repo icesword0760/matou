@@ -8,7 +8,7 @@ use std::{
     ffi::OsString,
     path::{Component, Path, PathBuf},
     sync::{
-        Arc, OnceLock,
+        Arc, LazyLock, OnceLock,
         mpsc::{self, Receiver, Sender},
     },
     thread::{self, JoinHandle},
@@ -433,6 +433,7 @@ pub struct RuntimeHost {
 
 impl RuntimeHost {
     pub fn start(options: LaunchOptions) -> Result<Self> {
+        LazyLock::force(&PERMISSION_STARTUP_WINDOW);
         let (commands, incoming) = mpsc::channel();
         let (send, events) = async_channel::unbounded();
         let shutdown_requested = Arc::new(OnceLock::new());
@@ -2548,7 +2549,14 @@ fn workspace_path_error(state: &WorkspacePathState) -> String {
 }
 
 const CATALOG_BUSY: &str = "Claude Code catalog is busy or unavailable";
-const PERMISSION_STARTUP_WINDOW: Duration = Duration::from_millis(150);
+// Process contract tests can allow more time for the provider stub to exit.
+static PERMISSION_STARTUP_WINDOW: LazyLock<Duration> = LazyLock::new(|| {
+    let millis = std::env::var("MATOU_PERMISSION_STARTUP_WINDOW_MS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(150);
+    Duration::from_millis(millis)
+});
 
 struct PermissionChange {
     mode: String,
@@ -2646,7 +2654,7 @@ impl PermissionChange {
                     owner.launch_claude_permission(session_id, terminal, plan, binding.as_ref())?;
                 self.phase = PermissionPhase::AwaitingIdentity {
                     run_id,
-                    startup_until: Some(Instant::now() + PERMISSION_STARTUP_WINDOW),
+                    startup_until: Some(Instant::now() + *PERMISSION_STARTUP_WINDOW),
                     consent_shown: false,
                     outcome: None,
                 };
