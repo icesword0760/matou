@@ -75,6 +75,33 @@ function buildSampleStatus(overrides: Partial<EgressStatusWire> = {}): EgressSta
 }
 
 describe('EgressPanel', () => {
+  it.each([
+    ['zh-CN', 'Google（通用出口检测）', 'Google 线路使用通用出口检测，不能保证 Google 实际看到的出口。'],
+    ['en', 'Google (generic exit)', 'Google']
+  ] as const)('renders Google heading, unknown login and sampling limit in %s', (locale, heading, limit) => {
+    const status = buildSampleStatus()
+    status.families.push({ family: 'google', state: 'ok',
+      exit: { ip: '203.0.113.20', country: 'US' }, hosts: [],
+      overridden: false, frozenSessionIds: [], recovering: false })
+    status.checks.push(
+      { id: 'mainland', family: 'google', result: 'pass' },
+      { id: 'exit-rule', family: 'google', result: 'pass' },
+      { id: 'login-api-match', family: 'google', result: 'unknown' })
+    render(<LocaleProvider initialLocale={locale}><EgressPanel
+      status={status} onClose={vi.fn()} onRecheck={vi.fn()} onSetRule={vi.fn()}
+      onAcceptCurrent={vi.fn()} onSetProtection={vi.fn()}
+    /></LocaleProvider>)
+    expect(screen.getByRole('checkbox', { name: locale === 'zh-CN'
+      ? '出口保护：出口异常时暂停 Claude / Codex / Antigravity 会话'
+      : 'Exit protection: pause Claude / Codex / Antigravity sessions when the exit is wrong' })).toBeTruthy()
+    const googleHeading = screen.getByRole('heading', { name: heading })
+    const section = googleHeading.closest('section')!
+    expect(section.textContent).toContain(locale === 'zh-CN' ? '无法确认' : 'confirm')
+    expect(document.querySelector('.egress-panel__sampling-note')?.textContent).toContain(limit)
+    const local = screen.getByRole('region', { name: locale === 'zh-CN' ? '本机' : 'This Mac' })
+    expect(googleHeading.compareDocumentPosition(local) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
   it('renders exact zh copy, grouped checks, actions, and masks report IPs without session IDs', async () => {
     const onClose = vi.fn()
     const onRecheck = vi.fn()
@@ -160,7 +187,7 @@ describe('EgressPanel', () => {
 
     fireEvent.click(
       screen.getByRole('checkbox', {
-        name: '出口保护：出口异常时暂停 Claude / Codex 会话'
+        name: '出口保护：出口异常时暂停 Claude / Codex / Antigravity 会话'
       })
     )
     expect(onSetProtection).toHaveBeenCalledWith(false)
@@ -225,7 +252,7 @@ describe('EgressPanel', () => {
     ).toBeTruthy()
     expect(
       screen.getByText(
-        'Checks are sampled every minute and cannot guarantee every connection uses the same exit.'
+        'Checks are sampled every minute and cannot guarantee every connection uses the same exit. Google uses a generic exit check, which cannot guarantee the exit Google actually sees.'
       )
     ).toBeTruthy()
   })
@@ -294,5 +321,34 @@ describe('EgressPanel', () => {
       </LocaleProvider>
     )
     expect(screen.getByRole('heading', { name: 'Claude (ChatGPT subscription)' })).toBeTruthy()
+  })
+
+  it('distinguishes unreachable, invalid, timeout with host, and slow passing checks', () => {
+    const base = buildSampleStatus()
+    const status = buildSampleStatus({
+      families: [{ ...base.families[0]!, state: 'unknown' }],
+      checks: [
+        { id: 'mainland', family: 'anthropic', result: 'unknown', facts: { error: 'unreachable', host: 'api.anthropic.com' } },
+        { id: 'exit-rule', family: 'anthropic', result: 'unknown', facts: { error: 'invalid', host: 'api.anthropic.com' } },
+        { id: 'login-api-match', family: 'anthropic', result: 'unknown', facts: { error: 'timeout', host: 'chatgpt.com' } },
+        { id: 'exit-rule', family: 'openai', result: 'pass', facts: { slowHost: 'chatgpt.com' } }
+      ]
+    })
+    render(
+      <LocaleProvider initialLocale="zh-CN">
+        <EgressPanel
+          status={status}
+          onClose={vi.fn()}
+          onRecheck={vi.fn()}
+          onSetRule={vi.fn()}
+          onAcceptCurrent={vi.fn()}
+          onSetProtection={vi.fn()}
+        />
+      </LocaleProvider>
+    )
+    expect(screen.getByText('无法确认（api.anthropic.com 连不上）')).toBeTruthy()
+    expect(screen.getByText('无法确认（api.anthropic.com 返回异常）')).toBeTruthy()
+    expect(screen.getByText('无法确认（chatgpt.com 检测超时）')).toBeTruthy()
+    expect(screen.getByText('chatgpt.com 响应慢（>5 秒）')).toBeTruthy()
   })
 })

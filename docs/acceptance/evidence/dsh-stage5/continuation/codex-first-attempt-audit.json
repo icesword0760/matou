@@ -1,0 +1,30 @@
+{
+  "scope": "Read-only audit of this round first Fork/loader attempt; does not alter failed assertion or substitute for final report.",
+  "attempt": 0,
+  "assertionLine": 485,
+  "failure": "150-second wait for the final loaded-parent recall answer returned empty",
+  "children": [
+    {
+      "mode": "new",
+      "intentSucceeded": true,
+      "bindingValidated": true,
+      "bindingDistinctFromParent": true,
+      "nativeIdMatchesBinding": true,
+      "nativeForkedFromMatchesParent": true
+    },
+    {
+      "mode": "current",
+      "intentSucceeded": true,
+      "bindingValidated": true,
+      "bindingDistinctFromParent": true,
+      "nativeIdMatchesBinding": true,
+      "nativeForkedFromMatchesParent": true
+    }
+  ],
+  "completedForkIsolationTurns": 7,
+  "loadedBindingFailed": true,
+  "nativeBootstrapError": "account/read failed during TUI bootstrap: account/read failed: workspace routing discovery timed out (code -32603)",
+  "sameNativeErrorAsBaseline": true,
+  "finalRecallQuestionInParentNativeRollout": false,
+  "conclusion": "Both Fork identities and parent-child checks completed before the final load. The loader-stage native process failed at bootstrap with the baseline routing error; no model turn accepted the last question. This is a later assertion location than the baseline Fork failure, but the same native error class. It is not evidence of child UUID rebinding. Final retry outcome is recorded in ui-regression.json."
+}

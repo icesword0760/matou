@@ -1,0 +1,25 @@
+[
+  {
+    "checkForUpdateOnStartup": true,
+    "upgradePrompt": true,
+    "configUnchanged": true,
+    "exitCode": 0,
+    "versionSeed": {
+      "latest_version": "999.0.0",
+      "last_checked_at": "2026-11-15T13:21:28.849244+00:00",
+      "dismissed_version": null
+    }
+  },
+  {
+    "checkForUpdateOnStartup": false,
+    "upgradePrompt": false,
+    "configUnchanged": false,
+    "exitCode": 0,
+    "versionSeed": {
+      "latest_version": "999.0.0",
+      "last_checked_at": "2026-11-15T13:21:33.867999+00:00",
+      "dismissed_version": null
+    },
+    "configChangeDetails": "Codex itself incremented isolated tui.model_availability_nux.gpt-6.1-sol from 1 to 2; no user/global config was touched."
+  }
+]

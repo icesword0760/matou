@@ -2,12 +2,17 @@ import { randomUUID } from 'node:crypto'
 import { realpath } from 'node:fs/promises'
 
 import type {
+  GitRepositoryStatus,
   SessionEnvironmentActionResult,
+  SessionEnvironmentIsolateResult,
   SessionEnvironmentLocateReason,
   SessionEnvironmentOpenResult,
   SessionEnvironmentTarget
 } from '@matou/contracts'
+import type { DomainCommandMetadata } from '@matou/domain'
 
+import type { GitWorkspaceService } from '../git/git-workspace-service'
+import { runtimeMessages } from '../i18n/messages'
 import {
   SessionEnvironmentRepository,
   type OwnedWorktreeIdentity
@@ -143,8 +148,10 @@ export class SessionEnvironmentService {
     sessionId: string
     target: SessionEnvironmentTarget
     now: number
+    resumeSession?: SessionEnvironmentServiceDependencies['resumeSession']
   }): Promise<SessionEnvironmentActionResult> {
     const original = requireBinding(this.#environments.get(input.sessionId), input.sessionId)
+    const resumeSession = input.resumeSession ?? this.#dependencies.resumeSession
     if (original.activeTarget === input.target && original.state === 'ready') {
       return environmentResult(original, false)
     }
@@ -169,17 +176,114 @@ export class SessionEnvironmentService {
         target: input.target,
         now: input.now
       })
-      await this.#dependencies.resumeSession(input.sessionId, input.target)
+      await resumeSession(input.sessionId, input.target)
       return environmentResult(binding, false)
     } catch (error) {
       this.#restoreOriginalState(original, errorMessage(error), input.now)
       if (pauseAttempted && original.state === 'ready') {
-        await this.#dependencies.resumeSession(input.sessionId, original.activeTarget)
+        await resumeSession(input.sessionId, original.activeTarget)
       }
       if (error instanceof RejectedEnvironmentTargetError) {
         return rejected(input.sessionId, error.reason)
       }
       throw error
+    }
+  }
+
+  async isolate(
+    git: GitWorkspaceService,
+    input: {
+      sessionId: string
+      branch: string
+      now: number
+      resumeSession?: SessionEnvironmentServiceDependencies['resumeSession']
+    }
+  ): Promise<SessionEnvironmentIsolateResult> {
+    const { sessionId, branch, now } = input
+    const messages = runtimeMessages().git
+    const workspaceId = this.#environments.getActiveWorkspaceId(sessionId)
+    const binding = this.#environments.get(sessionId)
+    if (!workspaceId || binding?.state !== 'ready' || binding.activeTarget !== 'local' ||
+        binding.managedWorktreeId) {
+      return { kind: 'rejected', reason: 'environment-not-local', message: messages.environmentNotLocal }
+    }
+    const cwd = binding.environment.path
+    let status: GitRepositoryStatus
+    try {
+      status = await git.status(cwd)
+    } catch (error) {
+      const message = errorMessage(error)
+      if (/not a git repository/i.test(message)) {
+        return { kind: 'rejected', reason: 'not-a-repository', message: messages.notARepository }
+      }
+      return { kind: 'rejected', reason: 'worktree-create-failed', message }
+    }
+    const target = status.branches.find(({ name }) => name === branch)
+    if (!target) {
+      return { kind: 'rejected', reason: 'branch-missing', message: messages.branchMissing(branch), status }
+    }
+    if (target.checkedOutPath) {
+      return {
+        kind: 'rejected', reason: 'branch-checked-out',
+        message: messages.branchCheckedOut(target.checkedOutPath), status
+      }
+    }
+    const commandId = randomUUID()
+    const command: DomainCommandMetadata = {
+      commandId, commandType: 'session.environment-isolate', requestHash: `${sessionId}:${branch}:${commandId}`
+    }
+    let worktree: Awaited<ReturnType<GitWorkspaceService['createWorktreeForExistingBranch']>>
+    try {
+      worktree = await git.createWorktreeForExistingBranch(command, {
+        workspaceId, repositoryRoot: status.repositoryRoot, branch, now
+      })
+    } catch (error) {
+      const message = errorMessage(error)
+      const occupiedPrefix = 'branch-checked-out:'
+      if (message.startsWith(occupiedPrefix) || message === 'branch-missing') {
+        const latest = await git.status(cwd).catch(() => status)
+        return message === 'branch-missing'
+          ? { kind: 'rejected', reason: 'branch-missing', message: messages.branchMissing(branch), status: latest }
+          : {
+              kind: 'rejected', reason: 'branch-checked-out',
+              message: messages.branchCheckedOut(message.slice(occupiedPrefix.length)), status: latest
+            }
+      }
+      return { kind: 'rejected', reason: 'worktree-create-failed', message, status }
+    }
+    let worktreeStatus: GitRepositoryStatus
+    let environment: EnvironmentBinding
+    try {
+      // Probe the new path before restarting. A later status refresh failure
+      // must not report the already completed handoff as rejected.
+      worktreeStatus = await git.status(worktree.path)
+      if (!this.#environments.getActiveWorkspaceId(sessionId)) {
+        throw new Error(messages.environmentNotLocal)
+      }
+      this.#environments.bindOwnedWorktree({ sessionId, worktreeId: worktree.id, activate: false, now })
+      const result = await this.handoff({ ...input, target: 'worktree' })
+      if (result.kind === 'rejected') throw new Error(result.reason)
+      if (!this.#environments.getActiveWorkspaceId(sessionId)) {
+        throw new Error(messages.environmentNotLocal)
+      }
+      environment = requireBinding(this.#environments.get(sessionId), sessionId)
+    } catch (error) {
+      this.#environments.unbindOwnedWorktree({ sessionId, worktreeId: worktree.id, now })
+      if (!this.#environments.findOwningSession(worktree.id)) {
+        await git.removeWorktree({
+          ...command, commandId: `${commandId}:cleanup`
+        }, { worktreeId: worktree.id, now }).catch(() => undefined)
+      }
+      return {
+        kind: 'rejected', reason: 'worktree-create-failed', message: errorMessage(error),
+        status: await git.status(cwd).catch(() => status)
+      }
+    }
+    return {
+      kind: 'switched',
+      environment,
+      status: await git.status(worktree.path).catch(() => worktreeStatus),
+      worktree: { id: worktree.id, path: worktree.path, branch: worktree.branch }
     }
   }
 

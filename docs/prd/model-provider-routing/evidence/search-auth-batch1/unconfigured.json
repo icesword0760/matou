@@ -1,0 +1,45 @@
+{
+  "requests": [
+    {
+      "path": "/v1/messages",
+      "headers": {
+        "content-type": "text/plain;charset=UTF-8",
+        "accept": "*/*",
+        "accept-language": "*",
+        "sec-fetch-mode": "cors",
+        "user-agent": "node",
+        "accept-encoding": "gzip, deflate",
+        "content-length": "159",
+        "x-api-key": "main-key",
+        "host": "127.0.0.1:57888",
+        "connection": "keep-alive"
+      },
+      "body": {
+        "model": "gemini",
+        "max_tokens": 9999,
+        "messages": [
+          {
+            "role": "user",
+            "content": "conversation context"
+          }
+        ],
+        "tools": [
+          {
+            "type": "web_search_20250305",
+            "name": "web_search"
+          }
+        ]
+      }
+    }
+  ],
+  "reply": {
+    "target": "haiku",
+    "content": [
+      {
+        "type": "web_search_tool_result",
+        "content": "local search result"
+      }
+    ]
+  },
+  "searchTargetRequests": 0
+}

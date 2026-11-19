@@ -1,0 +1,10 @@
+[
+  {
+    "sessionId": "faaace09-d75a-44c0-9165-414d97ba0765",
+    "providerSessionId": "01a1df3d-4b35-7611-895a-673fa189d9c1",
+    "turnId": "01a1df3d-4c65-7aa3-90a7-72c100ff7574",
+    "prompt": "Remember restart codeword cedar-brook-573. Reply only RESTART_READY.",
+    "finalAnswer": "RESTART_READY",
+    "completedAnswer": "RESTART_READY"
+  }
+]

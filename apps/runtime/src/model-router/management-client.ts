@@ -3,7 +3,7 @@ import type { RouterConnection } from './manager'
 import type { ModelAlias } from './claude-launch'
 import { MAX_MODEL_BODY_BYTES } from './account-readers'
 import { ANTIGRAVITY_CLIENT_USER_AGENT } from './antigravity-client'
-import { CODEX_CLIENT_ORIGINATOR, CODEX_CLIENT_USER_AGENT } from './codex-client'
+import { CODEX_CLIENT_ORIGINATOR, CODEX_CLIENT_USER_AGENT, CODEX_CLIENT_VERSION } from './codex-client'
 
 export interface RouterCredential extends Record<string, unknown> {
   id: string
@@ -73,6 +73,11 @@ export class RouterManagementClient {
   /** Merge credential-level headers. The router applies them to inference
    * after its defaults, so Codex sees one Originator/Version for one token. */
   async setHeaders(name: string, headers: Record<string, string>): Promise<void> { await this.#request('/credentials/fields', 'PATCH', { name, headers }) }
+  /** Register newly discovered account models on a credential so the router
+   * accepts them even when its compiled-in static model list is older. */
+  async setExtraModels(name: string, models: Array<{ id: string; display_name?: string; owned_by?: string; context_length?: number; max_completion_tokens?: number; thinking_levels?: string[] }>): Promise<void> {
+    await this.#request('/credentials/fields', 'PATCH', { name, extra_models: models })
+  }
   async deleteCredential(name: string): Promise<void> { await this.#request(`/credentials?${new URLSearchParams({ name })}`, 'DELETE') }
   async aliases(provider: SubscriptionProvider): Promise<ModelAlias[]> {
     try {
@@ -96,10 +101,12 @@ export class RouterManagementClient {
   }
   /** Fixed service URLs. The caller selects a probe; it cannot supply an URL/header. */
   async apiCall(probe: AccountProbe, credential: RouterCredential, project?: string): Promise<unknown> {
+    const codex = this.connection.codexClient ?? { version: CODEX_CLIENT_VERSION, userAgent: CODEX_CLIENT_USER_AGENT }
+    const antigravityUserAgent = this.connection.antigravityUserAgent ?? ANTIGRAVITY_CLIENT_USER_AGENT
     const googleBase = 'https://daily-cloudcode-pa.googleapis.com/v1internal:'
     const specs = {
       'chatgpt-usage': { method: 'GET', url: 'https://chatgpt.com/backend-api/wham/usage' },
-      'chatgpt-models': { method: 'GET', url: 'https://chatgpt.com/backend-api/codex/models?client_version=0.162.1' },
+      'chatgpt-models': { method: 'GET', url: `https://chatgpt.com/backend-api/codex/models?client_version=${codex.version}` },
       'antigravity-account': { method: 'POST', url: `${googleBase}loadCodeAssist` },
       'antigravity-quota': { method: 'POST', url: `${googleBase}retrieveUserQuotaSummary` },
       'antigravity-models': { method: 'POST', url: `${googleBase}fetchAvailableModels` }
@@ -109,12 +116,12 @@ export class RouterManagementClient {
     const header: Record<string, string> = { Authorization: 'Bearer $TOKEN$', 'Content-Type': 'application/json' }
     // Probes and inference carry one token, so both must look like the same
     // Codex client. The model-list URL already carries client_version.
-    if (probe.startsWith('chatgpt')) { header['User-Agent'] = CODEX_CLIENT_USER_AGENT; header.originator = CODEX_CLIENT_ORIGINATOR }
+    if (probe.startsWith('chatgpt')) { header['User-Agent'] = codex.userAgent; header.originator = CODEX_CLIENT_ORIGINATOR }
     if (credential.provider === 'codex' && accountId) header['ChatGPT-Account-Id'] = accountId
     // The same token is also used for inference. Never send a relay-specific
     // agent here: probes must look exactly like the runtime client that owns
     // the credential.
-    if (credential.provider === 'antigravity') header['User-Agent'] = ANTIGRAVITY_CLIENT_USER_AGENT
+    if (credential.provider === 'antigravity') header['User-Agent'] = antigravityUserAgent
     const data = probe === 'antigravity-account' ? { metadata: { ideType: 'ANTIGRAVITY' } } : { ...(project ? { project } : {}) }
     // api-call wraps the provider's JSON text in another JSON string. Quotes
     // and backslashes may double its bytes; the decoded model body remains 4MiB.

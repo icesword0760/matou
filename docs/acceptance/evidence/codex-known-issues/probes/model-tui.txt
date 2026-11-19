@@ -1,0 +1,13 @@
+GPT-6-Astradefault·~/Documents/AIProjects/matou-multi-agent-codex/.cache/c10/model/repo⚠1warning·f2toview⚠ 9 warnings
+
+  >_ OpenAI Codex (v0.162.1)
+     ~/Documents/AIProjects/matou-multi-agent-codex/.cache/c10/model/repo
+
+  Tip: Maximize usage with GPT-6.1 Sol. Try it on complex work for near-Astra performance at a lower cost.
+
+
+› Reply only READY.
+ • Working (0s • esc to interrupt)  › Ask Codex to do anything   GPT-6-Astra default · ~/Documents/AIProjects/matou-multi-agent-codex/.cache/c10/model/repo                      ⚠ 9 warnings · f2 to view
+
+■ unexpected status 404 Not Found: The model matou-probe-missing does not exist, url: http://127.0.0.1:51707/v1/responses  › Ask Codex to do anything   GPT-6-Astra default · ~/Documents/AIProjects/matou-multi-agent-codex/.cache/c10/model/repo · ⠼                  ⚠ 9 warnings · f2 to view   ^CTo continue this session, run:
+  codex resume 01a1df5d-34d8-7353-80cf-a50dd627cbe4

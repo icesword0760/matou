@@ -18,9 +18,9 @@ import { useMessages } from '../i18n/LocaleProvider'
 import type { Messages } from '../i18n/messages'
 
 type LoaderMessages = Messages['sessionCanvas']['loader']
-type LoaderProvider = 'claude-code' | 'antigravity'
+type LoaderProvider = 'claude-code' | 'antigravity' | 'codex' | 'dsh'
 
-const LOADER_PROVIDERS: readonly LoaderProvider[] = ['claude-code', 'antigravity']
+const LOADER_PROVIDERS: readonly LoaderProvider[] = ['claude-code', 'antigravity', 'codex', 'dsh']
 const SESSION_PAGE_SIZE = 50
 const EVENT_PAGE_SIZE = 200
 const SEARCH_PAGE_SIZE = 100
@@ -36,6 +36,7 @@ export function SessionLoaderDialog(props: {
   targetTitle: string
   targetRunning: boolean
   initialProvider?: LoaderProvider
+  metadataRevision?: string | number
   listSessions(
     query: string, searchScope?: 'metadata' | 'all', offset?: number, limit?: number,
     provider?: LoaderProvider
@@ -53,7 +54,7 @@ export function SessionLoaderDialog(props: {
   const messages = useMessages()
   const m = messages.sessionCanvas.loader
   const {
-    targetTitle, targetRunning, initialProvider = 'claude-code',
+    targetTitle, targetRunning, initialProvider = 'claude-code', metadataRevision,
     listSessions, loadDetail, searchSession, loadCurrentDetail, onLoad, onCancel, portalTarget
   } = props
   const historyMode = loadCurrentDetail !== undefined
@@ -83,8 +84,17 @@ export function SessionLoaderDialog(props: {
   const [viewingEarlier, setViewingEarlier] = useState(false)
   const [error, setError] = useState('')
   const [currentLoadFailed, setCurrentLoadFailed] = useState(false)
+  const [silentRefreshTrigger, setSilentRefreshTrigger] = useState(0)
   const listRequestSequence = useRef(0)
   const detailRequestSequence = useRef(0)
+  const loadingListRef = useRef(true)
+  const pendingMetadataRefreshRef = useRef(false)
+  const appliedMetadataRevisionRef = useRef(metadataRevision)
+  const metadataRevisionRef = useRef(metadataRevision)
+  metadataRevisionRef.current = metadataRevision
+  const handledSilentTriggerRef = useRef(0)
+  const sessionsCountRef = useRef(0)
+  sessionsCountRef.current = sessions.length
   const skipNextDetailLoad = useRef('')
   const currentHistoryBootstrapped = useRef(false)
   const historySearchFocused = useRef(false)
@@ -208,6 +218,9 @@ export function SessionLoaderDialog(props: {
   useEffect(() => {
     if (historyMode) return
     const sequence = ++listRequestSequence.current
+    pendingMetadataRefreshRef.current = false
+    appliedMetadataRevisionRef.current = metadataRevisionRef.current
+    loadingListRef.current = true
     setLoadingList(true)
     setError('')
     void fetchListPage(effectiveSessionQuery, 'metadata', 0, SESSION_PAGE_SIZE).then((result) => {
@@ -222,9 +235,58 @@ export function SessionLoaderDialog(props: {
     }).catch((reason: unknown) => {
       if (sequence === listRequestSequence.current) setError(errorMessage(reason))
     }).finally(() => {
-      if (sequence === listRequestSequence.current) setLoadingList(false)
+      if (sequence !== listRequestSequence.current) return
+      loadingListRef.current = false
+      setLoadingList(false)
+      if (pendingMetadataRefreshRef.current) {
+        pendingMetadataRefreshRef.current = false
+        setSilentRefreshTrigger((value) => value + 1)
+      }
     })
   }, [effectiveSessionQuery, fetchListPage, historyMode])
+
+  useEffect(() => {
+    if (historyMode) return
+    const silentTriggered = handledSilentTriggerRef.current !== silentRefreshTrigger
+    handledSilentTriggerRef.current = silentRefreshTrigger
+    if (appliedMetadataRevisionRef.current === metadataRevision && !silentTriggered) return
+    if (loadingListRef.current) {
+      pendingMetadataRefreshRef.current = true
+      return
+    }
+    appliedMetadataRevisionRef.current = metadataRevision
+    const sequence = listRequestSequence.current
+    const refreshLimit = Math.min(200, Math.max(SESSION_PAGE_SIZE, sessionsCountRef.current))
+    void fetchListPage(effectiveSessionQuery, 'metadata', 0, refreshLimit).then((result) => {
+      if (sequence !== listRequestSequence.current || loadingListRef.current) return
+      setSessions(result.sessions)
+      setSessionTotal(result.total)
+      setNextSessionOffset(result.nextOffset)
+      setHasMoreSessions(result.hasMore)
+      setSelectedId((current) => result.sessions.some(({ providerSessionId }) =>
+        providerSessionId === current) ? current : result.sessions[0]?.providerSessionId ?? '')
+      setDetail((current) => {
+        if (!current) return current
+        const updated = result.sessions.find(({ providerSessionId }) =>
+          providerSessionId === current.providerSessionId)
+        if (!updated) return current
+        const {
+          loadedSessionId: _previousLoadedId,
+          loadedSessionTitle: _previousLoadedTitle,
+          ...rest
+        } = current
+        return {
+          ...rest,
+          title: updated.title,
+          availability: updated.availability,
+          ...(updated.loadedSessionId ? { loadedSessionId: updated.loadedSessionId } : {}),
+          ...(updated.loadedSessionTitle ? { loadedSessionTitle: updated.loadedSessionTitle } : {})
+        }
+      })
+    }).catch(() => {
+      // Background metadata refreshes must not clobber an already visible list.
+    })
+  }, [effectiveSessionQuery, fetchListPage, historyMode, metadataRevision, silentRefreshTrigger])
 
   const loadCurrentHistory = useCallback(async () => {
     if (!loadCurrentDetail) return
@@ -514,7 +576,9 @@ export function SessionLoaderDialog(props: {
                       onClick={() => setSelectedId(session.providerSessionId)}>
                       <strong>{session.title}</strong>
                       <span>{relativeTime(session.updatedAt, m)} · {session.model ?? providerName}</span>
-                      <small>{m.permission[session.permissionMode]} · {m.entries(session.eventCount)}</small>
+                      {provider !== 'codex' && (provider === 'dsh'
+                        ? <small>{m.entries(session.eventCount)}</small>
+                        : <small>{m.permission[session.permissionMode]} · {m.entries(session.eventCount)}</small>)}
                       {session.availability === 'loaded-here' && <small>{m.loadedHere}</small>}
                       {session.availability === 'loaded-elsewhere' &&
                         <small>{m.loadedElsewhere(session.loadedSessionTitle
@@ -534,7 +598,9 @@ export function SessionLoaderDialog(props: {
         <section className="session-loader-preview" aria-label={m.preview}>
           <header>
             <div><strong>{detail?.title ?? m.selectSession}</strong>
-              {detail && <span>{detail.model ?? providerName} · {m.permission[detail.permissionMode]}</span>}
+              {detail && <span>{detail.model ?? providerName}{provider === 'dsh'
+                ? null
+                : ` · ${m.permission[detail.permissionMode]}`}</span>}
             </div>
             <div className="session-loader-content-search-group">
               {historyMode && !effectiveContentQuery && detail &&

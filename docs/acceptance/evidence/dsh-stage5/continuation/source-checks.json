@@ -1,0 +1,24 @@
+{
+  "recordedAt": "2026-11-15T18:43:39.994822+00:00",
+  "commit": "479e620",
+  "workspaceTypecheck": {
+    "status": "passed",
+    "command": "pnpm typecheck",
+    "log": "continuation-typecheck.log"
+  },
+  "identifierCheck": {
+    "status": "passed",
+    "command": "pnpm check:identifiers"
+  },
+  "diffCheck": "passed",
+  "unchangedUnitEvidence": {
+    "reusedFrom": "../followup/source-checks.json",
+    "runtimeServerPassed": 166,
+    "includedDshRecoveryScenarios": 5,
+    "reason": "No product or unit-test changes since the prior successful run. Not rerun or counted as new execution."
+  },
+  "codexStrictSpecTypecheck": {
+    "status": "pre-existing three diagnostics also present in a06812f; separate from workspace typecheck",
+    "evidence": "../followup/source-checks.json"
+  }
+}

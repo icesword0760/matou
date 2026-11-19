@@ -1,0 +1,37 @@
+{
+  "baselineCommit": "73154003bc16e8612a23d7fca8c264b6fb6303c9",
+  "branchHeadBeforeClosure": "89fea16cb29630405b9cd7da9f266d5287983aff",
+  "baselinePrecedesBranchHead": true,
+  "mainWorktree": "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c8/main",
+  "sameTargetTestBody": true,
+  "targetTestBodySha256": "1805c9db12e4791cd299fd2cd6bdd0c73768b4461c4995da8f437c7fc656c7db",
+  "sameExecutableSpecSha256": "39884738348a51ea737af35844b22d603fe3fb0592e9e9e05ea1c930136e9ffa",
+  "harnessOnlyDifferenceFromMain": "Three existing isolated path environment overrides copied from branch; target scenario, selector, assertions unchanged",
+  "nativeResourcesSourceMatches": [
+    "tooling/model-router",
+    "tooling/claude-accounts",
+    "apps/desktop/build",
+    "apps/desktop/package.json",
+    "pnpm-lock.yaml",
+    "tooling/prepare-package-resources.mjs"
+  ],
+  "mainPackaging": "Main packages/runtime/desktop built from 7315400. Reused only unchanged model-router, account native resources, pinned node-pty and licenses; runtime entry/control assets rebuilt from main. Electron 43.4.1 distribution reused.",
+  "preparationFailure": "First resource-copy command used wrong cwd and failed; resulting incomplete bundle was not used for any test. Corrected absolute paths and packaged again.",
+  "components": {
+    "Contents/Resources/app.asar": {
+      "sha256": "97f1c60e17cf99253c9feb1d907addf86e6b91d35bb54ad7b84ccd90523ee37d",
+      "bytes": 27722781
+    },
+    "Contents/Resources/runtime/index.cjs": {
+      "sha256": "fafcd16e19101d0ac4399f7389db263f975a25c9576b71489f14244bbda0694c",
+      "bytes": 2726017
+    },
+    "Contents/Resources/runtime/mt-cli.cjs": {
+      "sha256": "a6489d906d0a4eb61c06e8de01fac5ef568708b4eba46f35134a25823a85c2c7",
+      "bytes": 648935
+    }
+  },
+  "mainTrackedDiff": [
+    "tests/e2e/antigravity-acceptance.spec.ts"
+  ]
+}

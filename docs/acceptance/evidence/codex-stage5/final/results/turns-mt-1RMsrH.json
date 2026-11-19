@@ -1,0 +1,10 @@
+[
+  {
+    "sessionId": "ffadf6d2-dea9-4b17-8bcf-fd38e88fe895",
+    "providerSessionId": "01a1df2b-c7e2-76e0-9349-e038b7903c93",
+    "turnId": "01a1df2b-c92d-7b21-8c0a-39aeb7574d1f",
+    "prompt": "Use the mt CLI to list cards and read the Shell sibling (mt read left --lines 30). Reply only its PEER_ token. Do not guess the token.",
+    "finalAnswer": "PEER_54f5f94e08ac",
+    "completedAnswer": "PEER_54f5f94e08ac"
+  }
+]

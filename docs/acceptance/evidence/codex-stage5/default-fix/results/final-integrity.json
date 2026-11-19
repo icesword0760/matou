@@ -1,0 +1,36 @@
+{
+  "sourceCommit": "3f71baa75256aafe797b6c2ae687c31fccd6d0bd",
+  "checkedAt": "2026-11-15T21:09:34.207623",
+  "componentsMatch": {
+    "Contents/MacOS/\u7801\u5934": true,
+    "Contents/Resources/app.asar": true,
+    "Contents/Resources/runtime/index.cjs": true,
+    "Contents/Resources/runtime/mt-cli.cjs": true,
+    "Contents/Resources/runtime/control-assets/bin/mt": true,
+    "Contents/Resources/runtime/control-assets/providers/codex-developer-instructions.md": true
+  },
+  "rawRolloutTurnContexts": [
+    {
+      "turnId": "01a1df4f-dcd4-7102-91e1-078a2b039e1a",
+      "approval": "never",
+      "sandbox": "danger-full-access"
+    },
+    {
+      "turnId": "01a1df50-0165-72f3-860c-3c80ccc035bd",
+      "approval": "on-request",
+      "sandbox": "workspace-write"
+    },
+    {
+      "turnId": "01a1df50-2fd1-77b2-ae9d-a111e08e7e49",
+      "approval": "on-request",
+      "sandbox": "read-only"
+    },
+    {
+      "turnId": "01a1df50-5de1-75f0-a4eb-e96c4aedffae",
+      "approval": "on-request",
+      "sandbox": "workspace-write"
+    }
+  ],
+  "authCopiesRemaining": 0,
+  "relatedProcessPids": []
+}

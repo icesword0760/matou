@@ -1,0 +1,1 @@
+https://github.com/openai/codex/releases/latest› 1. Update now (runs `npm install -g @openai/codex`)                                                                                       2.Skip3.Skipuntilnextversionenter continue · esc skip

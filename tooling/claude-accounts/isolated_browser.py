@@ -18,9 +18,22 @@ import threading
 import tempfile
 import time
 from urllib.parse import parse_qs, urlsplit
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
-def find_browser() -> str:
+def find_browser() -> tuple[str, list[str]]:
+    executable = os.environ.get("MATOU_SAFE_BROWSER_BIN", "")
+    timezone = os.environ.get("MATOU_SAFE_BROWSER_TZ", "")
+    seed = os.environ.get("MATOU_SAFE_BROWSER_SEED", "")
+    if (executable and Path(executable).is_file() and os.access(executable, os.X_OK)
+            and timezone and re.fullmatch(r"0*[1-9][0-9]*", seed)):
+        try:
+            ZoneInfo(timezone)
+        except (ValueError, ZoneInfoNotFoundError):
+            pass
+        else:
+            return executable, ["--timezone=" + timezone, "--accept-lang=zh-CN,zh",
+                                "--fingerprint=" + seed, "--fingerprint-platform=macos"]
     candidates = []
     if os.name == "nt":
         for base in (os.environ.get("PROGRAMFILES"), os.environ.get("PROGRAMFILES(X86)"), os.environ.get("LOCALAPPDATA")):
@@ -35,7 +48,7 @@ def find_browser() -> str:
         candidates.extend(filter(None, (shutil.which(n) for n in ("google-chrome", "chromium", "chromium-browser", "microsoft-edge", "brave-browser"))))
     for candidate in candidates:
         if Path(candidate).is_file() and os.access(candidate, os.X_OK):
-            return candidate
+            return candidate, []
     # No ordinary-browser fallback: it would silently reuse the old account.
     raise ValueError("browser-missing")
 
@@ -78,20 +91,23 @@ def stop_process(child: subprocess.Popen | None):
         pass
 
 
-def start_browser(executable: str, profile: Path, url: str) -> subprocess.Popen:
+def start_browser(executable: str, profile: Path, url: str, extra_args: list[str] | None = None) -> subprocess.Popen:
     # An exclusive profile isolates this flow even from other incognito windows.
     # Outlive the login profile: saving/cancelling may remove credentials while
     # the user still has this browser window open. No default Chrome data is used.
     directory = Path(tempfile.mkdtemp(prefix="matou-claude-browser-"))
     start = profile / "browser-start.html"
-    start.write_text('<!doctype html><meta charset="utf-8"><title>Matou · Claude</title>'
-                     '<meta http-equiv="refresh" content="0; url=' + html.escape(url, quote=True) + '">'
-                     '<p>Opening Claude sign-in…</p>', encoding="utf-8")
-    start.chmod(0o600)
+    target = url
+    if not extra_args:
+        start.write_text('<!doctype html><meta charset="utf-8"><title>Matou · Claude</title>'
+                         '<meta http-equiv="refresh" content="0; url=' + html.escape(url, quote=True) + '">'
+                         '<p>Opening Claude sign-in…</p>', encoding="utf-8")
+        start.chmod(0o600)
+        target = start.as_uri()
     child = subprocess.Popen([
         executable, "--user-data-dir=" + str(directory), "--incognito", "--new-window",
         "--no-first-run", "--no-default-browser-check", "--disable-sync", "--disable-background-mode",
-        start.as_uri(),
+        *(extra_args or []), target,
     ], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         start_new_session=True)
     child.matou_browser_directory = directory
@@ -99,7 +115,7 @@ def start_browser(executable: str, profile: Path, url: str) -> subprocess.Popen:
 
 
 def login(claude: str, profile: Path, timeout: float = 300, *, code_input=None, nonce: str | None = None):
-    executable = find_browser()
+    executable, extra_args = find_browser()
     # This override is scoped to the isolated CLI, not the shell or default app.
     env = dict(os.environ, BROWSER="true", NO_COLOR="1")
     child = None
@@ -159,7 +175,7 @@ def login(claude: str, profile: Path, timeout: float = 300, *, code_input=None, 
         while time.monotonic() < deadline:
             if browser is None:
                 try:
-                    browser = start_browser(executable, profile, urls.get(timeout=0.1))
+                    browser = start_browser(executable, profile, urls.get(timeout=0.1), extra_args)
                 except queue.Empty:
                     pass
             try:

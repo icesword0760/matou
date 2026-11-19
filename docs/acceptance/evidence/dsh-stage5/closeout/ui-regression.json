@@ -1,0 +1,114 @@
+{
+  "scope": "This closeout batch: Claude and Antigravity completed before reconnect; only the unstarted Codex suite was run after reconnect. No completed batch was repeated.",
+  "claude": {
+    "passed": 10,
+    "failed": 3,
+    "skipped": 0,
+    "duration": "1.8m",
+    "log": "closeout-claude-e2e.log",
+    "failures": [
+      {
+        "location": "prd-06-session-fork.spec.ts:187",
+        "observed": "relations=[]",
+        "comparison": "历史已知同点"
+      },
+      {
+        "location": "prd-06-session-fork.spec.ts:276",
+        "observed": "fork-failure-card=0",
+        "comparison": "历史已知同点"
+      },
+      {
+        "location": "session-load-existing-claude.spec.ts:164",
+        "observed": "搜索显示2/2，但预览未显示350",
+        "comparison": "antigravity-reference-matrix第81行有同类历史失败，后续曾通过，不能称稳定修复"
+      }
+    ]
+  },
+  "antigravity": {
+    "passed": 2,
+    "failed": 3,
+    "skipped": 0,
+    "duration": "8.9m",
+    "log": "closeout-agy-acceptance.log",
+    "passed_scenarios": [
+      "mt跨卡",
+      "缺命令、未登录和恢复失败受控场景"
+    ],
+    "failures": [
+      {
+        "location": "antigravity-acceptance.spec.ts:497",
+        "observed": "DAG idle等待90秒超时",
+        "comparison": "不同于最新矩阵876选择器失败；原因未知"
+      },
+      {
+        "location": "antigravity-acceptance.spec.ts:802",
+        "observed": "自动标题30秒为空",
+        "comparison": "不同于最新矩阵876选择器失败；原因未知"
+      },
+      {
+        "location": "antigravity-acceptance.spec.ts:408",
+        "observed": "模型HUD 45秒未出现",
+        "comparison": "不同于最新矩阵876选择器失败；原因未知"
+      }
+    ]
+  },
+  "codex": {
+    "passed": 7,
+    "failed": 3,
+    "skipped": 0,
+    "duration": "8.8m",
+    "workers": 1,
+    "retries": 0,
+    "log": "closeout-codex-acceptance.log",
+    "passed_scenarios": [
+      "模型错误通知和启动防升级",
+      "祖先历史预览搜索及缺失提示",
+      "Default从Bypass和Plan恢复权限",
+      "mt创建卡片并读取兄弟卡",
+      "审批通知、继续、中断及后续对话",
+      "恢复失败、重试、新开",
+      "缺CLI和未登录受控fixture"
+    ],
+    "failures": [
+      {
+        "location": "codex-acceptance.spec.ts:559 -> 411",
+        "observed": "首次对话等待provider session id 30秒仍为空",
+        "unreached": "三轮延迟采样、HUD、标题、通知、权限与该综合场景重启",
+        "comparison": "与历史核心失败不能简单等同；本次具体身份超时相对矩阵接受结果为新失败点，原因未知"
+      },
+      {
+        "location": "codex-acceptance.spec.ts:805 -> 411",
+        "observed": "重启前首次对话等待provider session id 30秒仍为空",
+        "unreached": "静置10秒、状态、重启与暗号回忆",
+        "comparison": "矩阵正常重启补测通过；本次为新失败点，未到重启步骤，不能断言重启本身失败"
+      },
+      {
+        "location": "codex-acceptance.spec.ts:862",
+        "observed": "首个当前目录Fork取得的子UUID与父UUID相同",
+        "unreached": "子元数据、继承和隔离、新Worktree Fork、载入搜索和恢复",
+        "comparison": "矩阵当前及新Worktree Fork均通过；本次新失败，原因未知，不能归因既知外部并发风险"
+      }
+    ]
+  },
+  "cleanup": {
+    "isolated_auth_copies_remaining": 0,
+    "own_matching_app_or_test_processes_remaining": 0,
+    "own_matching_short_links_remaining": 0,
+    "user_app": "未关闭"
+  },
+  "decisions": [
+    "仅运行一次完整Codex套件，不重试、不调试、不重打包",
+    "按精确命令确认后结束旧Claude测试残留PID 38854",
+    "不更改产品、测试或真实用户配置"
+  ],
+  "packageManifestSHA256": "1207ec4457ab31ad111fcff53d42963ef4ec8dae6a4daa17e4e42903e08699f6",
+  "buildUse": {
+    "claude": "Working-tree desktop build from the same package build; no product source changed.",
+    "antigravity": "Final packaged App.",
+    "codex": "Final packaged App."
+  },
+  "knownFailureReferences": [
+    "docs/acceptance/antigravity-reference-matrix.md:81 (Claude virtual search), :87-89 (historical main reproduction)",
+    "docs/acceptance/codex-reference-matrix.md:90 (known Antigravity selector failure differs from this run), :122-138 (latest accepted Codex fixes/boundaries)"
+  ]
+}

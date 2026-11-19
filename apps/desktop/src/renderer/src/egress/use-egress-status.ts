@@ -151,11 +151,26 @@ export function isEgressStatusWire(value: unknown): value is EgressStatusWire {
   )
 }
 
+export function sessionEgressFamilies(status: EgressStatusWire | undefined, sessionId: string): readonly EgressFamily[] {
+  const set = status?.sessionFamilySets?.[sessionId]
+  if (set) return set
+  const legacy = status?.sessionFamilies?.[sessionId]
+  return legacy ? [legacy] : []
+}
+
 export function sessionEgressFamily(
   status: EgressStatusWire | undefined,
   sessionId: string
 ): EgressFamily | undefined {
-  return status?.sessionFamilies?.[sessionId]
+  const families = sessionEgressFamilies(status, sessionId)
+  // Existing single-family surfaces show the blocking member first.
+  return families.find(f => {
+    const entry = findEgressFamily(status, f)
+    return entry && !entry.overridden && entry.state === 'abnormal'
+  }) ?? families.find(f => {
+    const entry = findEgressFamily(status, f)
+    return entry && !entry.overridden && entry.frozenSessionIds.includes(sessionId)
+  }) ?? families[0]
 }
 
 export function findEgressFamily(
@@ -170,10 +185,10 @@ export function isSessionEgressFrozen(
   status: EgressStatusWire | undefined,
   sessionId: string
 ): boolean {
-  const family = sessionEgressFamily(status, sessionId)
-  const entry = findEgressFamily(status, family)
-  if (!entry || entry.overridden) return false
-  return entry.frozenSessionIds.includes(sessionId)
+  return sessionEgressFamilies(status, sessionId).some(family => {
+    const entry = findEgressFamily(status, family)
+    return entry && !entry.overridden && entry.frozenSessionIds.includes(sessionId)
+  })
 }
 
 /** Extract only the frozen/resumed banner fields relevant to `sessionId`. */
@@ -213,7 +228,7 @@ export function selectSessionEgressBannerView(
 
   if (
     status.lastTransition?.kind === 'resumed' &&
-    status.lastTransition.family === family
+    sessionEgressFamilies(status, sessionId).includes(status.lastTransition.family)
   ) {
     return {
       kind: 'resumed',

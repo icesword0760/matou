@@ -64,6 +64,32 @@ export function familyWarnCount(
   ).length
 }
 
+/** Summarize all exit families for sessions without a monitored provider. */
+export function globalChipCopy(status: EgressStatusWire | undefined, zh: boolean): ChipCopy {
+  if (!status || status.state === 'checking') {
+    return { label: zh ? '检查中…' : 'Checking…', tone: 'neutral' }
+  }
+  switch (status.state) {
+    case 'abnormal': {
+      const paused = new Set(status.families.flatMap(family => family.frozenSessionIds)).size
+      return {
+        label: paused > 0
+          ? zh ? `出口异常 · 已暂停 ${paused} 个会话` : `Exit problem · ${paused} session(s) paused`
+          : zh ? '出口异常' : 'Exit problem',
+        tone: 'danger'
+      }
+    }
+    case 'warning': {
+      const count = Math.max(1, status.checks.filter((check) => check.result === 'warn' || check.result === 'fail').length)
+      return { label: zh ? `${count} 项提醒` : `${count} warning(s)`, tone: 'warn' }
+    }
+    case 'ok':
+      return { label: zh ? '出口正常' : 'Exit OK', tone: 'ok' }
+    default:
+      return { label: zh ? '无法确认出口' : 'Exit unconfirmed', tone: 'warn' }
+  }
+}
+
 /** Compute the exact HUD chip label and visual tone for a provider family. */
 export function chipCopy(
   statusState: EgressStatusWire['state'],
@@ -128,22 +154,50 @@ export function checkCopy(
   const title = checkTitle(check.id, zh)
 
   if (check.result === 'unknown') {
+    const error = factString(check, 'error')
+    const host = factString(check, 'host')
+    const target = host ? `${host} ` : ''
+    let reasonZh = '检测超时'
+    let reasonEn = 'check timed out'
+    if (error === 'unreachable') {
+      reasonZh = `${target}连不上`
+      reasonEn = `${target}unreachable`
+    } else if (error === 'invalid') {
+      reasonZh = `${target}返回异常`
+      reasonEn = `${target}invalid response`
+    } else if (host) {
+      reasonZh = `${host} 检测超时`
+      reasonEn = `${host} timed out`
+    }
     return {
       title,
-      detail: zh ? '无法确认（检测超时）' : "Couldn't confirm (check timed out)"
+      detail: zh ? `无法确认（${reasonZh}）` : `Couldn't confirm (${reasonEn})`
     }
   }
 
   if (check.result === 'pass') {
+    const slowHost = factString(check, 'slowHost')
+    const slowSuffix = slowHost
+      ? zh
+        ? ` · ${slowHost} 响应慢（>5 秒）`
+        : ` · ${slowHost} is slow (>5s)`
+      : ''
     if (check.id === 'mainland') {
       const ip = familyExit?.ip ?? factString(check, 'ip')
       const countryCode = familyExit?.country ?? factString(check, 'country')
       if (ip || countryCode) {
         const region = countryName(countryCode, zh)
+        const base = ip ? `${region} · ${ip}` : region
         return {
           title,
-          detail: ip ? `${region} · ${ip}` : region
+          detail: `${base}${slowSuffix}`
         }
+      }
+    }
+    if (slowHost) {
+      return {
+        title,
+        detail: zh ? `${slowHost} 响应慢（>5 秒）` : `${slowHost} is slow (>5s)`
       }
     }
     return { title }
@@ -268,6 +322,8 @@ export function familyHeading(family: EgressFamily, zh: boolean): string {
       return zh ? 'Codex（OpenAI）' : 'Codex (OpenAI)'
     case 'chatgpt-subscription':
       return zh ? 'Claude（ChatGPT 订阅）' : 'Claude (ChatGPT subscription)'
+    case 'google':
+      return zh ? 'Google（通用出口检测）' : 'Google (generic exit)'
   }
 }
 

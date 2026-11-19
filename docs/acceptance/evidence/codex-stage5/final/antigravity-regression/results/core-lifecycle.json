@@ -1,0 +1,45 @@
+{
+  "sessionId": "61fe1b49-d623-4502-b3f5-10f38a0bce4d",
+  "providerSessionId": "1371b292-be9c-45b0-a4b1-97765379a516",
+  "modelBefore": "Gemini 4 Carbon (Medium) (1M context)",
+  "modelAfter": "Gemini 4 Carbon (Medium) (1M context)",
+  "latencies": [
+    {
+      "transition": "idle -> running",
+      "triggerAtMs": 1794745877285,
+      "runtimeEventAtMs": 1794745882178,
+      "uiObservedAtMs": 1794745878017,
+      "runtimeToUiMs": 0,
+      "within1000ms": true,
+      "endToEndMs": 732
+    },
+    {
+      "transition": "running -> idle (Stop)",
+      "triggerAtMs": 1794745877285,
+      "runtimeEventAtMs": 1794745882132,
+      "uiObservedAtMs": 1794745882134,
+      "runtimeToUiMs": 2,
+      "within1000ms": true,
+      "endToEndMs": 4849
+    },
+    {
+      "transition": "running -> needs-input (tool_use)",
+      "triggerAtMs": 1794745887522,
+      "runtimeEventAtMs": 1794745894889,
+      "uiObservedAtMs": 1794745894891,
+      "runtimeToUiMs": 2,
+      "within1000ms": true,
+      "endToEndMs": 7369
+    }
+  ],
+  "dbBindingsAfter": [
+    {
+      "session_id": "61fe1b49-d623-4502-b3f5-10f38a0bce4d",
+      "provider": "antigravity",
+      "provider_session_id": "1371b292-be9c-45b0-a4b1-97765379a516",
+      "resume_state": "available",
+      "metadata_json": "{\"permissionMode\":\"default\",\"cwd\":\"/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/final-agy/core-BbTVUl/repo\",\"lastHookEvent\":\"unknown\",\"canFork\":true,\"observedUserPrompt\":true,\"model\":\"Gemini 4 Carbon (Medium)\",\"observedNormalStop\":true}",
+      "updated_at": 1794745919902
+    }
+  ]
+}

@@ -40,12 +40,19 @@ export async function prepareModelRouter({ arch = process.env.MATOU_MAC_ARCH || 
   if (process.env.MATOU_ROUTER_UPSTREAM !== '1') {
     try {
       const info = JSON.parse(await readFile(join(cache, 'source.json'), 'utf8'))
-      if (info?.patched === true && info.arch === arch && typeof info.binarySha256 === 'string' &&
+      if (info?.patched === true && info.commit === pinnedRouter.commit &&
+          info.patchSha256 === pinnedRouter.patch?.sha256 && typeof info.patchSha256 === 'string' &&
+          info.arch === arch && typeof info.binarySha256 === 'string' &&
           await digest(join(cache, 'model-router')) === info.binarySha256) {
         if (packageResources) await copyPackaged(cache)
         return cache
       }
     } catch { /* No patched build: fall through to the pinned release. */ }
+    // Packaging must not silently replace a missing/stale patch with upstream.
+    // Rebuilding is explicit, so a failed gate cannot alter the production cache.
+    if (packageResources && pinnedRouter.patch) {
+      throw new Error('Current patched model router is missing or stale; run pnpm router:build before packaging')
+    }
   }
   const base = `https://github.com/${pinnedRouter.repository}/releases/download/v${pinnedRouter.version}`
   const checksums = join(cache, 'checksums.txt'), archive = join(cache, asset.name)

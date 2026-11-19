@@ -1,0 +1,3 @@
+
+> @matou/runtime@0.0.0 typecheck /Users/icesword/Documents/AIProjects/matou-multi-agent-codex/apps/runtime
+> tsc --noEmit

@@ -1,0 +1,36 @@
+{
+  "targetedDshRecovery": {
+    "passed": 5,
+    "notSelected": 161,
+    "log": "next-dsh-recovery-targeted.log"
+  },
+  "runtimeServer": {
+    "passed": 166,
+    "failed": 0,
+    "durationSeconds": 67.95,
+    "log": "next-runtime-server.log"
+  },
+  "workspaceTypecheck": "passed",
+  "dshAcceptanceTypecheck": "passed",
+  "identifierCheck": "passed",
+  "diffCheck": "passed",
+  "codexAcceptanceStrictTypecheck": {
+    "status": "fails with the same three pre-existing diagnostics in a06812f and the branch",
+    "baselineLocations": [
+      378,
+      379,
+      665
+    ],
+    "branchLocations": [
+      380,
+      381,
+      670
+    ],
+    "diagnostics": [
+      "TS2339 status on never",
+      "TS2345 observation push to never[]",
+      "TS2379 exactOptionalPropertyTypes for HTTP request method/url"
+    ],
+    "scope": "Not part of workspace typecheck; unchanged unrelated helper typing remains recorded rather than widened in this fix."
+  }
+}

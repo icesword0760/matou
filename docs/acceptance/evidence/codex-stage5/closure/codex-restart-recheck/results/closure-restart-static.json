@@ -1,0 +1,17 @@
+{
+  "sid": "7ac05e59-a705-433f-a961-1f5b2e5d9b3e",
+  "providerId": "01a1df3f-8840-78a0-b954-9af370ab98db",
+  "staticElapsedMs": 10003,
+  "staticStatus": "starting",
+  "banner": null,
+  "bindingBeforeQuestion": [
+    {
+      "session_id": "7ac05e59-a705-433f-a961-1f5b2e5d9b3e",
+      "provider": "codex",
+      "provider_session_id": "01a1df3f-8840-78a0-b954-9af370ab98db",
+      "resume_state": "available",
+      "metadata_json": "{\"providerConfigId\":\"openai-official\",\"model\":\"gpt-6-astra\",\"permissionMode\":\"default\",\"cwd\":\"/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c8/codex-restart-recheck/restart-closure-kJcEBl/repo\",\"lastHookEvent\":\"Stop\",\"canFork\":true,\"observedUserPrompt\":true,\"observedNormalStop\":true}",
+      "updated_at": 1794746863989
+    }
+  ]
+}

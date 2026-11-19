@@ -10,7 +10,8 @@ import {
 export const EGRESS_HOSTS: Record<EgressFamily, { api: string; login: string }> = {
   anthropic: { api: 'api.anthropic.com', login: 'claude.ai' },
   openai: { api: 'api.openai.com', login: 'chatgpt.com' },
-  'chatgpt-subscription': { api: 'chatgpt.com', login: 'auth.openai.com' }
+  'chatgpt-subscription': { api: 'chatgpt.com', login: 'auth.openai.com' },
+  google: { api: 'www.cloudflare.com', login: 'accounts.google.com' }
 }
 
 export interface EgressSample {
@@ -82,11 +83,12 @@ function evaluateFamily(
   rule: EgressRule
 ): { evaluation: FamilyEvaluation; familyChecks: EgressCheckWire[] } {
   const { api, login } = pair
-  const exit = resolveExit(api, login)
+  const applicableLogin = family === 'google' ? undefined : login
+  const exit = resolveExit(api, applicableLogin)
 
-  const mainlandCheck = evaluateMainland(family, api, login)
+  const mainlandCheck = evaluateMainland(family, api, applicableLogin)
   const exitRuleCheck = evaluateExitRule(family, api, rule)
-  const loginApiMatchCheck = evaluateLoginApiMatch(family, api, login)
+  const loginApiMatchCheck = family === 'google' ? undefined : evaluateLoginApiMatch(family, api, login)
 
   let violation: 'mainland' | 'rule' | undefined
   let state: FamilyEvaluation['state']
@@ -99,7 +101,7 @@ function evaluateFamily(
     state = 'abnormal'
   } else if (mainlandCheck.result === 'unknown' || exitRuleCheck.result === 'unknown') {
     state = 'unknown'
-  } else if (loginApiMatchCheck.result === 'warn') {
+  } else if (loginApiMatchCheck?.result === 'warn') {
     state = 'warning'
   } else {
     state = 'ok'
@@ -111,13 +113,13 @@ function evaluateFamily(
 
   return {
     evaluation,
-    familyChecks: [mainlandCheck, exitRuleCheck, loginApiMatchCheck]
+    familyChecks: [mainlandCheck, exitRuleCheck, ...(loginApiMatchCheck ? [loginApiMatchCheck] : [])]
   }
 }
 
-function resolveExit(api: EgressHostSample, login: EgressHostSample): EgressExit | undefined {
+function resolveExit(api: EgressHostSample, login?: EgressHostSample): EgressExit | undefined {
   if (hasResolvedExit(api)) return { ip: api.ip, country: api.country }
-  if (hasResolvedExit(login)) return { ip: login.ip, country: login.country }
+  if (login && hasResolvedExit(login)) return { ip: login.ip, country: login.country }
   return undefined
 }
 
@@ -127,25 +129,48 @@ function hasResolvedExit(
   return Boolean(sample.ip && sample.country)
 }
 
+function unknownCheck(
+  id: EgressCheckWire['id'],
+  family: EgressFamily | undefined,
+  ...samples: Array<EgressHostSample | undefined>
+): EgressCheckWire {
+  const failed = samples.find(
+    (sample) => sample && !hasResolvedExit(sample) && !sample.notApplicable
+  )
+  const facts = failed?.error ? { error: failed.error, host: failed.host } : undefined
+  return {
+    id,
+    ...(family ? { family } : {}),
+    result: 'unknown',
+    ...(facts ? { facts } : {})
+  }
+}
+
+function slowFacts(...samples: Array<EgressHostSample | undefined>): Record<string, string> | undefined {
+  const slow = samples.find((sample) => sample?.slow && !sample.notApplicable)
+  return slow ? { slowHost: slow.host } : undefined
+}
+
 function evaluateMainland(
   family: EgressFamily,
   api: EgressHostSample,
-  login: EgressHostSample
+  login?: EgressHostSample
 ): EgressCheckWire {
   const cnHost = api.country === 'CN'
     ? api.host
-    : login.country === 'CN'
+    : login?.country === 'CN'
       ? login.host
       : undefined
   if (cnHost) {
     return { id: 'mainland', family, result: 'fail', facts: { host: cnHost } }
   }
 
-  if (!hasResolvedExit(api) && !hasResolvedExit(login)) {
-    return { id: 'mainland', family, result: 'unknown' }
+  if (!hasResolvedExit(api) && !(login && hasResolvedExit(login))) {
+    return unknownCheck('mainland', family, api, login)
   }
 
-  return { id: 'mainland', family, result: 'pass' }
+  const facts = slowFacts(api, login)
+  return { id: 'mainland', family, result: 'pass', ...(facts ? { facts } : {}) }
 }
 
 function evaluateExitRule(
@@ -155,11 +180,12 @@ function evaluateExitRule(
 ): EgressCheckWire {
   const baseline = rule.baselines[family]
   if (!baseline) {
-    return { id: 'exit-rule', family, result: 'pass' }
+    const facts = slowFacts(api)
+    return { id: 'exit-rule', family, result: 'pass', ...(facts ? { facts } : {}) }
   }
 
   if (!hasResolvedExit(api)) {
-    return { id: 'exit-rule', family, result: 'unknown' }
+    return unknownCheck('exit-rule', family, api)
   }
 
   const mismatch = rule.mode === 'country'
@@ -180,7 +206,8 @@ function evaluateExitRule(
     }
   }
 
-  return { id: 'exit-rule', family, result: 'pass' }
+  const facts = slowFacts(api)
+  return { id: 'exit-rule', family, result: 'pass', ...(facts ? { facts } : {}) }
 }
 
 function evaluateLoginApiMatch(
@@ -189,7 +216,7 @@ function evaluateLoginApiMatch(
   login: EgressHostSample
 ): EgressCheckWire {
   if (!hasResolvedExit(api) || !hasResolvedExit(login)) {
-    return { id: 'login-api-match', family, result: 'unknown' }
+    return unknownCheck('login-api-match', family, api, login)
   }
 
   if (api.ip !== login.ip) {
@@ -201,7 +228,8 @@ function evaluateLoginApiMatch(
     }
   }
 
-  return { id: 'login-api-match', family, result: 'pass' }
+  const facts = slowFacts(api, login)
+  return { id: 'login-api-match', family, result: 'pass', ...(facts ? { facts } : {}) }
 }
 
 function evaluateAgentProxyPath(sample: EgressSample): EgressCheckWire {
@@ -220,7 +248,7 @@ function evaluateBrowserPath(sample: EgressSample): EgressCheckWire {
   const agentIp = sample.hosts.anthropic?.login.ip
   const browserIp = sample.browserLogin.ip
   if (!browserIp || !agentIp) {
-    return { id: 'browser-path', result: 'unknown' }
+    return unknownCheck('browser-path', undefined, sample.browserLogin, sample.hosts.anthropic?.login)
   }
 
   if (browserIp !== agentIp) {

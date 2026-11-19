@@ -8,7 +8,7 @@ import { FOUNDATION_MIGRATIONS } from '../storage/migrations'
 import { ProviderConfigStore } from '../provider-config/provider-config-store'
 import { AgentModelSettings } from './agent-model-settings'
 vi.mock('./native-model-catalog', () => ({
-  nativeClaudeModels: async () => [{ id: 'default', contextWindow: 1_000_000, maxContextWindow: 1_000_000 }, { id: 'claude-test', contextWindow: 200000, maxContextWindow: 1_000_000 }],
+  nativeClaudeModels: async () => [{ id: 'default', contextWindow: 1_000_000, maxContextWindow: 1_000_000 }, { id: 'claude-test', contextWindow: 200000, maxContextWindow: 1_000_000 }, ...['opus','sonnet','haiku'].map(role=>({id:role,resolvedModel:`claude-${role}-native`,contextWindow:200000}))],
   nativeCodexModels: async () => [{ id: 'gpt-test', contextWindow: 272000, maxContextWindow: 872000, supportedEfforts: ['low', 'high'] }],
   nativeCodexDefaultModel: async () => 'gpt-test'
 }))
@@ -111,4 +111,187 @@ it('keeps native Codex metadata out of a built-in configuration edited to use a 
   const snapshot = await settings.set({ contextWindows: { [provider.id]: 'maximum' }, compaction: { mode: 'follow', effort: 'follow' } })
   expect(snapshot.providers.find(p => p.id === provider.id)?.models).toEqual([{ id: 'gpt-test', name: 'gpt-test', fixedTokens: 512_000 }])
   expect(await settings.launchWindow(provider)).toBeUndefined()
+})
+
+it('patches only role assignments and lets an old settings writer preserve them', async () => {
+  const a = await store.upsert({ cli: 'claude-code', name: 'Target', endpoint: 'https://target.invalid', model: 'shared', apiKey: 'private-fixture' })
+  const old = settings.preferences()
+  await settings.patchAssignments({ assignments: { opus: { providerId: a.id, model: 'shared' }, sonnet: { providerId: a.id, model: 'custom' } } })
+  await settings.set({ ...old, contextWindows: { [a.id]: 'maximum' }, claudeRoleAssignments: {} })
+  expect(settings.preferences()).toMatchObject({ contextWindows: { [a.id]: 'maximum' }, claudeRoleAssignments: { opus: { providerId: a.id, model: 'shared' }, sonnet: { providerId: a.id, model: 'custom' } } })
+  expect(JSON.stringify(await settings.snapshot())).not.toContain('private-fixture')
+  await settings.patchAssignments({ assignments: {} })
+  expect(settings.preferences()).toMatchObject({ contextWindows: { [a.id]: 'maximum' }, claudeRoleAssignments: {} })
+})
+
+it('merges a delayed assignment patch into the latest context and compaction settings', async () => {
+  const a = await store.upsert({ cli: 'claude-code', name: 'Target', endpoint: 'https://target.invalid', model: 'shared', apiKey: 'fixture' })
+  const original = store.snapshot.bind(store)
+  let entered!: () => void, release!: () => void
+  const ready = new Promise<void>(r => { entered = r }), gate = new Promise<void>(r => { release = r })
+  vi.spyOn(store, 'snapshot').mockImplementationOnce(async () => { entered(); await gate; return original() })
+  const patch = settings.patchAssignments({ assignments: { haiku: { providerId: a.id, model: 'shared' } } })
+  await ready
+  await settings.set({ contextWindows: { [a.id]: '512k' }, compaction: { mode: 'custom', effort: 'high', providerId: a.id, model: 'custom-summary' } })
+  release(); await patch
+  expect(settings.preferences()).toMatchObject({ contextWindows: { [a.id]: '512k' }, compaction: { model: 'custom-summary' }, claudeRoleAssignments: { haiku: { providerId: a.id, model: 'shared' } } })
+})
+
+it('preserves a new assignment while an old set awaits compaction validation', async () => {
+  const a = await store.upsert({ cli: 'claude-code', name: 'Target', endpoint: 'https://target.invalid', model: 'shared', apiKey: 'fixture' })
+  const original = store.snapshot.bind(store)
+  let entered!: () => void, release!: () => void
+  const ready = new Promise<void>(r => { entered = r }), gate = new Promise<void>(r => { release = r })
+  vi.spyOn(store, 'snapshot').mockImplementationOnce(async () => { entered(); await gate; return original() })
+  const save = settings.set({ contextWindows: {}, compaction: { mode: 'custom', effort: 'follow', providerId: a.id, model: 'summary' } })
+  await ready
+  await settings.patchAssignments({ assignments: { opus: { providerId: a.id, model: 'shared' } } })
+  release(); await save
+  expect(settings.preferences()).toMatchObject({ compaction: { model: 'summary' }, claudeRoleAssignments: { opus: { providerId: a.id, model: 'shared' } } })
+})
+
+it.each([null, [], {}, { assignments: [] }, { assignments: { fable: { providerId: 'p', model: 'm' } } },
+  { assignments: { opus: { providerId: '', model: 'm' } } }, { assignments: { opus: { providerId: 'p', model: '\n' } } },
+  { assignments: { opus: { providerId: 'p', model: 'x'.repeat(241) } } },
+  { assignments: { opus: { providerId: 'p'.repeat(257), model: 'm' } } },
+  { assignments: { opus: { providerId: 'p\u007f', model: 'm' } } }
+])('rejects malformed role patches without changing preferences: %j', async input => {
+  const before = settings.preferences()
+  await expect(settings.patchAssignments(input as never)).rejects.toThrow()
+  expect(settings.preferences()).toEqual(before)
+})
+
+it('rejects missing providers and explicit missing API catalog models, retaining an old selection on read', async () => {
+  const a = await store.upsert({ cli: 'claude-code', name: 'Catalog', endpoint: 'https://target.invalid', model: 'stale', apiKey: 'fixture', modelMetadata: [{ id: 'valid' }] })
+  await expect(settings.patchAssignments({ assignments: { opus: { providerId: a.id, model: 'stale' } } })).rejects.toThrow(/model.*unavailable/i)
+  await settings.patchAssignments({ assignments: { opus: { providerId: a.id, model: 'valid' } } })
+  await store.delete('claude-code', a.id)
+  expect((await settings.snapshot()).preferences.claudeRoleAssignments?.opus).toEqual({ providerId: a.id, model: 'valid' })
+  await expect(settings.patchAssignments({ assignments: { opus: { providerId: a.id, model: 'valid' } } })).rejects.toThrow(/provider.*unavailable/i)
+})
+
+it('rejects unavailable subscription accounts and does not use role mappings as a model catalog', async () => {
+  const a = await store.adoptSubscription({ name: 'Subscription', modelMapping: { opus: 'm', sonnet: 'm', haiku: 'm' }, subscription: { provider: 'codex', credentialRef: { name: 'fixture.json' }, account: { status: 'ready' }, modelMetadata: [{ id: 'm' }] } })
+  await expect(settings.patchAssignments({ assignments: { opus: { providerId: a.id, model: 'other' } } })).rejects.toThrow(/model.*unavailable/i)
+  const snapshot = await store.snapshot()
+  snapshot.providers['claude-code'].find(p => p.id === a.id)!.subscription!.account.status = 'needs-sign-in'
+  vi.spyOn(store, 'snapshot').mockResolvedValue(snapshot)
+  await expect(settings.patchAssignments({ assignments: { opus: { providerId: a.id, model: 'm' } } })).rejects.toThrow(/account.*unavailable/i)
+})
+
+it('exposes assignment patch through RPC without activating a provider and rejects read-only writes', async () => {
+  const { RuntimeRpcRouter } = await import('../rpc/runtime-rpc-router')
+  const { RuntimeAccessPolicy } = await import('../storage/runtime-access-policy')
+  const { RPC_METHODS, parseRendererMessage, PROTOCOL_VERSION } = await import('@matou/contracts')
+  expect(RPC_METHODS).toContain('agent-model-settings.patch-assignments')
+  expect(parseRendererMessage({ type: 'rpc.request', protocolVersion: PROTOCOL_VERSION, requestId: 'assignment-patch', capability: 'renderer', deadlineAt: Date.now() + 1000, method: 'agent-model-settings.patch-assignments', payload: { assignments: {} } })).toMatchObject({ type: 'rpc.request', method: 'agent-model-settings.patch-assignments' })
+  const a = await store.upsert({ cli: 'claude-code', name: 'Target', endpoint: 'https://target.invalid', model: 'm', apiKey: 'fixture' })
+  const before = (await store.snapshot()).activeProviderIds
+  const router = new RuntimeRpcRouter(db, undefined, { providerConfigs: store })
+  await router.handle('agent-model-settings.patch-assignments', { assignments: { opus: { providerId: a.id, model: 'm' } } })
+  expect(settings.preferences().claudeRoleAssignments?.opus).toEqual({ providerId: a.id, model: 'm' })
+  expect((await store.snapshot()).activeProviderIds).toEqual(before)
+  const readOnly = new RuntimeRpcRouter(db, undefined, { providerConfigs: store, accessPolicy: new RuntimeAccessPolicy('read-only') })
+  await expect(readOnly.handle('agent-model-settings.patch-assignments', { assignments: {} })).rejects.toMatchObject({ code: 'STORAGE_READ_ONLY' })
+})
+
+it('keeps a captured runtime route when the real provider store changes endpoint, key and model', async () => {
+  const { resolveClaudeRoleSnapshot } = await import('./claude-role-assignments')
+  const a = await store.upsert({ cli: 'claude-code', name: 'Target', endpoint: 'https://before.invalid', model: 'same', apiKey: 'before-key' })
+  await store.activate('claude-code', a.id)
+  await settings.patchAssignments({ assignments: { opus: { providerId: a.id, model: 'same' }, sonnet: { providerId: a.id, model: 'same' }, haiku: { providerId: a.id, model: 'same' } } })
+  const selection = await store.launchSelection('claude-code', a.id)
+  const captured = resolveClaudeRoleSnapshot({ preferences: settings.preferences(), providers: await store.snapshot(), connections: { [a.id]: { kind: 'api', baseUrl: selection.env.ANTHROPIC_BASE_URL!, headers: { 'x-api-key': selection.env.ANTHROPIC_API_KEY! } } } })!
+  await store.upsert({ id: a.id, cli: 'claude-code', name: 'Target', endpoint: 'https://after.invalid', model: 'changed', apiKey: 'after-key' })
+  await settings.patchAssignments({ assignments: {} })
+  expect(captured.roles.opus).toMatchObject({ baseUrl: 'https://before.invalid', model: 'same', headers: { 'x-api-key': 'before-key' } })
+  expect(captured.preferences.claudeRoleAssignments?.sonnet).toEqual({ providerId: a.id, model: 'same' })
+})
+
+it('round2 rejects invalid effective default tiers when saving mixed assignments, but permits clearing them', async () => {
+ const a=await store.upsert({cli:'claude-code',name:'Default API',endpoint:'https://default.invalid',model:'unrelated',apiKey:'fixture',modelMetadata:[{id:'a'}]})
+ await store.activate('claude-code',a.id)
+ await expect(settings.patchAssignments({assignments:{opus:{providerId:a.id,model:'a'}}})).rejects.toThrow(/sonnet/i)
+ await expect(settings.patchAssignments({assignments:{}})).resolves.toBeDefined()
+})
+it('round2 validates implicit subscription account status but never requires an unused official account', async () => {
+ const a=await store.upsert({cli:'claude-code',name:'Target',endpoint:'https://target.invalid',model:'a',apiKey:'fixture'})
+ const sub=await store.adoptSubscription({name:'Expired default',modelMapping:{opus:'m',sonnet:'m',haiku:'m'},subscription:{provider:'codex',credentialRef:{name:'fixture.json'},account:{status:'needs-sign-in'},modelMetadata:[{id:'m'}]}})
+ await store.activate('claude-code',sub.id)
+ await expect(settings.patchAssignments({assignments:{opus:{providerId:a.id,model:'a'}}})).rejects.toThrow(/account/i)
+ await store.activate('claude-code','anthropic-official')
+ const target={providerId:a.id,model:'a'}
+ await expect(settings.patchAssignments({assignments:{opus:target,sonnet:target,haiku:target}})).resolves.toBeDefined()
+})
+
+it('round2 projects exact native identity for API default validation and leaves unknown API catalogs permitted', async () => {
+ expect((await settings.snapshot()).providers.find(p=>p.id==='anthropic-official')!.models.find(m=>m.id==='sonnet')?.resolvedModel).toBe('claude-sonnet-native')
+ const a=await store.upsert({cli:'claude-code',name:'Unknown catalog',endpoint:'https://unknown.invalid',model:'unrelated',apiKey:'fixture'})
+ await store.activate('claude-code',a.id)
+ await expect(settings.patchAssignments({assignments:{opus:{providerId:a.id,model:'arbitrary-custom'}}})).resolves.toBeDefined()
+})
+
+it('saves a search target through the assignment patch and preserves it for legacy writers', async () => {
+ const api = await store.upsert({cli:'claude-code',name:'Search',endpoint:'https://search.invalid',apiKey:'fixture',model:'search',modelMetadata:[{id:'search'}]})
+ const webSearch = {providerId:api.id,model:'search'}
+ await settings.patchAssignments({assignments:{},webSearch} as never)
+ expect(settings.preferences().claudeWebSearch).toEqual(webSearch)
+ await settings.patchAssignments({assignments:{}})
+ await settings.set({...settings.preferences(),claudeWebSearch:{providerId:'injected',model:'bad'}})
+ expect(settings.preferences().claudeWebSearch).toEqual(webSearch)
+ await settings.patchAssignments({assignments:{},webSearch:null} as never)
+ expect(settings.preferences().claudeWebSearch).toBeUndefined()
+})
+it('rejects invalid search targets atomically and retains unavailable selections on read', async () => {
+ const api = await store.upsert({cli:'claude-code',name:'Search',endpoint:'https://search.invalid',apiKey:'fixture',model:'search',modelMetadata:[{id:'search'}]})
+ const webSearch = {providerId:api.id,model:'search'}
+ await settings.patchAssignments({assignments:{},webSearch} as never)
+ for(const target of [{providerId:'missing',model:'search'},{providerId:api.id,model:'stale'},{providerId:api.id,model:'\n'},[]]) {
+  await expect(settings.patchAssignments({assignments:{},webSearch:target} as never)).rejects.toThrow()
+  expect(settings.preferences().claudeWebSearch).toEqual(webSearch)
+ }
+ await store.delete('claude-code',api.id)
+ expect((await settings.snapshot()).preferences.claudeWebSearch).toEqual(webSearch)
+})
+
+it('validates live subscription status for search through RPC and preserves the last saved target',async()=>{
+ const sub=await store.adoptSubscription({name:'Search account',modelMapping:{opus:'m',sonnet:'m',haiku:'m'},subscription:{provider:'codex',credentialRef:{name:'fixture.json'},account:{status:'ready'},modelMetadata:[{id:'m'}]}})
+ const {RuntimeRpcRouter}=await import('../rpc/runtime-rpc-router')
+ let status:'ready'|'needs-sign-in'='ready'
+ const router=new RuntimeRpcRouter(db,undefined,{providerConfigs:store,modelAccounts:{snapshot:async()=>{const snapshot=await store.snapshot();snapshot.providers['claude-code'].find(p=>p.id===sub.id)!.subscription!.account.status=status;return snapshot}}})
+ const input={assignments:{},webSearch:{providerId:sub.id,model:'m'}}
+ await router.handle('agent-model-settings.patch-assignments',input)
+ status='needs-sign-in'
+ await expect(router.handle('agent-model-settings.patch-assignments',input)).rejects.toThrow(/account.*unavailable/i)
+ expect((await settings.snapshot()).preferences.claudeWebSearch).toEqual(input.webSearch)
+ await router.handle('agent-model-settings.patch-assignments',{assignments:{}})
+ expect(settings.preferences().claudeWebSearch).toEqual(input.webSearch)
+})
+it('permits manual search models only for API providers without an authoritative catalog',async()=>{
+ const api=await store.upsert({cli:'claude-code',name:'Manual',endpoint:'https://search.invalid',apiKey:'fixture',model:'search'})
+ await settings.patchAssignments({assignments:{},webSearch:{providerId:api.id,model:'vendor/custom'}})
+ expect(settings.preferences().claudeWebSearch?.model).toBe('vendor/custom')
+ await settings.patchAssignments({assignments:{},webSearch:undefined} as never)
+ expect(settings.preferences().claudeWebSearch).toBeUndefined()
+})
+
+it('validates and persists per-assignment reasoning effort for roles and web search', async () => {
+ const deepseek = await store.upsert({
+  cli: 'claude-code', name: 'DeepSeek', endpoint: 'https://api.deepseek.com/anthropic',
+  apiKey: 'fixture', model: 'deepseek-flash',
+  modelMetadata: [{ id: 'deepseek-flash', displayName: 'DeepSeek-V4.1-Flash', supportedEfforts: ['low', 'high', 'max'] }]
+ })
+ await expect(settings.patchAssignments({
+  assignments: { opus: { providerId: deepseek.id, model: 'deepseek-flash', effort: 'medium' } }
+ })).rejects.toThrow(/effort/i)
+ await expect(settings.patchAssignments({
+  assignments: { opus: { providerId: deepseek.id, model: 'deepseek-flash', effort: 'high' } },
+  webSearch: { providerId: deepseek.id, model: 'deepseek-flash', effort: 'xhigh' }
+ })).rejects.toThrow(/effort/i)
+ const snapshot = await settings.patchAssignments({
+  assignments: { opus: { providerId: deepseek.id, model: 'deepseek-flash', effort: 'high' } },
+  webSearch: { providerId: deepseek.id, model: 'deepseek-flash', effort: 'low' }
+ })
+ expect(snapshot.preferences.claudeRoleAssignments?.opus).toEqual({ providerId: deepseek.id, model: 'deepseek-flash', effort: 'high' })
+ expect(snapshot.preferences.claudeWebSearch).toEqual({ providerId: deepseek.id, model: 'deepseek-flash', effort: 'low' })
 })

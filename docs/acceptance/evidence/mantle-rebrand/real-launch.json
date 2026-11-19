@@ -1,0 +1,68 @@
+{
+  "checkedAt": "2026-11-15T14:31:54.195Z",
+  "userData": "/Users/icesword/Documents/AIProjects/matou-login-integration/.cache/safe-browser/real-userData-68DzCq",
+  "status": {
+    "installed": true,
+    "version": "148.0.7778.215"
+  },
+  "launches": [
+    {
+      "kind": "persistent",
+      "executable": "/Users/icesword/Documents/AIProjects/mantle/dist/Mantle.app/Contents/MacOS/Chromium",
+      "args": [
+        "--user-data-dir=/Users/icesword/Documents/AIProjects/matou-login-integration/.cache/safe-browser/real-userData-68DzCq/safe-browser/profile",
+        "--timezone=Asia/Tokyo",
+        "--accept-lang=zh-CN,zh",
+        "--fingerprint=1146775411",
+        "--fingerprint-platform=macos",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--remote-debugging-pipe",
+        "http://127.0.0.1:65176/?kind=persistent"
+      ],
+      "pid": 9783,
+      "timezone": "Asia/Tokyo",
+      "profile": "/Users/icesword/Documents/AIProjects/matou-login-integration/.cache/safe-browser/real-userData-68DzCq/safe-browser/profile",
+      "profileExistedWhileRunning": true,
+      "profileExistsAfterExit": true,
+      "processesBefore": [
+        " 9783  9631  9783 /Users/icesword/Documents/AIProjects/mantle/dist/Mantle.app/Contents/MacOS/Chromium --user-data-dir=/Users/icesword/Documents/AIProjects/matou-login-integration/.cache/safe-browser/real-userData-68DzCq/safe-browser/profile --timezone=Asia/Tokyo --accept-lang=zh-CN,zh --fingerprint=1146775411 --fingerprint-platform=macos --no-first-run --no-default-browser-check --remote-debugging-pipe http://127.0.0.1:65176/?kind=persistent",
+        "10447  9783  9783 /Users/icesword/Documents/AIProjects/mantle/dist/Mantle.app/Contents/Frameworks/Chromium Framework.framework/Versions/148.0.7778.215/Helpers/Chromium Helper.app/Contents/MacOS/Chromium Helper --type=gpu-process --user-data-dir=/Users/icesword/Documents/AIProjects/matou-login-integration/.cache/safe-browser/real-userData-68DzCq/safe-browser/profile --start-stack-profiler --gpu-preferences=SAAAAAAAAAAgAQAEAAAAAAAAAAAAAGAAAwAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAAAAAAQAAAAAAAAABAAAAAAAAAACAAAAAAAAAAIAAAAAAAAAA== --shared-files --metrics-shmem-handle=1752395122,r,17629741502491062077,5767101500846232062,262144 --field-trial-handle=1718379636,r,16053687376038384413,18420821604565406188,262144 --variations-seed-version --pseudonymization-salt-handle=1935764596,r,9349706350808843622,4124914216012719950,4 --trace-process-track-uuid=3190708988185955192 --seatbelt-client=21",
+        "10448  9783  9783 /Users/icesword/Documents/AIProjects/mantle/dist/Mantle.app/Contents/Frameworks/Chromium Framework.framework/Versions/148.0.7778.215/Helpers/Chromium Helper.app/Contents/MacOS/Chromium Helper --type=utility --utility-sub-type=network.mojom.NetworkService --lang=zh-CN --service-sandbox-type=network --user-data-dir=/Users/icesword/Documents/AIProjects/matou-login-integration/.cache/safe-browser/real-userData-68DzCq/safe-browser/profile --start-stack-profiler --shared-files --metrics-shmem-handle=1752395122,r,8540981602323106281,6442499002360237630,524288 --field-trial-handle=1718379636,r,16053687376038384413,18420821604565406188,262144 --variations-seed-version --pseudonymization-salt-handle=1935764596,r,9349706350808843622,4124914216012719950,4 --trace-process-track-uuid=3190708989122997041 --seatbelt-client=29",
+        "10533  9783  9783 /Users/icesword/Documents/AIProjects/mantle/dist/Mantle.app/Contents/Frameworks/Chromium Framework.framework/Versions/148.0.7778.215/Helpers/Chromium Helper.app/Contents/MacOS/Chromium Helper --type=utility --utility-sub-type=storage.mojom.StorageService --lang=zh-CN --service-sandbox-type=service --user-data-dir=/Users/icesword/Documents/AIProjects/matou-login-integration/.cache/safe-browser/real-userData-68DzCq/safe-browser/profile --shared-files --metrics-shmem-handle=1752395122,r,3347413953678951445,11158797926658247606,524288 --field-trial-handle=1718379636,r,16053687376038384413,18420821604565406188,262144 --variations-seed-version --pseudonymization-salt-handle=1935764596,r,9349706350808843622,4124914216012719950,4 --trace-process-track-uuid=3190708990060038890 --seatbelt-client=35",
+        "10686  9783  9783 /Users/icesword/Documents/AIProjects/mantle/dist/Mantle.app/Contents/Frameworks/Chromium Framework.framework/Versions/148.0.7778.215/Helpers/Chromium Helper (Renderer).app/Contents/MacOS/Chromium Helper (Renderer) --type=renderer --user-data-dir=/Users/icesword/Documents/AIProjects/matou-login-integration/.cache/safe-browser/real-userData-68DzCq/safe-browser/profile --fingerprint=1146775411 --fingerprint-platform=macos --timezone=Asia/Tokyo --remote-debugging-pipe --lang=zh-CN --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=7 --time-ticks-at-unix-epoch=-1793443771054455 --launch-time-ticks=1309341160760 --shared-files --metrics-shmem-handle=1752395122,r,3732051496495397008,4477909210779589488,2097152 --field-trial-handle=1718379636,r,16053687376038384413,18420821604565406188,262144 --variations-seed-version --pseudonymization-salt-handle=1935764596,r,9349706350808843622,4124914216012719950,4 --trace-process-track-uuid=3190708992871164437 --seatbelt-client=67",
+        "10687  9783  9783 /Users/icesword/Documents/AIProjects/mantle/dist/Mantle.app/Contents/Frameworks/Chromium Framework.framework/Versions/148.0.7778.215/Helpers/Chromium Helper (Renderer).app/Contents/MacOS/Chromium Helper (Renderer) --type=renderer --user-data-dir=/Users/icesword/Documents/AIProjects/matou-login-integration/.cache/safe-browser/real-userData-68DzCq/safe-browser/profile --fingerprint=1146775411 --fingerprint-platform=macos --timezone=Asia/Tokyo --remote-debugging-pipe --lang=zh-CN --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=6 --time-ticks-at-unix-epoch=-1793443771054455 --launch-time-ticks=1309341167699 --shared-files --metrics-shmem-handle=1752395122,r,9058385452150451313,4301079338237457979,2097152 --field-trial-handle=1718379636,r,16053687376038384413,18420821604565406188,262144 --variations-seed-version --pseudonymization-salt-handle=1935764596,r,9349706350808843622,4124914216012719950,4 --trace-process-track-uuid=3190708991934122588 --seatbelt-client=67"
+      ],
+      "processesAfter": []
+    },
+    {
+      "kind": "ephemeral",
+      "executable": "/Users/icesword/Documents/AIProjects/mantle/dist/Mantle.app/Contents/MacOS/Chromium",
+      "args": [
+        "--user-data-dir=/Users/icesword/Documents/AIProjects/matou-login-integration/.cache/safe-browser/real-userData-68DzCq/safe-browser/tmp/profile-KDYtWn",
+        "--timezone=America/Los_Angeles",
+        "--accept-lang=zh-CN,zh",
+        "--fingerprint=1146775411",
+        "--fingerprint-platform=macos",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--remote-debugging-pipe",
+        "http://127.0.0.1:65176/?kind=ephemeral"
+      ],
+      "pid": 11095,
+      "timezone": "America/Los_Angeles",
+      "profile": "/Users/icesword/Documents/AIProjects/matou-login-integration/.cache/safe-browser/real-userData-68DzCq/safe-browser/tmp/profile-KDYtWn",
+      "profileExistedWhileRunning": true,
+      "profileExistsAfterExit": false,
+      "processesBefore": [
+        "11095  9631 11095 /Users/icesword/Documents/AIProjects/mantle/dist/Mantle.app/Contents/MacOS/Chromium --user-data-dir=/Users/icesword/Documents/AIProjects/matou-login-integration/.cache/safe-browser/real-userData-68DzCq/safe-browser/tmp/profile-KDYtWn --timezone=America/Los_Angeles --accept-lang=zh-CN,zh --fingerprint=1146775411 --fingerprint-platform=macos --no-first-run --no-default-browser-check --remote-debugging-pipe http://127.0.0.1:65176/?kind=ephemeral",
+        "11210 11095 11095 /Users/icesword/Documents/AIProjects/mantle/dist/Mantle.app/Contents/Frameworks/Chromium Framework.framework/Versions/148.0.7778.215/Helpers/Chromium Helper.app/Contents/MacOS/Chromium Helper --type=gpu-process --user-data-dir=/Users/icesword/Documents/AIProjects/matou-login-integration/.cache/safe-browser/real-userData-68DzCq/safe-browser/tmp/profile-KDYtWn --start-stack-profiler --gpu-preferences=SAAAAAAAAAAgAQAEAAAAAAAAAAAAAGAAAwAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAAAAAAQAAAAAAAAABAAAAAAAAAACAAAAAAAAAAIAAAAAAAAAA== --shared-files --metrics-shmem-handle=1752395122,r,400665653719623987,15776898942902136661,262144 --field-trial-handle=1718379636,r,10013009350426498512,13892582636054181283,262144 --variations-seed-version --pseudonymization-salt-handle=1935764596,r,17009269482873630793,4144935357990925498,4 --trace-process-track-uuid=3190708988185955192 --seatbelt-client=25",
+        "11211 11095 11095 /Users/icesword/Documents/AIProjects/mantle/dist/Mantle.app/Contents/Frameworks/Chromium Framework.framework/Versions/148.0.7778.215/Helpers/Chromium Helper.app/Contents/MacOS/Chromium Helper --type=utility --utility-sub-type=network.mojom.NetworkService --lang=zh-CN --service-sandbox-type=network --user-data-dir=/Users/icesword/Documents/AIProjects/matou-login-integration/.cache/safe-browser/real-userData-68DzCq/safe-browser/tmp/profile-KDYtWn --start-stack-profiler --shared-files --metrics-shmem-handle=1752395122,r,15783206863133235840,4472871990225541089,524288 --field-trial-handle=1718379636,r,10013009350426498512,13892582636054181283,262144 --variations-seed-version --pseudonymization-salt-handle=1935764596,r,17009269482873630793,4144935357990925498,4 --trace-process-track-uuid=3190708989122997041 --seatbelt-client=25",
+        "11212 11095 11095 /Users/icesword/Documents/AIProjects/mantle/dist/Mantle.app/Contents/Frameworks/Chromium Framework.framework/Versions/148.0.7778.215/Helpers/Chromium Helper.app/Contents/MacOS/Chromium Helper --type=utility --utility-sub-type=storage.mojom.StorageService --lang=zh-CN --service-sandbox-type=service --user-data-dir=/Users/icesword/Documents/AIProjects/matou-login-integration/.cache/safe-browser/real-userData-68DzCq/safe-browser/tmp/profile-KDYtWn --shared-files --metrics-shmem-handle=1752395122,r,417174091305836530,8192112837449214245,524288 --field-trial-handle=1718379636,r,10013009350426498512,13892582636054181283,262144 --variations-seed-version --pseudonymization-salt-handle=1935764596,r,17009269482873630793,4144935357990925498,4 --trace-process-track-uuid=3190708990060038890 --seatbelt-client=46",
+        "11317 11095 11095 /Users/icesword/Documents/AIProjects/mantle/dist/Mantle.app/Contents/Frameworks/Chromium Framework.framework/Versions/148.0.7778.215/Helpers/Chromium Helper (Renderer).app/Contents/MacOS/Chromium Helper (Renderer) --type=renderer --user-data-dir=/Users/icesword/Documents/AIProjects/matou-login-integration/.cache/safe-browser/real-userData-68DzCq/safe-browser/tmp/profile-KDYtWn --fingerprint=1146775411 --fingerprint-platform=macos --timezone=America/Los_Angeles --remote-debugging-pipe --lang=zh-CN --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=7 --time-ticks-at-unix-epoch=-1793443771054455 --launch-time-ticks=1309342384674 --shared-files --metrics-shmem-handle=1752395122,r,15514387996589958480,2511455181676808777,2097152 --field-trial-handle=1718379636,r,10013009350426498512,13892582636054181283,262144 --variations-seed-version --pseudonymization-salt-handle=1935764596,r,17009269482873630793,4144935357990925498,4 --trace-process-track-uuid=3190708992871164437 --seatbelt-client=74",
+        "11318 11095 11095 /Users/icesword/Documents/AIProjects/mantle/dist/Mantle.app/Contents/Frameworks/Chromium Framework.framework/Versions/148.0.7778.215/Helpers/Chromium Helper (Renderer).app/Contents/MacOS/Chromium Helper (Renderer) --type=renderer --user-data-dir=/Users/icesword/Documents/AIProjects/matou-login-integration/.cache/safe-browser/real-userData-68DzCq/safe-browser/tmp/profile-KDYtWn --fingerprint=1146775411 --fingerprint-platform=macos --timezone=America/Los_Angeles --remote-debugging-pipe --lang=zh-CN --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=6 --time-ticks-at-unix-epoch=-1793443771054455 --launch-time-ticks=1309342392480 --shared-files --metrics-shmem-handle=1752395122,r,105491187560302866,6091042157038541511,2097152 --field-trial-handle=1718379636,r,10013009350426498512,13892582636054181283,262144 --variations-seed-version --pseudonymization-salt-handle=1935764596,r,17009269482873630793,4144935357990925498,4 --trace-process-track-uuid=3190708991934122588 --seatbelt-client=75"
+      ],
+      "processesAfter": []
+    }
+  ]
+}

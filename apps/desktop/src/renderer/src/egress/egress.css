@@ -326,6 +326,70 @@
   gap: 10px;
 }
 
+.egress-client-notices {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.egress-client-notice {
+  margin: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(210, 153, 34, .35);
+  background: var(--eg-warn-bg);
+  color: var(--eg-warn);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.egress-client-notice__mark {
+  flex: none;
+  font-weight: 700;
+}
+
+.egress-safe-browser {
+  padding-top: 10px;
+  border-top: 1px solid var(--eg-border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.egress-safe-browser__main {
+  min-width: 0;
+}
+
+.egress-safe-browser__title {
+  font-size: 11px;
+  font-weight: 650;
+  color: var(--eg-muted);
+}
+
+.egress-safe-browser__state {
+  margin-top: 2px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.egress-safe-browser__hint {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--eg-muted);
+  line-height: 1.45;
+}
+
+.egress-safe-browser__actions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .egress-rule-fieldset {
   margin: 0;
   padding: 0;

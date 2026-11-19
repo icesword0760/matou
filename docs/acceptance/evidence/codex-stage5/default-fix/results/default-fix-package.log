@@ -1,0 +1,219 @@
+
+> matou@0.0.0 package:dir /Users/icesword/Documents/AIProjects/matou-multi-agent-codex
+> MATOU_UPDATE_BASE_URL=${MATOU_UPDATE_BASE_URL:-https://updates.example.invalid/matou/stable} pnpm build && node tooling/prepare-package-resources.mjs && electron-builder --projectDir apps/desktop --dir
+
+
+> matou@0.0.0 build /Users/icesword/Documents/AIProjects/matou-multi-agent-codex
+> pnpm build:packages && pnpm build:runtime && pnpm build:desktop
+
+
+> matou@0.0.0 build:packages /Users/icesword/Documents/AIProjects/matou-multi-agent-codex
+> pnpm --filter './packages/**' --workspace-concurrency=1 build
+
+Scope: 3 of 6 workspace projects
+
+> @matou/domain@0.0.0 build /Users/icesword/Documents/AIProjects/matou-multi-agent-codex/packages/domain
+> tsup && tsc -p tsconfig.build.json
+
+CLI Building entry: src/index.ts
+CLI Using tsconfig: tsconfig.json
+CLI tsup v8.5.1
+CLI Using tsup config: /Users/icesword/Documents/AIProjects/matou-multi-agent-codex/packages/domain/tsup.config.ts
+CLI Target: es2022
+CLI Cleaning output folder
+ESM Build start
+CJS Build start
+ESM dist/index.js     9.20 KB
+ESM dist/index.js.map 18.22 KB
+ESM ⚡️ Build success in 7ms
+CJS dist/index.cjs     10.98 KB
+CJS dist/index.cjs.map 18.48 KB
+CJS ⚡️ Build success in 7ms
+
+> @matou/ui@0.0.0 build /Users/icesword/Documents/AIProjects/matou-multi-agent-codex/packages/ui
+> tsup && tsc -p tsconfig.build.json
+
+CLI Building entry: src/index.tsx
+CLI Using tsconfig: tsconfig.json
+CLI tsup v8.5.1
+CLI Using tsup config: /Users/icesword/Documents/AIProjects/matou-multi-agent-codex/packages/ui/tsup.config.ts
+CLI Target: es2022
+CLI Cleaning output folder
+ESM Build start
+CJS Build start
+ESM dist/index.js     33.00 B
+ESM dist/index.js.map 71.00 B
+ESM ⚡️ Build success in 5ms
+CJS dist/index.cjs     793.00 B
+CJS dist/index.cjs.map 174.00 B
+CJS ⚡️ Build success in 5ms
+
+> @matou/contracts@0.0.0 build /Users/icesword/Documents/AIProjects/matou-multi-agent-codex/packages/contracts
+> tsup && tsc -p tsconfig.build.json
+
+CLI Building entry: src/index.ts
+CLI Using tsconfig: tsconfig.json
+CLI tsup v8.5.1
+CLI Using tsup config: /Users/icesword/Documents/AIProjects/matou-multi-agent-codex/packages/contracts/tsup.config.ts
+CLI Target: es2022
+CLI Cleaning output folder
+ESM Build start
+CJS Build start
+CJS dist/index.cjs     22.53 KB
+CJS dist/index.cjs.map 46.34 KB
+CJS ⚡️ Build success in 10ms
+ESM dist/index.js     18.43 KB
+ESM dist/index.js.map 45.60 KB
+ESM ⚡️ Build success in 10ms
+
+> matou@0.0.0 build:runtime /Users/icesword/Documents/AIProjects/matou-multi-agent-codex
+> pnpm --filter @matou/runtime build
+
+
+> @matou/runtime@0.0.0 build /Users/icesword/Documents/AIProjects/matou-multi-agent-codex/apps/runtime
+> tsup && node ../../tooling/prepare-runtime-control-assets.mjs
+
+CLI Building entry: {"index":"src/index.ts","mt-cli":"src/cli/mt-cli.ts","model-router-supervisor":"src/model-router/process-supervisor.ts"}
+CLI Using tsconfig: tsconfig.json
+CLI tsup v8.5.1
+CLI Using tsup config: /Users/icesword/Documents/AIProjects/matou-multi-agent-codex/apps/runtime/tsup.config.ts
+CLI Target: node22
+CLI Cleaning output folder
+CJS Build start
+CJS dist/model-router-supervisor.cjs     1.90 KB
+CJS dist/mt-cli.cjs                      634.75 KB
+CJS dist/model-router-supervisor.cjs.map 3.38 KB
+CJS dist/index.cjs                       2.64 MB
+CJS dist/mt-cli.cjs.map                  1.03 MB
+CJS dist/index.cjs.map                   4.87 MB
+CJS ⚡️ Build success in 133ms
+
+> matou@0.0.0 build:desktop /Users/icesword/Documents/AIProjects/matou-multi-agent-codex
+> pnpm --filter @matou/desktop build
+
+
+> @matou/desktop@0.2.19 build /Users/icesword/Documents/AIProjects/matou-multi-agent-codex/apps/desktop
+> electron-vite build
+
+vite v7.3.6 building ssr environment for production...
+transforming...
+✓ 29 modules transformed.
+rendering chunks...
+out/main/index.js  100.89 kB
+✓ built in 122ms
+vite v7.3.6 building ssr environment for production...
+transforming...
+✓ 2 modules transformed.
+rendering chunks...
+out/preload/index.cjs  11.77 kB
+✓ built in 11ms
+vite v7.3.6 building client environment for production...
+transforming...
+✓ 244 modules transformed.
+rendering chunks...
+../../out/renderer/index.html                           0.62 kB
+../../out/renderer/assets/dark_lujing-Do9dtYoD.svg     10.88 kB
+../../out/renderer/assets/white_mac-BKs0lRdm.png       65.26 kB
+../../out/renderer/assets/white_win-_deeNMsq.png       66.65 kB
+../../out/renderer/assets/dark_mac-XDPanXY0.png        69.56 kB
+../../out/renderer/assets/dark_win-D0Y_o4bQ.png       113.82 kB
+../../out/renderer/assets/index-VCkMIDHu.css          250.97 kB
+../../out/renderer/assets/index-C4vw7001.js         2,366.21 kB
+✓ built in 1.11s
+46 INFO: PyInstaller: 6.16.0, contrib hooks: 2026.8
+46 INFO: Python: 3.13.3
+53 INFO: Platform: macOS-15.7.4-arm64-arm-64bit-Mach-O
+54 INFO: Python environment: /Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tooling/claude-accounts/.venv
+54 INFO: wrote /Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tooling/claude-accounts/build/matou-claude-accounts.spec
+69 INFO: UPX is available but is disabled on non-Windows due to known compatibility problems.
+69 INFO: Removing temporary files and cleaning cache in /Users/icesword/Library/Application Support/pyinstaller
+305 INFO: Module search paths (PYTHONPATH):
+['/Users/icesword/.local/share/uv/python/cpython-3.13.3-macos-aarch64-none/lib/python313.zip',
+ '/Users/icesword/.local/share/uv/python/cpython-3.13.3-macos-aarch64-none/lib/python3.13',
+ '/Users/icesword/.local/share/uv/python/cpython-3.13.3-macos-aarch64-none/lib/python3.13/lib-dynload',
+ '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tooling/claude-accounts/.venv/lib/python3.13/site-packages',
+ '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tooling/claude-accounts']
+371 INFO: Appending 'datas' from .spec
+372 INFO: checking Analysis
+372 INFO: Building Analysis because Analysis-00.toc is non existent
+372 INFO: Looking for Python shared library...
+375 INFO: Using Python shared library: /Users/icesword/.local/share/uv/python/cpython-3.13.3-macos-aarch64-none/lib/libpython3.13.dylib
+375 INFO: Running Analysis Analysis-00.toc
+375 INFO: Target bytecode optimization level: 0
+375 INFO: Initializing module dependency graph...
+376 INFO: Initializing module graph hook caches...
+383 INFO: Analyzing modules for base_library.zip ...
+797 INFO: Processing standard module hook 'hook-heapq.py' from '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tooling/claude-accounts/.venv/lib/python3.13/site-packages/PyInstaller/hooks'
+839 INFO: Processing standard module hook 'hook-encodings.py' from '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tooling/claude-accounts/.venv/lib/python3.13/site-packages/PyInstaller/hooks'
+1491 INFO: Processing standard module hook 'hook-pickle.py' from '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tooling/claude-accounts/.venv/lib/python3.13/site-packages/PyInstaller/hooks'
+2106 INFO: Caching module dependency graph...
+2120 INFO: Analyzing /Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tooling/claude-accounts/bridge.py
+2312 INFO: Processing standard module hook 'hook-multiprocessing.util.py' from '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tooling/claude-accounts/.venv/lib/python3.13/site-packages/PyInstaller/hooks'
+2387 INFO: Processing standard module hook 'hook-xml.py' from '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tooling/claude-accounts/.venv/lib/python3.13/site-packages/PyInstaller/hooks'
+2518 INFO: Processing standard module hook 'hook-_ctypes.py' from '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tooling/claude-accounts/.venv/lib/python3.13/site-packages/PyInstaller/hooks'
+2690 INFO: Processing standard module hook 'hook-platform.py' from '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tooling/claude-accounts/.venv/lib/python3.13/site-packages/PyInstaller/hooks'
+2831 INFO: Processing pre-safe-import-module hook 'hook-typing_extensions.py' from '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tooling/claude-accounts/.venv/lib/python3.13/site-packages/PyInstaller/hooks/pre_safe_import_module'
+2831 INFO: SetuptoolsInfo: initializing cached setuptools info...
+3227 INFO: Analyzing hidden import 'claude_swap.__main__'
+3316 INFO: Processing standard module hook 'hook-rich.py' from '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tooling/claude-accounts/.venv/lib/python3.13/site-packages/_pyinstaller_hooks_contrib/stdhooks'
+3573 INFO: Processing standard module hook 'hook-pygments.py' from '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tooling/claude-accounts/.venv/lib/python3.13/site-packages/PyInstaller/hooks'
+4302 INFO: Processing standard module hook 'hook-sysconfig.py' from '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tooling/claude-accounts/.venv/lib/python3.13/site-packages/PyInstaller/hooks'
+4308 INFO: Processing standard module hook 'hook-_osx_support.py' from '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tooling/claude-accounts/.venv/lib/python3.13/site-packages/PyInstaller/hooks'
+4474 INFO: Processing pre-safe-import-module hook 'hook-platformdirs.py' from '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tooling/claude-accounts/.venv/lib/python3.13/site-packages/PyInstaller/hooks/pre_safe_import_module'
+4480 INFO: Processing standard module hook 'hook-platformdirs.py' from '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tooling/claude-accounts/.venv/lib/python3.13/site-packages/_pyinstaller_hooks_contrib/stdhooks'
+4723 INFO: Processing standard module hook 'hook-difflib.py' from '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tooling/claude-accounts/.venv/lib/python3.13/site-packages/PyInstaller/hooks'
+5456 INFO: Processing module hooks (post-graph stage)...
+6451 INFO: Performing binary vs. data reclassification (14 entries)
+6455 INFO: Looking for ctypes DLLs
+6468 WARNING: Library ole32 required via ctypes not found
+6468 WARNING: Library shell32 required via ctypes not found
+6471 INFO: Analyzing run-time hooks ...
+6473 INFO: Including run-time hook 'pyi_rth_inspect.py' from '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tooling/claude-accounts/.venv/lib/python3.13/site-packages/PyInstaller/hooks/rthooks'
+6474 INFO: Including run-time hook 'pyi_rth_pkgutil.py' from '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tooling/claude-accounts/.venv/lib/python3.13/site-packages/PyInstaller/hooks/rthooks'
+6475 INFO: Including run-time hook 'pyi_rth_multiprocessing.py' from '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tooling/claude-accounts/.venv/lib/python3.13/site-packages/PyInstaller/hooks/rthooks'
+6480 INFO: Creating base_library.zip...
+6488 INFO: Looking for dynamic libraries
+6496 INFO: Warnings written to /Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tooling/claude-accounts/build/matou-claude-accounts/warn-matou-claude-accounts.txt
+6511 INFO: Graph cross-reference written to /Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tooling/claude-accounts/build/matou-claude-accounts/xref-matou-claude-accounts.html
+6527 INFO: checking PYZ
+6527 INFO: Building PYZ because PYZ-00.toc is non existent
+6527 INFO: Building PYZ (ZlibArchive) /Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tooling/claude-accounts/build/matou-claude-accounts/PYZ-00.pyz
+6933 INFO: Building PYZ (ZlibArchive) /Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tooling/claude-accounts/build/matou-claude-accounts/PYZ-00.pyz completed successfully.
+6941 INFO: EXE target arch: arm64
+6941 INFO: Code signing identity: None
+6942 INFO: checking PKG
+6942 INFO: Building PKG because PKG-00.toc is non existent
+6942 INFO: Building PKG (CArchive) matou-claude-accounts.pkg
+6952 INFO: Building PKG (CArchive) matou-claude-accounts.pkg completed successfully.
+6953 INFO: Bootloader /Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tooling/claude-accounts/.venv/lib/python3.13/site-packages/PyInstaller/bootloader/Darwin-64bit/run
+6953 INFO: checking EXE
+6953 INFO: Building EXE because EXE-00.toc is non existent
+6953 INFO: Building EXE from EXE-00.toc
+6953 INFO: Copying bootloader EXE to /Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tooling/claude-accounts/build/matou-claude-accounts/matou-claude-accounts
+6956 INFO: Converting EXE to target arch (arm64)
+6982 INFO: Removing signature(s) from EXE
+6994 INFO: Modifying Mach-O image UUID(s) in EXE
+6998 INFO: Appending PKG archive to EXE
+7000 INFO: Fixing EXE headers for code signing
+7004 INFO: Rewriting the executable's macOS SDK version (15.5.0) to match the SDK version of the Python library (14.2.0) in order to avoid inconsistent behavior and potential UI issues in the frozen application.
+7004 INFO: Re-signing the EXE
+7023 INFO: Building EXE from EXE-00.toc completed successfully.
+7024 INFO: checking COLLECT
+7024 INFO: Building COLLECT because COLLECT-00.toc is non existent
+7024 INFO: Building COLLECT COLLECT-00.toc
+7128 INFO: Building COLLECT COLLECT-00.toc completed successfully.
+7129 INFO: Build complete! The results are available in: /Users/icesword/Documents/AIProjects/matou-multi-agent-codex/apps/desktop/package-resources/claude-accounts
+  • electron-builder  version=26.15.3 os=24.6.0
+  • loaded configuration  file=package.json ("build" field)
+  • description is missed in the package.json  appPackageFile=/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/apps/desktop/package.json
+  • author is missed in the package.json  appPackageFile=/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/apps/desktop/package.json
+  • packageManager not detected by file, falling back to environment detection  resolvedPackageManager=pnpm detected=/Users/icesword/Documents/AIProjects/matou-multi-agent-codex
+  • detected workspace root for project using packageManager field  pm=pnpm config=pnpm@10.17.1 resolved=/Users/icesword/Documents/AIProjects/matou-multi-agent-codex projectDir=/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/apps/desktop
+  • executing @electron/rebuild  electronVersion=43.4.1 arch=arm64 buildFromSource=false workspaceRoot=/Users/icesword/Documents/AIProjects/matou-multi-agent-codex projectDir=apps/desktop appDir=apps/desktop
+  • installing native dependencies  arch=arm64
+  • completed installing native dependencies
+  • packaging       platform=darwin arch=arm64 electron=43.4.1 appOutDir=apps/desktop/release/mac-arm64
+  • downloaded      label=electron progress=100%
+  • downloaded electron zip extracted successfully  output=/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/apps/desktop/release/mac-arm64
+  • searching for node modules  pm=pnpm searchDir=/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/apps/desktop
+  • skipped macOS application code signing  reason=, see https://electron.build/code-signing CSC_IDENTITY_AUTO_DISCOVERY=false

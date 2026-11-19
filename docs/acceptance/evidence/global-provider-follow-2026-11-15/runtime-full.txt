@@ -1,0 +1,11 @@
+
+ RUN  v4.1.11 /Users/icesword/Documents/AIProjects/matou/apps/runtime
+
+(node:25764) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+ Test Files  1 passed (1)
+      Tests  154 passed (154)
+   Start at  15:12:38
+   Duration  76.95s (transform 814ms, setup 0ms, import 1.03s, tests 75.81s, environment 0ms)
+

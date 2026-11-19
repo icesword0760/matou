@@ -23,7 +23,9 @@ async function fixture(readOnly = false) {
   const output = resolve(import.meta.dirname, '../../../../output/model-router-stage3'); await mkdir(output, { recursive: true })
   const root = await mkdtemp(join(output, 'rpc-')), database = RuntimeDatabase.open(join(root, 'matou.sqlite'))
   await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
-  const connection = { start: vi.fn(async () => ({ attemptId: 'attempt', status: 'waiting' })), reopen: vi.fn(async () => ({ attemptId: 'attempt', status: 'waiting' })), status: vi.fn(() => ({ attemptId: 'attempt', status: 'ready' })), cancel: vi.fn(async () => ({ status: 'cancelled' })), models: vi.fn(async () => ({ account: { status: 'ready' }, models: [] })), settings: vi.fn(async () => ({ accounts: {} })), closeSettings: vi.fn(async () => {}), confirmRisk: vi.fn(async () => ({ accepted: true })), save: vi.fn(async () => ({ id: 'subscription' })) }
+  const connection = { start: vi.fn(async () => ({ attemptId: 'attempt', status: 'waiting' })), reopen: vi.fn(async () => ({ attemptId: 'attempt', status: 'waiting' })), status: vi.fn(() => ({ attemptId: 'attempt', status: 'ready' })), cancel: vi.fn(async () => ({ status: 'cancelled' })), models: vi.fn(async () => ({ account: { status: 'ready' }, models: [] })), settings: vi.fn(async () => ({ accounts: {} })), closeSettings: vi.fn(async () => {}), confirmRisk: vi.fn(async () => ({ accepted: true })), save: vi.fn(async () => ({ id: 'subscription' })),
+    refreshModels: vi.fn(async (_providerId: string, _isCancelled: () => boolean) => ({ snapshot: await store.snapshot(), details: { account: { status: 'ready' }, models: [{ id: 'model' }] } }))
+  }
   let changed = () => {}
   const unsubscribe = vi.fn(() => { changed = () => {} })
   const accounts = { onChange: vi.fn((listener: () => void) => { changed = listener; return unsubscribe }), prepareLaunch: vi.fn(async (_providerId: string, _scope?: string) => { throw new SubscriptionLaunchError('fixture preparation failed access_token=private-value') }), snapshot: vi.fn(async () => ({ providers: {} })), delete: vi.fn(async () => ({ providers: {} })) }
@@ -127,6 +129,28 @@ describe('subscription RPC through the actual runtime message dispatcher', () =>
       expect((await f.rpc(`${prefix}login-status` as RpcMethod, { attemptId: 3 })).type).toBe('rpc.error')
     } finally { f.close() }
   })
+  it('dispatches manual model refresh and returns the existing localized failure shapes', async () => {
+    const f = await fixture()
+    const method = 'provider-config.subscription.models-refresh'
+    try {
+      expect(await f.rpc(method, { attemptId: 'attempt' })).toMatchObject({ type: 'rpc.error', code: 'INVALID_REQUEST' })
+      expect(f.connection.refreshModels).not.toHaveBeenCalled()
+      expect(await f.rpc(method, { providerId: 'subscription' })).toMatchObject({
+        type: 'rpc.response', result: { snapshot: { providers: {} }, details: { models: [{ id: 'model' }] } }
+      })
+      expect(f.connection.refreshModels).toHaveBeenCalledExactlyOnceWith('subscription', expect.any(Function))
+      expect(f.connection.models).not.toHaveBeenCalled()
+
+      f.connection.refreshModels.mockRejectedValueOnce(new Error('Fixture directory unavailable'))
+      expect(await f.rpc(method, { providerId: 'subscription' })).toMatchObject({
+        type: 'rpc.error', messageLocalized: { zh: '模型列表未能读取，请重试。', en: 'The model list could not be read. Try again.' }
+      })
+      f.connection.refreshModels.mockRejectedValueOnce(new SubscriptionLaunchError('Fixture credential missing', 'needs-sign-in'))
+      expect(await f.rpc(method, { providerId: 'subscription' })).toMatchObject({
+        type: 'rpc.error', providerFailure: { status: 'needs-sign-in', recovery: 'sign-in' }
+      })
+    } finally { f.close() }
+  })
   it('prepares a subscription before persisting activation and returns the mapped failure without touching any live session', async () => {
     const f = await fixture()
     const dispose = vi.fn()
@@ -158,9 +182,10 @@ describe('subscription RPC through the actual runtime message dispatcher', () =>
   it('retains the read-only storage gate for every new side-effecting account operation', async () => {
     const f = await fixture(true)
     try {
-      for (const method of ['login-start', 'login-reopen', 'login-cancel', 'models-read', 'settings-read', 'risk-confirm']) expect((await f.rpc(`provider-config.subscription.${method}` as RpcMethod)).type).toBe('rpc.error')
+      for (const method of ['login-start', 'login-reopen', 'login-cancel', 'models-read', 'models-refresh', 'settings-read', 'risk-confirm']) expect((await f.rpc(`provider-config.subscription.${method}` as RpcMethod, { providerId: 'subscription' })).type).toBe('rpc.error')
       expect(f.connection.start).not.toHaveBeenCalled()
       expect(f.connection.settings).not.toHaveBeenCalled()
+      expect(f.connection.refreshModels).not.toHaveBeenCalled()
       expect((await f.rpc('provider-config.snapshot')).type).toBe('rpc.response')
     } finally { f.close() }
   })

@@ -1,0 +1,1076 @@
+
+ RUN  v4.1.11 /Users/icesword/Documents/AIProjects/matou-multi-agent-codex/apps/runtime
+
+(node:53676) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:53675) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:53672) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:53677) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:53671) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:53679) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:53678) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:53670) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:53674) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:53669) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:53668) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/storage/runtime-database-bootstrap.test.ts (33 tests | 1 failed) 10249ms
+     × makes concurrent corrupt bootstraps converge on one recovery marker 644ms
+(node:70607) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:72101) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:72541) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:73248) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:73495) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:73676) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:76985) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/antigravity-runtime.test.ts (7 tests | 1 failed) 15731ms
+     × injects antigravity-system-message.md via SessionStart and enables mt identify/list/read inside Antigravity cards 302ms
+(node:77352) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:77517) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+Preparing worktree (new branch 'feature/open')
+(node:78798) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:79580) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:80839) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:80809) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:81070) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:82331) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:82677) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:83239) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:83406) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:83632) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:83709) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:83794) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:83883) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:83923) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:83927) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:84045) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:84079) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:84168) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:84188) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:84211) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:84367) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:84613) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:84652) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:84668) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:84708) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:84736) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/control/host-control-server.test.ts (56 tests | 56 failed) 400ms
+     × uses a stable Named Pipe endpoint on Windows and a private socket path on Unix 16ms
+     × uses a private local socket and denies calls without a capability token 9ms
+     × issues run-bound, expiring, generation-bound capabilities 12ms
+     × binds capabilities to the caller SessionRun and identifies that caller 9ms
+     × rejects a non-expiring capability after a new runtime generation starts 12ms
+     × still expires short-lived capabilities without expiring a run-bound capability 12ms
+     × authorizes structure.create.workspace independently before terminal target resolution 10ms
+     × authorizes structure.create.task independently before terminal target resolution 10ms
+     × authorizes structure.create.canvas independently before terminal target resolution 11ms
+     × authorizes structure.create.session independently before terminal target resolution 7ms
+     × authorizes structure.fork.child independently before terminal target resolution 17ms
+     × authorizes structure.fork.sibling independently before terminal target resolution 4ms
+     × authorizes structure.fork.children independently before terminal target resolution 10ms
+     × authorizes structure.remove.preview independently before terminal target resolution 11ms
+     × authorizes structure.remove.commit independently before terminal target resolution 13ms
+     × authorizes structure.canvas-close.preview independently before terminal target resolution 7ms
+     × authorizes structure.canvas-close.commit independently before terminal target resolution 7ms
+     × authorizes navigation.focus.session independently before terminal target resolution 4ms
+     × authorizes navigation.switch.workspace independently before terminal target resolution 3ms
+     × authorizes navigation.switch.task independently before terminal target resolution 9ms
+     × authorizes navigation.switch.canvas independently before terminal target resolution 12ms
+     × preserves the facade error code TARGET_NOT_FOUND 3ms
+     × preserves the facade error code AMBIGUOUS_TARGET 6ms
+     × preserves the facade error code STALE_PROJECTION 14ms
+     × preserves the facade error code TARGET_NOT_READY 18ms
+     × preserves the facade error code CAPABILITY_DENIED 9ms
+     × preserves the facade error code CONFIRMATION_REQUIRED 5ms
+     × preserves the facade error code CONFIRMATION_EXPIRED 7ms
+     × preserves the facade error code CONFIRMATION_STALE 6ms
+     × preserves the facade error code PATH_CONFLICT 3ms
+     × preserves the facade error code BRANCH_CONFLICT 3ms
+     × preserves the facade error code WORKTREE_CONFLICT 14ms
+     × preserves the facade error code PARTIAL_SUCCESS 14ms
+     × preserves the facade error code NAVIGATION_TIMEOUT 2ms
+     × preserves the facade error code STORAGE_READ_ONLY 2ms
+     × maps real facade field validation faults to concise INVALID_REQUEST frames 3ms
+     × preserves a missing durable batch TARGET_NOT_FOUND through the real 'empty retry set' chain 8ms
+     × preserves a missing durable batch TARGET_NOT_FOUND through the real 'nonempty retry set' chain 4ms
+     × preserves sorted safe ambiguity candidates from the real resolver through the socket frame 2ms
+     × fails closed on mixed invalid candidates and enforces the 4096-byte path limit 2ms
+     × returns a deterministic framed fault when complete ambiguity details exceed the frame limit 2ms
+     × reports an uninstalled action executor as Runtime not ready 1ms
+     × returns a self-removal success frame before running the action post-response disposal 2ms
+     × writes the authoritative Host Control result before running caller disposal 2ms
+     × keeps the authoritative mutation result when caller disposal is queued after the deadline 3ms
+     × keeps a committed 'create' result across the post-dispatch deadline 2ms
+     × keeps a committed 'slow Fork batch' result across the post-dispatch deadline 7ms
+     × keeps a committed 'non-caller removal' result across the post-dispatch deadline 8ms
+     × reports disposal failure after returning the committed structure result 10ms
+     × passes relative and relation selectors to the topology backend with caller context 1ms
+     × resolves human ordinals only with their matching projection revision 6ms
+     × bounds terminal reads and allowlists control keys 6ms
+     × sends text and optional Enter as one backend action 6ms
+     × clamps external Task progress before it reaches the product data channel 6ms
+     × isolates backend failure and remains available for later requests 6ms
+     × requires the dedicated capability before moving a whole Task 2ms
+(node:84841) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:84860) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:84859) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:84877) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:84914) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:84915) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:84974) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:85027) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:85094) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:85096) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:85138) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:85173) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:85225) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:85224) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:85227) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:85230) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:85232) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:85250) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:85252) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/cli/mt-cli.test.ts (109 tests | 1 failed) 50ms
+     × transports exactly 1 MiB of stdin JSON through the real client and server envelope 15ms
+(node:85361) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/control/host-control-client.test.ts (11 tests | 1 failed) 91ms
+     × accepts a 4096-byte candidate path and rejects a longer one 3ms
+(node:85381) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:85498) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:85581) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+[protocol-regression] SKIPPED: MATOU_MODEL_ROUTER_BINARY is unset; pinned CLIProxyAPI 8.0.69 integration was NOT run.
+(node:85886) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ❯ src/session/claude-resume-notices.test.ts (2 tests | 2 failed) 20166ms
+     × leaves native transcript bytes untouched on PTY launch (fork=false) 10116ms
+     × leaves native transcript bytes untouched on PTY launch (fork=true) 10049ms
+
+⎯⎯⎯⎯⎯⎯ Failed Tests 62 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/antigravity-runtime.test.ts > Antigravity RuntimeServer integration (mocked agy) > injects antigravity-system-message.md via SessionStart and enables mt identify/list/read inside Antigravity cards
+Error: ENOENT: no such file or directory, chmod '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-agy-runtime-zBGE3k/control.sock'
+ ❯ HostControlServer.start src/control/host-control-server.ts:222:48
+    220|       })
+    221|     })
+    222|     if (!isWindowsNamedPipe(this.#socketPath)) await chmod(this.#socke…
+       |                                                ^
+    223|   }
+    224|
+ ❯ src/antigravity-runtime.test.ts:418:5
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/62]⎯
+
+ FAIL  src/cli/mt-cli.test.ts > mt CLI > transports exactly 1 MiB of stdin JSON through the real client and server envelope
+Error: ENOENT: no such file or directory, chmod '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-mt-frame-z3hsa6/control/runtime.sock'
+ ❯ HostControlServer.start src/control/host-control-server.ts:222:48
+    220|       })
+    221|     })
+    222|     if (!isWindowsNamedPipe(this.#socketPath)) await chmod(this.#socke…
+       |                                                ^
+    223|   }
+    224|
+ ❯ src/cli/mt-cli.test.ts:409:5
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/62]⎯
+
+ FAIL  src/control/host-control-client.test.ts > HostControlClient > accepts a 4096-byte candidate path and rejects a longer one
+Error: listen EADDRINUSE: address already in use /Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-control-client-mHqjHp/control.sock
+ ❯ endpoint.endpoint src/control/host-control-client.test.ts:263:12
+    261|   await new Promise<void>((resolve, reject) => {
+    262|     server.once('error', reject)
+    263|     server.listen(endpoint, resolve)
+       |            ^
+    264|   })
+    265|   return { endpoint, requests }
+ ❯ fixtureServer src/control/host-control-client.test.ts:261:9
+ ❯ src/control/host-control-client.test.ts:150:27
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/62]⎯
+
+ FAIL  src/control/host-control-server.test.ts > HostControlServer > uses a stable Named Pipe endpoint on Windows and a private socket path on Unix
+Error: ENOENT: no such file or directory, chmod '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-control-LztLnF/control.sock'
+ ❯ HostControlServer.start src/control/host-control-server.ts:222:48
+    220|       })
+    221|     })
+    222|     if (!isWindowsNamedPipe(this.#socketPath)) await chmod(this.#socke…
+       |                                                ^
+    223|   }
+    224|
+ ❯ src/control/host-control-server.test.ts:59:3
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/62]⎯
+
+ FAIL  src/control/host-control-server.test.ts > HostControlServer > uses a private local socket and denies calls without a capability token
+Error: ENOENT: no such file or directory, chmod '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-control-XQi6ji/control.sock'
+ ❯ HostControlServer.start src/control/host-control-server.ts:222:48
+    220|       })
+    221|     })
+    222|     if (!isWindowsNamedPipe(this.#socketPath)) await chmod(this.#socke…
+       |                                                ^
+    223|   }
+    224|
+ ❯ src/control/host-control-server.test.ts:59:3
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[5/62]⎯
+
+ FAIL  src/control/host-control-server.test.ts > HostControlServer > issues run-bound, expiring, generation-bound capabilities
+Error: ENOENT: no such file or directory, chmod '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-control-gKwcuX/control.sock'
+ ❯ HostControlServer.start src/control/host-control-server.ts:222:48
+    220|       })
+    221|     })
+    222|     if (!isWindowsNamedPipe(this.#socketPath)) await chmod(this.#socke…
+       |                                                ^
+    223|   }
+    224|
+ ❯ src/control/host-control-server.test.ts:59:3
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[6/62]⎯
+
+ FAIL  src/control/host-control-server.test.ts > HostControlServer > binds capabilities to the caller SessionRun and identifies that caller
+Error: ENOENT: no such file or directory, chmod '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-control-JBFwdX/control.sock'
+ ❯ HostControlServer.start src/control/host-control-server.ts:222:48
+    220|       })
+    221|     })
+    222|     if (!isWindowsNamedPipe(this.#socketPath)) await chmod(this.#socke…
+       |                                                ^
+    223|   }
+    224|
+ ❯ src/control/host-control-server.test.ts:59:3
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[7/62]⎯
+
+ FAIL  src/control/host-control-server.test.ts > HostControlServer > rejects a non-expiring capability after a new runtime generation starts
+Error: ENOENT: no such file or directory, chmod '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-control-rcwNTi/control.sock'
+ ❯ HostControlServer.start src/control/host-control-server.ts:222:48
+    220|       })
+    221|     })
+    222|     if (!isWindowsNamedPipe(this.#socketPath)) await chmod(this.#socke…
+       |                                                ^
+    223|   }
+    224|
+ ❯ src/control/host-control-server.test.ts:59:3
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[8/62]⎯
+
+ FAIL  src/control/host-control-server.test.ts > HostControlServer > still expires short-lived capabilities without expiring a run-bound capability
+Error: ENOENT: no such file or directory, chmod '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-control-K83sK3/control.sock'
+ ❯ HostControlServer.start src/control/host-control-server.ts:222:48
+    220|       })
+    221|     })
+    222|     if (!isWindowsNamedPipe(this.#socketPath)) await chmod(this.#socke…
+       |                                                ^
+    223|   }
+    224|
+ ❯ src/control/host-control-server.test.ts:59:3
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[9/62]⎯
+
+ FAIL  src/control/host-control-server.test.ts > HostControlServer > authorizes structure.create.workspace independently before terminal target resolution
+Error: ENOENT: no such file or directory, chmod '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-control-5IFymp/control.sock'
+ ❯ HostControlServer.start src/control/host-control-server.ts:222:48
+    220|       })
+    221|     })
+    222|     if (!isWindowsNamedPipe(this.#socketPath)) await chmod(this.#socke…
+       |                                                ^
+    223|   }
+    224|
+ ❯ src/control/host-control-server.test.ts:59:3
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[10/62]⎯
+
+ FAIL  src/control/host-control-server.test.ts > HostControlServer > authorizes structure.create.task independently before terminal target resolution
+Error: ENOENT: no such file or directory, chmod '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-control-fepRwX/control.sock'
+ ❯ HostControlServer.start src/control/host-control-server.ts:222:48
+    220|       })
+    221|     })
+    222|     if (!isWindowsNamedPipe(this.#socketPath)) await chmod(this.#socke…
+       |                                                ^
+    223|   }
+    224|
+ ❯ src/control/host-control-server.test.ts:59:3
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[11/62]⎯
+
+ FAIL  src/control/host-control-server.test.ts > HostControlServer > authorizes structure.create.canvas independently before terminal target resolution
+Error: ENOENT: no such file or directory, chmod '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-control-FKLjL2/control.sock'
+ ❯ HostControlServer.start src/control/host-control-server.ts:222:48
+    220|       })
+    221|     })
+    222|     if (!isWindowsNamedPipe(this.#socketPath)) await chmod(this.#socke…
+       |                                                ^
+    223|   }
+    224|
+ ❯ src/control/host-control-server.test.ts:59:3
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[12/62]⎯
+
+ FAIL  src/control/host-control-server.test.ts > HostControlServer > authorizes structure.create.session independently before terminal target resolution
+Error: ENOENT: no such file or directory, chmod '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-control-W1z8RG/control.sock'
+ ❯ HostControlServer.start src/control/host-control-server.ts:222:48
+    220|       })
+    221|     })
+    222|     if (!isWindowsNamedPipe(this.#socketPath)) await chmod(this.#socke…
+       |                                                ^
+    223|   }
+    224|
+ ❯ src/control/host-control-server.test.ts:59:3
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[13/62]⎯
+
+ FAIL  src/control/host-control-server.test.ts > HostControlServer > authorizes structure.fork.child independently before terminal target resolution
+Error: ENOENT: no such file or directory, chmod '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-control-Bm1GPa/control.sock'
+ ❯ HostControlServer.start src/control/host-control-server.ts:222:48
+    220|       })
+    221|     })
+    222|     if (!isWindowsNamedPipe(this.#socketPath)) await chmod(this.#socke…
+       |                                                ^
+    223|   }
+    224|
+ ❯ src/control/host-control-server.test.ts:59:3
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[14/62]⎯
+
+ FAIL  src/control/host-control-server.test.ts > HostControlServer > authorizes structure.fork.sibling independently before terminal target resolution
+Error: ENOENT: no such file or directory, chmod '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-control-FdQoxw/control.sock'
+ ❯ HostControlServer.start src/control/host-control-server.ts:222:48
+    220|       })
+    221|     })
+    222|     if (!isWindowsNamedPipe(this.#socketPath)) await chmod(this.#socke…
+       |                                                ^
+    223|   }
+    224|
+ ❯ src/control/host-control-server.test.ts:59:3
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[15/62]⎯
+
+ FAIL  src/control/host-control-server.test.ts > HostControlServer > authorizes structure.fork.children independently before terminal target resolution
+Error: ENOENT: no such file or directory, chmod '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-control-RhWUXi/control.sock'
+ ❯ HostControlServer.start src/control/host-control-server.ts:222:48
+    220|       })
+    221|     })
+    222|     if (!isWindowsNamedPipe(this.#socketPath)) await chmod(this.#socke…
+       |                                                ^
+    223|   }
+    224|
+ ❯ src/control/host-control-server.test.ts:59:3
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[16/62]⎯
+
+ FAIL  src/control/host-control-server.test.ts > HostControlServer > authorizes structure.remove.preview independently before terminal target resolution
+Error: ENOENT: no such file or directory, chmod '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-control-DU4ib6/control.sock'
+ ❯ HostControlServer.start src/control/host-control-server.ts:222:48
+    220|       })
+    221|     })
+    222|     if (!isWindowsNamedPipe(this.#socketPath)) await chmod(this.#socke…
+       |                                                ^
+    223|   }
+    224|
+ ❯ src/control/host-control-server.test.ts:59:3
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[17/62]⎯
+
+ FAIL  src/control/host-control-server.test.ts > HostControlServer > authorizes structure.remove.commit independently before terminal target resolution
+Error: ENOENT: no such file or directory, chmod '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-control-LCAs7l/control.sock'
+ ❯ HostControlServer.start src/control/host-control-server.ts:222:48
+    220|       })
+    221|     })
+    222|     if (!isWindowsNamedPipe(this.#socketPath)) await chmod(this.#socke…
+       |                                                ^
+    223|   }
+    224|
+ ❯ src/control/host-control-server.test.ts:59:3
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[18/62]⎯
+
+ FAIL  src/control/host-control-server.test.ts > HostControlServer > authorizes structure.canvas-close.preview independently before terminal target resolution
+Error: ENOENT: no such file or directory, chmod '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-control-0PsVGw/control.sock'
+ ❯ HostControlServer.start src/control/host-control-server.ts:222:48
+    220|       })
+    221|     })
+    222|     if (!isWindowsNamedPipe(this.#socketPath)) await chmod(this.#socke…
+       |                                                ^
+    223|   }
+    224|
+ ❯ src/control/host-control-server.test.ts:59:3
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[19/62]⎯
+
+ FAIL  src/control/host-control-server.test.ts > HostControlServer > authorizes structure.canvas-close.commit independently before terminal target resolution
+Error: ENOENT: no such file or directory, chmod '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-control-ktVKsn/control.sock'
+ ❯ HostControlServer.start src/control/host-control-server.ts:222:48
+    220|       })
+    221|     })
+    222|     if (!isWindowsNamedPipe(this.#socketPath)) await chmod(this.#socke…
+       |                                                ^
+    223|   }
+    224|
+ ❯ src/control/host-control-server.test.ts:59:3
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[20/62]⎯
+
+ FAIL  src/control/host-control-server.test.ts > HostControlServer > authorizes navigation.focus.session independently before terminal target resolution
+Error: ENOENT: no such file or directory, chmod '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-control-sTAfBK/control.sock'
+ ❯ HostControlServer.start src/control/host-control-server.ts:222:48
+    220|       })
+    221|     })
+    222|     if (!isWindowsNamedPipe(this.#socketPath)) await chmod(this.#socke…
+       |                                                ^
+    223|   }
+    224|
+ ❯ src/control/host-control-server.test.ts:59:3
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[21/62]⎯
+
+ FAIL  src/control/host-control-server.test.ts > HostControlServer > authorizes navigation.switch.workspace independently before terminal target resolution
+Error: ENOENT: no such file or directory, chmod '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-control-0br5bQ/control.sock'
+ ❯ HostControlServer.start src/control/host-control-server.ts:222:48
+    220|       })
+    221|     })
+    222|     if (!isWindowsNamedPipe(this.#socketPath)) await chmod(this.#socke…
+       |                                                ^
+    223|   }
+    224|
+ ❯ src/control/host-control-server.test.ts:59:3
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[22/62]⎯
+
+ FAIL  src/control/host-control-server.test.ts > HostControlServer > authorizes navigation.switch.task independently before terminal target resolution
+Error: ENOENT: no such file or directory, chmod '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-control-WFf9Zl/control.sock'
+ ❯ HostControlServer.start src/control/host-control-server.ts:222:48
+    220|       })
+    221|     })
+    222|     if (!isWindowsNamedPipe(this.#socketPath)) await chmod(this.#socke…
+       |                                                ^
+    223|   }
+    224|
+ ❯ src/control/host-control-server.test.ts:59:3
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[23/62]⎯
+
+ FAIL  src/control/host-control-server.test.ts > HostControlServer > authorizes navigation.switch.canvas independently before terminal target resolution
+Error: ENOENT: no such file or directory, chmod '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-control-T6o0l6/control.sock'
+ ❯ HostControlServer.start src/control/host-control-server.ts:222:48
+    220|       })
+    221|     })
+    222|     if (!isWindowsNamedPipe(this.#socketPath)) await chmod(this.#socke…
+       |                                                ^
+    223|   }
+    224|
+ ❯ src/control/host-control-server.test.ts:59:3
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[24/62]⎯
+
+ FAIL  src/control/host-control-server.test.ts > HostControlServer > preserves the facade error code TARGET_NOT_FOUND
+Error: ENOENT: no such file or directory, chmod '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-control-VPJ7BL/control.sock'
+ ❯ HostControlServer.start src/control/host-control-server.ts:222:48
+    220|       })
+    221|     })
+    222|     if (!isWindowsNamedPipe(this.#socketPath)) await chmod(this.#socke…
+       |                                                ^
+    223|   }
+    224|
+ ❯ src/control/host-control-server.test.ts:59:3
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[25/62]⎯
+
+ FAIL  src/control/host-control-server.test.ts > HostControlServer > preserves the facade error code AMBIGUOUS_TARGET
+Error: ENOENT: no such file or directory, chmod '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-control-UiGv9b/control.sock'
+ ❯ HostControlServer.start src/control/host-control-server.ts:222:48
+    220|       })
+    221|     })
+    222|     if (!isWindowsNamedPipe(this.#socketPath)) await chmod(this.#socke…
+       |                                                ^
+    223|   }
+    224|
+ ❯ src/control/host-control-server.test.ts:59:3
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[26/62]⎯
+
+ FAIL  src/control/host-control-server.test.ts > HostControlServer > preserves the facade error code STALE_PROJECTION
+Error: ENOENT: no such file or directory, chmod '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-control-VmLe6O/control.sock'
+ ❯ HostControlServer.start src/control/host-control-server.ts:222:48
+    220|       })
+    221|     })
+    222|     if (!isWindowsNamedPipe(this.#socketPath)) await chmod(this.#socke…
+       |                                                ^
+    223|   }
+    224|
+ ❯ src/control/host-control-server.test.ts:59:3
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[27/62]⎯
+
+ FAIL  src/control/host-control-server.test.ts > HostControlServer > preserves the facade error code TARGET_NOT_READY
+Error: ENOENT: no such file or directory, chmod '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-control-YFfXDB/control.sock'
+ ❯ HostControlServer.start src/control/host-control-server.ts:222:48
+    220|       })
+    221|     })
+    222|     if (!isWindowsNamedPipe(this.#socketPath)) await chmod(this.#socke…
+       |                                                ^
+    223|   }
+    224|
+ ❯ src/control/host-control-server.test.ts:59:3
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[28/62]⎯
+
+ FAIL  src/control/host-control-server.test.ts > HostControlServer > preserves the facade error code CAPABILITY_DENIED
+Error: ENOENT: no such file or directory, chmod '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-control-kbkA2K/control.sock'
+ ❯ HostControlServer.start src/control/host-control-server.ts:222:48
+    220|       })
+    221|     })
+    222|     if (!isWindowsNamedPipe(this.#socketPath)) await chmod(this.#socke…
+       |                                                ^
+    223|   }
+    224|
+ ❯ src/control/host-control-server.test.ts:59:3
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[29/62]⎯
+
+ FAIL  src/control/host-control-server.test.ts > HostControlServer > preserves the facade error code CONFIRMATION_REQUIRED
+Error: ENOENT: no such file or directory, chmod '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-control-KrSO39/control.sock'
+ ❯ HostControlServer.start src/control/host-control-server.ts:222:48
+    220|       })
+    221|     })
+    222|     if (!isWindowsNamedPipe(this.#socketPath)) await chmod(this.#socke…
+       |                                                ^
+    223|   }
+    224|
+ ❯ src/control/host-control-server.test.ts:59:3
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[30/62]⎯
+
+ FAIL  src/control/host-control-server.test.ts > HostControlServer > preserves the facade error code CONFIRMATION_EXPIRED
+Error: ENOENT: no such file or directory, chmod '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-control-yTpLQt/control.sock'
+ ❯ HostControlServer.start src/control/host-control-server.ts:222:48
+    220|       })
+    221|     })
+    222|     if (!isWindowsNamedPipe(this.#socketPath)) await chmod(this.#socke…
+       |                                                ^
+    223|   }
+    224|
+ ❯ src/control/host-control-server.test.ts:59:3
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[31/62]⎯
+
+ FAIL  src/control/host-control-server.test.ts > HostControlServer > preserves the facade error code CONFIRMATION_STALE
+Error: ENOENT: no such file or directory, chmod '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-control-nInIXo/control.sock'
+ ❯ HostControlServer.start src/control/host-control-server.ts:222:48
+    220|       })
+    221|     })
+    222|     if (!isWindowsNamedPipe(this.#socketPath)) await chmod(this.#socke…
+       |                                                ^
+    223|   }
+    224|
+ ❯ src/control/host-control-server.test.ts:59:3
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[32/62]⎯
+
+ FAIL  src/control/host-control-server.test.ts > HostControlServer > preserves the facade error code PATH_CONFLICT
+Error: ENOENT: no such file or directory, chmod '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-control-Q9fYVa/control.sock'
+ ❯ HostControlServer.start src/control/host-control-server.ts:222:48
+    220|       })
+    221|     })
+    222|     if (!isWindowsNamedPipe(this.#socketPath)) await chmod(this.#socke…
+       |                                                ^
+    223|   }
+    224|
+ ❯ src/control/host-control-server.test.ts:59:3
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[33/62]⎯
+
+ FAIL  src/control/host-control-server.test.ts > HostControlServer > preserves the facade error code BRANCH_CONFLICT
+Error: ENOENT: no such file or directory, chmod '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-control-J3sfxO/control.sock'
+ ❯ HostControlServer.start src/control/host-control-server.ts:222:48
+    220|       })
+    221|     })
+    222|     if (!isWindowsNamedPipe(this.#socketPath)) await chmod(this.#socke…
+       |                                                ^
+    223|   }
+    224|
+ ❯ src/control/host-control-server.test.ts:59:3
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[34/62]⎯
+
+ FAIL  src/control/host-control-server.test.ts > HostControlServer > preserves the facade error code WORKTREE_CONFLICT
+Error: ENOENT: no such file or directory, chmod '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-control-sj7QF6/control.sock'
+ ❯ HostControlServer.start src/control/host-control-server.ts:222:48
+    220|       })
+    221|     })
+    222|     if (!isWindowsNamedPipe(this.#socketPath)) await chmod(this.#socke…
+       |                                                ^
+    223|   }
+    224|
+ ❯ src/control/host-control-server.test.ts:59:3
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[35/62]⎯
+
+ FAIL  src/control/host-control-server.test.ts > HostControlServer > preserves the facade error code PARTIAL_SUCCESS
+Error: ENOENT: no such file or directory, chmod '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-control-PYV1vq/control.sock'
+ ❯ HostControlServer.start src/control/host-control-server.ts:222:48
+    220|       })
+    221|     })
+    222|     if (!isWindowsNamedPipe(this.#socketPath)) await chmod(this.#socke…
+       |                                                ^
+    223|   }
+    224|
+ ❯ src/control/host-control-server.test.ts:59:3
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[36/62]⎯
+
+ FAIL  src/control/host-control-server.test.ts > HostControlServer > preserves the facade error code NAVIGATION_TIMEOUT
+Error: ENOENT: no such file or directory, chmod '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-control-FcwE1j/control.sock'
+ ❯ HostControlServer.start src/control/host-control-server.ts:222:48
+    220|       })
+    221|     })
+    222|     if (!isWindowsNamedPipe(this.#socketPath)) await chmod(this.#socke…
+       |                                                ^
+    223|   }
+    224|
+ ❯ src/control/host-control-server.test.ts:59:3
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[37/62]⎯
+
+ FAIL  src/control/host-control-server.test.ts > HostControlServer > preserves the facade error code STORAGE_READ_ONLY
+Error: ENOENT: no such file or directory, chmod '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-control-WBzRMn/control.sock'
+ ❯ HostControlServer.start src/control/host-control-server.ts:222:48
+    220|       })
+    221|     })
+    222|     if (!isWindowsNamedPipe(this.#socketPath)) await chmod(this.#socke…
+       |                                                ^
+    223|   }
+    224|
+ ❯ src/control/host-control-server.test.ts:59:3
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[38/62]⎯
+
+ FAIL  src/control/host-control-server.test.ts > HostControlServer > maps real facade field validation faults to concise INVALID_REQUEST frames
+Error: ENOENT: no such file or directory, chmod '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-control-pTVXde/control.sock'
+ ❯ HostControlServer.start src/control/host-control-server.ts:222:48
+    220|       })
+    221|     })
+    222|     if (!isWindowsNamedPipe(this.#socketPath)) await chmod(this.#socke…
+       |                                                ^
+    223|   }
+    224|
+ ❯ src/control/host-control-server.test.ts:59:3
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[39/62]⎯
+
+ FAIL  src/control/host-control-server.test.ts > HostControlServer > preserves a missing durable batch TARGET_NOT_FOUND through the real 'empty retry set' chain
+Error: ENOENT: no such file or directory, chmod '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-control-JNtSSI/control.sock'
+ ❯ HostControlServer.start src/control/host-control-server.ts:222:48
+    220|       })
+    221|     })
+    222|     if (!isWindowsNamedPipe(this.#socketPath)) await chmod(this.#socke…
+       |                                                ^
+    223|   }
+    224|
+ ❯ src/control/host-control-server.test.ts:59:3
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[40/62]⎯
+
+ FAIL  src/control/host-control-server.test.ts > HostControlServer > preserves a missing durable batch TARGET_NOT_FOUND through the real 'nonempty retry set' chain
+Error: ENOENT: no such file or directory, chmod '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-control-b5z6jv/control.sock'
+ ❯ HostControlServer.start src/control/host-control-server.ts:222:48
+    220|       })
+    221|     })
+    222|     if (!isWindowsNamedPipe(this.#socketPath)) await chmod(this.#socke…
+       |                                                ^
+    223|   }
+    224|
+ ❯ src/control/host-control-server.test.ts:59:3
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[41/62]⎯
+
+ FAIL  src/control/host-control-server.test.ts > HostControlServer > preserves sorted safe ambiguity candidates from the real resolver through the socket frame
+Error: ENOENT: no such file or directory, chmod '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-control-zmc8DF/control.sock'
+ ❯ HostControlServer.start src/control/host-control-server.ts:222:48
+    220|       })
+    221|     })
+    222|     if (!isWindowsNamedPipe(this.#socketPath)) await chmod(this.#socke…
+       |                                                ^
+    223|   }
+    224|
+ ❯ src/control/host-control-server.test.ts:59:3
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[42/62]⎯
+
+ FAIL  src/control/host-control-server.test.ts > HostControlServer > fails closed on mixed invalid candidates and enforces the 4096-byte path limit
+Error: ENOENT: no such file or directory, chmod '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-control-TsovEz/control.sock'
+ ❯ HostControlServer.start src/control/host-control-server.ts:222:48
+    220|       })
+    221|     })
+    222|     if (!isWindowsNamedPipe(this.#socketPath)) await chmod(this.#socke…
+       |                                                ^
+    223|   }
+    224|
+ ❯ src/control/host-control-server.test.ts:59:3
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[43/62]⎯
+
+ FAIL  src/control/host-control-server.test.ts > HostControlServer > returns a deterministic framed fault when complete ambiguity details exceed the frame limit
+Error: ENOENT: no such file or directory, chmod '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-control-96HUo6/control.sock'
+ ❯ HostControlServer.start src/control/host-control-server.ts:222:48
+    220|       })
+    221|     })
+    222|     if (!isWindowsNamedPipe(this.#socketPath)) await chmod(this.#socke…
+       |                                                ^
+    223|   }
+    224|
+ ❯ src/control/host-control-server.test.ts:59:3
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[44/62]⎯
+
+ FAIL  src/control/host-control-server.test.ts > HostControlServer > reports an uninstalled action executor as Runtime not ready
+Error: ENOENT: no such file or directory, chmod '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-control-9ELjIo/control.sock'
+ ❯ HostControlServer.start src/control/host-control-server.ts:222:48
+    220|       })
+    221|     })
+    222|     if (!isWindowsNamedPipe(this.#socketPath)) await chmod(this.#socke…
+       |                                                ^
+    223|   }
+    224|
+ ❯ src/control/host-control-server.test.ts:59:3
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[45/62]⎯
+
+ FAIL  src/control/host-control-server.test.ts > HostControlServer > returns a self-removal success frame before running the action post-response disposal
+Error: ENOENT: no such file or directory, chmod '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-control-o0J8im/control.sock'
+ ❯ HostControlServer.start src/control/host-control-server.ts:222:48
+    220|       })
+    221|     })
+    222|     if (!isWindowsNamedPipe(this.#socketPath)) await chmod(this.#socke…
+       |                                                ^
+    223|   }
+    224|
+ ❯ src/control/host-control-server.test.ts:59:3
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[46/62]⎯
+
+ FAIL  src/control/host-control-server.test.ts > HostControlServer > writes the authoritative Host Control result before running caller disposal
+Error: ENOENT: no such file or directory, chmod '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-control-Jm82DV/control.sock'
+ ❯ HostControlServer.start src/control/host-control-server.ts:222:48
+    220|       })
+    221|     })
+    222|     if (!isWindowsNamedPipe(this.#socketPath)) await chmod(this.#socke…
+       |                                                ^
+    223|   }
+    224|
+ ❯ src/control/host-control-server.test.ts:59:3
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[47/62]⎯
+
+ FAIL  src/control/host-control-server.test.ts > HostControlServer > keeps the authoritative mutation result when caller disposal is queued after the deadline
+Error: ENOENT: no such file or directory, chmod '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-control-SLfkBs/control.sock'
+ ❯ HostControlServer.start src/control/host-control-server.ts:222:48
+    220|       })
+    221|     })
+    222|     if (!isWindowsNamedPipe(this.#socketPath)) await chmod(this.#socke…
+       |                                                ^
+    223|   }
+    224|
+ ❯ src/control/host-control-server.test.ts:59:3
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[48/62]⎯
+
+ FAIL  src/control/host-control-server.test.ts > HostControlServer > keeps a committed 'create' result across the post-dispatch deadline
+Error: ENOENT: no such file or directory, chmod '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-control-yxaPwh/control.sock'
+ ❯ HostControlServer.start src/control/host-control-server.ts:222:48
+    220|       })
+    221|     })
+    222|     if (!isWindowsNamedPipe(this.#socketPath)) await chmod(this.#socke…
+       |                                                ^
+    223|   }
+    224|
+ ❯ src/control/host-control-server.test.ts:59:3
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[49/62]⎯
+
+ FAIL  src/control/host-control-server.test.ts > HostControlServer > keeps a committed 'slow Fork batch' result across the post-dispatch deadline
+Error: ENOENT: no such file or directory, chmod '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-control-6qmAle/control.sock'
+ ❯ HostControlServer.start src/control/host-control-server.ts:222:48
+    220|       })
+    221|     })
+    222|     if (!isWindowsNamedPipe(this.#socketPath)) await chmod(this.#socke…
+       |                                                ^
+    223|   }
+    224|
+ ❯ src/control/host-control-server.test.ts:59:3
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[50/62]⎯
+
+ FAIL  src/control/host-control-server.test.ts > HostControlServer > keeps a committed 'non-caller removal' result across the post-dispatch deadline
+Error: ENOENT: no such file or directory, chmod '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-control-gEsM5O/control.sock'
+ ❯ HostControlServer.start src/control/host-control-server.ts:222:48
+    220|       })
+    221|     })
+    222|     if (!isWindowsNamedPipe(this.#socketPath)) await chmod(this.#socke…
+       |                                                ^
+    223|   }
+    224|
+ ❯ src/control/host-control-server.test.ts:59:3
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[51/62]⎯
+
+ FAIL  src/control/host-control-server.test.ts > HostControlServer > reports disposal failure after returning the committed structure result
+Error: ENOENT: no such file or directory, chmod '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-control-HWcyw7/control.sock'
+ ❯ HostControlServer.start src/control/host-control-server.ts:222:48
+    220|       })
+    221|     })
+    222|     if (!isWindowsNamedPipe(this.#socketPath)) await chmod(this.#socke…
+       |                                                ^
+    223|   }
+    224|
+ ❯ src/control/host-control-server.test.ts:59:3
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[52/62]⎯
+
+ FAIL  src/control/host-control-server.test.ts > HostControlServer > passes relative and relation selectors to the topology backend with caller context
+Error: ENOENT: no such file or directory, chmod '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-control-ADtFQ7/control.sock'
+ ❯ HostControlServer.start src/control/host-control-server.ts:222:48
+    220|       })
+    221|     })
+    222|     if (!isWindowsNamedPipe(this.#socketPath)) await chmod(this.#socke…
+       |                                                ^
+    223|   }
+    224|
+ ❯ src/control/host-control-server.test.ts:59:3
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[53/62]⎯
+
+ FAIL  src/control/host-control-server.test.ts > HostControlServer > resolves human ordinals only with their matching projection revision
+Error: ENOENT: no such file or directory, chmod '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-control-05nI1g/control.sock'
+ ❯ HostControlServer.start src/control/host-control-server.ts:222:48
+    220|       })
+    221|     })
+    222|     if (!isWindowsNamedPipe(this.#socketPath)) await chmod(this.#socke…
+       |                                                ^
+    223|   }
+    224|
+ ❯ src/control/host-control-server.test.ts:59:3
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[54/62]⎯
+
+ FAIL  src/control/host-control-server.test.ts > HostControlServer > bounds terminal reads and allowlists control keys
+Error: ENOENT: no such file or directory, chmod '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-control-3WO5Vn/control.sock'
+ ❯ HostControlServer.start src/control/host-control-server.ts:222:48
+    220|       })
+    221|     })
+    222|     if (!isWindowsNamedPipe(this.#socketPath)) await chmod(this.#socke…
+       |                                                ^
+    223|   }
+    224|
+ ❯ src/control/host-control-server.test.ts:59:3
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[55/62]⎯
+
+ FAIL  src/control/host-control-server.test.ts > HostControlServer > sends text and optional Enter as one backend action
+Error: ENOENT: no such file or directory, chmod '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-control-ToEY47/control.sock'
+ ❯ HostControlServer.start src/control/host-control-server.ts:222:48
+    220|       })
+    221|     })
+    222|     if (!isWindowsNamedPipe(this.#socketPath)) await chmod(this.#socke…
+       |                                                ^
+    223|   }
+    224|
+ ❯ src/control/host-control-server.test.ts:59:3
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[56/62]⎯
+
+ FAIL  src/control/host-control-server.test.ts > HostControlServer > clamps external Task progress before it reaches the product data channel
+Error: ENOENT: no such file or directory, chmod '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-control-qh0lVO/control.sock'
+ ❯ HostControlServer.start src/control/host-control-server.ts:222:48
+    220|       })
+    221|     })
+    222|     if (!isWindowsNamedPipe(this.#socketPath)) await chmod(this.#socke…
+       |                                                ^
+    223|   }
+    224|
+ ❯ src/control/host-control-server.test.ts:59:3
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[57/62]⎯
+
+ FAIL  src/control/host-control-server.test.ts > HostControlServer > isolates backend failure and remains available for later requests
+Error: ENOENT: no such file or directory, chmod '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-control-SINL7b/control.sock'
+ ❯ HostControlServer.start src/control/host-control-server.ts:222:48
+    220|       })
+    221|     })
+    222|     if (!isWindowsNamedPipe(this.#socketPath)) await chmod(this.#socke…
+       |                                                ^
+    223|   }
+    224|
+ ❯ src/control/host-control-server.test.ts:59:3
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[58/62]⎯
+
+ FAIL  src/control/host-control-server.test.ts > HostControlServer > requires the dedicated capability before moving a whole Task
+Error: ENOENT: no such file or directory, chmod '/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-control-bckl39/control.sock'
+ ❯ HostControlServer.start src/control/host-control-server.ts:222:48
+    220|       })
+    221|     })
+    222|     if (!isWindowsNamedPipe(this.#socketPath)) await chmod(this.#socke…
+       |                                                ^
+    223|   }
+    224|
+ ❯ src/control/host-control-server.test.ts:59:3
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[59/62]⎯
+
+ FAIL  src/storage/runtime-database-bootstrap.test.ts > openRecoverableRuntimeDatabase > makes concurrent corrupt bootstraps converge on one recovery marker
+Error: database is already owned by a live Runtime
+ ❯ ownershipConflict src/storage/database-owner.ts:372:10
+    370|
+    371| function ownershipConflict(): Error {
+    372|   return new Error('database is already owned by a live Runtime')
+       |          ^
+    373| }
+    374|
+ ❯ acquireDatabaseOwner src/storage/database-owner.ts:80:11
+ ❯ new RuntimeDatabaseOwnershipLease src/storage/database.ts:288:18
+ ❯ Function.acquireOwnership src/storage/database.ts:119:12
+ ❯ openRecoverableRuntimeDatabase src/storage/runtime-database-bootstrap.ts:155:39
+ ❯ src/storage/runtime-database-bootstrap.test.ts:407:7
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[60/62]⎯
+
+ FAIL  src/session/claude-resume-notices.test.ts > Claude resume preserves native transcripts > leaves native transcript bytes untouched on PTY launch (fork=false)
+AssertionError: expected 'file:///Users/icesword/Documents/AIPr…' to contain 'NATIVE_LEVEL=notice'
+
+- Expected
++ Received
+
+- NATIVE_LEVEL=notice
++ file:///Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-quiet-notices-z7bS24/provider-fixture:2
++ const fs = require('node:fs'); const rows = fs.readFileSync("/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-quiet-notices-z7bS24/config/projects/-Users-icesword-Documents-AIProjects-matou-multi-agent-codex--cache-c5-test-results-tmp-matou-quiet-notices-z7bS24/31a2ee23-87c6-4220-ab1b-a6a26368f94a.jsonl", 'utf8').trim().split('\n').map(JSON.parse); console.log('NATIVE_LEVEL='+rows.at(-1).level); setInterval(()=>{}, 1000)
++            ^
++
++ ReferenceError: require is not defined in ES module scope, you can use import instead
++     at [90mfile:///Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-quiet-notices-z7bS24/[39mprovider-fixture:2:12
++ [90m    at ModuleJob.run (node:internal/modules/esm/module_job:274:25)[39m
++ [90m    at async onImport.tracePromise.__proto__ (node:internal/modules/esm/loader:644:26)[39m
++ [90m    at async asyncRunEntryPointWithESMLoader (node:internal/modules/run_main:117:5)[39m
++
++ Node.js v22.16.0
++
+
+ ❯ src/session/claude-resume-notices.test.ts:47:60
+     45|     })
+     46|     try {
+     47|       await expect.poll(() => output, { timeout: 10_000 }).toContain('…
+       |                                                            ^
+     48|       const actual = await readFile(path, 'utf8')
+     49|       expect(actual).toBe(original)
+
+Caused by: Error: Matcher did not succeed in time.
+ ❯ src/session/claude-resume-notices.test.ts:47:7
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[61/62]⎯
+
+ FAIL  src/session/claude-resume-notices.test.ts > Claude resume preserves native transcripts > leaves native transcript bytes untouched on PTY launch (fork=true)
+AssertionError: expected 'file:///Users/icesword/Documents/AIPr…' to contain 'NATIVE_LEVEL=notice'
+
+- Expected
++ Received
+
+- NATIVE_LEVEL=notice
++ file:///Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-quiet-notices-RFjloG/provider-fixture:2
++ const fs = require('node:fs'); const rows = fs.readFileSync("/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-quiet-notices-RFjloG/config/projects/-Users-icesword-Documents-AIProjects-matou-multi-agent-codex--cache-c5-test-results-tmp-matou-quiet-notices-RFjloG/c4fd4c28-6586-4f6b-8382-69696c0379a3.jsonl", 'utf8').trim().split('\n').map(JSON.parse); console.log('NATIVE_LEVEL='+rows.at(-1).level); setInterval(()=>{}, 1000)
++            ^
++
++ ReferenceError: require is not defined in ES module scope, you can use import instead
++     at [90mfile:///Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/test-results/tmp/matou-quiet-notices-RFjloG/[39mprovider-fixture:2:12
++ [90m    at ModuleJob.run (node:internal/modules/esm/module_job:274:25)[39m
++ [90m    at async onImport.tracePromise.__proto__ (node:internal/modules/esm/loader:644:26)[39m
++ [90m    at async asyncRunEntryPointWithESMLoader (node:internal/modules/run_main:117:5)[39m
++
++ Node.js v22.16.0
++
+
+ ❯ src/session/claude-resume-notices.test.ts:47:60
+     45|     })
+     46|     try {
+     47|       await expect.poll(() => output, { timeout: 10_000 }).toContain('…
+       |                                                            ^
+     48|       const actual = await readFile(path, 'utf8')
+     49|       expect(actual).toBe(original)
+
+Caused by: Error: Matcher did not succeed in time.
+ ❯ src/session/claude-resume-notices.test.ts:47:7
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[62/62]⎯
+
+
+ Test Files  6 failed | 149 passed | 5 skipped (160)
+      Tests  62 failed | 1495 passed | 36 skipped (1593)
+   Start at  20:28:43
+   Duration  42.23s (transform 6.71s, setup 0ms, import 13.24s, tests 415.13s, environment 8ms)
+
+undefined
+/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/apps/runtime:
+ ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL  Command failed with exit code 1: vitest run --testTimeout=15000 --exclude src/runtime-server.test.ts --exclude src/journal/journal-range-reader.test.ts

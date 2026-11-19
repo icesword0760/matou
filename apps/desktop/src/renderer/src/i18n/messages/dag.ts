@@ -52,6 +52,7 @@ export const dagZhCN = {
       'claude-code': 'Claude',
       codex: 'Codex',
       antigravity: 'Antigravity',
+      dsh: 'DSH',
       'agent-team-member': '队友'
     },
     awaitingOutput: '等待会话输出…',
@@ -134,6 +135,7 @@ export const dagEn: CatalogShape<typeof dagZhCN> = {
       'claude-code': 'Claude',
       codex: 'Codex',
       antigravity: 'Antigravity',
+      dsh: 'DSH',
       'agent-team-member': 'Teammate'
     },
     awaitingOutput: 'Waiting for session output…',

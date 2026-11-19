@@ -1,0 +1,17 @@
+{
+  "name": "network",
+  "pid": 97125,
+  "exitCode": 0,
+  "elapsed": 15.885575250023976,
+  "hookEvents": [
+    "SessionStart",
+    "UserPromptSubmit",
+    "SessionEnd"
+  ],
+  "stopPayloads": [],
+  "eventTypes": [
+    "task_started",
+    "item_completed",
+    "turn_aborted"
+  ]
+}

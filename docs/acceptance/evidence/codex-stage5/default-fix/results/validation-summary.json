@@ -1,0 +1,34 @@
+{
+  "productCommit": "3f71baa75256aafe797b6c2ae687c31fccd6d0bd",
+  "tests": {
+    "configAndLaunchAndPty": {
+      "passed": 58,
+      "files": 3
+    },
+    "runtimeCodexSubset": {
+      "passed": 17,
+      "notSelected": 144,
+      "initialFailed": 3,
+      "reason": "Old exact no-Default-flag assertions updated; fixtures now use isolated missing config instead of live user config"
+    },
+    "uniquePassed": 75
+  },
+  "typecheck": {
+    "workspaceOtherPackages": "passed",
+    "runtimeInitial": "failed: exact optional test argument included undefined",
+    "runtimeAfterCorrection": "passed"
+  },
+  "identifiers": "passed",
+  "packageExitCode": 0,
+  "actualUserTopLevelConfigObserved": {
+    "approval_policy": "missing; fallback on-request",
+    "sandbox_mode": "danger-full-access; preserve explicit user choice"
+  },
+  "realAppFixtureConfig": {
+    "approval_policy": "on-request",
+    "sandbox_mode": "workspace-write"
+  },
+  "configFileWritesByProduct": false,
+  "newRuntimeLlmRequests": 0,
+  "newDependencies": []
+}

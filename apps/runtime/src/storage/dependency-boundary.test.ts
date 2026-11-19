@@ -26,7 +26,9 @@ describe('storage dependency boundary', () => {
 async function collectSourceFiles(directory: string): Promise<string[]> {
   const results: string[] = []
   for (const entry of await readdir(directory, { withFileTypes: true })) {
-    if (['node_modules', 'dist', 'out', 'output', 'release', 'package-resources', 'test-results', '.git', '.worktrees'].includes(entry.name)) {
+    // Hidden directories (.git, .cache, agent worktrees) hold build caches and
+    // copies, not Matou sources; walking them made this test time out under load.
+    if (entry.name.startsWith('.') || ['node_modules', 'dist', 'out', 'output', 'release', 'release-interrupted', 'package-resources', 'test-results'].includes(entry.name)) {
       continue
     }
     const path = join(directory, entry.name)

@@ -1,0 +1,31 @@
+{
+  "createdAt": "2026-11-15T16:45:23.382314+00:00",
+  "buildCommand": "CSC_IDENTITY_AUTO_DISCOVERY=false pnpm package:dir",
+  "packageAttempts": 2,
+  "sourceCommit": "9f82f8def44015bd35858754c39a1b0423dff5c8",
+  "appPath": "apps/desktop/release/mac-arm64/\u7801\u5934.app",
+  "codeSigning": "auto-discovery disabled; unsigned local acceptance app",
+  "bundleManifestSHA256": "1207ec4457ab31ad111fcff53d42963ef4ec8dae6a4daa17e4e42903e08699f6",
+  "regularFiles": 604,
+  "fingerprints": {
+    "Contents/MacOS/\u7801\u5934": "221d5695ab9eb2263b9107e4a5bb3f5780adc35963530e322673d5535e8eeae5",
+    "Contents/Resources/app.asar": "18c644b387fe91f36d539afad1e9de6f91df308424d25d139fc1a419dc5a9bfc",
+    "Contents/Resources/runtime/index.cjs": "fc8bbe7dee21eda293512b29ab619dae00e2838bddd427f692368f6b4529b48c",
+    "Contents/Resources/runtime/mt-cli.cjs": "4f29ca074b7a4e207a1028ba1bf8d5be1adef777925654b1a34f2342d4da514c",
+    "Contents/Resources/runtime/control-assets/providers/dsh/bridge.mjs": "07ea92adf21da1b56c8b68826aeaea69265fb54777acada8b1092b355884a4b1",
+    "Contents/Resources/runtime/control-assets/providers/dsh/instructions.mjs": "5ea8f3303f29533775ee3d0c13816937101c6fb91b562f9b3d079ddc13948aaa",
+    "Contents/Resources/runtime/control-assets/providers/dsh-system-message.md": "ed05b35a98387a8ece2ec52f79332735469ea884ea6e3a54e7801dccf485d5bb"
+  },
+  "cleanup": {
+    "removed": [
+      ".cache/dsh-stage4/mt-live-1794758221863/result.json",
+      ".cache/dsh-stage4/mt-live-1794757550404/result.json",
+      ".cache/dsh-stage4/mt-live-1794758039292/result.json",
+      ".cache/dsh-stage4/mt-live-1794757696785/result.json",
+      ".cache/dsh-stage4/mt-live-1794757607086/result.json"
+    ],
+    "bytesFreed": 647700,
+    "kept": "Configuration backups and accepted mode/live evidence"
+  },
+  "rebuildReason": "Product source changed after first packaged UI acceptance: DSH early resume failure state/waiter fix and compact HUD occupancy. Initial fingerprint retained."
+}

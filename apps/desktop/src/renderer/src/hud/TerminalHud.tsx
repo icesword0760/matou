@@ -50,13 +50,22 @@ export function TerminalHud(props: {
   environment?: SessionEnvironment
   git?: SessionGitState
   hasOwnedWorktree?: boolean
+  sharedWorkingDirectory?: boolean
+  sharedSessionCount?: number
   environmentActions?: SessionEnvironmentActions
 }) {
   const { hud } = props
   const m = useMessages().hud
+  const isDsh = hud?.provider === 'dsh'
+  const dshPermissionLabel = isDsh ? hud?.providerPermissionLabel?.trim() : undefined
   const manifest = getAgentManifest(hud?.provider ?? 'claude-code')
   const showAccountControl = manifest?.hud.showAccountControl ?? true
-  const instructionButtonLabel = manifest?.instructionFiles.buttonLabel ?? hud?.instructionFileLabel
+  const dshInstructionLabel = isDsh ? hud?.instructionFileLabel?.trim() : undefined
+  const instructionButtonLabel = isDsh
+    ? dshInstructionLabel
+    : manifest?.instructionFiles.buttonLabel ?? hud?.instructionFileLabel
+  const showInstructionButton = hud?.mode === 'agent' && Boolean(instructionButtonLabel) &&
+    (isDsh ? Boolean(dshInstructionLabel) : hud?.configCounts?.projectInstructionFileExists === true)
   const allowedPermissionModes = manifest?.capabilities.permissionModes ?? [
     'default', 'acceptEdits', 'plan', 'bypassPermissions'
   ]
@@ -75,7 +84,7 @@ export function TerminalHud(props: {
     account?.usageIssue === 'unsupported' ? (zh ? '暂无用量数据' : 'Usage unavailable') :
     accountState?.usageRefreshFailed || account?.usageIssue ? (zh ? '读取失败，保留上次数据' : 'Read failed; last known usage') :
     account?.usage?.stale ? (zh ? '上次记录，使用后更新' : 'Last known; updates after use') : ''
-  const usageWindows = (useDeviceQuota ? deviceWindows : hud?.usageWindows ?? [])
+  const usageWindows = (manifest?.hud.supportsQuotaWindows === false ? [] : useDeviceQuota ? deviceWindows : hud?.usageWindows ?? [])
     .filter(window => Number.isFinite(window.percent))
   const quotaEmpty = quotaProblem || (!accountState ? (zh ? '正在读取用量' : 'Loading usage') :
     accountState.operation === 'idle' && !account ? (zh ? '添加账户后查看用量' : 'Add an account to view usage') :
@@ -90,18 +99,27 @@ export function TerminalHud(props: {
   const [switching, setSwitching] = useState(false)
   const [switchError, setSwitchError] = useState('')
   const [gitOpen, setGitOpen] = useState(false)
+  const [gitIsolatingSessionId, setGitIsolatingSessionId] = useState<string>()
+  const [gitNotice, setGitNotice] = useState<{ sessionId: string; branch: string }>()
   const [environmentOpen, setEnvironmentOpen] = useState(false)
   const [instructionsOpen, setInstructionsOpen] = useState(false)
   const rootRef = useRef<HTMLDivElement>(null)
+  const sessionId = hud?.sessionId ?? props.sessionId
+  const gitIsolating = gitIsolatingSessionId !== undefined && gitIsolatingSessionId === sessionId
 
   useEffect(() => setPermissionMode(hud?.permissionMode ?? 'default'), [hud?.sessionId, hud?.permissionMode])
+  useEffect(() => {
+    if (!gitNotice) return
+    const timer = window.setTimeout(() => setGitNotice(undefined), 3500)
+    return () => window.clearTimeout(timer)
+  }, [gitNotice])
   useEffect(() => {
     if (!disabled) return
     setMenu(null)
     setConfirmTarget(null)
-    setGitOpen(false)
+    if (!gitIsolating) setGitOpen(false)
     setInstructionsOpen(false)
-  }, [disabled])
+  }, [disabled, gitIsolating])
   useEffect(() => {
     const closeOutside = (event: Event) => {
       const target = event.target
@@ -124,7 +142,6 @@ export function TerminalHud(props: {
     }
   }, [menu, environmentOpen])
 
-  const sessionId = hud?.sessionId ?? props.sessionId
   if (!sessionId || (!hud && !props.environment && !props.git)) return null
   const agents = hud ? agentDisplay(hud) : { count: 0, items: [] }
   const shortCwd = cwdShortName(hud?.cwd)
@@ -132,7 +149,7 @@ export function TerminalHud(props: {
     ? legacyGitState(hud)
     : props.git ?? (props.environment ? { state: 'unavailable' as const, dirty: false } : undefined)
   const gitDisplay = git ? gitStateLabel(git, m) : ''
-  const gitCwd = props.environment?.state === 'ready' ? props.environment.path : hud?.cwd
+  const gitCwd = props.environment?.state === 'ready' || gitIsolating ? props.environment?.path ?? hud?.cwd : hud?.cwd
   const permissionTitle = m.permissionSwitch(m.permission[permissionMode])
   const openPermissionMenu = (event: React.MouseEvent<HTMLElement>) => {
     if (disabled || switching || !props.onPermissionMode) return
@@ -143,7 +160,7 @@ export function TerminalHud(props: {
   }
 
   return <div className="status-info" data-hud-mode={hud?.mode ?? 'environment'} data-session-id={sessionId} ref={rootRef}>
-    {hud?.mode === 'agent' && hud.configCounts?.projectInstructionFileExists === true && instructionButtonLabel && <button type="button"
+    {hud?.mode === 'agent' && showInstructionButton && <button type="button"
       className="status-field status-instructions is-clickable"
       aria-label={instructionButtonLabel === 'ClaudeMd' ? m.editClaudeMd : instructionButtonLabel} disabled={!gitClient}
       title={instructionButtonLabel === 'ClaudeMd' ? m.editClaudeMdTitle : instructionButtonLabel}
@@ -152,15 +169,20 @@ export function TerminalHud(props: {
       }}>{instructionButtonLabel}</button>}
     <div className="status-info__primary">
     {hud?.mode === 'agent' ? <>
-      <button type="button" className={`status-field status-perm-badge is-clickable perm-${permissionMode}`}
-        disabled={disabled || switching || !props.onPermissionMode}
-        title={props.disabledReason ?? permissionTitle}
-        aria-label={permissionTitle}
-        onClick={openPermissionMenu}>{permissionAbbreviation(permissionMode)}</button>
+      {isDsh
+        ? dshPermissionLabel
+          ? <span className="status-field status-perm-badge" title={dshPermissionLabel}
+            aria-label={dshPermissionLabel}>{dshPermissionLabel}</span>
+          : null
+        : <button type="button" className={`status-field status-perm-badge is-clickable perm-${permissionMode}`}
+          disabled={disabled || switching || !props.onPermissionMode}
+          title={props.disabledReason ?? permissionTitle}
+          aria-label={permissionTitle}
+          onClick={openPermissionMenu}>{permissionAbbreviation(permissionMode)}</button>}
       {modelLabel(hud, m) && <span className="status-field status-model status-priority-8"
         title={m.modelTitle(modelLabel(hud, m))}>{modelLabel(hud, m)}</span>}
       {hud.contextPercent !== undefined ? <ContextRing percent={hud.contextPercent} /> :
-        hud.contextWindowSize !== undefined && hud.contextWindowSize > 0 &&
+        !isDsh && hud.provider !== 'codex' && hud.contextWindowSize !== undefined && hud.contextWindowSize > 0 &&
         <span className="status-field status-priority-7">{zh ? '等待真实用量' : 'Awaiting usage'}</span>}
       {manifest?.hud.supportsMcpSummary !== false && hud.configCounts && hud.configCounts.mcpServers > 0 && <HudDetail
         label={`${hud.configCounts.mcpServers} MCPs`} title={m.mcpServers}
@@ -177,16 +199,16 @@ export function TerminalHud(props: {
       {manifest?.hud.supportsHooksCount !== false && hud.configCounts && hud.configCounts.hooks > 0 && <HudDetail
         label={`${hud.configCounts.hooks} hooks`} title="Hooks"
         items={hud.configCounts.hookNames ?? []} />}
-      {usageWindows.length === 0 && manifest?.hud.hideEmptyQuotaPlaceholder !== true && <span className="status-field status-usage status-priority-6" role="status"
+      {!isDsh && usageWindows.length === 0 && manifest?.hud.hideEmptyQuotaPlaceholder !== true && <span className="status-field status-usage status-priority-6" role="status"
         title={useDeviceQuota ? `${quotaAccount} · ${quotaEmpty}` : (zh ? '暂无用量数据' : 'Usage unavailable')}>—</span>}
-      {!useDeviceQuota && (hud.allUsageWindows?.length ?? 0) > 0
+      {!isDsh && (manifest?.hud.supportsQuotaWindows !== false && !useDeviceQuota && (hud.allUsageWindows?.length ?? 0) > 0
         ? <QuotaDetailWindows windows={usageWindows} allWindows={hud.allUsageWindows!} zh={zh} />
         : usageWindows.map((window, index) => <span
           className="status-field status-usage status-priority-6"
           title={`${useDeviceQuota ? `${quotaAccount} · ` : ''}${usageTitle(window, zh)}${useDeviceQuota && quotaProblem ? ` · ${quotaProblem}` : ''}`} key={`${window.label}:${index}`}>
           {window.label} <strong>{window.percent}%</strong><small> · {formatReset(window.resetsAt)}</small>
-        </span>)}
-      {hud.teamRole && <span className={`team-role-badge status-priority-5 team-${teamTone(hud.teamStatus)}`}>{hud.teamRole}</span>}
+        </span>))}
+      {!isDsh && hud.teamRole && <span className={`team-role-badge status-priority-5 team-${teamTone(hud.teamStatus)}`}>{hud.teamRole}</span>}
       {(hud.mcpErrors ?? []).map((name) => <span className="status-field status-mcp-error status-priority-5" key={name}>⚠ {name}</span>)}
       {manifest?.hud.supportsTodos !== false && todoDisplay(hud) && <span className="status-field status-todos status-priority-4">
         <span className={`tool-icon ${todoDisplay(hud)!.done ? 'tool-icon-done' : 'tool-icon-running'}`}>{todoDisplay(hud)!.icon}</span>
@@ -256,6 +278,9 @@ export function TerminalHud(props: {
         }).finally(() => setSwitching(false))
       }} />, document.body)}
     {switchError && createPortal(<div className="terminal-toast is-error" role="status">{switchError}</div>, document.body)}
+    {gitNotice?.sessionId === sessionId && createPortal(
+      <div className="terminal-toast" role="status">{m.isolatedWorktreeSwitched(gitNotice.branch)}</div>, document.body
+    )}
     {environmentOpen && props.environment && props.environmentActions && createPortal(
       <EnvironmentControlMenu sessionId={sessionId} environment={props.environment}
         hasOwnedWorktree={props.hasOwnedWorktree === true} actions={props.environmentActions}
@@ -264,9 +289,16 @@ export function TerminalHud(props: {
           : {})}
         onClose={() => setEnvironmentOpen(false)} />, document.body
     )}
-    {gitOpen && !disabled && git?.state === 'ready' && gitClient && gitCwd && createPortal(<GitControlMenu client={gitClient}
+    {gitOpen && (gitIsolating || (!disabled && git?.state === 'ready')) && gitClient && gitCwd && createPortal(
+      <GitControlMenu key={sessionId} client={gitClient}
       cwd={gitCwd} sessionId={sessionId} {...(props.gitContext ? { context: props.gitContext } : {})}
+      {...(props.environment ? { environmentKind: props.environment.kind } : {})}
+      hasOwnedWorktree={props.hasOwnedWorktree === true}
+      sharedWorkingDirectory={props.sharedWorkingDirectory === true}
+      {...(props.sharedSessionCount === undefined ? {} : { sharedSessionCount: props.sharedSessionCount })}
       dialogLabel={m.gitMenu} branchRowsAsButtons
+      onIsolationBusyChange={(busy) => setGitIsolatingSessionId((id) => busy ? sessionId : id === sessionId ? undefined : id)}
+      onIsolated={(branch) => setGitNotice({ sessionId, branch })}
       onClose={() => setGitOpen(false)} />, document.body)}
     {instructionsOpen && gitClient && createPortal(<InstructionFileDialog client={gitClient}
       sessionId={sessionId} label={instructionButtonLabel ?? 'ClaudeMd'} readOnly={disabled} onClose={() => setInstructionsOpen(false)} />, document.body)}
@@ -509,7 +541,12 @@ function modelLabel(hud: SessionHudView, m: HudMessages): string {
   const name = hud.model?.trim()
   const stripClaudePrefix = getAgentManifest(hud.provider ?? 'claude-code')?.hud.stripClaudeModelPrefix ?? true
   let label = (stripClaudePrefix ? name?.replace(/^Claude\s+/i, '') : name) ?? ''
-  if (!label && hud.modelStrategy) label = m.model[hud.modelStrategy]
+  if ((hud.provider === 'codex' || hud.provider === 'dsh') && label && hud.effort) {
+    label = `${label} (${hud.effort})`
+  }
+  if (!label && hud.provider !== 'codex' && hud.provider !== 'dsh' && hud.modelStrategy) {
+    label = m.model[hud.modelStrategy]
+  }
   const context = formatContextWindow(hud.contextWindowSize)
   return label && context ? m.modelWithContext(label, context) : label
 }
@@ -572,9 +609,11 @@ function todoDisplay(hud: SessionHudView): { icon: string; text: string; progres
     : null
 }
 function hasAgentInfo(hud: SessionHudView): boolean {
-  return Boolean(hud.model || hud.modelStrategy || hud.contextPercent !== undefined ||
-    (hud.usageWindows?.length ?? 0) > 0 || hud.configCounts || (hud.mcpErrors?.length ?? 0) > 0 ||
-    agentDisplay(hud).count > 0 || hud.teamRole || todoDisplay(hud))
+  const dsh = hud.provider === 'dsh'
+  return Boolean(hud.model || (!dsh && hud.modelStrategy) || hud.contextPercent !== undefined ||
+    (hud.mcpErrors?.length ?? 0) > 0 ||
+    (!dsh && ((hud.usageWindows?.length ?? 0) > 0 || hud.configCounts || agentDisplay(hud).count > 0 ||
+      hud.teamRole || todoDisplay(hud))))
 }
 
 function bypassCopy(target: HudPermissionMode, resumable: boolean, agent: string, m: HudMessages): string {

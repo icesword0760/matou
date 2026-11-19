@@ -1,0 +1,177 @@
+{
+  "recordedAt": "2026-11-15T18:17:55.166550+00:00",
+  "sourceCommit": "a06812f4ceb144befee5b99cce50c07b9264275b",
+  "workspace": ".cache/dsh-next/base",
+  "buildCommand": "CSC_IDENTITY_AUTO_DISCOVERY=false pnpm package:dir",
+  "buildExitCode": 0,
+  "isolation": "Real HOME; empty ZDOTDIR; temporary git repository; distinct Electron user-data and Matou data; Codex config/auth/session copies isolated; short links point only to this run. Suites run serially, one worker, retries=0.",
+  "suites": {
+    "antigravity": {
+      "passed": 4,
+      "failed": 1,
+      "flaky": 0,
+      "skipped": 0,
+      "durationMs": 239837.027,
+      "scenarios": [
+        {
+          "title": "PRD #1 #3 #4 #5 #6 #11 #12: Real agy lifecycle, HUD, notifications, modes, and /model in packaged 码头.app",
+          "declaredLine": 441,
+          "status": "expected",
+          "attempts": 1,
+          "assertionLine": null,
+          "assertionColumn": null
+        },
+        {
+          "title": "PRD #7 #9a + Latency (3x): Auto Title lock/restore, Restart recovery, and Running/Idle latency",
+          "declaredLine": 690,
+          "status": "expected",
+          "attempts": 1,
+          "assertionLine": null,
+          "assertionColumn": null
+        },
+        {
+          "title": "PRD #2 #8 #10 + Running-Parent Fork: DAG/Badge/ParentProjection, Fork Current/Worktree/Running, SessionLoader",
+          "declaredLine": 862,
+          "status": "unexpected",
+          "attempts": 1,
+          "assertionLine": 876,
+          "assertionColumn": 120
+        },
+        {
+          "title": "PRD #13: mt cross-card control inside real Antigravity card",
+          "declaredLine": 1051,
+          "status": "expected",
+          "attempts": 1,
+          "assertionLine": null,
+          "assertionColumn": null
+        },
+        {
+          "title": "PRD #9b #14: Controlled fixtures for missing binary, unauthenticated sign-in prompt, and restore failure",
+          "declaredLine": 1110,
+          "status": "expected",
+          "attempts": 1,
+          "assertionLine": null,
+          "assertionColumn": null
+        }
+      ]
+    },
+    "codex": {
+      "passed": 9,
+      "failed": 1,
+      "flaky": 0,
+      "skipped": 0,
+      "durationMs": 607396.881,
+      "scenarios": [
+        {
+          "title": "PRD 1–6, 8, 10: lifecycle, HUD, notifications, title, modes, restart and latency 3x",
+          "declaredLine": 547,
+          "status": "expected",
+          "attempts": 1,
+          "assertionLine": null,
+          "assertionColumn": null
+        },
+        {
+          "title": "known issues: a real Codex model error notifies once and marks the card error; startup upgrade is disabled",
+          "declaredLine": 653,
+          "status": "expected",
+          "attempts": 1,
+          "assertionLine": null,
+          "assertionColumn": null
+        },
+        {
+          "title": "known issues: history_base ancestor appears in preview and search; missing parent is labeled",
+          "declaredLine": 732,
+          "status": "expected",
+          "attempts": 1,
+          "assertionLine": null,
+          "assertionColumn": null
+        },
+        {
+          "title": "closure PRD 5: Default restores user permissions after Bypass and Plan",
+          "declaredLine": 772,
+          "status": "expected",
+          "attempts": 1,
+          "assertionLine": null,
+          "assertionColumn": null
+        },
+        {
+          "title": "closure PRD 8: independent restart stays starting for 10 seconds then recalls a codeword",
+          "declaredLine": 800,
+          "status": "expected",
+          "attempts": 1,
+          "assertionLine": null,
+          "assertionColumn": null
+        },
+        {
+          "title": "PRD 7, 9: current/new Worktree Fork, parent-child isolation, loader search and resume",
+          "declaredLine": 842,
+          "status": "unexpected",
+          "attempts": 1,
+          "assertionLine": 862,
+          "assertionColumn": 26
+        },
+        {
+          "title": "PRD 1, 11: mt creates a Codex card and real Codex reads its sibling",
+          "declaredLine": 909,
+          "status": "expected",
+          "attempts": 1,
+          "assertionLine": null,
+          "assertionColumn": null
+        },
+        {
+          "title": "PRD 2, 3: real approval, waiting notification, continue and interrupted turn",
+          "declaredLine": 941,
+          "status": "expected",
+          "attempts": 1,
+          "assertionLine": null,
+          "assertionColumn": null
+        },
+        {
+          "title": "PRD 2, 8: real missing local rollout, recovery failure, retry and new conversation",
+          "declaredLine": 973,
+          "status": "expected",
+          "attempts": 1,
+          "assertionLine": null,
+          "assertionColumn": null
+        },
+        {
+          "title": "controlled fixtures: missing CLI and unauthenticated sign-in; no real login is revoked",
+          "declaredLine": 1024,
+          "status": "expected",
+          "attempts": 1,
+          "assertionLine": null,
+          "assertionColumn": null
+        }
+      ]
+    }
+  },
+  "comparisonToPreviousCloseout": {
+    "antigravity": {
+      "baselineFailures": [
+        "876:120 strict selector matches history and Fork buttons"
+      ],
+      "previousBranchFailures": [
+        "497 native still working / no assistant response",
+        "802 native title empty",
+        "408 trust dialog not confirmed by helper; model HUD unavailable"
+      ],
+      "exactFailureIntersection": [],
+      "conclusion": "The earlier three points did not recur in the baseline. Read-only native evidence explains each missing signal; the reviewed DSH shared-file changes do not change those provider paths. This is not sufficient to label every failure pre-existing or declare the final branch accepted; retain the individual causes and compare the final rerun."
+    },
+    "codex": {
+      "baselineFailures": [
+        "862:26 inherited source ID after new Worktree Fork native exit"
+      ],
+      "previousBranchFailures": [
+        "559->411 native account/read workspace routing discovery timeout",
+        "805->411 native MCP startup / no first-turn identity before deadline",
+        "862:26 inherited source ID after current-directory Fork native exit"
+      ],
+      "sameFailureClass": [
+        "Fork failure is wrongly read as a confirmed child identity; baseline current-directory fork succeeded with distinct validated ID, new-worktree fork failed"
+      ],
+      "conclusion": "Native startup failures occur without DSH as well. The old failed child was never a successfully confirmed session bound to the parent. Repair the acceptance helper to require a succeeded Fork and a validated resumable binding, then validate both native id and forked_from_id.",
+      "baselineNativeError": "account/read failed during TUI bootstrap: account/read failed: workspace routing discovery timed out (code -32603)"
+    }
+  }
+}

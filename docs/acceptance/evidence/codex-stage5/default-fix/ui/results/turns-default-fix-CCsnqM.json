@@ -1,0 +1,42 @@
+[
+  {
+    "sessionId": "59680f42-0870-45bf-8b24-9cd62a2a8761",
+    "providerSessionId": "01a1df4f-b04c-73c3-a4a2-21e8f79eda99",
+    "turnId": "01a1df4f-b183-7773-ad93-18312fad92b4",
+    "prompt": "Remember mode codeword river-slate-842. Reply only MODES_READY.",
+    "finalAnswer": "MODES_READY",
+    "completedAnswer": "MODES_READY"
+  },
+  {
+    "sessionId": "59680f42-0870-45bf-8b24-9cd62a2a8761",
+    "providerSessionId": "01a1df4f-b04c-73c3-a4a2-21e8f79eda99",
+    "turnId": "01a1df4f-dcd4-7102-91e1-078a2b039e1a",
+    "prompt": "Which mode codeword did I ask you to remember? Reply only that codeword.",
+    "finalAnswer": "river-slate-842",
+    "completedAnswer": "river-slate-842"
+  },
+  {
+    "sessionId": "59680f42-0870-45bf-8b24-9cd62a2a8761",
+    "providerSessionId": "01a1df4f-b04c-73c3-a4a2-21e8f79eda99",
+    "turnId": "01a1df50-0165-72f3-860c-3c80ccc035bd",
+    "prompt": "Which mode codeword did I ask you to remember? Reply only that codeword.",
+    "finalAnswer": "river-slate-842",
+    "completedAnswer": "river-slate-842"
+  },
+  {
+    "sessionId": "59680f42-0870-45bf-8b24-9cd62a2a8761",
+    "providerSessionId": "01a1df4f-b04c-73c3-a4a2-21e8f79eda99",
+    "turnId": "01a1df50-2fd1-77b2-ae9d-a111e08e7e49",
+    "prompt": "Which mode codeword did I ask you to remember? Reply only that codeword.",
+    "finalAnswer": "river-slate-842",
+    "completedAnswer": "river-slate-842"
+  },
+  {
+    "sessionId": "59680f42-0870-45bf-8b24-9cd62a2a8761",
+    "providerSessionId": "01a1df4f-b04c-73c3-a4a2-21e8f79eda99",
+    "turnId": "01a1df50-5de1-75f0-a4eb-e96c4aedffae",
+    "prompt": "Which mode codeword did I ask you to remember? Reply only that codeword.",
+    "finalAnswer": "river-slate-842",
+    "completedAnswer": "river-slate-842"
+  }
+]

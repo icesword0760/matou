@@ -14,6 +14,7 @@ import { FOUNDATION_MIGRATIONS } from '../storage/migrations'
 import { evaluateAntigravityPreToolUse, ProviderHookServer } from './provider-hook-server'
 import { SessionForkIntentRepository } from './session-fork-intent-repository'
 import { SessionHudRegistry } from './session-hud-registry'
+import { createProviderHudPayloadHandler } from './provider-hud-payload-handler'
 
 let root: string
 let database: RuntimeDatabase
@@ -24,6 +25,7 @@ let hudEvents: unknown[]
 let identityEvents: unknown[]
 let titleEvents: unknown[]
 let teamObservations: unknown[]
+let workStatusEvents: unknown[]
 
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), 'matou-provider-hooks-'))
@@ -51,12 +53,14 @@ beforeEach(async () => {
   identityEvents = []
   titleEvents = []
   teamObservations = []
+  workStatusEvents = []
   hooks = new ProviderHookServer(root, sessions, {
     onNotification: (event) => { notificationEvents.push(event) },
     onHudPayload: (event) => { hudEvents.push(event) },
     onIdentityRecorded: (event) => { identityEvents.push(event) },
     onTitleObserved: (event) => { titleEvents.push(event) },
-    onTeamObservations: (events) => { teamObservations.push(...events) }
+    onTeamObservations: (events) => { teamObservations.push(...events) },
+    onWorkStatus: (event) => { workStatusEvents.push(event) }
   })
   await hooks.start()
 })
@@ -116,6 +120,11 @@ describe('ProviderHookServer', () => {
     })
     expect(registration.codexHooksConfig).toBe(
       `{ SessionStart = [{ hooks = [{ type = "command", command = ${JSON.stringify(startHook?.command)}, timeout = 5, statusMessage = "正在确认会话" }] }], ` +
+      `UserPromptSubmit = [{ hooks = [{ type = "command", command = ${JSON.stringify(startHook?.command)}, timeout = 5, statusMessage = "正在确认会话" }] }], ` +
+      `PreToolUse = [{ hooks = [{ type = "command", command = ${JSON.stringify(startHook?.command)}, timeout = 10, statusMessage = "正在确认会话" }] }], ` +
+      `PermissionRequest = [{ hooks = [{ type = "command", command = ${JSON.stringify(startHook?.command)}, timeout = 10, statusMessage = "正在确认会话" }] }], ` +
+      `PostToolUse = [{ hooks = [{ type = "command", command = ${JSON.stringify(startHook?.command)}, timeout = 10, statusMessage = "正在确认会话" }] }], ` +
+      `Stop = [{ hooks = [{ type = "command", command = ${JSON.stringify(startHook?.command)}, timeout = 5, statusMessage = "正在确认会话" }] }], ` +
       `SessionEnd = [{ hooks = [{ type = "command", command = ${JSON.stringify(endHook?.command)}, timeout = 3, statusMessage = "正在确认会话" }] }] }`
     )
     expect(registration.codexHooksConfig).not.toContain(registration.hookUrl)
@@ -136,6 +145,290 @@ describe('ProviderHookServer', () => {
       runId: 'codex-run', sessionId: 'codex-child', provider: 'codex',
       providerSessionId: 'codex-derived-context', eventName: 'SessionStart'
     }))
+  })
+
+  it('registers only the seven observed Codex events in both launch representations', async () => {
+    const registration = await hooks.registerCodexSession({ runId: 'codex-run', sessionId: 'session-1' })
+    const settings = JSON.parse(await readFile(registration.settingsPath, 'utf8')) as {
+      hooks: Record<string, Array<{ hooks: Array<{ type: string; timeout: number }> }>>
+    }
+    const events = [
+      'SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PermissionRequest', 'PostToolUse', 'Stop', 'SessionEnd'
+    ]
+    expect(Object.keys(settings.hooks)).toEqual(events)
+    expect([...registration.codexHooksConfig!.matchAll(/\b([A-Z]\w*) = \[/g)].map((match) => match[1])).toEqual(events)
+    expect(settings.hooks.PermissionRequest?.[0]?.hooks[0]).toMatchObject({ type: 'command', timeout: 10 })
+    expect(settings.hooks.SessionEnd?.[0]?.hooks[0]?.timeout).toBe(3)
+    expect(settings).not.toHaveProperty('statusLine')
+  })
+
+  it('routes Codex identity, lifecycle HUD payloads, statuses and notifications through the shared callbacks', async () => {
+    const registration = await hooks.registerCodexSession({ runId: 'codex-run', sessionId: 'session-1' })
+    const common = {
+      session_id: '01a1ddc1-88fd-7fc1-8c66-ab8d38719da8',
+      cwd: root, model: 'gpt-6-astra', permission_mode: 'default'
+    }
+    const events = [
+      { hook_event_name: 'SessionStart', source: 'startup' },
+      { hook_event_name: 'UserPromptSubmit', prompt: "Run python3 -c 'print(2)'" },
+      { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_use_id: 'exec-1', tool_input: { command: "python3 -c 'print(2)'" } },
+      // The real PermissionRequest payload has no tool_use_id.
+      { hook_event_name: 'PermissionRequest', tool_name: 'Bash', tool_input: { command: "python3 -c 'print(2)'" } },
+      { hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_use_id: 'exec-1', tool_response: '2\n' },
+      { hook_event_name: 'Stop', stop_hook_active: false, last_assistant_message: 'Output: 2' },
+      { hook_event_name: 'SessionEnd', reason: 'other' }
+    ]
+    for (const event of events) {
+      expect((await postHook(registration.hookUrl, { ...common, ...event })).status).toBe(200)
+    }
+    expect(sessions.getResumeBinding('session-1', 'codex')).toMatchObject({
+      providerSessionId: common.session_id,
+      metadata: expect.objectContaining({ model: 'gpt-6-astra', permissionMode: 'default' })
+    })
+    expect(identityEvents).toHaveLength(6)
+    expect(hudEvents).toEqual(events.map((event) => ({
+      runId: 'codex-run', sessionId: 'session-1', provider: 'codex',
+      payload: { ...common, ...event }, isStatusline: false
+    })))
+    expect(workStatusEvents).toEqual(['idle', 'running', 'running', 'needs-input', 'running', 'idle', 'exited'].map((workStatus) => ({
+      runId: 'codex-run', sessionId: 'session-1', provider: 'codex', workStatus
+    })))
+    expect(notificationEvents).toEqual([
+      expect.objectContaining({ provider: 'codex', event: expect.objectContaining({
+        eventType: 'permission', title: 'Codex', body: "Bash: python3 -c 'print(2)'", sound: true, cooldownKey: 'Notification'
+      }) }),
+      expect.objectContaining({ provider: 'codex', event: expect.objectContaining({
+        eventType: 'completed', title: 'Codex', body: 'Output: 2', sound: true, cooldownKey: 'Stop'
+      }) })
+    ])
+    expect(titleEvents).toEqual([])
+    expect(teamObservations).toEqual([])
+  })
+
+  it('updates the existing Codex HUD state immediately and clears approval waiting on tool completion', async () => {
+    const hud = new SessionHudRegistry()
+    hud.spawn({ sessionId: 'session-1', profile: 'codex', cwd: root })
+    const pipeline = createProviderHudPayloadHandler({
+      hud, currentRunId: () => 'codex-hud-run', publish: () => {},
+      reportError: (error) => { throw error }
+    })
+    const server = new ProviderHookServer(root, sessions, { onHudPayload: pipeline })
+    await server.start()
+    try {
+      const registration = await server.registerCodexSession({ runId: 'codex-hud-run', sessionId: 'session-1' })
+      for (const [event, expected] of [
+        ['UserPromptSubmit', 'running'], ['SessionStart', 'idle'], ['UserPromptSubmit', 'running'],
+        ['PreToolUse', 'running'], ['PermissionRequest', 'needs-input'], ['PostToolUse', 'running'], ['Stop', 'idle'], ['SessionEnd', 'idle']
+      ]) {
+        await postHook(registration.hookUrl, {
+          hook_event_name: event, session_id: 'codex-hud-id',
+          tool_name: 'Bash', tool_use_id: 'exec-1'
+        })
+        expect(hud.snapshot('session-1')?.taskStatus).toBe(expected)
+      }
+      expect(hud.snapshot('session-1')?.runningTools).toEqual([])
+    } finally {
+      await server.stop()
+    }
+  })
+
+  it('reports one Codex turn error from the real task_complete.error shape without a Stop hook', async () => {
+    const path = join(root, 'rollout-error.jsonl')
+    const event = (payload: unknown) => JSON.stringify({ type: 'event_msg', payload }) + '\n'
+    await writeFile(path, event({ type: 'task_complete', turn_id: 'old', error: { message: 'old error' } }))
+    const registration = await hooks.registerCodexSession({ runId: 'codex-error', sessionId: 'session-1' })
+    const payload = { hook_event_name: 'UserPromptSubmit', session_id: 'codex-error-id',
+      turn_id: 'new', transcript_path: path, cwd: root }
+    await postHook(registration.hookUrl, payload)
+    // An ordinary failed tool and a user cancellation are not whole-turn errors.
+    await appendFile(path, event({ type: 'item_completed', turn_id: 'new',
+      item: { type: 'CommandExecution', exit_code: 2 } }) + event({ type: 'turn_aborted', turn_id: 'new' }))
+    await new Promise(resolve => setTimeout(resolve, 60))
+    expect(notificationEvents).toEqual([])
+    const failure = event({ type: 'task_complete', turn_id: 'new', last_agent_message: null,
+      error: { message: 'unexpected status 404 Not Found: model does not exist',
+        codex_error_info: { http_connection_failed: { http_status_code: 404 } } } })
+    // A partial final line must not become a premature notification.
+    await appendFile(path, failure.slice(0, -4))
+    await new Promise(resolve => setTimeout(resolve, 60))
+    expect(notificationEvents).toEqual([])
+    await appendFile(path, failure.slice(-4))
+    await waitFor(() => notificationEvents.length === 1, 1000)
+    expect(notificationEvents).toMatchObject([{ provider: 'codex', event: {
+      eventType: 'error', title: 'Codex', body: 'unexpected status 404 Not Found: model does not exist'
+    } }])
+    expect(workStatusEvents.at(-1)).toMatchObject({ provider: 'codex', workStatus: 'error' })
+    await appendFile(path, failure)
+    await postHook(registration.hookUrl, { ...payload, hook_event_name: 'Stop' })
+    expect(notificationEvents).toHaveLength(1)
+    expect(workStatusEvents.at(-1)).toMatchObject({ workStatus: 'error' })
+    await postHook(registration.hookUrl, { ...payload, turn_id: 'next' })
+    await appendFile(path, event({ type: 'task_complete', turn_id: 'next', error: null }))
+    await postHook(registration.hookUrl, { ...payload, hook_event_name: 'Stop', last_assistant_message: 'Recovered' })
+    expect(notificationEvents).toHaveLength(2)
+    expect(notificationEvents.at(-1)).toMatchObject({ event: { eventType: 'completed', title: 'Codex' } })
+  })
+
+  it('stops Codex error observations when the run is replaced or retired with effects suppressed', async () => {
+    const path = join(root, 'rollout-stale-error.jsonl')
+    await writeFile(path, '')
+    let run = 'codex-old'
+    const server = new ProviderHookServer(root, sessions, { currentRunId: () => run,
+      onNotification: event => notificationEvents.push(event) })
+    await server.start()
+    try {
+      const registration = await server.registerCodexSession({ runId: run, sessionId: 'session-1' })
+      const payload = { hook_event_name: 'UserPromptSubmit', session_id: 'codex-stale-id', turn_id: 't', transcript_path: path }
+      await postHook(registration.hookUrl, payload)
+      run = 'replacement'
+      await appendFile(path, JSON.stringify({ type: 'event_msg', payload: { type: 'task_complete',
+        turn_id: 't', error: { message: 'stale' } } }) + '\n')
+      await new Promise(resolve => setTimeout(resolve, 70))
+      expect(notificationEvents).toEqual([])
+      run = 'codex-old'
+      registration.retire(1000, { suppressSideEffects: true })
+      await appendFile(path, '\n')
+      await new Promise(resolve => setTimeout(resolve, 70))
+      expect(notificationEvents).toEqual([])
+    } finally { await server.stop() }
+  })
+
+  it('ignores all late Codex effects after a newer run owns the card', async () => {
+    let currentRun = 'codex-old-run'
+    const server = new ProviderHookServer(root, sessions, {
+      currentRunId: () => currentRun,
+      onNotification: (event) => { notificationEvents.push(event) },
+      onHudPayload: (event) => { hudEvents.push(event) },
+      onWorkStatus: (event) => { workStatusEvents.push(event) },
+      onIdentityRecorded: (event) => { identityEvents.push(event) },
+      onTitleObserved: (event) => { titleEvents.push(event) }
+    })
+    await server.start()
+    try {
+      const oldRun = await server.registerCodexSession({ runId: currentRun, sessionId: 'session-1' })
+      currentRun = 'codex-new-run'
+      const newRun = await server.registerCodexSession({ runId: currentRun, sessionId: 'session-1' })
+      await postHook(newRun.hookUrl, { hook_event_name: 'SessionStart', session_id: 'codex-current-id' })
+      const currentBinding = sessions.getResumeBinding('session-1', 'codex')
+      const counts = [identityEvents.length, hudEvents.length, workStatusEvents.length]
+      oldRun.retire(1_000)
+      for (const hook_event_name of ['SessionStart', 'PermissionRequest', 'Stop', 'SessionEnd']) {
+        expect((await postHook(oldRun.hookUrl, {
+          hook_event_name, session_id: 'codex-old-id', last_assistant_message: 'stale answer'
+        })).status).toBe(200)
+      }
+      expect(sessions.getResumeBinding('session-1', 'codex')).toEqual(currentBinding)
+      expect([identityEvents.length, hudEvents.length, workStatusEvents.length]).toEqual(counts)
+      expect(notificationEvents).toEqual([])
+      expect(titleEvents).toEqual([])
+    } finally {
+      await server.stop()
+    }
+  })
+
+  it('rejects a mismatched Codex restore identity before any visible effect', async () => {
+    const registration = await hooks.registerCodexSession({
+      runId: 'codex-restore-run', sessionId: 'session-1', expectedProviderSessionId: 'expected-codex-id'
+    })
+    for (const hook_event_name of ['SessionStart', 'PermissionRequest', 'Stop', 'SessionEnd']) {
+      expect((await postHook(registration.hookUrl, { hook_event_name, session_id: 'wrong-codex-id' })).status).toBe(200)
+    }
+    expect(sessions.getResumeBinding('session-1', 'codex')).toBeUndefined()
+    expect([identityEvents, hudEvents, notificationEvents, workStatusEvents, titleEvents]).toEqual([[], [], [], [], []])
+  })
+
+  it('preserves Codex retirement grace without reactivating identity, and suppresses effects when requested', async () => {
+    const registration = await hooks.registerCodexSession({ runId: 'codex-ending', sessionId: 'session-1' })
+    registration.retire(1_000)
+    await postHook(registration.hookUrl, { hook_event_name: 'Stop', session_id: 'codex-ending-id', last_assistant_message: 'Done' })
+    expect(notificationEvents).toHaveLength(1)
+    expect(sessions.getResumeBinding('session-1', 'codex')).toBeUndefined()
+    const muted = await hooks.registerCodexSession({ runId: 'codex-muted', sessionId: 'session-1' })
+    muted.retire(1_000, { suppressSideEffects: true })
+    await postHook(muted.hookUrl, { hook_event_name: 'Stop', session_id: 'codex-muted-id' })
+    expect(notificationEvents).toHaveLength(1)
+    expect(hudEvents).toHaveLength(1)
+    expect(workStatusEvents).toHaveLength(1)
+    expect(identityEvents).toEqual([])
+    await registration.dispose()
+    expect((await postHook(registration.hookUrl, { hook_event_name: 'Stop' })).status).toBe(404)
+  })
+
+  it('ignores the observed transcript-less Codex memories run before and after the main identity', async () => {
+    const registration = await hooks.registerCodexSession({ runId: 'codex-main', sessionId: 'session-1' })
+    const noise = {
+      session_id: '01a1ddc1-e832-7cf2-83b7-5adb2f12224b',
+      hook_event_name: 'SessionStart', transcript_path: null,
+      cwd: '/private/tmp/matou-stage2-probe/codex-home/memories',
+      source: 'startup', model: 'gpt-5.6-terra', permission_mode: 'bypassPermissions'
+    }
+    await postHook(registration.hookUrl, noise)
+    expect(sessions.getResumeBinding('session-1', 'codex')).toBeUndefined()
+    expect([identityEvents, hudEvents, workStatusEvents, notificationEvents]).toEqual([[], [], [], []])
+
+    await postHook(registration.hookUrl, {
+      hook_event_name: 'SessionStart', session_id: 'codex-main-id', transcript_path: '/tmp/main-rollout.jsonl'
+    })
+    const binding = sessions.getResumeBinding('session-1', 'codex')
+    for (const hook_event_name of ['SessionStart', 'PreToolUse', 'PermissionRequest', 'Stop', 'SessionEnd']) {
+      await postHook(registration.hookUrl, { ...noise, hook_event_name })
+    }
+    expect(sessions.getResumeBinding('session-1', 'codex')).toEqual(binding)
+    expect([identityEvents.length, hudEvents.length, workStatusEvents.length]).toEqual([1, 1, 1])
+    expect(notificationEvents).toEqual([])
+  })
+
+  it('pins the confirmed Codex identity even if another conversation has a transcript', async () => {
+    const registration = await hooks.registerCodexSession({ runId: 'codex-main', sessionId: 'session-1' })
+    await postHook(registration.hookUrl, { hook_event_name: 'SessionStart', session_id: 'codex-main-id' })
+    const binding = sessions.getResumeBinding('session-1', 'codex')
+    for (const hook_event_name of ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PermissionRequest', 'Stop', 'SessionEnd']) {
+      await postHook(registration.hookUrl, {
+        hook_event_name, session_id: 'codex-other-id', transcript_path: '/tmp/other-rollout.jsonl'
+      })
+    }
+    expect(sessions.getResumeBinding('session-1', 'codex')).toEqual(binding)
+    expect([identityEvents.length, hudEvents.length, workStatusEvents.length]).toEqual([1, 1, 1])
+    expect(notificationEvents).toEqual([])
+    await postHook(registration.hookUrl, { hook_event_name: 'UserPromptSubmit', session_id: 'codex-main-id' })
+    expect(workStatusEvents.at(-1)).toMatchObject({ provider: 'codex', workStatus: 'running' })
+  })
+
+  it('does not discard Codex events with a valid alternate transcript path', async () => {
+    const registration = await hooks.registerCodexSession({ runId: 'codex-main', sessionId: 'session-1' })
+    await postHook(registration.hookUrl, {
+      hook_event_name: 'SessionStart', session_id: 'codex-main-id',
+      transcript_path: null, transcriptPath: '/tmp/main-rollout.jsonl'
+    })
+    expect(sessions.getResumeBinding('session-1', 'codex')?.providerSessionId).toBe('codex-main-id')
+    expect(workStatusEvents).toHaveLength(1)
+  })
+
+  it('retains the Codex lease fence before allowing HUD, status or notification effects', async () => {
+    sessions.createSession(command('codex-parent'), {
+      id: 'codex-parent', taskId: 'task-1', executionContextId: 'context-1',
+      kind: 'codex', title: 'Codex', now: 2
+    })
+    const intents = new SessionForkIntentRepository(database)
+    const now = Date.now() - 5_000
+    intents.accept({
+      operationId: 'codex-stale-op', submissionKey: 'codex-stale-key',
+      sessionId: 'session-1', sourceSessionId: 'codex-parent',
+      sourceProviderSessionId: 'codex-parent', permissionMode: 'default',
+      displayName: 'Codex', worktreeMode: 'current', totalSteps: 2, now
+    })
+    const lease = intents.acquireLease({ operationId: 'codex-stale-op', owner: 'old-run', ttlMs: 1, now })
+    if (lease.kind !== 'acquired') throw new Error('Expected test lease')
+    intents.advanceStage({ operationId: 'codex-stale-op', lease: lease.lease, stage: 'restoring-provider', now })
+    const registration = await hooks.registerCodexSession({
+      runId: 'codex-stale-run', sessionId: 'session-1',
+      forkAuthority: { operationId: 'codex-stale-op', runId: 'codex-stale-run', lease: lease.lease }
+    })
+    for (const hook_event_name of ['SessionStart', 'PermissionRequest', 'Stop']) {
+      expect((await postHook(registration.hookUrl, { hook_event_name, session_id: 'codex-stale-child' })).status).toBe(200)
+    }
+    expect(sessions.getResumeBinding('session-1', 'codex')).toBeUndefined()
+    expect([identityEvents, hudEvents, workStatusEvents, notificationEvents]).toEqual([[], [], [], []])
   })
 
   it('writes a private additive Claude settings file with reference product-equivalent hook coverage', async () => {
@@ -231,6 +524,79 @@ describe('ProviderHookServer', () => {
     })}`)
     await new Promise((resolve) => setTimeout(resolve, 80))
     expect(titleEvents).toHaveLength(1)
+  })
+
+  it('watches active turns on UserPromptSubmit, falls back to clean user prompt after Stop timeout, and upgrades if ai-title arrives later', async () => {
+    await hooks.stop()
+    const titleEvents: Array<{ sessionId: string; providerSessionId: string; title: string }> = []
+    hooks = new ProviderHookServer(root, sessions, {
+      titleWatchWindowMs: 40,
+      onTitleObserved: (event) => {
+        titleEvents.push({
+          sessionId: event.sessionId,
+          providerSessionId: event.providerSessionId,
+          title: event.title
+        })
+      }
+    })
+    await hooks.start()
+    const registration = await hooks.registerClaudeSession({
+      runId: 'run-fallback-title', sessionId: 'session-1'
+    })
+    const transcriptPath = join(root, 'provider-fallback-title.jsonl')
+    await writeFile(transcriptPath, [
+      JSON.stringify({
+        type: 'user',
+        sessionId: 'provider-fallback-title',
+        message: { role: 'user', content: '<local-command-caveat>ignore</local-command-caveat>' }
+      }),
+      JSON.stringify({
+        type: 'user',
+        sessionId: 'provider-fallback-title',
+        message: { role: 'user', content: '<command-name>/model</command-name><command-args></command-args>' }
+      }),
+      JSON.stringify({
+        type: 'user',
+        sessionId: 'provider-fallback-title',
+        message: { role: 'user', content: '排查为什么会话标题一直是 Claude' }
+      })
+    ].join('\n'))
+
+    const promptHook = await postHook(registration.hookUrl, {
+      hook_token: registration.hookToken,
+      hook_event_name: 'UserPromptSubmit',
+      session_id: 'provider-fallback-title',
+      transcript_path: transcriptPath
+    })
+    expect(promptHook.status).toBe(200)
+    expect(titleEvents).toHaveLength(0)
+
+    const stopHook = await postHook(registration.hookUrl, {
+      hook_token: registration.hookToken,
+      hook_event_name: 'Stop',
+      session_id: 'provider-fallback-title',
+      transcript_path: transcriptPath
+    })
+    expect(stopHook.status).toBe(200)
+    await waitFor(() => titleEvents.length === 1, 300)
+    expect(titleEvents[0]).toEqual({
+      sessionId: 'session-1',
+      providerSessionId: 'provider-fallback-title',
+      title: '排查为什么会话标题一直是 Claude'
+    })
+
+    await appendFile(transcriptPath, `\n${JSON.stringify({
+      type: 'ai-title', sessionId: 'provider-fallback-title', aiTitle: '修复默认会话标题回退'
+    })}`)
+    const nextHook = await postHook(registration.hookUrl, {
+      hook_token: registration.hookToken,
+      hook_event_name: 'UserPromptSubmit',
+      session_id: 'provider-fallback-title',
+      transcript_path: transcriptPath
+    })
+    expect(nextHook.status).toBe(200)
+    await waitFor(() => titleEvents.length === 2, 200)
+    expect(titleEvents[1]?.title).toBe('修复默认会话标题回退')
   })
 
   it('projects real Agent Teams transcript activity into teammate observations', async () => {
@@ -355,6 +721,47 @@ describe('ProviderHookServer', () => {
     })
     await postHook(resumed.hookUrl, { ...payload, session_id: 'provider-replacement' })
     expect(identityEvents).toHaveLength(6)
+  })
+
+  it('suppresses redundant identity commits during routine tool hooks while already running', async () => {
+    const registration = await hooks.registerClaudeSession({
+      runId: 'run-tools', sessionId: 'session-1'
+    })
+    const payload = { session_id: 'provider-tools', cwd: root, model: { id: 'claude-opus-4-6' } }
+
+    await postHook(registration.hookUrl, { ...payload, hook_event_name: 'UserPromptSubmit' })
+    database.run(
+      `UPDATE sessions SET kind = 'claude-code', work_status = 'running' WHERE id = 'session-1'`
+    )
+    const eventCount = () => database.get<{ count: number }>('SELECT COUNT(*) AS count FROM domain_events')!.count
+    const commandCount = () => database.get<{ count: number }>('SELECT COUNT(*) AS count FROM command_deduplication')!.count
+    const before = [eventCount(), commandCount()]
+    const beforeIdentityCount = identityEvents.length
+
+    for (let step = 0; step < 10; step++) {
+      expect((await postHook(registration.hookUrl, {
+        ...payload, hook_event_name: 'PreToolUse', tool_name: 'Bash'
+      })).status).toBe(200)
+      expect((await postHook(registration.hookUrl, {
+        ...payload, hook_event_name: 'PostToolUse', tool_name: 'Bash'
+      })).status).toBe(200)
+      expect((await postHook(registration.hookUrl, {
+        ...payload, hook_event_name: 'PostToolUseFailure', tool_name: 'Bash'
+      })).status).toBe(200)
+    }
+
+    expect([eventCount(), commandCount()]).toEqual(before)
+    expect(identityEvents).toHaveLength(beforeIdentityCount)
+
+    // Resuming from needs-input via PreToolUse and completing via Stop still persist durably.
+    database.run(`UPDATE sessions SET work_status = 'needs-input' WHERE id = 'session-1'`)
+    await postHook(registration.hookUrl, {
+      ...payload, hook_event_name: 'PreToolUse', tool_name: 'Write'
+    })
+    expect(identityEvents).toHaveLength(beforeIdentityCount + 1)
+
+    await postHook(registration.hookUrl, { ...payload, hook_event_name: 'Stop' })
+    expect(identityEvents).toHaveLength(beforeIdentityCount + 2)
   })
 
   it('rejects a different statusline identity while restoring one specific conversation', async () => {
@@ -1241,3 +1648,87 @@ async function waitFor(predicate: () => boolean, timeoutMs: number): Promise<voi
   }
   expect(predicate()).toBe(true)
 }
+
+it('observes late Codex index titles, keeps manual names locked, restores latest auto title, and fences retired runs', async () => {
+  const codexRoot = join(root, 'codex-title')
+  await mkdir(codexRoot)
+  const index = join(codexRoot, 'session_index.jsonl')
+  const id = '01a1ddd6-4064-70e1-a006-79d310600776'
+  let run = 'codex-title-run'
+  const observed: string[] = []
+  sessions.createSession(command('codex-title-session'), {
+    id: 'codex-title-session', taskId: 'task-1', executionContextId: 'context-1', kind: 'codex', title: 'Codex', now: 1
+  })
+  const server = new ProviderHookServer(root, sessions, {
+    codexRoot, currentRunId: () => run,
+    onTitleObserved: ({ sessionId, title }) => {
+      observed.push(title)
+      sessions.observeProviderTitle(command(`codex-title-${observed.length}`), { sessionId, title, now: observed.length + 10 })
+    }
+  })
+  await server.start()
+  try {
+    const registration = await server.registerCodexSession({ runId: run, sessionId: 'codex-title-session' })
+    const hook = (hook_event_name: string) => postHook(registration.hookUrl, { hook_event_name, session_id: id })
+    await hook('SessionStart')
+    expect(sessions.getSession('codex-title-session')?.title).toBe('Codex')
+    await writeFile(index, JSON.stringify({ id, thread_name: 'First automatic title', updated_at: '2026-11-15T06:13:00Z' }) + '\n')
+    await waitFor(() => observed.length === 1, 2000)
+    expect(sessions.getSession('codex-title-session')).toMatchObject({ title: 'First automatic title', titleSource: 'auto' })
+    sessions.renameSession(command('manual-codex-title'), { sessionId: 'codex-title-session', title: 'My title', now: 20 })
+    await appendFile(index, JSON.stringify({ id, thread_name: 'New automatic title', updated_at: '2026-11-15T06:14:00Z' }) + '\n')
+    await waitFor(() => observed.length === 2, 2000)
+    expect(sessions.getSession('codex-title-session')).toMatchObject({ title: 'My title', titleSource: 'manual', providerTitle: 'New automatic title' })
+    expect(sessions.restoreProviderTitle(command('restore-codex-title'), { sessionId: 'codex-title-session', now: 21 }).result)
+      .toMatchObject({ title: 'New automatic title', titleSource: 'auto' })
+    run = 'replacement-run'
+    await appendFile(index, JSON.stringify({ id, thread_name: 'Retired title', updated_at: '2026-11-15T06:15:00Z' }) + '\n')
+    await hook('Stop')
+    await new Promise(resolve => setTimeout(resolve, 70))
+    expect(observed).toEqual(['First automatic title', 'New automatic title'])
+  } finally { await server.stop() }
+})
+
+it('rejects a Codex Fork returning the parent UUID before binding, and revokes all subsequent side effects', async () => {
+  const parentId = '01a1ddd6-4064-70e1-a006-000000000001'
+  const childId = '01a1ddd6-4064-70e1-a006-000000000002'
+  const mismatches: unknown[] = []
+  const effects: unknown[] = []
+  const server = new ProviderHookServer(root, sessions, {
+    codexRoot: join(root, 'missing-codex'),
+    onIdentityMismatch: event => { mismatches.push(event) },
+    onHudPayload: event => { effects.push(event) }
+  })
+  await server.start()
+  try {
+    const registration = await server.registerCodexSession({
+      sessionId: 'session-1', runId: 'codex-parent-returned', forkSourceProviderSessionId: parentId
+    })
+    await postHook(registration.hookUrl, { hook_event_name: 'SessionStart', session_id: parentId })
+    expect(mismatches).toEqual([expect.objectContaining({ provider: 'codex', expectedProviderSessionId: parentId, actualProviderSessionId: parentId })])
+    expect(sessions.getResumeBinding('session-1', 'codex')).toBeUndefined()
+    await postHook(registration.hookUrl, { hook_event_name: 'SessionStart', session_id: childId })
+    expect(sessions.getResumeBinding('session-1', 'codex')).toBeUndefined()
+    expect(effects).toEqual([])
+  } finally { await server.stop() }
+})
+
+it('accepts only a new valid Codex Fork UUID and leaves the parent binding/title unchanged', async () => {
+  const parentId = '01a1ddd6-4064-70e1-a006-000000000001'
+  const childId = '01a1ddd6-4064-70e1-a006-000000000002'
+  sessions.createSession(command('codex-fork-parent-stage4'), {
+    id: 'codex-fork-parent-stage4', kind: 'codex', taskId: 'task-1', executionContextId: 'context-1', title: 'Parent title', now: 1
+  })
+  sessions.recordResumableProviderIdentity(command('codex-parent-stage4-binding'), {
+    id: 'codex-parent-stage4-binding', sessionId: 'codex-fork-parent-stage4', provider: 'codex',
+    providerSessionId: parentId, metadata: { canFork: true }, now: 2
+  })
+  const parent = sessions.getResumeBinding('codex-fork-parent-stage4', 'codex')
+  const registration = await hooks.registerCodexSession({
+    sessionId: 'session-1', runId: 'codex-new-child', forkSourceProviderSessionId: parentId, inheritedConversation: true
+  })
+  await postHook(registration.hookUrl, { hook_event_name: 'SessionStart', session_id: childId })
+  expect(sessions.getResumeBinding('session-1', 'codex')).toMatchObject({ providerSessionId: childId, metadata: { canFork: true } })
+  expect(sessions.getResumeBinding('codex-fork-parent-stage4', 'codex')).toEqual(parent)
+  expect(sessions.getSession('codex-fork-parent-stage4')?.title).toBe('Parent title')
+})

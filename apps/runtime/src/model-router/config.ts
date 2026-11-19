@@ -43,7 +43,14 @@ export async function prepareRouterDirectory(dataRoot: string): Promise<{ direct
   return { directory, keys }
 }
 
-export function routerConfig(directory: string, port: number, keys: RouterKeys, proxyUrl?: string, aliases: RouterModelAliases = {}) {
+export function routerConfig(
+  directory: string,
+  port: number,
+  keys: RouterKeys,
+  proxyUrl?: string,
+  aliases: RouterModelAliases = {},
+  codexUserAgent = CODEX_CLIENT_USER_AGENT
+) {
   return {
     'config-version': 8,
     server: { host: '127.0.0.1', port, 'shutdown-timeout': 1, discovery: { enabled: false } },
@@ -53,10 +60,13 @@ export function routerConfig(directory: string, port: number, keys: RouterKeys, 
     oauth: {
       'auth-dir': join(directory, 'credentials'),
       providers: {
-        antigravity: { 'antigravity-credits': false },
+        // One Antigravity account has nothing to fail over to, and upstream
+        // answers some prompt content with a deterministic 429. Cooling would
+        // block every session on that model; let Claude Code back off instead.
+        antigravity: { 'antigravity-credits': false, 'disable-cooling': true },
         // The client is Claude Code, so without this Codex would see Claude
         // Code's user agent for a ChatGPT subscription token.
-        codex: { 'header-defaults': { 'user-agent': CODEX_CLIENT_USER_AGENT } }
+        codex: { 'header-defaults': { 'user-agent': codexUserAgent } }
       },
       ...(Object.keys(aliases).length ? { 'model-alias': aliases } : {})
     },
@@ -82,10 +92,17 @@ export function routerConfig(directory: string, port: number, keys: RouterKeys, 
   }
 }
 
-export async function writeRouterConfig(directory: string, port: number, keys: RouterKeys, proxyUrl?: string, aliases: RouterModelAliases = {}): Promise<void> {
+export async function writeRouterConfig(
+  directory: string,
+  port: number,
+  keys: RouterKeys,
+  proxyUrl?: string,
+  aliases: RouterModelAliases = {},
+  codexUserAgent = CODEX_CLIENT_USER_AGENT
+): Promise<void> {
   const path = join(directory, 'config.json')
   const temporary = `${path}.tmp`
-  await writeFile(temporary, JSON.stringify(routerConfig(directory, port, keys, proxyUrl, aliases), null, 2), { mode: 0o600 })
+  await writeFile(temporary, JSON.stringify(routerConfig(directory, port, keys, proxyUrl, aliases, codexUserAgent), null, 2), { mode: 0o600 })
   await chmod(temporary, 0o600)
   await rename(temporary, path)
 }

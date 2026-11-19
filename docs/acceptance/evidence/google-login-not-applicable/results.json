@@ -1,0 +1,26 @@
+{
+  "fixture": true,
+  "groups": {
+    "Claude（Anthropic）": "Claude（Anthropic）\n✓\n出口不在中国大陆\n美国 · 169.128.10.1\n✓\n出口符合出口规则\n✓\n登录与 API 同一出口",
+    "Codex（OpenAI）": "Codex（OpenAI）\n✓\n出口不在中国大陆\n美国 · 169.128.10.1\n✓\n出口符合出口规则\n✓\n登录与 API 同一出口",
+    "Google（通用出口检测）": "Google（通用出口检测）\n✓\n出口不在中国大陆\n美国 · 169.128.10.1\n✓\n出口符合出口规则"
+  },
+  "googleRows": [
+    "出口不在中国大陆",
+    "出口符合出口规则"
+  ],
+  "googleText": "Google（通用出口检测）\n✓\n出口不在中国大陆\n美国 · 169.128.10.1\n✓\n出口符合出口规则",
+  "footer": "检测为每分钟抽查，无法保证每条连接都使用同一出口。Google 线路使用通用出口检测，不能保证 Google 实际看到的出口。\n复制报告",
+  "recheckWallMs": 35,
+  "recheckDisabledMs": 5.799999952316284,
+  "trace": [
+    {
+      "time": 4580.099999904633,
+      "disabled": true
+    },
+    {
+      "time": 4585.899999856949,
+      "disabled": false
+    }
+  ]
+}

@@ -1,0 +1,42 @@
+[
+  {
+    "sessionId": "6614192c-ba83-4b76-923a-4176f7a940b0",
+    "providerSessionId": "01a1df12-a5e3-7421-85ca-cc452093e415",
+    "turnId": "01a1df12-a8f3-7c60-ad05-adb4e5e840ff",
+    "prompt": "Remember the codeword opal-harbor-628. Reply only ACK_1.",
+    "finalAnswer": "ACK_1",
+    "completedAnswer": "ACK_1"
+  },
+  {
+    "sessionId": "6614192c-ba83-4b76-923a-4176f7a940b0",
+    "providerSessionId": "01a1df12-a5e3-7421-85ca-cc452093e415",
+    "turnId": "01a1df12-c59d-7562-8285-48adfe5147b0",
+    "prompt": "Reply only ACK_2.",
+    "finalAnswer": "ACK_2",
+    "completedAnswer": "ACK_2"
+  },
+  {
+    "sessionId": "6614192c-ba83-4b76-923a-4176f7a940b0",
+    "providerSessionId": "01a1df12-a5e3-7421-85ca-cc452093e415",
+    "turnId": "01a1df12-d947-7330-a5d7-235005b3f48c",
+    "prompt": "Reply only ACK_3.",
+    "finalAnswer": "ACK_3",
+    "completedAnswer": "ACK_3"
+  },
+  {
+    "sessionId": "6614192c-ba83-4b76-923a-4176f7a940b0",
+    "providerSessionId": "01a1df12-a5e3-7421-85ca-cc452093e415",
+    "turnId": "01a1df12-eb58-7f52-abe5-2ecee5bdba6f",
+    "prompt": "Read README.md using a shell tool, then reply only TOOL_OK.",
+    "finalAnswer": "TOOL_OK",
+    "completedAnswer": "TOOL_OK"
+  },
+  {
+    "sessionId": "6614192c-ba83-4b76-923a-4176f7a940b0",
+    "providerSessionId": "01a1df12-a5e3-7421-85ca-cc452093e415",
+    "turnId": "01a1df13-07f5-7011-b126-7a441f11cf36",
+    "prompt": "Reply only TITLE_LOCK_OK.",
+    "finalAnswer": "TITLE_LOCK_OK",
+    "completedAnswer": "TITLE_LOCK_OK"
+  }
+]

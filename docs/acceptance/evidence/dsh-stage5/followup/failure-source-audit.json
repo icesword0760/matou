@@ -1,0 +1,96 @@
+{
+  "scope": "Read-only inspection of the previous closeout failures before repairs; does not substitute for the baseline or final rerun.",
+  "codex": {
+    "fork": {
+      "nativeRollouts": 1,
+      "nativeChildRollouts": 0,
+      "childIntent": "failed",
+      "completedSteps": 0,
+      "nativeProcessExitCode": 1,
+      "nativeError": "account/read failed during TUI bootstrap: account/read failed: workspace routing discovery timed out (code -32603)",
+      "childBinding": {
+        "resumeState": "unknown",
+        "validated": false,
+        "inheritedConversation": true,
+        "sameAsSource": true
+      },
+      "conclusion": "The test treated inherited launch settings as a confirmed child identity after a real native startup failure. There is no successful child bound to the parent in this evidence. Check succeeded intent and validated distinct identity before asserting native metadata."
+    },
+    "core": {
+      "nativeError": "account/read failed during TUI bootstrap: account/read failed: workspace routing discovery timed out (code -32603)",
+      "bindings": 0
+    },
+    "restartBeforeRestart": {
+      "lastNativeScreen": "Starting MCP servers (1/2): codex_apps; prompt already submitted",
+      "conclusion": "Identity wait expired before the restart step. This does not demonstrate a restart failure."
+    },
+    "baselineNewWorktreeFork": {
+      "intent": "failed",
+      "nativeChildRolloutCreated": false,
+      "nativeProcessExitCode": 1,
+      "nativeError": "account/read failed during TUI bootstrap: account/read failed: workspace routing discovery timed out (code -32603)",
+      "conclusion": "Exact same native bootstrap error exists in the independent a06812f baseline; no DSH code is present in that build."
+    }
+  },
+  "antigravity": {
+    "core": {
+      "nativeTranscriptTypes": [
+        "USER_INPUT",
+        "SYSTEM_MESSAGE"
+      ],
+      "nativeTranscriptCount": 2,
+      "nativeTitle": "",
+      "nativeLastScreen": "Working",
+      "conclusion": "The native provider had not produced an assistant response or normal stop; Matou remained running."
+    },
+    "title": {
+      "nativeTranscriptCount": 7,
+      "nativePlannerResponses": 3,
+      "nativeTitle": "",
+      "conclusion": "Matou did not have a nonempty native title to apply. The title reader path is unchanged from the baseline."
+    },
+    "forkLoaderStartup": {
+      "nativeLastScreen": "Do you trust the contents of this project?",
+      "bindings": 0,
+      "conclusion": "The helper matches the early Welcome Antigravity text and checks trust once; a later trust screen is missed. Missing model HUD precedes any fork attempt."
+    }
+  },
+  "dsh": {
+    "approval": {
+      "firstAttemptAsked": 1,
+      "firstAttemptCompletedWithoutApprovalRound": 2,
+      "retryAttemptAsked": 2,
+      "retryCompletedWithoutApprovalRound": 3,
+      "conclusion": "Native model declines repeated requests for the same already-denied command; normal completed turn maps correctly to idle. Use distinct authorized actions and cover allow-once before a final denial."
+    },
+    "modelError": {
+      "nativeLogCreated": false,
+      "nativeLastScreen": "Context Loading with an intentionally unknown model",
+      "conclusion": "Invalid model fixture blocks native initialization instead of causing a real request error. Replace with a known model and per-run loopback HTTP error response."
+    },
+    "recovery": {
+      "providerBinding": "failed",
+      "sessionWorkStatus": "error",
+      "queueState": "failed",
+      "conclusion": "The provider-recovery waiter rejects into generic terminal-recovery failure, which disables the provider-specific retry action. Parked DSH failures must release terminal mounting while retaining failed provider binding and identity gate."
+    }
+  },
+  "sourceReview": {
+    "baseline": "a06812f",
+    "current": "816ed3d",
+    "reviewed": [
+      "provider-hook-server",
+      "session-hud-registry",
+      "runtime-server",
+      "pty-session",
+      "TerminalHud",
+      "SessionLoaderDialog",
+      "agent-manifest",
+      "index identity callback",
+      "session-repository",
+      "HierarchyShell",
+      "runtime-rpc-router"
+    ],
+    "conclusion": "No inspected DSH branch changes Codex native bootstrap, Antigravity native responses, or the Antigravity title reader. Baseline and final rerun are still required to separate reproducibility from this source-level finding."
+  }
+}

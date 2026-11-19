@@ -1,0 +1,58 @@
+[
+  {
+    "sessionId": "af69bb4e-1e27-495d-9a80-28c2a8eb927d",
+    "providerSessionId": "01a1df27-93d9-7f73-96e1-d8be48d5de17",
+    "turnId": "01a1df27-9514-7590-8da7-aa07c97803b4",
+    "prompt": "Remember the codeword opal-harbor-628. Reply only ACK_1.",
+    "finalAnswer": "ACK_1",
+    "completedAnswer": "ACK_1"
+  },
+  {
+    "sessionId": "af69bb4e-1e27-495d-9a80-28c2a8eb927d",
+    "providerSessionId": "01a1df27-93d9-7f73-96e1-d8be48d5de17",
+    "turnId": "01a1df27-b305-74e2-ac4a-ce85209b466e",
+    "prompt": "Reply only ACK_2.",
+    "finalAnswer": "ACK_2",
+    "completedAnswer": "ACK_2"
+  },
+  {
+    "sessionId": "af69bb4e-1e27-495d-9a80-28c2a8eb927d",
+    "providerSessionId": "01a1df27-93d9-7f73-96e1-d8be48d5de17",
+    "turnId": "01a1df27-be8b-7f00-8b13-98d59378569e",
+    "prompt": "Reply only ACK_3.",
+    "finalAnswer": "ACK_3",
+    "completedAnswer": "ACK_3"
+  },
+  {
+    "sessionId": "af69bb4e-1e27-495d-9a80-28c2a8eb927d",
+    "providerSessionId": "01a1df27-93d9-7f73-96e1-d8be48d5de17",
+    "turnId": "01a1df27-cc3d-7fe0-a3b2-4c291cd22e7c",
+    "prompt": "Read README.md using a shell tool, then reply only TOOL_OK.",
+    "finalAnswer": "TOOL_OK",
+    "completedAnswer": "TOOL_OK"
+  },
+  {
+    "sessionId": "af69bb4e-1e27-495d-9a80-28c2a8eb927d",
+    "providerSessionId": "01a1df27-93d9-7f73-96e1-d8be48d5de17",
+    "turnId": "01a1df27-f0ea-7990-8f82-e29860ed3490",
+    "prompt": "Reply only TITLE_LOCK_OK.",
+    "finalAnswer": "TITLE_LOCK_OK",
+    "completedAnswer": "TITLE_LOCK_OK"
+  },
+  {
+    "sessionId": "af69bb4e-1e27-495d-9a80-28c2a8eb927d",
+    "providerSessionId": "01a1df27-93d9-7f73-96e1-d8be48d5de17",
+    "turnId": "01a1df28-4035-78b1-bc98-0a3937fa8ab6",
+    "prompt": "Which codeword did I ask you to remember? Reply only that codeword.",
+    "finalAnswer": "opal-harbor-628",
+    "completedAnswer": "opal-harbor-628"
+  },
+  {
+    "sessionId": "af69bb4e-1e27-495d-9a80-28c2a8eb927d",
+    "providerSessionId": "01a1df27-93d9-7f73-96e1-d8be48d5de17",
+    "turnId": "01a1df28-6494-7820-b9cc-d6a2e1e29eba",
+    "prompt": "Which codeword did I ask you to remember? Reply only that codeword.",
+    "finalAnswer": "opal-harbor-628",
+    "completedAnswer": "opal-harbor-628"
+  }
+]

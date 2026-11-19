@@ -1,0 +1,42 @@
+(node:79311) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+Running 1 test using 1 worker
+
+(node:79343) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+
+(node:79343) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+
+[1/1] tests/e2e/codex-acceptance.spec.ts:653:3 › Codex packaged acceptance — real CLI and explicit controlled fixtures › known issues: a real Codex model error notifies once and marks the card error; startup upgrade is disabled
+  1) tests/e2e/codex-acceptance.spec.ts:653:3 › Codex packaged acceptance — real CLI and explicit controlled fixtures › known issues: a real Codex model error notifies once and marks the card error; startup upgrade is disabled
+
+    Error: expect(locator).toContainText(expected) failed
+
+    Locator: locator('.scene-stage:not([hidden]) .session-card.is-focused [data-testid="terminal-pane"]:visible .terminal-surface').first().locator('.xterm-rows')
+    Expected substring: "unexpected status 404"
+    Received string:    "icesword@icesworddeMacBook-Pro repo %  "
+    Timeout: 15000ms
+
+    Call log:
+      - Expect "toContainText" with timeout 15000ms
+      - waiting for locator('.scene-stage:not([hidden]) .session-card.is-focused [data-testid="terminal-pane"]:visible .terminal-surface').first().locator('.xterm-rows')
+        34 × locator resolved to <div class="xterm-rows" aria-hidden="true">…</div>
+           - unexpected value "icesword@icesworddeMacBook-Pro repo %  "
+
+
+      712 |       await expect(center.locator('.notification-item__title')).toHaveText('Codex')
+      713 |       await expect(center).toContainText('matou-probe-missing does not exist')
+    > 714 |       await expect(surface.locator('.xterm-rows')).toContainText('unexpected status 404')
+          |                                                    ^
+      715 |       await expect(surface.locator('.xterm-rows')).not.toContainText('Update available')
+      716 |       await saveScreenshot(h.page, 'error-notification.png')
+      717 |       await saveScreenshot(dagPage, 'error-dag.png')
+        at /Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tests/e2e/codex-acceptance.spec.ts:714:52
+
+    Error Context: .cache/c10/playwright-final-results/codex-acceptance-Codex-pac-add21-startup-upgrade-is-disabled/error-context.md
+
+
+  1 failed
+    tests/e2e/codex-acceptance.spec.ts:653:3 › Codex packaged acceptance — real CLI and explicit controlled fixtures › known issues: a real Codex model error notifies once and marks the card error; startup upgrade is disabled

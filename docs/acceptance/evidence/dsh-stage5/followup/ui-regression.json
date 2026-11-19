@@ -1,0 +1,324 @@
+{
+  "recordedAt": "2026-11-15T18:39:51.917450+00:00",
+  "scope": "Formal final packaged acceptance; each complete suite started once, one worker, Playwright retries=1. Targeted checks and baseline are separate.",
+  "suites": {
+    "dsh": {
+      "status": "complete",
+      "passedFirstAttempt": 7,
+      "passedAfterRetry": 0,
+      "failed": 0,
+      "skipped": 0,
+      "durationMs": 192377.652,
+      "rawReport": ".cache/dsh-next/final/dsh/report.json",
+      "tests": [
+        {
+          "title": "PRD 1–6, 8, 11: lifecycle, labels, HUD, title, notifications, static restart and latency",
+          "declaredLine": 249,
+          "result": "expected",
+          "attempts": [
+            {
+              "retry": 0,
+              "status": "passed",
+              "durationMs": 53146
+            }
+          ]
+        },
+        {
+          "title": "PRD 7, 9: native /fork produces an independent child that Matou previews, searches and loads",
+          "declaredLine": 313,
+          "result": "expected",
+          "attempts": [
+            {
+              "retry": 0,
+              "status": "passed",
+              "durationMs": 27481
+            }
+          ]
+        },
+        {
+          "title": "PRD 1, 10: mt creates a DSH card and real DSH reads its sibling under the default sandbox",
+          "declaredLine": 352,
+          "result": "expected",
+          "attempts": [
+            {
+              "retry": 0,
+              "status": "passed",
+              "durationMs": 22783
+            }
+          ]
+        },
+        {
+          "title": "PRD 2, 3: real approval request, notification and return to idle",
+          "declaredLine": 373,
+          "result": "expected",
+          "attempts": [
+            {
+              "retry": 0,
+              "status": "passed",
+              "durationMs": 33925
+            }
+          ]
+        },
+        {
+          "title": "PRD 2, 3: real native model error marks UI error and notifies once per turn",
+          "declaredLine": 406,
+          "result": "expected",
+          "attempts": [
+            {
+              "retry": 0,
+              "status": "passed",
+              "durationMs": 10823
+            }
+          ]
+        },
+        {
+          "title": "PRD 8: controlled resume failure retries the same ID and new-start creates a fresh ID",
+          "declaredLine": 450,
+          "result": "expected",
+          "attempts": [
+            {
+              "retry": 0,
+              "status": "passed",
+              "durationMs": 39475
+            }
+          ]
+        },
+        {
+          "title": "missing CLI: nonexistent command shows actionable installation feedback",
+          "declaredLine": 479,
+          "result": "expected",
+          "attempts": [
+            {
+              "retry": 0,
+              "status": "passed",
+              "durationMs": 4275
+            }
+          ]
+        }
+      ]
+    },
+    "antigravity": {
+      "status": "complete",
+      "passedFirstAttempt": 4,
+      "passedAfterRetry": 0,
+      "failed": 1,
+      "skipped": 0,
+      "durationMs": 258266.897,
+      "rawReport": ".cache/dsh-next/final/agy/report.json",
+      "tests": [
+        {
+          "title": "PRD #1 #3 #4 #5 #6 #11 #12: Real agy lifecycle, HUD, notifications, modes, and /model in packaged 码头.app",
+          "declaredLine": 441,
+          "result": "expected",
+          "attempts": [
+            {
+              "retry": 0,
+              "status": "passed",
+              "durationMs": 44203
+            }
+          ]
+        },
+        {
+          "title": "PRD #7 #9a + Latency (3x): Auto Title lock/restore, Restart recovery, and Running/Idle latency",
+          "declaredLine": 690,
+          "result": "expected",
+          "attempts": [
+            {
+              "retry": 0,
+              "status": "passed",
+              "durationMs": 42317
+            }
+          ]
+        },
+        {
+          "title": "PRD #2 #8 #10 + Running-Parent Fork: DAG/Badge/ParentProjection, Fork Current/Worktree/Running, SessionLoader",
+          "declaredLine": 862,
+          "result": "unexpected",
+          "attempts": [
+            {
+              "retry": 0,
+              "status": "failed",
+              "durationMs": 15236,
+              "failureLine": 876,
+              "failureColumn": 120,
+              "messageHeadline": "Error: expect(locator).toHaveAttribute(expected) failed"
+            },
+            {
+              "retry": 1,
+              "status": "failed",
+              "durationMs": 14230,
+              "failureLine": 876,
+              "failureColumn": 120,
+              "messageHeadline": "Error: expect(locator).toHaveAttribute(expected) failed"
+            }
+          ]
+        },
+        {
+          "title": "PRD #13: mt cross-card control inside real Antigravity card",
+          "declaredLine": 1051,
+          "result": "expected",
+          "attempts": [
+            {
+              "retry": 0,
+              "status": "passed",
+              "durationMs": 125827
+            }
+          ]
+        },
+        {
+          "title": "PRD #9b #14: Controlled fixtures for missing binary, unauthenticated sign-in prompt, and restore failure",
+          "declaredLine": 1110,
+          "result": "expected",
+          "attempts": [
+            {
+              "retry": 0,
+              "status": "passed",
+              "durationMs": 15409
+            }
+          ]
+        }
+      ]
+    },
+    "codex": {
+      "status": "complete",
+      "passedFirstAttempt": 10,
+      "passedAfterRetry": 0,
+      "failed": 0,
+      "skipped": 0,
+      "durationMs": 580764.3999999999,
+      "rawReport": ".cache/dsh-next/final/codex/report.json",
+      "tests": [
+        {
+          "title": "PRD 1–6, 8, 10: lifecycle, HUD, notifications, title, modes, restart and latency 3x",
+          "declaredLine": 552,
+          "result": "expected",
+          "attempts": [
+            {
+              "retry": 0,
+              "status": "passed",
+              "durationMs": 118463
+            }
+          ]
+        },
+        {
+          "title": "known issues: a real Codex model error notifies once and marks the card error; startup upgrade is disabled",
+          "declaredLine": 658,
+          "result": "expected",
+          "attempts": [
+            {
+              "retry": 0,
+              "status": "passed",
+              "durationMs": 7076
+            }
+          ]
+        },
+        {
+          "title": "known issues: history_base ancestor appears in preview and search; missing parent is labeled",
+          "declaredLine": 737,
+          "result": "expected",
+          "attempts": [
+            {
+              "retry": 0,
+              "status": "passed",
+              "durationMs": 5063
+            }
+          ]
+        },
+        {
+          "title": "closure PRD 5: Default restores user permissions after Bypass and Plan",
+          "declaredLine": 777,
+          "result": "expected",
+          "attempts": [
+            {
+              "retry": 0,
+              "status": "passed",
+              "durationMs": 73750
+            }
+          ]
+        },
+        {
+          "title": "closure PRD 8: independent restart stays starting for 10 seconds then recalls a codeword",
+          "declaredLine": 805,
+          "result": "expected",
+          "attempts": [
+            {
+              "retry": 0,
+              "status": "passed",
+              "durationMs": 40757
+            }
+          ]
+        },
+        {
+          "title": "PRD 7, 9: current/new Worktree Fork, parent-child isolation, loader search and resume",
+          "declaredLine": 847,
+          "result": "expected",
+          "attempts": [
+            {
+              "retry": 0,
+              "status": "passed",
+              "durationMs": 171776
+            }
+          ]
+        },
+        {
+          "title": "PRD 1, 11: mt creates a Codex card and real Codex reads its sibling",
+          "declaredLine": 919,
+          "result": "expected",
+          "attempts": [
+            {
+              "retry": 0,
+              "status": "passed",
+              "durationMs": 35480
+            }
+          ]
+        },
+        {
+          "title": "PRD 2, 3: real approval, waiting notification, continue and interrupted turn",
+          "declaredLine": 951,
+          "result": "expected",
+          "attempts": [
+            {
+              "retry": 0,
+              "status": "passed",
+              "durationMs": 52970
+            }
+          ]
+        },
+        {
+          "title": "PRD 2, 8: real missing local rollout, recovery failure, retry and new conversation",
+          "declaredLine": 983,
+          "result": "expected",
+          "attempts": [
+            {
+              "retry": 0,
+              "status": "passed",
+              "durationMs": 64996
+            }
+          ]
+        },
+        {
+          "title": "controlled fixtures: missing CLI and unauthenticated sign-in; no real login is revoked",
+          "declaredLine": 1034,
+          "result": "expected",
+          "attempts": [
+            {
+              "retry": 0,
+              "status": "passed",
+              "durationMs": 9916
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "antigravityComparison": {
+    "baseline": "4 first-pass / 1 failed at 876:120",
+    "final": "4 first-pass / 1 failed; both attempts at 876:120",
+    "conclusion": "Exact same selector ambiguity in baseline and final. Previous branch failures 497/802/408 did not recur in the final suite. The failed scenario never reached Fork execution, new Worktree or loader assertions."
+  },
+  "codexComparison": {
+    "baseline": "9 passed / 1 failed; native new-worktree Fork bootstrap routing timeout then inherited source identity read",
+    "final": "10 first-pass / 0 failed / 0 skipped",
+    "conclusion": "All previous three branch failure points did not recur. Current-directory and new-worktree Fork have successful intents, validated independent native identities and matching forked_from_id; full parent-child isolation, loader, restart, approval and failure-recovery scenarios passed. Native routing instability is not claimed permanently fixed."
+  }
+}

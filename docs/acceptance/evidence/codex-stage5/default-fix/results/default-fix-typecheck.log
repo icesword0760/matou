@@ -1,0 +1,82 @@
+
+> matou@0.0.0 typecheck /Users/icesword/Documents/AIProjects/matou-multi-agent-codex
+> pnpm build:packages && pnpm -r --if-present run typecheck
+
+
+> matou@0.0.0 build:packages /Users/icesword/Documents/AIProjects/matou-multi-agent-codex
+> pnpm --filter './packages/**' --workspace-concurrency=1 build
+
+Scope: 3 of 6 workspace projects
+
+> @matou/domain@0.0.0 build /Users/icesword/Documents/AIProjects/matou-multi-agent-codex/packages/domain
+> tsup && tsc -p tsconfig.build.json
+
+CLI Building entry: src/index.ts
+CLI Using tsconfig: tsconfig.json
+CLI tsup v8.5.1
+CLI Using tsup config: /Users/icesword/Documents/AIProjects/matou-multi-agent-codex/packages/domain/tsup.config.ts
+CLI Target: es2022
+CLI Cleaning output folder
+ESM Build start
+CJS Build start
+ESM dist/index.js     9.20 KB
+ESM dist/index.js.map 18.22 KB
+ESM ⚡️ Build success in 8ms
+CJS dist/index.cjs     10.98 KB
+CJS dist/index.cjs.map 18.48 KB
+CJS ⚡️ Build success in 8ms
+
+> @matou/ui@0.0.0 build /Users/icesword/Documents/AIProjects/matou-multi-agent-codex/packages/ui
+> tsup && tsc -p tsconfig.build.json
+
+CLI Building entry: src/index.tsx
+CLI Using tsconfig: tsconfig.json
+CLI tsup v8.5.1
+CLI Using tsup config: /Users/icesword/Documents/AIProjects/matou-multi-agent-codex/packages/ui/tsup.config.ts
+CLI Target: es2022
+CLI Cleaning output folder
+ESM Build start
+CJS Build start
+CJS dist/index.cjs     793.00 B
+CJS dist/index.cjs.map 174.00 B
+CJS ⚡️ Build success in 5ms
+ESM dist/index.js     33.00 B
+ESM dist/index.js.map 71.00 B
+ESM ⚡️ Build success in 5ms
+
+> @matou/contracts@0.0.0 build /Users/icesword/Documents/AIProjects/matou-multi-agent-codex/packages/contracts
+> tsup && tsc -p tsconfig.build.json
+
+CLI Building entry: src/index.ts
+CLI Using tsconfig: tsconfig.json
+CLI tsup v8.5.1
+CLI Using tsup config: /Users/icesword/Documents/AIProjects/matou-multi-agent-codex/packages/contracts/tsup.config.ts
+CLI Target: es2022
+CLI Cleaning output folder
+ESM Build start
+CJS Build start
+CJS dist/index.cjs     22.53 KB
+CJS dist/index.cjs.map 46.34 KB
+CJS ⚡️ Build success in 11ms
+ESM dist/index.js     18.43 KB
+ESM dist/index.js.map 45.60 KB
+ESM ⚡️ Build success in 11ms
+Scope: 5 of 6 workspace projects
+packages/domain typecheck$ tsc --noEmit
+packages/ui typecheck$ tsc --noEmit
+packages/ui typecheck: Done
+packages/domain typecheck: Done
+packages/contracts typecheck$ tsc --noEmit
+packages/contracts typecheck: Done
+apps/desktop typecheck$ tsc --noEmit
+apps/runtime typecheck$ tsc --noEmit
+apps/desktop typecheck: Done
+apps/runtime typecheck: src/session/provider-launch-plan.test.ts(300,39): error TS2379: Argument of type '{ profile: "codex"; executable: string; permissionMode: string; providerSessionId: string | undefined; forkSession: boolean; codexDefaultPermissions: { approvalPolicy: string; sandboxMode: "read-only"; }; }' is not assignable to parameter of type 'PtyCommandInput' with 'exactOptionalPropertyTypes: true'. Consider adding 'undefined' to the types of the target's properties.
+apps/runtime typecheck:   Types of property 'providerSessionId' are incompatible.
+apps/runtime typecheck:     Type 'string | undefined' is not assignable to type 'string'.
+apps/runtime typecheck:       Type 'undefined' is not assignable to type 'string'.
+apps/runtime typecheck: Failed
+/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/apps/runtime:
+ ERR_PNPM_RECURSIVE_RUN_FIRST_FAIL  @matou/runtime@0.0.0 typecheck: `tsc --noEmit`
+Exit status 1
+ ELIFECYCLE  Command failed with exit code 1.

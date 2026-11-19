@@ -10,6 +10,7 @@ import { ModelRouterManager } from './manager'
 import { RouterProcessOwner } from './process-owner'
 import { prepareRouterDirectory, routerConfig, writeRouterConfig } from './config'
 import { resolveRouterProxy, type RouterProxyResolution } from './network-proxy'
+import { startClaudeRequestGateway } from '../session/claude-request-gateway'
 
 const project = resolve(import.meta.dirname, '../../../..')
 const binary = join(project, `.cache/model-router/8.0.69/darwin-${process.arch}/model-router`)
@@ -227,21 +228,73 @@ describe.runIf(process.env.MATOU_TEST_MODEL_ROUTER === '1')('fixed engine manage
     await until(() => manager.status.state === 'stopped')
   }, 20_000)
 
-  it('restarts once on the same port, then fails without a third process', async () => {
+  it('restarts up to three times on the same port and recovers after the supervisor exhausts them', async () => {
     const { manager, events, dataRoot } = await fixture()
     const lease = await manager.acquire('session:test')
-    const first = lease.connection.pid
-    process.kill(first, 'SIGKILL')
-    await until(() => !!manager.status.pid && manager.status.pid !== first)
-    const second = manager.status.pid!
-    await until(async () => { try { return (await fetch(`${lease.connection.baseUrl}/healthz`)).ok } catch { return false } })
-    expect(exists(first)).toBe(false)
-    process.kill(second, 'SIGKILL')
+    const pids = [lease.connection.pid]
+    for (let i = 0; i < 3; i++) {
+      const previous = pids.at(-1)!
+      process.kill(previous, 'SIGKILL')
+      await until(() => !!manager.status.pid && manager.status.pid !== previous)
+      pids.push(manager.status.pid!)
+      await until(async () => { try { return (await fetch(`${lease.connection.baseUrl}/healthz`)).ok } catch { return false } })
+      expect(exists(previous)).toBe(false)
+    }
+    process.kill(pids.at(-1)!, 'SIGKILL')
     await until(() => manager.status.state === 'failed')
-    await delay(200)
-    expect(events.filter(event => (event as { state: string }).state === 'spawned')).toHaveLength(2)
-    expect(exists(second)).toBe(false)
-    await writeFile(join(dataRoot, 'restart-evidence.json'), JSON.stringify({ first, second, events, sameBaseUrl: lease.connection.baseUrl }, null, 2))
+    expect(events.filter(event => (event as { state: string }).state === 'spawned')).toHaveLength(4)
+    expect(events.at(-1)).toEqual({ state: 'failed', reason: 'restart-exhausted: router terminated by SIGKILL' })
+    expect(exists(pids.at(-1)!)).toBe(false)
+    const recovered = await manager.acquire('request-recovery')
+    expect(recovered.connection.baseUrl).toBe(lease.connection.baseUrl)
+    const response = await fetch(`${lease.connection.baseUrl}/healthz`)
+    expect(response.ok).toBe(true)
+    await response.body?.cancel()
+    recovered.release()
+    await writeFile(join(dataRoot, 'restart-evidence.json'), JSON.stringify({ pids, events, recoveredPid: recovered.connection.pid, sameBaseUrl: lease.connection.baseUrl }, null, 2))
+  }, 20_000)
+
+  it('recovers the existing gateway after both the supervisor and router are killed', async () => {
+    const { manager, events, dataRoot } = await fixture()
+    const session = await manager.acquire('session:test')
+    const { pid, baseUrl, clientKey } = session.connection
+    const supervisorPid = Number(execFileSync('/bin/ps', ['-o', 'ppid=', '-p', String(pid)], { encoding: 'utf8' }).trim())
+    const command = execFileSync('/bin/ps', ['-o', 'command=', '-p', String(supervisorPid)], { encoding: 'utf8' })
+    expect(command).toContain(supervisor)
+    const gateway = await startClaudeRequestGateway({
+      upstreamUrl: baseUrl,
+      env: {},
+      resolveOverride: () => ({ routerTarget: true, headers: { authorization: `Bearer ${clientKey}` } }),
+      recoverRouter: async () => { (await manager.acquire('request-recovery')).release() }
+    })
+    const request = async () => {
+      const response = await fetch(gateway.baseUrl + '/v1/messages', {
+        method: 'POST', body: JSON.stringify({ model: 'fixture-missing-model', max_tokens: 1, messages: [] }),
+        signal: AbortSignal.timeout(5_000)
+      })
+      return { status: response.status, body: await response.text() }
+    }
+    try {
+      const before = await request()
+      expect(before.body).not.toContain('Claude request gateway')
+      process.kill(supervisorPid, 'SIGKILL')
+      try { await until(() => manager.status.state === 'failed') }
+      finally { if (exists(pid)) process.kill(pid, 'SIGKILL') }
+      await until(() => !exists(pid))
+      expect(events.at(-1)).toEqual({ state: 'failed', reason: 'supervisor terminated by SIGKILL' })
+      expect(await request()).toEqual(before)
+      expect(manager.status.pid).not.toBe(pid)
+      const config = JSON.parse(await readFile(join(dataRoot, 'model-router/config.json'), 'utf8'))
+      expect(config.server.port).toBe(Number(new URL(baseUrl).port))
+      const path = join(dataRoot, 'model-router/logs/lifecycle.log')
+      await until(async () => (await readFile(path, 'utf8')).includes('"event":"recovery-succeeded"'))
+      await writeFile(join(dataRoot, 'gateway-recovery-evidence.json'), JSON.stringify({
+        supervisorPid, originalRouterPid: pid, recoveredRouterPid: manager.status.pid, baseUrl, upstreamStatus: before.status, events
+      }, null, 2))
+    } finally {
+      await gateway.close()
+      session.release()
+    }
   }, 20_000)
 
   it('main SIGKILL closes the stdin owner lease and reaps its router', async () => {

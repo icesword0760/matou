@@ -50,6 +50,8 @@ export interface ForkItemInput {
   start?: boolean
 }
 
+export type SessionCreatePermissionMode = 'default' | 'acceptEdits' | 'plan' | 'bypassPermissions'
+
 export type HostActionRequest =
   | { method: 'structure.create.workspace'; path: string; title?: string;
       submissionKey: string; enter?: boolean }
@@ -58,7 +60,8 @@ export type HostActionRequest =
   | { method: 'structure.create.canvas'; task: HostEntitySelector; title?: string;
       submissionKey: string; enter?: boolean }
   | { method: 'structure.create.session'; canvas: HostEntitySelector;
-      profile: SessionRunProfile; title?: string;
+      profile: SessionRunProfile; title?: string; cwd?: string;
+      permissionMode?: SessionCreatePermissionMode;
       submissionKey: string; enter?: boolean }
   | { method: 'structure.fork.child' | 'structure.fork.sibling';
       source: HostActionTargetSelector; title: string; environment: ForkEnvironmentChoice;
@@ -183,11 +186,13 @@ const forkItemSchema = z.object({
   start: optionalStart
 }).strict()
 
+const permissionModeSchema = z.enum(['default', 'acceptEdits', 'plan', 'bypassPermissions']).optional()
+
 const hostActionRequestSchema = z.discriminatedUnion('method', [
   z.object({ method: z.literal('structure.create.workspace'), path: nonEmptyText(4096), title: optionalTitle, submissionKey: keySchema, enter: optionalEnter }).strict(),
   z.object({ method: z.literal('structure.create.task'), workspace: entitySelectorSchema, title: optionalTitle, submissionKey: keySchema, enter: optionalEnter }).strict(),
   z.object({ method: z.literal('structure.create.canvas'), task: entitySelectorSchema, title: optionalTitle, submissionKey: keySchema, enter: optionalEnter }).strict(),
-  z.object({ method: z.literal('structure.create.session'), canvas: entitySelectorSchema, profile: z.enum(SESSION_RUN_PROFILES), title: optionalTitle, submissionKey: keySchema, enter: optionalEnter }).strict(),
+  z.object({ method: z.literal('structure.create.session'), canvas: entitySelectorSchema, profile: z.enum(SESSION_RUN_PROFILES), title: optionalTitle, cwd: nonEmptyText(4096).optional(), permissionMode: permissionModeSchema, submissionKey: keySchema, enter: optionalEnter }).strict(),
   z.object({ method: z.enum(['structure.fork.child', 'structure.fork.sibling']), source: actionTargetSelectorSchema, title: titleSchema, environment: environmentSchema, prompt: optionalPrompt, start: optionalStart, submissionKey: keySchema }).strict(),
   z.object({ method: z.literal('structure.fork.children'), source: actionTargetSelectorSchema, batchKey: keySchema, items: z.array(forkItemSchema).max(50), retryItemKeys: z.array(keySchema).max(50).optional() }).strict().superRefine((request, context) => {
     const itemKeys = new Set<string>()

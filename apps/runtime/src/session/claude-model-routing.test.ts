@@ -125,7 +125,9 @@ describe('Claude model routing', () => {
     expect(await routing.resolveOverride(ordinary)).toEqual({ effort: 'max' })
     expect(snapshot).not.toHaveBeenCalled()
     expect(await routing.resolveOverride(compact)).toEqual({
-      baseUrl: connection.baseUrl, headers: { authorization: 'Bearer target-router-key' },
+      routerTarget: true,
+      authentication: {providerId: subscription.id, providerName: subscription.name, label: 'compaction'},
+      family: 'chatgpt-subscription', baseUrl: connection.baseUrl, headers: { authorization: 'Bearer target-router-key' },
       model: 'matou-chatgpt/summarizer', maxOutputTokens: 4096, effort: 'max', thinking: 'adaptive'
     })
     await routing.resolveOverride(compact)
@@ -153,4 +155,14 @@ it('uses endpoint and key from the same selection when a provider changes during
   const routing = claudeModelRouting({ provider: source, store, preferences: preferences({ mode: 'custom', providerId: target.id, model: 'summary', effort: 'low' }) }, {})
   expect(await routing.resolveOverride({ compaction: true, model: 'main' })).toMatchObject({ baseUrl: 'https://replacement.example', headers: { 'x-api-key': 'replacement-key' } })
   routing.close()
+})
+it('enables expiry observation for subscription and native OAuth sessions without assignments',async()=>{
+ const prefs=preferences({mode:'follow',effort:'follow'})
+ expect(modelRoutingEnabled(prefs,subscription)).toBe(true)
+ expect(modelRoutingEnabled(prefs,{...target,endpoint:'https://api.anthropic.com',hasApiKey:false})).toBe(true)
+ expect(modelRoutingEnabled(prefs,{...target,endpoint:'https://api.anthropic.com',hasApiKey:true})).toBe(false)
+ const {store}=storeFor(subscription)
+ const routing=claudeModelRouting({provider:subscription,preferences:prefs,store},{})
+ expect(await routing.resolveOverride({model:'matou-chatgpt/matou-haiku',compaction:false})).toEqual({routerTarget:true,authentication:{providerId:subscription.id,providerName:subscription.name,label:'haiku'}})
+ routing.close()
 })

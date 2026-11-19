@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process'
-import { access } from 'node:fs/promises'
+import { access, realpath } from 'node:fs/promises'
 import { promisify } from 'node:util'
 
 import type {
@@ -73,6 +73,7 @@ export class WorktreeService {
       repositoryRoot: string
       path: string
       branch: string
+      branchMode?: 'create' | 'checkout-existing'
       baseRef: string
       setupPolicy: WorktreeSetupStep[]
       now: number
@@ -84,7 +85,9 @@ export class WorktreeService {
     }
   ): Promise<Worktree> {
     validateSetupPolicy(input.setupPolicy)
-    const durableRecoveryClaim = this.#matchesDurableCreateClaim(input)
+    const checkoutExisting = input.branchMode === 'checkout-existing'
+    const baseRef = checkoutExisting ? input.branch : input.baseRef
+    const durableRecoveryClaim = this.#matchesDurableCreateClaim({ ...input, baseRef })
     let worktree = this.get(input.id)
     if (worktree && !durableRecoveryClaim) {
       throw new Error(`Worktree ${input.id} durable creation claim does not match`)
@@ -112,7 +115,7 @@ export class WorktreeService {
           input.repositoryRoot,
           input.path,
           input.branch,
-          input.baseRef,
+          baseRef,
           JSON.stringify(input.setupPolicy),
           input.now,
           input.now
@@ -131,16 +134,23 @@ export class WorktreeService {
       input.beforeExternalSideEffect?.()
       const repository = (await exec('git', ['-C', input.repositoryRoot, 'rev-parse', '--show-toplevel'])).stdout.trim()
       input.beforeExternalSideEffect?.()
-      const baseRevision = await resolveCommit(repository, worktree.baseRevision ?? input.baseRef)
+      const branchRef = `refs/heads/${input.branch}`
+      if (checkoutExisting && !(await localBranchExists(repository, input.branch))) {
+        throw new Error('branch-missing')
+      }
+      const baseRevision = await resolveCommit(repository,
+        worktree.baseRevision ?? (checkoutExisting ? branchRef : baseRef)
+      )
       input.beforeExternalSideEffect?.()
       let createdWorktreePath = false
       const existingWorktreePath = await pathIsGitWorktree(input.path)
       const branchExists = await localBranchExists(repository, input.branch)
-      if (branchExists && !durableRecoveryClaim) {
+      if (branchExists && !checkoutExisting && !durableRecoveryClaim) {
         throw new Error(
           `Worktree ${input.id} existing branch is not reserved by this Worktree`
         )
       }
+      if (!branchExists && checkoutExisting) throw new Error('branch-missing')
       if (!branchExists && existingWorktreePath) {
         throw new Error(
           `Worktree ${input.id} branch ${input.branch} is missing; expected frozen revision ${baseRevision}`
@@ -149,12 +159,19 @@ export class WorktreeService {
       if (branchExists) {
         input.beforeExternalSideEffect?.()
         const branchRevision = await resolveCommit(
-          repository, `refs/heads/${input.branch}`
+          repository, branchRef
         )
         input.beforeExternalSideEffect?.()
         if (branchRevision !== baseRevision) {
           throw revisionMismatchError(input.id, input.branch, branchRevision, baseRevision)
         }
+      }
+      if (checkoutExisting) {
+        const checkoutPath = await branchCheckoutPath(repository, branchRef)
+        if (checkoutPath && (!durableRecoveryClaim || checkoutPath !== await canonicalPath(input.path))) {
+          throw new Error(`branch-checked-out:${checkoutPath}`)
+        }
+        this.#database.run('UPDATE worktrees SET base_revision = ? WHERE id = ?', baseRevision, input.id)
       }
       if (!existingWorktreePath) {
         // `git worktree add -b` creates the branch before it creates the target
@@ -164,10 +181,23 @@ export class WorktreeService {
         // branch and let Git still reject it if another worktree has it checked
         // out.
         const args = branchExists
-          ? ['-C', repository, 'worktree', 'add', input.path, input.branch]
+          ? ['-C', repository, 'worktree', 'add', '--', input.path, input.branch]
           : ['-C', repository, 'worktree', 'add', '-b', input.branch, input.path, input.baseRef]
         input.beforeExternalSideEffect?.()
-        await exec('git', args)
+        try {
+          await exec('git', args)
+        } catch (error) {
+          if (checkoutExisting) {
+            const checkoutPath = await branchCheckoutPath(repository, branchRef).catch(() => undefined)
+            if (checkoutPath && checkoutPath !== await canonicalPath(input.path)) {
+              throw new Error(`branch-checked-out:${checkoutPath}`)
+            }
+            if (await localBranchExists(repository, input.branch).catch(() => true) === false) {
+              throw new Error('branch-missing')
+            }
+          }
+          throw error
+        }
         createdWorktreePath = true
         input.beforeExternalSideEffect?.()
       }
@@ -178,8 +208,12 @@ export class WorktreeService {
         worktreeRevision = await resolveCommit(input.path, 'HEAD')
         input.beforeExternalSideEffect?.()
         finalBranchRevision = await resolveCommit(
-          repository, `refs/heads/${input.branch}`
+          repository, branchRef
         )
+        if (checkoutExisting) {
+          const headRef = (await exec('git', ['-C', input.path, 'symbolic-ref', 'HEAD'])).stdout.trim()
+          if (headRef !== branchRef) throw new Error(`Expected ${branchRef}, got ${headRef}`)
+        }
       } catch (error) {
         const verificationError = new Error(
           `Worktree ${input.id} did not expose its branch and checkout at frozen revision ${baseRevision}: ${errorMessage(error)}`
@@ -562,6 +596,24 @@ async function localBranchExists(repository: string, branch: string): Promise<bo
     }
     throw error
   }
+}
+
+async function branchCheckoutPath(repository: string, ref: string): Promise<string | undefined> {
+  const { stdout } = await exec('git', [
+    '-C', repository, 'worktree', 'list', '--porcelain', '-z'
+  ])
+  for (const block of stdout.split('\0\0')) {
+    const fields = block.split('\0')
+    const path = fields[0]
+    if (path?.startsWith('worktree ') && fields.includes(`branch ${ref}`)) {
+      return canonicalPath(path.slice('worktree '.length))
+    }
+  }
+  return undefined
+}
+
+function canonicalPath(path: string): Promise<string> {
+  return realpath(path).catch(() => path)
 }
 
 async function resolveCommit(repository: string, ref: string): Promise<string> {

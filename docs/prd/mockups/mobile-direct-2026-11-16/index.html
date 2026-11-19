@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <link rel="icon" href="data:," />
+  <title>Matou 手机多会话直达原型</title>
+  <link rel="stylesheet" href="style.css" />
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <div class="desktop-stage">
+    <!-- 原型外：桌面端简洁 3 步体验指南与演示数据说明 -->
+    <aside class="guide-panel" aria-label="原型体验指南">
+      <div class="guide-badge">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="12" cy="12" r="9"></circle>
+          <path d="M12 8v4l2.5 2.5"></path>
+        </svg>
+        <span>交互原型 · 本地演示数据</span>
+      </div>
+      <h1 class="guide-title">Matou 手机端续接桌面多会话</h1>
+      <p class="guide-lead">
+        无需按「工作空间 → 事项 → 画布」逐级深入。在首页直接续接活跃分支，并在会话内随时切换分支树与同画布会话。
+      </p>
+
+      <ol class="guide-steps">
+        <li class="guide-step">
+          <span class="step-num">1</span>
+          <div>
+            <strong>首页直达替代方案</strong>
+            <p>点击列表中「替代方案」，直接进入上下文；也可按状态筛选、搜索或新建本地会话。</p>
+          </div>
+        </li>
+        <li class="guide-step">
+          <span class="step-num">2</span>
+          <div>
+            <strong>会话内快速切换关系</strong>
+            <p>点击关系条右侧「切换」或顶部归属路径，查看分支树、无继承线的同画布会话（测试）与其他画布（账户恢复）。</p>
+          </div>
+        </li>
+        <li class="guide-step">
+          <span class="step-num">3</span>
+          <div>
+            <strong>保留草稿与阅读位置</strong>
+            <p>在「替代方案」中滚动阅读并输入草稿，点测试结果卡直达「测试」，再点返回即可还原滚动位置与草稿。</p>
+          </div>
+        </li>
+      </ol>
+
+      <div class="guide-footnote">
+        <strong>演示数据声明：</strong>当前展示的设备（家里的Mac）、会话记录、文件改动与 AI 回复均为本地静态/模拟演示数据；草稿与自发消息仅保存在本次浏览器会话中，不会发送到电脑。
+      </div>
+    </aside>
+
+    <!-- 手机交互原型外壳 -->
+    <main class="phone-shell" aria-label="Matou 手机交互原型">
+      <div id="app-viewport" class="app-viewport">
+        <!-- 主视图（首页 / 工作空间 / 我的） -->
+        <section id="view-tabs" class="view-tabs" aria-label="主导航视图">
+          <!-- 首页：会话列表 -->
+          <div id="tab-sessions" class="tab-panel is-active" role="tabpanel" aria-labelledby="nav-btn-sessions">
+            <header class="top-bar">
+              <div class="top-bar-row">
+                <div class="top-title-group">
+                  <h2 class="page-title">会话</h2>
+                  <span class="device-mini-tag" title="当前关联桌面设备">
+                    <span class="status-dot is-online" aria-hidden="true"></span>
+                    家里的Mac
+                  </span>
+                </div>
+                <div class="top-actions">
+                  <button id="btn-toggle-search" class="icon-btn" type="button" aria-label="搜索会话" aria-expanded="false" aria-controls="home-search-wrap">
+                    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                      <circle cx="11" cy="11" r="7"></circle>
+                      <path d="M20 20l-3.5-3.5"></path>
+                    </svg>
+                  </button>
+                  <button id="btn-new-session" class="icon-btn is-accent" type="button" aria-label="新建本地演示会话">
+                    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="M12 5v14"></path>
+                      <path d="M5 12h14"></path>
+                    </svg>
+                  </button>
+                </div>
+              </div>
+
+              <!-- 可折叠搜索框 -->
+              <div id="home-search-wrap" class="search-wrap" hidden>
+                <label class="search-box" for="home-search-input">
+                  <svg class="icon search-icon" viewBox="0 0 24 24" aria-hidden="true">
+                    <circle cx="11" cy="11" r="7"></circle>
+                    <path d="M20 20l-3.5-3.5"></path>
+                  </svg>
+                  <input id="home-search-input" type="search" placeholder="搜索会话、事项或画布…" autocomplete="off" />
+                  <button id="btn-clear-search" class="clear-search-btn" type="button" aria-label="清空搜索" hidden>
+                    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="M18 6L6 18"></path>
+                      <path d="M6 6l12 12"></path>
+                    </svg>
+                  </button>
+                </label>
+              </div>
+
+              <!-- 状态筛选条（数量动态派生） -->
+              <div id="home-filters" class="filter-chips" role="tablist" aria-label="会话状态筛选"></div>
+            </header>
+
+            <div id="home-list-scroll" class="panel-scroll">
+              <div id="session-list" class="session-list" role="list"></div>
+              <div id="home-empty" class="empty-state" hidden>
+                <div class="empty-icon-wrap" aria-hidden="true">
+                  <svg class="icon" viewBox="0 0 24 24">
+                    <circle cx="11" cy="11" r="7"></circle>
+                    <path d="M20 20l-3.5-3.5"></path>
+                    <path d="M8.5 11h5"></path>
+                  </svg>
+                </div>
+                <p class="empty-title">没有匹配的会话</p>
+                <p class="empty-desc">尝试调整关键词或切换回全部最近会话</p>
+                <button id="btn-reset-filters" class="btn-secondary" type="button">清除筛选与搜索</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- 工作空间：分组可点列表 -->
+          <div id="tab-workspaces" class="tab-panel" role="tabpanel" aria-labelledby="nav-btn-workspaces" hidden>
+            <header class="top-bar">
+              <div class="top-bar-row">
+                <div class="top-title-group">
+                  <h2 class="page-title">工作空间</h2>
+                  <span class="subtle-count" id="workspace-summary-count"></span>
+                </div>
+              </div>
+              <p class="top-subhint">按工作空间、事项与画布分组，点击任意会话直接进入</p>
+            </header>
+            <div id="workspaces-scroll" class="panel-scroll">
+              <div id="workspaces-tree" class="workspaces-tree"></div>
+            </div>
+          </div>
+
+          <!-- 我的：演示说明 + 重置 -->
+          <div id="tab-me" class="tab-panel" role="tabpanel" aria-labelledby="nav-btn-me" hidden>
+            <header class="top-bar">
+              <div class="top-bar-row">
+                <h2 class="page-title">我的</h2>
+              </div>
+            </header>
+            <div class="panel-scroll me-scroll">
+              <div class="me-card">
+                <div class="me-device-head">
+                  <div class="me-device-icon" aria-hidden="true">
+                    <svg class="icon" viewBox="0 0 24 24">
+                      <rect x="3" y="4" width="18" height="12" rx="2"></rect>
+                      <path d="M8 20h8"></path>
+                      <path d="M12 16v4"></path>
+                    </svg>
+                  </div>
+                  <div class="me-device-info">
+                    <strong>家里的Mac</strong>
+                    <span>桌面端协同中 · 本地模拟连接</span>
+                  </div>
+                  <span class="conn-pill is-online">已连接</span>
+                </div>
+              </div>
+
+              <div class="me-card">
+                <h3 class="me-card-title">原型演示说明</h3>
+                <ul class="me-list">
+                  <li>所有会话（main / alt / weak / test / recovery / api / release）均为本地预设演示数据。</li>
+                  <li>输入的草稿、自发消息、停止状态与新建会话均仅保存于当前标签页 <code>sessionStorage</code>，不会发起任何网络请求。</li>
+                  <li>每个会话独立记忆滚动位置（<code>scrollTop</code>）与草稿，方便在父子分支、同画布测试与其他画布间来回切换。</li>
+                </ul>
+              </div>
+
+              <div class="me-card">
+                <h3 class="me-card-title">状态管理</h3>
+                <p class="me-desc">若需恢复初始 7 个示例会话与默认状态，可一键重置本地演示存储。</p>
+                <button id="btn-reset-demo" class="btn-danger-outline" type="button">重置所有演示数据</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- 底部导航栏 -->
+          <nav class="bottom-nav" aria-label="主导航">
+            <button id="nav-btn-sessions" class="nav-item is-active" type="button" data-tab="sessions" aria-selected="true">
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+              </svg>
+              <span>会话</span>
+            </button>
+            <button id="nav-btn-workspaces" class="nav-item" type="button" data-tab="workspaces" aria-selected="false">
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                <rect x="3" y="3" width="7" height="7" rx="1.5"></rect>
+                <rect x="14" y="3" width="7" height="7" rx="1.5"></rect>
+                <rect x="3" y="14" width="7" height="7" rx="1.5"></rect>
+                <rect x="14" y="14" width="7" height="7" rx="1.5"></rect>
+              </svg>
+              <span>工作空间</span>
+            </button>
+            <button id="nav-btn-me" class="nav-item" type="button" data-tab="me" aria-selected="false">
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                <circle cx="12" cy="8" r="4"></circle>
+                <path d="M5 20a7 7 0 0 1 14 0"></path>
+              </svg>
+              <span>我的</span>
+            </button>
+          </nav>
+        </section>
+
+        <!-- 会话详情视图 -->
+        <section id="view-detail" class="view-detail" aria-label="会话详情" hidden>
+          <header class="detail-header">
+            <button id="btn-detail-back" class="icon-btn back-btn" type="button" aria-label="返回上一页">
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M15 18l-6-6 6-6"></path>
+              </svg>
+            </button>
+            <div class="detail-title-wrap">
+              <div class="detail-title-row">
+                <h2 id="detail-title" class="detail-title">替代方案</h2>
+                <span id="detail-status-badge" class="status-badge">运行中</span>
+              </div>
+              <button id="btn-open-location" class="detail-path-btn" type="button" aria-label="打开归属位置面板">
+                <span id="detail-path-text">Matou / 登录改版 / 登录流程</span>
+                <svg class="icon path-chevron" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M6 9l6 6 6-6"></path>
+                </svg>
+              </button>
+            </div>
+            <button id="btn-device-status" class="conn-chip" type="button" aria-label="查看设备连接状态">
+              <span class="status-dot is-online" aria-hidden="true"></span>
+              <span class="conn-chip-text">家里的Mac</span>
+            </button>
+          </header>
+
+          <!-- 唯一关系条 -->
+          <div class="relation-bar" aria-label="会话关系">
+            <div class="relation-info">
+              <div id="relation-primary" class="relation-primary">主方案 → 替代方案</div>
+              <div id="relation-sub" class="relation-sub">继承上下文 · 独立工作副本</div>
+            </div>
+            <button id="btn-open-switcher" class="btn-switch-pill" type="button">
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M7 7h11l-3-3"></path>
+                <path d="M17 17H6l3 3"></path>
+              </svg>
+              <span>切换</span>
+            </button>
+          </div>
+
+          <!-- 正文滚动区 -->
+          <div id="detail-scroll" class="detail-scroll" tabindex="-1">
+            <div id="detail-messages" class="detail-messages"></div>
+          </div>
+
+          <!-- 固定底部输入区 -->
+          <footer class="composer-wrap">
+            <div id="running-banner" class="running-banner" hidden>
+              <div class="running-banner-left">
+                <span class="pulse-ring" aria-hidden="true"></span>
+                <span id="running-banner-text">当前会话正在运行中…</span>
+              </div>
+              <button id="btn-stop-session" class="btn-stop" type="button">停止</button>
+            </div>
+            <div class="composer-box">
+              <button id="btn-composer-attach" class="icon-btn composer-attach-btn" type="button" aria-label="附件说明">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M21.44 11.05l-8.49 8.49a5.5 5.5 0 0 1-7.78-7.78l8.49-8.49a3.5 3.5 0 0 1 4.95 4.95l-8.49 8.49a1.5 1.5 0 0 1-2.12-2.12l7.78-7.78"></path>
+                </svg>
+              </button>
+              <textarea id="composer-input" rows="1" placeholder="给当前会话发送指令或补充上下文…" aria-label="会话消息输入框"></textarea>
+              <button id="btn-send-message" class="btn-send" type="button" aria-label="发送消息">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M22 2L11 13"></path>
+                  <path d="M22 2l-7 20-4-9-9-4 20-7z"></path>
+                </svg>
+              </button>
+            </div>
+          </footer>
+        </section>
+
+        <!-- Bottom Sheet 遮罩与面板（切换面板 / 位置面板 / 新建会话） -->
+        <div id="sheet-backdrop" class="sheet-backdrop" hidden></div>
+        <div id="bottom-sheet" class="bottom-sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title" hidden>
+          <div class="sheet-handle" aria-hidden="true"></div>
+          <div class="sheet-header">
+            <div class="sheet-title-group">
+              <button id="btn-sheet-back" class="icon-btn sheet-back-btn" type="button" aria-label="返回切换视图" hidden>
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M15 18l-6-6 6-6"></path>
+                </svg>
+              </button>
+              <div>
+                <h3 id="sheet-title" class="sheet-title">切换会话</h3>
+                <p id="sheet-subtitle" class="sheet-subtitle"></p>
+              </div>
+            </div>
+            <button id="btn-close-sheet" class="icon-btn" type="button" aria-label="关闭面板">
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M18 6L6 18"></path>
+                <path d="M6 6l12 12"></path>
+              </svg>
+            </button>
+          </div>
+          <div id="sheet-body" class="sheet-body"></div>
+        </div>
+
+        <!-- 轻量 Toast 提示 -->
+        <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+      </div>
+    </main>
+  </div>
+</body>
+</html>

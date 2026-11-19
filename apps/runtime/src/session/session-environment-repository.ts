@@ -151,6 +151,14 @@ export class SessionEnvironmentRepository {
     return row ? mapBinding(row) : undefined
   }
 
+  getActiveWorkspaceId(sessionId: string): string | undefined {
+    return this.#database.get<SessionOwnerRow>(
+      `SELECT tasks.workspace_id FROM sessions JOIN tasks ON tasks.id = sessions.task_id
+       WHERE sessions.id = ? AND sessions.archived_at IS NULL`,
+      sessionId
+    )?.workspace_id
+  }
+
   findOwningSession(worktreeId: string, source: DatabaseTransaction = this.#database): string | undefined {
     return source.get<WorktreeOwnerRow>(
       'SELECT session_id FROM session_environment_bindings WHERE managed_worktree_id = ?',
@@ -301,6 +309,24 @@ export class SessionEnvironmentRepository {
         )
       }
       return requireEnvironment(this.get(input.sessionId, tx), input.sessionId)
+    })
+  }
+
+  unbindOwnedWorktree(input: { sessionId: string; worktreeId: string; now: number }): void {
+    this.#mutate(undefined, (tx) => {
+      const binding = this.get(input.sessionId, tx)
+      if (binding?.managedWorktreeId !== input.worktreeId) return
+      if (binding.activeTarget === 'worktree' && tx.get(
+        'SELECT id FROM sessions WHERE id = ? AND archived_at IS NOT NULL', input.sessionId
+      )) {
+        this.completeTransition({ sessionId: input.sessionId, target: 'local', now: input.now }, tx)
+      }
+      tx.run(
+        `UPDATE session_environment_bindings
+         SET managed_worktree_id = NULL, updated_at = ?
+         WHERE session_id = ? AND managed_worktree_id = ? AND active_target = 'local'`,
+        input.now, input.sessionId, input.worktreeId
+      )
     })
   }
 

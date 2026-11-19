@@ -408,7 +408,7 @@ describe('ProviderModeService', () => {
     )?.count).toBe(1)
   })
 
-  it('ignores non-auto-restore Codex bindings in latestBinding like main', () => {
+  it('handles explicit user exit for auto-restorable Codex bindings', () => {
     const initial = hierarchy.bootstrapWindow(command('codex-bootstrap'), {
       windowId: 'window-1', defaultRootDirectory: workspaceRoot,
       defaultName: 'workspace', now: 10
@@ -422,13 +422,13 @@ describe('ProviderModeService', () => {
       initial.session!.id
     )
 
-    expect(() => providerModes.markUserExited(command('codex-exit'), {
+    expect(providerModes.markUserExited(command('codex-exit'), {
       sessionId: initial.session!.id, now: 30
-    })).toThrow('ProviderBinding does not exist')
+    }).session.kind).toBe('shell')
 
     expect(database.get<{ resume_state: string }>(
       `SELECT resume_state FROM provider_bindings WHERE id = 'binding-codex'`
-    )?.resume_state).toBe('available')
+    )?.resume_state).toBe('expired')
   })
 
   it('uses Antigravity display names in recovery failure notifications and retry errors', () => {
@@ -590,3 +590,26 @@ function latestRecoveryNotification(sessionId: string): Record<string, unknown> 
   const payload = JSON.parse(row.payload_json) as { event?: Record<string, unknown> }
   return payload.event
 }
+
+it.each([false, true])('grants loaded Codex Fork only with verified completed history (%s), preserving it through SessionStart', hasCompletedTurn => {
+  const initial = bootstrapClaudeTree({ canFork: false })
+  const loaded = providerModes.loadClaudeSession(command('load-codex-verified-history'), {
+    sessionId: initial.childSessionId, bindingId: 'codex-history-binding', provider: 'codex',
+    providerSessionId: '01a1ddd6-4064-70e1-a006-000000000001', title: 'Codex history', permissionMode: 'default', hasCompletedTurn, now: 40
+  })
+  expect(loaded.binding.metadata).toMatchObject({ canFork: hasCompletedTurn })
+  const active = providerModes.observeHook(command('codex-live-start'), {
+    sessionId: initial.childSessionId, provider: 'codex', providerSessionId: '01a1ddd6-4064-70e1-a006-000000000001', eventName: 'SessionStart', now: 41
+  })
+  expect(active.binding.metadata).toMatchObject({ canFork: hasCompletedTurn })
+  if (!hasCompletedTurn) {
+    providerModes.observeHook(command('codex-live-prompt'), {
+      sessionId: initial.childSessionId, provider: 'codex', providerSessionId: '01a1ddd6-4064-70e1-a006-000000000001', eventName: 'UserPromptSubmit', now: 42
+    })
+    expect(providerModes.canFork(initial.childSessionId)).toBe(false)
+    providerModes.observeHook(command('codex-live-stop'), {
+      sessionId: initial.childSessionId, provider: 'codex', providerSessionId: '01a1ddd6-4064-70e1-a006-000000000001', eventName: 'Stop', now: 43
+    })
+    expect(providerModes.canFork(initial.childSessionId)).toBe(true)
+  }
+})

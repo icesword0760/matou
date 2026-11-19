@@ -98,6 +98,8 @@ export interface CreateSessionSiblingInput extends CreateNavigationOptions {
   parentSessionId?: string
   profile: SessionRunProfile
   title?: string
+  cwd?: string
+  permissionMode?: 'default' | 'acceptEdits' | 'plan' | 'bypassPermissions'
   executionContextId?: string
   now: number
 }
@@ -374,9 +376,24 @@ export class SessionCanvasService {
            created_at, updated_at, last_activity_at, version
          ) VALUES (?, ?, ?, ?, 'created', ?, ?, ?, ?, ?, ?, 1)`,
         ids.sessionId, task.id, executionContext.id, input.profile, title,
-        input.title === undefined ? 'default' : 'manual', executionContext.cwd,
+        input.title === undefined ? 'default' : 'manual', input.cwd ?? executionContext.cwd,
         input.now, input.now, input.now
       )
+      if (input.profile !== 'shell' && input.permissionMode !== undefined) {
+        tx.run(
+          `INSERT INTO provider_bindings (
+             id, session_id, provider, provider_session_id, resume_state,
+             metadata_json, created_at, updated_at
+           ) VALUES (?, ?, ?, ?, 'unknown', ?, ?, ?)`,
+          randomUUID(),
+          ids.sessionId,
+          input.profile,
+          `pending-${ids.sessionId}`,
+          JSON.stringify({ permissionMode: input.permissionMode }),
+          input.now,
+          input.now
+        )
+      }
       tx.run(
         `INSERT INTO session_mounts (
            id, scene_id, scene_node_id, session_id, created_at

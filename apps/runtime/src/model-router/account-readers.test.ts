@@ -32,6 +32,17 @@ describe('ChatGPT account readers', () => {
     for (const reader of [readChatGptUsage, readAntigravityAccount, readAntigravityQuota]) expect(reader(response)).toMatchObject({ ok: false, error: 'response-too-large' });
     expect(readChatGptModels(envelope({ models: [{ slug: 'too-large', instructions: 'x'.repeat(MAX_MODEL_BODY_BYTES) }] }))).toMatchObject({ ok: false, error: 'response-too-large' });
   });
+  it('excludes hidden and internal models from live catalogs', () => {
+    const models = value(readChatGptModels(envelope({
+      models: [
+        { slug: 'gpt-6.2-sol', visibility: 'list', display_name: 'GPT-6.2-Sol' },
+        { slug: 'gpt-reserve', visibility: 'hide', display_name: 'GPT-Reserve' },
+        { slug: 'chat_20706', isInternal: true },
+        { slug: 'tab_flash_lite_preview' }
+      ]
+    })));
+    expect(models.map(m => m.id)).toEqual(['gpt-6.2-sol']);
+  });
   it.each([['pro', 'Pro 200'], ['prolite', 'Pro 100'], ['promax', 'Pro 500'], ['plus', 'Plus'], ['team', 'Business'],
     ['business', 'Enterprise'], ['enterprise_cbp_usage_based', 'Enterprise'], ['self_serve_business_prolite', 'Business Premium'],
     ['free_workspace', 'Free Workspace'], ['future_plan', 'Future Plan'], ['unknown', null], ['', null]])(

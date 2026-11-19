@@ -36,29 +36,34 @@ export const SEARCH_READ_BATCH_BYTES = 4 * 1024 * 1024
 export const SEARCH_CACHE_LIMIT = 16
 
 export async function* scanJsonLines(path: string): AsyncGenerator<JsonLine> {
-  let pending = Buffer.alloc(0)
-  let pendingOffset = 0
+  let pending: Buffer[] = []
+  let chunkOffset = 0
+  let lineOffset = 0
   for await (const value of createReadStream(path)) {
     const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value)
-    const buffer = pending.length > 0 ? Buffer.concat([pending, chunk]) : chunk
     let start = 0
-    for (let index = 0; index < buffer.length; index += 1) {
-      if (buffer[index] !== 0x0a) continue
-      const rawEnd = index > start && buffer[index - 1] === 0x0d ? index - 1 : index
-      yield {
-        offset: pendingOffset + start,
-        length: rawEnd - start,
-        source: buffer.subarray(start, rawEnd)
+    for (let end = chunk.indexOf(0x0a, start); end !== -1; end = chunk.indexOf(0x0a, start)) {
+      let source = chunk.subarray(start, end)
+      if (pending.length > 0) {
+        pending.push(source)
+        source = Buffer.concat(pending, chunkOffset + end - lineOffset)
+        pending = []
       }
-      start = index + 1
+      yield jsonLine(source, lineOffset)
+      start = end + 1
+      lineOffset = chunkOffset + start
     }
-    pendingOffset += start
-    pending = start < buffer.length ? Buffer.from(buffer.subarray(start)) : Buffer.alloc(0)
+    if (start < chunk.length) pending.push(chunk.subarray(start))
+    chunkOffset += chunk.length
   }
   if (pending.length > 0) {
-    const rawEnd = pending.at(-1) === 0x0d ? pending.length - 1 : pending.length
-    yield { offset: pendingOffset, length: rawEnd, source: pending.subarray(0, rawEnd) }
+    yield jsonLine(Buffer.concat(pending, chunkOffset - lineOffset), lineOffset)
   }
+}
+
+function jsonLine(source: Buffer, offset: number): JsonLine {
+  if (source.at(-1) === 0x0d) source = source.subarray(0, -1)
+  return { offset, length: source.length, source }
 }
 
 export function selectEventWindow<T extends { index: number }>(

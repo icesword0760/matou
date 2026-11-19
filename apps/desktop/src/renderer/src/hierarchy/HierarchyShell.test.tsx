@@ -426,6 +426,85 @@ describe('PRD 05 hierarchy shell', () => {
     expect(screen.queryByRole('button', { name: '预览会话：旧卡片名称' })).toBeNull()
   })
 
+  it('ignores provider-binding and card updates from other workspaces while the session loader is open', async () => {
+    const data = fixture()
+    const initialList = deferred<{
+      total: number; offset: number; limit: number; nextOffset: number; hasMore: boolean
+      sessions: Array<{
+        providerSessionId: string; title: string; cwd: string; updatedAt: number
+        permissionMode: 'default'; eventCount: number; matchCount: number; hits: never[]
+        availability: 'available'
+      }>
+    }>()
+    let projectionListener: ((message: unknown) => void) | undefined
+    let listCalls = 0
+    const request = vi.fn(async (method: string) => {
+      if (method === 'hierarchy.bootstrap-window' || method === 'hierarchy.validate-workspace-path') return {}
+      if (method === 'projection.snapshot') return projectionSnapshot(data)
+      if (method === 'claude-sessions.list') {
+        listCalls += 1
+        return initialList.promise
+      }
+      if (method === 'claude-sessions.detail') return {
+        providerSessionId: 'provider-a1', title: '当前工作空间会话', cwd: '/tmp/a',
+        updatedAt: 10, permissionMode: 'default', eventCount: 1, matchCount: 0, hits: [],
+        availability: 'available',
+        events: [{ index: 1, kind: 'user', role: 'user', text: '内容', matched: false }],
+        page: { startEventIndex: 1, endEventIndex: 1, total: 1, hasEarlier: false, hasLater: false }
+      }
+      throw new Error(`unexpected Runtime request: ${method}`)
+    })
+    runtime.current = {
+      request,
+      startProjection: vi.fn(),
+      subscribeProjection: vi.fn((listener) => {
+        const previous = projectionListener
+        projectionListener = (message) => { previous?.(message); listener(message) }
+        return () => { projectionListener = undefined }
+      })
+    }
+
+    render(<HierarchyShell />)
+    await screen.findByRole('region', { name: 'Workspace A 工作现场' })
+    await userEvent.setup().click(screen.getByRole('button', {
+      name: '载入 Claude Code 会话到“终端 A1”'
+    }))
+    await waitFor(() => expect(listCalls).toBe(1))
+
+    // Unrelated Workspace B emits continuous provider-binding and session title events.
+    const otherSession = data.sessions.find(({ id }) => id === 'session-b1')!
+    act(() => projectionListener?.({
+      type: 'events.batch', runtimeGeneration: 'readonly-runtime', events: [
+        {
+          sequence: 18, eventId: 'other-ws-binding', eventType: 'provider-binding.recorded',
+          aggregateType: 'session', aggregateId: 'session-b1', workspaceId: 'workspace-b',
+          sessionId: 'session-b1',
+          payload: { binding: { id: 'other-binding', sessionId: 'session-b1' } },
+          schemaVersion: 1, commandId: 'other-ws-binding', occurredAt: 18
+        },
+        {
+          sequence: 19, eventId: 'other-ws-rename', eventType: 'session.updated',
+          aggregateType: 'session', aggregateId: 'session-b1', workspaceId: 'workspace-b',
+          sessionId: 'session-b1',
+          payload: { session: { ...otherSession, title: '其它工作空间改名' } },
+          schemaVersion: 1, commandId: 'other-ws-rename', occurredAt: 19
+        }
+      ]
+    }))
+
+    initialList.resolve({
+      total: 1, offset: 0, limit: 50, nextOffset: 1, hasMore: false,
+      sessions: [{
+        providerSessionId: 'provider-a1', title: '当前工作空间会话', cwd: '/tmp/a',
+        updatedAt: 10, permissionMode: 'default', eventCount: 1, matchCount: 0, hits: [],
+        availability: 'available'
+      }]
+    })
+
+    expect(await screen.findByRole('button', { name: '预览会话：当前工作空间会话' })).toBeTruthy()
+    expect(listCalls).toBe(1)
+  })
+
   it('closes session management when the existing window enters read-only recovery', async () => {
     const view = render(<HierarchyShell fixture={fixture()} />)
 

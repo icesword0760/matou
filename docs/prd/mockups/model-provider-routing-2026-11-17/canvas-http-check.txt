@@ -1,0 +1,3 @@
+Canvas route: HTTP 200; browser evidence canvas-variant.png.
+Standalone prototype: HTTP 200; served content matches index.html after trailing-newline normalization.
+URL: http://localhost:3000/api/magic-brush/preview/13a33bd7-a1d2-4309-b851-68799ca2b63e/design_iterations/claude-code_1_0.html

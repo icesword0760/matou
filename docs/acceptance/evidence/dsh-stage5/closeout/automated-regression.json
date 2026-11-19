@@ -1,0 +1,47 @@
+{
+  "recordedAt": "2026-11-15T17:17:49.819244+00:00",
+  "sourceProductUnchangedSinceBundle": true,
+  "runtimeMain": {
+    "command": "pnpm --filter @matou/runtime exec vitest run --exclude src/runtime-server.test.ts",
+    "exitCode": 0,
+    "passed": 1653,
+    "failed": 0,
+    "skipped": 36,
+    "passedFiles": 166,
+    "skippedFiles": 5,
+    "durationSeconds": 40.16,
+    "log": "closeout-runtime-main.log",
+    "skipDisclosure": "Conditional suites include pinned model-router integration not run because MATOU_MODEL_ROUTER_BINARY is unset. The 36 skips are not reported as passes."
+  },
+  "runtimeServer": {
+    "command": "pnpm --filter @matou/runtime exec vitest run src/runtime-server.test.ts --maxWorkers=1 --testTimeout=15000",
+    "exitCode": 0,
+    "passed": 166,
+    "failed": 0,
+    "skipped": 0,
+    "durationSeconds": 60.59,
+    "log": "closeout-runtime-server.log"
+  },
+  "runtimeTotal": {
+    "passed": 1819,
+    "failed": 0,
+    "skipped": 36
+  },
+  "desktop": {
+    "command": "pnpm --filter @matou/desktop test",
+    "exitCode": 0,
+    "functionalFiles": 113,
+    "functionalPassed": 1031,
+    "performanceFiles": 2,
+    "performancePassed": 3,
+    "failed": 0,
+    "functionalDurationSeconds": 63.93,
+    "performanceDurationSeconds": 1.55,
+    "log": "closeout-desktop.log"
+  },
+  "historicalFluctuations": {
+    "rssGate": "Failed twice before closeout (18.16/30.53 MiB over 16 MiB); exported base journal module passed. This closeout full run passed. No extra investigation or changed assertion in closeout.",
+    "runtimeServer": "Earlier full attempts had fixture startup and two old waits time out. This closeout isolated full file passed 166/166; historical runs retained. This does not prove those waits can never fluctuate."
+  },
+  "scope": "One fresh full run per requested group in this closeout; no debugging reruns."
+}

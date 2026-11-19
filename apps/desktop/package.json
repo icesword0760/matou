@@ -1,6 +1,6 @@
 {
   "name": "@matou/desktop",
-  "version": "0.2.19",
+  "version": "0.2.24",
   "productName": "码头",
   "private": true,
   "type": "module",
@@ -64,6 +64,9 @@
         "zip"
       ],
       "category": "public.app-category.developer-tools",
+      "type": "distribution",
+      "identity": "Lu'an Yidayi Electronic Commerce Co.,Ltd. (JAKX72KQ6X)",
+      "forceCodeSigning": true,
       "hardenedRuntime": true,
       "gatekeeperAssess": false,
       "entitlements": "build/entitlements.mac.plist",

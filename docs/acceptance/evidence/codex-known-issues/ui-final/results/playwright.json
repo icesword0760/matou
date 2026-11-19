@@ -1,0 +1,162 @@
+{
+  "config": {
+    "argv": [
+      "/Users/icesword/.nvm/versions/node/v22.16.0/bin/node",
+      "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/node_modules/@playwright/test/cli.js",
+      "test",
+      "tests/e2e/codex-acceptance.spec.ts",
+      "--grep",
+      "known issues: a real Codex",
+      "--workers=1",
+      "--retries=0",
+      "--reporter=line,json",
+      "--output",
+      ".cache/c10/playwright-final-results"
+    ],
+    "configFile": "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/playwright.config.ts",
+    "rootDir": "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tests/e2e",
+    "failOnFlakyTests": false,
+    "forbidOnly": false,
+    "fullyParallel": false,
+    "globalSetup": null,
+    "globalTeardown": null,
+    "globalTimeout": 0,
+    "grep": {},
+    "grepInvert": null,
+    "maxFailures": 0,
+    "metadata": {
+      "actualWorkers": 1
+    },
+    "preserveOutput": "always",
+    "projects": [
+      {
+        "outputDir": "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c10/playwright-final-results",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "",
+        "name": "",
+        "testDir": "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tests/e2e",
+        "testIgnore": [],
+        "testMatch": [
+          "**/*.@(spec|test).?(c|m)[jt]s?(x)"
+        ],
+        "timeout": 30000
+      }
+    ],
+    "quiet": false,
+    "reporter": [
+      [
+        "line"
+      ],
+      [
+        "json"
+      ]
+    ],
+    "reportSlowTests": {
+      "max": 5,
+      "threshold": 300000
+    },
+    "shard": null,
+    "tags": [],
+    "updateSnapshots": "missing",
+    "updateSourceMethod": "patch",
+    "version": "1.62.1",
+    "workers": 1,
+    "webServer": null
+  },
+  "suites": [
+    {
+      "title": "codex-acceptance.spec.ts",
+      "file": "codex-acceptance.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [],
+      "suites": [
+        {
+          "title": "Codex packaged acceptance — real CLI and explicit controlled fixtures",
+          "file": "codex-acceptance.spec.ts",
+          "line": 544,
+          "column": 6,
+          "specs": [
+            {
+              "title": "known issues: a real Codex model error notifies once and marks the card error; startup upgrade is disabled",
+              "ok": false,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 300000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "",
+                  "projectName": "",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "failed",
+                      "duration": 21167,
+                      "error": {
+                        "message": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mlocator\u001b[39m\u001b[2m).\u001b[22mtoContainText\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m)\u001b[22m failed\n\nLocator: locator('.scene-stage:not([hidden]) .session-card.is-focused [data-testid=\"terminal-pane\"]:visible .terminal-surface').first().locator('.xterm-rows')\nExpected substring: \u001b[32m\"unexpected status 404\"\u001b[39m\nReceived string:    \u001b[31m\"icesword@icesworddeMacBook-Pro repo %  \"\u001b[39m\nTimeout: 15000ms\n\nCall log:\n\u001b[2m  - Expect \"toContainText\" with timeout 15000ms\u001b[22m\n\u001b[2m  - waiting for locator('.scene-stage:not([hidden]) .session-card.is-focused [data-testid=\"terminal-pane\"]:visible .terminal-surface').first().locator('.xterm-rows')\u001b[22m\n\u001b[2m    34 × locator resolved to <div class=\"xterm-rows\" aria-hidden=\"true\">…</div>\u001b[22m\n\u001b[2m       - unexpected value \"icesword@icesworddeMacBook-Pro repo %  \"\u001b[22m\n",
+                        "stack": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mlocator\u001b[39m\u001b[2m).\u001b[22mtoContainText\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m)\u001b[22m failed\n\nLocator: locator('.scene-stage:not([hidden]) .session-card.is-focused [data-testid=\"terminal-pane\"]:visible .terminal-surface').first().locator('.xterm-rows')\nExpected substring: \u001b[32m\"unexpected status 404\"\u001b[39m\nReceived string:    \u001b[31m\"icesword@icesworddeMacBook-Pro repo %  \"\u001b[39m\nTimeout: 15000ms\n\nCall log:\n\u001b[2m  - Expect \"toContainText\" with timeout 15000ms\u001b[22m\n\u001b[2m  - waiting for locator('.scene-stage:not([hidden]) .session-card.is-focused [data-testid=\"terminal-pane\"]:visible .terminal-surface').first().locator('.xterm-rows')\u001b[22m\n\u001b[2m    34 × locator resolved to <div class=\"xterm-rows\" aria-hidden=\"true\">…</div>\u001b[22m\n\u001b[2m       - unexpected value \"icesword@icesworddeMacBook-Pro repo %  \"\u001b[22m\n\n    at /Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tests/e2e/codex-acceptance.spec.ts:714:52",
+                        "location": {
+                          "file": "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tests/e2e/codex-acceptance.spec.ts",
+                          "column": 52,
+                          "line": 714
+                        },
+                        "snippet": "  712 |       await expect(center.locator('.notification-item__title')).toHaveText('Codex')\n  713 |       await expect(center).toContainText('matou-probe-missing does not exist')\n> 714 |       await expect(surface.locator('.xterm-rows')).toContainText('unexpected status 404')\n      |                                                    ^\n  715 |       await expect(surface.locator('.xterm-rows')).not.toContainText('Update available')\n  716 |       await saveScreenshot(h.page, 'error-notification.png')\n  717 |       await saveScreenshot(dagPage, 'error-dag.png')"
+                      },
+                      "errors": [
+                        {
+                          "location": {
+                            "file": "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tests/e2e/codex-acceptance.spec.ts",
+                            "column": 52,
+                            "line": 714
+                          },
+                          "message": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mlocator\u001b[39m\u001b[2m).\u001b[22mtoContainText\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m)\u001b[22m failed\n\nLocator: locator('.scene-stage:not([hidden]) .session-card.is-focused [data-testid=\"terminal-pane\"]:visible .terminal-surface').first().locator('.xterm-rows')\nExpected substring: \u001b[32m\"unexpected status 404\"\u001b[39m\nReceived string:    \u001b[31m\"icesword@icesworddeMacBook-Pro repo %  \"\u001b[39m\nTimeout: 15000ms\n\nCall log:\n\u001b[2m  - Expect \"toContainText\" with timeout 15000ms\u001b[22m\n\u001b[2m  - waiting for locator('.scene-stage:not([hidden]) .session-card.is-focused [data-testid=\"terminal-pane\"]:visible .terminal-surface').first().locator('.xterm-rows')\u001b[22m\n\u001b[2m    34 × locator resolved to <div class=\"xterm-rows\" aria-hidden=\"true\">…</div>\u001b[22m\n\u001b[2m       - unexpected value \"icesword@icesworddeMacBook-Pro repo %  \"\u001b[22m\n\n\n  712 |       await expect(center.locator('.notification-item__title')).toHaveText('Codex')\n  713 |       await expect(center).toContainText('matou-probe-missing does not exist')\n> 714 |       await expect(surface.locator('.xterm-rows')).toContainText('unexpected status 404')\n      |                                                    ^\n  715 |       await expect(surface.locator('.xterm-rows')).not.toContainText('Update available')\n  716 |       await saveScreenshot(h.page, 'error-notification.png')\n  717 |       await saveScreenshot(dagPage, 'error-dag.png')\n    at /Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tests/e2e/codex-acceptance.spec.ts:714:52"
+                        }
+                      ],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-11-15T13:37:54.536Z",
+                      "annotations": [],
+                      "attachments": [
+                        {
+                          "name": "error-context",
+                          "contentType": "text/markdown",
+                          "path": "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c10/playwright-final-results/codex-acceptance-Codex-pac-add21-startup-upgrade-is-disabled/error-context.md"
+                        }
+                      ],
+                      "errorLocation": {
+                        "file": "/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/tests/e2e/codex-acceptance.spec.ts",
+                        "column": 52,
+                        "line": 714
+                      }
+                    }
+                  ],
+                  "status": "unexpected"
+                }
+              ],
+              "id": "b33e2b54a6e36ead1596-9d51ca0cfc3f2b5f9287",
+              "file": "codex-acceptance.spec.ts",
+              "line": 653,
+              "column": 3
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "errors": [],
+  "stats": {
+    "startTime": "2026-11-15T13:37:54.104Z",
+    "duration": 21630.814000000002,
+    "expected": 0,
+    "skipped": 0,
+    "unexpected": 1,
+    "flaky": 0
+  }
+}

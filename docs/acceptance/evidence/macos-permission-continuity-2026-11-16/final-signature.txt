@@ -1,0 +1,28 @@
+Executable=/Applications/码头.app/Contents/MacOS/码头
+Identifier=com.matou.desktop
+Format=app bundle with Mach-O thin (arm64)
+CodeDirectory v=20500 size=637 flags=0x10000(runtime) hashes=9+7 location=embedded
+VersionPlatform=1
+VersionMin=786432
+VersionSDK=1705216
+Hash type=sha256 size=32
+CandidateCDHash sha256=1b1353ad6a316fee673ce0223f969a8df9b07ebb
+CandidateCDHashFull sha256=1b1353ad6a316fee673ce0223f969a8df9b07ebb38213b046e34f5458bf86224
+Hash choices=sha256
+CMSDigest=1b1353ad6a316fee673ce0223f969a8df9b07ebb38213b046e34f5458bf86224
+CMSDigestType=2
+Executable Segment base=0
+Executable Segment limit=16384
+Executable Segment flags=0x1
+Page size=4096
+CDHash=1b1353ad6a316fee673ce0223f969a8df9b07ebb
+Signature size=9102
+Authority=Developer ID Application: Lu'an Yidayi Electronic Commerce Co.,Ltd. (JAKX72KQ6X)
+Authority=Developer ID Certification Authority
+Authority=Apple Root CA
+Timestamp=Nov 16, 2026 at 15:42:39
+Info.plist entries=33
+TeamIdentifier=JAKX72KQ6X
+Runtime Version=26.5.0
+Sealed Resources version=2 rules=13 files=356
+designated => identifier "com.matou.desktop" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = JAKX72KQ6X

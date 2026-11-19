@@ -1,0 +1,80 @@
+{
+  "sessionId": "9804dee9-a155-4c1b-8879-3a5f7d8ded17",
+  "providerSessionId": "3c413a85-9114-4f55-b7a8-bf49397b264c",
+  "initialPaneTitle": "Codeword Memory And Response",
+  "restoredAutoTitle": "Codeword Memory And Response",
+  "runningSamples": [
+    {
+      "round": 1,
+      "triggerAtMs": 1794745928475,
+      "runtimeEventAtMs": 1794745929217,
+      "uiObservedAtMs": 1794745929219,
+      "runtimeToUiMs": 2,
+      "within1000ms": true,
+      "triggerToUiMs": 744
+    },
+    {
+      "round": 2,
+      "triggerAtMs": 1794745937376,
+      "runtimeEventAtMs": 1794745937762,
+      "uiObservedAtMs": 1794745937763,
+      "runtimeToUiMs": 1,
+      "within1000ms": true,
+      "triggerToUiMs": 387
+    },
+    {
+      "round": 3,
+      "triggerAtMs": 1794745944457,
+      "runtimeEventAtMs": 1794745944811,
+      "uiObservedAtMs": 1794745944813,
+      "runtimeToUiMs": 2,
+      "within1000ms": true,
+      "triggerToUiMs": 356
+    }
+  ],
+  "idleSamples": [
+    {
+      "round": 1,
+      "triggerAtMs": 1794745928475,
+      "runtimeEventAtMs": 1794745936642,
+      "uiObservedAtMs": 1794745936644,
+      "runtimeToUiMs": 2,
+      "within1000ms": true
+    },
+    {
+      "round": 2,
+      "triggerAtMs": 1794745937376,
+      "runtimeEventAtMs": 1794745943755,
+      "uiObservedAtMs": 1794745943757,
+      "runtimeToUiMs": 2,
+      "within1000ms": true
+    },
+    {
+      "round": 3,
+      "triggerAtMs": 1794745944457,
+      "runtimeEventAtMs": 1794745952030,
+      "uiObservedAtMs": 1794745952033,
+      "runtimeToUiMs": 3,
+      "within1000ms": true
+    }
+  ],
+  "summary": {
+    "runningCount": 3,
+    "runningAvgMs": 1.7,
+    "runningMaxMs": 2,
+    "runningTriggerAvgMs": 495.7,
+    "idleCount": 3,
+    "idleAvgMs": 2.3,
+    "idleMaxMs": 3
+  },
+  "dbBindingsAfter": [
+    {
+      "session_id": "9804dee9-a155-4c1b-8879-3a5f7d8ded17",
+      "provider": "antigravity",
+      "provider_session_id": "3c413a85-9114-4f55-b7a8-bf49397b264c",
+      "resume_state": "available",
+      "metadata_json": "{\"model\":\"Gemini 4 Carbon (Medium)\",\"permissionMode\":\"default\",\"cwd\":\"/Users/icesword/Documents/AIProjects/matou-multi-agent-codex/.cache/c5/final-agy/title-restart-eSyKfU/repo\",\"lastHookEvent\":\"unknown\",\"canFork\":true,\"observedUserPrompt\":true,\"observedNormalStop\":true}",
+      "updated_at": 1794745974501
+    }
+  ]
+}

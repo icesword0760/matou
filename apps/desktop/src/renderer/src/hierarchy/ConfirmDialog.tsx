@@ -11,6 +11,7 @@ export function ConfirmDialog(props: {
   confirmTone?: 'default' | 'danger'
   cancelLabel?: string
   showCancel?: boolean
+  secondaryAction?: { label: string; onSelect(): void }
   scope?: 'viewport' | 'session'
   onConfirm(): void
   onCancel(): void
@@ -18,19 +19,33 @@ export function ConfirmDialog(props: {
   const m = useMessages().common
   const dialogRef = useRef<HTMLDivElement>(null)
   const [composing, setComposing] = useState(false)
+  const hasSecondaryAction = props.secondaryAction !== undefined
 
   useEffect(() => {
     const dialog = dialogRef.current
+    const previousFocus = document.activeElement
     const firstControl = dialog?.querySelector<HTMLElement>('button, input')
     firstControl?.focus()
-  }, [])
+    return () => {
+      if (hasSecondaryAction && previousFocus instanceof HTMLElement && previousFocus.isConnected) {
+        previousFocus.focus()
+      }
+    }
+  }, [hasSecondaryAction])
 
   const overlay = <div className={`dialog-overlay${props.scope === 'session' ? ' is-session-scoped' : ''}`} onPointerDown={(event) => {
     if (event.currentTarget === event.target) props.onCancel()
   }}><div ref={dialogRef} role="alertdialog" aria-modal="true" aria-label={props.title}
+    className={hasSecondaryAction ? 'git-shared-checkout-dialog' : undefined}
     onCompositionStart={() => setComposing(true)} onCompositionEnd={() => setComposing(false)}
     onKeyDown={(event) => {
-      if (event.key === 'Escape' && !composing) props.onCancel()
+      if (event.key === 'Escape') {
+        if (hasSecondaryAction) {
+          event.preventDefault()
+          event.stopPropagation()
+        }
+        if (!composing) props.onCancel()
+      }
       if (event.key !== 'Tab') return
       const controls = [...(dialogRef.current?.querySelectorAll<HTMLElement>('button, input') ?? [])]
       if (controls.length === 0) return
@@ -41,10 +56,12 @@ export function ConfirmDialog(props: {
       event.preventDefault()
       next?.focus()
     }}>
-    <header><h2>{props.title}</h2><button className="dialog-close" aria-label={m.close} onClick={props.onCancel}>×</button></header>
+    <header><h2>{props.title}</h2>{!hasSecondaryAction &&
+      <button className="dialog-close" aria-label={m.close} onClick={props.onCancel}>×</button>}</header>
     {typeof props.body === 'string' ? <p>{props.body}</p> : <div className="dialog-content">{props.body}</div>}
     <footer>
       {props.showCancel !== false && <button onClick={props.onCancel}>{props.cancelLabel ?? m.cancel}</button>}
+      {props.secondaryAction && <button onClick={props.secondaryAction.onSelect}>{props.secondaryAction.label}</button>}
       <button className={`dialog-primary${props.confirmTone === 'danger' ? ' is-danger' : ''}`}
         onClick={() => !composing && props.onConfirm()}>{props.confirmLabel}</button>
     </footer>

@@ -5,6 +5,10 @@ import { stat } from 'node:fs/promises'
 import { StringDecoder } from 'node:string_decoder'
 
 export interface ProviderTranscriptHudSnapshot {
+  effort?: string
+  contextPercent?: number
+  contextWindowSize?: number
+  completedToolCalls?: Array<{ id: string; name: string }>
   sessionName?: string
   startedAt?: number
   permissionMode?: string
@@ -20,6 +24,10 @@ export interface ProviderTranscriptHudSnapshot {
 }
 
 interface TranscriptState {
+  codex?: boolean
+  effort?: string
+  contextPercent?: number
+  contextWindowSize?: number
   offset: number
   remainder: string
   fileMtimeMs: number
@@ -130,6 +138,7 @@ function ingestLine(state: TranscriptState, line: string): void {
   } catch {
     return
   }
+  if (ingestCodexLine(state, row)) return
   if (row.type === 'queue-operation') return
   const timestamp = timestampMs(row.timestamp)
   if (timestamp !== undefined) state.startedAt = Math.min(state.startedAt ?? timestamp, timestamp)
@@ -160,6 +169,56 @@ function ingestLine(state: TranscriptState, line: string): void {
     if (item.type === 'tool_use') ingestToolUse(state, item, timestamp)
     if (item.type === 'tool_result') ingestToolResult(state, item, row, timestamp)
   }
+}
+
+// Codex rollout records share the incremental reader, but never pass through
+// Claude message/title inference. Only observed structured command IDs count.
+function ingestCodexLine(state: TranscriptState, row: Record<string, unknown>): boolean {
+  if (!['session_meta', 'turn_context', 'event_msg', 'response_item', 'compacted'].includes(String(row.type))) return false
+  state.codex = true
+  const payload = isRecord(row.payload) ? row.payload : {}
+  if (row.type === 'session_meta') {
+    const timestamp = timestampMs(payload.timestamp) ?? timestampMs(row.timestamp)
+    if (timestamp !== undefined) state.startedAt = timestamp
+  }
+  if (row.type === 'turn_context') {
+    const model = text(payload.model)
+    if (model) state.model = model
+    const collaboration = isRecord(payload.collaboration_mode) ? payload.collaboration_mode : {}
+    const settings = isRecord(collaboration.settings) ? collaboration.settings : {}
+    const effort = text(payload.effort) ?? text(settings.reasoning_effort)
+    if (effort) state.effort = effort
+    else delete state.effort
+  }
+  if (row.type === 'compacted' || (row.type === 'event_msg' && payload.type === 'context_compacted')) {
+    delete state.contextPercent
+    delete state.contextWindowSize
+  }
+  if (row.type === 'event_msg' && payload.type === 'token_count') {
+    delete state.contextPercent
+    delete state.contextWindowSize
+    const info = isRecord(payload.info) ? payload.info : {}
+    const usage = isRecord(info.last_token_usage) ? info.last_token_usage : {}
+    const used = usage.total_tokens
+    const size = info.model_context_window
+    if (typeof used === 'number' && Number.isFinite(used) && used >= 0 &&
+        typeof size === 'number' && Number.isFinite(size) && size > 0) {
+      state.contextPercent = Math.round(100 * used / size)
+      state.contextWindowSize = size
+    }
+  }
+  const item = isRecord(payload.item) ? payload.item : undefined
+  if (row.type === 'event_msg' && payload.type === 'item_completed' && item?.type === 'CommandExecution') {
+    const id = text(item.id)
+    if (id && !state.completedTools.has(id) && ['completed', 'failed'].includes(String(item.status))) {
+      state.completedTools.add(id)
+      state.completedToolCounts.set('Bash', (state.completedToolCounts.get('Bash') ?? 0) + 1)
+      const command = Array.isArray(item.command) ? item.command.filter(v => typeof v === 'string').join(' ') : text(item.command)
+      state.lastTool = { name: 'Bash', ...(command ? { target: command.slice(0, 120) } : {}),
+        status: item.status === 'failed' || (typeof item.exit_code === 'number' && item.exit_code !== 0) ? 'error' : 'completed' }
+    }
+  }
+  return true
 }
 
 function ingestToolUse(state: TranscriptState, item: Record<string, unknown>, timestamp?: number): void {
@@ -218,6 +277,12 @@ function snapshot(state: TranscriptState, now: number): ProviderTranscriptHudSna
   }))
   const sessionName = state.customTitle ?? state.autoTitle ?? state.slug ?? state.firstPrompt
   return {
+    ...(state.codex ? {
+      ...(state.effort ? { effort: state.effort } : {}),
+      ...(state.contextPercent === undefined ? {} : { contextPercent: state.contextPercent }),
+      ...(state.contextWindowSize === undefined ? {} : { contextWindowSize: state.contextWindowSize }),
+      completedToolCalls: [...state.completedTools].map(id => ({ id, name: 'Bash' }))
+    } : {}),
     ...(sessionName ? { sessionName } : {}),
     ...(state.startedAt === undefined ? {} : { startedAt: state.startedAt }),
     ...(state.permissionMode ? { permissionMode: state.permissionMode } : {}),

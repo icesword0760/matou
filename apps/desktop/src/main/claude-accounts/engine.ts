@@ -40,10 +40,10 @@ export class ClaudeSwapEngine implements AccountEngine {
     })
   }
   private environment: Promise<NodeJS.ProcessEnv> | undefined
-  constructor(private readonly launch: EngineLaunch, private readonly baseEnv = process.env) {}
-  private env() {
+  constructor(private readonly launch: EngineLaunch, private readonly baseEnv: NodeJS.ProcessEnv | (() => NodeJS.ProcessEnv) = process.env) {}
+  private env(baseEnv: NodeJS.ProcessEnv) {
     this.environment ??= (async () => {
-      const env: NodeJS.ProcessEnv = { ...this.baseEnv, PYTHONNOUSERSITE: '1', PYTHONUNBUFFERED: '1' }
+      const env: NodeJS.ProcessEnv = { ...baseEnv, PYTHONNOUSERSITE: '1', PYTHONUNBUFFERED: '1' }
       delete env.PYTHONPATH; delete env.PYTHONHOME
       if (process.platform !== 'win32') {
         try {
@@ -58,7 +58,12 @@ export class ClaudeSwapEngine implements AccountEngine {
   }
   async run(input: Record<string, unknown>, signal?: AbortSignal): Promise<EngineState> {
     try { await access(this.launch.executable) } catch { throw new AccountFault('engine-missing') }
-    const env = await this.env()
+    const baseEnv = typeof this.baseEnv === 'function' ? this.baseEnv() : this.baseEnv
+    const env = { ...await this.env(baseEnv) }
+    for (const key of ['MATOU_SAFE_BROWSER_BIN', 'MATOU_SAFE_BROWSER_TZ', 'MATOU_SAFE_BROWSER_SEED']) {
+      delete env[key]
+      if (baseEnv[key] !== undefined) env[key] = baseEnv[key]
+    }
     if (signal?.aborted) throw new AccountFault('login-failed')
     return new Promise((resolve, reject) => {
       const child = spawn(this.launch.executable, [...this.launch.args, this.launch.stateRoot], { env, stdio: ['pipe', 'pipe', 'pipe'] })

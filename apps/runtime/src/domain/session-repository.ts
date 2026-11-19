@@ -12,7 +12,8 @@ import {
   type SessionRunProfile,
   type SessionRunStatus,
   type SessionStatus,
-  type SessionTitleSource
+  type SessionTitleSource,
+  type SessionWorkStatus
 } from '@matou/domain'
 
 const AGENT_SHORT_NAMES = listAgentManifests().map((manifest) => manifest.shortName)
@@ -865,6 +866,14 @@ export class SessionRepository {
     return row ? mapSession(row) : undefined
   }
 
+  getSessionModeState(id: string): { kind: SessionKind; workStatus: SessionWorkStatus } | undefined {
+    const row = this.#database.get<{ kind: SessionKind; work_status: SessionWorkStatus }>(
+      'SELECT kind, work_status FROM sessions WHERE id = ? AND archived_at IS NULL',
+      id
+    )
+    return row ? { kind: row.kind, workStatus: row.work_status } : undefined
+  }
+
 
   listSessions(): Session[] {
     return this.#database.all<SessionRow>(
@@ -902,6 +911,13 @@ export class SessionRepository {
     sessionId: string,
     provider: ProviderBinding['provider']
   ): ProviderBinding | undefined {
+    // DSH can switch its foreground to a new, not-yet-persisted conversation.
+    // An older saved conversation must never stand in for that current identity.
+    if (provider === 'dsh') {
+      const latest = this.getProviderSettingsBinding(sessionId, provider)
+      return latest && (latest.resumeState === 'available' || latest.resumeState === 'resumed') &&
+        latest.validatedAt !== undefined && latest.invalidatedAt === undefined ? latest : undefined
+    }
     const row = this.#database.get<BindingRow>(
       `SELECT * FROM provider_bindings
        WHERE session_id = ? AND provider = ?

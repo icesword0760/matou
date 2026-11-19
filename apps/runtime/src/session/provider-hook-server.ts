@@ -5,7 +5,7 @@ import type { AgentProfileId, SessionWorkStatus } from '@matou/domain'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 
 import { runtimeMessages } from '../i18n/messages'
 import {
@@ -18,8 +18,12 @@ import {
   defaultAntigravityRoot,
   latestAntigravityAutoTitle
 } from './antigravity-session-catalog'
-import { latestClaudeAutoTitle } from './claude-session-catalog'
+import { CodexSessionCatalog, isCodexSessionId } from './codex-session-catalog'
+import { latestCodexAutoTitle } from './codex-session-title'
+import { latestClaudeAutoTitle, readClaudeFallbackTitle } from './claude-session-catalog'
 import { toProviderNotificationEvent, type ProviderNotificationEvent } from './provider-notification-event'
+
+import { DshProviderEvents, parseDshObservation } from './dsh-provider-events'
 
 const MAX_HOOK_BYTES = 1024 * 1024
 
@@ -36,6 +40,7 @@ interface HookRegistrationRecord {
   identityRejected?: boolean
   inheritedConversation: boolean
   forkAuthority?: ProviderIdentityForkAuthority
+  discoveredForkAuthority?: ProviderIdentityForkAuthority
   forkSourceProviderSessionId?: string
   acceptIdentity: boolean
   acceptSideEffects: boolean
@@ -44,15 +49,27 @@ interface HookRegistrationRecord {
   systemMessagePath?: string
   mtExecutablePath?: string
   lastAgentState?: string
+  dshEvents?: DshProviderEvents
+  dshPersisted?: boolean
   errorLatched?: boolean
+  codexErrorWatch?: {
+    path: string
+    turnId: string
+    cwd?: string
+    notified: boolean
+    watcher: FSWatcher
+    debounce?: ReturnType<typeof setTimeout>
+  }
   retirementTimer?: ReturnType<typeof setTimeout>
   observedTitle?: string
+  observedTitleKind?: 'ai' | 'fallback'
   titleWatch?: {
     providerSessionId: string
     transcriptPath: string
     watchers?: FSWatcher[]
     timeout: ReturnType<typeof setTimeout>
     debounce?: ReturnType<typeof setTimeout>
+    allowFallbackOnTimeout?: boolean
   }
 }
 
@@ -65,6 +82,7 @@ export interface ProviderHookNotification {
 }
 
 export interface ProviderIdentityMismatch {
+  forkAuthority?: ProviderIdentityForkAuthority
   runId: string
   sessionId: string
   provider: AgentProfileId
@@ -85,6 +103,7 @@ export interface AgentTeamObservation {
 
 export interface ProviderHookServerOptions {
   antigravitySettingsPath?: string
+  codexRoot?: string
   antigravityRoot?: string
   controlAssetRoot?: string
   currentRunId?: (sessionId: string) => string | undefined
@@ -109,6 +128,7 @@ export interface ProviderHookServerOptions {
     providerSessionId: string
     eventName: string
     forkAuthority?: ProviderIdentityForkAuthority
+    resumable?: boolean
   }) => void
   onTitleObserved?: (event: {
     runId: string
@@ -125,6 +145,7 @@ export interface ProviderHookServerOptions {
     provider: AgentProfileId
     parentProviderSessionId: string
   }) => void
+  titleWatchWindowMs?: number
 }
 
 export interface ProviderHookRegistration {
@@ -132,13 +153,14 @@ export interface ProviderHookRegistration {
   codexHooksConfig?: string
   hookUrl: string
   hookToken: string
+  discoverCodexFork?(input: { cwd: string; startedAt: number; isCurrent(): boolean }): Promise<boolean>
   systemMessagePath?: string
   retire(graceMs?: number, options?: { suppressSideEffects?: boolean }): void
   dispose(): Promise<void>
 }
 
 const DEFAULT_RETIREMENT_GRACE_MS = 2_000
-const TITLE_WATCH_WINDOW_MS = 10_000
+const TITLE_WATCH_WINDOW_MS = 30_000
 const TITLE_WATCH_DEBOUNCE_MS = 25
 const ANTIGRAVITY_TITLE_DEBOUNCE_MS = 40
 
@@ -146,8 +168,10 @@ export class ProviderHookServer {
   readonly #dataRoot: string
   readonly #sessions: SessionRepository
   readonly #antigravitySettingsPath: string
+  readonly #codexRoot: string
   readonly #antigravityRoot: string
   readonly #defaultMtExecutablePath: string | undefined
+  readonly #titleWatchWindowMs: number
   readonly #registrations = new Map<string, HookRegistrationRecord>()
   readonly #currentRunId: NonNullable<ProviderHookServerOptions['currentRunId']>
   readonly #onNotification: (notification: ProviderHookNotification) => void
@@ -162,6 +186,7 @@ export class ProviderHookServer {
   #port: number | undefined
 
   constructor(dataRoot: string, sessions: SessionRepository, options: ProviderHookServerOptions = {}) {
+    this.#codexRoot = options.codexRoot ?? (process.env.CODEX_HOME || join(homedir(), '.codex'))
     this.#dataRoot = dataRoot
     this.#sessions = sessions
     this.#antigravitySettingsPath = options.antigravitySettingsPath ??
@@ -171,6 +196,7 @@ export class ProviderHookServer {
     this.#defaultMtExecutablePath = options.controlAssetRoot
       ? join(options.controlAssetRoot, 'bin', 'mt')
       : undefined
+    this.#titleWatchWindowMs = options.titleWatchWindowMs ?? TITLE_WATCH_WINDOW_MS
     this.#currentRunId = options.currentRunId ?? (() => undefined)
     this.#onNotification = options.onNotification ?? (() => {})
     this.#onWorkStatus = options.onWorkStatus ?? (() => {})
@@ -207,6 +233,7 @@ export class ProviderHookServer {
     for (const record of records) {
       clearTimeout(record.retirementTimer)
       this.#stopTitleWatch(record)
+      this.#stopCodexErrorWatch(record)
     }
     await Promise.all(records.flatMap(({ settingsPath, statusScriptPath, systemMessagePath }) => [
       rm(settingsPath, { force: true }),
@@ -260,6 +287,7 @@ export class ProviderHookServer {
     model?: string
     expectedProviderSessionId?: string
     inheritedConversation?: boolean
+    forkSourceProviderSessionId?: string
     forkAuthority?: ProviderIdentityForkAuthority
   }): Promise<ProviderHookRegistration> {
     return this.#registerProviderSession('codex', input)
@@ -308,7 +336,7 @@ export class ProviderHookServer {
     const directory = join(this.#dataRoot, 'provider-hooks')
     await mkdir(directory, { recursive: true, mode: 0o700 })
     await chmod(directory, 0o700)
-    const settingsPath = join(directory, `${token}.${provider === 'codex' ? 'hooks' : 'settings'}.json`)
+    const settingsPath = join(directory, provider === 'dsh' ? `${token}.patch.yml` : `${token}.${provider === 'codex' ? 'hooks' : 'settings'}.json`)
     const statusScriptPath = join(directory, `${token}.statusline.sh`)
     const systemMessagePath = provider === 'antigravity' && input.systemMessageMarkdown?.trim()
       ? join(directory, `${token}.system-message.json`)
@@ -320,8 +348,10 @@ export class ProviderHookServer {
     const scriptContent = provider === 'antigravity'
       ? antigravityStatusLineScript(`${hookUrl}?kind=statusline`, userAntigravityStatusCommand)
       : statusLineScript(hookUrl)
-    await writeFile(statusScriptPath, scriptContent, { encoding: 'utf8', mode: 0o700 })
-    await chmod(statusScriptPath, 0o700)
+    if (provider !== 'dsh') {
+      await writeFile(statusScriptPath, scriptContent, { encoding: 'utf8', mode: 0o700 })
+      await chmod(statusScriptPath, 0o700)
+    }
     if (systemMessagePath && input.systemMessageMarkdown?.trim()) {
       const systemMessagePayload = JSON.stringify({
         injectSteps: [{ systemMessage: { systemMessage: input.systemMessageMarkdown.trim() } }]
@@ -334,7 +364,7 @@ export class ProviderHookServer {
       : provider === 'antigravity'
         ? antigravityHookSettings(statusScriptPath)
         : codexHookSettings(statusScriptPath)
-    await writeFile(temporaryPath, JSON.stringify(settings, null, 2), {
+    await writeFile(temporaryPath, provider === 'dsh' ? '' : JSON.stringify(settings, null, 2), {
       encoding: 'utf8', mode: 0o600
     })
     await rename(temporaryPath, settingsPath)
@@ -359,6 +389,7 @@ export class ProviderHookServer {
       ...(input.forkSourceProviderSessionId?.trim()
         ? { forkSourceProviderSessionId: input.forkSourceProviderSessionId.trim() }
         : {}),
+      ...(provider === 'dsh' ? { dshEvents: new DshProviderEvents() } : {}),
       acceptIdentity: true,
       acceptSideEffects: true,
       settingsPath,
@@ -367,11 +398,14 @@ export class ProviderHookServer {
       ...(resolvedMtExecutablePath === undefined ? {} : { mtExecutablePath: resolvedMtExecutablePath })
     }
     this.#registrations.set(token, record)
+    const codexForkCatalog = provider === 'codex' && input.forkAuthority && input.forkSourceProviderSessionId
+      ? new CodexSessionCatalog(this.#codexRoot) : undefined
     let disposePromise: Promise<void> | undefined
     const dispose = (): Promise<void> => {
       disposePromise ??= (async () => {
         clearTimeout(record.retirementTimer)
         this.#stopTitleWatch(record)
+        this.#stopCodexErrorWatch(record)
         this.#registrations.delete(token)
         await Promise.all([
           rm(settingsPath, { force: true }),
@@ -386,9 +420,50 @@ export class ProviderHookServer {
       ...(provider === 'codex' ? { codexHooksConfig: codexInlineHookConfig(statusScriptPath) } : {}),
       hookUrl,
       hookToken: token,
+      ...(provider === 'codex' && input.forkAuthority && input.forkSourceProviderSessionId ? {
+        discoverCodexFork: async (discovery: { cwd: string; startedAt: number; isCurrent(): boolean }): Promise<boolean> => {
+          if (!record.acceptIdentity || record.identityRejected || record.confirmedProviderSessionId || record.discoveredForkAuthority) return false
+          const candidates = await codexForkCatalog!.forkCandidates({
+            cwd: discovery.cwd, startedAt: discovery.startedAt,
+            parentProviderSessionId: input.forkSourceProviderSessionId!
+          })
+          // A hook or process exit may have won while files were being read.
+          if (candidates.length !== 1 || !discovery.isCurrent() || !this.#acceptsSideEffects(record) ||
+              !record.acceptIdentity || record.identityRejected || record.confirmedProviderSessionId || record.discoveredForkAuthority) return false
+          const candidate = candidates[0]!
+          const authority = record.forkAuthority!
+          const now = Date.now()
+          try {
+            this.#sessions.recordResumableProviderIdentity({
+              commandId: `codex-fork-rollout-${record.runId}-${randomUUID()}`,
+              commandType: 'provider-hook.identity', requestHash: `${record.runId}:${candidate.providerSessionId}:${now}`
+            }, {
+              id: `provider-binding-${randomUUID()}`, sessionId: record.sessionId,
+              provider: 'codex', providerSessionId: candidate.providerSessionId, now, forkAuthority: authority,
+              metadata: { cwd: discovery.cwd, inheritedConversation: true, canFork: true,
+                codexForkAwaitingHook: true, lastHookEvent: 'CodexForkRollout',
+                ...(record.providerConfigId === undefined ? {} : { providerConfigId: record.providerConfigId }),
+                ...(record.model === undefined ? {} : { model: record.model }),
+                ...(record.permissionMode === undefined ? {} : { permissionMode: record.permissionMode }) }
+            })
+          } catch (error) {
+            if (!(error instanceof StaleForkProviderIdentityError)) throw error
+            return false
+          }
+          record.expectedProviderSessionId = candidate.providerSessionId
+          record.discoveredForkAuthority = authority
+          delete record.forkAuthority
+          this.#onIdentityRecorded({ sessionId: record.sessionId, runId: record.runId, provider: 'codex',
+            providerSessionId: candidate.providerSessionId, eventName: 'CodexForkRollout', forkAuthority: authority })
+          return true
+        }
+      } : {}),
       ...(systemMessagePath === undefined ? {} : { systemMessagePath }),
       retire: (graceMs = DEFAULT_RETIREMENT_GRACE_MS, options = {}) => {
-        if (options.suppressSideEffects) record.acceptSideEffects = false
+        if (options.suppressSideEffects) {
+          record.acceptSideEffects = false
+          this.#stopCodexErrorWatch(record)
+        }
         if (disposePromise || record.retirementTimer) return
         // Keep the endpoint alive briefly for the final HUD/notification hooks, while
         // preventing a process that has already returned to Shell from resurrecting
@@ -432,7 +507,25 @@ export class ProviderHookServer {
         replyNoIntervention()
         return
       }
+      if (registration.provider === 'dsh') {
+        this.#handleDsh(registration, payload)
+        replyNoIntervention()
+        return
+      }
       const providerSessionId = providerSessionIdentity(payload, registration.provider)
+      if (registration.provider === 'codex' && (
+        // Codex can reuse launch hooks for a separate, non-transcript run.
+        // It must not claim the card before the interactive conversation does.
+        (payload.transcript_path === null && !providerTranscriptPath(payload, 'codex')) ||
+        // Once this run has claimed its conversation, unrelated conversations
+        // sharing its hook config cannot overwrite any of its visible state.
+        // A Fork's first new identity is still accepted before confirmation.
+        (registration.confirmedProviderSessionId !== undefined &&
+          providerSessionId !== registration.confirmedProviderSessionId)
+      )) {
+        replyNoIntervention()
+        return
+      }
       const eventName = nonEmptyText(payload.hook_event_name) ??
         nonEmptyText(payload.hookEventName) ??
         'unknown'
@@ -447,6 +540,21 @@ export class ProviderHookServer {
       const confirmsConversation = eventName !== 'SessionEnd' && (
         eventName !== 'unknown' || registration.acceptStatuslineIdentity
       )
+      if (registration.provider === 'codex' && registration.forkSourceProviderSessionId &&
+          providerSessionId && confirmsConversation && registration.acceptIdentity &&
+          (providerSessionId === registration.forkSourceProviderSessionId || !isCodexSessionId(providerSessionId))) {
+        registration.acceptIdentity = false
+        registration.identityRejected = true
+        this.#onIdentityMismatch({
+          runId: registration.runId, sessionId: registration.sessionId, provider: registration.provider,
+          expectedProviderSessionId: registration.expectedProviderSessionId ?? registration.forkSourceProviderSessionId,
+          actualProviderSessionId: providerSessionId, eventName,
+          ...((registration.forkAuthority ?? registration.discoveredForkAuthority)
+            ? { forkAuthority: (registration.forkAuthority ?? registration.discoveredForkAuthority)! } : {})
+        })
+        replyNoIntervention()
+        return
+      }
       if (registration.forkSourceProviderSessionId !== undefined) {
         if (!registration.acceptIdentity || !providerSessionId) {
           replyNoIntervention()
@@ -496,7 +604,8 @@ export class ProviderHookServer {
             provider: registration.provider,
             expectedProviderSessionId: registration.expectedProviderSessionId,
             actualProviderSessionId: providerSessionId,
-            eventName
+            eventName,
+            ...(registration.discoveredForkAuthority ? { forkAuthority: registration.discoveredForkAuthority } : {})
           })
           replyNoIntervention()
           return
@@ -525,6 +634,9 @@ export class ProviderHookServer {
         const now = Date.now()
         const forkAuthority = registration.forkAuthority
         const metadata = {
+          ...(registration.provider === 'codex' && (registration.discoveredForkAuthority ||
+            (currentBinding?.metadata as Record<string, unknown> | undefined)?.codexForkAwaitingHook === true)
+            ? { codexForkAwaitingHook: false } : {}),
           ...(registration.providerConfigId === undefined
             ? {} : { providerConfigId: registration.providerConfigId }),
           ...(model === undefined ? {} : { model }),
@@ -533,10 +645,20 @@ export class ProviderHookServer {
           ...(registration.inheritedConversation ? { inheritedConversation: true, canFork: true } : {})
         }
         const previousMetadata = currentBinding?.metadata as Record<string, unknown> | undefined
-        // Statusline metrics refresh continuously, even for idle conversations.
-        // Confirm each new run once, then persist only identity/settings changes;
-        // HUD updates below still receive every payload and real hooks still run.
-        const needsIdentityUpdate = eventName !== 'unknown' ||
+        const currentModeState = this.#sessions.getSessionModeState?.(registration.sessionId)
+        const nonTransitionToolHook =
+          eventName === 'PostToolUse' ||
+          eventName === 'PostToolUseFailure' ||
+          (eventName === 'PreToolUse' && currentModeState?.workStatus === 'running')
+        const lifecycleRequiresUpdate = eventName !== 'unknown' && (
+          !nonTransitionToolHook ||
+          (currentModeState !== undefined && currentModeState.kind !== registration.provider)
+        )
+        // Statusline metrics and routine running tool hooks refresh continuously.
+        // Confirm each new run once, then persist only real lifecycle transitions
+        // or identity/settings changes; HUD and notification handlers still run below.
+        const needsIdentityUpdate = lifecycleRequiresUpdate ||
+          forkAuthority !== undefined ||
           registration.confirmedProviderSessionId !== providerSessionId || !isKnownIdentity ||
           currentBinding?.resumeState !== 'available' ||
           (currentBinding.restoreState !== undefined && currentBinding.restoreState !== 'none') ||
@@ -565,10 +687,12 @@ export class ProviderHookServer {
             // requested conversation is confirmed, later intentional conversation
             // changes from this same provider process follow the ordinary hook path.
             delete registration.expectedProviderSessionId
+            delete registration.discoveredForkAuthority
             // The first accepted provider identity atomically completes the
             // durable Fork. Later lifecycle hooks belong to the now ordinary
             // live Session and must not reuse the expired launch lease.
             if (forkAuthority !== undefined) delete registration.forkAuthority
+            if (registration.provider === 'codex') delete registration.forkSourceProviderSessionId
             this.#onIdentityRecorded({
               runId: registration.runId,
               sessionId: registration.sessionId,
@@ -592,10 +716,6 @@ export class ProviderHookServer {
           }
         }
       }
-      if (registration.provider === 'codex') {
-        replyNoIntervention()
-        return
-      }
       if (!this.#acceptsSideEffects(registration)) {
         this.#stopTitleWatch(registration)
         replyNoIntervention()
@@ -614,8 +734,17 @@ export class ProviderHookServer {
           const titleObserved = await this.#observeTitle(
             registration, providerSessionId, transcriptPath
           ).catch(() => false)
-          if (eventName === 'Stop' && !titleObserved) {
-            await this.#startTitleWatch(registration, providerSessionId, transcriptPath)
+          if (!titleObserved) {
+            if (eventName === 'Stop' || eventName === 'UserPromptSubmit') {
+              await this.#startTitleWatch(registration, providerSessionId, transcriptPath, {
+                allowFallbackOnTimeout: eventName === 'Stop'
+              })
+            } else if (eventName === 'SessionEnd') {
+              await this.#observeClaudeFallbackTitle(
+                registration, providerSessionId, transcriptPath
+              ).catch(() => false)
+              this.#stopTitleWatch(registration)
+            }
           }
         }
         const observations = await readAgentTeamObservations(transcriptPath, {
@@ -628,6 +757,22 @@ export class ProviderHookServer {
           return
         }
         if (observations.length > 0) await this.#onTeamObservations(observations)
+      }
+      if (registration.provider === 'codex' && transcriptPath) {
+        if (eventName === 'UserPromptSubmit' && nonEmptyText(payload.turn_id)) {
+          registration.errorLatched = false
+          await this.#startCodexErrorWatch(registration, transcriptPath, payload)
+        }
+        if (eventName === 'Stop' || eventName === 'SessionEnd') {
+          await this.#observeCodexError(registration).catch(() => {})
+          if (eventName === 'SessionEnd') this.#stopCodexErrorWatch(registration)
+        }
+      }
+      if (registration.provider === 'codex' && providerSessionId) {
+        const indexPath = join(this.#codexRoot, 'session_index.jsonl')
+        await this.#observeTitle(registration, providerSessionId, indexPath).catch(() => false)
+        if (eventName === 'SessionEnd') this.#stopTitleWatch(registration)
+        else await this.#startTitleWatch(registration, providerSessionId, indexPath)
       }
       if (registration.provider === 'antigravity' && !isStatusline && eventName === 'Stop') {
         const antigravitySessionId = providerSessionId ?? registration.confirmedProviderSessionId
@@ -653,7 +798,7 @@ export class ProviderHookServer {
         registration.provider,
         { ...(previousAgentState === undefined ? {} : { previousAgentState }) }
       )
-      if (notificationEvent) {
+      if (notificationEvent && !(registration.provider === 'codex' && eventName === 'Stop' && registration.errorLatched)) {
         this.#onNotification({
           runId: registration.runId,
           sessionId: registration.sessionId,
@@ -668,6 +813,17 @@ export class ProviderHookServer {
           provider: registration.provider,
           workStatus: antigravityWorkStatus
         })
+      }
+      if (registration.provider === 'codex') {
+        const workStatus = eventName === 'Stop' && registration.errorLatched ? 'error' : codexHookWorkStatus(eventName)
+        if (workStatus) {
+          this.#onWorkStatus({
+            runId: registration.runId,
+            sessionId: registration.sessionId,
+            provider: registration.provider,
+            workStatus
+          })
+        }
       }
       if (isPreToolUseRequest) {
         if (preToolDecision) sendJson(response, 200, preToolDecision)
@@ -689,15 +845,32 @@ export class ProviderHookServer {
       this.#stopTitleWatch(registration)
       return false
     }
-    const transcript = await readTranscriptTail(transcriptPath).catch(() => '')
+    const title = registration.provider === 'codex'
+      ? await latestCodexAutoTitle(transcriptPath, providerSessionId)
+      : latestClaudeAutoTitle(await readTranscriptTail(transcriptPath).catch(() => ''), providerSessionId)
     if (!this.#acceptsSideEffects(registration)) {
       this.#stopTitleWatch(registration)
       return false
     }
-    const title = latestClaudeAutoTitle(transcript, providerSessionId)
     if (!title) return false
-    if (registration.observedTitle === title) {
+    if (registration.provider !== 'codex') {
+      if (registration.observedTitle === title && registration.observedTitleKind === 'ai') {
+        this.#stopTitleWatch(registration)
+        return true
+      }
+      await this.#onTitleObserved({
+        runId: registration.runId,
+        sessionId: registration.sessionId,
+        provider: registration.provider,
+        providerSessionId,
+        title
+      })
+      registration.observedTitle = title
+      registration.observedTitleKind = 'ai'
       this.#stopTitleWatch(registration)
+      return true
+    }
+    if (registration.observedTitle === title) {
       return true
     }
     await this.#onTitleObserved({
@@ -708,26 +881,85 @@ export class ProviderHookServer {
       title
     })
     registration.observedTitle = title
-    this.#stopTitleWatch(registration)
     return true
+  }
+
+  async #observeClaudeFallbackTitle(
+    registration: HookRegistrationRecord,
+    providerSessionId: string,
+    transcriptPath: string
+  ): Promise<boolean> {
+    if (registration.provider !== 'claude-code' || registration.observedTitle) return false
+    if (!this.#acceptsSideEffects(registration)) return false
+    const title = await readClaudeFallbackTitle(transcriptPath, providerSessionId).catch(() => undefined)
+    if (!title || registration.observedTitle || !this.#acceptsSideEffects(registration)) return false
+    // Wait a final check in case ai-title arrived concurrently on the transcript tail.
+    const aiTitle = latestClaudeAutoTitle(
+      await readTranscriptTail(transcriptPath).catch(() => ''),
+      providerSessionId
+    )
+    if (aiTitle) {
+      return this.#observeTitle(registration, providerSessionId, transcriptPath)
+    }
+    await this.#onTitleObserved({
+      runId: registration.runId,
+      sessionId: registration.sessionId,
+      provider: registration.provider,
+      providerSessionId,
+      title
+    })
+    registration.observedTitle = title
+    registration.observedTitleKind = 'fallback'
+    return true
+  }
+
+  #scheduleTitleWatchTimeout(
+    registration: HookRegistrationRecord,
+    providerSessionId: string,
+    transcriptPath: string,
+    allowFallbackOnTimeout: boolean
+  ): ReturnType<typeof setTimeout> {
+    const timeout = setTimeout(() => {
+      const active = registration.titleWatch
+      const shouldFallback = allowFallbackOnTimeout && registration.provider === 'claude-code' && !registration.observedTitle
+      this.#stopTitleWatch(registration)
+      if (active && shouldFallback) {
+        void this.#observeClaudeFallbackTitle(registration, providerSessionId, transcriptPath).catch(() => {})
+      }
+    }, this.#titleWatchWindowMs)
+    timeout.unref?.()
+    return timeout
   }
 
   async #startTitleWatch(
     registration: HookRegistrationRecord,
     providerSessionId: string,
-    transcriptPath: string
+    transcriptPath: string,
+    options: { allowFallbackOnTimeout?: boolean } = {}
   ): Promise<void> {
     if (!this.#acceptsSideEffects(registration)) {
       this.#stopTitleWatch(registration)
       return
     }
+    const allowFallbackOnTimeout = options.allowFallbackOnTimeout ?? false
     const current = registration.titleWatch
-    if (current?.providerSessionId === providerSessionId && current.transcriptPath === transcriptPath) return
+    if (current?.providerSessionId === providerSessionId && current.transcriptPath === transcriptPath) {
+      if (allowFallbackOnTimeout || !current.allowFallbackOnTimeout) {
+        clearTimeout(current.timeout)
+        current.allowFallbackOnTimeout = current.allowFallbackOnTimeout || allowFallbackOnTimeout
+        current.timeout = this.#scheduleTitleWatchTimeout(
+          registration, providerSessionId, transcriptPath, current.allowFallbackOnTimeout
+        )
+      }
+      return
+    }
     this.#stopTitleWatch(registration)
 
     let watcher: FSWatcher
     try {
-      watcher = watch(transcriptPath, { persistent: false }, () => {
+      const codex = registration.provider === 'codex'
+      watcher = watch(codex ? dirname(transcriptPath) : transcriptPath, { persistent: false }, (_event, filename) => {
+        if (codex && filename && filename !== basename(transcriptPath)) return
         const active = registration.titleWatch
         if (!active || active.debounce) return
         active.debounce = setTimeout(() => {
@@ -742,9 +974,16 @@ export class ProviderHookServer {
       return
     }
     watcher.on('error', () => this.#stopTitleWatch(registration))
-    const timeout = setTimeout(() => this.#stopTitleWatch(registration), TITLE_WATCH_WINDOW_MS)
-    timeout.unref?.()
-    registration.titleWatch = { providerSessionId, transcriptPath, watchers: [watcher], timeout }
+    const timeout = this.#scheduleTitleWatchTimeout(
+      registration, providerSessionId, transcriptPath, allowFallbackOnTimeout
+    )
+    registration.titleWatch = {
+      providerSessionId,
+      transcriptPath,
+      watchers: [watcher],
+      timeout,
+      allowFallbackOnTimeout
+    }
 
     // Close the gap between the first read and installing the file watcher.
     await this.#observeTitle(registration, providerSessionId, transcriptPath).catch(() => false)
@@ -845,6 +1084,55 @@ export class ProviderHookServer {
     return true
   }
 
+  #handleDsh(registration: HookRegistrationRecord, payload: Record<string, unknown>): void {
+    const event = parseDshObservation(payload, registration.runId)
+    const events = registration.dshEvents
+    if (!event || !events || !events.accepts(event) || !registration.acceptIdentity) return
+    if (event.ready) {
+      const expected = registration.expectedProviderSessionId
+      if (expected && (event.sessionId !== expected || !event.persisted)) {
+        if (event.sessionId !== expected) {
+          registration.identityRejected = true
+          this.#onIdentityMismatch({ runId: registration.runId, sessionId: registration.sessionId,
+            provider: 'dsh', expectedProviderSessionId: expected, actualProviderSessionId: event.sessionId,
+            eventName: 'ready' })
+        }
+        return
+      }
+      if (registration.confirmedProviderSessionId !== event.sessionId || registration.dshPersisted !== event.persisted) {
+        const previous = this.#sessions.getProviderSettingsBinding(registration.sessionId, 'dsh')
+        const now = Math.max(Date.now(), (previous?.updatedAt ?? 0) + 1)
+        this.#sessions.recordResumableProviderIdentity({
+          commandId: `dsh-identity-${registration.runId}-${randomUUID()}`,
+          commandType: 'provider-hook.identity', requestHash: `${registration.runId}:${event.sessionId}:${event.sequence}`
+        }, { id: `provider-binding-${randomUUID()}`, sessionId: registration.sessionId,
+          provider: 'dsh', providerSessionId: event.sessionId,
+          provisional: !event.persisted, metadata: { ...(event.cwd ? { cwd: event.cwd } : {}), lastHookEvent: 'ready' }, now })
+        if (registration.confirmedProviderSessionId !== event.sessionId) delete registration.observedTitle
+        registration.confirmedProviderSessionId = event.sessionId
+        registration.dshPersisted = event.persisted
+        delete registration.expectedProviderSessionId
+        this.#onIdentityRecorded({ runId: registration.runId, sessionId: registration.sessionId,
+          provider: 'dsh', providerSessionId: event.sessionId, eventName: 'ready', resumable: event.persisted })
+      }
+    }
+    const result = events.ingest(event)
+    this.#onHudPayload({ runId: registration.runId, sessionId: registration.sessionId,
+      provider: 'dsh', payload: { dsh_session_id: event.sessionId,
+        ...(record(payload.hud) ? { dsh_hud: payload.hud } : {}), dsh_work_status: result.workStatus } })
+    const title = nonEmptyText(record(payload.hud)?.title)
+    if (title && title !== registration.observedTitle) {
+      registration.observedTitle = title
+      void Promise.resolve(this.#onTitleObserved({ runId: registration.runId, sessionId: registration.sessionId,
+        provider: 'dsh', providerSessionId: event.sessionId, title })).catch(() => {})
+    }
+    // Notification consumers also derive a status; authoritative structured state wins last.
+    if (result.notification) this.#onNotification({ runId: registration.runId,
+      sessionId: registration.sessionId, provider: 'dsh', event: result.notification })
+    this.#onWorkStatus({ runId: registration.runId, sessionId: registration.sessionId,
+      provider: 'dsh', workStatus: result.workStatus })
+  }
+
   #acceptsSideEffects(registration: HookRegistrationRecord): boolean {
     if (!registration.acceptSideEffects) return false
     try {
@@ -853,6 +1141,66 @@ export class ProviderHookServer {
     } catch {
       return false
     }
+  }
+
+  /** Failed turns in 0.162.1 emit task_complete.error without a Stop hook.
+   * Watch only the current submitted turn's exact rollout, never terminal text,
+   * tool exit codes or historical errors in resumed conversations. */
+  async #startCodexErrorWatch(
+    registration: HookRegistrationRecord, path: string, payload: Record<string, unknown>
+  ): Promise<void> {
+    this.#stopCodexErrorWatch(registration)
+    if (!this.#acceptsSideEffects(registration)) return
+    try {
+      const watcher = watch(path, { persistent: false }, () => {
+        const active = registration.codexErrorWatch
+        if (!active || active.debounce || active.notified) return
+        active.debounce = setTimeout(() => {
+          delete active.debounce
+          void this.#observeCodexError(registration).catch(() => {})
+        }, TITLE_WATCH_DEBOUNCE_MS)
+        active.debounce.unref?.()
+      })
+      watcher.on('error', () => this.#stopCodexErrorWatch(registration))
+      const cwd = nonEmptyText(payload.cwd)
+      registration.codexErrorWatch = { path, turnId: nonEmptyText(payload.turn_id)!,
+        ...(cwd ? { cwd } : {}), notified: false, watcher }
+      await this.#observeCodexError(registration)
+    } catch { this.#stopCodexErrorWatch(registration) }
+  }
+
+  async #observeCodexError(registration: HookRegistrationRecord): Promise<void> {
+    const active = registration.codexErrorWatch
+    if (!active || active.notified || !this.#acceptsSideEffects(registration)) return
+    const tail = await readTranscriptTail(active.path)
+    if (registration.codexErrorWatch !== active || active.notified || !this.#acceptsSideEffects(registration)) return
+    for (const line of tail.split('\n')) {
+      let row: Record<string, unknown> | undefined
+      try { row = record(JSON.parse(line)) } catch { continue }
+      const payload = record(row?.payload)
+      if (row?.type !== 'event_msg' || payload?.type !== 'task_complete' || payload.turn_id !== active.turnId) continue
+      const error = record(payload.error)
+      const message = nonEmptyText(error?.message)
+      if (!message) continue
+      // Latch before callbacks, so concurrent file notifications cannot duplicate.
+      active.notified = true
+      registration.errorLatched = true
+      this.#onNotification({ runId: registration.runId, sessionId: registration.sessionId, provider: 'codex',
+        event: { eventType: 'error', title: 'Codex', subtitle: active.cwd ? `Error in ${basename(active.cwd)}` : 'Error',
+          body: message.replace(/\s+/g, ' ').trim().slice(0, 200), sound: true, cooldownKey: 'Stop',
+          replacementKey: `codex-turn-error:${active.turnId}` } })
+      this.#onWorkStatus({ runId: registration.runId, sessionId: registration.sessionId,
+        provider: 'codex', workStatus: 'error' })
+      return
+    }
+  }
+
+  #stopCodexErrorWatch(registration: HookRegistrationRecord): void {
+    const active = registration.codexErrorWatch
+    if (!active) return
+    delete registration.codexErrorWatch
+    clearTimeout(active.debounce)
+    active.watcher.close()
   }
 
   #stopTitleWatch(registration: HookRegistrationRecord): void {
@@ -886,12 +1234,21 @@ function claudeHookSettings(hookUrl: string, statusScriptPath: string): unknown 
   }
 }
 
+const CODEX_HOOK_TIMEOUTS = [
+  ['SessionStart', 5],
+  ['UserPromptSubmit', 5],
+  ['PreToolUse', 10],
+  ['PermissionRequest', 10],
+  ['PostToolUse', 10],
+  ['Stop', 5],
+  ['SessionEnd', 3]
+] as const
+
 function codexHookSettings(statusScriptPath: string): unknown {
   return {
-    hooks: {
-      SessionStart: [{ hooks: [codexCommandHook(statusScriptPath, 5)] }],
-      SessionEnd: [{ hooks: [codexCommandHook(statusScriptPath, 3)] }]
-    }
+    hooks: Object.fromEntries(CODEX_HOOK_TIMEOUTS.map(([event, timeout]) => [
+      event, [{ hooks: [codexCommandHook(statusScriptPath, timeout)] }]
+    ]))
   }
 }
 
@@ -900,7 +1257,17 @@ function codexInlineHookConfig(statusScriptPath: string): string {
   const statusMessage = JSON.stringify(runtimeMessages().session.hookStatusMessage)
   const event = (timeout: number) =>
     `{ hooks = [{ type = "command", command = ${command}, timeout = ${timeout}, statusMessage = ${statusMessage} }] }`
-  return `{ SessionStart = [${event(5)}], SessionEnd = [${event(3)}] }`
+  return `{ ${CODEX_HOOK_TIMEOUTS.map(([name, timeout]) => `${name} = [${event(timeout)}]`).join(', ')} }`
+}
+
+function codexHookWorkStatus(eventName: string): SessionWorkStatus | undefined {
+  if (eventName === 'SessionStart' || eventName === 'Stop') return 'idle'
+  if (eventName === 'UserPromptSubmit' || eventName === 'PreToolUse' || eventName === 'PostToolUse') {
+    return 'running'
+  }
+  if (eventName === 'PermissionRequest') return 'needs-input'
+  if (eventName === 'SessionEnd') return 'exited'
+  return undefined
 }
 
 function codexCommandHook(statusScriptPath: string, timeout: number): Record<string, unknown> {

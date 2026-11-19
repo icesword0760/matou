@@ -1,0 +1,18 @@
+[
+  {
+    "sessionId": "dda7c2e5-1668-4a42-a045-5e532dec5b1d",
+    "providerSessionId": "01a1df19-58c3-7e03-ad83-ad2c8174ceec",
+    "turnId": "01a1df19-5a12-73c1-ae40-3574519ce0da",
+    "prompt": "Reply only READY_APPROVAL.",
+    "finalAnswer": "READY_APPROVAL",
+    "completedAnswer": "READY_APPROVAL"
+  },
+  {
+    "sessionId": "dda7c2e5-1668-4a42-a045-5e532dec5b1d",
+    "providerSessionId": "01a1df19-58c3-7e03-ad83-ad2c8174ceec",
+    "turnId": "01a1df19-c5a6-7e61-81a5-0b32ff4ccf7f",
+    "prompt": "Reply only AFTER_INTERRUPT_OK.",
+    "finalAnswer": "AFTER_INTERRUPT_OK",
+    "completedAnswer": "AFTER_INTERRUPT_OK"
+  }
+]

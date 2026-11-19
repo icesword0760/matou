@@ -1,0 +1,34 @@
+{
+  "repo": "/Users/icesword/Documents/AIProjects/matou/test-results/r-QL4g5e/matou_workspace",
+  "retainedForDebugging": false,
+  "stage": "真实 Electron 验收通过",
+  "windowBounds": {
+    "width": 1400,
+    "height": 850
+  },
+  "mainBranch": "main",
+  "mainStatusShort": " M checkout.txt",
+  "mainFileContent": "main with uncommitted changes\n",
+  "sessions": {
+    "firstBefore": {
+      "sessionId": "b9b89662-df34-4700-8669-2718915cc3cf",
+      "cwd": "/Users/icesword/Documents/AIProjects/matou/test-results/r-QL4g5e/matou_workspace",
+      "text": "zsh\n~/matou_workspace\nmain*\n出口正常\nClaude 账户\n⌃"
+    },
+    "peerBefore": {
+      "sessionId": "ff5e75ed-5c85-41f2-9a77-68c83c99fbe0",
+      "cwd": "/Users/icesword/Documents/AIProjects/matou/test-results/r-QL4g5e/matou_workspace",
+      "text": "zsh\n~/matou_workspace\nmain*\n出口正常\nClaude 账户\n⌃"
+    },
+    "first": {
+      "sessionId": "b9b89662-df34-4700-8669-2718915cc3cf",
+      "cwd": "/Users/icesword/Documents/AIProjects/matou/test-results/r-QL4g5e/data/worktrees/48a700b6-4efb-45d0-b80f-17b9a868b5a9/ecb08ebb-c6fb-49ec-8e8c-fb786f333163",
+      "text": "zsh\n~/ecb08ebb-c6fb-49ec-8e8c-fb786f333163\nfeature/shared-checkout\n出口正常\nClaude 账户\n⌃"
+    },
+    "peer": {
+      "sessionId": "ff5e75ed-5c85-41f2-9a77-68c83c99fbe0",
+      "cwd": "/Users/icesword/Documents/AIProjects/matou/test-results/r-QL4g5e/matou_workspace",
+      "text": "zsh\n~/matou_workspace\nmain*\n出口正常\nClaude 账户\n⌃"
+    }
+  }
+}

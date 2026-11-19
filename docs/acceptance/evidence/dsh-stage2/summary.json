@@ -1,0 +1,214 @@
+{
+  "date": "2026-11-15",
+  "launcher": "0.2.2-rc.1",
+  "tui": "0.19.0",
+  "nodeForDsh": "24.13.0",
+  "tuiResolvedAgentPackage": "0.1.5-rc.2",
+  "tuiResolvedSessionPackage": "0.1.5-rc.2",
+  "configurationAudit": {
+    "protectedFiles": 33,
+    "matchingNow": 33,
+    "rollbackPerformed": false
+  },
+  "cases": [
+    {
+      "scenario": "complete",
+      "exitCode": 0,
+      "distinctNativeIdentities": 1,
+      "identityDurability": [
+        false,
+        true
+      ],
+      "statusTransitions": [
+        "idle",
+        "running",
+        "idle"
+      ],
+      "notifications": [
+        {
+          "title": "DSH",
+          "type": "completed"
+        }
+      ],
+      "identityMismatches": 0,
+      "nativeNotificationOsc": 0,
+      "backedUpFiles": 35,
+      "changedNativeRunIndexes": [
+        "workspace.json",
+        "last-used.json"
+      ],
+      "unchangedProtectedFiles": 33,
+      "rawEvidence": ".cache/dsh-stage2/live-complete-1794754657572"
+    },
+    {
+      "scenario": "resume",
+      "exitCode": 0,
+      "distinctNativeIdentities": 1,
+      "identityDurability": [
+        true
+      ],
+      "statusTransitions": [
+        "idle"
+      ],
+      "notifications": [],
+      "identityMismatches": 0,
+      "nativeNotificationOsc": 0,
+      "backedUpFiles": 35,
+      "changedNativeRunIndexes": [],
+      "unchangedProtectedFiles": 33,
+      "rawEvidence": ".cache/dsh-stage2/live-resume-1794754106421"
+    },
+    {
+      "scenario": "switch",
+      "exitCode": 0,
+      "distinctNativeIdentities": 2,
+      "identityDurability": [
+        false,
+        false
+      ],
+      "statusTransitions": [
+        "idle"
+      ],
+      "notifications": [],
+      "identityMismatches": 0,
+      "nativeNotificationOsc": 0,
+      "backedUpFiles": 35,
+      "changedNativeRunIndexes": [
+        "workspace.json",
+        "last-used.json"
+      ],
+      "unchangedProtectedFiles": 33,
+      "rawEvidence": ".cache/dsh-stage2/live-switch-1794754045945"
+    },
+    {
+      "scenario": "dual",
+      "exitCode": 0,
+      "distinctNativeIdentities": 2,
+      "identityDurability": [
+        false,
+        false
+      ],
+      "statusTransitions": [
+        "idle"
+      ],
+      "notifications": [],
+      "identityMismatches": 0,
+      "nativeNotificationOsc": 0,
+      "backedUpFiles": 35,
+      "changedNativeRunIndexes": [
+        "workspace.json"
+      ],
+      "unchangedProtectedFiles": 33,
+      "rawEvidence": ".cache/dsh-stage2/live-dual-1794754310508"
+    },
+    {
+      "scenario": "approval",
+      "exitCode": 0,
+      "distinctNativeIdentities": 1,
+      "identityDurability": [
+        false,
+        true
+      ],
+      "statusTransitions": [
+        "idle",
+        "running",
+        "needs-input"
+      ],
+      "notifications": [
+        {
+          "title": "DSH",
+          "type": "permission"
+        }
+      ],
+      "identityMismatches": 0,
+      "nativeNotificationOsc": 0,
+      "backedUpFiles": 35,
+      "changedNativeRunIndexes": [
+        "workspace.json",
+        "last-used.json"
+      ],
+      "unchangedProtectedFiles": 33,
+      "rawEvidence": ".cache/dsh-stage2/live-approval-1794754148918"
+    },
+    {
+      "scenario": "error",
+      "exitCode": 0,
+      "distinctNativeIdentities": 1,
+      "identityDurability": [
+        false,
+        true
+      ],
+      "statusTransitions": [
+        "idle",
+        "running",
+        "error"
+      ],
+      "notifications": [
+        {
+          "title": "DSH",
+          "type": "error"
+        }
+      ],
+      "identityMismatches": 0,
+      "nativeNotificationOsc": 0,
+      "backedUpFiles": 35,
+      "changedNativeRunIndexes": [
+        "workspace.json",
+        "last-used.json"
+      ],
+      "unchangedProtectedFiles": 33,
+      "rawEvidence": ".cache/dsh-stage2/live-error-1794754240882"
+    },
+    {
+      "scenario": "background",
+      "exitCode": 0,
+      "distinctNativeIdentities": 3,
+      "identityDurability": [
+        false,
+        true,
+        false,
+        false
+      ],
+      "statusTransitions": [
+        "idle",
+        "running",
+        "idle"
+      ],
+      "notifications": [],
+      "identityMismatches": 0,
+      "nativeNotificationOsc": 0,
+      "backedUpFiles": 35,
+      "changedNativeRunIndexes": [
+        "workspace.json",
+        "last-used.json"
+      ],
+      "unchangedProtectedFiles": 33,
+      "rawEvidence": ".cache/dsh-stage2/live-background-1794754550212"
+    }
+  ],
+  "automatedValidation": {
+    "dshAndProviderSuites": {
+      "files": 8,
+      "passed": 133
+    },
+    "ptyAndRepositoryRegression": {
+      "files": 5,
+      "passed": 74
+    },
+    "domainManifest": {
+      "passed": 5
+    },
+    "runtimeIdentityRecoverySubset": {
+      "passed": 50,
+      "notSelected": 111
+    },
+    "observerForegroundBoundary": {
+      "passed": 1
+    },
+    "typecheck": "passed",
+    "runtimeTypecheckAfterFinalTest": "passed",
+    "identifiers": "passed"
+  },
+  "productUiVerified": false,
+  "packagedAppVerified": false
+}

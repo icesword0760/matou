@@ -1,0 +1,128 @@
+{
+  "uuid": "01a1df3c-c979-79a0-9604-29720adf41ce",
+  "configuredDefault": {
+    "approval_policy": "on-request",
+    "sandbox_mode": "read-only"
+  },
+  "contexts": [
+    {
+      "turn_id": "01a1df3c-cac9-7fb1-8cf9-349ad791f564",
+      "approval_policy": "on-request",
+      "sandbox_policy": {
+        "type": "read-only"
+      },
+      "permission_profile": {
+        "type": "managed",
+        "file_system": {
+          "type": "restricted",
+          "entries": [
+            {
+              "path": {
+                "type": "special",
+                "value": {
+                  "kind": "root"
+                }
+              },
+              "access": "read"
+            }
+          ]
+        },
+        "network": "restricted"
+      }
+    },
+    {
+      "turn_id": "01a1df3c-f11b-7612-a358-b93dcc99444a",
+      "approval_policy": "never",
+      "sandbox_policy": {
+        "type": "danger-full-access"
+      },
+      "permission_profile": {
+        "type": "disabled"
+      }
+    },
+    {
+      "turn_id": "01a1df3d-15b4-7702-8c7b-712b3862a025",
+      "approval_policy": "never",
+      "sandbox_policy": {
+        "type": "read-only"
+      },
+      "permission_profile": {
+        "type": "managed",
+        "file_system": {
+          "type": "restricted",
+          "entries": [
+            {
+              "path": {
+                "type": "special",
+                "value": {
+                  "kind": "root"
+                }
+              },
+              "access": "read"
+            }
+          ]
+        },
+        "network": "restricted"
+      }
+    }
+  ],
+  "processRuns": [
+    {
+      "ordinal": 1,
+      "pid": 1622,
+      "profile": "shell",
+      "status": "exited"
+    },
+    {
+      "ordinal": 2,
+      "pid": 1721,
+      "profile": "codex",
+      "status": "exited"
+    },
+    {
+      "ordinal": 3,
+      "pid": 3381,
+      "profile": "codex",
+      "status": "exited"
+    },
+    {
+      "ordinal": 4,
+      "pid": 4685,
+      "profile": "codex",
+      "status": "exited"
+    }
+  ],
+  "turns": [
+    {
+      "sessionId": "55f6db0a-a4a1-442e-9bb4-f703433d516a",
+      "providerSessionId": "01a1df3c-c979-79a0-9604-29720adf41ce",
+      "turnId": "01a1df3c-cac9-7fb1-8cf9-349ad791f564",
+      "prompt": "Remember mode codeword river-slate-842. Reply only MODES_READY.",
+      "finalAnswer": "MODES_READY",
+      "completedAnswer": "MODES_READY"
+    },
+    {
+      "sessionId": "55f6db0a-a4a1-442e-9bb4-f703433d516a",
+      "providerSessionId": "01a1df3c-c979-79a0-9604-29720adf41ce",
+      "turnId": "01a1df3c-f11b-7612-a358-b93dcc99444a",
+      "prompt": "Which mode codeword did I ask you to remember? Reply only that codeword.",
+      "finalAnswer": "river-slate-842",
+      "completedAnswer": "river-slate-842"
+    },
+    {
+      "sessionId": "55f6db0a-a4a1-442e-9bb4-f703433d516a",
+      "providerSessionId": "01a1df3c-c979-79a0-9604-29720adf41ce",
+      "turnId": "01a1df3d-15b4-7702-8c7b-712b3862a025",
+      "prompt": "Which mode codeword did I ask you to remember? Reply only that codeword.",
+      "finalAnswer": "river-slate-842",
+      "completedAnswer": "river-slate-842"
+    }
+  ],
+  "verdict": {
+    "bypass": "passed",
+    "defaultProcessAndMemory": "passed",
+    "defaultApprovalRestore": "failed: observed never instead of configured on-request"
+  },
+  "productUnchanged": true,
+  "specBasis": "docs/superpowers/specs/2026-11-15-codex-adapter-design.md lines 161-166; default emits no permission flags, resume inheritance must be verified and reported before changing behavior"
+}

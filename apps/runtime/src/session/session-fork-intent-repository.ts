@@ -372,6 +372,37 @@ export class SessionForkIntentRepository {
     return this.advanceStage({ ...input, stage: 'failed' }, transaction)
   }
 
+  /** A discovered Codex child remains revocable until its first real hook agrees. */
+  rejectDiscoveredCodexIdentity(input: {
+    operationId: string; sessionId: string; runId: string
+    lease: Pick<ForkLease, 'token' | 'fence'>; error: string; now: number
+  }, transaction?: DatabaseTransaction): FencedMutationResult {
+    return this.#mutate(transaction, tx => {
+      const binding = tx.get<{ id: string }>(
+        `SELECT binding.id FROM provider_bindings binding JOIN session_fork_intents fork
+           ON fork.session_id = binding.session_id
+         WHERE fork.operation_id = ? AND fork.session_id = ? AND fork.stage = 'succeeded'
+           AND fork.lease_token = ? AND fork.lease_fence = ? AND binding.provider = 'codex'
+           AND json_extract(binding.metadata_json, '$.codexForkAwaitingHook') = 1
+           AND json_extract(binding.metadata_json, '$.forkOperationId') = fork.operation_id
+           AND json_extract(binding.metadata_json, '$.forkRunId') = ?
+           AND json_extract(binding.metadata_json, '$.forkLeaseFence') = fork.lease_fence`,
+        input.operationId, input.sessionId, input.lease.token, input.lease.fence, input.runId
+      )
+      if (!binding) return { kind: 'stale' }
+      const error = requiredError(input.error)
+      tx.run(`UPDATE session_fork_intents SET state = 'failed', stage = 'failed',
+        error_message = ?, completed_at = ?, updated_at = ? WHERE operation_id = ?`,
+      error, input.now, input.now, input.operationId)
+      tx.run(`UPDATE provider_bindings SET resume_state = 'failed', restore_state = 'failed',
+        restore_error = ?, invalidated_at = ?, updated_at = ? WHERE id = ?`,
+      error, input.now, input.now, binding.id)
+      return { kind: 'applied', progress: progress(requireRow(tx.get<ForkIntentRow>(
+        'SELECT * FROM session_fork_intents WHERE operation_id = ?', input.operationId
+      ), 'Codex Fork')) }
+    })
+  }
+
   retry(operationId: string, now: number, transaction?: DatabaseTransaction): ForkProgress {
     return this.#mutate(transaction, (tx) => {
       const row = requireRow(tx.get<ForkIntentRow>(

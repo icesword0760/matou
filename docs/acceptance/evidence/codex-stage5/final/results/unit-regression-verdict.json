@@ -1,0 +1,26 @@
+{
+  "productCommit": "e62abdee8ff0382eaa65fee4c51adeca204cc302",
+  "runtime": {
+    "uniquePassed": 1727,
+    "skipped": 36,
+    "initialMain": {
+      "passed": 1495,
+      "failed": 62,
+      "skipped": 36
+    },
+    "separateServerPassed": 161,
+    "separateJournalPassed": 9,
+    "sixFileRecheck": {
+      "passed": 217,
+      "failed": 1
+    },
+    "finalFrameRecheckPassed": 1,
+    "testOrProductEdits": false,
+    "mainComparison": "Six affected test files match main 7315400; main was not executed"
+  },
+  "desktop": {
+    "passed": 1025,
+    "failed": 0,
+    "performancePassed": 3
+  }
+}

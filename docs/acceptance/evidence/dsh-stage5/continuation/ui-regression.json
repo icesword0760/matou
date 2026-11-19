@@ -1,0 +1,382 @@
+{
+  "recordedAt": "2026-11-15T19:02:43.277807+00:00",
+  "scope": "Formal final packaged acceptance; each complete suite started once, one worker, Playwright retries=1. Targeted checks and baseline are separate.",
+  "suites": {
+    "dsh": {
+      "status": "complete",
+      "workers": 1,
+      "configuredRetries": [
+        1
+      ],
+      "passedFirstAttempt": 6,
+      "passedAfterRetry": 1,
+      "failed": 0,
+      "skipped": 0,
+      "durationMs": 215810.331,
+      "rawReport": ".cache/dsh-continuation/dsh/report.json",
+      "tests": [
+        {
+          "title": "PRD 1–6, 8, 11: lifecycle, labels, HUD, title, notifications, static restart and latency",
+          "declaredLine": 249,
+          "result": "expected",
+          "attempts": [
+            {
+              "retry": 0,
+              "status": "passed",
+              "durationMs": 57684
+            }
+          ]
+        },
+        {
+          "title": "PRD 7, 9: native /fork produces an independent child that Matou previews, searches and loads",
+          "declaredLine": 313,
+          "result": "expected",
+          "attempts": [
+            {
+              "retry": 0,
+              "status": "passed",
+              "durationMs": 27505
+            }
+          ]
+        },
+        {
+          "title": "PRD 1, 10: mt creates a DSH card and real DSH reads its sibling under the default sandbox",
+          "declaredLine": 352,
+          "result": "expected",
+          "attempts": [
+            {
+              "retry": 0,
+              "status": "passed",
+              "durationMs": 22172
+            }
+          ]
+        },
+        {
+          "title": "PRD 2, 3: real approval request, notification and return to idle",
+          "declaredLine": 373,
+          "result": "flaky",
+          "attempts": [
+            {
+              "retry": 0,
+              "status": "failed",
+              "durationMs": 20616,
+              "failureLine": 187,
+              "failureColumn": 66,
+              "messageHeadline": "Error: expect(received).toBeLessThanOrEqual(expected)"
+            },
+            {
+              "retry": 1,
+              "status": "passed",
+              "durationMs": 33233
+            }
+          ]
+        },
+        {
+          "title": "PRD 2, 3: real native model error marks UI error and notifies once per turn",
+          "declaredLine": 406,
+          "result": "expected",
+          "attempts": [
+            {
+              "retry": 0,
+              "status": "passed",
+              "durationMs": 10868
+            }
+          ]
+        },
+        {
+          "title": "PRD 8: controlled resume failure retries the same ID and new-start creates a fresh ID",
+          "declaredLine": 450,
+          "result": "expected",
+          "attempts": [
+            {
+              "retry": 0,
+              "status": "passed",
+              "durationMs": 38555
+            }
+          ]
+        },
+        {
+          "title": "missing CLI: nonexistent command shows actionable installation feedback",
+          "declaredLine": 479,
+          "result": "expected",
+          "attempts": [
+            {
+              "retry": 0,
+              "status": "passed",
+              "durationMs": 4313
+            }
+          ]
+        }
+      ]
+    },
+    "antigravity": {
+      "status": "complete",
+      "workers": 1,
+      "configuredRetries": [
+        1
+      ],
+      "passedFirstAttempt": 4,
+      "passedAfterRetry": 0,
+      "failed": 1,
+      "skipped": 0,
+      "durationMs": 199336.03699999998,
+      "rawReport": ".cache/dsh-continuation/agy/report.json",
+      "tests": [
+        {
+          "title": "PRD #1 #3 #4 #5 #6 #11 #12: Real agy lifecycle, HUD, notifications, modes, and /model in packaged 码头.app",
+          "declaredLine": 441,
+          "result": "expected",
+          "attempts": [
+            {
+              "retry": 0,
+              "status": "passed",
+              "durationMs": 44095
+            }
+          ]
+        },
+        {
+          "title": "PRD #7 #9a + Latency (3x): Auto Title lock/restore, Restart recovery, and Running/Idle latency",
+          "declaredLine": 690,
+          "result": "expected",
+          "attempts": [
+            {
+              "retry": 0,
+              "status": "passed",
+              "durationMs": 37902
+            }
+          ]
+        },
+        {
+          "title": "PRD #2 #8 #10 + Running-Parent Fork: DAG/Badge/ParentProjection, Fork Current/Worktree/Running, SessionLoader",
+          "declaredLine": 862,
+          "result": "unexpected",
+          "attempts": [
+            {
+              "retry": 0,
+              "status": "failed",
+              "durationMs": 12788,
+              "failureLine": 876,
+              "failureColumn": 120,
+              "messageHeadline": "Error: expect(locator).toHaveAttribute(expected) failed"
+            },
+            {
+              "retry": 1,
+              "status": "failed",
+              "durationMs": 13854,
+              "failureLine": 876,
+              "failureColumn": 120,
+              "messageHeadline": "Error: expect(locator).toHaveAttribute(expected) failed"
+            }
+          ]
+        },
+        {
+          "title": "PRD #13: mt cross-card control inside real Antigravity card",
+          "declaredLine": 1051,
+          "result": "expected",
+          "attempts": [
+            {
+              "retry": 0,
+              "status": "passed",
+              "durationMs": 75162
+            }
+          ]
+        },
+        {
+          "title": "PRD #9b #14: Controlled fixtures for missing binary, unauthenticated sign-in prompt, and restore failure",
+          "declaredLine": 1110,
+          "result": "expected",
+          "attempts": [
+            {
+              "retry": 0,
+              "status": "passed",
+              "durationMs": 14571
+            }
+          ]
+        }
+      ]
+    },
+    "codex": {
+      "status": "complete",
+      "workers": 1,
+      "configuredRetries": [
+        1
+      ],
+      "passedFirstAttempt": 9,
+      "passedAfterRetry": 1,
+      "failed": 0,
+      "skipped": 0,
+      "durationMs": 703549.928,
+      "rawReport": ".cache/dsh-continuation/codex/report.json",
+      "tests": [
+        {
+          "title": "PRD 1–6, 8, 10: lifecycle, HUD, notifications, title, modes, restart and latency 3x",
+          "declaredLine": 552,
+          "result": "expected",
+          "attempts": [
+            {
+              "retry": 0,
+              "status": "passed",
+              "durationMs": 110346
+            }
+          ]
+        },
+        {
+          "title": "known issues: a real Codex model error notifies once and marks the card error; startup upgrade is disabled",
+          "declaredLine": 658,
+          "result": "expected",
+          "attempts": [
+            {
+              "retry": 0,
+              "status": "passed",
+              "durationMs": 7043
+            }
+          ]
+        },
+        {
+          "title": "known issues: history_base ancestor appears in preview and search; missing parent is labeled",
+          "declaredLine": 737,
+          "result": "expected",
+          "attempts": [
+            {
+              "retry": 0,
+              "status": "passed",
+              "durationMs": 5148
+            }
+          ]
+        },
+        {
+          "title": "closure PRD 5: Default restores user permissions after Bypass and Plan",
+          "declaredLine": 777,
+          "result": "expected",
+          "attempts": [
+            {
+              "retry": 0,
+              "status": "passed",
+              "durationMs": 85031
+            }
+          ]
+        },
+        {
+          "title": "closure PRD 8: independent restart stays starting for 10 seconds then recalls a codeword",
+          "declaredLine": 805,
+          "result": "expected",
+          "attempts": [
+            {
+              "retry": 0,
+              "status": "passed",
+              "durationMs": 44853
+            }
+          ]
+        },
+        {
+          "title": "PRD 7, 9: current/new Worktree Fork, parent-child isolation, loader search and resume",
+          "declaredLine": 847,
+          "result": "flaky",
+          "attempts": [
+            {
+              "retry": 0,
+              "status": "failed",
+              "durationMs": 241875,
+              "failureLine": 485,
+              "failureColumn": 57,
+              "messageHeadline": "Error: expect(received).toMatch(expected)"
+            },
+            {
+              "retry": 1,
+              "status": "passed",
+              "durationMs": 80667
+            }
+          ]
+        },
+        {
+          "title": "PRD 1, 11: mt creates a Codex card and real Codex reads its sibling",
+          "declaredLine": 919,
+          "result": "expected",
+          "attempts": [
+            {
+              "retry": 0,
+              "status": "passed",
+              "durationMs": 24348
+            }
+          ]
+        },
+        {
+          "title": "PRD 2, 3: real approval, waiting notification, continue and interrupted turn",
+          "declaredLine": 951,
+          "result": "expected",
+          "attempts": [
+            {
+              "retry": 0,
+              "status": "passed",
+              "durationMs": 42883
+            }
+          ]
+        },
+        {
+          "title": "PRD 2, 8: real missing local rollout, recovery failure, retry and new conversation",
+          "declaredLine": 983,
+          "result": "expected",
+          "attempts": [
+            {
+              "retry": 0,
+              "status": "passed",
+              "durationMs": 50676
+            }
+          ]
+        },
+        {
+          "title": "controlled fixtures: missing CLI and unauthenticated sign-in; no real login is revoked",
+          "declaredLine": 1034,
+          "result": "expected",
+          "attempts": [
+            {
+              "retry": 0,
+              "status": "passed",
+              "durationMs": 9971
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "comparisonToA06812f": {
+    "antigravity": {
+      "baselineFinalFailures": [
+        "876:120 selector matches history and fork buttons"
+      ],
+      "currentFailedAttempts": [
+        "876:120 attempt 0",
+        "876:120 attempt 1"
+      ],
+      "currentFinalFailures": 1,
+      "conclusion": "Exact same failed assertion and selector ambiguity; later Fork and loader checks did not execute. Prior branch 497/802/408 failures did not recur."
+    },
+    "codex": {
+      "baselineFinalFailures": [
+        "862:26 inherited source ID after new-worktree native bootstrap routing timeout"
+      ],
+      "currentFailedAttempts": [
+        "485:57 called by 912:28, final loaded-parent recall timed out; native bootstrap workspace routing discovery error"
+      ],
+      "currentFinalFailures": 0,
+      "currentPassedAfterRetry": 1,
+      "conclusion": "Failure location differs from baseline, but actual terminal records have the same native bootstrap routing error. Both child UUIDs and forked_from_id are correct in both attempts. Retry completed the whole Fork/isolation/loader flow. Native routing instability is not fixed by the DSH patch."
+    },
+    "dsh": {
+      "baseline": "not present",
+      "currentFailedAttempts": [
+        "187:66 called by 383:25 approval round 2 sampler reused prior native timestamp, producing 7240ms"
+      ],
+      "currentFinalFailures": 0,
+      "currentPassedAfterRetry": 1,
+      "conclusion": "Retry independently completed all three native approvals and recovery. Later journal audit gives actual 106ms for the failed sample, without rewriting its failure. Native journal timing race remains recorded."
+    }
+  },
+  "cleanup": {
+    "temporaryAuthCopiesRemaining": 0,
+    "ownAcceptanceProcessesRemaining": 0,
+    "ownShortLinksRemaining": 0,
+    "unrelatedOldShortLink": "left unchanged; points to old dsh-stage5 run",
+    "agentExtraDecisions": "none"
+  }
+}

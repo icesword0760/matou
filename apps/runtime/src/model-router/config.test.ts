@@ -9,6 +9,8 @@ it('keeps Antigravity connections alive with a bounded pool', () => {
   expect(config.antigravity['connection-pool']).toEqual({ enabled: true, 'idle-conn-timeout': '30s', 'max-idle-conns-per-host': 2 })
   // Credits fallback stays opt-out; pooling must not re-enable it.
   expect(config.oauth.providers.antigravity['antigravity-credits']).toBe(false)
+  expect(config.oauth.providers.antigravity['disable-cooling']).toBe(true)
+  expect(config.routing.cooldown['disable-cooling']).toBe(false)
   // Claude Code is the client, so Codex inference must not forward its UA.
   expect(config.oauth.providers.codex['header-defaults']['user-agent']).toBe(CODEX_CLIENT_USER_AGENT)
 })

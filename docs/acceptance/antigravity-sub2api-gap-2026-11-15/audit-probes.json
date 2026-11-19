@@ -1,0 +1,81 @@
+{
+  "kind": "local diagnostic probes, not live upstream validation",
+  "source_commit": "f7ae8feeb3710319f524730849fbe32fde1751e4",
+  "tool_choice": {
+    "claude-sonnet-4-5": {
+      "auto": {
+        "translated": "AUTO",
+        "final": "VALIDATED",
+        "tools_present": true
+      },
+      "none": {
+        "translated": "NONE",
+        "final": "VALIDATED",
+        "tools_present": false
+      },
+      "any": {
+        "translated": "ANY",
+        "final": "VALIDATED",
+        "tools_present": true
+      },
+      "tool": {
+        "translated": "ANY",
+        "final": "VALIDATED",
+        "allowedFunctionNames": [
+          "mcp__docs__read"
+        ],
+        "tools_present": true
+      }
+    },
+    "gemini-3.8-flash": {
+      "auto": "AUTO",
+      "none": "NONE",
+      "any": "ANY",
+      "tool": {
+        "mode": "ANY",
+        "allowedFunctionNames": [
+          "mcp__docs__read"
+        ]
+      }
+    }
+  },
+  "synthetic_cap_risk": {
+    "capabilities": {
+      "maxCompletionTokens": 16384,
+      "thinking": {
+        "Min": 1024,
+        "Max": 32768
+      }
+    },
+    "input": {
+      "max_tokens": 32768,
+      "thinking": {
+        "type": "enabled",
+        "budget_tokens": 24576
+      }
+    },
+    "final_generationConfig": {
+      "thinkingConfig": {
+        "thinkingBudget": 24576
+      },
+      "maxOutputTokens": 16384
+    },
+    "live_400_evidence": false
+  },
+  "empty_message": {
+    "input_message": {
+      "role": "user",
+      "content": ""
+    },
+    "final_contents": [
+      {
+        "role": "user",
+        "parts": [
+          {}
+        ]
+      }
+    ],
+    "live_upstream_failure_evidence": false
+  },
+  "log": "/Users/icesword/.claude/agent-foreman/runs/Matou-sub2api对照-08/logs/go-audit-probe.log"
+}
