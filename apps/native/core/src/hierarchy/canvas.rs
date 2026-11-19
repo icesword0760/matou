@@ -629,6 +629,71 @@ pub fn create_fork_child(
     Ok(commit.result)
 }
 
+pub fn retry_fork(
+    connection: &mut Connection,
+    command: &CommandMetadata,
+    window_id: &str,
+    session_id: &str,
+    now: i64,
+) -> Result<Value> {
+    let commit = execute(connection, command, now, |tx, events| {
+        let submission_key: String = tx
+            .query_row(
+                "UPDATE session_fork_intents
+                 SET state = 'pending', stage = 'queued', error_message = NULL,
+                     completed_steps = 0, started_at = NULL, completed_at = NULL,
+                     attempt = attempt + 1, attempt_count = attempt_count + 1,
+                     lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL,
+                     last_heartbeat_at = NULL, updated_at = ?
+                 WHERE session_id = ? AND operation_id = ? || session_id AND state = 'failed'
+                   AND EXISTS (SELECT 1 FROM sessions WHERE id = session_fork_intents.session_id
+                     AND archived_at IS NULL AND status NOT IN ('running', 'starting'))
+                   AND NOT EXISTS (SELECT 1 FROM session_runs
+                     WHERE session_runs.session_id = session_fork_intents.session_id
+                       AND session_runs.status IN ('starting', 'running'))
+                 RETURNING submission_key",
+                params![now, session_id, crate::sessions::NATIVE_FORK_PREFIX],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| fork_error("FORK_NOT_FAILED", "当前分支无需重试"))?;
+        tx.execute(
+            "UPDATE sessions SET status = 'starting', work_status = 'starting',
+                 updated_at = ?, version = version + 1 WHERE id = ?",
+            params![now, session_id],
+        )?;
+        register_window(tx, window_id, now)?;
+        activate_session_in_transaction(tx, window_id, session_id, now)?;
+        let created = read_created_path(tx, session_id)?;
+        let context = CreationEvents {
+            command_id: &command.command_id,
+            workspace_id: created["workspace"]["id"]
+                .as_str()
+                .context("Fork workspace")?,
+            task_id: created["task"]["id"].as_str().context("Fork task")?,
+            scene_id: created["scene"]["id"].as_str().context("Fork scene")?,
+            session_id,
+            now,
+        };
+        let graph = project_scene_graph(tx, context.scene_id, Some(window_id))?;
+        events.push(context.event(
+            "fork-retrying",
+            "session.fork-retrying",
+            "session",
+            session_id,
+            Some(session_id),
+            json!({"graph": graph}),
+        ));
+        Ok(json!({
+            "sessionId": session_id, "submissionKey": submission_key,
+            "stage": "queued", "forkState": "pending", "error": null, "replayed": false,
+        }))
+    })?;
+    let mut result = commit.result;
+    result["replayed"] = json!(commit.replayed);
+    Ok(result)
+}
+
 fn fork_error(code: &'static str, message: impl Into<String>) -> anyhow::Error {
     CanvasError {
         code,

@@ -377,17 +377,181 @@ def source_snapshot_copy(snapshot):
     return {table: [row.copy() for row in rows] for table, rows in snapshot.items()}
 
 
+def verify_retry(root, env, guard, binary, cli, config, key, proof):
+    source_id, cwd = seed_fork_canvas(root, env, guard, binary)
+    config_path = identity.config_file(root, config)
+    cli_link = root / "retry-cli"
+    cli_link.symlink_to(cli)
+    env = dict(env, MATOU_CLAUDE_COMMAND=str(cli_link))
+    frozen_error = ("FORK_NOT_FAILED", "当前分支无需重试")
+
+    def retry_result(host, card_id):
+        def observe(_, event):
+            encoded = json.dumps(event, ensure_ascii=False).encode()
+            require(key not in encoded and not identity.AUTH_HEADER.search(encoded),
+                    "Sensitive bytes appeared in runtime output")
+            result = event.get("Graph", event.get("Navigation", {}).get("graph", {})).get(
+                "forkSessionResult",
+            )
+            return result if result and result.get("sessionId") == card_id else None
+        return host.wait("RetryFork result", observe)
+
+    def check_rejected(result):
+        require((result.get("code"), result.get("error")) == frozen_error,
+                "Retry did not return the frozen rejection")
+
+    def intent(card_id):
+        with launch.database(root) as db:
+            db.row_factory = sqlite3.Row
+            row = db.execute(
+                "SELECT * FROM session_fork_intents WHERE session_id=?", (card_id,),
+            ).fetchone()
+            require(row is not None, "Fork intent was missing")
+            return dict(row)
+
+    try:
+        with launch.database(root) as db:
+            scene_id, = db.execute(
+                "SELECT scene_id FROM session_canvas_memberships WHERE session_id=?", (source_id,),
+            ).fetchone()
+        with launch.runtime(root, env, guard, binary) as host:
+            require(host.ready() == source_id, "Runtime opened a different source card")
+            source = resume.Card(host, source_id, key)
+            source.interactive()
+            resume.assert_argv(resume.running(root, source, 1), cli_link, None)
+            host.command("RetryFork", {"session_id": source_id})
+            check_rejected(retry_result(host, source_id))
+            token = secrets.token_hex(8).upper()
+            source_provider, _, source_transcript = source.ask(
+                root, f"记住代号 {token}，只回答 OK。不要调用工具。", "OK",
+            )
+            proof["source"] = {"card_id": source_id, "provider_id": source_provider, "token": token}
+            request = {"scene_id": scene_id, "source_session_id": source_id, "placement": "child",
+                       "worktree_mode": "current", "name": "重试验收分支",
+                       "submission_key": "real-fork-retry"}
+
+            # The live source keeps running. Only the isolated command path is removed.
+            cli_link.unlink()
+            accepted, _ = fork_result(host, request, key)
+            card_id = accepted.get("sessionId")
+            require(card_id and card_id != source_id and accepted["stage"] == "queued",
+                    "Initial submission did not create a fork card")
+            child = resume.Card(host, card_id, key)
+            first_failure = child.wait("initial fork failure", lambda: child.event("fork-failed"))
+            original = intent(card_id)
+            require(original["state"] == "failed"
+                    and first_failure["forkError"] == original["error_message"]
+                    and "未检测到 Claude Code" in original["error_message"]
+                    and not resume.rows(root, "session_runs", card_id),
+                    "Missing executable did not park the initial attempt")
+            proof["initial_failure"] = {"card_id": card_id, "attempt": original["attempt"],
+                                        "reason": original["error_message"]}
+            cli_link.symlink_to(cli)
+
+            def retry(duplicates, expected_attempt):
+                for _ in range(duplicates):
+                    host.command("RetryFork", {"session_id": card_id})
+                result = retry_result(host, card_id)
+                require(result.get("forkState") == "pending" and result["stage"] == "queued"
+                        and result["submissionKey"] == request["submission_key"]
+                        and result["error"] is None and not result["replayed"],
+                        "Explicit retry did not queue the same fork")
+                for _ in range(duplicates - 1):
+                    check_rejected(retry_result(host, card_id))
+                pending = intent(card_id)
+                require(pending["attempt"] == expected_attempt and pending["error_message"] is None,
+                        "Retry did not clear the error and increment the attempt once")
+
+            # Let the installed CLI reject the same source ID by hiding only its test transcript.
+            quarantined = root / "source-transcript.jsonl"
+            source_transcript.rename(quarantined)
+            try:
+                first_retry = original["attempt"] + 1
+                # This attempt can exit before the receipt is read, so check its count after parking.
+                host.command("RetryFork", {"session_id": card_id})
+                result = retry_result(host, card_id)
+                require(result.get("forkState") == "pending" and result["error"] is None,
+                        "Retry did not publish the reset state")
+                failure = child.wait("real CLI retry failure", lambda: next((
+                    event for event in child.events if event["result"] == "fork-failed"
+                    and event.get("runId")), None), timeout=25)
+                failed_run = resume.exited(root, child, 1)
+                failed = intent(card_id)
+                require(failed["state"] == "failed" and failed["attempt"] == first_retry
+                        and failure["runId"] == failed_run["id"]
+                        and failed["error_message"] == failure["forkError"]
+                        and failed["error_message"] != original["error_message"]
+                        and not resume.rows(root, "provider_bindings", card_id),
+                        "The failed retry did not replace the old reason on the same card")
+                proof["retry_failure"] = {"attempt": first_retry, "run_id": failed_run["id"],
+                                          "reason": failure["forkError"]}
+            finally:
+                quarantined.rename(source_transcript)
+
+            child.screen = ""
+            retry(duplicates=2, expected_attempt=first_retry + 1)
+            run = resume.running(root, child, 2)
+            argv = live_fork_argv(run, cli_link, source_provider)
+            child.interactive()
+            host.command("RetryFork", {"session_id": card_id})
+            check_rejected(retry_result(host, card_id))
+            require(not resume.rows(root, "provider_bindings", card_id),
+                    "Retry bound a provider identity before authoritative confirmation")
+
+            replied_id, reply, transcript = child.ask(root, resume.READBACK, token)
+            confirmed = child.wait("retry confirmed by current run",
+                                   lambda: child.event("confirmed", run["id"]))
+            require(confirmed["providerSessionId"] == replied_id and replied_id != source_provider
+                    and transcript != source_transcript and resume.binding(root, card_id, replied_id),
+                    "Retried fork did not bind a new identity with the source conversation")
+            host.command("RetryFork", {"session_id": card_id})
+            check_rejected(retry_result(host, card_id))
+            replay, graph = fork_result(host, request, key)
+            require(replay["sessionId"] == card_id and replay["stage"] == "succeeded"
+                    and replay["replayed"], "Original submission did not resolve to the retried card")
+            node = next(node for node in graph["nodes"] if node["sessionId"] == card_id)
+            require(node["title"] == original["display_name"] and node["parentSessionId"] == source_id
+                    and node["cwd"] == str(cwd) and node["workStatus"] == "idle",
+                    "Successful retry did not restore the original card as a normal session")
+            settled = intent(card_id)
+            for field in ("source_session_id", "source_provider_session_id", "display_name",
+                          "worktree_mode", "submission_key", "operation_id"):
+                require(settled[field] == original[field], f"Retry changed {field}")
+            require(settled["state"] == "succeeded" and settled["attempt"] == first_retry + 1
+                    and settled["error_message"] is None
+                    and len(resume.rows(root, "session_runs", card_id)) == 2
+                    and len(resume.rows(root, "provider_bindings", card_id)) == 1,
+                    "Retry left extra runs or bindings, or stale intent progress")
+            with launch.database(root) as db:
+                require(db.execute("SELECT COUNT(*) FROM sessions").fetchone() == (2,)
+                        and db.execute("SELECT COUNT(*) FROM session_fork_intents").fetchone() == (1,),
+                        "Retries created another card or intent")
+            proof["retry_success"] = {
+                "card_id": card_id, "attempt": settled["attempt"], "run_id": run["id"], "argv": argv,
+                "provider_id": replied_id, "reply": reply, "submission_key": settled["submission_key"],
+                "distinct_transcript": True, "duplicate_running_and_succeeded_retry_rejected": True,
+            }
+            host.shutdown()
+    finally:
+        identity.check_secret(root, config_path, key, proof)
+        proof["credential_absent_from_artifacts"] = True
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--claude", type=Path, default=shutil.which("claude"))
     parser.add_argument("--runtime", type=Path, default=launch.BINARY)
-    parser.add_argument("--placement", choices=("child", "sibling", "peer", "both"), default="child")
+    workflow = parser.add_mutually_exclusive_group()
+    workflow.add_argument("--placement", choices=("child", "sibling", "peer", "both"), default="child")
+    workflow.add_argument("--retry", action="store_true", help="Verify real failed-fork retries")
     parser.add_argument("--evidence", type=Path)
     args = parser.parse_args()
     require(sys.platform == "darwin", "Real fork verification requires macOS sandbox-exec")
     cli = args.claude.resolve(strict=True)
     binary = args.runtime.resolve(strict=True)
     default_name = "claude-fork.json" if args.placement == "child" else f"claude-fork-{args.placement}.json"
+    if args.retry:
+        default_name = "claude-fork-retry.json"
     evidence = (args.evidence or launch.CHECKS / default_name).resolve()
     require(evidence.is_relative_to(launch.REPO), "Evidence must stay inside the workspace")
     launch.CHECKS.mkdir(parents=True, exist_ok=True)
@@ -412,7 +576,9 @@ def main():
                                                   text=True, timeout=10, stderr=subprocess.DEVNULL).strip()
                 require(re.fullmatch(r"[\d.]+ \(Claude Code\)", version), "Unexpected CLI version response")
                 proof["cli_version"] = version
-                if args.placement == "child":
+                if args.retry:
+                    verify_retry(root, env, guard, binary, cli, config, key, proof)
+                elif args.placement == "child":
                     verify(root, env, guard, binary, cli, config, key, proof)
                 else:
                     placements = ("sibling", "peer") if args.placement == "both" else (args.placement,)

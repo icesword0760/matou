@@ -485,6 +485,23 @@ impl ShellOwner {
         )
     }
 
+    pub(crate) fn retry_fork(
+        &mut self,
+        command: &CommandMetadata,
+        window_id: &str,
+        session_id: &str,
+        time: i64,
+    ) -> Result<Value> {
+        if !self.can_launch_provider(session_id) {
+            return Err(canvas::CanvasError {
+                code: "FORK_NOT_FAILED",
+                message: "当前分支无需重试".into(),
+            }
+            .into());
+        }
+        canvas::retry_fork(&mut self.connection, command, window_id, session_id, time)
+    }
+
     pub fn rename_scene(
         &mut self,
         command: &CommandMetadata,

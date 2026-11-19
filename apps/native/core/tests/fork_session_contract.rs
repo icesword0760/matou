@@ -4,11 +4,13 @@ use matou_native_core::{
         BootstrapWindowInput, HierarchyIds, bootstrap_window,
         canvas::{
             CanvasError, CanvasIds, CanvasMessages, ForkPlacement, ForkSessionInput,
-            ForkWorktreeMode, create_fork_child,
+            ForkWorktreeMode, create_fork_child, retry_fork,
         },
     },
     session_graph::project_scene_graph,
-    sessions::{get_session, pending_claude_fork},
+    sessions::{
+        StartRunInput, fail_claude_fork, finish_run, get_session, pending_claude_fork, start_run,
+    },
     storage::{CommandMetadata, configure_connection, migrate},
 };
 use rusqlite::Connection;
@@ -96,6 +98,185 @@ fn create(db: &mut Connection, command_id: &str, input: &ForkSessionInput) -> Re
         &MESSAGES,
         input.now,
     )
+}
+
+#[test]
+fn fork_retry_rejects_nonfailed_running_starting_and_archived_cards() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let mut db = fixture(directory.path().to_str().unwrap())?;
+    let reject = |db: &mut Connection, session_id: &str| {
+        let error = retry_fork(db, &command("rejected"), "window", session_id, 5).unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<CanvasError>().unwrap().code,
+            "FORK_NOT_FAILED"
+        );
+        assert_eq!(error.to_string(), "当前分支无需重试");
+    };
+    reject(&mut db, "source");
+    reject(&mut db, "missing");
+    create(&mut db, "create", &request())?;
+    reject(&mut db, "child"); // Pending first launch.
+    for state in ["starting", "succeeded"] {
+        db.execute(
+            "UPDATE session_fork_intents SET state=? WHERE session_id='child'",
+            [state],
+        )?;
+        reject(&mut db, "child");
+    }
+    db.execute(
+        "UPDATE session_fork_intents SET state='failed' WHERE session_id='child'",
+        [],
+    )?;
+    for status in ["running", "starting"] {
+        db.execute("UPDATE sessions SET status=? WHERE id='child'", [status])?;
+        reject(&mut db, "child");
+    }
+    db.execute(
+        "UPDATE sessions SET status='archived', archived_at=4 WHERE id='child'",
+        [],
+    )?;
+    reject(&mut db, "child");
+    assert_eq!(
+        db.query_row("SELECT attempt FROM session_fork_intents", [], |row| row
+            .get::<_, i64>(0))?,
+        0
+    );
+    Ok(())
+}
+
+#[test]
+fn fork_retry_reuses_the_intent_and_preserves_the_incremented_attempt_on_launch() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let mut db = fixture(directory.path().to_str().unwrap())?;
+    create(&mut db, "create", &request())?;
+    let start = |db: &mut Connection, run_id: &str, now| {
+        start_run(
+            db,
+            &command(run_id),
+            &StartRunInput {
+                id: run_id.into(),
+                session_id: "child".into(),
+                runtime_generation: "generation".into(),
+                pid: None,
+                cols: 80,
+                rows: 24,
+                now,
+            },
+            now,
+        )
+    };
+    start(&mut db, "first-run", 4)?;
+    fail_claude_fork(
+        &mut db,
+        &command("first-failure"),
+        "child",
+        "first reason",
+        5,
+    )?;
+    // The failure can be reported while the worker is still being retired.
+    let retry = command("retry");
+    for status in ["running", "starting"] {
+        db.execute(
+            "UPDATE session_runs SET status=? WHERE id='first-run'",
+            [status],
+        )?;
+        let error = retry_fork(&mut db, &retry, "window", "child", 6).unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<CanvasError>().unwrap().code,
+            "FORK_NOT_FAILED"
+        );
+    }
+    finish_run(&mut db, &command("first-exit"), "first-run", 1, None, 7, 7)?;
+
+    db.execute_batch(
+        "UPDATE session_fork_intents
+         SET lease_owner='old-owner', lease_token='old-token', lease_expires_at=50, last_heartbeat_at=5;
+         UPDATE provider_bindings SET provider_session_id='different-source-id' WHERE session_id='source';",
+    )?;
+    let accepted = retry_fork(&mut db, &retry, "window", "child", 8)?;
+    assert_eq!(accepted["sessionId"], "child");
+    assert_eq!(accepted["submissionKey"], "submission");
+    assert_eq!(accepted["forkState"], "pending");
+    assert_eq!(accepted["replayed"], false);
+    assert_eq!(
+        retry_fork(&mut db, &retry, "window", "child", 8)?["replayed"],
+        true
+    );
+    let duplicate = retry_fork(&mut db, &command("duplicate"), "window", "child", 8).unwrap_err();
+    assert_eq!(
+        duplicate.downcast_ref::<CanvasError>().unwrap().code,
+        "FORK_NOT_FAILED"
+    );
+
+    let matches: bool = db.query_row(
+        "SELECT state='pending' AND stage='queued' AND completed_steps=0
+           AND started_at IS NULL AND completed_at IS NULL AND error_message IS NULL
+           AND lease_owner IS NULL AND lease_token IS NULL AND lease_expires_at IS NULL
+           AND last_heartbeat_at IS NULL AND attempt=2 AND attempt_count=2
+           AND source_session_id='source' AND source_provider_session_id='source-provider-id'
+           AND display_name='子分支' AND worktree_mode='current'
+           AND submission_key='submission' AND operation_id='native-fork:child'
+         FROM session_fork_intents WHERE session_id='child'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert!(matches);
+    assert_eq!(get_session(&db, "child")?.unwrap().status, "starting");
+    assert_eq!(
+        pending_claude_fork(&db, "child")?.unwrap().source_id,
+        "source-provider-id"
+    );
+    let focused: String = db.query_row(
+        "SELECT active_session_id FROM window_scene_focus WHERE window_id='window' AND scene_id='scene'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(focused, "child");
+
+    start(&mut db, "retry-run", 9)?;
+    let during_run = retry_fork(&mut db, &command("during-run"), "window", "child", 9).unwrap_err();
+    assert_eq!(
+        during_run.downcast_ref::<CanvasError>().unwrap().code,
+        "FORK_NOT_FAILED"
+    );
+    finish_run(
+        &mut db,
+        &command("retry-exit"),
+        "retry-run",
+        2,
+        None,
+        10,
+        10,
+    )?;
+    fail_claude_fork(
+        &mut db,
+        &command("retry-failure"),
+        "child",
+        "new reason",
+        10,
+    )?;
+    let replay = create(&mut db, "replay-submission", &request())?;
+    assert_eq!(replay["sessionId"], "child");
+    assert_eq!(replay["stage"], "failed");
+    assert_eq!(replay["error"], "new reason");
+    assert_eq!(replay["replayed"], true);
+    assert_eq!(
+        db.query_row(
+            "SELECT attempt, attempt_count, (SELECT COUNT(*) FROM sessions),
+                    (SELECT COUNT(*) FROM session_runs), (SELECT COUNT(*) FROM domain_events
+                     WHERE event_type='session.fork-retrying') FROM session_fork_intents",
+            [],
+            |row| Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?
+            )),
+        )?,
+        (2, 2, 2, 2, 1)
+    );
+    Ok(())
 }
 
 #[test]

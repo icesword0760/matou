@@ -197,6 +197,9 @@ pub enum Command {
         worktree_mode: ForkWorktreeMode,
         submission_key: String,
     },
+    RetryFork {
+        session_id: String,
+    },
     CreateWorkspace {
         root_directory: String,
     },
@@ -1017,6 +1020,7 @@ fn run(
                     | Command::CreateCanvas { .. }
                     | Command::CreateShellSibling { .. }
                     | Command::ForkSession { .. }
+                    | Command::RetryFork { .. }
                     | Command::SelectScene { .. }
                     | Command::RenameScene { .. }
                     | Command::ReorderScene { .. }
@@ -1040,9 +1044,12 @@ fn run(
                     }
                     _ => None,
                 };
-                let fork_submission = match &command {
-                    Command::ForkSession { submission_key, .. } => Some(submission_key.clone()),
-                    _ => None,
+                let (fork_submission, fork_retry) = match &command {
+                    Command::ForkSession { submission_key, .. } => {
+                        (Some(submission_key.clone()), None)
+                    }
+                    Command::RetryFork { session_id } => (None, Some(session_id.clone())),
+                    _ => (None, None),
                 };
                 let workspace_action = match &command {
                     Command::CreateWorkspace { .. } => Some(("create", None)),
@@ -1063,6 +1070,7 @@ fn run(
                         | Command::SelectTask { .. }
                         | Command::CreateCanvas { .. }
                         | Command::CreateShellSibling { .. }
+                        | Command::RetryFork { .. }
                         | Command::SelectScene { .. }
                 );
                 match navigate(&mut owner, window_id, command) {
@@ -1070,7 +1078,9 @@ fn run(
                         let (card_action, fork_result) = match action {
                             Some(NavigationAction::Card(action)) => (Some(action), None),
                             Some(NavigationAction::Fork(mut result)) => {
-                                result["submissionKey"] = json!(fork_submission);
+                                if let Some(submission_key) = &fork_submission {
+                                    result["submissionKey"] = json!(submission_key);
+                                }
                                 if result["replayed"] == true {
                                     let mut graph =
                                         active_graph(&owner, scene_id.as_deref(), window_id)?;
@@ -1165,6 +1175,7 @@ fn run(
                                 .clone()
                                 .context("Fork result has no workspace")?;
                             pending_launch.remove(child);
+                            failed_launches.remove(child);
                             launch_retries.insert(
                                 child.to_owned(),
                                 LaunchRetry {
@@ -1238,13 +1249,19 @@ fn run(
                         dirty.extend(sessions.iter().cloned());
                     }
                     Err(error) => {
-                        if let Some(submission_key) = fork_submission {
+                        if fork_submission.is_some() || fork_retry.is_some() {
                             let mut graph = active_graph(&owner, scene_id.as_deref(), window_id)?;
-                            graph["forkSessionResult"] = json!({
-                                "submissionKey": submission_key,
+                            let mut result = json!({
                                 "code": error.downcast_ref::<CanvasError>().map_or("FORK_CREATE_FAILED", |error| error.code),
                                 "error": format!("{error:#}"),
                             });
+                            if let Some(submission_key) = fork_submission {
+                                result["submissionKey"] = json!(submission_key);
+                            }
+                            if let Some(session_id) = fork_retry {
+                                result["sessionId"] = json!(session_id);
+                            }
+                            graph["forkSessionResult"] = result;
                             send.send_blocking(Event::Graph(graph))?;
                         } else if let Some((action, workspace_id)) = workspace_action {
                             send.send_blocking(Event::WorkspaceActionResult {
@@ -1761,6 +1778,7 @@ fn run(
                 | Command::CreateCanvas { .. }
                 | Command::CreateShellSibling { .. }
                 | Command::ForkSession { .. }
+                | Command::RetryFork { .. }
                 | Command::SelectScene { .. }
                 | Command::RenameScene { .. }
                 | Command::ReorderScene { .. }
@@ -2931,6 +2949,19 @@ fn navigate(
                 &input,
                 &ids,
                 &messages,
+            )?;
+            return Ok((
+                owner.hierarchy(window_id)?,
+                Vec::new(),
+                Some(NavigationAction::Fork(result)),
+            ));
+        }
+        Command::RetryFork { session_id } => {
+            let result = owner.retry_fork(
+                &metadata("hierarchy.retry-fork", &json!({"sessionId": session_id})),
+                window_id,
+                &session_id,
+                time,
             )?;
             return Ok((
                 owner.hierarchy(window_id)?,
