@@ -4,9 +4,9 @@ use anyhow::{Context, Result, bail};
 use matou_native_core::{
     hierarchy::{BootstrapWindowInput, HierarchyIds, bootstrap_window},
     sessions::{
-        CreateShellSessionInput, StartShellRunInput, archive_session, create_shell_session,
-        finish_run, get_run, get_session, interrupt_run, list_all_runs, list_runs, list_sessions,
-        rename_session, start_shell_run, update_cwd,
+        CreateShellSessionInput, StartRunInput, archive_session, create_shell_session, finish_run,
+        get_run, get_session, interrupt_run, list_all_runs, list_runs, list_sessions,
+        rename_session, start_run, update_cwd,
     },
     storage::{CommandMetadata, DomainCommit, configure_connection, migrate},
 };
@@ -140,10 +140,10 @@ fn apply(db: &mut Connection, step: &Step) -> Result<DomainCommit> {
             &serde_json::from_value::<CreateShellSessionInput>(input.clone())?,
             *committed_at,
         ),
-        "start" => start_shell_run(
+        "start" => start_run(
             db,
             command,
-            &serde_json::from_value::<StartShellRunInput>(input.clone())?,
+            &serde_json::from_value::<StartRunInput>(input.clone())?,
             *committed_at,
         ),
         "finish" => finish_run(

@@ -13,7 +13,7 @@ use matou_native_core::{
         focus_session,
         tasks::{CreateTaskInput, create_task},
     },
-    sessions::{StartShellRunInput, finish_run, get_run, get_session, start_shell_run},
+    sessions::{StartRunInput, finish_run, get_run, get_session, start_run},
     storage::{CommandMetadata, configure_connection, migrate},
 };
 use rusqlite::{Connection, params, types::Value as SqlValue};
@@ -522,10 +522,10 @@ fn close_card_requires_intent_and_preserves_membership_and_relations() -> Result
 fn close_rejects_unowned_active_run_and_rolls_back_owned_stop_on_error() -> Result<()> {
     let mut fixture = Fixture::new()?;
     fixture.sibling("shell", None, 3)?;
-    start_shell_run(
+    start_run(
         &mut fixture.db,
         &command("start-run"),
-        &StartShellRunInput {
+        &StartRunInput {
             id: "run".into(),
             session_id: "shell".into(),
             runtime_generation: "generation".into(),

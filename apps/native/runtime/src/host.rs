@@ -33,7 +33,8 @@ use matou_native_core::{
         tasks, workspaces,
     },
     journal::JournalOptions,
-    pty::ShellLaunch,
+    provider_launch::{prepare_claude_launch, validate_cwd},
+    pty::{LaunchProfile, ShellLaunch},
     startup::{self, BootstrapResult},
     storage::CommandMetadata,
     workspace_paths::WorkspacePathState,
@@ -576,10 +577,10 @@ fn run(
         .map(|workspace| workspace.id.clone());
     let mut checks = WorkspacePathChecks::default();
     let graph = active_graph(&owner, scene_id.as_deref(), window_id)?;
-    let mut pending_launch = unstarted_shells(&graph, &sessions);
-    let mut foreground_shells: HashSet<_> = shell_ids(&graph).map(str::to_owned).collect();
+    let mut pending_launch = unstarted_sessions(&owner, &graph, &sessions)?;
+    let mut foreground_sessions: HashSet<_> = launchable_ids(&graph).map(str::to_owned).collect();
     let mut deferred_recovery = HashSet::new();
-    let mut launch_directories = HashMap::<String, Receiver<Option<String>>>::new();
+    let mut launch_preparations = HashMap::<String, Receiver<Result<PreparedLaunch>>>::new();
     let mut recovering = HashMap::<String, String>::new();
     // A failed launch stays blocked until an explicit retry starts a worker.
     let mut failed_launches = HashMap::new();
@@ -697,8 +698,16 @@ fn run(
                 for id in failed {
                     pending_launch.remove(&id);
                     let rebuilding = owner.has_shell_run(&id)?;
-                    let failure =
-                        report_launch_failure(send, &id, rebuilding, workspace_path_error(&state))?;
+                    let message = match owner.session(&id)? {
+                        Some(session) if session.kind == "claude-code" => {
+                            validate_cwd(Path::new(&session.cwd)).err().map_or_else(
+                                || workspace_path_error(&state),
+                                |error| format!("{error:#}"),
+                            )
+                        }
+                        _ => workspace_path_error(&state),
+                    };
+                    let failure = report_launch_failure(send, &id, rebuilding, message)?;
                     failed_launches.insert(id, failure);
                 }
             } else {
@@ -714,7 +723,7 @@ fn run(
                 }
                 // The reference increments the background pane's revision, then
                 // replaces its worker only when the pane attaches in the foreground.
-                let running: Vec<_> = foreground_shells
+                let running: Vec<_> = foreground_sessions
                     .iter()
                     .filter(|id| deferred_recovery.remove(*id))
                     .cloned()
@@ -764,37 +773,42 @@ fn run(
                 .filter(|(_, retry)| retry.validated)
                 .map(|(id, _)| id.clone()),
         );
-        launch_directories.retain(|id, _| launch_candidates.contains(id));
+        launch_preparations.retain(|id, _| launch_candidates.contains(id));
+        let mut completed_launches = Vec::new();
         for session_id in launch_candidates {
-            if !launch_directories.contains_key(&session_id) {
-                let candidates =
-                    owner.shell_directory_candidates(&session_id, &options.shell_home)?;
-                launch_directories.insert(session_id, choose_launch_directory(candidates)?);
+            if !launch_preparations.contains_key(&session_id) {
+                match prepare_launch(&owner, &options, &session_id) {
+                    Ok(result) => {
+                        launch_preparations.insert(session_id, result);
+                    }
+                    Err(error) => completed_launches.push((session_id, Err(error))),
+                }
             }
         }
-        let mut completed_launches = Vec::new();
-        launch_directories.retain(|id, result| match result.try_recv() {
-            Ok(directory) => {
-                completed_launches.push((id.clone(), directory));
+        launch_preparations.retain(|id, result| match result.try_recv() {
+            Ok(launch) => {
+                completed_launches.push((id.clone(), launch));
                 false
             }
             Err(mpsc::TryRecvError::Empty) => true,
             Err(mpsc::TryRecvError::Disconnected) => {
-                completed_launches.push((id.clone(), None));
+                completed_launches.push((
+                    id.clone(),
+                    Err(anyhow!("session launch preparation disconnected")),
+                ));
                 false
             }
         });
         let mut started_shell = false;
-        for (session_id, directory) in completed_launches {
+        for (session_id, launch) in completed_launches {
             pending_launch.remove(&session_id);
             let rebuilding = recovering.remove(&session_id).is_some();
             let rebuilding = match launch_retries.remove(&session_id) {
                 Some(retry) => retry.recovering,
                 None => rebuilding || owner.has_shell_run(&session_id)?,
             };
-            let result = directory
-                .context("no usable Shell launch directory")
-                .and_then(|directory| {
+            let result = launch.and_then(|launch| match launch {
+                PreparedLaunch::Shell(directory) => {
                     owner.set_shell_launch_directory(&session_id, &directory)?;
                     launch_shell(
                         &mut owner,
@@ -803,7 +817,28 @@ fn run(
                         directory,
                         &terminal_layouts,
                     )
-                });
+                }
+                PreparedLaunch::ClaudeCode(mut launch) => {
+                    let terminal = terminal_layouts
+                        .get(&session_id)
+                        .copied()
+                        .unwrap_or_else(default_terminal_options);
+                    launch.cols = terminal.cols;
+                    launch.rows = terminal.rows;
+                    owner.launch(
+                        SessionOptions {
+                            session_id: session_id.clone(),
+                            terminal,
+                            launch,
+                            journal: JournalOptions::default(),
+                            restored_history: Vec::new(),
+                            collect_history: false,
+                        },
+                        false,
+                        "",
+                    )
+                }
+            });
             match result {
                 Ok(()) => {
                     failed_launches.remove(&session_id);
@@ -828,7 +863,7 @@ fn run(
             for _ in 0..pending_input.len() {
                 let input = pending_input.pop_front().expect("queued terminal input");
                 if sessions.contains(&input.session_id)
-                    && !(foreground_shells.contains(&input.session_id)
+                    && !(foreground_sessions.contains(&input.session_id)
                         && deferred_recovery.contains(&input.session_id))
                     && owner
                         .workspace_path_state(&input.workspace_id)?
@@ -945,7 +980,7 @@ fn run(
                                 deferred_recovery.remove(id);
                                 failed_launches.remove(id);
                                 launch_retries.remove(id);
-                                launch_directories.remove(id);
+                                launch_preparations.remove(id);
                             }
                             pending_input.retain(|input| !disposed.contains(&input.session_id));
                             operations.retain(|(id, _, _)| sessions.contains(id));
@@ -970,11 +1005,11 @@ fn run(
                         active_task = hierarchy.task.as_ref().map(|task| task.id.clone());
                         active_workspace = next_workspace;
                         let mut graph = active_graph(&owner, scene_id.as_deref(), window_id)?;
-                        pending_launch = unstarted_shells(&graph, &sessions);
+                        pending_launch = unstarted_sessions(&owner, &graph, &sessions)?;
                         pending_launch.retain(|id| {
                             !failed_launches.contains_key(id) && !launch_retries.contains_key(id)
                         });
-                        foreground_shells = shell_ids(&graph).map(str::to_owned).collect();
+                        foreground_sessions = launchable_ids(&graph).map(str::to_owned).collect();
                         if (target_changed || check_target || !pending_launch.is_empty())
                             && let Some(workspace_id) = &active_workspace
                         {
@@ -1098,7 +1133,7 @@ fn run(
                     };
                     if state.is_none()
                         || !sessions.contains(&input.session_id)
-                        || (foreground_shells.contains(&input.session_id)
+                        || (foreground_sessions.contains(&input.session_id)
                             && deferred_recovery.contains(&input.session_id))
                     {
                         checks.request(&owner, &input.workspace_id)?;
@@ -1263,10 +1298,10 @@ fn run(
                             Some(_) => continue,
                             None => None,
                         };
-                        if !foreground_shells.contains(session_id)
+                        if !foreground_sessions.contains(session_id)
                             || pending_launch.contains(session_id)
                             || recovering.contains_key(session_id)
-                            || !owner.can_restart_shell(session_id, reason.is_some())?
+                            || !owner.can_restart_session(session_id, reason.is_some())?
                         {
                             continue;
                         }
@@ -1356,11 +1391,11 @@ fn run(
                     dirty.extend(sessions.iter().cloned());
                     awaiting_ui.clear();
                     let graph = active_graph(&owner, scene_id.as_deref(), window_id)?;
-                    pending_launch = unstarted_shells(&graph, &sessions);
+                    pending_launch = unstarted_sessions(&owner, &graph, &sessions)?;
                     pending_launch.retain(|id| {
                         !failed_launches.contains_key(id) && !launch_retries.contains_key(id)
                     });
-                    foreground_shells = shell_ids(&graph).map(str::to_owned).collect();
+                    foreground_sessions = launchable_ids(&graph).map(str::to_owned).collect();
                     if let Some(workspace_id) = &active_workspace {
                         checks.request(&owner, workspace_id)?;
                         launch_validated = false;
@@ -1693,25 +1728,98 @@ fn shell_ids(graph: &Value) -> impl Iterator<Item = &str> {
         .filter_map(|node| node["sessionId"].as_str())
 }
 
-fn unstarted_shells(graph: &Value, sessions: &HashSet<String>) -> HashSet<String> {
-    shell_ids(graph)
-        .filter(|id| !sessions.contains(*id))
-        .map(str::to_owned)
-        .collect()
+fn launchable_nodes(graph: &Value) -> impl Iterator<Item = &Value> {
+    graph["nodes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|node| {
+            matches!(node["currentMode"].as_str(), Some("shell" | "claude-code"))
+                && node.get("archivedAt").is_none()
+        })
+}
+
+fn launchable_ids(graph: &Value) -> impl Iterator<Item = &str> {
+    launchable_nodes(graph).filter_map(|node| node["sessionId"].as_str())
+}
+
+fn unstarted_sessions(
+    owner: &ShellOwner,
+    graph: &Value,
+    sessions: &HashSet<String>,
+) -> Result<HashSet<String>> {
+    let mut pending = HashSet::new();
+    for node in launchable_nodes(graph) {
+        let Some(id) = node["sessionId"]
+            .as_str()
+            .filter(|id| !sessions.contains(*id))
+        else {
+            continue;
+        };
+        if node["currentMode"] == "shell"
+            || (owner
+                .session(id)?
+                .is_some_and(|session| session.status == "created")
+                && !owner.has_shell_run(id)?)
+        {
+            pending.insert(id.to_owned());
+        }
+    }
+    Ok(pending)
 }
 
 fn default_terminal_options() -> TerminalOptions {
     TerminalOptions::new(80, 24, 7, 14)
 }
 
-fn choose_launch_directory(candidates: Vec<String>) -> Result<Receiver<Option<String>>> {
+enum PreparedLaunch {
+    Shell(String),
+    ClaudeCode(ShellLaunch),
+}
+
+fn prepare_launch(
+    owner: &ShellOwner,
+    options: &LaunchOptions,
+    session_id: &str,
+) -> Result<Receiver<Result<PreparedLaunch>>> {
+    let session = owner
+        .session(session_id)?
+        .context("read the authoritative session")?;
     let (send, receive) = mpsc::channel();
-    thread::Builder::new()
-        .name("shell-directory".into())
-        .spawn(move || {
-            let directory = candidates.into_iter().find(|path| Path::new(path).is_dir());
-            let _ = send.send(directory);
-        })?;
+    match session.kind.as_str() {
+        "shell" => {
+            let candidates = owner.shell_directory_candidates(session_id, &options.shell_home)?;
+            thread::Builder::new()
+                .name("shell-directory".into())
+                .spawn(move || {
+                    let directory = candidates.into_iter().find(|path| Path::new(path).is_dir());
+                    let _ = send.send(
+                        directory
+                            .map(PreparedLaunch::Shell)
+                            .context("no usable Shell launch directory"),
+                    );
+                })?;
+        }
+        "claude-code" => {
+            let binding = owner.claude_launch_binding(session_id)?;
+            let data_root = options.data_root.clone();
+            thread::Builder::new()
+                .name("claude-launch".into())
+                .spawn(move || {
+                    let terminal = default_terminal_options();
+                    let result = prepare_claude_launch(
+                        &data_root,
+                        Path::new(&session.cwd),
+                        &binding,
+                        std::env::vars_os().collect(),
+                        terminal.cols,
+                        terminal.rows,
+                    );
+                    let _ = send.send(result.map(PreparedLaunch::ClaudeCode));
+                })?;
+        }
+        _ => bail!("unsupported session launch kind"),
+    }
     Ok(receive)
 }
 
@@ -1737,6 +1845,8 @@ fn launch_shell(
         SessionOptions {
             session_id: session_id.to_owned(),
             launch: ShellLaunch {
+                profile: LaunchProfile::Shell,
+                argv: Vec::new(),
                 executable: options.shell.clone(),
                 cwd: cwd.into(),
                 data_root: options.data_root.clone(),

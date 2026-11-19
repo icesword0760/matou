@@ -11,7 +11,7 @@ use std::{
 use anyhow::{Context, Result, ensure};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
-const CALLER_SESSION_MARKERS: [&str; 13] = [
+pub(crate) const CALLER_SESSION_MARKERS: [&str; 13] = [
     "CLAUDECODE",
     "CLAUDE_CODE_CHILD_SESSION",
     "CLAUDE_CODE_SESSION_ID",
@@ -60,8 +60,25 @@ preexec_functions=(_matou_preexec ${preexec_functions:#_matou_preexec})
 precmd_functions=(_matou_precmd ${precmd_functions:#_matou_precmd})
 "#;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum LaunchProfile {
+    Shell,
+    ClaudeCode,
+}
+
+impl LaunchProfile {
+    pub fn kind(self) -> &'static str {
+        match self {
+            Self::Shell => "shell",
+            Self::ClaudeCode => "claude-code",
+        }
+    }
+}
+
 pub struct ShellLaunch {
+    pub profile: LaunchProfile,
     pub executable: PathBuf,
+    pub argv: Vec<String>,
     pub cwd: PathBuf,
     pub data_root: PathBuf,
     pub inherited_env: BTreeMap<OsString, OsString>,
@@ -145,21 +162,28 @@ fn matches_key(left: &OsStr, right: &OsStr) -> bool {
     left == right
 }
 
-fn get_var<'a>(environment: &'a BTreeMap<OsString, OsString>, key: &str) -> Option<&'a OsStr> {
+pub(crate) fn get_var<'a>(
+    environment: &'a BTreeMap<OsString, OsString>,
+    key: &str,
+) -> Option<&'a OsStr> {
     environment
         .iter()
         .find(|(name, _)| matches_key(name, OsStr::new(key)))
         .map(|(_, value)| value.as_os_str())
 }
 
-fn remove_var(environment: &mut BTreeMap<OsString, OsString>, key: &OsStr) {
+pub(crate) fn remove_var(environment: &mut BTreeMap<OsString, OsString>, key: &OsStr) {
     #[cfg(windows)]
     environment.retain(|name, _| !matches_key(name, key));
     #[cfg(not(windows))]
     environment.remove(key);
 }
 
-fn set_var(environment: &mut BTreeMap<OsString, OsString>, key: OsString, value: OsString) {
+pub(crate) fn set_var(
+    environment: &mut BTreeMap<OsString, OsString>,
+    key: OsString,
+    value: OsString,
+) {
     #[cfg(windows)]
     remove_var(environment, &key);
     environment.insert(key, value);
@@ -215,36 +239,44 @@ pub struct PtyProcess {
 impl PtyProcess {
     pub fn spawn(launch: &ShellLaunch) -> Result<(Self, Box<dyn Read + Send>)> {
         let geometry = pty_size(launch.cols, launch.rows)?;
-        // portable-pty falls back to HOME if cwd is invalid. A Matou Shell launch fails instead.
+        let label = match launch.profile {
+            LaunchProfile::Shell => "Shell",
+            LaunchProfile::ClaudeCode => "Claude Code",
+        };
+        // portable-pty falls back to HOME if cwd is invalid. Check it at spawn.
         let metadata = fs::metadata(&launch.cwd)
-            .with_context(|| format!("open Shell working directory {}", launch.cwd.display()))?;
+            .with_context(|| format!("open {label} working directory {}", launch.cwd.display()))?;
         ensure!(
             metadata.is_dir(),
-            "Shell working directory {} is not a directory",
+            "{label} working directory {} is not a directory",
             launch.cwd.display()
         );
 
-        let environment = prepare_shell_environment(launch)?;
-        #[cfg(unix)]
-        let mut command = if get_var(&environment, "SHELL").is_none() {
-            // portable-pty injects a passwd SHELL when it is missing. The reference
-            // preserves an unset SHELL. env execs the same process in the PTY.
-            let executable = executable_for_unset_shell(launch, &environment)?;
-            let mut command = CommandBuilder::new("/usr/bin/env");
-            command.args([
-                OsStr::new("-u"),
-                OsStr::new("SHELL"),
-                executable.as_os_str(),
-            ]);
-            command.arg("-l");
-            command
-        } else {
-            let mut command = CommandBuilder::new(&launch.executable);
-            command.arg("-l");
-            command
-        };
-        #[cfg(windows)]
         let mut command = CommandBuilder::new(&launch.executable);
+        let environment = match launch.profile {
+            LaunchProfile::Shell => {
+                let environment = prepare_shell_environment(launch)?;
+                #[cfg(unix)]
+                {
+                    if get_var(&environment, "SHELL").is_none() {
+                        // Preserve an unset SHELL despite portable-pty's passwd fallback.
+                        let executable = executable_for_unset_shell(launch, &environment)?;
+                        command = CommandBuilder::new("/usr/bin/env");
+                        command.args([
+                            OsStr::new("-u"),
+                            OsStr::new("SHELL"),
+                            executable.as_os_str(),
+                        ]);
+                    }
+                    if launch.argv.is_empty() {
+                        command.arg("-l");
+                    }
+                }
+                environment
+            }
+            LaunchProfile::ClaudeCode => launch.env.clone(),
+        };
+        command.args(&launch.argv);
         command.cwd(&launch.cwd);
         command.env_clear();
         for (key, value) in environment {
@@ -253,11 +285,11 @@ impl PtyProcess {
 
         let pair = native_pty_system()
             .openpty(geometry)
-            .context("open Shell PTY")?;
+            .with_context(|| format!("open {label} PTY"))?;
         let child = pair
             .slave
             .spawn_command(command)
-            .with_context(|| format!("start Shell {}", launch.executable.display()))?;
+            .with_context(|| format!("start {label} {}", launch.executable.display()))?;
         drop(pair.slave);
 
         let mut process = Self {

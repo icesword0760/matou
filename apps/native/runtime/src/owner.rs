@@ -13,12 +13,13 @@ use matou_native_core::{
         canvas, cards, tabs, tasks, workspaces,
     },
     ownership::DatabaseOwner,
+    pty::LaunchProfile,
     session_graph,
-    sessions::{self, SessionRun, StartShellRunInput},
+    sessions::{self, SessionRun, StartRunInput},
     shell_history,
     storage::{CommandMetadata, DomainCommit},
 };
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
 
 use crate::{
@@ -31,6 +32,7 @@ struct RunningShell {
     worker: SessionWorker,
     run_id: String,
     cwd: String,
+    is_shell: bool,
     restore_history: bool,
     cwd_tracker: CwdTracker,
     work_tracker: WorkStatusTracker,
@@ -586,17 +588,33 @@ impl ShellOwner {
         )?)
     }
 
-    pub(crate) fn can_restart_shell(&self, session_id: &str, start_failed: bool) -> Result<bool> {
+    pub(crate) fn can_restart_session(&self, session_id: &str, start_failed: bool) -> Result<bool> {
         Ok(!self.closing
             && self
                 .shells
                 .get(session_id)
                 .is_none_or(|shell| shell.ended && !shell.retiring)
             && self.session(session_id)?.is_some_and(|session| {
-                session.kind == "shell"
+                matches!(session.kind.as_str(), "shell" | "claude-code")
                     && session.archived_at.is_none()
                     && (start_failed || session.status == "exited")
             }))
+    }
+
+    pub(crate) fn claude_launch_binding(&self, session_id: &str) -> Result<Value> {
+        let metadata: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT metadata_json FROM provider_bindings
+             WHERE session_id=? AND provider='claude-code'
+             ORDER BY updated_at DESC, id DESC LIMIT 1",
+                [session_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(metadata
+            .and_then(|data| serde_json::from_str(&data).ok())
+            .unwrap_or(Value::Null))
     }
 
     /// Resolve environment and geometry before calling. Startup handshaking stays
@@ -619,35 +637,48 @@ impl ShellOwner {
         }
         let stored = self
             .session(&options.session_id)?
-            .context("read the authoritative Shell session")?;
-        ensure!(stored.kind == "shell", "session is not an ordinary Shell");
+            .context("read the authoritative session")?;
+        let profile = options.launch.profile;
+        ensure!(
+            stored.kind == profile.kind(),
+            "launch profile differs from its stored session"
+        );
         ensure!(
             stored.archived_at.is_none(),
             "archived Session cannot start a new run"
         );
         ensure!(
             Path::new(&stored.cwd) == options.launch.cwd,
-            "Shell launch cwd differs from its stored session"
+            "{} launch cwd differs from its stored session",
+            profile.kind()
         );
+        let is_shell = profile == LaunchProfile::Shell;
+        let restore_history = is_shell && restore_history;
         options.collect_history = restore_history;
-        let blocks =
-            shell_history::list_for_launch(&self.connection, &options.session_id, restore_history)?;
-        options.restored_history =
-            shell_history::format_shell_history_for_terminal(&blocks, divider).into_bytes();
+        options.restored_history = if is_shell {
+            let blocks = shell_history::list_for_launch(
+                &self.connection,
+                &options.session_id,
+                restore_history,
+            )?;
+            shell_history::format_shell_history_for_terminal(&blocks, divider).into_bytes()
+        } else {
+            Vec::new()
+        };
         let session_id = options.session_id.clone();
         let cols = options.launch.cols.into();
         let rows = options.launch.rows.into();
         let run_id = (self.next_id)();
         let mut worker = SessionWorker::spawn(options, self.send.clone(), run_id.clone())?;
         let time = now();
-        let commit = sessions::start_shell_run(
+        let commit = sessions::start_run(
             &mut self.connection,
             &command(
                 format!("runtime-start-{run_id}"),
                 "session.run-start",
-                format!("start:{run_id}:{session_id}:shell"),
+                format!("start:{run_id}:{session_id}:{}", profile.kind()),
             ),
-            &StartShellRunInput {
+            &StartRunInput {
                 id: run_id.clone(),
                 session_id: session_id.clone(),
                 runtime_generation: self.generation.clone(),
@@ -671,6 +702,7 @@ impl ShellOwner {
                 worker,
                 run_id,
                 cwd: stored.cwd,
+                is_shell,
                 restore_history,
                 cwd_tracker: CwdTracker::default(),
                 work_tracker: WorkStatusTracker::default(),
@@ -781,7 +813,14 @@ impl ShellOwner {
         }
         let result = match &event.event {
             SessionEvent::InputSubmitted => {
-                if let Some(shell) = self.shells.get_mut(&event.session_id) {
+                if !shell.is_shell {
+                    return;
+                }
+                if let Some(shell) = self
+                    .shells
+                    .get_mut(&event.session_id)
+                    .filter(|shell| shell.is_shell)
+                {
                     shell.cwd_capture = Some((Instant::now() + Duration::from_millis(180), true));
                 }
                 if let Err(error) = self.set_work_status(&event.session_id, "running", events) {
@@ -842,14 +881,17 @@ impl ShellOwner {
         blocks: &[matou_native_core::shell_history::CollectedShellBlock],
         events: &mut Vec<OwnerEvent>,
     ) {
+        let shell = self.shells.get_mut(id).expect("registered session output");
+        shell.emitted_output = true;
+        if !shell.is_shell {
+            return;
+        }
         let summary = self.summaries.entry(id.to_owned()).or_default();
         summary.raw.push_str(data);
         summary.raw = utf16_tail(&summary.raw, 32_768);
         summary
             .deadline
             .get_or_insert_with(|| Instant::now() + Duration::from_millis(180));
-        let shell = self.shells.get_mut(id).expect("registered Shell output");
-        shell.emitted_output = true;
         let mut completed = false;
         if shell.restore_history {
             for block in blocks {

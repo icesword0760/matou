@@ -77,6 +77,8 @@ fn launch(root: &Path) -> SessionOptions {
     SessionOptions {
         session_id: ID.into(),
         launch: ShellLaunch {
+            profile: matou_native_core::pty::LaunchProfile::Shell,
+            argv: Vec::new(),
             executable: "/bin/zsh".into(),
             cwd: root.join("workspace"),
             data_root: root.to_owned(),

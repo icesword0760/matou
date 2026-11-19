@@ -38,6 +38,8 @@ fn worker_search_selects_cycles_and_refreshes_without_scrolling() -> Result<()> 
         SessionOptions {
             session_id: "search-worker".into(),
             launch: ShellLaunch {
+                profile: matou_native_core::pty::LaunchProfile::Shell,
+                argv: Vec::new(),
                 executable: "/bin/zsh".into(),
                 cwd: root.path().to_path_buf(),
                 data_root: root.path().to_path_buf(),
