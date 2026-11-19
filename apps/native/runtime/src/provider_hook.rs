@@ -51,6 +51,7 @@ pub(crate) struct Scope {
     pub run_id: String,
     pub generation: String,
     pub expected_id: Option<String>,
+    pub fork_source_id: Option<String>,
 }
 
 #[derive(PartialEq, Eq)]
@@ -183,7 +184,7 @@ fn transcript_uuid(path: &str) -> Option<&str> {
 }
 
 pub(crate) enum HookMessage {
-    Observed(Scope, Observation),
+    Observed(Scope, Observation, Instant),
     Retired(Scope),
 }
 
@@ -581,7 +582,11 @@ fn read_request(
         observation.event = "unknown";
         observation.notification = None;
     }
-    match send.try_send(HookMessage::Observed(record.scope.clone(), observation)) {
+    match send.try_send(HookMessage::Observed(
+        record.scope.clone(),
+        observation,
+        Instant::now(),
+    )) {
         Ok(()) => Ok(()),
         Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => {
             Err("503 Service Unavailable")
@@ -642,6 +647,7 @@ mod tests {
             run_id: run.into(),
             generation: "generation".into(),
             expected_id: None,
+            fork_source_id: None,
         }
     }
 
@@ -736,7 +742,7 @@ mod tests {
         assert_eq!(request(&server, &run.token, "POST", &exact)?, 200);
         exact.push(b' ');
         assert_eq!(request(&server, &run.token, "POST", &exact)?, 413);
-        let Some(HookMessage::Observed(scope, observation)) = server.messages().next() else {
+        let Some(HookMessage::Observed(scope, observation, _)) = server.messages().next() else {
             panic!("hook body was not delivered");
         };
         assert_eq!(scope.run_id, "current");
@@ -756,7 +762,7 @@ mod tests {
             )?,
             200
         );
-        let Some(HookMessage::Observed(_, statusline)) = server.messages().next() else {
+        let Some(HookMessage::Observed(_, statusline, _)) = server.messages().next() else {
             panic!("statusline body was not delivered");
         };
         assert_eq!(statusline.event, "unknown");
@@ -862,7 +868,7 @@ mod tests {
             matches!(messages.next(), Some(HookMessage::Retired(scope)) if scope.run_id == "first")
         );
         assert!(
-            matches!(messages.next(), Some(HookMessage::Observed(scope, _)) if scope.run_id == "second")
+            matches!(messages.next(), Some(HookMessage::Observed(scope, _, _)) if scope.run_id == "second")
         );
         assert!(messages.next().is_none());
         drop(second);

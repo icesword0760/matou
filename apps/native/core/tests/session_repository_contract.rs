@@ -351,7 +351,7 @@ fn provider_binding_requires_current_run_and_validation_replays_once() -> Result
         serde_json::from_str::<Value>(row["metadata"].as_str().unwrap())?,
         json!({"providerConfigId": "configuration", "model": "observed-model",
                       "permissionMode": "plan", "cwd": "/observed", "lastHookEvent": "Stop",
-                      "observedUserPrompt": true, "observedNormalStop": true, "unrelated": true})
+                      "observedUserPrompt": true, "observedNormalStop": true, "canFork": true, "unrelated": true})
     );
     let count = |query| db.query_row(query, [], |row| row.get::<_, i64>(0));
     assert_eq!(count("SELECT COUNT(*) FROM provider_bindings")?, 1);

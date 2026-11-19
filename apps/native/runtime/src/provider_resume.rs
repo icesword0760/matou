@@ -14,7 +14,7 @@ static MISSING: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 pub(crate) struct ResumeMonitor {
-    pub binding_id: String,
+    pub binding_id: Option<String>,
     pub expected_id: String,
     recent: String,
     has_visible_output: bool,
@@ -31,9 +31,15 @@ enum Trust {
 
 impl ResumeMonitor {
     pub(crate) fn new(binding: &ClaudeBinding, bypass_permissions: bool) -> Self {
+        let mut monitor = Self::for_id(binding.provider_session_id.clone(), bypass_permissions);
+        monitor.binding_id = Some(binding.id.clone());
+        monitor
+    }
+
+    pub(crate) fn for_id(expected_id: String, bypass_permissions: bool) -> Self {
         Self {
-            binding_id: binding.id.clone(),
-            expected_id: binding.provider_session_id.clone(),
+            binding_id: None,
+            expected_id,
             recent: String::new(),
             has_visible_output: false,
             watching_failure_output: true,

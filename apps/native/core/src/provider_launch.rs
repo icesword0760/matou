@@ -88,6 +88,56 @@ pub fn prepare_claude_launch(
     cwd: &Path,
     binding: &Value,
     resume_id: Option<&str>,
+    environment: BTreeMap<OsString, OsString>,
+    cols: u16,
+    rows: u16,
+) -> Result<ClaudeLaunch> {
+    prepare_claude(
+        data_root,
+        cwd,
+        binding,
+        resume_id.map(ClaudeTarget::Resume),
+        environment,
+        cols,
+        rows,
+    )
+}
+
+pub fn prepare_claude_fork(
+    data_root: &Path,
+    cwd: &Path,
+    metadata: &Value,
+    source_id: &str,
+    environment: BTreeMap<OsString, OsString>,
+    cols: u16,
+    rows: u16,
+) -> Result<ClaudeLaunch> {
+    ensure!(
+        !source_id.trim().is_empty(),
+        "Fork source conversation is missing"
+    );
+    prepare_claude(
+        data_root,
+        cwd,
+        metadata,
+        Some(ClaudeTarget::Fork(source_id)),
+        environment,
+        cols,
+        rows,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum ClaudeTarget<'a> {
+    Resume(&'a str),
+    Fork(&'a str),
+}
+
+fn prepare_claude(
+    data_root: &Path,
+    cwd: &Path,
+    binding: &Value,
+    target: Option<ClaudeTarget<'_>>,
     mut environment: BTreeMap<OsString, OsString>,
     cols: u16,
     rows: u16,
@@ -130,7 +180,7 @@ pub fn prepare_claude_launch(
     let argv = claude_argv(
         model,
         reasoning_effort(&provider, model),
-        resume_id,
+        target,
         binding["permissionMode"].as_str(),
     );
     for key in CALLER_SESSION_MARKERS {
@@ -245,7 +295,7 @@ fn read_provider(data_root: &Path, binding: &Value) -> Result<Provider> {
 fn claude_argv(
     model: &str,
     effort: Option<&str>,
-    resume_id: Option<&str>,
+    target: Option<ClaudeTarget<'_>>,
     permission: Option<&str>,
 ) -> Vec<String> {
     let mut argv = Vec::new();
@@ -255,8 +305,11 @@ fn claude_argv(
     if let Some(effort) = effort.filter(|effort| !effort.is_empty() && *effort != "follow") {
         argv.extend(["--effort".into(), effort.into()]);
     }
-    if let Some(id) = resume_id {
+    if let Some(ClaudeTarget::Resume(id) | ClaudeTarget::Fork(id)) = target {
         argv.extend(["--resume".into(), id.into()]);
+        if matches!(target, Some(ClaudeTarget::Fork(_))) {
+            argv.push("--fork-session".into());
+        }
     }
     match permission {
         Some("bypassPermissions") => argv.push("--dangerously-skip-permissions".into()),

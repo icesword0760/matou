@@ -29,13 +29,16 @@ use anyhow::{Context, Result, anyhow, bail};
 use matou_native_core::{
     hierarchy::{
         self, BootstrapWindowInput, HierarchyIds, HierarchyResult, Scene, Task, Workspace,
-        canvas::{CanvasIds, CanvasMessages, CreateCanvasInput, CreateShellSiblingInput},
+        canvas::{
+            CanvasError, CanvasIds, CanvasMessages, CreateCanvasInput, CreateShellSiblingInput,
+            ForkSessionInput,
+        },
         cards::{CloseSessionCardInput, RemoveScope, RemoveSessionBranchInput},
         tabs::{CloseSceneInput, RenameSceneInput, ReorderSceneInput},
         tasks, workspaces,
     },
     journal::JournalOptions,
-    provider_launch::{ClaudeLaunch, prepare_claude_launch, validate_cwd},
+    provider_launch::{ClaudeLaunch, prepare_claude_fork, prepare_claude_launch, validate_cwd},
     pty::{LaunchProfile, ShellLaunch},
     sessions::{ClaudeCatalogLoad, ClaudeRestore},
     startup::{self, BootstrapResult},
@@ -48,6 +51,8 @@ use matou_native_terminal::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
+
+pub use matou_native_core::hierarchy::canvas::{ForkPlacement, ForkWorktreeMode};
 
 #[derive(Clone)]
 pub struct LaunchOptions {
@@ -183,6 +188,14 @@ pub enum Command {
     LoadProviderSession {
         session_id: String,
         provider_session_id: String,
+    },
+    ForkSession {
+        scene_id: String,
+        source_session_id: String,
+        placement: ForkPlacement,
+        name: String,
+        worktree_mode: ForkWorktreeMode,
+        submission_key: String,
     },
     CreateWorkspace {
         root_directory: String,
@@ -672,7 +685,7 @@ fn run(
     let mut navigation_publications = VecDeque::new();
     let mut graph_dirty = false;
     let mut provider_identity_events = Vec::new();
-    let mut provider_starting = HashSet::new();
+    let mut provider_starting = HashMap::new();
     let (catalog_requests, catalog_replies) = start_provider_catalog()?;
     let mut catalog_loads = HashMap::<String, CatalogLoad>::new();
     let mut catalog_lists = Vec::new();
@@ -837,8 +850,13 @@ fn run(
                 })
                 .then_with(|| left.cmp(right))
         });
-        // Shell and fresh Claude starts do not consume provider recovery slots.
-        let mut available_slots = 4usize.saturating_sub(provider_starting.len());
+        // A fork can wait for the user's first prompt. Only actual restores
+        // consume a recovery slot during identity confirmation.
+        let restoring = provider_starting
+            .values()
+            .filter(|&&restoring| restoring)
+            .count();
+        let mut available_slots = 4usize.saturating_sub(restoring);
         let mut eligible = HashSet::new();
         let mut completed_launches = Vec::new();
         for session_id in launch_candidates {
@@ -887,6 +905,7 @@ fn run(
             };
             let binding = owner.claude_binding(&session_id)?;
             let resume = binding.as_ref().filter(|binding| binding.resumable);
+            let mut waits_for_identity = resume.is_some();
             let result = launch.and_then(|launch| match launch {
                 PreparedLaunch::Shell(directory) => {
                     owner.set_shell_launch_directory(&session_id, &directory)?;
@@ -898,25 +917,34 @@ fn run(
                         &terminal_layouts,
                     )
                 }
-                PreparedLaunch::ClaudeCode(launch) => {
+                PreparedLaunch::ClaudeCode(launch, fork_source) => {
+                    let terminal = terminal_layouts
+                        .get(&session_id)
+                        .copied()
+                        .unwrap_or_else(default_terminal_options);
+                    if let Some(source_id) = fork_source {
+                        waits_for_identity = true;
+                        return owner.launch_claude_fork(
+                            session_id.clone(),
+                            terminal,
+                            launch,
+                            source_id,
+                        );
+                    }
                     if let Some(binding) = resume {
                         owner.change_claude_restore(
                             &session_id,
                             ClaudeRestore::Begin(&binding.id),
                         )?;
                     }
-                    let terminal = terminal_layouts
-                        .get(&session_id)
-                        .copied()
-                        .unwrap_or_else(default_terminal_options);
                     owner.launch_claude(session_id.clone(), terminal, launch, binding.as_ref())
                 }
             });
             match result {
                 Ok(()) => {
                     failed_launches.remove(&session_id);
-                    if resume.is_some() {
-                        provider_starting.insert(session_id.clone());
+                    if waits_for_identity {
+                        provider_starting.insert(session_id.clone(), resume.is_some());
                     } else {
                         send.send_blocking(Event::Recovery {
                             session_id: session_id.clone(),
@@ -988,6 +1016,7 @@ fn run(
                     | Command::DeleteTask { .. }
                     | Command::CreateCanvas { .. }
                     | Command::CreateShellSibling { .. }
+                    | Command::ForkSession { .. }
                     | Command::SelectScene { .. }
                     | Command::RenameScene { .. }
                     | Command::ReorderScene { .. }
@@ -1009,6 +1038,10 @@ fn run(
                     Command::RenameTask { task_id, title } => {
                         Some((task_id.clone(), title.clone()))
                     }
+                    _ => None,
+                };
+                let fork_submission = match &command {
+                    Command::ForkSession { submission_key, .. } => Some(submission_key.clone()),
                     _ => None,
                 };
                 let workspace_action = match &command {
@@ -1033,7 +1066,22 @@ fn run(
                         | Command::SelectScene { .. }
                 );
                 match navigate(&mut owner, window_id, command) {
-                    Ok((hierarchy, disposed, card_action)) => {
+                    Ok((hierarchy, disposed, action)) => {
+                        let (card_action, fork_result) = match action {
+                            Some(NavigationAction::Card(action)) => (Some(action), None),
+                            Some(NavigationAction::Fork(mut result)) => {
+                                result["submissionKey"] = json!(fork_submission);
+                                if result["replayed"] == true {
+                                    let mut graph =
+                                        active_graph(&owner, scene_id.as_deref(), window_id)?;
+                                    graph["forkSessionResult"] = result;
+                                    send.send_blocking(Event::Graph(graph))?;
+                                    continue;
+                                }
+                                (None, Some(result))
+                            }
+                            None => (None, None),
+                        };
                         if let Some(action) = &card_action
                             && action["outcome"] == "hide-window"
                         {
@@ -1109,6 +1157,24 @@ fn run(
                             launch_validated = false;
                             next_active_check = Instant::now() + ACTIVE_PATH_INTERVAL;
                         }
+                        if let Some(result) = fork_result {
+                            let child = result["sessionId"]
+                                .as_str()
+                                .context("Fork result has no session")?;
+                            let workspace_id = active_workspace
+                                .clone()
+                                .context("Fork result has no workspace")?;
+                            pending_launch.remove(child);
+                            launch_retries.insert(
+                                child.to_owned(),
+                                LaunchRetry {
+                                    workspace_id,
+                                    recovering: false,
+                                    validated: false,
+                                },
+                            );
+                            graph["forkSessionResult"] = result;
+                        }
                         let scenes = hierarchy
                             .task
                             .as_ref()
@@ -1172,7 +1238,15 @@ fn run(
                         dirty.extend(sessions.iter().cloned());
                     }
                     Err(error) => {
-                        if let Some((action, workspace_id)) = workspace_action {
+                        if let Some(submission_key) = fork_submission {
+                            let mut graph = active_graph(&owner, scene_id.as_deref(), window_id)?;
+                            graph["forkSessionResult"] = json!({
+                                "submissionKey": submission_key,
+                                "code": error.downcast_ref::<CanvasError>().map_or("FORK_CREATE_FAILED", |error| error.code),
+                                "error": format!("{error:#}"),
+                            });
+                            send.send_blocking(Event::Graph(graph))?;
+                        } else if let Some((action, workspace_id)) = workspace_action {
                             send.send_blocking(Event::WorkspaceActionResult {
                                 action: action.into(),
                                 workspace_id,
@@ -1686,6 +1760,7 @@ fn run(
                 | Command::DeleteTask { .. }
                 | Command::CreateCanvas { .. }
                 | Command::CreateShellSibling { .. }
+                | Command::ForkSession { .. }
                 | Command::SelectScene { .. }
                 | Command::RenameScene { .. }
                 | Command::ReorderScene { .. }
@@ -1882,12 +1957,15 @@ fn run(
                     {
                         catalog_loads.remove(session_id);
                     }
-                    if result["result"] == "restore-failed"
-                        && let (Some(id), Some(error)) = (
-                            result["sessionId"].as_str(),
-                            result["restoreError"].as_str(),
-                        )
-                    {
+                    if matches!(
+                        result["result"].as_str(),
+                        Some("restore-failed" | "fork-failed")
+                    ) && let (Some(id), Some(error)) = (
+                        result["sessionId"].as_str(),
+                        result["restoreError"]
+                            .as_str()
+                            .or_else(|| result["forkError"].as_str()),
+                    ) {
                         pending_input.retain(|input| input.session_id != id);
                         failed_launches
                             .insert(id.to_owned(), RecoveryState::Failed(error.to_owned()));
@@ -1957,7 +2035,7 @@ fn run(
             }
         }
         let released: Vec<_> = provider_starting
-            .iter()
+            .keys()
             .filter(|id| !owner.waiting_for_provider_restore(id))
             .cloned()
             .collect();
@@ -2247,6 +2325,11 @@ fn report_session_launch_failure(
     recovering: bool,
     message: String,
 ) -> Result<RecoveryState> {
+    if owner.pending_claude_fork(session_id)?.is_some() {
+        let reason = format!("Fork CLI could not start: {message}");
+        owner.fail_claude_fork(session_id, &reason)?;
+        return report_launch_failure(send, session_id, true, reason);
+    }
     if let Some(binding) = owner
         .claude_binding(session_id)?
         .filter(|binding| binding.resumable)
@@ -2373,6 +2456,10 @@ fn unstarted_sessions(
             pending.insert(id.to_owned());
             continue;
         }
+        if owner.pending_claude_fork(id)?.is_some() {
+            pending.insert(id.to_owned());
+            continue;
+        }
         let binding = owner.claude_binding(id)?;
         if binding
             .as_ref()
@@ -2402,7 +2489,7 @@ fn default_terminal_options() -> TerminalOptions {
 
 enum PreparedLaunch {
     Shell(String),
-    ClaudeCode(ClaudeLaunch),
+    ClaudeCode(ClaudeLaunch, Option<String>),
 }
 
 fn prepare_launch(
@@ -2430,11 +2517,28 @@ fn prepare_launch(
         }
         "claude-code" => {
             let binding = owner.claude_binding(session_id)?;
+            let fork = owner.pending_claude_fork(session_id)?;
             let data_root = options.data_root.clone();
             thread::Builder::new()
                 .name("claude-launch".into())
                 .spawn(move || {
                     let terminal = default_terminal_options();
+                    if let Some(fork) = fork {
+                        let result = prepare_claude_fork(
+                            &data_root,
+                            Path::new(&session.cwd),
+                            &fork.metadata,
+                            &fork.source_id,
+                            std::env::vars_os().collect(),
+                            terminal.cols,
+                            terminal.rows,
+                        );
+                        let _ = send
+                            .send(result.map(|plan| {
+                                PreparedLaunch::ClaudeCode(plan, Some(fork.source_id))
+                            }));
+                        return;
+                    }
                     let result = prepare_claude_launch(
                         &data_root,
                         Path::new(&session.cwd),
@@ -2449,7 +2553,7 @@ fn prepare_launch(
                         terminal.cols,
                         terminal.rows,
                     );
-                    let _ = send.send(result.map(PreparedLaunch::ClaudeCode));
+                    let _ = send.send(result.map(|plan| PreparedLaunch::ClaudeCode(plan, None)));
                 })?;
         }
         _ => bail!("unsupported session launch kind"),
@@ -2556,11 +2660,16 @@ fn resolve_workspace_directory(directory: &str) -> Result<PathBuf> {
     Ok(resolved)
 }
 
+enum NavigationAction {
+    Card(Value),
+    Fork(Value),
+}
+
 fn navigate(
     owner: &mut ShellOwner,
     window_id: &str,
     command: Command,
-) -> Result<(HierarchyResult, Vec<String>, Option<Value>)> {
+) -> Result<(HierarchyResult, Vec<String>, Option<NavigationAction>)> {
     let time = now();
     let ids = CanvasIds {
         scene_id: id(),
@@ -2799,6 +2908,36 @@ fn navigate(
                 time,
             )?;
         }
+        Command::ForkSession {
+            scene_id,
+            source_session_id,
+            placement,
+            name,
+            worktree_mode,
+            submission_key,
+        } => {
+            let input = ForkSessionInput {
+                window_id: window_id.into(),
+                scene_id,
+                source_session_id,
+                placement,
+                name,
+                worktree_mode,
+                submission_key,
+                now: time,
+            };
+            let result = owner.create_fork_child(
+                &metadata("hierarchy.fork-session", &serde_json::to_value(&input)?),
+                &input,
+                &ids,
+                &messages,
+            )?;
+            return Ok((
+                owner.hierarchy(window_id)?,
+                Vec::new(),
+                Some(NavigationAction::Fork(result)),
+            ));
+        }
         Command::SelectScene { scene_id } => {
             owner.select_scene(window_id, &scene_id, time)?;
         }
@@ -2884,7 +3023,11 @@ fn navigate(
                     "confirmLabel": "我知道了",
                 });
             }
-            return Ok((owner.hierarchy(window_id)?, disposed, Some(action)));
+            return Ok((
+                owner.hierarchy(window_id)?,
+                disposed,
+                Some(NavigationAction::Card(action)),
+            ));
         }
         Command::RemoveSessionBranch {
             scene_id,
@@ -2916,7 +3059,11 @@ fn navigate(
                 "removedSessionIds": result["removedSessionIds"],
                 "disposedSessionIds": disposed,
             });
-            return Ok((owner.hierarchy(window_id)?, disposed, Some(action)));
+            return Ok((
+                owner.hierarchy(window_id)?,
+                disposed,
+                Some(NavigationAction::Card(action)),
+            ));
         }
         Command::FocusSession {
             scene_id,
