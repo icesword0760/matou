@@ -20,7 +20,7 @@ use matou_native_core::{
     shell_history,
     storage::{CommandMetadata, DomainCommit},
 };
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 
 use crate::{
@@ -55,6 +55,7 @@ struct RunHook {
     secrets: Vec<String>,
     deadline: Option<Instant>,
     last_observation: Option<Observation>,
+    last_submission: Option<Instant>,
     resume: Option<ResumeMonitor>,
     reported_missing: bool,
 }
@@ -872,6 +873,7 @@ impl ShellOwner {
                 secrets,
                 deadline: Some(Instant::now() + IDENTITY_TIMEOUT),
                 last_observation: None,
+                last_submission: None,
                 resume,
                 reported_missing: false,
             })
@@ -1126,55 +1128,72 @@ impl ShellOwner {
         observation.permission_mode = safe(observation.permission_mode);
         observation.cwd = safe(observation.cwd)
             .filter(|cwd| Path::new(cwd).is_absolute() && Path::new(cwd).is_dir());
-        if hook.last_observation.as_ref() == Some(&observation) {
-            return;
-        }
+        // Hook status is independent of whether the identity metadata changed.
+        let notification = observation.notification.take();
         let confirms = hook
             .last_observation
             .as_ref()
             .is_none_or(|last| last.identity != observation.identity);
-        let observed = [
-            ("model", &observation.model),
-            ("permissionMode", &observation.permission_mode),
-            ("cwd", &observation.cwd),
-        ]
-        .into_iter()
-        .filter_map(|(key, value)| value.as_ref().map(|value| (key.to_owned(), json!(value))))
-        .collect();
-        let id = (self.next_id)();
-        let commit = sessions::record_claude_identity(
-            &mut self.connection,
-            &command(
-                format!("provider-hook-{}-{id}", scope.run_id),
-                "provider-hook.identity",
-                id.clone(),
-            ),
-            &sessions::ClaudeIdentity {
-                binding_id: &id,
-                session_id: &scope.session_id,
-                run_id: &scope.run_id,
-                generation: &scope.generation,
-                provider_session_id: identity,
-                expected_id: scope.expected_id.as_deref(),
-                launch_metadata: &hook.launch_metadata,
-                observed_metadata: &Value::Object(observed),
-                event_name: observation.event,
-                first_for_run: confirms,
-            },
-            now(),
-        );
-        match commit {
-            Ok(commit) => {
-                hook.deadline = None;
-                hook.last_observation = Some(observation);
-                if confirms {
-                    let mut payload = commit.result.clone();
-                    payload["result"] = json!("confirmed");
-                    events.push(OwnerEvent::ProviderIdentity(payload));
-                }
-                events.push(OwnerEvent::Domain(commit));
+        if hook.last_observation.as_ref() != Some(&observation) {
+            let observed = [
+                ("model", &observation.model),
+                ("permissionMode", &observation.permission_mode),
+                ("cwd", &observation.cwd),
+            ]
+            .into_iter()
+            .filter_map(|(key, value)| value.as_ref().map(|value| (key.to_owned(), json!(value))))
+            .collect();
+            let id = (self.next_id)();
+            let commit = sessions::record_claude_identity(
+                &mut self.connection,
+                &command(
+                    format!("provider-hook-{}-{id}", scope.run_id),
+                    "provider-hook.identity",
+                    id.clone(),
+                ),
+                &sessions::ClaudeIdentity {
+                    binding_id: &id,
+                    session_id: &scope.session_id,
+                    run_id: &scope.run_id,
+                    generation: &scope.generation,
+                    provider_session_id: identity,
+                    expected_id: scope.expected_id.as_deref(),
+                    launch_metadata: &hook.launch_metadata,
+                    observed_metadata: &Value::Object(observed),
+                    event_name: observation.event,
+                    first_for_run: confirms,
+                },
+                now(),
+            );
+            let Ok(commit) = commit else {
+                reject_identity(events, &scope, "binding-write-failed");
+                return;
+            };
+            hook.deadline = None;
+            hook.last_observation = Some(observation);
+            if confirms {
+                let mut payload = commit.result.clone();
+                payload["result"] = json!("confirmed");
+                events.push(OwnerEvent::ProviderIdentity(payload));
             }
-            Err(_) => reject_identity(events, &scope, "binding-write-failed"),
+            events.push(OwnerEvent::Domain(commit));
+        }
+        // Worker events and HTTP hooks arrive on separate queues. A queued
+        // hook must not overwrite a newer submission already applied above it.
+        if let Some((kind, received_at)) = notification
+            && !confirms
+            && hook
+                .last_submission
+                .is_none_or(|submitted| submitted <= received_at)
+            && let Err(error) = self.set_work_status(&scope.session_id, events, |current| {
+                kind.work_status(current)
+            })
+        {
+            diagnostic(
+                events,
+                &scope.session_id,
+                format!("persist provider hook work status: {error:#}"),
+            );
         }
     }
 
@@ -1221,22 +1240,25 @@ impl ShellOwner {
             }
         }
         let result = match &event.event {
-            SessionEvent::InputSubmitted => {
-                if !shell.is_shell {
+            SessionEvent::InputSubmitted(submitted_at) => {
+                if shell.ended {
                     return;
                 }
-                if let Some(shell) = self
+                let shell = self
                     .shells
                     .get_mut(&event.session_id)
-                    .filter(|shell| shell.is_shell)
-                {
+                    .expect("live session");
+                if shell.is_shell {
                     shell.cwd_capture = Some((Instant::now() + Duration::from_millis(180), true));
                 }
-                if let Err(error) = self.set_work_status(&event.session_id, "running", events) {
+                if let Some(hook) = &mut shell.hook {
+                    hook.last_submission = Some(*submitted_at);
+                }
+                if let Err(error) = self.set_work_status(&event.session_id, events, |_| "running") {
                     diagnostic(
                         events,
                         &event.session_id,
-                        format!("persist submitted Shell input: {error:#}"),
+                        format!("persist submitted terminal input: {error:#}"),
                     );
                 }
                 return;
@@ -1358,7 +1380,7 @@ impl ShellOwner {
             if status == "error" {
                 self.flush_summary(id, events);
             }
-            if let Err(error) = self.set_work_status(id, &status, events) {
+            if let Err(error) = self.set_work_status(id, events, |_| &status) {
                 diagnostic(events, id, format!("persist Shell work status: {error:#}"));
             }
         }
@@ -1396,17 +1418,24 @@ impl ShellOwner {
         Ok(())
     }
 
-    fn set_work_status(
+    fn set_work_status<'a>(
         &mut self,
         id: &str,
-        status: &str,
         events: &mut Vec<OwnerEvent>,
+        next_status: impl FnOnce(&str) -> &'a str,
     ) -> Result<()> {
-        let current: String = self.connection.query_row(
-            "SELECT work_status FROM sessions WHERE id=?",
-            [id],
-            |row| row.get(0),
-        )?;
+        let Some(current): Option<String> = self
+            .connection
+            .query_row(
+                "SELECT work_status FROM sessions WHERE id=? AND archived_at IS NULL",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()?
+        else {
+            return Ok(());
+        };
+        let status = next_status(&current);
         if current == status {
             return Ok(());
         }
@@ -1498,7 +1527,7 @@ impl ShellOwner {
                 events,
             );
         } else if startup_failed {
-            self.set_work_status(id, "error", events)?;
+            self.set_work_status(id, events, |_| "error")?;
         }
         Ok(())
     }
@@ -1732,6 +1761,131 @@ mod provider_tests {
         thread,
     };
 
+    fn work_state(owner: &ShellOwner, session: &str) -> Result<(String, i64)> {
+        Ok(owner.connection.query_row(
+            "SELECT work_status, version FROM sessions WHERE id=?",
+            [session],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?)
+    }
+
+    fn assert_provider_work_status(owner: &mut ShellOwner, scope: &Scope) -> Result<()> {
+        let session = &scope.session_id;
+        let mut events = Vec::new();
+        let hook = |event, message| {
+            let payload =
+                json!({"hook_event_name": event, "message": message, "session_id": "first-id"});
+            Observation::parse(payload.as_object().unwrap())
+        };
+        let submit = |owner: &mut ShellOwner, events: &mut Vec<OwnerEvent>| {
+            owner.apply(
+                WorkerEvent {
+                    session_id: session.clone(),
+                    run_id: scope.run_id.clone(),
+                    event: SessionEvent::InputSubmitted(Instant::now()),
+                },
+                events,
+            );
+        };
+        submit(owner, &mut events);
+        let running = work_state(owner, session)?;
+        assert_eq!(running.0, "running");
+        submit(owner, &mut events);
+        assert_eq!(work_state(owner, session)?, running);
+        let mut stale_stop = hook("Stop", "");
+        stale_stop.notification.as_mut().unwrap().1 -= Duration::from_millis(1);
+        submit(owner, &mut events);
+        owner.apply_hook(scope.clone(), stale_stop, &mut events);
+        assert_eq!(work_state(owner, session)?, running);
+
+        owner.apply_hook(scope.clone(), hook("Stop", ""), &mut events);
+        assert_eq!(work_state(owner, session)?.0, "idle");
+        submit(owner, &mut events);
+        owner.apply_hook(scope.clone(), hook("Stop", ""), &mut events);
+        let idle = work_state(owner, session)?;
+        assert_eq!(idle.0, "idle");
+        owner.apply_hook(scope.clone(), hook("Stop", ""), &mut events);
+        assert_eq!(work_state(owner, session)?, idle);
+        owner.apply_hook(scope.clone(), hook("PermissionRequest", ""), &mut events);
+        assert_eq!(work_state(owner, session)?.0, "needs-input");
+        owner.apply_hook(scope.clone(), hook("Notification", "Finished"), &mut events);
+        assert_eq!(work_state(owner, session)?.0, "idle");
+        owner.apply_hook(
+            scope.clone(),
+            hook("Notification", "Awaiting input"),
+            &mut events,
+        );
+        assert_eq!(work_state(owner, session)?.0, "needs-input");
+
+        owner
+            .connection
+            .execute("UPDATE sessions SET archived_at=1 WHERE id=?", [session])?;
+        let archived = work_state(owner, session)?;
+        owner.apply_hook(scope.clone(), hook("Notification", "Done"), &mut events);
+        assert_eq!(work_state(owner, session)?, archived);
+        owner.connection.execute(
+            "UPDATE sessions SET archived_at=NULL, work_status='error' WHERE id=?",
+            [session],
+        )?;
+        let error = work_state(owner, session)?;
+        for (event, message) in [
+            ("Stop", ""),
+            ("Notification", "Done"),
+            ("Notification", "Waiting"),
+            ("PermissionRequest", ""),
+        ] {
+            owner.apply_hook(scope.clone(), hook(event, message), &mut events);
+            assert_eq!(work_state(owner, session)?, error);
+        }
+        submit(owner, &mut events);
+        assert_eq!(work_state(owner, session)?.0, "running");
+        let committed_statuses: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                OwnerEvent::Domain(commit) => commit.result["workStatus"].as_str(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            committed_statuses,
+            [
+                "running",
+                "idle",
+                "running",
+                "idle",
+                "needs-input",
+                "idle",
+                "needs-input",
+                "running",
+            ]
+        );
+        let writes: i64 = owner.connection.query_row(
+            "SELECT COUNT(*) FROM command_deduplication WHERE command_type='session.work-status'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(writes, committed_statuses.len() as i64);
+
+        let (reply, result) = mpsc::channel();
+        owner.send(
+            session,
+            WorkerCommand::Write {
+                bytes: vec![b'\n'],
+                reply,
+            },
+        )?;
+        result.recv_timeout(Duration::from_secs(5))??;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !owner.shells[session].ended && Instant::now() < deadline {
+            owner.poll(Duration::from_millis(25))?;
+        }
+        let exited = work_state(owner, session)?;
+        assert_eq!(exited.0, "exited");
+        owner.apply_hook(scope.clone(), hook("Stop", ""), &mut events);
+        assert_eq!(work_state(owner, session)?, exited);
+        Ok(())
+    }
+
     #[test]
     fn current_provider_run_alone_can_project_identity() -> Result<()> {
         let root = tempfile::tempdir()?;
@@ -1822,6 +1976,7 @@ mod provider_tests {
             model: None,
             permission_mode: None,
             cwd: None,
+            notification: None,
         };
         let mut events = Vec::new();
         for (event, id) in [
@@ -1906,6 +2061,7 @@ mod provider_tests {
         );
         owner.apply_output(session, "accepted terminal text", &[], &mut events);
         assert_eq!(owner.summaries[session].raw, "accepted terminal text");
+        assert_provider_work_status(&mut owner, &scope)?;
 
         owner.retire_sessions(&[session.into()]);
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -1918,17 +2074,31 @@ mod provider_tests {
             run_id: owner.shells[session].run_id.clone(),
             ..scope.clone()
         };
+        let stop = |id| {
+            let payload = json!({"hook_event_name": "Stop", "session_id": id});
+            Observation::parse(payload.as_object().unwrap())
+        };
+        let before = work_state(&owner, session)?;
+        owner.apply_hook(current.clone(), stop("current-id"), &mut events);
+        assert!(owner.provider_allows_derivation(session));
+        assert_eq!(work_state(&owner, session)?, before);
+        owner.apply_hook(scope, stop("late-id"), &mut events);
         owner.apply_hook(
-            current,
-            observation("UserPromptSubmit", Some("current-id")),
+            Scope {
+                generation: "old-generation".into(),
+                ..current.clone()
+            },
+            stop("current-id"),
             &mut events,
         );
-        owner.apply_hook(scope, observation("Stop", Some("late-id")), &mut events);
+        assert_eq!(work_state(&owner, session)?, before);
         assert_eq!(count(&owner)?, 2);
         assert!(
             matches!(events.last(), Some(OwnerEvent::ProviderIdentity(value)) if value["reason"] == "retired-run")
         );
         owner.retire_sessions(&[session.into()]);
+        owner.apply_hook(current, stop("current-id"), &mut events);
+        assert_eq!(work_state(&owner, session)?, before);
         let deadline = Instant::now() + Duration::from_secs(5);
         while owner.has_shell_worker(session) && Instant::now() < deadline {
             owner.poll(Duration::from_millis(25))?;

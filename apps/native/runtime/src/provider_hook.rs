@@ -60,10 +60,11 @@ pub(crate) struct Observation {
     pub model: Option<String>,
     pub permission_mode: Option<String>,
     pub cwd: Option<String>,
+    pub notification: Option<(NotificationKind, Instant)>,
 }
 
 impl Observation {
-    fn parse(payload: &Map<String, Value>) -> Self {
+    pub(super) fn parse(payload: &Map<String, Value>) -> Self {
         let text = |names: &[&str]| {
             names
                 .iter()
@@ -96,6 +97,69 @@ impl Observation {
                 .map(str::to_owned),
             permission_mode: text(&["permission_mode", "permissionMode"]).map(str::to_owned),
             cwd: text(&["cwd"]).map(str::to_owned),
+            notification: NotificationKind::classify(event, payload)
+                .map(|kind| (kind, Instant::now())),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NotificationKind {
+    Completed,
+    Permission,
+    Waiting,
+    Attention,
+}
+
+impl NotificationKind {
+    fn classify(event: &str, payload: &Map<String, Value>) -> Option<Self> {
+        match event {
+            "Stop" => return Some(Self::Completed),
+            "PermissionRequest" => return Some(Self::Permission),
+            "Notification" => {}
+            _ => return None,
+        }
+        let nested_message = |name: &str| payload.get(name)?.get("message");
+        let lower = [
+            payload.get("message"),
+            payload.get("body"),
+            payload.get("text"),
+            payload.get("prompt"),
+            payload.get("error"),
+            payload.get("description"),
+            nested_message("notification"),
+            nested_message("data"),
+        ]
+        .into_iter()
+        .flatten()
+        .find_map(nonempty)
+        .unwrap_or_default()
+        .to_lowercase();
+        if ["permission", "approve", "approval"]
+            .iter()
+            .any(|word| lower.contains(word))
+        {
+            Some(Self::Permission)
+        } else if ["complet", "finish", "done", "success"]
+            .iter()
+            .any(|word| lower.contains(word))
+        {
+            Some(Self::Completed)
+        } else if ["idle", "wait", "input"]
+            .iter()
+            .any(|word| lower.contains(word))
+        {
+            Some(Self::Waiting)
+        } else {
+            Some(Self::Attention)
+        }
+    }
+
+    pub fn work_status(self, current: &str) -> &'static str {
+        match (self, current) {
+            (_, "error") => "error",
+            (Self::Completed, _) => "idle",
+            _ => "needs-input",
         }
     }
 }
@@ -515,6 +579,7 @@ fn read_request(
     let mut observation = Observation::parse(&payload);
     if statusline {
         observation.event = "unknown";
+        observation.notification = None;
     }
     match send.try_send(HookMessage::Observed(record.scope.clone(), observation)) {
         Ok(()) => Ok(()),
@@ -676,6 +741,10 @@ mod tests {
         };
         assert_eq!(scope.run_id, "current");
         assert_eq!(observation.identity.as_deref(), Some("external"));
+        assert_eq!(
+            observation.notification.unwrap().0,
+            NotificationKind::Completed
+        );
         assert!(server.messages().next().is_none());
         let statusline = format!("{}?kind=statusline", run.token);
         assert_eq!(
@@ -683,7 +752,7 @@ mod tests {
                 &server,
                 &statusline,
                 "POST",
-                br#"{"hook_event_name":"SessionStart","session_id":" exact-ID "}"#,
+                br#"{"hook_event_name":"Stop","session_id":" exact-ID "}"#,
             )?,
             200
         );
@@ -692,7 +761,86 @@ mod tests {
         };
         assert_eq!(statusline.event, "unknown");
         assert_eq!(statusline.identity.as_deref(), Some(" exact-ID "));
+        assert!(statusline.notification.is_none());
         Ok(())
+    }
+
+    #[test]
+    fn notifications_follow_frozen_text_precedence() {
+        use NotificationKind::*;
+
+        for (payload, expected) in [
+            (
+                json!({"hook_event_name": "Stop", "message": "approval"}),
+                Some(Completed),
+            ),
+            (
+                json!({"hook_event_name": "PermissionRequest", "message": "done"}),
+                Some(Permission),
+            ),
+            (
+                json!({"hook_event_name": "PreToolUse", "message": "done"}),
+                None,
+            ),
+            (
+                json!({"hook_event_name": "unknown", "message": "done"}),
+                None,
+            ),
+        ] {
+            assert_eq!(
+                Observation::parse(payload.as_object().unwrap())
+                    .notification
+                    .map(|(kind, _)| kind),
+                expected
+            );
+        }
+        for (mut payload, expected) in [
+            (
+                json!({"message": "DONE but waiting for APPROVAL"}),
+                Permission,
+            ),
+            (json!({"body": "Approve", "text": "Done"}), Permission),
+            (
+                json!({"message": " \u{feff} ", "body": 123, "text": "Finished, awaiting input"}),
+                Completed,
+            ),
+            (
+                json!({"message": "Review this", "body": "success"}),
+                Attention,
+            ),
+            (
+                json!({"prompt": "Successful", "error": "permission"}),
+                Completed,
+            ),
+            (
+                json!({"error": "COMPLETED", "description": "needs your input"}),
+                Completed,
+            ),
+            (
+                json!({"description": "IDLE", "notification": {"message": "done"}}),
+                Waiting,
+            ),
+            (
+                json!({"notification": {"message": "Awaiting"}, "data": {"message": "done"}}),
+                Waiting,
+            ),
+            (
+                json!({"notification": [{"message": "done"}], "data": {"message": "INPUT"}}),
+                Waiting,
+            ),
+            (
+                json!({"message": "", "notification_type": "permission_prompt"}),
+                Attention,
+            ),
+        ] {
+            payload["hookEventName"] = json!("Notification");
+            let parsed = Observation::parse(payload.as_object().unwrap());
+            assert_eq!(
+                parsed.notification.map(|(kind, _)| kind),
+                Some(expected),
+                "{payload}"
+            );
+        }
     }
 
     #[test]

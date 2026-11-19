@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use matou_native_core::{
     journal::JournalOptions,
     pty::{ProcessExit, ShellLaunch},
@@ -31,7 +33,7 @@ pub enum SessionEvent {
         pid: u32,
         sequence: u64,
     },
-    InputSubmitted,
+    InputSubmitted(Instant),
     CwdCaptured {
         run_id: String,
         cwd: String,
