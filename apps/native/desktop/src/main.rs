@@ -4,6 +4,8 @@ use std::{cell::RefCell, rc::Rc};
 
 use anyhow::Result;
 use gpui::*;
+#[cfg(target_os = "macos")]
+use matou_native_desktop::macos;
 use matou_native_desktop::{
     assets::NativeAssets,
     runtime_bridge::{LaunchOptions, RuntimeBridge},
@@ -20,11 +22,25 @@ fn main() -> Result<()> {
     let quit_runtime = runtime.clone();
     let application = Application::new().with_assets(NativeAssets);
     #[cfg(target_os = "macos")]
+    let termination_hook = match macos::install_termination_hook() {
+        Ok(()) => true,
+        Err(error) => {
+            eprintln!("Install native termination hook: {error:#}");
+            false
+        }
+    };
+    #[cfg(target_os = "macos")]
+    let quitting = Rc::new(Cell::new(false));
+    #[cfg(target_os = "macos")]
     let main_window = Rc::new(Cell::new(None::<WindowHandle<Workspace>>));
     #[cfg(target_os = "macos")]
     application.on_reopen({
         let main_window = main_window.clone();
+        let quitting = quitting.clone();
         move |cx| {
+            if quitting.get() {
+                return;
+            }
             if let Some(window) = main_window.get() {
                 cx.activate(true);
                 if let Err(error) = window.update(cx, |_, window, _| window.activate_window()) {
@@ -35,7 +51,31 @@ fn main() -> Result<()> {
     });
     application.run(move |cx| {
         #[cfg(target_os = "macos")]
-        let quitting = Rc::new(Cell::new(false));
+        {
+            let window = main_window.clone();
+            let quitting = quitting.clone();
+            let runtime = quit_runtime.clone();
+            let mut cx = cx.to_async();
+            if termination_hook
+                && let Err(error) = macos::defer_termination(move || {
+                    quitting.set(true);
+                    if let Some(window) = window.get()
+                        && let Err(error) = window.update(&mut cx, |view, window, cx| {
+                            if let Err(error) = macos::hide_window(window) {
+                                eprintln!("Hide native window before quitting: {error:#}");
+                            }
+                            // Queue the last geometry write while the runtime still accepts commands.
+                            view.flush_geometry(cx);
+                        })
+                    {
+                        eprintln!("Flush native window geometry before quitting: {error:#}");
+                    }
+                    runtime.borrow_mut().shutdown_async()
+                })
+            {
+                eprintln!("Defer native termination: {error:#}");
+            }
+        }
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
         cx.set_menus(vec![Menu {
@@ -58,7 +98,7 @@ fn main() -> Result<()> {
             },
             |window, cx| {
                 #[cfg(target_os = "macos")]
-                if let Err(error) = matou_native_desktop::macos::apply_sidebar_material(window) {
+                if let Err(error) = macos::apply_sidebar_material(window) {
                     eprintln!("Apply native sidebar material: {error:#}");
                 }
                 let workspace = cx.new(|cx| Workspace::new(commands, events, window, cx));
@@ -68,6 +108,11 @@ fn main() -> Result<()> {
                     let quitting = quitting.clone();
                     window.on_window_should_close(cx, move |window, cx| {
                         if quitting.get() {
+                            if let Err(error) =
+                                workspace.update(cx, |view, cx| view.flush_geometry(cx))
+                            {
+                                eprintln!("Flush native window geometry before closing: {error:#}");
+                            }
                             return true;
                         }
                         if let Err(error) = workspace.update(cx, |view, cx| view.flush_geometry(cx))
@@ -75,7 +120,7 @@ fn main() -> Result<()> {
                             eprintln!("Flush native window geometry before hiding: {error:#}");
                             return false;
                         }
-                        if let Err(error) = matou_native_desktop::macos::hide_window(window) {
+                        if let Err(error) = macos::hide_window(window) {
                             eprintln!("Hide native window: {error:#}");
                         }
                         false
@@ -87,9 +132,8 @@ fn main() -> Result<()> {
             Ok(window) => {
                 #[cfg(target_os = "macos")]
                 main_window.set(Some(window));
+                #[cfg(not(target_os = "macos"))]
                 cx.on_app_quit(move |cx| {
-                    #[cfg(target_os = "macos")]
-                    quitting.set(true);
                     if let Err(error) = window.update(cx, |view, _, cx| view.flush_geometry(cx)) {
                         eprintln!("Flush native window geometry before quitting: {error:#}");
                     }
@@ -106,6 +150,20 @@ fn main() -> Result<()> {
                 cx.quit();
             }
         }
+        #[cfg(target_os = "macos")]
+        cx.on_app_quit(move |cx| {
+            if !quitting.replace(true)
+                && let Some(window) = main_window.get()
+                && let Err(error) = window.update(cx, |view, _, cx| view.flush_geometry(cx))
+            {
+                eprintln!("Flush native window geometry before quitting: {error:#}");
+            }
+            if let Err(error) = quit_runtime.borrow_mut().shutdown() {
+                eprintln!("Close native runtime: {error:#}");
+            }
+            async {}
+        })
+        .detach();
     });
     runtime.borrow_mut().shutdown()
 }

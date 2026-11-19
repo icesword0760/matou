@@ -239,6 +239,13 @@ impl RuntimeBridge {
             .join()
             .map_err(|_| anyhow!("native runtime bridge manager panicked"))?
     }
+
+    /// Stop accepting commands and hand off the supervisor so the caller can wait off-thread.
+    #[cfg(target_os = "macos")]
+    pub fn shutdown_async(&mut self) -> Option<JoinHandle<Result<()>>> {
+        self.commands.stop();
+        self.thread.take()
+    }
 }
 impl Drop for RuntimeBridge {
     fn drop(&mut self) {
