@@ -418,3 +418,136 @@ fn provider_binding_requires_current_run_and_validation_replays_once() -> Result
     )?, ("expired".into(), 23, None));
     Ok(())
 }
+
+#[test]
+fn catalog_binding_replaces_available_history_without_validating_the_new_id() -> Result<()> {
+    use matou_native_core::sessions::{
+        ClaudeCatalogLoad, ClaudeRestore, change_claude_restore, claude_binding,
+        load_claude_catalog_binding,
+    };
+
+    let reference: Reference = serde_json::from_str(REFERENCE)?;
+    let seed = reference.bootstrap;
+    let mut db = open(Path::new(":memory:"))?;
+    bootstrap_window(
+        &mut db,
+        &seed.command,
+        &seed.input,
+        &seed.ids,
+        "默认",
+        seed.committed_at,
+    )?;
+    let session_id = seed.ids.session_id.as_str();
+    let cwd = get_session(&db, session_id)?.context("seed session")?.cwd;
+    db.execute(
+        "UPDATE sessions SET kind='claude-code' WHERE id=?",
+        [session_id],
+    )?;
+    db.execute(
+        "INSERT INTO provider_bindings (id, session_id, provider, provider_session_id,
+            resume_state, metadata_json, created_at, updated_at, validated_at)
+         VALUES ('old', ?, 'claude-code', 'old-conversation', 'available',
+                 '{\"spawnRevision\":7}', 9, 9, 9)",
+        [session_id],
+    )?;
+    let command = |name: &str| CommandMetadata {
+        command_id: name.into(),
+        command_type: "session.load-provider-catalog".into(),
+        request_hash: name.into(),
+        causation_id: None,
+        correlation_id: None,
+    };
+    let input = ClaudeCatalogLoad {
+        binding_id: "catalog-binding",
+        session_id,
+        scene_id: &seed.ids.scene_id,
+        cwd: &cwd,
+        provider_session_id: "catalog-conversation",
+        title: "Previously saved conversation",
+        model: Some("test-model"),
+        permission_mode: "plan",
+    };
+    assert!(
+        load_claude_catalog_binding(
+            &mut db,
+            &command("wrong-scene"),
+            &ClaudeCatalogLoad {
+                scene_id: "another",
+                ..input
+            },
+            10
+        )
+        .is_err()
+    );
+    assert!(
+        load_claude_catalog_binding(
+            &mut db,
+            &command("changed-cwd"),
+            &ClaudeCatalogLoad {
+                cwd: "/changed",
+                ..input
+            },
+            10
+        )
+        .is_err()
+    );
+    assert_eq!(claude_binding(&db, session_id)?.unwrap().id, "old");
+
+    load_claude_catalog_binding(&mut db, &command("load"), &input, 10)?;
+    let binding = claude_binding(&db, session_id)?.unwrap();
+    assert_eq!(binding.id, "catalog-binding");
+    assert_eq!(binding.provider_session_id, "catalog-conversation");
+    assert_eq!(binding.restore_state, "none");
+    assert!(binding.resumable);
+    assert_eq!(binding.metadata["loadedFromCatalog"], true);
+    assert_eq!(binding.metadata["model"], "test-model");
+    assert_eq!(binding.metadata["permissionMode"], "plan");
+    assert_eq!(binding.metadata["spawnRevision"], 8);
+    let rows = read_rows(
+        &db,
+        "SELECT id, resume_state, validated_at, invalidated_at FROM provider_bindings ORDER BY id",
+    )?;
+    assert_eq!(
+        rows,
+        [
+            json!({"id": "catalog-binding", "resume_state": "available", "validated_at": null, "invalidated_at": null}),
+            json!({"id": "old", "resume_state": "expired", "validated_at": 9, "invalidated_at": 10})
+        ]
+    );
+    let session = get_session(&db, session_id)?.unwrap();
+    assert_eq!(session.title, input.title);
+    assert_eq!(session.status, "starting");
+
+    change_claude_restore(
+        &mut db,
+        &command("begin"),
+        session_id,
+        ClaudeRestore::Begin(&binding.id),
+        11,
+    )?;
+    assert_eq!(
+        claude_binding(&db, session_id)?.unwrap().restore_state,
+        "restoring"
+    );
+
+    start_run(
+        &mut db,
+        &command("run"),
+        &StartRunInput {
+            id: "running".into(),
+            session_id: session_id.into(),
+            runtime_generation: "generation".into(),
+            pid: None,
+            cols: 80,
+            rows: 24,
+            now: 12,
+        },
+        12,
+    )?;
+    assert!(load_claude_catalog_binding(&mut db, &command("running"), &input, 13).is_err());
+    assert_eq!(
+        claude_binding(&db, session_id)?.unwrap().metadata["spawnRevision"],
+        8
+    );
+    Ok(())
+}

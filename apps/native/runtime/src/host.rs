@@ -19,6 +19,7 @@ use crate::{
     SessionEvent, SessionOptions,
     history_worker::{HistoryReply, HistoryRequest, HistoryWorker},
     owner::{OwnerEvent, ShellOwner},
+    provider_catalog,
     provider_hook::HookSetup,
     search::{SearchRequest, SearchResult},
     worker::{SelectionCopy, WorkerCommand},
@@ -36,7 +37,7 @@ use matou_native_core::{
     journal::JournalOptions,
     provider_launch::{ClaudeLaunch, prepare_claude_launch, validate_cwd},
     pty::{LaunchProfile, ShellLaunch},
-    sessions::ClaudeRestore,
+    sessions::{ClaudeCatalogLoad, ClaudeRestore},
     startup::{self, BootstrapResult},
     storage::CommandMetadata,
     workspace_paths::WorkspacePathState,
@@ -169,6 +170,13 @@ pub enum Command {
     },
     StartFreshProviderSession {
         session_id: String,
+    },
+    ListProviderSessions {
+        cwd: String,
+    },
+    LoadProviderSession {
+        session_id: String,
+        provider_session_id: String,
     },
     CreateWorkspace {
         root_directory: String,
@@ -347,7 +355,7 @@ pub enum Event {
         update: matou_native_core::geometry::GeometryUpdate,
         error: Option<String>,
     },
-    /// Graph with optional `sessionCardAction` and `providerIdentityEvents` results.
+    /// Graph with optional card, provider identity and provider catalog results.
     Graph(Value),
     ClipboardWrite {
         session_id: String,
@@ -659,6 +667,10 @@ fn run(
     let mut graph_dirty = false;
     let mut provider_identity_events = Vec::new();
     let mut provider_starting = HashSet::new();
+    let (catalog_requests, catalog_replies) = start_provider_catalog()?;
+    let mut catalog_loads = HashMap::<String, CatalogLoad>::new();
+    let mut catalog_lists = Vec::new();
+    let mut catalog_load_errors = Vec::new();
     let mut tasks_dirty = false;
     let clean_exit = 'running: loop {
         let now = Instant::now();
@@ -1033,6 +1045,13 @@ fn run(
                             wait_for_workers || !navigation_publications.is_empty();
                         if !disposed.is_empty() {
                             for id in &disposed {
+                                if let Some(load) = catalog_loads.remove(id) {
+                                    catalog_load_errors.push(catalog_load_error(
+                                        id,
+                                        &load.provider_session_id,
+                                        &anyhow!("Card was closed while loading the conversation"),
+                                    ));
+                                }
                                 sessions.remove(id);
                                 dirty.remove(id);
                                 sequence.remove(id);
@@ -1349,9 +1368,88 @@ fn run(
                         false,
                     )
                 }
+                Command::ListProviderSessions { cwd } => {
+                    if let Err(
+                        mpsc::TrySendError::Full(request)
+                        | mpsc::TrySendError::Disconnected(request),
+                    ) = catalog_requests.try_send(CatalogRequest { cwd, load: None })
+                    {
+                        catalog_lists.push(json!({"cwd": request.cwd, "error": CATALOG_BUSY}));
+                    }
+                    continue;
+                }
+                Command::LoadProviderSession {
+                    session_id,
+                    provider_session_id,
+                } => {
+                    let attempt = (|| -> Result<()> {
+                        anyhow::ensure!(
+                            foreground_sessions.contains(&session_id),
+                            "Card is no longer available in this scene"
+                        );
+                        if let Some(loading) = catalog_loads.get(&session_id) {
+                            anyhow::ensure!(
+                                loading.provider_session_id == provider_session_id,
+                                "Another conversation is already loading"
+                            );
+                            return Ok(());
+                        }
+                        if launch_retries.contains_key(&session_id)
+                            || !owner.can_launch_provider(&session_id)
+                        {
+                            let duplicate =
+                                owner.claude_binding(&session_id)?.is_some_and(|binding| {
+                                    binding.resumable
+                                        && binding.provider_session_id == provider_session_id
+                                        && binding.metadata["loadedFromCatalog"] == true
+                                });
+                            anyhow::ensure!(
+                                duplicate,
+                                "Card already has a running or starting process"
+                            );
+                            return Ok(());
+                        }
+                        anyhow::ensure!(
+                            !pending_launch.contains(&session_id)
+                                && !recovering.contains_key(&session_id),
+                            "Card already has a starting process"
+                        );
+                        let stored = owner
+                            .session(&session_id)?
+                            .filter(|session| session.archived_at.is_none())
+                            .context("Card is no longer available")?;
+                        catalog_requests
+                            .try_send(CatalogRequest {
+                                cwd: stored.cwd,
+                                load: Some(CatalogLoadTarget {
+                                    scene_id: scene_id.clone().context("No active scene")?,
+                                    session_id: session_id.clone(),
+                                    provider_session_id: provider_session_id.clone(),
+                                }),
+                            })
+                            .map_err(|_| anyhow!(CATALOG_BUSY))?;
+                        catalog_loads.insert(
+                            session_id.clone(),
+                            CatalogLoad {
+                                provider_session_id: provider_session_id.clone(),
+                                spawn_revision: None,
+                            },
+                        );
+                        Ok(())
+                    })();
+                    if let Err(error) = attempt {
+                        catalog_load_errors.push(catalog_load_error(
+                            &session_id,
+                            &provider_session_id,
+                            &error,
+                        ));
+                    }
+                    continue;
+                }
                 Command::RetryProviderRestore { ref session_id }
                 | Command::StartFreshProviderSession { ref session_id } => {
                     if !foreground_sessions.contains(session_id)
+                        || catalog_loads.contains_key(session_id)
                         || pending_launch.contains(session_id)
                         || launch_retries.contains_key(session_id)
                         || !owner.can_launch_provider(session_id)
@@ -1397,7 +1495,8 @@ fn run(
                 Command::RetryRecovery { ref session_id }
                 | Command::RestartSession { ref session_id } => {
                     let rebuilding = matches!(command, Command::RetryRecovery { .. });
-                    if launch_retries.contains_key(session_id)
+                    if catalog_loads.contains_key(session_id)
+                        || launch_retries.contains_key(session_id)
                         || owner
                             .claude_binding(session_id)?
                             .is_some_and(|binding| binding.restore_state == "failed")
@@ -1562,10 +1661,121 @@ fn run(
             }
             operations.push((session_id, result, refresh));
         }
+        // Revalidate a selected card after the background read, after any queued
+        // navigation/close commands have had a chance to change its authority.
+        for (CatalogRequest { cwd, load }, result) in catalog_replies.try_iter() {
+            let Some(CatalogLoadTarget {
+                scene_id: requested_scene,
+                session_id,
+                provider_session_id,
+            }) = load
+            else {
+                let result = result.and_then(|mut entries| {
+                    let ids: Vec<_> = entries
+                        .iter()
+                        .map(|entry| entry.provider_session_id.as_str())
+                        .collect();
+                    let mut owners = owner
+                        .catalog_binding_owners(&ids)
+                        .map_err(|_| "Could not read provider session bindings")?;
+                    for entry in &mut entries {
+                        entry.loaded_by = owners.remove(&entry.provider_session_id);
+                    }
+                    Ok(entries)
+                });
+                catalog_lists.push(match result {
+                    Ok(sessions) => json!({"cwd": cwd, "sessions": sessions}),
+                    Err(error) => json!({"cwd": cwd, "error": error}),
+                });
+                continue;
+            };
+            let Some(load) = catalog_loads.get_mut(&session_id) else {
+                // The navigation command already rejected and disposed this load.
+                continue;
+            };
+            let attempt = (|| -> Result<(String, i64)> {
+                anyhow::ensure!(
+                    scene_id.as_ref() == Some(&requested_scene)
+                        && foreground_sessions.contains(&session_id),
+                    "Card is no longer available in this scene"
+                );
+                anyhow::ensure!(
+                    owner.can_launch_provider(&session_id)
+                        && !pending_launch.contains(&session_id)
+                        && !recovering.contains_key(&session_id)
+                        && !launch_retries.contains_key(&session_id),
+                    "Card already has a running or starting process"
+                );
+                let entry = result
+                    .map_err(|error| anyhow!(error))?
+                    .into_iter()
+                    .next()
+                    .context("Provider session was not found in this working directory")?;
+                let workspace_id = owner
+                    .session_workspace(&session_id)?
+                    .context("Card is no longer available")?;
+                checks.request(&owner, &workspace_id)?;
+                let revision = owner.load_claude_catalog_binding(&ClaudeCatalogLoad {
+                    binding_id: &id(),
+                    session_id: &session_id,
+                    scene_id: &requested_scene,
+                    cwd: &cwd,
+                    provider_session_id: &entry.provider_session_id,
+                    title: &entry.title,
+                    model: entry.model.as_deref(),
+                    permission_mode: &entry.permission_mode,
+                })?;
+                Ok((workspace_id, revision))
+            })();
+            match attempt {
+                Ok((workspace_id, revision)) => {
+                    load.spawn_revision = Some(revision);
+                    failed_launches.remove(&session_id);
+                    sessions.remove(&session_id);
+                    dirty.remove(&session_id);
+                    sequence.remove(&session_id);
+                    scroll_requests.remove(&session_id);
+                    views.remove(&session_id);
+                    awaiting_ui.remove(&session_id);
+                    pending_input.retain(|input| input.session_id != session_id);
+                    operations.retain(|(id, _, _)| id != &session_id);
+                    searches.retain(|(id, _, _)| id != &session_id);
+                    copies.retain(|(_, id, _, _)| id != &session_id);
+                    launch_retries.insert(
+                        session_id,
+                        LaunchRetry {
+                            workspace_id,
+                            recovering: true,
+                            validated: false,
+                        },
+                    );
+                }
+                Err(error) => {
+                    catalog_loads.remove(&session_id);
+                    catalog_load_errors.push(catalog_load_error(
+                        &session_id,
+                        &provider_session_id,
+                        &error,
+                    ));
+                }
+            }
+        }
         for event in owner.poll(Duration::from_millis(4))? {
             match event {
                 OwnerEvent::Domain(_) => graph_dirty = true,
                 OwnerEvent::ProviderIdentity(result) => {
+                    if matches!(
+                        result["result"].as_str(),
+                        Some("confirmed" | "restore-failed")
+                    ) && let Some(session_id) = result["sessionId"].as_str()
+                        && catalog_loads.get(session_id).is_some_and(|load| {
+                            load.spawn_revision.is_some()
+                                && load.spawn_revision == result["spawnRevision"].as_i64()
+                                && result["providerSessionId"] == load.provider_session_id
+                        })
+                    {
+                        catalog_loads.remove(session_id);
+                    }
                     if result["result"] == "restore-failed"
                         && let (Some(id), Some(error)) = (
                             result["sessionId"].as_str(),
@@ -1739,13 +1949,23 @@ fn run(
             }
             send.send_blocking(event)?;
         }
-        if (graph_dirty || !provider_identity_events.is_empty())
+        if (graph_dirty
+            || !provider_identity_events.is_empty()
+            || !catalog_lists.is_empty()
+            || !catalog_load_errors.is_empty())
             && navigation_publications.is_empty()
         {
             let mut graph = active_graph(&owner, scene_id.as_deref(), window_id)?;
             if !provider_identity_events.is_empty() {
                 graph["providerIdentityEvents"] =
                     json!(std::mem::take(&mut provider_identity_events));
+            }
+            if !catalog_lists.is_empty() {
+                graph["providerSessionCatalogResults"] = json!(std::mem::take(&mut catalog_lists));
+            }
+            if !catalog_load_errors.is_empty() {
+                graph["providerSessionLoadErrors"] =
+                    json!(std::mem::take(&mut catalog_load_errors));
             }
             send.send_blocking(Event::Graph(graph))?;
             graph_dirty = false;
@@ -1813,6 +2033,54 @@ fn shutdown_result(sessions: Result<()>, backup: Option<Result<()>>) -> Result<(
 
 fn workspace_path_error(state: &WorkspacePathState) -> String {
     format!("{WORKSPACE_PATH_INVALID} ({})", state.reason)
+}
+
+const CATALOG_BUSY: &str = "Claude Code catalog is busy or unavailable";
+
+struct CatalogLoad {
+    provider_session_id: String,
+    spawn_revision: Option<i64>,
+}
+
+struct CatalogLoadTarget {
+    scene_id: String,
+    session_id: String,
+    provider_session_id: String,
+}
+
+struct CatalogRequest {
+    cwd: String,
+    load: Option<CatalogLoadTarget>,
+}
+
+type CatalogReply = (
+    CatalogRequest,
+    Result<Vec<provider_catalog::CatalogEntry>, &'static str>,
+);
+
+fn start_provider_catalog() -> Result<(mpsc::SyncSender<CatalogRequest>, Receiver<CatalogReply>)> {
+    let (requests, incoming) = mpsc::sync_channel::<CatalogRequest>(16);
+    let (outgoing, replies) = mpsc::channel();
+    let root = provider_catalog::projects_root();
+    thread::Builder::new()
+        .name("provider-catalog".into())
+        .spawn(move || {
+            for request in incoming {
+                let selected = request
+                    .load
+                    .as_ref()
+                    .map(|load| load.provider_session_id.as_str());
+                let result = provider_catalog::read(root.as_deref(), &request.cwd, selected);
+                if outgoing.send((request, result)).is_err() {
+                    break;
+                }
+            }
+        })?;
+    Ok((requests, replies))
+}
+
+fn catalog_load_error(session_id: &str, provider_session_id: &str, error: &anyhow::Error) -> Value {
+    json!({"sessionId": session_id, "providerSessionId": provider_session_id, "error": error.to_string()})
 }
 
 fn report_session_launch_failure(

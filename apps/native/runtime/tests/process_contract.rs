@@ -43,24 +43,39 @@ impl RuntimeChild {
     }
 
     fn spawn_with_zshrc(root: &Path, zshrc: &str) -> Result<Self> {
+        Self::spawn_configured(root, zshrc, Path::new("/bin/zsh"), None)
+    }
+
+    fn spawn_configured(
+        root: &Path,
+        zshrc: &str,
+        shell: &Path,
+        provider: Option<&Path>,
+    ) -> Result<Self> {
         let data = root.join("数据 空间");
         let workspace = root.join("工作 区");
         let home = root.join("Shell 家目录");
         fs::create_dir_all(&home)?;
         fs::write(home.join(".zshrc"), zshrc)?;
-        let mut child = ProcessCommand::new(env!("CARGO_BIN_EXE_matou-native-runtime"))
+        let mut command = ProcessCommand::new(env!("CARGO_BIN_EXE_matou-native-runtime"));
+        command
             .arg("--data-root")
             .arg(&data)
             .arg("--workspace")
             .arg(&workspace)
             .arg("--shell-home")
             .arg(&home)
-            .args(["--shell", "/bin/zsh"])
+            .arg("--shell")
+            .arg(shell)
             .env("HOME", &home)
+            .env("CLAUDE_CONFIG_DIR", home.join("claude"))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
+            .stderr(Stdio::piped());
+        if let Some(provider) = provider {
+            command.env("MATOU_CLAUDE_COMMAND", provider);
+        }
+        let mut child = command.spawn()?;
         let input = child.stdin.take().context("child stdin")?;
         let stdout = child.stdout.take().context("child stdout")?;
         let (send, messages) = mpsc::channel();
@@ -97,6 +112,12 @@ impl RuntimeChild {
     }
 
     fn hello(&mut self) -> Result<()> {
+        self.ready()?;
+        self.frame(|rows, _, _| rows.iter().any(|row| row == PROMPT))?;
+        Ok(())
+    }
+
+    fn ready(&mut self) -> Result<()> {
         ensure!(
             !self.data.exists() && !self.workspace.exists(),
             "host started before Hello"
@@ -131,7 +152,6 @@ impl RuntimeChild {
                 _ => {}
             }
         }
-        self.frame(|rows, _, _| rows.iter().any(|row| row == PROMPT))?;
         Ok(())
     }
 
@@ -962,4 +982,162 @@ fn card_write_count(db: &Connection) -> Result<(i64, i64)> {
                 (SELECT COUNT(*) FROM domain_events WHERE event_type = 'session.archived')",
         [], |row| Ok((row.get(0)?, row.get(1)?)),
     )?)
+}
+
+#[test]
+fn catalog_rejects_absent_ids_and_closing_a_pending_load_stops_its_only_run() -> Result<()> {
+    use matou_native_core::sessions::{claude_binding, list_runs};
+    use serde_json::json;
+
+    let root = tempfile::tempdir()?;
+    let stub = root.path().join("claude-stub");
+    // A real PTY with a deterministic stand-in which never confirms identity.
+    fs::write(
+        &stub,
+        "#!/bin/sh\nwhile [ $# -gt 0 ]; do\n  if [ \"$1\" = '--resume' ] && [ \"$2\" = 'catalog-test-id' ]; then exec /bin/sleep 60; fi\n  shift\ndone\nexit 3\n",
+    )?;
+    fs::set_permissions(&stub, fs::Permissions::from_mode(0o700))?;
+    let mut child = RuntimeChild::spawn_configured(
+        root.path(),
+        "",
+        &root.path().join("missing-shell"),
+        Some(&stub),
+    )?;
+    child.ready()?;
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        if matches!(
+            child
+                .event(deadline, true)
+                .context("initial Shell start failure")?,
+            Event::Recovery {
+                state: matou_native_runtime::host::RecoveryState::StartFailed(_),
+                ..
+            }
+        ) {
+            break;
+        }
+    }
+
+    let cwd = child
+        .workspace
+        .to_str()
+        .context("workspace UTF-8")?
+        .to_owned();
+    let bucket_name: String = cwd
+        .encode_utf16()
+        .map(|unit| match unit {
+            48..=57 | 65..=90 | 97..=122 => char::from(unit as u8),
+            _ => '-',
+        })
+        .collect();
+    let bucket = root
+        .path()
+        .join("Shell 家目录/claude/projects")
+        .join(bucket_name);
+    fs::create_dir_all(&bucket)?;
+    fs::write(
+        bucket.join("catalog-test-id.jsonl"),
+        json!({
+            "cwd": cwd, "timestamp": 1234,
+            "message": {"role": "user", "content": "Synthetic command fixture"}
+        })
+        .to_string(),
+    )?;
+    let session = child.session.clone();
+    let scene = child.scene.clone();
+    // With a sibling, Close actually archives the target instead of hiding the window.
+    child.send(Command::CreateShellSibling {
+        scene_id: scene.clone(),
+        source_session_id: session.clone(),
+        parent_session_id: None,
+    })?;
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        if matches!(
+            child.event(deadline, true).context("create sibling")?,
+            Event::Navigation { .. }
+        ) {
+            break;
+        }
+    }
+    let load = |id: &str| Command::LoadProviderSession {
+        session_id: session.clone(),
+        provider_session_id: id.into(),
+    };
+    let db = startup::open_read_only(&child.data.join("matou.sqlite"))?;
+    child.send(load("absent"))?;
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        if let Event::Graph(graph) = child
+            .event(deadline, true)
+            .context("absent catalog result")?
+            && let Some(error) = graph["providerSessionLoadErrors"].get(0)
+        {
+            assert_eq!(error["providerSessionId"], "absent");
+            assert_eq!(
+                error["error"],
+                "Provider session was not found in this working directory"
+            );
+            break;
+        }
+    }
+    assert!(claude_binding(&db, &session)?.is_none());
+    assert!(list_runs(&db, &session)?.is_empty());
+
+    child.send(load("catalog-test-id"))?;
+    child.send(load("catalog-test-id"))?;
+    let deadline = Instant::now() + TIMEOUT;
+    let pid = loop {
+        if let Event::Graph(graph) = child.event(deadline, true).context("catalog PTY startup")?
+            && let Some(run) = list_runs(&db, &session)?.first()
+        {
+            assert!(graph["providerSessionLoadErrors"].is_null());
+            assert_eq!(run.status, "running");
+            break run.pid.context("PTY PID")? as u32;
+        }
+    };
+    let active = claude_binding(&db, &session)?.context("catalog binding")?;
+    assert_eq!(active.restore_state, "restoring");
+    assert_eq!(active.metadata["spawnRevision"], 1);
+
+    child.send(Command::CloseSessionCard {
+        scene_id: scene,
+        session_id: session.clone(),
+        confirmed_intent: Some(format!("delete-session:{session}")),
+        preserve_scene_on_last_session: true,
+    })?;
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        if let Event::ScenesDisposed(sessions) = child
+            .event(deadline, true)
+            .context("dispose pending catalog PTY")?
+            && sessions.contains(&session)
+        {
+            break;
+        }
+    }
+    assert_shell_gone(pid)?;
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        if let Event::Graph(graph) = child
+            .event(deadline, true)
+            .context("cancelled catalog result")?
+            && let Some(error) = graph["providerSessionLoadErrors"].get(0)
+        {
+            assert_eq!(error["sessionId"], session);
+            assert_eq!(
+                error["error"],
+                "Card was closed while loading the conversation"
+            );
+            break;
+        }
+    }
+    let runs = list_runs(&db, &session)?;
+    assert_eq!(runs.len(), 1);
+    assert_ne!(runs[0].status, "running");
+    child.send(Command::Shutdown)?;
+    child.closed()?;
+    assert!(child.wait()?.0.success());
+    Ok(())
 }
