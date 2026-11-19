@@ -350,6 +350,74 @@ mod workspace {
             println!("Remove tooltip | enabled={enabled} | {expected}");
         }
 
+        pub(super) fn assert_start_failure_card(
+            &self,
+            id: &str,
+            reason: &str,
+            blocked: Option<&str>,
+        ) {
+            let node = self.graph_node(id).unwrap();
+            let card = self
+                .start_failure_card(id, node)
+                .expect("startup failure card");
+            assert_eq!(card.title, "会话启动失败");
+            assert_eq!(card.reason, reason);
+            assert_eq!(card.retry, "重试启动");
+            assert_eq!(card.remove, "移除失败会话");
+            assert_eq!(card.blocked, blocked);
+            assert_eq!(self.start_failure_action_available(id), blocked.is_none());
+            assert!(!self.recovery_water_needed(id, node));
+            assert!(!self.recovery_controls.contains_key(id));
+            assert_eq!(self.fault, None, "the launch error belongs on its card");
+            println!(
+                "{} | {} | {} | {} | blocked={blocked:?}",
+                card.title, card.reason, card.retry, card.remove
+            );
+        }
+
+        pub(super) fn retry_start_button_position(&self, id: &str) -> Point<Pixels> {
+            let index = self.order.iter().position(|card| card == id).unwrap();
+            let bounds = self.carousel_scroll.bounds_for_item(index).unwrap();
+            assert!(
+                bounds.size.width > px(540.),
+                "probe needs a single-row failure card"
+            );
+            point(
+                bounds.right() + self.carousel_scroll.offset().x - px(133.),
+                bounds.top() + px(61.),
+            )
+        }
+
+        pub(super) fn assert_restarting_has_no_failure_controls(&self, id: &str) {
+            let node = self.graph_node(id).unwrap();
+            assert!(matches!(
+                self.recovery.get(id),
+                Some(RecoveryState::Restarting(_))
+            ));
+            assert!(self.start_failure_card(id, node).is_none());
+            assert!(!self.start_failure_controls.contains_key(id));
+            assert!(!self.recovery_controls.contains_key(id));
+            assert!(!self.recovery_water_needed(id, node));
+        }
+
+        pub(super) fn focus_start_failure_button(
+            &self,
+            id: &str,
+            button: usize,
+            window: &mut Window,
+        ) {
+            window.focus(&self.start_failure_controls[id][button]);
+        }
+
+        pub(super) fn focus_recovery_failure_button(&self, id: &str, window: &mut Window) {
+            assert!(
+                self.start_failure_card(id, self.graph_node(id).unwrap())
+                    .is_none()
+            );
+            assert!(!self.start_failure_controls.contains_key(id));
+            window.focus(&self.recovery_controls[id]);
+        }
+
         pub(super) fn focus_remove_button(&self, id: &str, window: &mut Window) {
             window.focus(&self.remove_card_controls[id]);
         }
@@ -769,6 +837,8 @@ mod probe {
                         );
                     }
                     Command::CreateShellSibling { .. }
+                    | Command::RestartSession { .. }
+                    | Command::RetryRecovery { .. }
                     | Command::CloseSessionCard { .. }
                     | Command::RemoveSessionBranch { .. } => actions.push(command),
                     _ => {}
@@ -1299,6 +1369,127 @@ mod probe {
             })
             .unwrap();
         println!("Narrow stopped peer uses the shared summary until visually selected");
+    }
+
+    fn verify_start_failure_card(cx: &mut AsyncApp) {
+        let mut fixture = Fixture::new();
+        fixture.prepare_card_actions();
+        let (window, sink) = open_hidden(cx, 1500.);
+        let failure = |state| Event::Recovery {
+            session_id: PEER.into(),
+            state,
+        };
+        let inspect = |cx: &mut AsyncApp, reason, blocked| {
+            window
+                .update(cx, |view, _, _| {
+                    view.assert_start_failure_card(PEER, reason, blocked);
+                })
+                .unwrap();
+        };
+        let activate = |cx: &mut AsyncApp, button| {
+            window
+                .update(cx, |view, window, _| {
+                    view.focus_start_failure_button(PEER, button, window);
+                })
+                .unwrap();
+            draw(window, cx);
+            AnyWindowHandle::from(window)
+                .update(cx, |_, window, cx| {
+                    window.dispatch_keystroke(Keystroke::parse("enter").unwrap(), cx);
+                })
+                .unwrap();
+        };
+
+        deliver(window, cx, fixture.event(true));
+        let error = "start Shell /probe/missing-zsh: No such file or directory";
+        deliver(
+            window,
+            cx,
+            failure(RecoveryState::StartFailed(error.into())),
+        );
+        deliver(window, cx, Event::Diagnostic(error.into()));
+        draw(window, cx);
+        inspect(cx, error, None);
+        assert!(fixture.process(window, cx, &sink).is_empty());
+
+        fixture.set_peer_environment("recovering");
+        deliver(window, cx, fixture.event(false));
+        draw(window, cx);
+        inspect(cx, error, Some("当前运行环境需要先恢复或交接"));
+        activate(cx, 0);
+        activate(cx, 1);
+        assert!(fixture.process(window, cx, &sink).is_empty());
+        sink.read_only();
+        inspect(cx, error, Some("数据库处于只读恢复模式"));
+        sink.generation(1);
+
+        fixture.set_peer_environment("ready");
+        deliver(window, cx, fixture.event(false));
+        draw(window, cx);
+        let retry_position = window
+            .update(cx, |view, _, _| view.retry_start_button_position(PEER))
+            .unwrap();
+        click(window, cx, retry_position);
+        assert!(matches!(fixture.process(window, cx, &sink).as_slice(), [
+            Command::RestartSession { session_id }
+        ] if session_id == PEER));
+        draw(window, cx);
+        window
+            .update(cx, |view, _, _| {
+                view.assert_restarting_has_no_failure_controls(PEER);
+            })
+            .unwrap();
+        deliver(window, cx, failure(RecoveryState::Restarting(error.into())));
+        draw(window, cx);
+        window
+            .update(cx, |view, _, _| {
+                view.assert_restarting_has_no_failure_controls(PEER);
+            })
+            .unwrap();
+        click(window, cx, retry_position);
+        assert!(fixture.process(window, cx, &sink).is_empty());
+        println!("重试中隐藏启动失败卡、恢复失败控件和恢复水效；原按钮位置再次点击无会话命令");
+
+        deliver(
+            window,
+            cx,
+            failure(RecoveryState::StartFailed(String::new())),
+        );
+        draw(window, cx);
+        inspect(cx, "终端进程未能启动", None);
+        deliver(
+            window,
+            cx,
+            failure(RecoveryState::StartFailed("updated Shell failure".into())),
+        );
+        draw(window, cx);
+        inspect(cx, "updated Shell failure", None);
+        activate(cx, 1);
+        assert_close_command(
+            fixture.process(window, cx, &sink),
+            PEER,
+            Some(&format!("delete-session:{PEER}")),
+        );
+
+        deliver(
+            window,
+            cx,
+            failure(RecoveryState::Failed("probe recovery failure".into())),
+        );
+        window
+            .update(cx, |view, window, _| {
+                view.focus_recovery_failure_button(PEER, window);
+            })
+            .unwrap();
+        draw(window, cx);
+        press(window, cx, "enter");
+        assert!(matches!(fixture.process(window, cx, &sink).as_slice(), [
+            Command::RetryRecovery { session_id }
+        ] if session_id == PEER));
+        println!("恢复失败仍发送 RetryRecovery | session={PEER}");
+        window
+            .update(cx, |_, window, _| window.remove_window())
+            .unwrap();
     }
 
     fn verify_card_actions(cx: &mut AsyncApp) {
@@ -1885,6 +2076,7 @@ mod probe {
                 .unwrap();
             cx.spawn(async move |cx| {
                 verify_compact_card(cx);
+                verify_start_failure_card(cx);
                 verify_card_actions(cx);
                 verify_stopped_cards(cx);
                 verify_narrow_stopped_cards(cx);

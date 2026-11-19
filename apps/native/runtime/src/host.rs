@@ -158,6 +158,9 @@ pub enum Command {
     RetryRecovery {
         session_id: String,
     },
+    RestartSession {
+        session_id: String,
+    },
     CreateWorkspace {
         root_directory: String,
     },
@@ -263,6 +266,8 @@ pub enum RecoveryState {
     Restoring,
     Ready,
     Failed(String),
+    StartFailed(String),
+    Restarting(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -439,9 +444,10 @@ struct PendingView {
     scroll_request_id: u64,
 }
 
-struct RecoveryRetry {
+struct LaunchRetry {
     workspace_id: String,
     validated: bool,
+    recovering: bool,
 }
 
 struct PendingInput {
@@ -576,8 +582,8 @@ fn run(
     let mut launch_directories = HashMap::<String, Receiver<Option<String>>>::new();
     let mut recovering = HashMap::<String, String>::new();
     // A failed launch stays blocked until an explicit retry starts a worker.
-    let mut failed_recovery = HashSet::new();
-    let mut recovery_retries = HashMap::<String, RecoveryRetry>::new();
+    let mut failed_launches = HashMap::new();
+    let mut launch_retries = HashMap::<String, LaunchRetry>::new();
     let mut launch_validated = false;
     let mut pending_input = VecDeque::<PendingInput>::new();
     let mut terminal_layouts = HashMap::new();
@@ -659,7 +665,7 @@ fn run(
                     send.send_blocking(Event::Diagnostic(WORKSPACE_PATH_INVALID.into()))?;
                 }
             }
-            let retries: Vec<_> = recovery_retries
+            let retries: Vec<_> = launch_retries
                 .iter_mut()
                 .filter(|(_, retry)| retry.workspace_id == state.workspace_id)
                 .filter_map(|(session_id, retry)| {
@@ -668,8 +674,16 @@ fn run(
                 })
                 .collect();
             for session_id in retries {
-                recovery_retries.remove(&session_id);
-                report_failed_recovery(send, &session_id)?;
+                let retry = launch_retries.remove(&session_id).expect("checked retry");
+                failed_launches.insert(
+                    session_id.clone(),
+                    report_launch_failure(
+                        send,
+                        &session_id,
+                        retry.recovering,
+                        workspace_path_error(&state),
+                    )?,
+                );
             }
             if active_workspace.as_ref() != Some(&state.workspace_id) {
                 continue;
@@ -682,8 +696,10 @@ fn run(
                     .collect();
                 for id in failed {
                     pending_launch.remove(&id);
-                    report_failed_recovery(send, &id)?;
-                    failed_recovery.insert(id);
+                    let rebuilding = owner.has_shell_run(&id)?;
+                    let failure =
+                        report_launch_failure(send, &id, rebuilding, workspace_path_error(&state))?;
+                    failed_launches.insert(id, failure);
                 }
             } else {
                 if active_path_invalid && let Some(task_id) = &active_task {
@@ -743,7 +759,7 @@ fn run(
             }
         }
         launch_candidates.extend(
-            recovery_retries
+            launch_retries
                 .iter()
                 .filter(|(_, retry)| retry.validated)
                 .map(|(id, _)| id.clone()),
@@ -771,10 +787,13 @@ fn run(
         let mut started_shell = false;
         for (session_id, directory) in completed_launches {
             pending_launch.remove(&session_id);
-            recovering.remove(&session_id);
-            recovery_retries.remove(&session_id);
+            let rebuilding = recovering.remove(&session_id).is_some();
+            let rebuilding = match launch_retries.remove(&session_id) {
+                Some(retry) => retry.recovering,
+                None => rebuilding || owner.has_shell_run(&session_id)?,
+            };
             let result = directory
-                .context("execution context is not registered")
+                .context("no usable Shell launch directory")
                 .and_then(|directory| {
                     owner.set_shell_launch_directory(&session_id, &directory)?;
                     launch_shell(
@@ -787,7 +806,7 @@ fn run(
                 });
             match result {
                 Ok(()) => {
-                    failed_recovery.remove(&session_id);
+                    failed_launches.remove(&session_id);
                     send.send_blocking(Event::Recovery {
                         session_id: session_id.clone(),
                         state: RecoveryState::Ready,
@@ -799,9 +818,9 @@ fn run(
                 }
                 Err(error) => {
                     pending_input.retain(|input| input.session_id != session_id);
-                    report_failed_recovery(send, &session_id)?;
-                    failed_recovery.insert(session_id);
-                    send.send_blocking(Event::Diagnostic(format!("{error:#}")))?;
+                    let failure =
+                        report_launch_failure(send, &session_id, rebuilding, format!("{error:#}"))?;
+                    failed_launches.insert(session_id, failure);
                 }
             }
         }
@@ -924,8 +943,8 @@ fn run(
                                 terminal_layouts.remove(id);
                                 recovering.remove(id);
                                 deferred_recovery.remove(id);
-                                failed_recovery.remove(id);
-                                recovery_retries.remove(id);
+                                failed_launches.remove(id);
+                                launch_retries.remove(id);
                                 launch_directories.remove(id);
                             }
                             pending_input.retain(|input| !disposed.contains(&input.session_id));
@@ -952,7 +971,9 @@ fn run(
                         active_workspace = next_workspace;
                         let mut graph = active_graph(&owner, scene_id.as_deref(), window_id)?;
                         pending_launch = unstarted_shells(&graph, &sessions);
-                        pending_launch.retain(|id| !failed_recovery.contains(id));
+                        pending_launch.retain(|id| {
+                            !failed_launches.contains_key(id) && !launch_retries.contains_key(id)
+                        });
                         foreground_shells = shell_ids(&graph).map(str::to_owned).collect();
                         if (target_changed || check_target || !pending_launch.is_empty())
                             && let Some(workspace_id) = &active_workspace
@@ -1053,7 +1074,9 @@ fn run(
                     bytes,
                     defer_ordering,
                 } => {
-                    if failed_recovery.contains(&session_id) {
+                    if failed_launches.contains_key(&session_id)
+                        || launch_retries.contains_key(&session_id)
+                    {
                         continue;
                     }
                     let Some(workspace_id) = owner.session_workspace(&session_id)? else {
@@ -1222,32 +1245,72 @@ fn run(
                         false,
                     )
                 }
-                Command::RetryRecovery { session_id } => {
-                    if !failed_recovery.contains(&session_id)
-                        || recovery_retries.contains_key(&session_id)
-                    {
+                Command::RetryRecovery { ref session_id }
+                | Command::RestartSession { ref session_id } => {
+                    let rebuilding = matches!(command, Command::RetryRecovery { .. });
+                    if launch_retries.contains_key(session_id) {
                         continue;
                     }
-                    let Some(workspace_id) = owner.session_workspace(&session_id)? else {
+                    let failed = failed_launches.get(session_id);
+                    let state = if rebuilding {
+                        if !matches!(failed, Some(RecoveryState::Failed(_))) {
+                            continue;
+                        }
+                        RecoveryState::Restoring
+                    } else {
+                        let reason = match failed {
+                            Some(RecoveryState::StartFailed(reason)) => Some(reason),
+                            Some(_) => continue,
+                            None => None,
+                        };
+                        if !foreground_shells.contains(session_id)
+                            || pending_launch.contains(session_id)
+                            || recovering.contains_key(session_id)
+                            || !owner.can_restart_shell(session_id, reason.is_some())?
+                        {
+                            continue;
+                        }
+                        RecoveryState::Restarting(reason.cloned().unwrap_or_default())
+                    };
+                    let Some(workspace_id) = owner.session_workspace(session_id)? else {
                         continue;
                     };
                     send.send_blocking(Event::Recovery {
                         session_id: session_id.clone(),
-                        state: RecoveryState::Restoring,
+                        state,
                     })?;
                     match checks.request(&owner, &workspace_id) {
                         Ok(()) => {
-                            recovery_retries.insert(
-                                session_id,
-                                RecoveryRetry {
+                            if !rebuilding {
+                                deferred_recovery.remove(session_id);
+                                sessions.remove(session_id);
+                                dirty.remove(session_id);
+                                sequence.remove(session_id);
+                                scroll_requests.remove(session_id);
+                                views.remove(session_id);
+                                awaiting_ui.remove(session_id);
+                                pending_input.retain(|input| input.session_id != *session_id);
+                                operations.retain(|(id, _, _)| id != session_id);
+                                searches.retain(|(id, _, _)| id != session_id);
+                                copies.retain(|(_, id, _, _)| id != session_id);
+                            }
+                            launch_retries.insert(
+                                session_id.clone(),
+                                LaunchRetry {
                                     workspace_id,
                                     validated: false,
+                                    recovering: rebuilding,
                                 },
                             );
                         }
                         Err(error) => {
-                            report_failed_recovery(send, &session_id)?;
-                            send.send_blocking(Event::Diagnostic(format!("{error:#}")))?;
+                            let failure = report_launch_failure(
+                                send,
+                                session_id,
+                                rebuilding,
+                                format!("{error:#}"),
+                            )?;
+                            failed_launches.insert(session_id.clone(), failure);
                         }
                     }
                     continue;
@@ -1294,7 +1357,9 @@ fn run(
                     awaiting_ui.clear();
                     let graph = active_graph(&owner, scene_id.as_deref(), window_id)?;
                     pending_launch = unstarted_shells(&graph, &sessions);
-                    pending_launch.retain(|id| !failed_recovery.contains(id));
+                    pending_launch.retain(|id| {
+                        !failed_launches.contains_key(id) && !launch_retries.contains_key(id)
+                    });
                     foreground_shells = shell_ids(&graph).map(str::to_owned).collect();
                     if let Some(workspace_id) = &active_workspace {
                         checks.request(&owner, workspace_id)?;
@@ -1553,14 +1618,27 @@ fn shutdown_result(sessions: Result<()>, backup: Option<Result<()>>) -> Result<(
     }
 }
 
-fn report_failed_recovery(send: &async_channel::Sender<Event>, session_id: &str) -> Result<()> {
+fn workspace_path_error(state: &WorkspacePathState) -> String {
+    format!("{WORKSPACE_PATH_INVALID} ({})", state.reason)
+}
+
+fn report_launch_failure(
+    send: &async_channel::Sender<Event>,
+    session_id: &str,
+    recovering: bool,
+    message: String,
+) -> Result<RecoveryState> {
+    let state = if recovering {
+        RecoveryState::Failed(message.clone())
+    } else {
+        RecoveryState::StartFailed(message.clone())
+    };
     send.send_blocking(Event::Recovery {
         session_id: session_id.to_owned(),
-        state: RecoveryState::Failed(format!(
-            "Session {session_id} did not reach a running state"
-        )),
+        state: state.clone(),
     })?;
-    Ok(())
+    send.send_blocking(Event::Diagnostic(message))?;
+    Ok(state)
 }
 
 fn send_input(

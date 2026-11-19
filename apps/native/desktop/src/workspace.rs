@@ -158,6 +158,16 @@ const STOPPED_SESSION_STATUS: &str = "正在恢复会话…";
 const REMOVE_NODE_ACTION: &str = "移除节点…";
 const WORKSPACE_PATH_UNAVAILABLE: &str = "工作区目录不可用，请先在本地恢复原路径，或移出该工作区";
 
+struct StartFailureCard<'a> {
+    title: &'static str,
+    reason: &'a str,
+    retry: &'static str,
+    remove: &'static str,
+    blocked: Option<&'static str>,
+}
+
+struct CardTooltip(SharedString);
+
 #[derive(Clone, Copy)]
 struct RemoveNodeTooltip {
     blocked_reason: Option<&'static str>,
@@ -169,20 +179,32 @@ impl RemoveNodeTooltip {
     }
 }
 
+fn card_tooltip_box() -> Div {
+    div()
+        .px(px(9.))
+        .py(px(7.))
+        .border_1()
+        .border_color(rgb(0xd6dae1))
+        .rounded(px(7.))
+        .bg(rgb(0xffffff))
+        .text_color(rgb(0x333b47))
+        .text_size(px(10.))
+        .line_height(px(15.))
+        .shadow(vec![shadow(0x1f2837, 0.16, 8., 24.)])
+}
+
 impl Render for RemoveNodeTooltip {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .px(px(9.))
-            .py(px(7.))
-            .border_1()
-            .border_color(rgb(0xd6dae1))
-            .rounded(px(7.))
-            .bg(rgb(0xffffff))
-            .text_color(rgb(0x333b47))
-            .text_size(px(10.))
-            .line_height(px(15.))
-            .shadow(vec![shadow(0x1f2837, 0.16, 8., 24.)])
-            .child(self.text())
+        card_tooltip_box().child(self.text())
+    }
+}
+
+impl Render for CardTooltip {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        card_tooltip_box()
+            .max_w(px(460.))
+            .whitespace_normal()
+            .child(ui_text(self.0.clone()).pre_line())
     }
 }
 
@@ -389,6 +411,7 @@ pub struct Workspace {
     terminals: HashMap<String, Entity<TerminalSurface>>,
     recovery: HashMap<String, RecoveryState>,
     recovery_controls: HashMap<String, FocusHandle>,
+    start_failure_controls: HashMap<String, [FocusHandle; 2]>,
     #[cfg(target_os = "macos")]
     recovery_water: HashMap<String, Entity<RecoveryWater>>,
     #[cfg(target_os = "macos")]
@@ -1165,6 +1188,7 @@ impl Workspace {
             terminals: HashMap::new(),
             recovery: HashMap::new(),
             recovery_controls: HashMap::new(),
+            start_failure_controls: HashMap::new(),
             #[cfg(target_os = "macos")]
             recovery_water: HashMap::new(),
             #[cfg(target_os = "macos")]
@@ -1244,6 +1268,7 @@ impl Workspace {
         self.session_frames.clear();
         self.recovery.clear();
         self.recovery_controls.clear();
+        self.start_failure_controls.clear();
         self.copy_request_id += 1;
         self.resize_revisions.clear();
         self.reconnect_geometry = self.geometry_dirty.clone();
@@ -1705,6 +1730,7 @@ impl Workspace {
                 if fresh_ready {
                     self.session_frames.clear();
                     self.recovery.clear();
+                    self.start_failure_controls.clear();
                     for id in session_levels::nodes(&self.graph)
                         .iter()
                         .filter(|node| node["archivedAt"].is_null())
@@ -1773,9 +1799,11 @@ impl Workspace {
                     self.dismiss_history_context(cx);
                 }
                 for id in ids {
+                    self.clear_start_failure_focus(&id, window);
                     self.terminals.remove(&id);
                     self.recovery.remove(&id);
                     self.recovery_controls.remove(&id);
+                    self.start_failure_controls.remove(&id);
                     self.storage_fault_sessions.remove(&id);
                     self.card_controls.remove(&id);
                     self.remove_card_controls.remove(&id);
@@ -2003,6 +2031,19 @@ impl Workspace {
                 {
                     window.blur();
                 }
+                if matches!(state, RecoveryState::StartFailed(_)) {
+                    self.start_failure_controls
+                        .entry(session_id.clone())
+                        .or_insert_with(|| {
+                            [
+                                cx.focus_handle().tab_stop(true),
+                                cx.focus_handle().tab_stop(true),
+                            ]
+                        });
+                } else {
+                    self.clear_start_failure_focus(&session_id, window);
+                    self.start_failure_controls.remove(&session_id);
+                }
                 if !matches!(state, RecoveryState::Ready)
                     && self
                         .terminals
@@ -2015,8 +2056,14 @@ impl Workspace {
                 self.sync_terminal_input(window, cx);
                 self.resume_search_after_frame(cx);
             }
-            Event::StorageFault { message, .. } | Event::Diagnostic(message) => {
-                self.fault = Some(message)
+            Event::StorageFault { message, .. } => self.fault = Some(message),
+            Event::Diagnostic(message) => {
+                // Launch failures already carry this same diagnostic in their card.
+                if !self.recovery.values().any(|state| {
+                    matches!(state, RecoveryState::StartFailed(error) | RecoveryState::Failed(error) if error == &message)
+                }) {
+                    self.fault = Some(message);
+                }
             }
             Event::StorageRecovered { .. } => self.fault = None,
             Event::StartupBlocked(_) | Event::Closed => {}
@@ -2038,6 +2085,8 @@ impl Workspace {
             if !node["archivedAt"].is_null() {
                 let terminal = self.terminals.remove(id);
                 let retry = self.recovery_controls.remove(id);
+                self.clear_start_failure_focus(id, window);
+                self.start_failure_controls.remove(id);
                 if terminal.is_some_and(|terminal| terminal.read(cx).focus.is_focused(window))
                     || retry.is_some_and(|focus| focus.is_focused(window))
                 {
@@ -2577,12 +2626,29 @@ impl Workspace {
             || !matches!(self.recovery.get(session_id), Some(RecoveryState::Ready))
     }
 
+    fn clear_start_failure_focus(&self, id: &str, window: &mut Window) {
+        if self
+            .start_failure_controls
+            .get(id)
+            .is_some_and(|controls| controls.iter().any(|focus| focus.is_focused(window)))
+        {
+            window.blur();
+        }
+    }
+
     #[cfg(target_os = "macos")]
     fn recovery_water_needed(&self, id: &str, node: &Value) -> bool {
         node["archivedAt"].is_null()
             && self.recovery_blocked(id)
             && !self.storage_fault_sessions.contains(id)
-            && !matches!(self.recovery.get(id), Some(RecoveryState::Failed(_)))
+            && !matches!(
+                self.recovery.get(id),
+                Some(
+                    RecoveryState::Failed(_)
+                        | RecoveryState::StartFailed(_)
+                        | RecoveryState::Restarting(_)
+                )
+            )
             && !matches!(node["workStatus"].as_str(), Some("error" | "exited"))
     }
 
@@ -3960,6 +4026,11 @@ impl Workspace {
     }
 
     fn card_action_blocked_reason(&self, id: &str, node: &Value) -> Option<&'static str> {
+        self.card_mutation_blocked_reason(id, node)
+            .or_else(|| self.recovery_blocked(id).then_some("当前终端仍在恢复"))
+    }
+
+    fn card_mutation_blocked_reason(&self, id: &str, node: &Value) -> Option<&'static str> {
         if !self.active_path_valid() {
             Some(WORKSPACE_PATH_UNAVAILABLE)
         } else if self.storage_fault_sessions.contains(id) {
@@ -3969,8 +4040,6 @@ impl Workspace {
             .is_some_and(|state| state != "ready")
         {
             Some("当前运行环境需要先恢复或交接")
-        } else if self.recovery_blocked(id) {
-            Some("当前终端仍在恢复")
         } else {
             None
         }
@@ -3980,6 +4049,93 @@ impl Workspace {
         RemoveNodeTooltip {
             blocked_reason: self.card_action_blocked_reason(id, node),
         }
+    }
+
+    fn start_failure_card(&self, id: &str, node: &Value) -> Option<StartFailureCard<'_>> {
+        if !node["archivedAt"].is_null() {
+            return None;
+        }
+        let RecoveryState::StartFailed(error) = self.recovery.get(id)? else {
+            return None;
+        };
+        let blocked = match self.commands.connection() {
+            (_, ConnectionPhase::Blocked(block)) if block.kind == StartupBlockKind::ReadOnly => {
+                Some("数据库处于只读恢复模式")
+            }
+            (generation, ConnectionPhase::Ready)
+                if generation == self.runtime_generation
+                    && self.domain_ready
+                    && self.transport_connected =>
+            {
+                self.card_mutation_blocked_reason(id, node)
+            }
+            _ => Some("当前终端仍在恢复"),
+        };
+        Some(StartFailureCard {
+            title: "会话启动失败",
+            reason: if error.is_empty() {
+                "终端进程未能启动"
+            } else {
+                error
+            },
+            retry: "重试启动",
+            remove: "移除失败会话",
+            blocked,
+        })
+    }
+
+    fn start_failure_action_available(&self, id: &str) -> bool {
+        self.active_scene_id().is_some()
+            && self.dialog.is_none()
+            && self.pending_close.is_none()
+            && self.pending_card_action.is_none()
+            && self.graph_node(id).is_some_and(|node| {
+                self.start_failure_card(id, node)
+                    .is_some_and(|card| card.blocked.is_none())
+            })
+    }
+
+    fn retry_session_start(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.start_failure_action_available(id) {
+            return;
+        }
+        let Some(RecoveryState::StartFailed(reason)) = self.recovery.get(id) else {
+            return;
+        };
+        if self
+            .commands
+            .send_at(
+                self.runtime_generation,
+                Command::RestartSession {
+                    session_id: id.to_owned(),
+                },
+            )
+            .is_ok()
+        {
+            self.recovery
+                .insert(id.to_owned(), RecoveryState::Restarting(reason.clone()));
+            self.clear_start_failure_focus(id, window);
+            self.start_failure_controls.remove(id);
+            cx.notify();
+        }
+    }
+
+    fn remove_failed_session(&mut self, id: &str, cx: &mut Context<Self>) {
+        if !self.start_failure_action_available(id) {
+            return;
+        }
+        let Some(scene_id) = self.active_scene_id() else {
+            return;
+        };
+        self.send_card_action(
+            Command::CloseSessionCard {
+                scene_id: scene_id.to_owned(),
+                session_id: id.to_owned(),
+                confirmed_intent: Some(format!("delete-session:{id}")),
+                preserve_scene_on_last_session: false,
+            },
+            cx,
+        );
     }
 
     fn open_card_dialog(
@@ -5274,6 +5430,115 @@ impl Workspace {
                 .opacity(0.38)
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         }
+    }
+
+    fn render_start_failure_card(
+        &self,
+        id: &str,
+        card: StartFailureCard<'_>,
+        width: f32,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let controls = &self.start_failure_controls[id];
+        let narrow = width - 20. <= 520.;
+        let reason = SharedString::from(card.reason.to_owned());
+        let reason_tooltip = reason.clone();
+        let action = |name: &str, label| {
+            div()
+                .id(SharedString::from(format!("{name}-{id}")))
+                .flex_none()
+                .px(px(8.))
+                .py(px(3.))
+                .border_1()
+                .border_color(Hsla::from(rgb(0xe45d55)).alpha(0.45))
+                .rounded(px(5.))
+                .text_color(rgb(0xf2b7b3))
+                .bg(rgba(0xe45d5514))
+                .whitespace_nowrap()
+                .cursor_pointer()
+                .child(label)
+        };
+        let retry = action("retry-start", card.retry);
+        let remove = action("remove-failed-session", card.remove);
+        let (retry, remove) = if let Some(blocked) = card.blocked {
+            let disable = |button: Stateful<Div>| {
+                button.tooltip(move |_, cx| cx.new(|_| CardTooltip(blocked.into())).into())
+            };
+            (disable(retry), disable(remove))
+        } else {
+            let retry_id = id.to_owned();
+            let remove_id = id.to_owned();
+            (
+                self.button(
+                    retry,
+                    &controls[0],
+                    move |this, window, cx| this.retry_session_start(&retry_id, window, cx),
+                    cx,
+                ),
+                self.button(
+                    remove,
+                    &controls[1],
+                    move |this, _, cx| this.remove_failed_session(&remove_id, cx),
+                    cx,
+                ),
+            )
+        };
+        div()
+            .w_full()
+            .flex_none()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .justify_between()
+            .gap(px(12.))
+            .px(px(10.))
+            .py(px(8.))
+            .border_t_1()
+            .border_b_1()
+            .border_color(rgb(0xedc2bf))
+            .bg(rgb(0xfff3f2))
+            .text_color(rgb(0x9b2f2a))
+            .text_size(px(11.))
+            .line_height(relative(1.2))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .flex()
+                    .min_w_0()
+                    .items_baseline()
+                    .gap(px(8.))
+                    .when(narrow, |summary| summary.w_full())
+                    .when(!narrow, |summary| summary.flex_1())
+                    .child(
+                        div()
+                            .flex_none()
+                            .font_weight(FontWeight::BOLD)
+                            .whitespace_nowrap()
+                            .child(card.title),
+                    )
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("start-failure-reason-{id}")))
+                            .flex_1()
+                            .min_w_0()
+                            .text_color(rgb(0xa95853))
+                            .when(narrow, |label| label.whitespace_normal().line_clamp(2))
+                            .when(!narrow, |label| label.truncate())
+                            .tooltip(move |_, cx| {
+                                cx.new(|_| CardTooltip(reason_tooltip.clone())).into()
+                            })
+                            .child(reason),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .ml_auto()
+                    .gap(px(8.))
+                    .child(retry)
+                    .child(remove),
+            )
     }
 
     fn tab_overlay(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -6657,6 +6922,10 @@ impl Render for Workspace {
                             .child(WORKSPACE_PATH_UNAVAILABLE),
                     )
                 })
+                .children(node.and_then(|node| {
+                    self.start_failure_card(id, node)
+                        .map(|card| self.render_start_failure_card(id, card, width, cx))
+                }))
                 .child({
                     let body = div()
                         .flex_1()

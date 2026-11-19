@@ -73,10 +73,12 @@ fn verify_workspace_retry(root: &Path) -> Result<()> {
     let mut probe = Probe::new(&bridge);
     let reopened = probe.ready()?.session.context("reopened session")?.id;
     assert_eq!(reopened, session_id);
-    let failed = RecoveryState::Failed(format!(
-        "Session {session_id} did not reach a running state"
-    ));
+    let reason = "工作区目录不可用，请先在本地恢复原路径，或移出该工作区 (missing)";
+    let failed = RecoveryState::Failed(reason.into());
     probe.recovery_state(&session_id, &failed)?;
+    probe.wait("initial recovery diagnostic", |event| {
+        Ok(matches!(event, Event::Diagnostic(message) if message == reason).then_some(()))
+    })?;
     let initial_path = probe.path_state(&workspace_id, "invalid")?;
     assert_eq!(initial_path.reason, "missing");
     assert!(!probe.frames.contains(&session_id));
@@ -90,6 +92,9 @@ fn verify_workspace_retry(root: &Path) -> Result<()> {
     probe.send(retry())?;
     probe.recovery_state(&session_id, &RecoveryState::Restoring)?;
     probe.recovery_state(&session_id, &failed)?;
+    probe.wait("retry recovery diagnostic", |event| {
+        Ok(matches!(event, Event::Diagnostic(message) if message == reason).then_some(()))
+    })?;
     probe.path_state(&workspace_id, "invalid")?;
     assert!(!probe.frames.contains(&session_id));
     assert_eq!(list_runs(&db, &session_id)?.len(), 1);
