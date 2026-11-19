@@ -962,6 +962,15 @@ fn main() {
         px, size,
     };
     use matou_native_runtime::host::{Event, LaunchOptions, RuntimeHost};
+
+    #[cfg(debug_assertions)]
+    let recovery_water = std::env::args().any(|arg| arg == "--recovery-water");
+    #[cfg(debug_assertions)]
+    if recovery_water {
+        // SAFETY: Set the flag before starting RuntimeHost or GPUI threads.
+        unsafe { std::env::set_var("MATOU_RECOVERY_WATER_TRACE", "1") };
+    }
+
     let root = std::env::temp_dir().join(format!(
         "matou-transport-probe-{}-{}",
         std::process::id(),
@@ -989,7 +998,7 @@ fn main() {
         .with_assets(assets::NativeAssets)
         .run(move |cx| {
             #[cfg(debug_assertions)]
-            if std::env::args().any(|arg| arg == "--recovery-water") {
+            if recovery_water {
                 run_water_probe(cx, fixture);
                 return;
             }
