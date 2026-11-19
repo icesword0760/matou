@@ -94,6 +94,7 @@ struct CardMotion {
 enum LevelFocusRequest {
     OpenChildren,
     ReturnParent,
+    Notification(u64),
 }
 
 struct WorkspaceDragMotion {
@@ -686,6 +687,194 @@ struct HistoryContextRequest {
     result_count: usize,
 }
 
+const NOTIFICATION_COOLDOWN_MS: u64 = 5_000;
+const NOTIFICATION_LIMIT: usize = 1_000;
+const NOTIFICATION_READ_RETENTION_MS: u64 = 30 * 24 * 60 * 60 * 1_000;
+
+struct NotificationEntry {
+    id: u64,
+    event_id: String,
+    title: String,
+    subtitle: String,
+    body: String,
+    workspace_id: Option<String>,
+    task_id: Option<String>,
+    scene_id: Option<String>,
+    session_id: Option<String>,
+    occurred_at: u64,
+    read: bool,
+    replacement_key: Option<String>,
+    cooldown_key: Option<String>,
+}
+
+struct Notifications {
+    entries: Vec<NotificationEntry>,
+    // Last accepted receipt time and number of rows keeping each key alive.
+    cooldowns: HashMap<String, (u64, usize)>,
+    sequence: u64,
+    sound_enabled: bool,
+    sound_path: Option<PathBuf>,
+}
+
+impl Notifications {
+    fn new(sound_path: Option<PathBuf>) -> Self {
+        let sound_enabled = sound_path
+            .as_ref()
+            .and_then(|path| std::fs::read(path).ok())
+            .is_none_or(|bytes| bytes != b"0");
+        Self {
+            entries: Vec::new(),
+            cooldowns: HashMap::new(),
+            sequence: 0,
+            sound_enabled,
+            sound_path,
+        }
+    }
+
+    fn push(&mut self, value: &Value, focused: Option<&str>, now: u64) -> bool {
+        let text = |name| {
+            value[name]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+        };
+        let Some(event_id) = text("eventId") else {
+            return false;
+        };
+        self.prune(now);
+        let replacement_key = text("replacementKey");
+        let replacement = replacement_key.and_then(|key| {
+            self.entries
+                .iter()
+                .position(|entry| entry.replacement_key.as_deref() == Some(key))
+        });
+        if text("operation") == Some("dismiss") {
+            if let Some(index) = replacement {
+                self.remove_at(index);
+            }
+            return false;
+        }
+        if self.entries.iter().any(|entry| entry.event_id == event_id) {
+            return false;
+        }
+        let session_id = text("sessionId");
+        let scene_id = text("sceneId");
+        let task_id = text("taskId");
+        let workspace_id = text("workspaceId");
+        let read = session_id.is_some() && session_id == focused;
+        let (id, cooldown_key) = if let Some(index) = replacement {
+            // A replacement takes precedence over cooldown and keeps the row's identity.
+            let current = self.entries.remove(index);
+            (current.id, current.cooldown_key)
+        } else {
+            let owner = session_id
+                .or(scene_id)
+                .or(task_id)
+                .or(workspace_id)
+                .unwrap_or("global");
+            let key = text("cooldownKey")
+                .or_else(|| text("eventType"))
+                .unwrap_or("attention");
+            let key = format!("{owner}:{key}");
+            let cooldown = self.cooldowns.entry(key.clone()).or_insert((now, 0));
+            if cooldown.1 > 0 && now.saturating_sub(cooldown.0) < NOTIFICATION_COOLDOWN_MS {
+                return false;
+            }
+            *cooldown = (now, cooldown.1 + 1);
+            if let Some(session_id) = session_id {
+                self.mark_session_read(session_id);
+            }
+            self.sequence += 1;
+            (self.sequence, Some(key))
+        };
+        let occurred_at = value["occurredAt"].as_u64().unwrap_or(now);
+        let index = self
+            .entries
+            .partition_point(|entry| entry.occurred_at > occurred_at);
+        self.entries.insert(
+            index,
+            NotificationEntry {
+                id,
+                event_id: event_id.into(),
+                title: text("title").unwrap_or("Claude Code").into(),
+                subtitle: text("subtitle").unwrap_or_default().into(),
+                body: text("body").unwrap_or_default().into(),
+                workspace_id: workspace_id.map(str::to_owned),
+                task_id: task_id.map(str::to_owned),
+                scene_id: scene_id.map(str::to_owned),
+                session_id: session_id.map(str::to_owned),
+                occurred_at,
+                read,
+                replacement_key: replacement_key.map(str::to_owned),
+                cooldown_key,
+            },
+        );
+        self.prune(now);
+        !read && value["sound"].as_bool() != Some(false) && self.sound_enabled
+    }
+
+    fn forget_cooldown(cooldowns: &mut HashMap<String, (u64, usize)>, entry: &NotificationEntry) {
+        if let Some(key) = &entry.cooldown_key
+            && let std::collections::hash_map::Entry::Occupied(mut cooldown) =
+                cooldowns.entry(key.clone())
+        {
+            cooldown.get_mut().1 -= 1;
+            if cooldown.get().1 == 0 {
+                cooldown.remove();
+            }
+        }
+    }
+
+    fn remove_at(&mut self, index: usize) {
+        Self::forget_cooldown(&mut self.cooldowns, &self.entries.remove(index));
+    }
+
+    fn prune(&mut self, now: u64) {
+        self.entries.retain(|entry| {
+            let keep = !entry.read
+                || now.saturating_sub(entry.occurred_at) <= NOTIFICATION_READ_RETENTION_MS;
+            if !keep {
+                Self::forget_cooldown(&mut self.cooldowns, entry);
+            }
+            keep
+        });
+        if self.entries.len() <= NOTIFICATION_LIMIT {
+            return;
+        }
+        let mut counts = HashMap::new();
+        self.entries.retain(|entry| {
+            let count = counts.entry(entry.workspace_id.clone()).or_insert(0);
+            *count += 1;
+            let keep = *count <= NOTIFICATION_LIMIT;
+            if !keep {
+                Self::forget_cooldown(&mut self.cooldowns, entry);
+            }
+            keep
+        });
+    }
+
+    fn mark_session_read(&mut self, id: &str) {
+        for entry in &mut self.entries {
+            if entry.session_id.as_deref() == Some(id) {
+                entry.read = true;
+            }
+        }
+    }
+
+    fn set_sound(&mut self, enabled: bool) {
+        self.sound_enabled = enabled;
+        if let Some(path) = &self.sound_path {
+            let temporary = path.with_extension("tmp");
+            let bytes = if enabled { b"1" } else { b"0" };
+            if let Err(error) =
+                std::fs::write(&temporary, bytes).and_then(|_| std::fs::rename(&temporary, path))
+            {
+                eprintln!("Save notification sound preference: {error}");
+            }
+        }
+    }
+}
+
 pub struct Workspace {
     history_view: Option<Entity<HistoryView>>,
     history_request: Option<HistoryContextRequest>,
@@ -722,6 +911,9 @@ pub struct Workspace {
     pub(crate) sidebar_scroll: ScrollHandle,
     sidebar_overflow: bool,
     pub(crate) sidebar_scrollbar: SidebarScrollbarState,
+    notifications: Notifications,
+    notification_open: bool,
+    notification_scene_sessions: HashMap<String, (String, HashSet<String>)>,
     task_toast: Option<String>,
     toast_generation: u64,
     permission_menu: Option<String>,
@@ -1509,6 +1701,13 @@ impl Workspace {
             sidebar_scroll: ScrollHandle::new(),
             sidebar_overflow: false,
             sidebar_scrollbar: SidebarScrollbarState::default(),
+            notifications: Notifications::new(
+                crate::runtime_bridge::LaunchOptions::from_args(std::env::args_os().skip(1))
+                    .ok()
+                    .map(|options| options.data_root.join("notification-sound")),
+            ),
+            notification_open: false,
+            notification_scene_sessions: HashMap::new(),
             task_toast: None,
             toast_generation: 0,
             permission_menu: None,
@@ -1609,6 +1808,154 @@ impl Workspace {
         })
         .detach();
         cx.notify();
+    }
+
+    fn toggle_notifications(&mut self, cx: &mut Context<Self>) {
+        if self.notification_open {
+            self.close_notifications(cx);
+        } else {
+            self.notifications.prune(notification_now());
+            self.notification_open = true;
+            cx.notify();
+        }
+    }
+
+    fn close_notifications(&mut self, cx: &mut Context<Self>) {
+        if std::mem::take(&mut self.notification_open) {
+            cx.notify();
+        }
+    }
+
+    fn clear_notifications(&mut self, cx: &mut Context<Self>) {
+        self.notifications.entries.clear();
+        self.notifications.cooldowns.clear();
+        cx.notify();
+    }
+
+    fn dismiss_notification(&mut self, id: u64, cx: &mut Context<Self>) {
+        if let Some(index) = self
+            .notifications
+            .entries
+            .iter()
+            .position(|entry| entry.id == id)
+        {
+            self.notifications.remove_at(index);
+            cx.notify();
+        }
+    }
+
+    fn toggle_notification_sound(&mut self, cx: &mut Context<Self>) {
+        self.notifications
+            .set_sound(!self.notifications.sound_enabled);
+        cx.notify();
+    }
+
+    fn update_notifications(&mut self, graph: &mut Value) {
+        if let Some((scene, task)) = self
+            .hierarchy
+            .as_ref()
+            .and_then(|hierarchy| Some((hierarchy.scene.as_ref()?, hierarchy.task.as_ref()?)))
+            && graph["sceneId"] == scene.id
+        {
+            let sessions = session_levels::nodes(graph)
+                .iter()
+                .filter(|node| node["archivedAt"].is_null())
+                .filter_map(|node| node["sessionId"].as_str().map(str::to_owned))
+                .collect();
+            self.notification_scene_sessions
+                .insert(scene.id.clone(), (task.id.clone(), sessions));
+        }
+        if let Some(Value::Array(events)) = graph
+            .as_object_mut()
+            .and_then(|graph| graph.remove("agentNotifications"))
+        {
+            let now = notification_now();
+            let mut play_sound = false;
+            for event in &events {
+                play_sound |= self.notifications.push(event, self.focused.as_deref(), now);
+            }
+            if play_sound {
+                play_notification_sound();
+            }
+        }
+    }
+
+    fn notification_target<'a>(
+        &'a self,
+        entry: &'a NotificationEntry,
+    ) -> Option<(&'a str, &'a str)> {
+        let session_id = entry.session_id.as_deref()?;
+        let task = self.tasks.iter().find(|task| {
+            Some(task.id.as_str()) == entry.task_id.as_deref()
+                && entry
+                    .workspace_id
+                    .as_deref()
+                    .is_none_or(|id| id == task.workspace_id)
+                && task.archived_at.is_none()
+                && self.workspaces.iter().any(|workspace| {
+                    workspace.id == task.workspace_id && workspace.archived_at.is_none()
+                })
+        })?;
+        let current = self.hierarchy.as_ref()?;
+        let scene_id = entry
+            .scene_id
+            .as_deref()
+            .or_else(|| {
+                self.notification_scene_sessions
+                    .iter()
+                    .find_map(|(scene, (task_id, sessions))| {
+                        (task_id == &task.id && sessions.contains(session_id))
+                            .then_some(scene.as_str())
+                    })
+            })
+            .or_else(|| {
+                // An inactive scene's last selected session is also recorded by the runtime.
+                current
+                    .navigation
+                    .session_by_scene
+                    .iter()
+                    .find_map(|(scene, session)| (session == session_id).then_some(scene.as_str()))
+            })?;
+        if self
+            .notification_scene_sessions
+            .get(scene_id)
+            .is_some_and(|(task_id, sessions)| {
+                task_id != &task.id || !sessions.contains(session_id)
+            })
+            || (current
+                .task
+                .as_ref()
+                .is_some_and(|active| active.id == task.id)
+                && !self.scenes.iter().any(|scene| scene.id == scene_id))
+        {
+            return None;
+        }
+        Some((scene_id, session_id))
+    }
+
+    fn open_notification(&mut self, id: u64, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some((scene_id, session_id)) = self
+            .notifications
+            .entries
+            .iter()
+            .find(|entry| entry.id == id)
+            .and_then(|entry| self.notification_target(entry))
+            .map(|(scene, session)| (scene.to_owned(), session.to_owned()))
+        else {
+            return;
+        };
+        // FocusSession activates the target's scene, task and workspace in one
+        // runtime transaction. A removed target leaves the current view intact.
+        self.send(
+            Command::FocusSession {
+                scene_id,
+                session_id,
+            },
+            cx,
+        );
+        if self.pending_focus.is_some() {
+            self.level_focus_request = Some(LevelFocusRequest::Notification(id));
+        }
     }
 
     fn send(&mut self, command: Command, cx: &mut Context<Self>) {
@@ -2003,6 +2350,8 @@ impl Workspace {
                 _ => {}
             },
             Event::Tasks(tasks) => {
+                self.notification_scene_sessions
+                    .retain(|_, (task_id, _)| tasks.iter().any(|task| &task.id == task_id));
                 self.task_controls
                     .retain(|id, _| tasks.iter().any(|task| &task.id == id));
                 self.task_bounds
@@ -2083,6 +2432,26 @@ impl Workspace {
                 };
                 let return_to_terminal =
                     level_focus_request == Some(LevelFocusRequest::ReturnParent);
+                let notification_focus = match level_focus_request {
+                    Some(LevelFocusRequest::Notification(id)) => Some(id),
+                    _ => None,
+                };
+                if let Some((id, session_id)) = notification_focus.zip(next_focus.as_deref()) {
+                    if let Some(entry) = self.notifications.entries.iter_mut().find(|entry| {
+                        entry.id == id && entry.session_id.as_deref() == Some(session_id)
+                    }) {
+                        entry.read = true;
+                    }
+                    if let Some(scene_id) = next_scene {
+                        let parent =
+                            session_levels::node(session_levels::nodes(&graph), session_id)
+                                .and_then(session_levels::parent_id)
+                                .map(str::to_owned);
+                        self.level_parent_by_scene.insert(scene_id.clone(), parent);
+                    }
+                    self.close_notifications(cx);
+                    window.blur();
+                }
                 if scene_changed {
                     #[cfg(target_os = "macos")]
                     self.retain_recovery_water(window, cx, |_, _| false);
@@ -2181,7 +2550,11 @@ impl Workspace {
                     self.tab_scroll.scroll_to_item(index);
                 }
                 if level_focus_request != Some(LevelFocusRequest::OpenChildren)
-                    && (initializing || scene_changed || focus_changed || return_to_terminal)
+                    && (initializing
+                        || scene_changed
+                        || focus_changed
+                        || return_to_terminal
+                        || notification_focus.is_some())
                     && self.dialog.is_none()
                     && self.active_path_valid()
                     && (return_to_terminal
@@ -2190,6 +2563,7 @@ impl Workspace {
                             .as_ref()
                             .is_none_or(|id| !self.recovery_blocked(id)))
                     && (return_to_terminal
+                        || notification_focus.is_some()
                         || window.focused(cx).is_none()
                         || (workspace_changed
                             && self
@@ -2223,6 +2597,9 @@ impl Workspace {
                     self.dismiss_history_context(cx);
                 }
                 for id in ids {
+                    for (_, sessions) in self.notification_scene_sessions.values_mut() {
+                        sessions.remove(&id);
+                    }
                     self.clear_start_failure_focus(&id, window);
                     self.terminals.remove(&id);
                     self.recovery.remove(&id);
@@ -2333,7 +2710,13 @@ impl Workspace {
                 }
                 if attempted_focus.is_some() && self.pending_focus == attempted_focus {
                     self.pending_focus = None;
-                    self.level_focus_request = None;
+                    if matches!(
+                        self.level_focus_request.take(),
+                        Some(LevelFocusRequest::Notification(_))
+                    ) {
+                        cx.notify();
+                        return;
+                    }
                 }
                 self.fault = Some(message);
             }
@@ -2356,6 +2739,7 @@ impl Workspace {
                             cx,
                         );
                     }
+                    self.update_notifications(&mut graph);
                     return;
                 }
                 let loader_results = graph.as_object_mut().map(|graph| {
@@ -3873,7 +4257,7 @@ impl Workspace {
             )
         };
         div()
-            .w(px(260.))
+            .w(px(NOTIFICATION_UI_SIDEBAR_WIDTH))
             .h_full()
             .flex_none()
             .flex()
@@ -3883,19 +4267,16 @@ impl Workspace {
             .bg(rgba(0xfbfdff17))
             .child(
                 div()
-                    .h(px(48.))
+                    .h(px(NOTIFICATION_UI_SIDEBAR_HEADER_HEIGHT))
                     .flex_none()
                     .flex()
                     .items_center()
                     .pl(px(78.))
-                    .pr(px(12.))
+                    .pr(px(NOTIFICATION_UI_SIDEBAR_RIGHT_PADDING))
                     .gap(px(8.))
                     .child(new_workspace)
                     .child(div().flex_1())
-                    .child(
-                        self.control(div().child(icon("bell", 16., 0x8d96a3)), "notifications")
-                            .flex_none(),
-                    ),
+                    .child(self.notification_bell(cx)),
             )
             .child(
                 div()
@@ -5123,6 +5504,7 @@ impl Workspace {
         let permission_results = graph
             .as_object_mut()
             .and_then(|object| object.remove("providerPermissionModeResults"));
+        self.update_notifications(&mut graph);
         self.graph = graph;
         self.reconcile_permission_modes(
             permission_results
@@ -6314,6 +6696,11 @@ impl Workspace {
 
     fn tab_key(&mut self, stroke: &Keystroke, window: &mut Window, cx: &mut Context<Self>) {
         let mods = stroke.modifiers;
+        if stroke.key == "escape" && self.notification_open {
+            self.close_notifications(cx);
+            cx.stop_propagation();
+            return;
+        }
         if let Some(TabDialog::Branch(state)) = &self.dialog {
             let input = state.input.read(cx);
             if stroke.key == "escape" && !input.composing() {
@@ -10149,6 +10536,7 @@ impl Render for Workspace {
                 .absolute()
                 .size(px(0.)),
             )
+            .children(self.notification_panel(window, cx))
             .children(badge_tooltip.filter(|_| !canvas_dialog))
             .children(toast)
             .children(
@@ -10169,6 +10557,815 @@ fn fork_submission_key() -> String {
         .as_nanos();
     let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
     format!("desktop-fork-{}-{time}-{sequence}", std::process::id())
+}
+
+// NotificationCenter.tsx, hierarchy.css:449–500 / 870–875, and i18n/messages/notifications.ts.
+// Panel geometry from `.notification-center`:
+// position fixed; top 49; bottom 5; left 0; width 382; radius 12.
+const NOTIFICATION_UI_PANEL_WIDTH: f32 = 382.;
+const NOTIFICATION_UI_PANEL_TOP: f32 = 49.;
+const NOTIFICATION_UI_PANEL_BOTTOM_GAP: f32 = 5.;
+const NOTIFICATION_UI_PANEL_RADIUS: f32 = 12.;
+const NOTIFICATION_UI_HEADER_HEIGHT: f32 = 44.;
+
+// `.flat-sidebar__notify` is 30x30. The real rect at the fixed sidebar
+// header is x=218..248, y=9..39 (260px sidebar, 48px header); the parent's
+// window-level outside-click capture should use that rect to keep the bell's
+// second click working.
+const NOTIFICATION_UI_BELL_SIZE: f32 = 30.;
+const NOTIFICATION_UI_SIDEBAR_WIDTH: f32 = 260.;
+const NOTIFICATION_UI_SIDEBAR_HEADER_HEIGHT: f32 = 48.;
+const NOTIFICATION_UI_SIDEBAR_RIGHT_PADDING: f32 = 12.;
+const NOTIFICATION_UI_BELL_LEFT: f32 = NOTIFICATION_UI_SIDEBAR_WIDTH
+    - 1.
+    - NOTIFICATION_UI_SIDEBAR_RIGHT_PADDING
+    - NOTIFICATION_UI_BELL_SIZE;
+const NOTIFICATION_UI_BELL_TOP: f32 =
+    (NOTIFICATION_UI_SIDEBAR_HEADER_HEIGHT - NOTIFICATION_UI_BELL_SIZE) / 2.;
+
+// `.notification-item__dismiss`.
+const NOTIFICATION_UI_DISMISS_TOP: f32 = 10.;
+const NOTIFICATION_UI_DISMISS_RIGHT: f32 = 10.;
+const NOTIFICATION_UI_DISMISS_SIZE: f32 = 20.;
+
+// `.notification-center` animation: notification-panel-drop-in .22s
+// cubic-bezier(.16,1,.3,1), from translateY(-8px) + opacity 0.
+const NOTIFICATION_UI_ANIMATION_MS: u64 = 220;
+const NOTIFICATION_UI_ANIMATION_OFFSET: f32 = 8.;
+
+#[derive(Clone, Copy)]
+struct NotificationUiPalette {
+    panel_bg: u32,
+    text: u32,
+    muted: u32,
+    count: u32,
+    item_bg: Rgba,
+    item_hover_bg: Rgba,
+    action: u32,
+    action_hover: u32,
+    action_hover_bg: Rgba,
+    close: u32,
+    close_hover: u32,
+    dismiss: u32,
+    dismiss_hover_bg: Rgba,
+    empty: u32,
+    shadow_alpha: f32,
+    shadow_y: f32,
+    shadow_blur: f32,
+}
+
+impl NotificationUiPalette {
+    /// The panel is the only themed surface in this file. The workspace
+    /// around it keeps its existing light treatment.
+    fn for_appearance(appearance: WindowAppearance) -> Self {
+        let light = matches!(
+            appearance,
+            WindowAppearance::Light | WindowAppearance::VibrantLight
+        );
+        let dark = Self {
+            panel_bg: 0x212121,
+            text: 0xdfdfdf,
+            muted: 0x7b7b7b,
+            count: 0x898989,
+            item_bg: rgba(0xffffff0a),
+            item_hover_bg: rgba(0xffffff0f),
+            action: 0x797979,
+            action_hover: 0xffffff,
+            action_hover_bg: rgba(0xffffff0f),
+            close: 0xdfdfdf,
+            close_hover: 0xffffff,
+            dismiss: 0xffffff,
+            dismiss_hover_bg: rgba(0xffffff1a),
+            empty: 0x8b949e,
+            shadow_alpha: 0.38,
+            shadow_y: 8.,
+            shadow_blur: 24.,
+        };
+        if light {
+            Self {
+                panel_bg: 0xffffff,
+                text: 0x2f3547,
+                item_bg: rgba(0xf7f8faff),
+                item_hover_bg: rgba(0xeceef3ff),
+                shadow_alpha: 0.1,
+                shadow_y: 4.,
+                shadow_blur: 20.,
+                ..dark
+            }
+        } else {
+            dark
+        }
+    }
+}
+
+fn notification_ui_icon(name: &str, size: f32, color: u32) -> Svg {
+    // GPUI's Svg paint reads the computed `text.color` directly (it does not
+    // fall back to the parent's text style), so pass it explicitly.
+    svg()
+        .path(SharedString::from(format!("icons/{name}.svg")))
+        .size(px(size))
+        .flex_none()
+        .text_color(rgb(color))
+}
+
+/// Svg paints from its own computed `text.color`, so a hover colour on the
+/// parent button would not reach it. Bind the icon to the button's group
+/// instead. Used by the two header actions whose frozen hover turns #fff.
+fn notification_ui_icon_with_hover(
+    name: &str,
+    size: f32,
+    color: u32,
+    group: SharedString,
+    hover: u32,
+) -> Svg {
+    notification_ui_icon(name, size, color)
+        .group_hover(group, move |style| style.text_color(rgb(hover)))
+}
+
+/// One axis of a cubic Bézier with endpoints 0/1.
+fn notification_ui_bezier_axis(t: f32, control_1: f32, control_2: f32) -> f32 {
+    let inverse = 1. - t;
+    3. * inverse * inverse * t * control_1 + 3. * inverse * t * t * control_2 + t * t * t
+}
+
+/// `cubic-bezier(.16, 1, .3, 1)` from the frozen drop-in animation.
+/// GPUI 0.2 ships named easings only, so solve x -> u with a small bisection
+/// and evaluate y(u).
+fn notification_ui_easing(progress: f32) -> f32 {
+    let target = progress.clamp(0., 1.);
+    let mut low = 0.;
+    let mut high = 1.;
+    let mut u = target;
+    for _ in 0..12 {
+        let x = notification_ui_bezier_axis(u, 0.16, 0.3);
+        if x < target {
+            low = u;
+        } else {
+            high = u;
+        }
+        u = (low + high) * 0.5;
+    }
+    notification_ui_bezier_axis(u, 1., 1.).clamp(0., 1.)
+}
+
+/// `.notification-item__dismiss` is `occlude`d so the body underneath does not
+/// also receive the click. Its own `hover` keeps it visible while the pointer
+/// is on it (the parent item's group hover no longer contributes there).
+fn notification_ui_item_dismiss(
+    id: u64,
+    group: SharedString,
+    palette: NotificationUiPalette,
+    cx: &mut Context<Workspace>,
+) -> Stateful<Div> {
+    div()
+        .id(SharedString::from(format!("notification-dismiss-{id}")))
+        .absolute()
+        .top(px(NOTIFICATION_UI_DISMISS_TOP))
+        .right(px(NOTIFICATION_UI_DISMISS_RIGHT))
+        .size(px(NOTIFICATION_UI_DISMISS_SIZE))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(4.))
+        .text_color(rgb(palette.dismiss))
+        .opacity(0.)
+        .occlude()
+        .cursor_pointer()
+        .focusable()
+        .tab_stop(true)
+        .group_hover(group, |style| style.opacity(1.))
+        .hover(|style| style.opacity(1.).bg(palette.dismiss_hover_bg))
+        .focus(|style| style.opacity(1.))
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(cx.listener(move |this, _, _, cx| {
+            cx.stop_propagation();
+            this.dismiss_notification(id, cx);
+        }))
+        .child(notification_ui_icon("x", 16., palette.dismiss))
+}
+
+fn notification_clear_icon() -> impl IntoElement {
+    // Frozen 24×24 ClearIcon, at the header's 14 px icon size.
+    canvas(
+        |_, _, _| (),
+        |bounds, (), window, _| {
+            let at = |x: f32, y: f32| bounds.origin + point(px(x * 14. / 24.), px(y * 14. / 24.));
+            let mut path = PathBuilder::stroke(px(2. * 14. / 24.));
+            path.move_to(at(3., 6.));
+            path.line_to(at(21., 6.));
+            path.move_to(at(8., 6.));
+            path.line_to(at(8., 4.));
+            path.line_to(at(16., 4.));
+            path.line_to(at(16., 6.));
+            path.move_to(at(19., 6.));
+            path.line_to(at(18., 20.));
+            path.line_to(at(6., 20.));
+            path.line_to(at(5., 6.));
+            if let Ok(path) = path.build() {
+                window.paint_path(path, window.text_style().color);
+            }
+        },
+    )
+    .size(px(14.))
+    .flex_none()
+}
+
+fn notification_item_title(
+    entry: &NotificationEntry,
+    palette: NotificationUiPalette,
+) -> Stateful<Div> {
+    div()
+        .id(SharedString::from(format!(
+            "notification-item-title-{}",
+            entry.id
+        )))
+        .text_color(rgb(palette.text))
+        .text_size(px(14.))
+        .line_height(relative(1.4))
+        .font_weight(if entry.read {
+            FontWeight::MEDIUM
+        } else {
+            FontWeight::BOLD
+        })
+        .child(entry.title.clone())
+}
+
+impl Workspace {
+    /// `.flat-sidebar__notify` + the frozen red unread indicator, upgraded from
+    /// the frozen 6px dot to the numeric badge required by this round.
+    fn notification_bell(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let unread = self
+            .notifications
+            .entries
+            .iter()
+            .filter(|entry| !entry.read)
+            .count();
+        let badge = (unread > 0).then(|| {
+            div()
+                .id("notification-bell-badge")
+                .absolute()
+                .top(px(1.))
+                .right(px(1.))
+                .h(px(16.))
+                .min_w(px(16.))
+                .px(px(4.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(8.))
+                .border(px(1.5))
+                // The sidebar is the existing light surface regardless of
+                // window appearance, so the frozen light dot border applies.
+                .border_color(rgb(0xf4f5f7))
+                .bg(rgb(0xf24d49))
+                .text_size(px(10.))
+                .line_height(px(12.))
+                .font_weight(FontWeight::BOLD)
+                .text_color(rgb(0xffffff))
+                .child(unread.to_string())
+        });
+        let bell = div()
+            .id("notification-bell")
+            .relative()
+            .size(px(NOTIFICATION_UI_BELL_SIZE))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(7.))
+            .text_color(rgb(0x8d96a3))
+            .cursor_pointer()
+            .hover(|style| style.bg(rgba(0x2f35470f)))
+            .child(notification_ui_icon("bell", 16., 0x8d96a3).opacity(0.9))
+            .children(badge);
+        self.button(
+            bell,
+            &self.control_focus["notifications"],
+            |this, _, cx| this.toggle_notifications(cx),
+            cx,
+        )
+        .tooltip(|_, cx| cx.new(|_| CardTooltip("通知中心".into())).into())
+    }
+
+    /// The panel is mounted by `Render for Workspace` as an absolute root
+    /// child after the main sidebar/content children.
+    fn notification_panel(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement> {
+        if !self.notification_open {
+            return None;
+        }
+
+        let palette = NotificationUiPalette::for_appearance(window.appearance());
+        let viewport = window.viewport_size();
+        let viewport_height = f32::from(viewport.height);
+        let panel_height =
+            (viewport_height - NOTIFICATION_UI_PANEL_TOP - NOTIFICATION_UI_PANEL_BOTTOM_GAP)
+                .max(0.);
+
+        let entries = &self.notifications.entries;
+
+        let close_focus = window
+            .use_keyed_state("notification-close-focus", cx, |_, cx| {
+                cx.focus_handle().tab_stop(true)
+            })
+            .read(cx)
+            .clone();
+        let sound_focus = window
+            .use_keyed_state("notification-sound-focus", cx, |_, cx| {
+                cx.focus_handle().tab_stop(true)
+            })
+            .read(cx)
+            .clone();
+        let clear_focus = (!entries.is_empty()).then(|| {
+            window
+                .use_keyed_state("notification-clear-focus", cx, |_, cx| {
+                    cx.focus_handle().tab_stop(true)
+                })
+                .read(cx)
+                .clone()
+        });
+
+        // `.notification-center__title` + `__title-count`.
+        let title = div()
+            .id("notification-panel-title")
+            .flex()
+            .items_center()
+            .gap(px(4.))
+            .text_size(px(13.))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(rgb(palette.text))
+            .child("通知")
+            .child(
+                div()
+                    .id("notification-panel-count")
+                    .text_color(rgb(palette.count))
+                    .child(format!("({})", entries.len())),
+            );
+
+        let mut header_actions = div().flex().items_center().gap(px(8.));
+        if let Some(clear_focus) = clear_focus {
+            let clear = div()
+                .id("notification-clear")
+                .flex()
+                .items_center()
+                .justify_center()
+                .p(px(5.))
+                .rounded(px(6.))
+                .text_color(rgb(palette.action))
+                .cursor_pointer()
+                .hover(|style| {
+                    style
+                        .bg(palette.action_hover_bg)
+                        .text_color(rgb(palette.action_hover))
+                })
+                .child(notification_clear_icon());
+            header_actions = header_actions.child(
+                self.button(
+                    clear,
+                    &clear_focus,
+                    |this, _, cx| this.clear_notifications(cx),
+                    cx,
+                )
+                .tooltip(|_, cx| cx.new(|_| CardTooltip("清空通知".into())).into()),
+            );
+        }
+        // `.notification-center__close-btn`.
+        let close_group = SharedString::from("notification-close-group");
+        let close = div()
+            .id("notification-close")
+            .group(close_group.clone())
+            .flex()
+            .items_center()
+            .justify_center()
+            .p(px(4.))
+            .rounded(px(6.))
+            .text_color(rgb(palette.close))
+            .cursor_pointer()
+            .hover(|style| {
+                style
+                    .bg(palette.action_hover_bg)
+                    .text_color(rgb(palette.close_hover))
+            })
+            .child(notification_ui_icon_with_hover(
+                "x",
+                16.,
+                palette.close,
+                close_group,
+                palette.close_hover,
+            ));
+        header_actions = header_actions.child(
+            self.button(
+                close,
+                &close_focus,
+                |this, _, cx| this.close_notifications(cx),
+                cx,
+            )
+            .tooltip(|_, cx| cx.new(|_| CardTooltip("关闭通知中心".into())).into()),
+        );
+
+        let header = div()
+            .id("notification-panel-header")
+            .flex_none()
+            .h(px(NOTIFICATION_UI_HEADER_HEIGHT))
+            .flex()
+            .items_center()
+            .justify_between()
+            .px(px(12.))
+            .child(title)
+            .child(header_actions);
+
+        let empty = entries.is_empty();
+        let list_content = if empty {
+            // `.notification-center__empty` / `__empty-text`.
+            div()
+                .id("notification-empty")
+                .h_full()
+                .min_h_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .id("notification-empty-text")
+                        .text_size(px(13.))
+                        .text_color(rgb(palette.empty))
+                        .child("暂无通知"),
+                )
+                .into_any_element()
+        } else {
+            let items = entries
+                .iter()
+                .map(|entry| self.notification_item(entry, palette, cx))
+                .collect::<Vec<_>>();
+            // `.notification-center__group { padding: 8px 16px 16px }` and
+            // `.notification-center__items { gap: 8px }`.
+            div()
+                .id("notification-group")
+                .px(px(16.))
+                .pt(px(8.))
+                .pb(px(16.))
+                .child(
+                    div()
+                        .id("notification-items")
+                        .flex()
+                        .flex_col()
+                        .gap(px(8.))
+                        .children(items),
+                )
+                .into_any_element()
+        };
+
+        // `.notification-center__list` is the only scroll container; the panel
+        // is absolute and the list is `min-height: 0` so it cannot push the
+        // workspace (or the footer) around.
+        let scroll = window
+            .use_keyed_state("notification-scroll", cx, |_, _| ScrollHandle::new())
+            .read(cx)
+            .clone();
+        let list = div()
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .child(
+                div()
+                    .id("notification-list")
+                    .size_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&scroll)
+                    .scrollbar_width(px(4.))
+                    .child(list_content),
+            )
+            .child(
+                canvas(
+                    |_, _, _| (),
+                    move |bounds, (), window, _| {
+                        let overflow = scroll.max_offset().height;
+                        if overflow <= px(0.) {
+                            return;
+                        }
+                        let height = bounds.size.height;
+                        let thumb = (height * (height / (height + overflow)))
+                            .max(px(10.))
+                            .min(height);
+                        let offset =
+                            (height - thumb) * (-scroll.offset().y / overflow).clamp(0., 1.);
+                        window.paint_quad(
+                            fill(
+                                Bounds::new(
+                                    bounds.origin + point(px(0.), offset),
+                                    size(px(4.), thumb),
+                                ),
+                                rgb(0x30363d),
+                            )
+                            .corner_radii(px(10.)),
+                        );
+                    },
+                )
+                .absolute()
+                .right_0()
+                .top_0()
+                .h_full()
+                .w(px(4.)),
+            );
+
+        // `.notification-center__footer` / `__sound-toggle` / `__switch`.
+        let sound_enabled = self.notifications.sound_enabled;
+        let sound_track = div()
+            .id("notification-sound-track")
+            .relative()
+            .w(px(32.))
+            .h(px(16.))
+            .rounded(px(8.))
+            .bg(if sound_enabled {
+                rgb(0xff684e)
+            } else {
+                rgb(0x30363d)
+            })
+            .child(
+                div()
+                    .id("notification-sound-thumb")
+                    .absolute()
+                    .top(px(2.))
+                    .left(px(if sound_enabled { 18. } else { 2. }))
+                    .size(px(12.))
+                    .rounded_full()
+                    .bg(rgb(0xffffff)),
+            );
+        let sound_toggle = div()
+            .id("notification-sound-toggle")
+            .w_full()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .cursor_pointer()
+            .child(sound_track)
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(rgb(palette.muted))
+                    .child("通知声音"),
+            );
+        let footer = div()
+            .id("notification-footer")
+            .flex_none()
+            .px(px(14.))
+            .py(px(12.))
+            .child(self.button(
+                sound_toggle,
+                &sound_focus,
+                |this, _, cx| this.toggle_notification_sound(cx),
+                cx,
+            ));
+
+        let panel = div()
+            .id("notification-panel")
+            .absolute()
+            .left(px(0.))
+            .top(px(NOTIFICATION_UI_PANEL_TOP))
+            .w(px(NOTIFICATION_UI_PANEL_WIDTH))
+            .h(px(panel_height))
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .rounded(px(NOTIFICATION_UI_PANEL_RADIUS))
+            .bg(rgb(palette.panel_bg))
+            .text_color(rgb(palette.text))
+            .shadow(vec![shadow(
+                0x000000,
+                palette.shadow_alpha,
+                palette.shadow_y,
+                palette.shadow_blur,
+            )])
+            .occlude()
+            .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                let bell = Bounds::new(
+                    point(px(NOTIFICATION_UI_BELL_LEFT), px(NOTIFICATION_UI_BELL_TOP)),
+                    size(px(NOTIFICATION_UI_BELL_SIZE), px(NOTIFICATION_UI_BELL_SIZE)),
+                );
+                if !bell.contains(&event.position) {
+                    this.close_notifications(cx);
+                }
+            }))
+            .child(header)
+            .child(list)
+            .child(footer);
+
+        let panel: AnyElement = if reduced_motion() {
+            panel.into_any_element()
+        } else {
+            panel
+                .with_animation(
+                    "notification-panel-drop-in",
+                    Animation::new(Duration::from_millis(NOTIFICATION_UI_ANIMATION_MS))
+                        .with_easing(notification_ui_easing),
+                    |panel, delta| {
+                        panel.opacity(delta).top(px(NOTIFICATION_UI_PANEL_TOP
+                            - NOTIFICATION_UI_ANIMATION_OFFSET * (1. - delta)))
+                    },
+                )
+                .into_any_element()
+        };
+
+        Some(panel)
+    }
+
+    /// `.notification-item` + `.notification-item__body`.
+    fn notification_item(
+        &self,
+        entry: &NotificationEntry,
+        palette: NotificationUiPalette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let id = entry.id;
+        let group = SharedString::from(format!("notification-item-group-{id}"));
+
+        let workspace_name = entry
+            .workspace_id
+            .as_deref()
+            .and_then(|id| {
+                self.workspaces
+                    .iter()
+                    .find(|workspace| workspace.id.as_str() == id)
+            })
+            .map_or_else(
+                || "未知工作区".to_string(),
+                |workspace| workspace.name.clone(),
+            );
+        let task_name = entry
+            .task_id
+            .as_deref()
+            .and_then(|id| self.tasks.iter().find(|task| task.id.as_str() == id))
+            .map_or_else(|| "未知工作台".to_string(), |task| task.title.clone());
+
+        let breadcrumb_part = |text: String| {
+            div()
+                .min_w_0()
+                .flex_shrink()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .child(text)
+        };
+        let breadcrumb = div()
+            .id(SharedString::from(format!(
+                "notification-item-breadcrumb-{id}"
+            )))
+            .w_full()
+            .min_w_0()
+            .flex()
+            .items_center()
+            .gap(px(4.))
+            .text_size(px(12.))
+            .text_color(rgb(palette.muted))
+            .child(breadcrumb_part(workspace_name))
+            .child(div().flex_none().opacity(0.5).child("/"))
+            .child(breadcrumb_part(task_name));
+
+        let title_row = div()
+            .flex()
+            .items_center()
+            .my(px(4.))
+            .child(notification_item_title(entry, palette));
+
+        let body = div()
+            .id(SharedString::from(format!("notification-item-body-{id}")))
+            .w_full()
+            .flex()
+            .flex_col()
+            .focusable()
+            .tab_stop(true)
+            .on_click(cx.listener(move |this, _, window, cx| {
+                cx.stop_propagation();
+                this.open_notification(id, window, cx);
+            }))
+            .child(breadcrumb)
+            .child(title_row)
+            .when(!entry.subtitle.is_empty(), |body| {
+                // `.notification-item__subtitle`.
+                body.child(
+                    div()
+                        .id(SharedString::from(format!(
+                            "notification-item-subtitle-{id}"
+                        )))
+                        .mb(px(6.))
+                        .text_color(rgb(palette.muted))
+                        .text_size(px(12.))
+                        .line_height(relative(1.4))
+                        .child(entry.subtitle.clone()),
+                )
+            })
+            .when(!entry.body.is_empty(), |body| {
+                // `.notification-item__content`: pre-wrap + four-line clamp.
+                body.child(
+                    div()
+                        .id(SharedString::from(format!(
+                            "notification-item-content-{id}"
+                        )))
+                        .mb(px(4.))
+                        .text_color(rgb(palette.text))
+                        .text_size(px(12.))
+                        .line_height(relative(1.6))
+                        .line_clamp(4)
+                        .child(entry.body.clone()),
+                )
+            })
+            .child(
+                // `.notification-item__time`; the string is formatted by the
+                // parent's `notification_time`.
+                div()
+                    .id(SharedString::from(format!("notification-item-time-{id}")))
+                    .mt(px(8.))
+                    .text_color(rgb(palette.muted))
+                    .text_size(px(12.))
+                    .child(notification_time(entry.occurred_at)),
+            );
+
+        let dismiss = notification_ui_item_dismiss(id, group.clone(), palette, cx);
+        div()
+            .id(SharedString::from(format!("notification-item-{id}")))
+            .group(group)
+            .relative()
+            .px(px(12.))
+            .py(px(8.))
+            .rounded(px(10.))
+            .bg(palette.item_bg)
+            .hover(|style| style.bg(palette.item_hover_bg))
+            .cursor_pointer()
+            .child(body)
+            .child(dismiss)
+            .into_any_element()
+    }
+}
+
+fn notification_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_millis() as u64)
+}
+
+fn notification_time(timestamp: u64) -> String {
+    // Use the system's local zone, including its offset at the event time.
+    #[repr(C)]
+    #[derive(Default)]
+    struct LocalTime {
+        second: i32,
+        minute: i32,
+        hour: i32,
+        day: i32,
+        month: i32,
+        year: i32,
+        weekday: i32,
+        year_day: i32,
+        is_dst: i32,
+        #[cfg(target_os = "macos")]
+        utc_offset: std::ffi::c_long,
+        #[cfg(target_os = "macos")]
+        timezone: *const std::ffi::c_char,
+    }
+    #[cfg(target_os = "macos")]
+    unsafe extern "C" {
+        fn localtime_r(seconds: *const i64, output: *mut LocalTime) -> *mut LocalTime;
+    }
+    #[cfg(target_os = "windows")]
+    unsafe extern "C" {
+        fn _localtime64_s(output: *mut LocalTime, seconds: *const i64) -> i32;
+    }
+    let seconds = (timestamp / 1_000) as i64;
+    let mut local = LocalTime::default();
+    // Each function fills the caller-owned C tm for this platform.
+    #[cfg(target_os = "macos")]
+    let valid = unsafe { !localtime_r(&seconds, &mut local).is_null() };
+    #[cfg(target_os = "windows")]
+    let valid = unsafe { _localtime64_s(&mut local, &seconds) == 0 };
+    if valid {
+        format!("{:02}:{:02}", local.hour, local.minute)
+    } else {
+        format!("{:02}:{:02}", seconds / 3_600 % 24, seconds / 60 % 60)
+    }
+}
+
+fn play_notification_sound() {
+    #[cfg(target_os = "macos")]
+    {
+        #[link(name = "AppKit", kind = "framework")]
+        unsafe extern "C" {
+            fn NSBeep();
+        }
+        // Workspace handles graph events on the GPUI main thread.
+        unsafe { NSBeep() };
+    }
+    #[cfg(target_os = "windows")]
+    {
+        #[link(name = "user32")]
+        unsafe extern "system" {
+            fn MessageBeep(kind: u32) -> i32;
+        }
+        // Zero selects the standard system notification sound.
+        unsafe { MessageBeep(0) };
+    }
 }
 
 fn loader_relative_time(updated_at: i64) -> String {
