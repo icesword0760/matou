@@ -9,13 +9,15 @@ parser.add_argument('--debug-port', type=int, help='Optional loopback CDP port f
 parser.add_argument('--startup-trace', action='store_true', help='Record the first 8 seconds, including compositor screenshots, as diagnostic evidence')
 parser.add_argument('--locale', choices=['zh-CN', 'en-US', 'system'], default='zh-CN',
                     help='Use system to test the product language preference without an environment override')
+parser.add_argument('--baseline', default='MatouReference.app',
+                    help='Baseline bundle name under artifacts/native-parity/baseline')
 args = parser.parse_args()
 if args.debug_port is not None and not 1024 <= args.debug_port <= 65535:
     parser.error('--debug-port must be between 1024 and 65535')
 root = Path(__file__).resolve().parents[2]
 base = root / 'artifacts/native-parity'
-source = base / 'baseline/MatouReference.app'
-run = base / 'reference'
+source = base / 'baseline' / args.baseline
+run = base / 'reference' if args.baseline == 'MatouReference.app' else base / 'reference' / Path(args.baseline).stem
 app = run / 'MatouParityReference.app'
 run.mkdir(parents=True, exist_ok=True)
 if not app.exists():
@@ -55,7 +57,7 @@ if not (run / 'home-harness.json').exists():
     if not args.asar_module:
         raise SystemExit('First preparation needs --asar-module <installed @electron/asar/lib/asar.js>')
     subprocess.run(['node', str(root / 'tooling/native-parity/isolate-reference-home.cjs'),
-                    args.asar_module, str(base)], check=True)
+                    str(Path(args.asar_module).resolve()), str(base), str(source), str(app)], check=True)
     plist = app / 'Contents/Info.plist'
     info = plistlib.loads(plist.read_bytes())
     info['ElectronAsarIntegrity']['Resources/app.asar']['hash'] = json.loads(

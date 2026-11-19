@@ -1,0 +1,25 @@
+<!doctype html><meta charset="utf-8"><title>Matou isolated shadow ref fixture</title>
+<style>body{font:16px system-ui;padding:24px}input,[contenteditable]{display:block;min-height:28px;border:1px solid #777;margin:8px;padding:4px}section{padding:8px;border:1px solid #ccc;margin:8px}output{white-space:pre-wrap;display:block}</style>
+<h1>Isolated OpenCLI shadow ref fixture</h1>
+<input id="light" aria-label="Light input"><section id="one"></section><section id="two"></section>
+<button id="duplicate">Duplicate marked one-layer input</button><output id="feedback">No input yet</output>
+<script>
+const a=document.querySelector('#one').attachShadow({mode:'open'});
+a.innerHTML='<input id="one-input" aria-label="One layer input"><div id="one-edit" role="textbox" aria-label="One layer editor" contenteditable="true"></div>';
+const b=document.querySelector('#two').attachShadow({mode:'open'});
+b.innerHTML='<section id="nested"></section>';
+const c=b.querySelector('#nested').attachShadow({mode:'open'});
+c.innerHTML='<input id="two-input" aria-label="Two layer input"><div id="two-edit" role="textbox" aria-label="Two layer editor" contenteditable="true"></div>';
+const fields=[document.querySelector('#light'),...a.querySelectorAll('input,[contenteditable]'),...c.querySelectorAll('input,[contenteditable]')];
+const events=[];
+for(const field of fields)field.addEventListener('input',e=>{
+  events.push({id:field.id,value:'value' in field?field.value:field.textContent,type:e.type,trusted:e.isTrusted});
+  document.querySelector('#feedback').textContent=JSON.stringify(events);
+});
+document.querySelector('#duplicate').addEventListener('click',()=>{
+  const original=a.querySelector('#one-input');
+  if(!original.hasAttribute('data-opencli-ref'))throw Error('Take state before duplicating');
+  a.append(original.cloneNode(true));
+  document.querySelector('#duplicate').disabled=true;
+});
+</script>
