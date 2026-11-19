@@ -91,8 +91,13 @@ mod workspace {
         pub(super) fn badge_position(&self) -> Point<Pixels> {
             let index = self.order.iter().position(|id| id == PARENT).unwrap();
             let bounds = self.carousel_scroll.bounds_for_item(index).unwrap();
+            let inset = if matches!(self.recovery.get(PARENT), Some(RecoveryState::Failed(_))) {
+                50.
+            } else {
+                83.
+            };
             point(
-                bounds.right() + self.carousel_scroll.offset().x - px(50.),
+                bounds.right() + self.carousel_scroll.offset().x - px(inset),
                 bounds.top() + px(20.),
             )
         }
@@ -205,12 +210,170 @@ mod workspace {
             } if scene_id == SCENE && source_session_id == source && parent_session_id.as_deref() == parent));
             println!("CreateShellSibling | source={source} | parent={parent:?}");
         }
+
+        pub(super) fn remove_button_position(&self, id: &str) -> Point<Pixels> {
+            let index = self.order.iter().position(|card| card == id).unwrap();
+            let bounds = self.carousel_scroll.bounds_for_item(index).unwrap();
+            point(
+                bounds.right() + self.carousel_scroll.offset().x - px(25.5),
+                bounds.top() + px(21.),
+            )
+        }
+
+        pub(super) fn assert_no_dialog(&self) {
+            assert!(self.dialog.is_none());
+        }
+
+        pub(super) fn assert_card_error(&self) {
+            self.assert_no_dialog();
+            assert_eq!(self.fault.as_deref(), Some("probe: navigation error"));
+        }
+
+        pub(super) fn assert_remove_tooltip(&self, id: &str, expected: &str, enabled: bool) {
+            let tooltip = self.remove_node_tooltip(id, self.graph_node(id).unwrap());
+            assert_eq!(tooltip.text(), expected);
+            assert_eq!(tooltip.blocked_reason.is_none(), enabled);
+            println!("Remove tooltip | enabled={enabled} | {expected}");
+        }
+
+        pub(super) fn focus_remove_button(&self, id: &str, window: &mut Window) {
+            window.focus(&self.remove_card_controls[id]);
+        }
+
+        pub(super) fn assert_card_focus(&self, id: &str, window: &Window, cx: &Context<Self>) {
+            assert_eq!(self.level_parent(), None);
+            assert_eq!(self.level_focus(), Some(id));
+            self.assert_terminal_focus(id, true, window, cx);
+        }
+
+        pub(super) fn assert_stop_dialog(&self, expected: &str, window: &Window) {
+            let Some(TabDialog::CloseSession { body, .. }) = &self.dialog else {
+                panic!("expected stop confirmation");
+            };
+            assert_eq!(body, expected);
+            assert_eq!(STOP_SESSION, "停止会话");
+            assert_eq!(self.dialog_controls.len(), 3);
+            assert!(self.dialog_controls[0].is_focused(window));
+            println!("停止会话 | {body} | 取消 / 停止会话");
+        }
+
+        pub(super) fn assert_last_dialog(&self, id: &str, window: &Window) {
+            assert!(
+                matches!(&self.dialog, Some(TabDialog::LastSession { session_id, .. }) if session_id == id)
+            );
+            assert_eq!(self.dialog_controls.len(), 2);
+            assert!(self.dialog_controls[0].is_focused(window));
+            assert_eq!(
+                LAST_TAB_BODY,
+                "当前已是最后一个事项下的最后一个标签，这里点击关闭不会删除该事项。\n\n如需删除该工作区，请在左侧事项面板的下拉菜单中执行删除。"
+            );
+            assert_eq!(LAST_TAB_CONFIRM, "我知道了");
+            println!("提示 | {LAST_TAB_BODY} | 我知道了");
+        }
+
+        pub(super) fn assert_leaf_dialog(&self) {
+            let Some(TabDialog::RemoveSession {
+                session_id, scope, ..
+            }) = &self.dialog
+            else {
+                panic!("expected leaf removal confirmation");
+            };
+            assert_eq!(*scope, RemoveScope::NodeOnly);
+            let text = self.removal_dialog_text(session_id, *scope).unwrap();
+            assert_eq!(text.title, "移除节点“level-peer”？");
+            assert_eq!(
+                text.body,
+                "影响 1 个会话、0 个自有 Worktree。移除后，该会话会从会话列表和 DAG 中消失。"
+            );
+            assert_eq!(
+                text.files_unchanged,
+                Some("项目文件和自有 Worktree 保持原样。")
+            );
+            assert!(text.choices.is_none() && text.warning.is_none());
+            assert_eq!(text.confirm, "移除");
+            assert_eq!(self.dialog_controls.len(), 3);
+            println!(
+                "{} | {} | {} | 取消 / {}",
+                text.title,
+                text.body,
+                text.files_unchanged.unwrap(),
+                text.confirm
+            );
+        }
+
+        pub(super) fn assert_branch_dialog(&self, selected: RemoveScope) {
+            let Some(TabDialog::RemoveSession {
+                session_id, scope, ..
+            }) = &self.dialog
+            else {
+                panic!("expected branch removal confirmation");
+            };
+            assert_eq!(*scope, selected);
+            let text = self.removal_dialog_text(session_id, *scope).unwrap();
+            assert_eq!(
+                text.body,
+                "请选择移除范围。项目文件和自有 Worktree 保持原样。"
+            );
+            let [node, branch] = text.choices.unwrap();
+            assert_eq!(node.title, "仅移除当前节点");
+            assert_eq!(branch.title, "移除当前节点及全部后代");
+            assert_eq!(self.dialog_controls.len(), 5);
+            match session_id.as_str() {
+                PARENT => {
+                    assert_eq!(text.title, "移除节点“分支主会话”？");
+                    assert_eq!(node.impact, "影响 1 个会话、0 个自有 Worktree");
+                    assert_eq!(node.description, "直接后代会话将成为根节点。");
+                    assert_eq!(
+                        branch.impact,
+                        "影响 6 个会话、1 个自有 Worktree；其中 2 个运行中、1 个待输入"
+                    );
+                    assert_eq!(branch.description, "当前节点与 5 个后代会话会全部移除。");
+                    match scope {
+                        RemoveScope::NodeOnly => {
+                            assert_eq!(text.confirm, "移除当前节点");
+                            assert_eq!(text.warning, None);
+                        }
+                        RemoveScope::NodeAndDescendants => {
+                            assert_eq!(text.confirm, "移除 6 个会话");
+                            assert_eq!(
+                                text.warning.as_deref(),
+                                Some("其中 2 个运行中、1 个待输入的会话将先停止。")
+                            );
+                        }
+                    }
+                }
+                "child-first" => {
+                    assert_eq!(text.title, "移除节点“child-first”？");
+                    assert_eq!(node.description, "后代会话将重连到当前节点的父级。");
+                    assert_eq!(
+                        node.impact,
+                        "影响 1 个会话、1 个自有 Worktree；其中 1 个运行中"
+                    );
+                    assert_eq!(
+                        branch.impact,
+                        "影响 2 个会话、1 个自有 Worktree；其中 1 个运行中"
+                    );
+                    assert_eq!(branch.description, "当前节点与 1 个后代会话会全部移除。");
+                    assert_eq!(text.confirm, "移除当前节点");
+                    assert_eq!(
+                        text.warning.as_deref(),
+                        Some("其中 1 个运行中的会话将先停止。")
+                    );
+                }
+                _ => unreachable!(),
+            }
+            println!(
+                "{} | {} | {} | {:?} | 取消 / {}",
+                text.title, node.impact, branch.impact, text.warning, text.confirm
+            );
+        }
     }
 }
 
 #[cfg(target_os = "macos")]
 mod probe {
     use std::path::PathBuf;
+    use std::time::{Duration, Instant};
 
     use cocoa::appkit::NSEventType;
 
@@ -223,12 +386,14 @@ mod probe {
         hierarchy::{
             self, BootstrapWindowInput, HierarchyIds,
             canvas::{self, CanvasIds, CanvasMessages, CreateCanvasInput, CreateShellSiblingInput},
+            cards::{RemoveScope, scene_workspace_session_count},
         },
         session_graph::project_scene_graph,
-        startup::{self, BootstrapResult},
+        startup::{self, BootstrapResult, open_read_only},
         storage::CommandMetadata,
+        workspace_paths::WorkspacePathState,
     };
-    use matou_native_runtime::host::{Command, Event, RecoveryState};
+    use matou_native_runtime::host::{Command, Event, LaunchOptions, RecoveryState, RuntimeHost};
 
     use crate::{
         assets::NativeAssets,
@@ -368,12 +533,60 @@ mod probe {
             fixture
         }
 
+        fn prepare_card_actions(&mut self) {
+            let Some(BootstrapResult::Writable { connection, .. }) = self.db.as_mut() else {
+                unreachable!()
+            };
+            canvas::create_shell_sibling(
+                connection,
+                &command("grandchild"),
+                &CreateShellSiblingInput {
+                    window_id: WINDOW.into(),
+                    scene_id: SCENE.into(),
+                    source_session_id: "child-first".into(),
+                    parent_session_id: Some("child-first".into()),
+                    execution_context_id: None,
+                    title: Some("grandchild".into()),
+                    navigation: None,
+                    now: 20,
+                },
+                &canvas_ids(SCENE, "grandchild"),
+                &MESSAGES,
+                20,
+            )
+            .unwrap();
+            connection.execute_batch(
+                "UPDATE sessions SET work_status = 'starting' WHERE id = 'child-first';
+                 INSERT INTO execution_contexts(id, workspace_id, kind, cwd, created_at)
+                 VALUES ('probe-worktree-context', 'levels-workspace', 'git-worktree', '/probe-worktree', 20);
+                 INSERT INTO worktrees (id, execution_context_id, repository_root, worktree_path, branch_name, state, created_at, updated_at)
+                 VALUES ('probe-worktree', 'probe-worktree-context', '/probe-repository', '/probe-worktree', 'probe', 'ready', 20, 20);
+                 UPDATE session_environment_bindings SET managed_worktree_id = 'probe-worktree' WHERE session_id = 'child-first';",
+            ).unwrap();
+            self.focus(SCENE, PEER);
+        }
+
         fn focus(&mut self, scene: &str, session: &str) {
             let Some(BootstrapResult::Writable { connection, .. }) = self.db.as_mut() else {
                 unreachable!()
             };
             hierarchy::focus_session(connection, WINDOW, scene, session, 10, "会话不在当前画布中")
                 .unwrap();
+        }
+
+        fn set_peer_environment(&self, state: &str) {
+            let Some(BootstrapResult::Writable { connection, .. }) = &self.db else {
+                unreachable!()
+            };
+            assert_eq!(
+                connection
+                    .execute(
+                        "UPDATE session_environment_bindings SET state = ?1 WHERE session_id = ?2",
+                        [state, PEER],
+                    )
+                    .unwrap(),
+                1
+            );
         }
 
         fn event(&self, ready: bool) -> Event {
@@ -383,7 +596,10 @@ mod probe {
             let hierarchy = hierarchy::read_hierarchy(connection, WINDOW).unwrap();
             let scene_id = &hierarchy.scene.as_ref().unwrap().id;
             let scenes = hierarchy::list_scenes(connection, "levels-task").unwrap();
-            let graph = project_scene_graph(connection, scene_id, Some(WINDOW)).unwrap();
+            let mut graph = project_scene_graph(connection, scene_id, Some(WINDOW)).unwrap();
+            graph["workspaceSessionCount"] = scene_workspace_session_count(connection, scene_id)
+                .unwrap()
+                .into();
             let geometry = geometry::list(connection, scene_id).unwrap();
             if ready {
                 Event::Ready {
@@ -438,7 +654,9 @@ mod probe {
                             },
                         );
                     }
-                    Command::CreateShellSibling { .. } => actions.push(command),
+                    Command::CreateShellSibling { .. }
+                    | Command::CloseSessionCard { .. }
+                    | Command::RemoveSessionBranch { .. } => actions.push(command),
                     _ => {}
                 }
             }
@@ -567,6 +785,514 @@ mod probe {
             .unwrap();
     }
 
+    fn click(window: WindowHandle<Workspace>, cx: &mut AsyncApp, position: Point<Pixels>) {
+        mouse(window, cx, position, NSEventType::NSLeftMouseDown);
+        mouse(window, cx, position, NSEventType::NSLeftMouseUp);
+    }
+
+    fn click_remove(window: WindowHandle<Workspace>, cx: &mut AsyncApp, id: &str) {
+        draw(window, cx);
+        let position = window
+            .update(cx, |view, _, _| view.remove_button_position(id))
+            .unwrap();
+        click(window, cx, position);
+        draw(window, cx);
+    }
+
+    fn open_hidden(cx: &mut AsyncApp, width: f32) -> (WindowHandle<Workspace>, ProbeReceiver) {
+        let (commands, sink) = runtime_bridge::probe_channel();
+        let (_events, incoming) = async_channel::unbounded();
+        let window = cx
+            .open_window(
+                WindowOptions {
+                    show: false,
+                    focus: false,
+                    window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                        point(px(0.), px(0.)),
+                        size(px(width), px(780.)),
+                    ))),
+                    ..Default::default()
+                },
+                |window, cx| cx.new(|cx| Workspace::new(commands, incoming, window, cx)),
+            )
+            .unwrap();
+        (window, sink)
+    }
+
+    fn assert_remove_command(commands: Vec<Command>, id: &str, expected: RemoveScope) {
+        assert!(
+            matches!(commands.as_slice(), [Command::RemoveSessionBranch {
+            scene_id, session_id, scope,
+        }] if scene_id == SCENE && session_id == id && *scope == expected)
+        );
+        println!("RemoveSessionBranch | session={id} | scope={expected:?}");
+    }
+
+    fn assert_close_command(commands: Vec<Command>, id: &str, intent: Option<&str>) {
+        assert!(matches!(commands.as_slice(), [Command::CloseSessionCard {
+            scene_id, session_id, confirmed_intent, preserve_scene_on_last_session: false,
+        }] if scene_id == SCENE && session_id == id && confirmed_intent.as_deref() == intent));
+        println!("CloseSessionCard | session={id} | confirmed_intent={intent:?}");
+    }
+
+    fn verify_card_actions(cx: &mut AsyncApp) {
+        let mut fixture = Fixture::new();
+        fixture.prepare_card_actions();
+        let (window, sink) = open_hidden(cx, 1200.);
+        let assert_tooltip = |cx: &mut AsyncApp, text, enabled| {
+            window
+                .update(cx, |view, _, _| {
+                    view.assert_remove_tooltip(PEER, text, enabled)
+                })
+                .unwrap();
+        };
+        deliver(window, cx, fixture.event(true));
+        draw(window, cx);
+
+        assert_tooltip(cx, "当前终端仍在恢复", false);
+        press(window, cx, "cmd-w");
+        assert!(
+            fixture.process(window, cx, &sink).is_empty(),
+            "recovery blocks close"
+        );
+        window
+            .update(cx, |view, window, cx| view.qualify(PEER, window, cx))
+            .unwrap();
+        deliver(
+            window,
+            cx,
+            Event::WorkspacePaths(vec![WorkspacePathState {
+                workspace_id: "levels-workspace".into(),
+                status: "invalid".into(),
+                reason: "probe path".into(),
+                checked_at: 1,
+                validation_generation: 1,
+            }]),
+        );
+        assert_tooltip(
+            cx,
+            "工作区目录不可用，请先在本地恢复原路径，或移出该工作区",
+            false,
+        );
+        press(window, cx, "cmd-w");
+        assert!(
+            fixture.process(window, cx, &sink).is_empty(),
+            "invalid path blocks close"
+        );
+        deliver(window, cx, Event::WorkspacePaths(Vec::new()));
+        deliver(
+            window,
+            cx,
+            Event::StorageFault {
+                session_id: PEER.into(),
+                message: "probe storage".into(),
+            },
+        );
+        assert_tooltip(cx, "终端存储异常，请先恢复或结束当前会话", false);
+        press(window, cx, "cmd-w");
+        assert!(
+            fixture.process(window, cx, &sink).is_empty(),
+            "storage fault blocks close"
+        );
+        deliver(
+            window,
+            cx,
+            Event::StorageRecovered {
+                session_id: PEER.into(),
+            },
+        );
+        fixture.set_peer_environment("recovering");
+        deliver(window, cx, fixture.event(false));
+        assert_tooltip(cx, "当前运行环境需要先恢复或交接", false);
+        fixture.set_peer_environment("ready");
+        deliver(window, cx, fixture.event(false));
+        assert_tooltip(cx, "移除节点…", true);
+
+        window
+            .update(cx, |view, window, _| view.focus_remove_button(PEER, window))
+            .unwrap();
+        draw(window, cx);
+        press(window, cx, "enter");
+        draw(window, cx);
+        window
+            .update(cx, |view, _, _| view.assert_leaf_dialog())
+            .unwrap();
+        press(window, cx, "cmd-w");
+        press(window, cx, "tab");
+        press(window, cx, "enter"); // Cancel after the header close control.
+        window
+            .update(cx, |view, _, _| view.assert_no_dialog())
+            .unwrap();
+        assert!(
+            fixture.process(window, cx, &sink).is_empty(),
+            "leaf cancel sends nothing"
+        );
+
+        click_remove(window, cx, PEER);
+        press(window, cx, "shift-tab");
+        press(window, cx, "enter");
+        assert_remove_command(
+            fixture.process(window, cx, &sink),
+            PEER,
+            RemoveScope::NodeOnly,
+        );
+        send_card_failure(window, cx);
+
+        press(window, cx, "cmd-w");
+        press(window, cx, "cmd-w");
+        window
+            .update(cx, |view, _, _| view.assert_no_dialog())
+            .unwrap();
+        assert_close_command(fixture.process(window, cx, &sink), PEER, None);
+        press(window, cx, "cmd-w");
+        assert!(
+            fixture.process(window, cx, &sink).is_empty(),
+            "in-flight close sends nothing"
+        );
+        send_card_failure(window, cx);
+
+        fixture.focus(SCENE, CHILD);
+        deliver(window, cx, fixture.event(false));
+        draw(window, cx);
+        window
+            .update(cx, |view, window, cx| view.qualify(CHILD, window, cx))
+            .unwrap();
+        press(window, cx, "cmd-w");
+        press(window, cx, "cmd-w");
+        draw(window, cx);
+        window.update(cx, |view, window, _| view.assert_stop_dialog(
+            "“child-urgent”正在运行。停止后，该节点会在会话列表和 DAG 中保持为“已停止”，子会话继续工作。",
+            window,
+        )).unwrap();
+        assert!(
+            fixture.process(window, cx, &sink).is_empty(),
+            "confirmation is required"
+        );
+        press(window, cx, "shift-tab");
+        press(window, cx, "enter");
+        press(window, cx, "cmd-w");
+        assert_close_command(
+            fixture.process(window, cx, &sink),
+            CHILD,
+            Some("delete-session:child-urgent"),
+        );
+        send_card_failure(window, cx);
+
+        fixture.focus(SCENE, "child-first");
+        deliver(window, cx, fixture.event(false));
+        draw(window, cx);
+        window
+            .update(cx, |view, window, cx| {
+                view.qualify("child-first", window, cx)
+            })
+            .unwrap();
+        click_remove(window, cx, "child-first");
+        window
+            .update(cx, |view, _, _| {
+                view.assert_branch_dialog(RemoveScope::NodeOnly)
+            })
+            .unwrap();
+        press(window, cx, "shift-tab");
+        press(window, cx, "enter");
+        assert_remove_command(
+            fixture.process(window, cx, &sink),
+            "child-first",
+            RemoveScope::NodeOnly,
+        );
+        send_card_failure(window, cx);
+
+        fixture.focus(SCENE, PARENT);
+        deliver(window, cx, fixture.event(false));
+        draw(window, cx);
+        window
+            .update(cx, |view, window, cx| view.qualify(PARENT, window, cx))
+            .unwrap();
+        press(window, cx, "cmd-w");
+        draw(window, cx);
+        window.update(cx, |view, window, _| view.assert_stop_dialog(
+            "“分支主会话”当前空闲，并有 4 个子会话。停止后，该节点会在会话列表和 DAG 中保持为“已停止”，子会话继续工作。",
+            window,
+        )).unwrap();
+        press(window, cx, "escape");
+        assert!(
+            fixture.process(window, cx, &sink).is_empty(),
+            "stop Escape sends nothing"
+        );
+        press(window, cx, "cmd-w");
+        draw(window, cx);
+        press(window, cx, "shift-tab");
+        press(window, cx, "enter");
+        assert_close_command(
+            fixture.process(window, cx, &sink),
+            PARENT,
+            Some("delete-session:level-parent"),
+        );
+        send_card_failure(window, cx);
+
+        click_remove(window, cx, PARENT);
+        window
+            .update(cx, |view, _, _| {
+                view.assert_branch_dialog(RemoveScope::NodeOnly)
+            })
+            .unwrap();
+        press(window, cx, "escape");
+        assert!(
+            fixture.process(window, cx, &sink).is_empty(),
+            "remove Escape sends nothing"
+        );
+        click_remove(window, cx, PARENT);
+        click(window, cx, point(px(300.), px(190.))); // Canvas shade outside the centered panel.
+        window
+            .update(cx, |view, _, _| view.assert_no_dialog())
+            .unwrap();
+        assert!(
+            fixture.process(window, cx, &sink).is_empty(),
+            "shade sends nothing"
+        );
+        click_remove(window, cx, PARENT);
+        press(window, cx, "tab");
+        press(window, cx, "down");
+        draw(window, cx);
+        window
+            .update(cx, |view, _, _| {
+                view.assert_branch_dialog(RemoveScope::NodeAndDescendants)
+            })
+            .unwrap();
+        press(window, cx, "tab");
+        press(window, cx, "tab");
+        press(window, cx, "enter");
+        assert_remove_command(
+            fixture.process(window, cx, &sink),
+            PARENT,
+            RemoveScope::NodeAndDescendants,
+        );
+        send_card_failure(window, cx);
+        window
+            .update(cx, |_, window, _| window.remove_window())
+            .unwrap();
+    }
+
+    fn send_card_failure(window: WindowHandle<Workspace>, cx: &mut AsyncApp) {
+        deliver(
+            window,
+            cx,
+            Event::NavigationFailed {
+                message: "probe: navigation error".into(),
+                attempted_focus: None,
+            },
+        );
+        window
+            .update(cx, |view, _, _| view.assert_card_error())
+            .unwrap();
+    }
+
+    fn runtime_event(host: &RuntimeHost, deadline: Instant) -> Event {
+        loop {
+            match host.events.try_recv() {
+                Ok(Event::Diagnostic(message) | Event::NavigationFailed { message, .. }) => {
+                    panic!("probe runtime: {message}");
+                }
+                Ok(event) => return event,
+                Err(async_channel::TryRecvError::Empty) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("timed out or disconnected from probe runtime: {error}"),
+            }
+        }
+    }
+
+    fn runtime_navigation(host: &RuntimeHost, command: Command, count: u64) -> serde_json::Value {
+        host.commands.send(command).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Event::Navigation { graph, .. } = runtime_event(host, deadline) {
+                assert_eq!(graph["workspaceSessionCount"], count);
+                return graph;
+            }
+        }
+    }
+
+    fn verify_last_card(cx: &mut AsyncApp) {
+        let root = Fixture {
+            db: None,
+            root: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../target")
+                .join(format!("last-card-probe-{}", uuid::Uuid::new_v4())),
+        };
+        let options = LaunchOptions {
+            data_root: root.root.join("data"),
+            workspace: root.root.join("workspace"),
+            shell_home: root.root.join("shell-home"),
+            shell: "/bin/zsh".into(),
+        };
+        let db_path = options.data_root.join("matou.sqlite");
+        let mut host = RuntimeHost::start(options).unwrap();
+        let (window, sink) = open_hidden(cx, 1000.);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let ready = loop {
+            if let event @ Event::Ready { .. } = runtime_event(&host, deadline) {
+                break event;
+            }
+        };
+        let Event::Ready {
+            hierarchy, graph, ..
+        } = &ready
+        else {
+            unreachable!()
+        };
+        let id = hierarchy.session.as_ref().unwrap().id.clone();
+        let scene = hierarchy.scene.as_ref().unwrap().id.clone();
+        let task_id = hierarchy.task.as_ref().unwrap().id.clone();
+        let workspace_id = hierarchy.workspace.as_ref().unwrap().id.clone();
+        assert_eq!(graph["workspaceSessionCount"], 1);
+        let mut missing_count = graph.clone();
+        missing_count
+            .as_object_mut()
+            .unwrap()
+            .remove("workspaceSessionCount");
+        deliver(window, cx, ready);
+        draw(window, cx);
+        window
+            .update(cx, |view, window, cx| view.qualify(&id, window, cx))
+            .unwrap();
+        while sink.try_recv().is_ok() {}
+        let db = open_read_only(&db_path).unwrap();
+        let card_state = || {
+            db.query_row(
+                "SELECT archived_at,
+                   (SELECT json_group_array(json_array(id, scene_id, scene_window_id))
+                    FROM (SELECT * FROM session_mounts WHERE session_id = ?1 ORDER BY id)),
+                   (SELECT COUNT(*) FROM domain_events WHERE event_type = 'session.archived'),
+                   (SELECT COUNT(*) FROM command_deduplication WHERE command_type = 'hierarchy.delete-session')
+                 FROM sessions WHERE id = ?1",
+                [&id],
+                |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, String>(1)?,
+                          row.get::<_, i64>(2)?, row.get::<_, i64>(3)?)),
+            ).unwrap()
+        };
+        let before = card_state();
+        assert!(before.0.is_none() && before.1 != "[]");
+
+        press(window, cx, "cmd-w");
+        press(window, cx, "cmd-w");
+        window
+            .update(cx, |view, window, _| view.assert_last_dialog(&id, window))
+            .unwrap();
+        assert!(
+            sink.try_recv().is_err(),
+            "known final card sends zero commands"
+        );
+        draw(window, cx);
+        press(window, cx, "tab");
+        press(window, cx, "enter");
+        window
+            .update(cx, |view, window, cx| {
+                view.assert_no_dialog();
+                view.assert_card_focus(&id, window, cx);
+            })
+            .unwrap();
+        assert!(
+            sink.try_recv().is_err(),
+            "dismissing final-card notice sends zero commands"
+        );
+        assert_eq!(card_state(), before);
+
+        deliver(window, cx, Event::Graph(missing_count));
+        press(window, cx, "cmd-w");
+        press(window, cx, "cmd-w");
+        let command = sink
+            .try_recv()
+            .expect("one card close request with missing count");
+        assert!(matches!(&command, Command::CloseSessionCard {
+            scene_id, session_id, confirmed_intent: None, preserve_scene_on_last_session: false,
+        } if scene_id == &scene && session_id == &id));
+        assert!(sink.try_recv().is_err());
+        host.commands.send(command).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let reply = loop {
+            match runtime_event(&host, deadline) {
+                Event::Graph(graph) if graph["sessionCardAction"]["outcome"] == "hide-window" => {
+                    let action = &graph["sessionCardAction"];
+                    assert_eq!(action["sessionId"], id);
+                    assert_eq!(action["disposedSessionIds"], serde_json::json!([]));
+                    break Event::Graph(graph);
+                }
+                Event::ScenesDisposed(ids) => panic!("last card disposed: {ids:?}"),
+                _ => {}
+            }
+        };
+        deliver(window, cx, reply);
+        draw(window, cx);
+        window
+            .update(cx, |view, window, _| view.assert_last_dialog(&id, window))
+            .unwrap();
+        press(window, cx, "escape");
+        window
+            .update(cx, |view, window, cx| {
+                view.assert_no_dialog();
+                view.assert_card_focus(&id, window, cx);
+                window.remove_window();
+            })
+            .unwrap();
+        assert!(sink.try_recv().is_err());
+        assert_eq!(card_state(), before);
+        println!(
+            "Actual runtime: hide-window, unchanged mounts, no archive events or close transaction"
+        );
+        drop(db);
+        let same_canvas = runtime_navigation(
+            &host,
+            Command::CreateShellSibling {
+                scene_id: scene.clone(),
+                source_session_id: id.clone(),
+                parent_session_id: None,
+            },
+            2,
+        );
+        assert_eq!(same_canvas["sceneId"], scene);
+        assert_eq!(same_canvas["nodes"].as_array().unwrap().len(), 2);
+        let across_canvas = runtime_navigation(
+            &host,
+            Command::CreateCanvas {
+                task_id: task_id.clone(),
+            },
+            3,
+        );
+        assert_ne!(across_canvas["sceneId"], scene);
+        assert_eq!(across_canvas["nodes"].as_array().unwrap().len(), 1);
+        let across_task = runtime_navigation(&host, Command::CreateTask { workspace_id }, 4);
+        assert_eq!(across_task["nodes"].as_array().unwrap().len(), 1);
+        runtime_navigation(&host, Command::SelectTask { task_id }, 4);
+        runtime_navigation(
+            &host,
+            Command::SelectScene {
+                scene_id: scene.clone(),
+            },
+            4,
+        );
+        let after_archive = runtime_navigation(
+            &host,
+            Command::CloseSessionCard {
+                scene_id: scene,
+                session_id: id.clone(),
+                confirmed_intent: Some(format!("delete-session:{id}")),
+                preserve_scene_on_last_session: false,
+            },
+            3,
+        );
+        assert!(
+            after_archive["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|node| { node["sessionId"] == id && node["archivedAt"].is_number() })
+        );
+        println!(
+            "Actual Navigation: workspace count 2 in one canvas, 3 across canvases, 4 across tasks, then 3 after archival"
+        );
+        host.shutdown().unwrap();
+    }
+
     fn verify_compact_card(cx: &mut AsyncApp) {
         let mut fixture = Fixture::new();
         let (commands, sink) = runtime_bridge::probe_channel();
@@ -622,6 +1348,18 @@ mod probe {
         println!(
             "Compact parent has no branch badge hit target; click selected it in the root level"
         );
+        fixture.focus(SCENE, PEER);
+        deliver(window, cx, fixture.event(false));
+        draw(window, cx);
+        let compact_header = window
+            .update(cx, |view, _, _| view.remove_button_position(PARENT))
+            .unwrap();
+        click(window, cx, compact_header);
+        assert_focus(fixture.process(window, cx, &sink), PARENT);
+        window
+            .update(cx, |view, _, _| view.assert_no_dialog())
+            .unwrap();
+        println!("Compact card header activates the card without a remove control");
 
         deliver(
             window,
@@ -681,6 +1419,8 @@ mod probe {
                 .unwrap();
             cx.spawn(async move |cx| {
                 verify_compact_card(cx);
+                verify_card_actions(cx);
+                verify_last_card(cx);
                 deliver(window, cx, fixture.event(true));
                 draw(window, cx);
                 window

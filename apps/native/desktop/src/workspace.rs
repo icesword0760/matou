@@ -10,6 +10,7 @@ use crate::history_view::{HistoryView, HistoryViewEvent, HistoryViewState};
 use crate::recovery_water_view::RecoveryWater;
 use gpui::{prelude::*, *};
 use matou_native_core::geometry::GeometryUpdate;
+use matou_native_core::hierarchy::cards::RemoveScope;
 use matou_native_core::hierarchy::{HierarchyResult, Scene, Task, Workspace as HierarchyWorkspace};
 use matou_native_core::workspace_paths::WorkspacePathState;
 use matou_native_runtime::history::{HistoryCursor, HistoryLine, HistorySearchOptions};
@@ -123,6 +124,129 @@ enum TabDialog {
         graph: Value,
         is_last: bool,
     },
+    CloseSession {
+        scene_id: String,
+        session_id: String,
+        body: String,
+    },
+    LastSession {
+        scene_id: String,
+        session_id: String,
+        return_focus: Option<FocusHandle>,
+    },
+    RemoveSession {
+        scene_id: String,
+        session_id: String,
+        scope: RemoveScope,
+    },
+}
+
+impl TabDialog {
+    fn is_session_card(&self) -> bool {
+        matches!(
+            self,
+            Self::CloseSession { .. } | Self::LastSession { .. } | Self::RemoveSession { .. }
+        )
+    }
+}
+
+const LAST_TAB_BODY: &str = "当前已是最后一个事项下的最后一个标签，这里点击关闭不会删除该事项。\n\n如需删除该工作区，请在左侧事项面板的下拉菜单中执行删除。";
+const LAST_TAB_CONFIRM: &str = "我知道了";
+const STOP_SESSION: &str = "停止会话";
+const REMOVE_NODE_ACTION: &str = "移除节点…";
+const WORKSPACE_PATH_UNAVAILABLE: &str = "工作区目录不可用，请先在本地恢复原路径，或移出该工作区";
+
+#[derive(Clone, Copy)]
+struct RemoveNodeTooltip {
+    blocked_reason: Option<&'static str>,
+}
+
+impl RemoveNodeTooltip {
+    fn text(self) -> &'static str {
+        self.blocked_reason.unwrap_or(REMOVE_NODE_ACTION)
+    }
+}
+
+impl Render for RemoveNodeTooltip {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px(px(9.))
+            .py(px(7.))
+            .border_1()
+            .border_color(rgb(0xd6dae1))
+            .rounded(px(7.))
+            .bg(rgb(0xffffff))
+            .text_color(rgb(0x333b47))
+            .text_size(px(10.))
+            .line_height(px(15.))
+            .shadow(vec![shadow(0x1f2837, 0.16, 8., 24.)])
+            .child(self.text())
+    }
+}
+
+struct RemovalDialogText {
+    title: String,
+    body: String,
+    files_unchanged: Option<&'static str>,
+    choices: Option<[RemovalChoiceText; 2]>,
+    warning: Option<String>,
+    confirm: String,
+}
+
+struct RemovalChoiceText {
+    title: &'static str,
+    impact: String,
+    description: String,
+}
+
+#[derive(Default)]
+struct RemovalImpact {
+    sessions: usize,
+    owned_worktrees: Option<usize>,
+    running: usize,
+    needs_input: usize,
+}
+
+impl RemovalImpact {
+    fn add(&mut self, node: &Value) {
+        let owned = node["hasOwnedWorktree"].as_bool().map(usize::from);
+        self.owned_worktrees = if self.sessions == 0 {
+            owned
+        } else {
+            self.owned_worktrees
+                .zip(owned)
+                .map(|(total, count)| total + count)
+        };
+        self.sessions += 1;
+        match node["workStatus"].as_str() {
+            Some("running" | "starting") => self.running += 1,
+            Some("needs-input") => self.needs_input += 1,
+            _ => {}
+        }
+    }
+
+    fn activity(&self) -> String {
+        [
+            (self.running > 0).then(|| format!("{} 个运行中", self.running)),
+            (self.needs_input > 0).then(|| format!("{} 个待输入", self.needs_input)),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("、")
+    }
+
+    fn label(&self) -> String {
+        let mut label = format!("影响 {} 个会话", self.sessions);
+        if let Some(count) = self.owned_worktrees {
+            label.push_str(&format!("、{count} 个自有 Worktree"));
+        }
+        let activity = self.activity();
+        if !activity.is_empty() {
+            label.push_str(&format!("；其中 {activity}"));
+        }
+        label
+    }
 }
 
 const CONTROLS: &[&str] = &[
@@ -222,6 +346,7 @@ pub struct Workspace {
     control_focus: HashMap<&'static str, FocusHandle>,
     tab_controls: HashMap<String, [FocusHandle; 2]>,
     card_controls: HashMap<String, FocusHandle>,
+    remove_card_controls: HashMap<String, FocusHandle>,
     keyboard_focus: bool,
     dialog: Option<TabDialog>,
     dialog_controls: Vec<FocusHandle>,
@@ -266,11 +391,11 @@ pub struct Workspace {
     recovery_water: HashMap<String, Entity<RecoveryWater>>,
     #[cfg(target_os = "macos")]
     recovery_water_visibility: Option<gpui::Task<()>>,
-    #[cfg(target_os = "macos")]
     storage_fault_sessions: HashSet<String>,
     order: Vec<String>,
     focused: Option<String>,
     pending_focus: Option<(String, String)>,
+    pending_card_action: Option<(String, String)>,
     level_focus_request: Option<LevelFocusRequest>,
     copy_request_id: u64,
     resize_revisions: HashMap<String, u64>,
@@ -997,6 +1122,7 @@ impl Workspace {
                 .collect(),
             tab_controls: HashMap::new(),
             card_controls: HashMap::new(),
+            remove_card_controls: HashMap::new(),
             keyboard_focus: false,
             dialog: None,
             dialog_controls: Vec::new(),
@@ -1041,11 +1167,11 @@ impl Workspace {
             recovery_water: HashMap::new(),
             #[cfg(target_os = "macos")]
             recovery_water_visibility: None,
-            #[cfg(target_os = "macos")]
             storage_fault_sessions: HashSet::new(),
             order: Vec::new(),
             focused: None,
             pending_focus: None,
+            pending_card_action: None,
             level_focus_request: None,
             copy_request_id: 0,
             resize_revisions: HashMap::new(),
@@ -1124,6 +1250,7 @@ impl Workspace {
         self.geometry_writes.clear();
         self.last_geometry_write.clear();
         self.pending_focus = None;
+        self.pending_card_action = None;
         self.level_focus_request = None;
         self.level_parent_by_scene.clear();
         self.refresh_level(cx);
@@ -1263,6 +1390,28 @@ impl Workspace {
             TabDialog::Rename { scene_id, .. } | TabDialog::Close { scene_id, .. } => {
                 !self.scenes.iter().any(|s| &s.id == scene_id)
             }
+            TabDialog::CloseSession {
+                scene_id,
+                session_id,
+                ..
+            }
+            | TabDialog::LastSession {
+                scene_id,
+                session_id,
+                ..
+            } => self.active_scene_id() != Some(scene_id) || self.graph_node(session_id).is_none(),
+            TabDialog::RemoveSession {
+                scene_id,
+                session_id,
+                scope,
+            } => {
+                self.active_scene_id() != Some(scene_id)
+                    || self
+                        .removal_dialog_text(session_id, *scope)
+                        .is_none_or(|text| {
+                            text.choices.is_some() != (self.dialog_controls.len() == 5)
+                        })
+            }
         });
         if invalid {
             self.close_dialog(window, cx);
@@ -1285,6 +1434,7 @@ impl Workspace {
                 self.transport_connected = matches!(phase, ConnectionPhase::Ready);
                 if !self.transport_connected {
                     self.domain_ready = false;
+                    self.pending_card_action = None;
                     self.session_frames.clear();
                     self.sync_terminal_input(window, cx);
                 }
@@ -1301,7 +1451,6 @@ impl Workspace {
             self.transport_connected = true;
             self.transport_fault = None;
         }
-        #[cfg(target_os = "macos")]
         match &event {
             Event::StorageFault { session_id, .. } => {
                 self.storage_fault_sessions.insert(session_id.clone());
@@ -1536,6 +1685,7 @@ impl Workspace {
                     self.run_search(false, cx);
                 }
                 self.hierarchy = Some(hierarchy);
+                self.finish_card_action(&graph["sessionCardAction"]);
                 self.graph = graph;
                 self.refresh_terminals(cx);
                 if fresh_ready {
@@ -1549,6 +1699,8 @@ impl Workspace {
                             .insert(id.to_owned(), RecoveryState::Restoring);
                     }
                     self.resend_terminal_sizes(cx);
+                }
+                if fresh_ready || self.dialog.as_ref().is_some_and(TabDialog::is_session_card) {
                     self.close_invalid_dialog(window, cx);
                 }
                 self.reconcile_transport_geometry(&geometry, cx);
@@ -1609,7 +1761,9 @@ impl Workspace {
                     self.terminals.remove(&id);
                     self.recovery.remove(&id);
                     self.recovery_controls.remove(&id);
+                    self.storage_fault_sessions.remove(&id);
                     self.card_controls.remove(&id);
+                    self.remove_card_controls.remove(&id);
                     self.card_motion.remove(&id);
                     self.resize_revisions.remove(&id);
                     self.session_frames.remove(&id);
@@ -1702,6 +1856,9 @@ impl Workspace {
                 message,
                 attempted_focus,
             } => {
+                if attempted_focus.is_none() {
+                    self.pending_card_action = None;
+                }
                 if attempted_focus.is_some() && self.pending_focus == attempted_focus {
                     self.pending_focus = None;
                     self.level_focus_request = None;
@@ -1709,8 +1866,31 @@ impl Workspace {
                 self.fault = Some(message);
             }
             Event::Graph(graph) => {
+                let action = &graph["sessionCardAction"];
+                if action["outcome"] == "hide-window" {
+                    if self.finish_card_action(action)
+                        && self.dialog.is_none()
+                        && let (Some(scene_id), Some(session_id)) =
+                            (action["sceneId"].as_str(), action["sessionId"].as_str())
+                        && self.active_scene_id() == Some(scene_id)
+                        && self.level_focus() == Some(session_id)
+                    {
+                        self.graph["workspaceSessionCount"] =
+                            graph["workspaceSessionCount"].clone();
+                        self.open_last_session(
+                            scene_id.to_owned(),
+                            session_id.to_owned(),
+                            window,
+                            cx,
+                        );
+                    }
+                    return;
+                }
                 self.graph = graph;
                 self.refresh_terminals(cx);
+                if self.dialog.as_ref().is_some_and(TabDialog::is_session_card) {
+                    self.close_invalid_dialog(window, cx);
+                }
                 self.sync_terminal_input(window, cx);
             }
             Event::ClipboardWrite { session_id, text } => {
@@ -1845,6 +2025,8 @@ impl Workspace {
                 surface
             });
             self.card_controls
+                .insert(id.to_owned(), cx.focus_handle().tab_stop(true));
+            self.remove_card_controls
                 .insert(id.to_owned(), cx.focus_handle().tab_stop(true));
             let session_id = id.to_owned();
             self.subscriptions.push(cx.subscribe(
@@ -3460,10 +3642,18 @@ impl Workspace {
         scene.name.clone()
     }
     fn close_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.dialog = None;
+        let dialog = self.dialog.take();
         self.dialog_subscription = None;
         self.dialog_controls.clear();
-        window.blur();
+        if let Some(TabDialog::LastSession {
+            return_focus: Some(focus),
+            ..
+        }) = dialog
+        {
+            window.focus(&focus);
+        } else {
+            window.blur();
+        }
         cx.notify();
     }
     fn open_rename(&mut self, scene_id: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -3553,11 +3743,47 @@ impl Workspace {
                     })
                 }
             }
+            Some(TabDialog::LastSession { .. }) => None,
+            Some(TabDialog::CloseSession {
+                scene_id,
+                session_id,
+                ..
+            }) => self
+                .card_action_available(session_id)
+                .then(|| Command::CloseSessionCard {
+                    scene_id: scene_id.clone(),
+                    session_id: session_id.clone(),
+                    confirmed_intent: Some(format!("delete-session:{session_id}")),
+                    preserve_scene_on_last_session: false,
+                }),
+            Some(TabDialog::RemoveSession {
+                scene_id,
+                session_id,
+                scope,
+            }) => self
+                .card_action_available(session_id)
+                .then(|| Command::RemoveSessionBranch {
+                    scene_id: scene_id.clone(),
+                    session_id: session_id.clone(),
+                    scope: *scope,
+                }),
             None => return,
         };
         self.close_dialog(window, cx);
         if let Some(command) = command {
-            self.send(command, cx);
+            match command {
+                Command::CloseSessionCard {
+                    scene_id,
+                    session_id,
+                    ..
+                } if self.graph["workspaceSessionCount"].as_u64() == Some(1) => {
+                    self.open_last_session(scene_id, session_id, window, cx);
+                }
+                Command::CloseSessionCard { .. } | Command::RemoveSessionBranch { .. } => {
+                    self.send_card_action(command, cx);
+                }
+                _ => self.send(command, cx),
+            }
         }
     }
     fn create_canvas(&mut self, cx: &mut Context<Self>) {
@@ -3616,6 +3842,279 @@ impl Workspace {
 
     fn graph_node(&self, id: &str) -> Option<&Value> {
         session_levels::node(session_levels::nodes(&self.graph), id)
+    }
+
+    fn card_action_available(&self, id: &str) -> bool {
+        self.graph_node(id).is_some_and(|node| {
+            node["archivedAt"].is_null() && self.card_action_blocked_reason(id, node).is_none()
+        })
+    }
+
+    fn card_action_blocked_reason(&self, id: &str, node: &Value) -> Option<&'static str> {
+        if !self.active_path_valid() {
+            Some(WORKSPACE_PATH_UNAVAILABLE)
+        } else if self.storage_fault_sessions.contains(id) {
+            Some("终端存储异常，请先恢复或结束当前会话")
+        } else if node["environment"]["state"]
+            .as_str()
+            .is_some_and(|state| state != "ready")
+        {
+            Some("当前运行环境需要先恢复或交接")
+        } else if self.recovery_blocked(id) {
+            Some("当前终端仍在恢复")
+        } else {
+            None
+        }
+    }
+
+    fn remove_node_tooltip(&self, id: &str, node: &Value) -> RemoveNodeTooltip {
+        RemoveNodeTooltip {
+            blocked_reason: self.card_action_blocked_reason(id, node),
+        }
+    }
+
+    fn open_card_dialog(
+        &mut self,
+        dialog: TabDialog,
+        controls: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.dialog = Some(dialog);
+        self.dialog_controls = (0..controls)
+            .map(|_| cx.focus_handle().tab_stop(true))
+            .collect();
+        window.focus(&self.dialog_controls[0]);
+        cx.notify();
+    }
+
+    fn open_last_session(
+        &mut self,
+        scene_id: String,
+        session_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let return_focus = window.focused(cx);
+        self.open_card_dialog(
+            TabDialog::LastSession {
+                scene_id,
+                session_id,
+                return_focus,
+            },
+            2,
+            window,
+            cx,
+        );
+    }
+
+    fn request_close_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dialog.is_some()
+            || self.pending_close.is_some()
+            || self.pending_card_action.is_some()
+        {
+            return;
+        }
+        let (Some(scene_id), Some(id)) = (self.active_scene_id(), self.level_focus()) else {
+            return;
+        };
+        if !self.card_action_available(id) {
+            return;
+        }
+        let (scene_id, session_id) = (scene_id.to_owned(), id.to_owned());
+        if self.graph["workspaceSessionCount"].as_u64() == Some(1) {
+            self.open_last_session(scene_id, session_id, window, cx);
+            return;
+        }
+        let node = self.graph_node(id).expect("available session");
+        let active = matches!(node["workStatus"].as_str(), Some("running" | "needs-input"));
+        let child_count =
+            session_levels::children_of(session_levels::nodes(&self.graph), Some(id)).count();
+        if !active && child_count == 0 {
+            self.send_card_action(
+                Command::CloseSessionCard {
+                    scene_id,
+                    session_id,
+                    confirmed_intent: None,
+                    preserve_scene_on_last_session: false,
+                },
+                cx,
+            );
+            return;
+        }
+        let title = node["title"].as_str().unwrap_or("当前会话");
+        let activity = if active {
+            "正在运行"
+        } else {
+            "当前空闲"
+        };
+        let descendants = if child_count > 0 {
+            format!("，并有 {child_count} 个子会话")
+        } else {
+            String::new()
+        };
+        let body = format!(
+            "“{title}”{activity}{descendants}。停止后，该节点会在会话列表和 DAG 中保持为“已停止”，子会话继续工作。"
+        );
+        self.open_card_dialog(
+            TabDialog::CloseSession {
+                scene_id,
+                session_id,
+                body,
+            },
+            3,
+            window,
+            cx,
+        );
+    }
+
+    fn send_card_action(&mut self, command: Command, cx: &mut Context<Self>) {
+        let (scene_id, session_id) = match &command {
+            Command::CloseSessionCard {
+                scene_id,
+                session_id,
+                ..
+            }
+            | Command::RemoveSessionBranch {
+                scene_id,
+                session_id,
+                ..
+            } => (scene_id, session_id),
+            _ => unreachable!("expected a session card action"),
+        };
+        let target = (scene_id.clone(), session_id.clone());
+        if self
+            .commands
+            .send_at(self.runtime_generation, command)
+            .is_ok()
+        {
+            self.pending_card_action = Some(target);
+        }
+        cx.notify();
+    }
+
+    fn finish_card_action(&mut self, action: &Value) -> bool {
+        let matches = self
+            .pending_card_action
+            .as_ref()
+            .is_some_and(|(scene_id, session_id)| {
+                action["sceneId"] == *scene_id && action["sessionId"] == *session_id
+            });
+        if matches {
+            self.pending_card_action = None;
+        }
+        matches
+    }
+
+    fn open_remove_session(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dialog.is_some()
+            || self.pending_close.is_some()
+            || self.pending_card_action.is_some()
+            || !self.card_action_available(id)
+        {
+            return;
+        }
+        let (Some(scene_id), Some(text)) = (
+            self.active_scene_id(),
+            self.removal_dialog_text(id, RemoveScope::NodeOnly),
+        ) else {
+            return;
+        };
+        let dialog = TabDialog::RemoveSession {
+            scene_id: scene_id.to_owned(),
+            session_id: id.to_owned(),
+            scope: RemoveScope::NodeOnly,
+        };
+        self.open_card_dialog(
+            dialog,
+            if text.choices.is_some() { 5 } else { 3 },
+            window,
+            cx,
+        );
+    }
+
+    fn select_remove_scope(&mut self, scope: RemoveScope, cx: &mut Context<Self>) {
+        if let Some(TabDialog::RemoveSession {
+            scope: selected, ..
+        }) = &mut self.dialog
+        {
+            *selected = scope;
+            cx.notify();
+        }
+    }
+
+    fn removal_dialog_text(&self, id: &str, scope: RemoveScope) -> Option<RemovalDialogText> {
+        let current = self.graph_node(id)?;
+        let title = format!("移除节点“{}”？", current["title"].as_str()?);
+        let mut children: HashMap<&str, Vec<&Value>> = HashMap::new();
+        for node in session_levels::nodes(&self.graph) {
+            if let Some(parent) = session_levels::parent_id(node) {
+                children.entry(parent).or_default().push(node);
+            }
+        }
+        let mut node_only = RemovalImpact::default();
+        node_only.add(current);
+        let mut branch = RemovalImpact::default();
+        let mut stack = vec![current];
+        let mut seen = HashSet::new();
+        while let Some(node) = stack.pop() {
+            let Some(session_id) = node["sessionId"].as_str() else {
+                continue;
+            };
+            if seen.insert(session_id) {
+                branch.add(node);
+                if let Some(children) = children.get(session_id) {
+                    stack.extend(children);
+                }
+            }
+        }
+        if branch.sessions == 1 {
+            return Some(RemovalDialogText {
+                title,
+                body: format!(
+                    "{}。移除后，该会话会从会话列表和 DAG 中消失。",
+                    node_only.label()
+                ),
+                files_unchanged: Some("项目文件和自有 Worktree 保持原样。"),
+                choices: None,
+                warning: None,
+                confirm: "移除".into(),
+            });
+        }
+        let description = if session_levels::parent_id(current).is_some() {
+            "后代会话将重连到当前节点的父级。"
+        } else {
+            "直接后代会话将成为根节点。"
+        };
+        let (activity, confirm) = match scope {
+            RemoveScope::NodeOnly => (node_only.activity(), "移除当前节点".into()),
+            RemoveScope::NodeAndDescendants => (
+                branch.activity(),
+                format!("移除 {} 个会话", branch.sessions),
+            ),
+        };
+        Some(RemovalDialogText {
+            title,
+            body: "请选择移除范围。项目文件和自有 Worktree 保持原样。".into(),
+            files_unchanged: None,
+            choices: Some([
+                RemovalChoiceText {
+                    title: "仅移除当前节点",
+                    impact: node_only.label(),
+                    description: description.into(),
+                },
+                RemovalChoiceText {
+                    title: "移除当前节点及全部后代",
+                    impact: branch.label(),
+                    description: format!(
+                        "当前节点与 {} 个后代会话会全部移除。",
+                        branch.sessions - 1
+                    ),
+                },
+            ]),
+            warning: (!activity.is_empty()).then(|| format!("其中 {activity}的会话将先停止。")),
+            confirm,
+        })
     }
 
     fn level_parent(&self) -> Option<&str> {
@@ -3863,6 +4362,18 @@ impl Workspace {
     }
 
     fn tab_key(&mut self, stroke: &Keystroke, window: &mut Window, cx: &mut Context<Self>) {
+        let mods = stroke.modifiers;
+        if cfg!(target_os = "macos")
+            && stroke.key == "w"
+            && mods.platform
+            && !mods.alt
+            && !mods.control
+            && !mods.shift
+        {
+            self.request_close_session(window, cx);
+            cx.stop_propagation();
+            return;
+        }
         if self.search_key(stroke, window, cx) {
             cx.stop_propagation();
             return;
@@ -3892,6 +4403,9 @@ impl Workspace {
                 TabDialog::Close { .. }
                     | TabDialog::DeleteTask { .. }
                     | TabDialog::RemoveWorkspace { .. }
+                    | TabDialog::CloseSession { .. }
+                    | TabDialog::LastSession { .. }
+                    | TabDialog::RemoveSession { .. }
             )
         );
         if stroke.key == "escape" {
@@ -4272,28 +4786,175 @@ impl Workspace {
             )
     }
 
+    fn remove_scope_choice(
+        &self,
+        choice: RemovalChoiceText,
+        scope: RemoveScope,
+        selected: RemoveScope,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let (id, index, other) = match scope {
+            RemoveScope::NodeOnly => ("remove-node-only", 1, RemoveScope::NodeAndDescendants),
+            RemoveScope::NodeAndDescendants => {
+                ("remove-node-and-descendants", 2, RemoveScope::NodeOnly)
+            }
+        };
+        let selected = scope == selected;
+        let choice = div()
+            .id(id)
+            .flex()
+            .items_start()
+            .gap(px(10.))
+            .p(px(12.))
+            .border_1()
+            .border_color(if selected {
+                rgb(0x458bd7)
+            } else {
+                rgba(0x0000001f)
+            })
+            .bg(if selected {
+                rgb(0xeef6ff)
+            } else {
+                rgba(0x00000005)
+            })
+            .rounded(px(9.))
+            .cursor_pointer()
+            .child(
+                div()
+                    .size(px(18.))
+                    .mt(px(3.))
+                    .flex_none()
+                    .flex()
+                    .justify_center()
+                    .child(
+                        div()
+                            .size(px(13.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_full()
+                            .border_1()
+                            .border_color(if selected {
+                                rgb(0x5b9de9)
+                            } else {
+                                rgb(0x878787)
+                            })
+                            .bg(if selected {
+                                rgb(0x5b9de9)
+                            } else {
+                                rgb(0xffffff)
+                            })
+                            .when(selected, |radio| {
+                                radio.child(div().size(px(5.)).rounded_full().bg(rgb(0xffffff)))
+                            }),
+                    ),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(3.))
+                    .child(
+                        div()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(0x2f3547))
+                            .child(choice.title),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(rgb(0x596273))
+                            .child(ui_text(choice.impact)),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(rgb(0x77808e))
+                            .child(ui_text(choice.description)),
+                    ),
+            )
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                if matches!(
+                    event.keystroke.key.as_str(),
+                    "left" | "right" | "up" | "down"
+                ) && !event.keystroke.modifiers.modified()
+                {
+                    window.focus(&this.dialog_controls[3 - index]);
+                    this.select_remove_scope(other, cx);
+                    cx.stop_propagation();
+                }
+            }));
+        self.button(
+            choice,
+            &self.dialog_controls[index],
+            move |this, _, cx| this.select_remove_scope(scope, cx),
+            cx,
+        )
+    }
+
+    fn remove_card_button(
+        &self,
+        id: &str,
+        node: &Value,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let tooltip = self.remove_node_tooltip(id, node);
+        let button = div()
+            .id(SharedString::from(format!("remove-session-{id}")))
+            .size(px(27.))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(5.))
+            .text_color(rgb(0x5f7898))
+            .child(
+                svg()
+                    .path("icons/circle-minus.svg")
+                    .size(px(14.))
+                    .flex_none(),
+            )
+            .tooltip(move |_, cx| cx.new(|_| tooltip).into());
+        if tooltip.blocked_reason.is_none() {
+            let session_id = id.to_owned();
+            self.button(
+                button
+                    .cursor_pointer()
+                    .hover(|style| style.bg(rgba(0x0000000f))),
+                &self.remove_card_controls[id],
+                move |this, window, cx| this.open_remove_session(&session_id, window, cx),
+                cx,
+            )
+        } else {
+            button
+                .opacity(0.38)
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        }
+    }
+
     fn tab_overlay(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         if let Some(dialog) = &self.dialog {
-            let (title, body, confirm, show_cancel, disabled) = match dialog {
+            let (title, body, confirm, show_cancel, disabled): (SharedString, _, SharedString, _, _) = match dialog {
                 TabDialog::RenameTask { task_id, input, empty_submitted, failure } => {
                     let value = trim_name(&input.read(cx).text);
                     let error = if *empty_submitted && value.is_empty() { Some("工作台名称不能为空".into()) }
                         else { self.task_rename_error(task_id, value).or_else(|| failure.as_ref().filter(|(title, _)| title == value).map(|(_, message)| message.clone())) };
                     let mut body = tabs_ui::dialog_body().child(input.clone());
                     if let Some(error) = &error { body = body.child(tabs_ui::dialog_error(error.clone())); }
-                    ("重命名", body, "确定", true, error.is_some() && !value.is_empty())
+                    ("重命名".into(), body, "确定".into(), true, error.is_some() && !value.is_empty())
                 }
                 TabDialog::RemoveWorkspace { name, .. } => (
-                    "移出工作空间",
+                    "移出工作空间".into(),
                     tabs_ui::dialog_body().child(ui_text(format!(
                         "移出 \"{name}\" 会关闭该空间下的事项和终端会话，本地文件保持原样。 是否继续？"
                     )).pre_line()),
-                    "移出",
+                    "移出".into(),
                     true,
                     false,
                 ),
                 TabDialog::DeleteTask { title, .. } => (
-                    "提示", tabs_ui::dialog_body().child(ui_text(format!("删除 \"{title}\" 会丢失该事项下所有终端会话，但不会删除本地目录。 是否继续？")).pre_line()), "确定", true, false,
+                    "提示".into(), tabs_ui::dialog_body().child(ui_text(format!("删除 \"{title}\" 会丢失该事项下所有终端会话，但不会删除本地目录。 是否继续？")).pre_line()), "确定".into(), true, false,
                 ),
                 TabDialog::Rename { scene_id, input } => {
                     let value = trim_name(&input.read(cx).text);
@@ -4303,9 +4964,9 @@ impl Workspace {
                         body = body.child(tabs_ui::dialog_error(error.clone()));
                     }
                     (
-                        "重命名标签页",
+                        "重命名标签页".into(),
                         body,
-                        "确定",
+                        "确定".into(),
                         true,
                         error.is_some() && !value.is_empty(),
                     )
@@ -4350,23 +5011,63 @@ impl Workspace {
                         format!("其中 {}将停止。", affected.join("和 "))
                     };
                     let text = if *is_last {
-                        "当前已是最后一个事项下的最后一个标签，这里点击关闭不会删除该事项。\n\n如需删除该工作区，请在左侧事项面板的下拉菜单中执行删除。".into()
+                        LAST_TAB_BODY.into()
                     } else {
                         format!(
                             "关闭后，“{name}”下的 {count} 个会话会全部从界面移除。{activity}项目文件和工作树保持原样。"
                         )
                     };
                     (
-                        if *is_last { "提示" } else { "关闭画布" },
+                        if *is_last { "提示" } else { "关闭画布" }.into(),
                         tabs_ui::dialog_body().child(ui_text(text).pre_line()),
                         if *is_last {
-                            "我知道了"
+                            LAST_TAB_CONFIRM
                         } else {
                             "关闭画布"
-                        },
+                        }.into(),
                         !*is_last,
                         false,
                     )
+                }
+                TabDialog::CloseSession { body, .. } => (
+                    STOP_SESSION.into(),
+                    tabs_ui::dialog_body().child(ui_text(body.clone()).pre_line()),
+                    STOP_SESSION.into(),
+                    true,
+                    false,
+                ),
+                TabDialog::LastSession { .. } => (
+                    "提示".into(),
+                    tabs_ui::dialog_body().child(ui_text(LAST_TAB_BODY).pre_line()),
+                    LAST_TAB_CONFIRM.into(),
+                    false,
+                    false,
+                ),
+                TabDialog::RemoveSession { session_id, scope, .. } => {
+                    let text = self.removal_dialog_text(session_id, *scope)?;
+                    let body = div()
+                        .px(px(24.))
+                        .text_color(rgba(0x000000a6))
+                        .text_size(px(13.))
+                        .line_height(relative(1.5))
+                        .flex()
+                        .flex_col()
+                        .when(text.files_unchanged.is_some(), |body| body.pt(px(4.)))
+                        .child(div().mb(px(12.)).child(ui_text(text.body)))
+                        .children(text.files_unchanged.map(|text| div().mb(px(12.)).child(ui_text(text))))
+                        .children(text.choices.map(|[node, branch]| {
+                            div()
+                                .id("remove-node-scope")
+                                .mt(px(2.))
+                                .mb(px(12.))
+                                .flex()
+                                .flex_col()
+                                .gap(px(8.))
+                                .child(self.remove_scope_choice(node, RemoveScope::NodeOnly, *scope, cx))
+                                .child(self.remove_scope_choice(branch, RemoveScope::NodeAndDescendants, *scope, cx))
+                        }))
+                        .children(text.warning.map(|warning| div().mb(px(12.)).text_color(rgb(0xe7aa65)).child(ui_text(warning))));
+                    (text.title.into(), body, text.confirm.into(), true, false)
                 }
             };
             let n = self.dialog_controls.len();
@@ -4406,7 +5107,10 @@ impl Workspace {
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .child(
                                 tabs_ui::dialog_header()
-                                    .child(tabs_ui::dialog_title(title))
+                                    .child(tabs_ui::dialog_title(title).when(
+                                        matches!(dialog, TabDialog::RemoveSession { .. }),
+                                        |title| title.min_w_0().whitespace_normal(),
+                                    ))
                                     .child(self.button(
                                         tabs_ui::dialog_close("dialog-close"),
                                         &self.dialog_controls[0],
@@ -5654,7 +6358,11 @@ impl Render for Workspace {
                                 .child(self.focus_control(
                                     div().child(icon("folder-input", 16., 0x687d92)),
                                     &self.card_controls[id],
-                                )),
+                                ))
+                                .children(
+                                    node.filter(|node| node["archivedAt"].is_null())
+                                        .map(|node| self.remove_card_button(id, node, cx)),
+                                ),
                         ),
                 )
                 .when(!path_valid, |card| {
@@ -5668,7 +6376,7 @@ impl Render for Workspace {
                             .text_color(rgb(0xe4aa78))
                             .text_size(px(11.))
                             .line_height(px(15.4))
-                            .child("工作区目录不可用，请先在本地恢复原路径，或移出该工作区"),
+                            .child(WORKSPACE_PATH_UNAVAILABLE),
                     )
                 })
                 .child({
@@ -5809,14 +6517,21 @@ impl Render for Workspace {
         )
         .absolute()
         .size_full();
+        let canvas_dialog = matches!(self.dialog, Some(TabDialog::RemoveSession { .. }));
+        let overlay = self.tab_overlay(window, cx);
+        let (carousel_overlay, window_overlay) = if canvas_dialog {
+            (overlay, None)
+        } else {
+            (None, overlay)
+        };
         let carousel = div()
             .flex_1()
             .min_h_0()
             .relative()
             .flex()
             .child(carousel)
-            .child(indicator);
-        let overlay = self.tab_overlay(window, cx);
+            .child(indicator)
+            .children(carousel_overlay);
         let toast = self.task_toast.as_ref().map(|text| {
             div()
                 .absolute()
@@ -5898,9 +6613,9 @@ impl Render for Workspace {
                 .absolute()
                 .size(px(0.)),
             )
-            .children(badge_tooltip)
+            .children(badge_tooltip.filter(|_| !canvas_dialog))
             .children(toast)
-            .children(overlay)
+            .children(window_overlay)
     }
 }
 
