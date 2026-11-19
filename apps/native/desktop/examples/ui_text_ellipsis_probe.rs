@@ -104,10 +104,10 @@ mod probe {
         let element = rendered.downcast_mut::<SingleLineText>().unwrap();
         let shape_width = |text: &str| {
             element
-                .0
+                .label
                 .shape(
                     text.to_owned().into(),
-                    &element.0.fonts.runs(text, window),
+                    &element.label.fonts.runs(text, window),
                     window,
                 )
                 .unwrap()
@@ -117,17 +117,23 @@ mod probe {
         let exact = shape_width(expected);
         let next_width = shape_width(next);
         let suffix_width = shape_width("…");
-        let fit = element.0.measure(Some(exact), window).line.unwrap();
+        let fit = element.label.measure(Some(exact), window).line.unwrap();
         assert_eq!(fit.text.as_ref(), expected);
         assert_eq!(fit.unwrapped_layout.width, exact);
         assert!(next_width > exact);
         assert_eq!(
-            element.0.measure(None, window).line.unwrap().text.as_ref(),
+            element
+                .label
+                .measure(None, window)
+                .line
+                .unwrap()
+                .text
+                .as_ref(),
             title
         );
         assert_eq!(
             element
-                .0
+                .label
                 .measure(Some(suffix_width), window)
                 .line
                 .unwrap()
@@ -135,7 +141,7 @@ mod probe {
                 .as_ref(),
             "…"
         );
-        assert!(element.0.measure(Some(px(0.)), window).line.is_none());
+        assert!(element.label.measure(Some(px(0.)), window).line.is_none());
 
         // Use the element's real measured node and final bounds, including GPUI's rounding.
         let (node, mut layout) = element.request_layout(None, None, window, cx);
@@ -210,7 +216,7 @@ mod probe {
                         .into_any_element();
                     let element = rendered.downcast_mut::<SingleLineText>().unwrap();
                     if normal {
-                        assert_eq!(element.0.measure(Some(px(1.)), window).line.unwrap().text.as_ref(), title);
+                        assert_eq!(element.label.measure(Some(px(1.)), window).line.unwrap().text.as_ref(), title);
                     }
                     let (node, mut layout) = element.request_layout(None, None, window, cx);
                     window.compute_layout(

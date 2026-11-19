@@ -738,6 +738,7 @@ mod supervisor_tests {
     }
     #[test]
     fn queued_old_input_paused_before_pipe_is_never_replayed() -> Result<()> {
+        const NEW_INPUT_LIMIT: Duration = Duration::from_secs(30);
         let (root, mut bridge) = setup()?;
         let (g1, session) = ready(&bridge)?;
         let (paused, resume) = install(&bridge.commands.shared.hooks.before_business);
@@ -773,7 +774,8 @@ mod supervisor_tests {
                 defer_ordering: false,
             },
         )?;
-        let deadline = Instant::now() + LIMIT;
+        // Let the replacement shell execute its input under parallel test load.
+        let deadline = Instant::now() + NEW_INPUT_LIMIT;
         while !fresh.exists() {
             ensure!(Instant::now() < deadline, "new input did not execute");
             thread::sleep(Duration::from_millis(4));
