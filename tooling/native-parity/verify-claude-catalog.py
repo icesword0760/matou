@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import os
 import re
 import secrets
 import shutil
@@ -97,6 +98,24 @@ def rejected(host, session_id, provider_id):
     ), None))
 
 
+def begin_answer(root, card, proof):
+    prompt = "请直接输出从 1 到 300 的 300 行编号。每行写一句不同的自然景物描写。不要调用工具。"
+    card.input(prompt.encode())
+    card.wait("long prompt in the CLI input field",
+              lambda: True if "".join(prompt[:15].split()) in "".join(card.screen.split()) else None)
+    card.input(b"\r")
+
+    def answering():
+        with launch.database(root) as db:
+            status, = db.execute("SELECT work_status FROM sessions WHERE id=?", (card.id,)).fetchone()
+        proof["work_status"] = status
+        proof["cli_interrupt_hint"] = "esc to interrupt" in card.screen.lower()
+        if status == "running" and proof["cli_interrupt_hint"]:
+            return True
+
+    card.wait("live Claude answer in progress", answering)
+
+
 def verify(root, env, guard, binary, cli, config, key, proof):
     cwd = root / "workspace/会话 cwd"
     cwd.mkdir(parents=True)
@@ -113,8 +132,9 @@ def verify(root, env, guard, binary, cli, config, key, proof):
     try:
         token = secrets.token_hex(8).upper()
         selected, selected_file = seed_history(root, env, guard, cli, config, key, cwd, token)
+        replacement_token = secrets.token_hex(8).upper()
         vanishing, vanishing_file = seed_history(
-            root, env, guard, cli, config, key, cwd, secrets.token_hex(8).upper())
+            root, env, guard, cli, config, key, cwd, replacement_token)
         proof["seeded_real_conversations"] = 2
         gate, shim = install_gate(root, cli)
         env = dict(env, MATOU_CLAUDE_COMMAND=str(shim))
@@ -222,10 +242,17 @@ def verify(root, env, guard, binary, cli, config, key, proof):
                     "The real CLI did not confirm the requested provider ID")
             require(reply_id == selected and reply == token and transcript == selected_file,
                     "Readback did not come from the selected history")
-            load(host, session_id, selected)  # A repeat while the same worker is live is a no-op.
+            load(host, session_id, selected)
+            duplicate = card.wait("explicit already-loaded result", lambda: next((
+                event for event in card.events if event.get("reason") == "already-loaded"
+            ), None))
+            require(duplicate["result"] == "confirmed" and duplicate["runId"] == resumed["id"]
+                    and duplicate["providerSessionId"] == selected
+                    and duplicate["spawnRevision"] == confirmed["spawnRevision"],
+                    "Idempotent load changed the current run or omitted its result")
             load(host, session_id, vanishing)
-            require("running" in rejected(host, session_id, vanishing)["error"],
-                    "A different history was not rejected while the card had a running worker")
+            require("not found" in rejected(host, session_id, vanishing)["error"],
+                    "The missing transcript did not fail catalog lookup")
             updated = list_sessions(host, cwd)
             require(len(updated) == 1 and updated[0]["loadedBy"] == {
                 "sessionId": session_id, "title": catalog_entry["title"]
@@ -243,6 +270,64 @@ def verify(root, env, guard, binary, cli, config, key, proof):
                 "previous_binding_expired": True, "loaded_by": session_id,
                 "expected_token": token, "actual_reply": reply, "same_transcript": True,
             }
+
+            (quarantined / "vanished.jsonl").rename(vanishing_file)
+            proof["answer_at_replacement"] = {}
+            begin_answer(root, card, proof["answer_at_replacement"])
+            for _ in range(2):
+                load(host, session_id, vanishing)
+            card.screen = ""
+            card.sent.clear()
+            replacement = resume.running(root, card, 3)
+            old = resume.exited(root, card, 2)
+            require(old["exit_code"] is not None and old["ended_at"] <= replacement["started_at"],
+                    "Replacement started before the previous CLI really exited")
+            card.interactive()
+            resume.assert_argv(replacement, cli, vanishing)
+            replacement_id, reply, transcript = card.ask(
+                root, "请回忆这条对话最开始的代号。只回答代号。不要调用工具。", replacement_token)
+            confirmed = card.wait("identity of loaded replacement",
+                                  lambda: card.event("confirmed", replacement["id"]))
+            require(confirmed["providerSessionId"] == replacement_id == vanishing
+                    and reply == replacement_token and transcript == vanishing_file
+                    and resume.binding(root, session_id, vanishing)["validated_at"]
+                    and resume.binding(root, session_id, selected)["resume_state"] == "expired"
+                    and len(resume.rows(root, "session_runs", session_id)) == 3,
+                    "The replacement identity or history did not match the selected conversation")
+            proof["replace_running"] = {
+                "old_run": {name: old[name] for name in (
+                    "id", "pid", "status", "ended_at", "exit_code", "signal")},
+                "old_process_gone": True, "new_run_id": replacement["id"],
+                "new_run_started_at": replacement["started_at"],
+                "provider_session_id": vanishing, "resume_argument_verified": True,
+                "binding_id": confirmed["bindingId"], "identity_confirmed": True,
+                "expected_token": replacement_token, "actual_reply": reply,
+                "old_binding_expired": True, "duplicate_runs_added": 0,
+            }
+
+            before = resume.rows(root, "provider_bindings", session_id)
+            with launch.database(root) as db:
+                db.execute("""CREATE TRIGGER reject_exit BEFORE UPDATE OF status ON session_runs
+                    WHEN NEW.status = 'exited'
+                    BEGIN SELECT RAISE(ABORT, 'injected exit persistence failure'); END;""")
+            try:
+                load(host, session_id, selected)
+                error = rejected(host, session_id, selected)
+                require("injected exit persistence failure" in error["error"]
+                        and len(resume.rows(root, "session_runs", session_id)) == 3
+                        and resume.rows(root, "provider_bindings", session_id) == before,
+                        "Exit-write failure changed the bindings or started a new process")
+                try:
+                    os.kill(replacement["pid"], 0)
+                except ProcessLookupError:
+                    pass
+                else:
+                    raise RuntimeError("A worker survived the failed exit write")
+                proof["stop_failure"] = {"error": error["error"], "bindings_unchanged": True,
+                                         "runs_added": 0, "old_process_gone": True}
+            finally:
+                with launch.database(root) as db:
+                    db.execute("DROP TRIGGER reject_exit")
             host.shutdown()
     finally:
         identity.check_secret(root, config_path, key, proof)
