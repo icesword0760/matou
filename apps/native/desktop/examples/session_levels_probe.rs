@@ -409,6 +409,95 @@ mod workspace {
             window.focus(&self.start_failure_controls[id][button]);
         }
 
+        pub(super) fn assert_provider_restore(
+            &self,
+            id: &str,
+            reason: Option<&str>,
+            pending: bool,
+            blocked: [Option<&str>; 2],
+        ) {
+            let node = self.graph_node(id).expect("projected Claude card");
+            let banner = self
+                .provider_restore_banner(id, node)
+                .expect("visible provider restore banner");
+            assert!(self.start_failure_card(id, node).is_none());
+            match (banner, reason) {
+                (ProviderRestoreBanner::Restoring { title }, None) => {
+                    assert_eq!(title, "正在恢复 Claude Code 会话…");
+                    println!("{title} | generic startup failure hidden");
+                }
+                (
+                    ProviderRestoreBanner::Failed {
+                        title,
+                        reason,
+                        retry,
+                        fresh,
+                        pending: busy,
+                        retry_blocked,
+                        fresh_blocked,
+                    },
+                    Some(expected_reason),
+                ) => {
+                    assert_eq!(title, "Claude Code 恢复失败");
+                    assert_eq!(reason, expected_reason);
+                    assert_eq!(
+                        retry,
+                        if pending {
+                            "正在恢复…"
+                        } else {
+                            "重试恢复"
+                        }
+                    );
+                    assert_eq!(fresh, "新开 Claude Code");
+                    assert_eq!(busy, pending);
+                    assert_eq!([retry_blocked, fresh_blocked], blocked);
+                    assert!(!self.recovery_water_needed(id, node));
+                    println!("{title} | {reason} | {retry} | {fresh} | busy={busy} | {blocked:?}");
+                }
+                _ => panic!("unexpected provider restore banner"),
+            }
+        }
+
+        pub(super) fn assert_no_provider_restore(&self, id: &str) {
+            assert!(
+                self.graph_node(id)
+                    .and_then(|node| self.provider_restore_banner(id, node))
+                    .is_none()
+            );
+        }
+
+        pub(super) fn assert_background_provider_restore_hidden(&self, id: &str) {
+            assert!(!self.order.iter().any(|card| card == id));
+            assert!(self.graph_node(id).is_none());
+            self.assert_no_provider_restore(id);
+        }
+
+        pub(super) fn focus_provider_restore_button(
+            &self,
+            id: &str,
+            button: usize,
+            window: &mut Window,
+        ) {
+            window.focus(&self.provider_restore_controls[id][button]);
+        }
+
+        pub(super) fn provider_restore_button_positions(&self, id: &str) -> [Point<Pixels>; 2] {
+            let index = self.order.iter().position(|card| card == id).unwrap();
+            let bounds = self.carousel_scroll.bounds_for_item(index).unwrap();
+            let right = bounds.right() + self.carousel_scroll.offset().x;
+            [
+                point(right - px(136.), bounds.top() + px(58.)),
+                point(right - px(45.), bounds.top() + px(58.)),
+            ]
+        }
+
+        pub(super) fn assert_provider_bridge_error(&self) {
+            assert_eq!(
+                self.task_toast.as_deref(),
+                Some("native runtime command rejected: NotReady")
+            );
+        }
+
         pub(super) fn focus_recovery_failure_button(&self, id: &str, window: &mut Window) {
             assert!(
                 self.start_failure_card(id, self.graph_node(id).unwrap())
@@ -771,6 +860,36 @@ mod probe {
             );
         }
 
+        fn set_provider_restore(&self, state: &str, error: Option<&str>, revision: i64) {
+            let Some(BootstrapResult::Writable { connection, .. }) = &self.db else {
+                unreachable!()
+            };
+            let resume = match state {
+                "failed" => "failed",
+                "restoring" => "available",
+                _ => "expired",
+            };
+            connection
+                .execute(
+                    "UPDATE sessions SET kind = 'claude-code' WHERE id = ?1",
+                    [PEER],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO provider_bindings (
+                        id, session_id, provider, provider_session_id, resume_state, metadata_json,
+                        created_at, updated_at, validated_at, restore_state, restore_error
+                    ) VALUES ('provider-probe', ?1, 'claude-code', 'probe-conversation', ?2,
+                        json_object('spawnRevision', ?3), 2, 3, 3, ?4, ?5)
+                    ON CONFLICT(id) DO UPDATE SET resume_state = excluded.resume_state,
+                        metadata_json = excluded.metadata_json, restore_state = excluded.restore_state,
+                        restore_error = excluded.restore_error",
+                    (PEER, resume, revision, state, error),
+                )
+                .unwrap();
+        }
+
         fn event(&self, ready: bool) -> Event {
             let Some(BootstrapResult::Writable { connection, .. }) = &self.db else {
                 unreachable!()
@@ -798,6 +917,13 @@ mod probe {
                     geometry,
                 }
             }
+        }
+
+        fn graph_event(&self) -> Event {
+            let Event::Navigation { graph, .. } = self.event(false) else {
+                unreachable!()
+            };
+            Event::Graph(graph)
         }
 
         fn process(
@@ -839,6 +965,8 @@ mod probe {
                     Command::CreateShellSibling { .. }
                     | Command::RestartSession { .. }
                     | Command::RetryRecovery { .. }
+                    | Command::RetryProviderRestore { .. }
+                    | Command::StartFreshProviderSession { .. }
                     | Command::CloseSessionCard { .. }
                     | Command::RemoveSessionBranch { .. } => actions.push(command),
                     _ => {}
@@ -1492,6 +1620,180 @@ mod probe {
             .unwrap();
     }
 
+    async fn verify_provider_restore_banner(cx: &mut AsyncApp) {
+        const BACKGROUND: &str = "provider session running in background";
+        const BACKGROUND_ZH: &str =
+            "此会话仍在 Claude 后台运行。请先停止对应后台会话，再重试恢复；聊天记录会保留。";
+        const NO_BLOCK: [Option<&str>; 2] = [None, None];
+        let mut fixture = Fixture::new();
+        let (window, sink) = open_hidden(cx, 900.);
+        let inspect = |cx: &mut AsyncApp, reason, pending, blocked| {
+            draw(window, cx);
+            window
+                .update(cx, |view, _, _| {
+                    view.assert_provider_restore(PEER, reason, pending, blocked);
+                    view.assert_no_provider_restore(PARENT);
+                })
+                .unwrap();
+        };
+        let activate = |cx: &mut AsyncApp, button| {
+            window
+                .update(cx, |view, window, _| {
+                    view.focus_provider_restore_button(PEER, button, window);
+                })
+                .unwrap();
+            draw(window, cx);
+            press(window, cx, "enter");
+        };
+
+        fixture.set_provider_restore("failed", Some(BACKGROUND), 0);
+        deliver(window, cx, fixture.event(true));
+        inspect(cx, Some(BACKGROUND_ZH), false, NO_BLOCK);
+
+        fixture.set_provider_restore("restoring", None, 0);
+        deliver(window, cx, fixture.graph_event());
+        deliver(
+            window,
+            cx,
+            Event::Recovery {
+                session_id: PEER.into(),
+                state: RecoveryState::StartFailed("obsolete startup failure".into()),
+            },
+        );
+        inspect(cx, None, false, NO_BLOCK);
+
+        fixture.set_provider_restore("failed", None, 0);
+        deliver(window, cx, fixture.graph_event());
+        inspect(cx, Some("终端进程未能启动"), false, NO_BLOCK);
+        let reason = "provider process could not start: ".to_owned() + &"probe detail ".repeat(30);
+        fixture.set_provider_restore("failed", Some(&reason), 0);
+        deliver(window, cx, fixture.graph_event());
+        inspect(cx, Some(&reason), false, NO_BLOCK);
+
+        let [retry_position, fresh_position] = window
+            .update(cx, |view, _, _| {
+                view.provider_restore_button_positions(PEER)
+            })
+            .unwrap();
+        deliver(
+            window,
+            cx,
+            Event::Recovery {
+                session_id: PEER.into(),
+                state: RecoveryState::Restoring,
+            },
+        );
+        inspect(cx, Some(&reason), false, [Some("当前终端仍在恢复"), None]);
+        click(window, cx, retry_position);
+        assert!(fixture.process(window, cx, &sink).is_empty());
+        deliver(
+            window,
+            cx,
+            Event::Recovery {
+                session_id: PEER.into(),
+                state: RecoveryState::Failed(reason.clone()),
+            },
+        );
+        fixture.set_peer_environment("recovering");
+        deliver(window, cx, fixture.graph_event());
+        inspect(
+            cx,
+            Some(&reason),
+            false,
+            [Some("当前运行环境需要先恢复或交接"); 2],
+        );
+        click(window, cx, retry_position);
+        click(window, cx, fresh_position);
+        assert!(fixture.process(window, cx, &sink).is_empty());
+        sink.read_only();
+        inspect(
+            cx,
+            Some(&reason),
+            false,
+            [Some("数据库处于只读恢复模式"); 2],
+        );
+        sink.generation(1);
+        fixture.set_peer_environment("ready");
+        deliver(window, cx, fixture.graph_event());
+        inspect(cx, Some(&reason), false, NO_BLOCK);
+
+        click(window, cx, retry_position);
+        // Dispatch both follow-up clicks before drawing so stale callbacks
+        // also exercise the action handler's in-flight guard.
+        click(window, cx, retry_position);
+        click(window, cx, fresh_position);
+        assert!(matches!(
+            fixture.process(window, cx, &sink).as_slice(),
+            [Command::RetryProviderRestore { session_id }] if session_id == PEER
+        ));
+        println!(
+            "RetryProviderRestore | session_id={PEER} | duplicate and competing clicks suppressed"
+        );
+        inspect(cx, Some(&reason), true, NO_BLOCK);
+        click(window, cx, fresh_position);
+        assert!(fixture.process(window, cx, &sink).is_empty());
+        deliver(window, cx, fixture.graph_event());
+        inspect(cx, Some(&reason), true, NO_BLOCK);
+
+        // The graph can publish a new failed revision without an intermediate
+        // restoring frame. The next explicit action must still become available.
+        fixture.set_provider_restore("failed", Some(&reason), 1);
+        deliver(window, cx, fixture.graph_event());
+        inspect(cx, Some(&reason), false, NO_BLOCK);
+        activate(cx, 1);
+        click(window, cx, retry_position);
+        assert!(matches!(
+            fixture.process(window, cx, &sink).as_slice(),
+            [Command::StartFreshProviderSession { session_id }] if session_id == PEER
+        ));
+        println!("StartFreshProviderSession | session_id={PEER} | competing click suppressed");
+        inspect(cx, Some(&reason), true, NO_BLOCK);
+
+        fixture.set_provider_restore("none", None, 2);
+        deliver(window, cx, fixture.graph_event());
+        draw(window, cx);
+        window
+            .update(cx, |view, _, _| view.assert_no_provider_restore(PEER))
+            .unwrap();
+
+        fixture.set_provider_restore("failed", Some(BACKGROUND), 2);
+        fixture.focus(SECOND_SCENE, SECOND_ROOT);
+        deliver(window, cx, fixture.event(false));
+        draw(window, cx);
+        window
+            .update(cx, |view, _, _| {
+                view.assert_background_provider_restore_hidden(PEER)
+            })
+            .unwrap();
+        fixture.focus(SCENE, PEER);
+        deliver(window, cx, fixture.event(false));
+        inspect(cx, Some(BACKGROUND_ZH), false, NO_BLOCK);
+        println!("Background card stays out of the active graph until its canvas opens");
+
+        activate(cx, 0);
+        assert!(matches!(
+            fixture.process(window, cx, &sink).as_slice(),
+            [Command::RetryProviderRestore { session_id }] if session_id == PEER
+        ));
+        inspect(cx, Some(BACKGROUND_ZH), true, NO_BLOCK);
+        cx.background_executor()
+            .timer(Duration::from_millis(8200))
+            .await;
+        inspect(cx, Some(BACKGROUND_ZH), false, NO_BLOCK);
+        assert!(fixture.process(window, cx, &sink).is_empty());
+        println!("Missing runtime acknowledgement unlocks both controls without another command");
+
+        drop(sink);
+        activate(cx, 0);
+        inspect(cx, Some(BACKGROUND_ZH), false, NO_BLOCK);
+        window
+            .update(cx, |view, window, _| {
+                view.assert_provider_bridge_error();
+                window.remove_window();
+            })
+            .unwrap();
+    }
+
     fn verify_card_actions(cx: &mut AsyncApp) {
         let mut fixture = Fixture::new();
         fixture.prepare_card_actions();
@@ -2077,6 +2379,7 @@ mod probe {
             cx.spawn(async move |cx| {
                 verify_compact_card(cx);
                 verify_start_failure_card(cx);
+                verify_provider_restore_banner(cx).await;
                 verify_card_actions(cx);
                 verify_stopped_cards(cx);
                 verify_narrow_stopped_cards(cx);

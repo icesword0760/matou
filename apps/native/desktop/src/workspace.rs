@@ -15,7 +15,6 @@ use matou_native_core::hierarchy::{HierarchyResult, Scene, Task, Workspace as Hi
 use matou_native_core::workspace_paths::WorkspacePathState;
 use matou_native_runtime::history::{HistoryCursor, HistoryLine, HistorySearchOptions};
 use matou_native_runtime::history_worker::{HistoryReply, HistoryRequest};
-#[cfg(target_os = "macos")]
 use matou_native_terminal::Theme;
 use serde_json::Value;
 
@@ -164,6 +163,26 @@ struct StartFailureCard<'a> {
     retry: &'static str,
     remove: &'static str,
     blocked: Option<&'static str>,
+}
+
+enum ProviderRestoreBanner<'a> {
+    Restoring {
+        title: &'static str,
+    },
+    Failed {
+        title: &'static str,
+        reason: &'a str,
+        retry: &'static str,
+        fresh: &'static str,
+        pending: bool,
+        retry_blocked: Option<&'static str>,
+        fresh_blocked: Option<&'static str>,
+    },
+}
+
+struct PendingProviderRestore {
+    revision: Option<u64>,
+    _watchdog: gpui::Task<()>,
 }
 
 struct CardTooltip(SharedString);
@@ -412,6 +431,8 @@ pub struct Workspace {
     recovery: HashMap<String, RecoveryState>,
     recovery_controls: HashMap<String, FocusHandle>,
     start_failure_controls: HashMap<String, [FocusHandle; 2]>,
+    provider_restore_controls: HashMap<String, [FocusHandle; 2]>,
+    pending_provider_restores: HashMap<String, PendingProviderRestore>,
     #[cfg(target_os = "macos")]
     recovery_water: HashMap<String, Entity<RecoveryWater>>,
     #[cfg(target_os = "macos")]
@@ -1189,6 +1210,8 @@ impl Workspace {
             recovery: HashMap::new(),
             recovery_controls: HashMap::new(),
             start_failure_controls: HashMap::new(),
+            provider_restore_controls: HashMap::new(),
+            pending_provider_restores: HashMap::new(),
             #[cfg(target_os = "macos")]
             recovery_water: HashMap::new(),
             #[cfg(target_os = "macos")]
@@ -1269,6 +1292,7 @@ impl Workspace {
         self.recovery.clear();
         self.recovery_controls.clear();
         self.start_failure_controls.clear();
+        self.pending_provider_restores.clear();
         self.copy_request_id += 1;
         self.resize_revisions.clear();
         self.reconnect_geometry = self.geometry_dirty.clone();
@@ -1464,6 +1488,7 @@ impl Workspace {
                 if !self.transport_connected {
                     self.domain_ready = false;
                     self.pending_card_action = None;
+                    self.pending_provider_restores.clear();
                     self.session_frames.clear();
                     if matches!(&self.dialog, Some(TabDialog::RemoveSession { session_id, .. })
                         if self.is_stopped_session(session_id))
@@ -1733,7 +1758,10 @@ impl Workspace {
                     self.start_failure_controls.clear();
                     for id in session_levels::nodes(&self.graph)
                         .iter()
-                        .filter(|node| node["archivedAt"].is_null())
+                        .filter(|node| {
+                            node["archivedAt"].is_null()
+                                && Self::provider_restore_state(node) != Some("failed")
+                        })
                         .filter_map(|node| node["sessionId"].as_str())
                     {
                         self.recovery
@@ -1804,6 +1832,8 @@ impl Workspace {
                     self.recovery.remove(&id);
                     self.recovery_controls.remove(&id);
                     self.start_failure_controls.remove(&id);
+                    self.provider_restore_controls.remove(&id);
+                    self.pending_provider_restores.remove(&id);
                     self.storage_fault_sessions.remove(&id);
                     self.card_controls.remove(&id);
                     self.remove_card_controls.remove(&id);
@@ -2075,6 +2105,13 @@ impl Workspace {
 
     fn refresh_terminals(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let nodes = session_levels::nodes(&self.graph);
+        self.pending_provider_restores.retain(|id, pending| {
+            session_levels::node(nodes, id).is_some_and(|node| {
+                node["archivedAt"].is_null()
+                    && Self::provider_restore_state(node) == Some("failed")
+                    && node["providerSpawnRevision"].as_u64() == pending.revision
+            })
+        });
         for node in nodes {
             let Some(id) = node["sessionId"].as_str() else {
                 continue;
@@ -2082,6 +2119,21 @@ impl Workspace {
             self.remove_card_controls
                 .entry(id.to_owned())
                 .or_insert_with(|| cx.focus_handle().tab_stop(true));
+            if node["archivedAt"].is_null() && Self::provider_restore_state(node) == Some("failed")
+            {
+                self.provider_restore_controls
+                    .entry(id.to_owned())
+                    .or_insert_with(|| {
+                        [
+                            cx.focus_handle().tab_stop(true),
+                            cx.focus_handle().tab_stop(true),
+                        ]
+                    });
+            } else if let Some(controls) = self.provider_restore_controls.remove(id)
+                && controls.iter().any(|focus| focus.is_focused(window))
+            {
+                window.blur();
+            }
             if !node["archivedAt"].is_null() {
                 let terminal = self.terminals.remove(id);
                 let retry = self.recovery_controls.remove(id);
@@ -2639,6 +2691,7 @@ impl Workspace {
     #[cfg(target_os = "macos")]
     fn recovery_water_needed(&self, id: &str, node: &Value) -> bool {
         node["archivedAt"].is_null()
+            && Self::provider_restore_state(node) != Some("failed")
             && self.recovery_blocked(id)
             && !self.storage_fault_sessions.contains(id)
             && !matches!(
@@ -4051,14 +4104,8 @@ impl Workspace {
         }
     }
 
-    fn start_failure_card(&self, id: &str, node: &Value) -> Option<StartFailureCard<'_>> {
-        if !node["archivedAt"].is_null() {
-            return None;
-        }
-        let RecoveryState::StartFailed(error) = self.recovery.get(id)? else {
-            return None;
-        };
-        let blocked = match self.commands.connection() {
+    fn launch_action_blocked_reason(&self, id: &str, node: &Value) -> Option<&'static str> {
+        match self.commands.connection() {
             (_, ConnectionPhase::Blocked(block)) if block.kind == StartupBlockKind::ReadOnly => {
                 Some("数据库处于只读恢复模式")
             }
@@ -4070,6 +4117,140 @@ impl Workspace {
                 self.card_mutation_blocked_reason(id, node)
             }
             _ => Some("当前终端仍在恢复"),
+        }
+    }
+
+    fn provider_restore_state(node: &Value) -> Option<&str> {
+        if node["currentMode"] != "claude-code" {
+            return None;
+        }
+        node["providerRestoreState"]
+            .as_str()
+            .filter(|state| matches!(*state, "restoring" | "failed"))
+    }
+
+    fn provider_restore_banner<'a>(
+        &self,
+        id: &str,
+        node: &'a Value,
+    ) -> Option<ProviderRestoreBanner<'a>> {
+        if !node["archivedAt"].is_null() || node["forkState"] == "failed" {
+            return None;
+        }
+        if Self::provider_restore_state(node)? == "restoring" {
+            return Some(ProviderRestoreBanner::Restoring {
+                title: "正在恢复 Claude Code 会话…",
+            });
+        }
+        let reason = match node["providerRestoreError"].as_str() {
+            Some("provider session running in background") => {
+                "此会话仍在 Claude 后台运行。请先停止对应后台会话，再重试恢复；聊天记录会保留。"
+            }
+            None | Some("") => "终端进程未能启动",
+            Some(error) => error,
+        };
+        let pending = self.pending_provider_restores.contains_key(id);
+        let fresh_blocked = self.launch_action_blocked_reason(id, node);
+        let retry_blocked = fresh_blocked.or_else(|| {
+            matches!(
+                self.recovery.get(id),
+                Some(RecoveryState::Restoring | RecoveryState::Restarting(_))
+            )
+            .then_some("当前终端仍在恢复")
+        });
+        Some(ProviderRestoreBanner::Failed {
+            title: "Claude Code 恢复失败",
+            reason,
+            retry: if pending {
+                "正在恢复…"
+            } else {
+                "重试恢复"
+            },
+            fresh: "新开 Claude Code",
+            pending,
+            retry_blocked,
+            fresh_blocked,
+        })
+    }
+
+    fn run_provider_restore(
+        &mut self,
+        id: &str,
+        fresh: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.order.iter().any(|session| session == id)
+            || self.dialog.is_some()
+            || self.pending_close.is_some()
+            || self.pending_card_action.is_some()
+        {
+            return;
+        }
+        let Some(node) = self.graph_node(id) else {
+            return;
+        };
+        let Some(ProviderRestoreBanner::Failed {
+            pending: false,
+            retry_blocked,
+            fresh_blocked,
+            ..
+        }) = self.provider_restore_banner(id, node)
+        else {
+            return;
+        };
+        let blocked = if fresh { fresh_blocked } else { retry_blocked };
+        if blocked.is_some() {
+            return;
+        }
+        let revision = node["providerSpawnRevision"].as_u64();
+        let session_id = id.to_owned();
+        let command = if fresh {
+            Command::StartFreshProviderSession { session_id }
+        } else {
+            Command::RetryProviderRestore { session_id }
+        };
+        match self.commands.send_at(self.runtime_generation, command) {
+            Ok(()) => {
+                let session_id = id.to_owned();
+                let watchdog = cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(Duration::from_secs(8)).await;
+                    let _ = this.update(cx, |this, cx| {
+                        // The host can ignore a command while the old PTY retires.
+                        // Allow another explicit click if no graph confirms it.
+                        this.pending_provider_restores.remove(&session_id);
+                        cx.notify();
+                    });
+                });
+                self.pending_provider_restores.insert(
+                    id.to_owned(),
+                    PendingProviderRestore {
+                        revision,
+                        _watchdog: watchdog,
+                    },
+                );
+                self.clear_start_failure_focus(id, window);
+                self.start_failure_controls.remove(id);
+                self.recovery_controls.remove(id);
+                if matches!(
+                    self.recovery.get(id),
+                    Some(RecoveryState::Failed(_) | RecoveryState::StartFailed(_))
+                ) {
+                    self.recovery.remove(id);
+                }
+                window.blur();
+            }
+            Err(error) => self.show_toast(error.to_string(), cx),
+        }
+        cx.notify();
+    }
+
+    fn start_failure_card(&self, id: &str, node: &Value) -> Option<StartFailureCard<'_>> {
+        if !node["archivedAt"].is_null() || Self::provider_restore_state(node).is_some() {
+            return None;
+        }
+        let RecoveryState::StartFailed(error) = self.recovery.get(id)? else {
+            return None;
         };
         Some(StartFailureCard {
             title: "会话启动失败",
@@ -4080,7 +4261,7 @@ impl Workspace {
             },
             retry: "重试启动",
             remove: "移除失败会话",
-            blocked,
+            blocked: self.launch_action_blocked_reason(id, node),
         })
     }
 
@@ -5429,6 +5610,132 @@ impl Workspace {
             button
                 .opacity(0.38)
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        }
+    }
+
+    fn render_provider_restore_banner(
+        &self,
+        id: &str,
+        banner: ProviderRestoreBanner<'_>,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        // The card keeps its light surface and has no theme picker; follow the
+        // terminal theme only where the native recovery water already does.
+        let dark = theme.background != Theme::LIGHT.background;
+        let solid = |color| Hsla::from(rgb(color));
+        let alpha = |color, value| Hsla::from(rgb(color)).alpha(value);
+        let restoring = matches!(banner, ProviderRestoreBanner::Restoring { .. });
+        let (text, background, border) = match (dark, restoring) {
+            (false, false) => (solid(0x8a4d10), solid(0xfff7eb), solid(0xefcfaa)),
+            (true, false) => (solid(0xe4aa78), solid(0x2a1e17), alpha(0xeea858, 0.28)),
+            (false, true) => (solid(0x315f9d), solid(0xedf5ff), solid(0xc5dcf8)),
+            (true, true) => (solid(0x8fb8ed), solid(0x172333), alpha(0x679fe2, 0.28)),
+        };
+        let row = div()
+            .id(SharedString::from(format!("provider-restore-banner-{id}")))
+            .w_full()
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(12.))
+            .px(px(10.))
+            .py(px(7.))
+            .border_t_1()
+            .border_b_1()
+            .border_color(border)
+            .bg(background)
+            .text_color(text)
+            .text_size(px(11.))
+            .line_height(relative(1.2))
+            .when(restoring, |row| row.justify_start())
+            .when(!restoring, |row| row.justify_between());
+        match banner {
+            ProviderRestoreBanner::Restoring { title } => {
+                row.child(div().font_weight(FontWeight::BOLD).child(title))
+            }
+            ProviderRestoreBanner::Failed {
+                title,
+                reason,
+                retry,
+                fresh,
+                pending,
+                retry_blocked,
+                fresh_blocked,
+            } => {
+                let (reason_color, button_text, button_border, button_background) = if dark {
+                    (
+                        solid(0xc99a73),
+                        solid(0xf1c08f),
+                        alpha(0xeea858, 0.55),
+                        alpha(0xeea858, 0.1),
+                    )
+                } else {
+                    (
+                        solid(0x966b43),
+                        solid(0x7c440d),
+                        solid(0xdaa86d),
+                        solid(0xffffff),
+                    )
+                };
+                let controls = &self.provider_restore_controls[id];
+                let reason = SharedString::from(reason.to_owned());
+                let reason_tooltip = reason.clone();
+                let mut action = |name: &str, label, blocked: Option<&'static str>, fresh: bool| {
+                    let button = div()
+                        .id(SharedString::from(format!("{name}-{id}")))
+                        .flex_none()
+                        .px(px(8.))
+                        .py(px(3.))
+                        .border_1()
+                        .border_color(button_border)
+                        .rounded(px(5.))
+                        .text_color(button_text)
+                        .bg(button_background)
+                        .whitespace_nowrap()
+                        .cursor_pointer()
+                        .child(label);
+                    if let Some(blocked) = blocked {
+                        return button
+                            .tooltip(move |_, cx| cx.new(|_| CardTooltip(blocked.into())).into());
+                    }
+                    if pending {
+                        return button;
+                    }
+                    let session_id = id.to_owned();
+                    self.button(
+                        button,
+                        &controls[usize::from(fresh)],
+                        move |this, window, cx| {
+                            this.run_provider_restore(&session_id, fresh, window, cx)
+                        },
+                        cx,
+                    )
+                };
+                let retry_button = action("retry-provider-restore", retry, retry_blocked, false);
+                let fresh_button = action("start-fresh-provider", fresh, fresh_blocked, true);
+                row.child(
+                    div()
+                        .flex()
+                        .min_w_0()
+                        .items_baseline()
+                        .gap(px(8.))
+                        .child(div().font_weight(FontWeight::BOLD).child(title))
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("provider-restore-reason-{id}")))
+                                .min_w_0()
+                                .text_color(reason_color)
+                                .truncate()
+                                .tooltip(move |_, cx| {
+                                    cx.new(|_| CardTooltip(reason_tooltip.clone())).into()
+                                })
+                                .child(reason),
+                        ),
+                )
+                .child(retry_button)
+                .child(fresh_button)
+            }
         }
     }
 
@@ -6806,7 +7113,12 @@ impl Render for Workspace {
                         }
                     }),
                 );
-            let card = if !compact && let Some(RecoveryState::Failed(error)) = self.recovery.get(id)
+            let provider_banner = node
+                .filter(|_| !compact)
+                .and_then(|node| self.provider_restore_banner(id, node));
+            let card = if !compact
+                && provider_banner.is_none()
+                && let Some(RecoveryState::Failed(error)) = self.recovery.get(id)
             {
                 let retry_id = id.clone();
                 card.child(
@@ -6922,6 +7234,9 @@ impl Render for Workspace {
                             .child(WORKSPACE_PATH_UNAVAILABLE),
                     )
                 })
+                .children(provider_banner.map(|banner| {
+                    self.render_provider_restore_banner(id, banner, Theme::default(), cx)
+                }))
                 .children(node.and_then(|node| {
                     self.start_failure_card(id, node)
                         .map(|card| self.render_start_failure_card(id, card, width, cx))
