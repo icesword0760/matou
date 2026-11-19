@@ -222,7 +222,10 @@ pub fn finish_run(
         tx.execute(
             "UPDATE sessions
              SET status = CASE WHEN archived_at IS NULL THEN 'exited' ELSE 'archived' END,
-                 work_status = CASE WHEN ? THEN 'exited' ELSE work_status END,
+                 work_status = CASE WHEN ? AND NOT (work_status = 'error' AND EXISTS (
+                     SELECT 1 FROM provider_bindings WHERE session_id = sessions.id
+                       AND provider = sessions.kind AND restore_state = 'failed'
+                 )) THEN 'exited' ELSE work_status END,
                  updated_at = ?, last_activity_at = ?,
                  version = version + 1
              WHERE id = ?",
@@ -240,12 +243,140 @@ pub fn finish_run(
     })
 }
 
+pub struct ClaudeBinding {
+    pub id: String,
+    pub provider_session_id: String,
+    pub metadata: Value,
+    pub resumable: bool,
+    pub restore_state: String,
+}
+
+pub fn claude_binding(db: &Connection, session_id: &str) -> Result<Option<ClaudeBinding>> {
+    Ok(db
+        .query_row(
+            "SELECT id, provider_session_id, metadata_json, restore_state,
+                (resume_state = 'available' AND validated_at IS NOT NULL
+                    AND invalidated_at IS NULL AND user_exited_at IS NULL
+                    AND restore_state <> 'failed' AND provider_session_id <> '') AS resumable
+         FROM provider_bindings WHERE session_id = ? AND provider = 'claude-code'
+           AND EXISTS (SELECT 1 FROM sessions WHERE id = session_id AND kind = 'claude-code')
+         ORDER BY updated_at DESC, (invalidated_at IS NULL) DESC, id DESC LIMIT 1",
+            [session_id],
+            |row| {
+                let metadata: String = row.get("metadata_json")?;
+                Ok(ClaudeBinding {
+                    id: row.get("id")?,
+                    provider_session_id: row.get("provider_session_id")?,
+                    metadata: serde_json::from_str(&metadata).unwrap_or(Value::Null),
+                    resumable: row.get("resumable")?,
+                    restore_state: row.get("restore_state")?,
+                })
+            },
+        )
+        .optional()?)
+}
+
+#[derive(Clone, Copy)]
+pub enum ClaudeRestore<'a> {
+    Begin(&'a str),
+    Fail { binding_id: &'a str, error: &'a str },
+    Retry,
+    Fresh,
+}
+
+pub fn change_claude_restore(
+    db: &mut Connection,
+    command: &CommandMetadata,
+    session_id: &str,
+    change: ClaudeRestore<'_>,
+    now: i64,
+) -> Result<Option<DomainCommit>> {
+    let Some(binding) = claude_binding(db, session_id)? else {
+        return Ok(None);
+    };
+    let mut metadata = binding.metadata.as_object().cloned().unwrap_or_default();
+    let (resume, restore, error, update_session) = match change {
+        ClaudeRestore::Begin(id)
+            if binding.id == id && binding.resumable && binding.restore_state != "restoring" =>
+        {
+            ("available", "restoring", None, None)
+        }
+        ClaudeRestore::Fail { binding_id, error }
+            if binding.id == binding_id && binding.resumable =>
+        {
+            ("failed", "failed", Some(error), Some("error"))
+        }
+        ClaudeRestore::Retry | ClaudeRestore::Fresh if binding.restore_state == "failed" => {
+            let revision = metadata
+                .get("spawnRevision")
+                .and_then(Value::as_i64)
+                .unwrap_or(0);
+            metadata.insert("spawnRevision".into(), json!(revision.saturating_add(1)));
+            match change {
+                ClaudeRestore::Retry => ("available", "restoring", None, Some("starting")),
+                _ => ("expired", "none", None, Some("starting")),
+            }
+        }
+        _ => return Ok(None),
+    };
+    execute(db, command, now, |tx, events| {
+        let session = require_session(tx, session_id)?;
+        ensure!(
+            session.archived_at.is_none() && session.kind == "claude-code",
+            "Claude restore requires an active Claude Code card"
+        );
+        tx.execute(
+            "UPDATE provider_bindings SET resume_state = ?, restore_state = ?, restore_error = ?,
+                 user_exited_at = NULL, metadata_json = ?, updated_at = ?,
+                 invalidated_at = CASE WHEN ? = 'available' THEN NULL
+                   WHEN ? = 'expired' THEN COALESCE(invalidated_at, ?) ELSE ? END
+             WHERE id = ?",
+            params![
+                resume,
+                restore,
+                error,
+                serde_json::to_string(&metadata)?,
+                now,
+                resume,
+                resume,
+                now,
+                now,
+                binding.id
+            ],
+        )?;
+        if let Some(work_status) = update_session {
+            tx.execute(
+                "UPDATE sessions SET
+                     status = CASE WHEN ? = 'starting' THEN 'starting' ELSE status END,
+                     work_status = ?, updated_at = ?, version = version + 1 WHERE id = ?",
+                params![work_status, work_status, now, session_id],
+            )?;
+        }
+        let payload = json!({
+            "sessionId": session_id, "provider": "claude-code",
+            "bindingId": binding.id, "providerSessionId": binding.provider_session_id,
+            "restoreState": restore, "restoreError": error,
+            "spawnRevision": metadata.get("spawnRevision"),
+        });
+        events.push(session_event(
+            command,
+            "session.restore-state-changed",
+            &session,
+            now,
+            payload.clone(),
+        ));
+        Ok(payload)
+    })
+    .map(Some)
+}
+
 pub struct ClaudeIdentity<'a> {
     pub binding_id: &'a str,
     pub session_id: &'a str,
     pub run_id: &'a str,
     pub generation: &'a str,
     pub provider_session_id: &'a str,
+    pub expected_id: Option<&'a str>,
     pub launch_metadata: &'a Value,
     pub observed_metadata: &'a Value,
     pub event_name: &'a str,
@@ -258,7 +389,19 @@ pub fn record_claude_identity(
     input: &ClaudeIdentity<'_>,
     now: i64,
 ) -> Result<DomainCommit> {
-    let provider_session_id = trim(input.provider_session_id);
+    let provider_session_id = if let Some(expected) = input.expected_id {
+        ensure!(
+            expected == input.provider_session_id,
+            "Provider session identity mismatch"
+        );
+        ensure!(
+            !matches!(input.event_name, "unknown" | "SessionEnd"),
+            "Provider restore requires a lifecycle event that confirms the conversation"
+        );
+        input.provider_session_id
+    } else {
+        trim(input.provider_session_id)
+    };
     ensure!(
         !provider_session_id.is_empty(),
         "Provider session identity must not be empty"
@@ -301,6 +444,13 @@ pub fn record_claude_identity(
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
+        if input.expected_id.is_some() {
+            ensure!(
+                claude_binding(tx, input.session_id)?.is_some_and(|binding| binding.resumable
+                    && binding.provider_session_id == provider_session_id),
+                "Provider hook no longer owns its restore binding"
+            );
+        }
         let binding_id = existing.as_ref().map_or(input.binding_id, |(id, _)| id);
         let mut metadata: serde_json::Map<String, Value> = existing
             .as_ref()
@@ -372,6 +522,9 @@ pub fn record_claude_identity(
             "sessionId": input.session_id, "runId": input.run_id,
             "provider": "claude-code", "providerSessionId": provider_session_id,
             "bindingId": binding_id, "metadata": public_metadata,
+            "restoreState": "none", "restoreError": null,
+            "spawnRevision": metadata.get("spawnRevision")
+                .or_else(|| input.launch_metadata.get("spawnRevision")),
         });
         events.push(session_event(
             command,
@@ -380,6 +533,17 @@ pub fn record_claude_identity(
             now,
             payload.clone(),
         ));
+        if input.expected_id.is_some() && input.first_for_run {
+            let mut event = session_event(
+                command,
+                "session.restore-state-changed",
+                &session,
+                now,
+                payload.clone(),
+            );
+            event.event_id.push_str(":restore");
+            events.push(event);
+        }
         let previous_work_status: String = tx.query_row(
             "SELECT work_status FROM sessions WHERE id = ?",
             [input.session_id],

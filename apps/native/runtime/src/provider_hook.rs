@@ -72,12 +72,18 @@ impl Observation {
         let event = text(&["hook_event_name", "hookEventName"])
             .and_then(|name| EVENTS.iter().find(|(event, _)| *event == name))
             .map_or("unknown", |&(event, _)| event);
-        let identity = text(&[
+        let identity = [
             "session_id",
             "sessionId",
             "conversationId",
             "conversation_id",
-        ])
+        ]
+        .iter()
+        .find_map(|name| {
+            let value = payload.get(*name)?;
+            nonempty(value)?;
+            value.as_str()
+        })
         .or_else(|| {
             let path = text(&["transcript_path", "transcriptPath", "agent_transcript_path"])?;
             transcript_uuid(path)
@@ -317,7 +323,7 @@ fn settings(url: &str, script: &Path) -> Result<Value> {
 
 fn status_script(url: &str) -> String {
     format!(
-        "#!/bin/sh\n/usr/bin/curl --silent --show-error --max-time 2 --request POST --header 'content-type: application/json' --data-binary @- '{url}' >/dev/null 2>&1 || true\n"
+        "#!/bin/sh\n/usr/bin/curl --silent --show-error --max-time 2 --request POST --header 'content-type: application/json' --data-binary @- '{url}?kind=statusline' >/dev/null 2>&1 || true\n"
     )
 }
 
@@ -434,10 +440,13 @@ fn read_request(
     if method != "POST" {
         return Err("405 Method Not Allowed");
     }
-    let token = fields
+    let path = fields
         .next()
         .and_then(|path| path.strip_prefix("/hooks/"))
         .ok_or(NOT_FOUND)?;
+    let (token, statusline) = path
+        .strip_suffix("?kind=statusline")
+        .map_or((path, false), |token| (token, true));
     if !matches!(fields.next(), Some("HTTP/1.0" | "HTTP/1.1")) || fields.next().is_some() {
         return Err(BAD_REQUEST);
     }
@@ -503,10 +512,11 @@ fn read_request(
         }
         return Ok(());
     }
-    match send.try_send(HookMessage::Observed(
-        record.scope.clone(),
-        Observation::parse(&payload),
-    )) {
+    let mut observation = Observation::parse(&payload);
+    if statusline {
+        observation.event = "unknown";
+    }
+    match send.try_send(HookMessage::Observed(record.scope.clone(), observation)) {
         Ok(()) => Ok(()),
         Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => {
             Err("503 Service Unavailable")
@@ -633,7 +643,7 @@ mod tests {
         assert_eq!(
             fs::read_to_string(&script)?,
             format!(
-                "#!/bin/sh\n/usr/bin/curl --silent --show-error --max-time 2 --request POST --header 'content-type: application/json' --data-binary @- '{url}' >/dev/null 2>&1 || true\n"
+                "#!/bin/sh\n/usr/bin/curl --silent --show-error --max-time 2 --request POST --header 'content-type: application/json' --data-binary @- '{url}?kind=statusline' >/dev/null 2>&1 || true\n"
             )
         );
         let directory = script.parent().unwrap();
@@ -667,6 +677,21 @@ mod tests {
         assert_eq!(scope.run_id, "current");
         assert_eq!(observation.identity.as_deref(), Some("external"));
         assert!(server.messages().next().is_none());
+        let statusline = format!("{}?kind=statusline", run.token);
+        assert_eq!(
+            request(
+                &server,
+                &statusline,
+                "POST",
+                br#"{"hook_event_name":"SessionStart","session_id":" exact-ID "}"#,
+            )?,
+            200
+        );
+        let Some(HookMessage::Observed(_, statusline)) = server.messages().next() else {
+            panic!("statusline body was not delivered");
+        };
+        assert_eq!(statusline.event, "unknown");
+        assert_eq!(statusline.identity.as_deref(), Some(" exact-ID "));
         Ok(())
     }
 
@@ -714,7 +739,7 @@ mod tests {
         ] {
             let body = json!({field: " observed ", "transcript_path": format!("/path/{id}.jsonl")});
             let observation = Observation::parse(body.as_object().unwrap());
-            assert_eq!(observation.identity.as_deref(), Some("observed"));
+            assert_eq!(observation.identity.as_deref(), Some(" observed "));
         }
         let body = json!({"transcriptPath": format!("/path/{id}.JSONL"), "hookEventName": "Stop"});
         let observation = Observation::parse(body.as_object().unwrap());

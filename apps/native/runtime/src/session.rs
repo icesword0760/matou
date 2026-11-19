@@ -499,7 +499,13 @@ impl Session {
         if self.closed {
             return Ok(());
         }
-        self.dispose()?;
+        let disposal = self.dispose();
+        if !self.disposed {
+            return disposal;
+        }
+        // A termination request can partly succeed (the PTY child received
+        // SIGHUP, but the process-group signal failed). Drain its real exit
+        // even in that case so the owner can finish and retire the run.
         self.await_shutdown(Duration::from_millis(1_500))?;
         if !self.closed {
             self.force_kill();
@@ -516,7 +522,7 @@ impl Session {
                 self.end_storage();
             }
         }
-        Ok(())
+        disposal
     }
 
     pub fn screen(&mut self) -> Result<Screen> {
