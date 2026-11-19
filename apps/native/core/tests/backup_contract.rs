@@ -1,4 +1,4 @@
-use std::{fs, path::Path};
+use std::{collections::BTreeSet, ffi::OsString, fs, path::Path};
 
 use anyhow::Result;
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -87,7 +87,18 @@ fn online_wal_backup_and_frozen_source_backup_are_independently_restorable() -> 
     }
     let snapshot = json!({ "rows": expected["rows"], "integrity": expected["integrity"] });
     assert_eq!(read_snapshot(&produced.path, "restored_rows")?, snapshot);
-    assert_eq!(native.list_valid()?, vec![produced]);
+    assert_eq!(native.list_valid()?, vec![produced.clone()]);
+    let entries = fs::read_dir(native_root.join("backups"))?
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<std::io::Result<BTreeSet<_>>>()?;
+    assert_eq!(
+        entries,
+        BTreeSet::from([
+            OsString::from(format!("{}.sqlite", produced.id)),
+            OsString::from(format!("{}.json", produced.id)),
+        ])
+    );
+    println!("unbudgeted backup directory: {entries:?}");
 
     let frozen_root = root.path().join("reference");
     let frozen_dir = frozen_root.join("backups");
