@@ -1,4 +1,4 @@
-//! Persistent lifecycle of ordinary Shell sessions and their process runs.
+//! Persistent lifecycle of sessions and their process runs.
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
@@ -21,7 +21,7 @@ pub struct CreateShellSessionInput {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct StartShellRunInput {
+pub struct StartRunInput {
     pub id: String,
     pub session_id: String,
     pub runtime_generation: String,
@@ -139,10 +139,10 @@ pub fn create_shell_session(
     })
 }
 
-pub fn start_shell_run(
+pub fn start_run(
     db: &mut Connection,
     command: &CommandMetadata,
-    input: &StartShellRunInput,
+    input: &StartRunInput,
     committed_at: i64,
 ) -> Result<DomainCommit> {
     execute(db, command, committed_at, |tx, events| {
@@ -160,12 +160,13 @@ pub fn start_shell_run(
             "INSERT INTO session_runs (
                id, session_id, ordinal, runtime_generation, profile, pid,
                status, cols, rows, started_at
-             ) VALUES (?, ?, ?, ?, 'shell', ?, 'running', ?, ?, ?)",
+             ) VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?, ?)",
             params![
                 input.id,
                 input.session_id,
                 ordinal,
                 input.runtime_generation,
+                session.kind,
                 input.pid,
                 input.cols,
                 input.rows,

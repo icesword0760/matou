@@ -6,7 +6,7 @@ use std::{
 };
 
 use anyhow::Result;
-use matou_native_core::pty::{ShellLaunch, prepare_shell_environment};
+use matou_native_core::pty::{LaunchProfile, ShellLaunch, prepare_shell_environment};
 
 // The real PTY test compares process-wide descriptor counts on failed launches.
 static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -26,6 +26,8 @@ fn launch(dir: &Path, executable: &str) -> Result<ShellLaunch> {
         ("LANG".into(), "C".into()),
     ]);
     Ok(ShellLaunch {
+        profile: LaunchProfile::Shell,
+        argv: Vec::new(),
         executable: executable.into(),
         cwd,
         data_root: dir.join("data"),
@@ -252,6 +254,7 @@ mod mac {
         }
 
         launch.executable = "/bin/zsh".into();
+        assert!(launch.argv.is_empty());
         let dotfiles = std::path::PathBuf::from(&launch.inherited_env[OsStr::new("ZDOTDIR")]);
         let original_env = "export MATOU_TEST_ENV=env-loaded\n";
         let original_rc = "export MATOU_TEST_RC=rc-loaded\nPROMPT='MATOU_READY> '\n";

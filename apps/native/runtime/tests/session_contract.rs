@@ -45,6 +45,8 @@ fn shell_options(root: &Path, id: &str, segment_bytes: u64) -> Result<SessionOpt
     Ok(SessionOptions {
         session_id: id.into(),
         launch: ShellLaunch {
+            profile: matou_native_core::pty::LaunchProfile::Shell,
+            argv: Vec::new(),
             executable: "/bin/zsh".into(),
             cwd,
             data_root: root.to_owned(),
