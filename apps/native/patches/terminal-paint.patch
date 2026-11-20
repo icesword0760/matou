@@ -1,0 +1,105 @@
+diff --git a/src/terminal/stream.zig b/src/terminal/stream.zig
+--- a/src/terminal/stream.zig
++++ b/src/terminal/stream.zig
+@@ -947,4 +947,9 @@
+             while (i < cps.len) {
+                 const cp = cps[i];
++                if (cp == 0x7F) {
++                    @branchHint(.unlikely);
++                    i += 1;
++                    continue;
++                }
+                 // C0 and UTF-8-decoded C1 controls never enter
+                 // printable runs. A codepoint is one of those
+@@ -987,6 +992,7 @@
+                             else
+                                 (v & @as(V, @splat(~@as(u32, 0x9F)))) == @as(V, @splat(0));
+-                            if (@reduce(.Or, stop)) {
+-                                const bits: @Int(.unsigned, lanes) = @bitCast(stop);
++                            const stop_or_del = @select(bool, v == @as(V, @splat(0x7F)), @as(@Vector(lanes, bool), @splat(true)), stop);
++                            if (@reduce(.Or, stop_or_del)) {
++                                const bits: @Int(.unsigned, lanes) = @bitCast(stop_or_del);
+                                 end += @ctz(bits);
+                                 break :scan;
+@@ -997,5 +1003,5 @@
+                     while (end < cps.len) : (end += 1) {
+                         const c = cps[end];
+-                        if (if (ascii) c < 0x20 else (c & ~@as(u32, 0x9F)) == 0) break;
++                        if (c == 0x7F or (if (ascii) c < 0x20 else (c & ~@as(u32, 0x9F)) == 0)) break;
+                     }
+                 }
+@@ -1455,5 +1461,5 @@
+                 return;
+             }
+-            self.print(@intCast(c));
++            if (c != 0x7F) self.print(@intCast(c));
+         }
+
+@@ -1583,5 +1589,10 @@
+                     .dcs_hook => |dcs| self.handler.vt(.dcs_hook, dcs),
+                     .dcs_put => |code| self.handler.vt(.dcs_put, code),
+-                    .dcs_unhook => self.handler.vt(.dcs_unhook, {}),
++                    .dcs_unhook => {
++                        if (comptime @hasDecl(T, "vtCancelDecrqss")) {
++                            if ((c == 0x18 or c == 0x1A) and self.handler.vtCancelDecrqss()) continue;
++                        }
++                        self.handler.vt(.dcs_unhook, {});
++                    },
+                     .apc_start => self.handler.vt(.apc_start, {}),
+                     .apc_put => |code| self.handler.vt(.apc_put, code),
+@@ -2508,5 +2519,9 @@
+                                     6 => .steady_bar,
+                                     else => {
+-                                        log.warn("invalid cursor style value: {}", .{input.params[0]});
++                                        if (comptime @hasDecl(T, "vtInvalidCursorStyle")) {
++                                            self.handler.vtInvalidCursorStyle(input.params[0]);
++                                        } else {
++                                            log.warn("invalid cursor style value: {}", .{input.params[0]});
++                                        }
+                                         return;
+                                     },
+diff --git a/src/terminal/stream_terminal.zig b/src/terminal/stream_terminal.zig
+--- a/src/terminal/stream_terminal.zig
++++ b/src/terminal/stream_terminal.zig
+@@ -846,4 +846,11 @@
+     }
+
++    /// CAN and SUB abort a pending status request without sending a reply.
++    pub fn vtCancelDecrqss(self: *Handler) bool {
++        if (self.dcs_handler.state != .decrqss) return false;
++        self.dcs_handler.state = .inactive;
++        return true;
++    }
++
+     fn dcsUnhook(self: *Handler) !void {
+         var cmd = self.dcs_handler.unhook() orelse return;
+@@ -2002,4 +2009,9 @@
+         const func = self.effects.render_hold orelse return;
+         func(self, held);
++    }
++
++    /// Unsupported DECSCUSR values still set the blink bit by parity.
++    pub fn vtInvalidCursorStyle(self: *Handler, param: u16) void {
++        self.terminal.modes.set(.cursor_blinking, param % 2 == 1);
+     }
+
+@@ -2032,6 +2044,6 @@
+             },
+
+-            .alt_screen_legacy => try self.terminal.switchScreenMode(.@"47", enabled),
+-            .alt_screen => try self.terminal.switchScreenMode(.@"1047", enabled),
++            // Both VT modes clear the alternate screen on exit in the frozen terminal.
++            .alt_screen_legacy, .alt_screen => try self.terminal.switchScreenMode(.@"1047", enabled),
+             .alt_screen_save_cursor_clear_enter => try self.terminal.switchScreenMode(.@"1049", enabled),
+
+diff --git a/src/terminal/style.zig b/src/terminal/style.zig
+--- a/src/terminal/style.zig
++++ b/src/terminal/style.zig
+@@ -179,5 +179,6 @@
+             .underline_color => |rgb| s.underline_color = .rgb(rgb),
+             .@"256_underline_color" => |idx| s.underline_color = .palette(idx),
+-            .reset_underline_color => s.underline_color = .none,
++            // The frozen SGR 59 exports an explicit white underline color.
++            .reset_underline_color => s.underline_color = .rgb(.{ .r = 255, .g = 255, .b = 255 }),
+         }
+         return s;

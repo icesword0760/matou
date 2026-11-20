@@ -1,6 +1,8 @@
 #include <ghostty/vt.h>
 
+#include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 typedef void (*MatouWrite)(void *, const uint8_t *, size_t);
 typedef void (*MatouHold)(void *, bool);
@@ -37,8 +39,39 @@ typedef struct {
 
 static void write_pty(GhosttyTerminal terminal, void *userdata,
                       const uint8_t *data, size_t len) {
-    (void)terminal;
     MatouVt *vt = userdata;
+    const uint8_t status_prefix[] = "\x1bP1$r";
+    const uint8_t status_suffix[] = "m\x1b\\";
+    const uint8_t sgr_reply[] = "\x1bP1$r0m\x1b\\";
+    const size_t prefix_len = sizeof(status_prefix) - 1;
+    const size_t suffix_len = sizeof(status_suffix) - 1;
+    if (len > prefix_len + suffix_len &&
+        memcmp(data, status_prefix, prefix_len) == 0 &&
+        memcmp(data + len - suffix_len, status_suffix, suffix_len) == 0) {
+        // The frozen DECRQSS SGR reply is independent of the active style.
+        vt->write(vt->userdata, sgr_reply, sizeof(sgr_reply) - 1);
+        return;
+    }
+
+    // Standard CPR uses the active screen's absolute row, even under DECOM.
+    // Leave the reported column and the distinct private CPR format intact.
+    if (len >= 6 && len <= 14 && data[0] == 0x1b && data[1] == '[' && data[len - 1] == 'R') {
+        size_t sep = 2;
+        while (sep < len - 1 && data[sep] >= '0' && data[sep] <= '9') sep++;
+        size_t end = sep + 1;
+        while (end < len - 1 && data[end] >= '0' && data[end] <= '9') end++;
+        uint16_t row;
+        if (sep > 2 && sep < len - 2 && data[sep] == ';' && end == len - 1 &&
+            ghostty_terminal_get(terminal, GHOSTTY_TERMINAL_DATA_CURSOR_Y, &row) == GHOSTTY_SUCCESS) {
+            char reply[16];
+            int size = snprintf(reply, sizeof(reply), "\x1b[%u%.*s", row + 1u,
+                                (int)(len - sep), (const char *)data + sep);
+            if (size > 0 && (size_t)size < sizeof(reply)) {
+                vt->write(vt->userdata, (const uint8_t *)reply, (size_t)size);
+                return;
+            }
+        }
+    }
     vt->write(vt->userdata, data, len);
 }
 

@@ -264,6 +264,163 @@ fn history() -> Result<()> {
     compare_fixture("history")
 }
 
+#[test]
+fn del_in_text_does_not_take_a_cell_in_any_chunking() -> Result<()> {
+    for (before, after) in [
+        ("abcdefghijklmnopqrstuvwxyz", "Z"),
+        ("中abcdefghijklmnopqrstuvwxyz", "Z"),
+    ] {
+        let bytes = format!("{before}\x7f{after}\x1b[6\x7fn").into_bytes();
+        for chunk_size in [1, bytes.len()] {
+            let mut terminal = Terminal::new(TerminalOptions::new(40, 3, 10, 19))?;
+            for chunk in bytes.chunks(chunk_size) {
+                terminal.feed(chunk);
+            }
+            let screen = terminal.screen()?;
+            assert_eq!(
+                screen.cells[..screen.cols]
+                    .iter()
+                    .map(|cell| cell.text.as_str())
+                    .collect::<String>()
+                    .trim_end_matches(' '),
+                format!("{before}{after}")
+            );
+            let col = if before.starts_with('中') { 30 } else { 28 };
+            assert_eq!(
+                terminal.drain_responses(),
+                format!("\x1b[1;{col}R").as_bytes()
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn decrqss_sgr_reports_zero_without_changing_the_active_style() -> Result<()> {
+    let mut terminal = Terminal::new(TerminalOptions::new(12, 3, 10, 19))?;
+    terminal.feed(b"\x1b[1;31m\x1bP$qm\x1b\\X\x1bP$qz\x1b\\");
+    assert_eq!(
+        terminal.drain_responses(),
+        b"\x1bP1$r0m\x1b\\\x1bP0$r\x1b\\"
+    );
+    let cell = &terminal.screen()?.cells[0];
+    assert_eq!(cell.text, "X");
+    assert!(cell.bold);
+    assert_eq!(cell.fg, Color::Palette(1));
+    Ok(())
+}
+
+#[test]
+fn can_and_sub_abort_decrqss_and_allow_the_next_request() -> Result<()> {
+    for cancel in [0x18, 0x1a] {
+        let mut terminal = Terminal::new(TerminalOptions::new(12, 3, 10, 19))?;
+        terminal.feed(b"A\x1bP$qm");
+        assert!(terminal.drain_responses().is_empty());
+        terminal.feed(&[cancel]);
+        assert!(terminal.drain_responses().is_empty());
+        terminal.feed(b"B\x1b[6n\x1bP$q");
+        assert_eq!(terminal.drain_responses(), b"\x1b[1;3R");
+        terminal.feed(b"r\x1b");
+        terminal.feed(b"\\");
+        assert_eq!(terminal.drain_responses(), b"\x1bP1$r1;3r\x1b\\");
+    }
+    Ok(())
+}
+
+#[test]
+fn standard_cpr_reports_the_absolute_row_under_origin_mode() -> Result<()> {
+    let mut terminal = Terminal::new(TerminalOptions::new(12, 12, 10, 19))?;
+    terminal.feed(b"\x1b[7;11r\x1b[?6h\x1b[4;12H\x1b[6n\x1b[?6n\x1bP$qr\x1b\\");
+    assert_eq!(
+        terminal.drain_responses(),
+        b"\x1b[10;12R\x1b[?4;12;1R\x1bP1$r7;11r\x1b\\"
+    );
+    let screen = terminal.screen()?;
+    assert_eq!(screen.cursor_row, 9);
+    assert_eq!(screen.cursor_col, 11);
+    Ok(())
+}
+
+#[test]
+fn alternate_47_clears_on_exit_without_erasing_primary_or_repeated_enter() -> Result<()> {
+    let mut terminal = Terminal::new(TerminalOptions::new(12, 3, 10, 19))?;
+    terminal.feed(b"MAIN\x1b[2;4H\x1b[?47hALT\x1b[?47h");
+    let alt = terminal.screen()?;
+    assert!(alt.alternate);
+    assert_eq!(alt.cells[alt.cols + 3].text, "A");
+    terminal.feed(b"\x1b[?47l");
+    let primary = terminal.screen()?;
+    assert!(!primary.alternate);
+    assert_eq!(primary.cells[0].text, "M");
+    assert_eq!((primary.cursor_row, primary.cursor_col), (1, 6));
+    terminal.feed(b"\x1b[?47h");
+    let alt = terminal.screen()?;
+    assert!(alt.alternate);
+    assert!(alt.cells.iter().all(|cell| cell.text == " "));
+    assert_eq!((alt.cursor_row, alt.cursor_col), (1, 6));
+    Ok(())
+}
+
+#[test]
+fn sgr_59_sets_explicit_white_until_the_next_underline_color_or_full_reset() -> Result<()> {
+    let mut terminal = Terminal::new(TerminalOptions::new(12, 3, 10, 19))?;
+    terminal.feed(b"\x1b[4:3;58:5:59mA\x1b[59;1mB\x1b[58:2::1:2:3mC\x1b[0mD");
+    let screen = terminal.screen()?;
+    let cells = &screen.cells[..4];
+    assert_eq!(cells[0].underline_color, Color::Palette(59));
+    assert_eq!(cells[1].underline_color, Color::Rgb(0xffffff));
+    assert_eq!(cells[1].underline_style, cells[0].underline_style);
+    assert!(cells[1].bold && cells[1].underline);
+    assert_eq!(cells[2].underline_color, Color::Rgb(0x010203));
+    assert_eq!(cells[3].underline_color, Color::Default);
+    Ok(())
+}
+
+#[test]
+fn unsupported_cursor_style_changes_only_blinking() -> Result<()> {
+    let mut terminal = Terminal::new(TerminalOptions::new(12, 3, 10, 19))?;
+    terminal.feed(b"\x1b[6 q\x1b[");
+    assert!(!terminal.screen()?.cursor_blinking);
+    terminal.feed(b"9 q");
+    let screen = terminal.screen()?;
+    assert_eq!(screen.cursor_style, CursorStyle::Bar);
+    assert!(screen.cursor_blinking);
+    terminal.feed(b"\x1b[8 q");
+    let screen = terminal.screen()?;
+    assert_eq!(screen.cursor_style, CursorStyle::Bar);
+    assert!(!screen.cursor_blinking);
+    terminal.feed(b"\x1b[3 q");
+    let screen = terminal.screen()?;
+    assert_eq!(screen.cursor_style, CursorStyle::Underline);
+    assert!(screen.cursor_blinking);
+    Ok(())
+}
+
+#[test]
+fn invalid_raw_utf8_is_dropped_at_every_split_without_losing_valid_utf8_or_controls() -> Result<()>
+{
+    let bytes = b"A\xff\xc0\xaf\xe2(\xa1\xed\xa0\x80\xf4\x90\x80\x80\xe2\x82\
+                  \xe4\xb8\xad\xf0\x9f\x99\x82\xef\xbf\xbd\xf0\x9f\x1b[6n";
+    for split in 0..=bytes.len() {
+        let mut terminal = Terminal::new(TerminalOptions::new(12, 3, 10, 19))?;
+        terminal.feed(&bytes[..split]);
+        terminal.feed(b"");
+        terminal.feed(&bytes[split..]);
+        let screen = terminal.screen()?;
+        assert_eq!(
+            screen.cells[..screen.cols]
+                .iter()
+                .map(|cell| cell.text.as_str())
+                .collect::<String>()
+                .trim_end_matches(' '),
+            "A(中🙂�",
+            "split at byte {split}"
+        );
+        assert_eq!(terminal.drain_responses(), b"\x1b[1;7R", "split {split}");
+    }
+    Ok(())
+}
+
 fn theme_colors_match(screen: &Screen, theme: Theme, expected: &Value) -> Result<()> {
     let hex = |name: &str| -> Result<u32> {
         Ok(u32::from_str_radix(

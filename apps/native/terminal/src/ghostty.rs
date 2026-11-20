@@ -154,6 +154,8 @@ pub struct Terminal {
     // Owned Box<Effects> allocation borrowed synchronously by the C callbacks.
     // Using a raw owner lets the allocation keep the same provenance on moves.
     effects: NonNull<Effects>,
+    pending_utf8: [u8; 4],
+    pending_utf8_len: usize,
     selection: SelectionState,
     last_selection_epoch: usize,
     last_history_trim: usize,
@@ -192,6 +194,8 @@ impl Terminal {
         let mut terminal = Self {
             handle: handle?,
             effects,
+            pending_utf8: [0; 4],
+            pending_utf8_len: 0,
             selection: SelectionState::default(),
             last_selection_epoch: 0,
             last_history_trim: 0,
@@ -202,8 +206,53 @@ impl Terminal {
         Ok(terminal)
     }
 
-    /// Feed raw bytes to the VT parser. The upstream parser handles malformed input internally.
-    pub fn feed(&mut self, bytes: &[u8]) {
+    /// Feed valid UTF-8 to the VT parser, dropping malformed bytes and keeping
+    /// an incomplete character for the next call.
+    pub fn feed(&mut self, mut bytes: &[u8]) {
+        while self.pending_utf8_len != 0 {
+            let Some((&byte, rest)) = bytes.split_first() else {
+                return;
+            };
+            self.pending_utf8[self.pending_utf8_len] = byte;
+            let len = self.pending_utf8_len + 1;
+            let pending = &self.pending_utf8[..len];
+            match str::from_utf8(pending) {
+                Ok(_) => {
+                    self.feed_vt(pending);
+                    self.pending_utf8_len = 0;
+                }
+                Err(error) if error.error_len().is_none() => self.pending_utf8_len = len,
+                Err(_) => {
+                    // Reprocess the byte that broke the sequence. It can start a
+                    // valid character or a control sequence.
+                    self.pending_utf8_len = 0;
+                    break;
+                }
+            }
+            bytes = rest;
+        }
+
+        while !bytes.is_empty() {
+            let Err(error) = str::from_utf8(bytes) else {
+                self.feed_vt(bytes);
+                break;
+            };
+            let (valid, tail) = bytes.split_at(error.valid_up_to());
+            if !valid.is_empty() {
+                self.feed_vt(valid);
+            }
+            match error.error_len() {
+                Some(invalid_len) => bytes = &tail[invalid_len..],
+                None => {
+                    self.pending_utf8[..tail.len()].copy_from_slice(tail);
+                    self.pending_utf8_len = tail.len();
+                    break;
+                }
+            }
+        }
+    }
+
+    fn feed_vt(&self, bytes: &[u8]) {
         unsafe { matou_vt_feed(self.handle.as_ptr(), bytes.as_ptr(), bytes.len()) };
     }
 

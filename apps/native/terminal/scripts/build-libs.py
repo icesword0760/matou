@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build pinned libghostty-vt with Matou's character widths and history trimming counter.
+"""Build pinned libghostty-vt with Matou's width, history and VT behavior patches.
 
 Requires Zig 0.17.x (pass --zig). Release sources/dependencies are downloaded
 and verified; original source is left intact in the ignored build cache.
@@ -119,6 +119,19 @@ def patch_history_trim(original, source):
     }
 
 
+def patch_terminal_paint(original, source):
+    patch = ROOT.parent / 'patches' / 'terminal-paint.patch'
+    # The history patch already restores stream_terminal.zig.
+    # Restore the other inputs as well so rebuilding from a warm cache is safe.
+    for path in ('src/terminal/stream.zig', 'src/terminal/style.zig'):
+        shutil.copy2(original / path, source / path)
+    workspace = ROOT.parents[2]
+    subprocess.run(['git', 'apply', '--whitespace=error',
+                    f'--directory={source.relative_to(workspace).as_posix()}', str(patch)],
+                   cwd=workspace, check=True)
+    return {'sha256': digest(patch)}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--target', choices=TARGETS,
@@ -161,6 +174,7 @@ def main():
         ('.width = uucode.get(.width, cp),', '.width = @import("reference_width.zig").get(cp),'),
     ])
     history_trim_patch = patch_history_trim(original, source)
+    terminal_paint_patch = patch_terminal_paint(original, source)
     target, package_name = TARGETS[args.target]
     package = ROOT / 'vendor/ghostty-vt' / package_name
     env = dict(os.environ, ZIG_GLOBAL_CACHE_DIR=str(cache / 'zig-global'))
@@ -178,6 +192,7 @@ def main():
         'sources': ARCHIVES, 'widthPolicy': 'xterm.js 6.0.0 / Unicode 6',
         'widthSha256': digest(width),
         'historyTrimPatch': history_trim_patch,
+        'terminalPaintPatch': terminal_paint_patch,
     }, indent=2) + '\n')
     print(f'Built Matou libghostty-vt at {package}')
 
