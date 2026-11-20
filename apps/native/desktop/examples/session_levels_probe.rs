@@ -2386,34 +2386,48 @@ mod probe {
     }
 
     fn press_native_escape(window: WindowHandle<Workspace>, cx: &mut AsyncApp) {
-        use cocoa::{
-            appkit::{NSEvent, NSEventModifierFlags},
-            base::{id, nil},
-            foundation::{NSInteger, NSPoint, NSString},
-        };
-        use objc::{msg_send, sel, sel_impl};
+        press_native_key(window, cx, "\u{1b}", 53);
+    }
+
+    fn native_probe_view(window: WindowHandle<Workspace>, cx: &mut AsyncApp) -> cocoa::base::id {
         use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
-        let view = window
+        window
             .update(cx, |_, window, _| {
                 let RawWindowHandle::AppKit(handle) =
                     HasWindowHandle::window_handle(window).unwrap().as_raw()
                 else {
                     unreachable!();
                 };
-                handle.ns_view.as_ptr() as id
+                handle.ns_view.as_ptr() as cocoa::base::id
             })
-            .unwrap();
+            .unwrap()
+    }
+
+    fn press_native_key(
+        window: WindowHandle<Workspace>,
+        cx: &mut AsyncApp,
+        characters: &str,
+        code: u16,
+    ) {
+        use cocoa::{
+            appkit::{NSEvent, NSEventModifierFlags},
+            base::{id, nil},
+            foundation::{NSInteger, NSPoint, NSString},
+        };
+        use objc::{msg_send, sel, sel_impl};
+
+        let view = native_probe_view(window, cx);
         // Use the AppKit key path, including GPUI's native text-input routing.
         // The event is sent only to this hidden NSView, just like probe clicks.
         unsafe {
             let native: id = msg_send![view, window];
             let number: NSInteger = msg_send![native, windowNumber];
-            let characters = NSString::alloc(nil).init_str("\u{1b}");
+            let characters = NSString::alloc(nil).init_str(characters);
             for kind in [NSEventType::NSKeyDown, NSEventType::NSKeyUp] {
                 let event = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode_(
                     nil, kind, NSPoint::new(0., 0.), NSEventModifierFlags::empty(),
-                    0., number, nil, characters, characters, false, 53,
+                    0., number, nil, characters, characters, false, code,
                 );
                 if kind == NSEventType::NSKeyDown {
                     let _: () = msg_send![view, keyDown: event];
@@ -2422,6 +2436,31 @@ mod probe {
                 }
             }
             let _: () = msg_send![characters, release];
+        }
+    }
+
+    fn attempt_chinese_preedit(window: WindowHandle<Workspace>, cx: &mut AsyncApp, commit: bool) {
+        use cocoa::{
+            base::{BOOL, NO, nil},
+            foundation::{NSNotFound, NSRange, NSString},
+        };
+        use objc::{msg_send, sel, sel_impl};
+
+        let view = native_probe_view(window, cx);
+        // Exercise the text-client callbacks without changing the system input source.
+        unsafe {
+            let text = NSString::alloc(nil).init_str("你好");
+            let selected = NSRange::new(2, 0);
+            let replacement = NSRange::new(NSNotFound as _, 0);
+            let _: () = msg_send![view, setMarkedText: text selectedRange: selected replacementRange: replacement];
+            let marked: BOOL = msg_send![view, hasMarkedText];
+            assert_eq!(marked, NO, "read-only preview accepted marked text");
+            if commit {
+                let _: () = msg_send![view, insertText: text replacementRange: replacement];
+            } else {
+                let _: () = msg_send![view, unmarkText];
+            }
+            let _: () = msg_send![text, release];
         }
     }
 
@@ -6059,10 +6098,27 @@ mod probe {
                 f32::from(model.size.width)
             );
 
+            let assert_esc_to_entry = |cx: &mut AsyncApp, scenario: &str| {
+                press_native_escape(window, cx);
+                draw(window, cx);
+                assert!(
+                    footer_bounds(window, cx, "instructions-dialog").is_none(),
+                    "first AppKit Esc left the preview open after {scenario}"
+                );
+                assert!(
+                    window
+                        .update(cx, |view, window, _| view
+                            .instructions_focus("project-instructions", window))
+                        .unwrap(),
+                    "Esc did not return focus to the entry after {scenario}"
+                );
+                println!(
+                    "instructions | {width} pt | {scenario}: one AppKit Esc, focus returned to entry"
+                );
+            };
+
             click(window, cx, entry.center());
-            press_native_escape(window, cx);
-            draw(window, cx);
-            assert!(footer_bounds(window, cx, "instructions-dialog").is_none());
+            assert_esc_to_entry(cx, "immediate");
 
             click(window, cx, entry.center());
             wait_for_instructions(window, cx).await;
@@ -6074,12 +6130,37 @@ mod probe {
                 })
                 .unwrap();
             click(window, cx, body);
-            press_native_escape(window, cx);
+            assert_esc_to_entry(cx, "body click");
+
+            click(window, cx, entry.center());
+            wait_for_instructions(window, cx).await;
+            press_native_key(window, cx, "a", 0);
             draw(window, cx);
-            assert!(footer_bounds(window, cx, "instructions-dialog").is_none());
-            println!(
-                "instructions | {width} pt | native AppKit Esc closes immediately and after clicking the body"
-            );
+            window
+                .update(cx, |view, window, _| {
+                    let focused = view.instructions_focus("project-instructions-preview", window);
+                    println!(
+                        "instructions | {width} pt | after AppKit a: preview focused={focused}"
+                    );
+                    assert!(focused);
+                    view.assert_instructions_preview(&root_file, Ok(Some(&contents)));
+                })
+                .unwrap();
+            assert_esc_to_entry(cx, "plain a");
+
+            for (commit, scenario) in [(true, "Chinese commit"), (false, "Chinese cancel")] {
+                click(window, cx, entry.center());
+                wait_for_instructions(window, cx).await;
+                attempt_chinese_preedit(window, cx, commit);
+                window
+                    .update(cx, |view, window, _| {
+                        assert!(view.instructions_focus("project-instructions-preview", window));
+                        view.assert_instructions_preview(&root_file, Ok(Some(&contents)));
+                    })
+                    .unwrap();
+                assert_esc_to_entry(cx, scenario);
+            }
+            assert_eq!(fs::read_to_string(&root_file).unwrap(), contents);
 
             click(window, cx, entry.center());
             wait_for_instructions(window, cx).await;
@@ -6147,10 +6228,9 @@ mod probe {
             press(window, cx, "shift-tab");
             draw(window, cx);
             assert_control_focus(cx, "project-instructions-cancel");
-            press(window, cx, "escape");
-            draw(window, cx);
-            assert!(footer_bounds(window, cx, "instructions-dialog").is_none());
-            assert_control_focus(cx, "project-instructions");
+            press(window, cx, "a");
+            assert_control_focus(cx, "project-instructions-cancel");
+            assert_esc_to_entry(cx, "plain a with Cancel focused");
             press(window, cx, "enter");
             wait_for_instructions(window, cx).await;
             assert_control_focus(cx, "project-instructions-preview");
@@ -6220,6 +6300,11 @@ mod probe {
                 println!(
                     "instructions | {width} pt | unreadable mode 000: existing entry retained, 读取失败, old text cleared"
                 );
+                assert_esc_to_entry(cx, "unreadable file");
+
+                click(window, cx, entry.center());
+                wait_for_instructions(window, cx).await;
+                while sink.try_recv().is_ok() {}
 
                 set_context(&fixture, &absent_cwd);
                 deliver(window, cx, fixture.graph_event());
@@ -6231,11 +6316,32 @@ mod probe {
                     .unwrap();
                 assert!(footer_bounds(window, cx, "instructions").is_none());
                 assert!(footer_bounds(window, cx, "instructions-dialog").is_some());
-                press(window, cx, "escape");
+                press_native_escape(window, cx);
                 draw(window, cx);
                 assert!(footer_bounds(window, cx, "instructions-dialog").is_none());
+                window
+                    .update(cx, |view, window, cx| {
+                        view.assert_terminal_focus(PEER, true, window, cx);
+                        view.qualify(PEER, window, cx);
+                    })
+                    .unwrap();
+                assert!(
+                    std::iter::from_fn(|| sink.try_recv().ok())
+                        .all(|cmd| !matches!(cmd, Command::Input { .. })),
+                    "a key reached the terminal while the preview was open"
+                );
+                draw(window, cx);
+                press_native_escape(window, cx);
+                let input = std::iter::from_fn(|| sink.try_recv().ok())
+                    .filter(|cmd| matches!(cmd, Command::Input { .. }))
+                    .collect::<Vec<_>>();
+                assert!(
+                    matches!(input.as_slice(), [Command::Input { session_id, bytes, .. }]
+                    if session_id == PEER && bytes == b"\x1b"),
+                    "one native Esc must send exactly 0x1b to the focused terminal"
+                );
                 println!(
-                    "instructions | {width} pt | missing after context change: no entry, expected path and blank preview"
+                    "instructions | {width} pt | missing file: one AppKit Esc restores terminal focus; the next Esc sent exactly 0x1b to the terminal"
                 );
 
                 set_card(&fixture, PEER, "codex", &root_cwd);

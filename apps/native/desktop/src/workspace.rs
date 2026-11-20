@@ -8688,6 +8688,13 @@ impl Workspace {
             &self.control_focus["project-instructions-preview"],
             &self.control_focus["project-instructions-cancel"],
         ];
+        // Keep unused text keys out of AppKit's input context, which can
+        // otherwise handle the next Esc before it reaches this modal.
+        let activates_button = matches!(stroke.key.as_str(), "enter" | "space")
+            && (controls[0].is_focused(window) || controls[2].is_focused(window));
+        if stroke.key_char.is_some() && !activates_button {
+            cx.stop_propagation();
+        }
         match stroke.key.as_str() {
             "escape" => self.close_project_instructions(window, cx),
             "tab"
