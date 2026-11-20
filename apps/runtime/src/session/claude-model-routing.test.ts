@@ -166,3 +166,38 @@ it('enables expiry observation for subscription and native OAuth sessions withou
  expect(await routing.resolveOverride({model:'matou-chatgpt/matou-haiku',compaction:false})).toEqual({routerTarget:true,authentication:{providerId:subscription.id,providerName:subscription.name,label:'haiku'}})
  routing.close()
 })
+
+it('marks streamKeepAlive only for Gemini targets and leaves Claude and DeepSeek targets without keep-alive', async () => {
+  const prefs = preferences({ mode: 'follow', effort: 'follow' })
+  const antigravityProvider: ProviderConfigView = {
+    id: 'agy',
+    cli: 'claude-code',
+    name: 'Antigravity',
+    endpoint: '',
+    hasApiKey: false,
+    kind: 'subscription',
+    model: 'gemini-4-neon-high',
+    modelMapping: {
+      opus: 'claude-opus-5-5-high',
+      sonnet: 'gemini-4-neon-high',
+      haiku: 'gemini-4-hydrogen-tiered-high'
+    },
+    subscription: {
+      provider: 'antigravity',
+      account: { status: 'ready' },
+      modelMetadata: [
+        { id: 'claude-opus-5-5-high', contextWindow: 1_000_000 },
+        { id: 'gemini-4-neon-high', contextWindow: 1_048_576 },
+        { id: 'gemini-4-hydrogen-tiered-high', contextWindow: 1_048_576 }
+      ]
+    }
+  }
+  const { store } = storeFor(antigravityProvider)
+  const routing = claudeModelRouting({ provider: antigravityProvider, preferences: prefs, store }, {})
+  const haikuOverride = await routing.resolveOverride({ model: 'matou-antigravity/matou-haiku', compaction: false })
+  expect(haikuOverride?.streamKeepAlive).toBe(true)
+
+  const opusClaudeOverride = await routing.resolveOverride({ model: 'matou-antigravity/claude-opus-5-5[1M]', compaction: false })
+  expect(opusClaudeOverride?.streamKeepAlive).toBeUndefined()
+  routing.close()
+})

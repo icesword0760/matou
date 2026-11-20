@@ -11,6 +11,7 @@ import { nativeClaudeModels } from './native-model-catalog'
 import { GatewayRoutingError, type GatewayOverride } from './claude-request-gateway'
 import { isDeepSeekMessagesDestination } from './deepseek-inline-tools'
 import type { SessionContextUsageSnapshot } from './deepseek-token-usage'
+import { isGeminiModelId } from './gemini-sse-keepalive'
 
 export interface ClaudeModelRoutingOptions {
   preferences: AgentModelPreferences
@@ -45,6 +46,7 @@ export function claudeModelRouting(options: ClaudeModelRoutingOptions, env: Node
       const headers: Record<string, string> = { authorization: `Bearer ${lease.connection.clientKey}` }
       return { routerTarget: true as const, authentication: authentication('compaction', selected)!, ...(selected.subscription.provider === 'codex' ? {family:'chatgpt-subscription' as const} : {}), baseUrl: lease.connection.baseUrl, headers,
         model: `${prepared.input.accountPrefix}/${compact.model.replace(/\[1m\]$/i, '')}`,
+        ...(isGeminiModelId(compact.model) ? { streamKeepAlive: true } : {}),
         ...(selected.subscription.modelMetadata.find(m => m.id === compact.model)?.maxOutputTokens ? { maxOutputTokens: selected.subscription.modelMetadata.find(m => m.id === compact.model)!.maxOutputTokens! } : {}) }
     }
     const selection = await options.store.launchSelection('claude-code', selected.id)
@@ -55,7 +57,7 @@ export function claudeModelRouting(options: ClaudeModelRoutingOptions, env: Node
     if (!key && !official) throw new Error('Compaction provider requires an API key')
     const headers: Record<string, string> = key ? { 'x-api-key': key } : {}
     const model = official ? (await nativeClaudeModels()).find(m => m.id === compact.model)?.resolvedModel ?? compact.model : compact.model
-    return { ...(official && !key ? { authentication: authentication('compaction', selected)! } : {}), baseUrl, headers, model, ...(official ? {family: 'anthropic' as const} : {}) }
+    return { ...(official && !key ? { authentication: authentication('compaction', selected)! } : {}), baseUrl, headers, model, ...(isGeminiModelId(model) ? { streamKeepAlive: true } : {}), ...(official ? {family: 'anthropic' as const} : {}) }
   }
   return {
     async resolveOverride(input: { compaction: boolean; model: string; webSearch?: boolean; kind?: 'message' | 'count_tokens' }): Promise<GatewayOverride | undefined> {
@@ -92,11 +94,13 @@ export function claudeModelRouting(options: ClaudeModelRoutingOptions, env: Node
           const mode = snapshot.preferences.contextWindows[selected.providerId] ?? 'default'
           const rawWindow = mode === 'maximum' ? selected.metadata?.maxContextWindow ?? selected.metadata?.contextWindow : selected.metadata?.contextWindow
           const contextWindow = rawWindow === undefined ? undefined : mode === '512k' ? Math.min(512_000, rawWindow) : rawWindow
+          const streamKeepAlive = isGeminiModelId(selected.catalogModel) || isGeminiModelId(selected.model)
           return { ...base,
             effort: effort && effort !== 'follow' ? effort : 'omit' as const,
             thinking: effort && effort !== 'follow' && /^claude-/.test(selected.model) ? 'adaptive' as const : 'omit' as const,
             ...(selected.metadata?.maxOutputTokens ? { maxOutputTokens: selected.metadata.maxOutputTokens } : {}),
-            ...(contextWindow ? { contextWindow } : {}) }
+            ...(contextWindow ? { contextWindow } : {}),
+            ...(streamKeepAlive ? { streamKeepAlive: true } : {}) }
         } catch (error) { throw new GatewayRoutingError(error instanceof SubscriptionAccountBindingError ? error.message : `${label}: model target or reasoning effort is unavailable`) }
       }
       const compact = options.preferences.compaction
@@ -110,21 +114,25 @@ export function claudeModelRouting(options: ClaudeModelRoutingOptions, env: Node
           ...(!effort || effort === 'follow' ? {} : { effort, thinking: 'adaptive' as const }) }
       }
       const effort = roleEffort(options.provider, input.model)
+      const detectedRole = claudeRequestRole(input.model)
       const apiRole = /^matou-api\/(opus|sonnet|haiku)$/.exec(input.model)?.[1] as 'opus' | 'sonnet' | 'haiku' | undefined
       const model = apiRole && !options.provider?.subscription ? options.provider?.modelMapping?.[apiRole] : undefined
+      const catalogCandidate = model ?? (detectedRole ? options.provider?.modelMapping?.[detectedRole] : undefined) ?? options.provider?.model
+      const streamKeepAlive = isGeminiModelId(catalogCandidate) || isGeminiModelId(input.model)
       const resolvedModelId = (model ?? input.model).replace(/\[1m\]$/i, '')
       const metadata = options.provider?.modelMetadata?.find(entry => entry.id === resolvedModelId)
       const mode = options.provider ? options.preferences.contextWindows[options.provider.id] ?? 'default' : 'default'
       const rawWindow = mode === 'maximum' ? metadata?.maxContextWindow ?? metadata?.contextWindow : metadata?.contextWindow
       const contextWindow = rawWindow === undefined ? undefined : mode === '512k' ? Math.min(512_000, rawWindow) : rawWindow
-      const auth = authentication(claudeRequestRole(input.model) ?? 'main')
-      return auth || model || contextWindow || effort && effort !== 'follow'
+      const auth = authentication(detectedRole ?? 'main')
+      return auth || model || contextWindow || streamKeepAlive || effort && effort !== 'follow'
         ? {
             ...(options.provider?.subscription ? { routerTarget: true } : {}),
             ...(auth ? { authentication: auth } : {}),
             ...(model ? { model } : {}),
             ...(effort && effort !== 'follow' ? { effort } : {}),
-            ...(contextWindow ? { contextWindow } : {})
+            ...(contextWindow ? { contextWindow } : {}),
+            ...(streamKeepAlive ? { streamKeepAlive: true } : {})
           }
         : undefined
     },
@@ -151,7 +159,8 @@ export function modelRoutingEnabled(preferences: AgentModelPreferences, provider
       deepSeek = isDeepSeekMessagesDestination(destination)
     } catch { /* Invalid provider endpoints are handled during launch. */ }
   }
-  return Boolean(provider?.subscription || provider && !provider.hasApiKey && provider.endpoint.replace(/\/$/, '') === 'https://api.anthropic.com') || Boolean(preferences.claudeWebSearch) || Object.keys(preferences.claudeRoleAssignments ?? {}).length > 0 || deepSeek || preferences.compaction.mode === 'custom' || Object.values(provider?.effortMapping ?? {}).some(value => value !== 'follow') || Boolean(provider?.reasoningEffort && provider.reasoningEffort !== 'follow')
+  const gemini = [provider?.model, ...Object.values(provider?.modelMapping ?? {})].some(isGeminiModelId)
+  return Boolean(provider?.subscription || provider && !provider.hasApiKey && provider.endpoint.replace(/\/$/, '') === 'https://api.anthropic.com') || Boolean(preferences.claudeWebSearch) || Object.keys(preferences.claudeRoleAssignments ?? {}).length > 0 || deepSeek || gemini || preferences.compaction.mode === 'custom' || Object.values(provider?.effortMapping ?? {}).some(value => value !== 'follow') || Boolean(provider?.reasoningEffort && provider.reasoningEffort !== 'follow')
 }
 export function restoredProviderModel(bound: string | undefined, selected: string | undefined, provider: ProviderConfigView | undefined, preferences: AgentModelPreferences): string | undefined {
   if (/^matou-role\//.test(bound ?? '')) return Object.keys(preferences.claudeRoleAssignments ?? {}).length || preferences.claudeWebSearch ? bound : selected

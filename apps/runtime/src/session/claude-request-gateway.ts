@@ -11,6 +11,7 @@ import { resolveProxyForUrl } from '../egress/proxy-route'
 import { sessionEn, sessionZhCN } from '../i18n/messages/session'
 import { convertDeepSeekInlineTools, DeepSeekInlineToolCompatibilityError, isDeepSeekMessagesDestination } from './deepseek-inline-tools'
 import { DeepSeekContextUsageTracker, type SessionContextUsageSnapshot } from './deepseek-token-usage'
+import { createGeminiSseKeepAliveStream, isGeminiModelId } from './gemini-sse-keepalive'
 
 const MAX_REQUEST_BYTES = 64 * 1024 * 1024
 const HOP_BY_HOP_HEADERS = [
@@ -43,6 +44,7 @@ export interface GatewayOverride {
   thinking?: 'adaptive' | 'omit'
   maxOutputTokens?: number
   contextWindow?: number
+  streamKeepAlive?: boolean
 }
 
 interface GatewayOptions {
@@ -50,6 +52,7 @@ interface GatewayOptions {
   env: NodeJS.ProcessEnv
   contextWindow?: number | null
   readContextUsage?: () => SessionContextUsageSnapshot | undefined
+  sseKeepAliveIntervalMs?: number
   assertTargetAllowed?: (family?: EgressFamily) => void | Promise<void>
   onAuthenticationFailure?: (target: GatewayAuthenticationTarget) => void | Promise<void>
   /** Restarts the shared router when needed and returns its current base URL. */
@@ -136,7 +139,7 @@ async function forwardRequest(
   prefix: string,
   upstream: URL,
   getAgent: (destination: URL) => http.Agent,
-  { resolveOverride, assertTargetAllowed, onAuthenticationFailure, recoverRouter, env, contextWindow, readContextUsage }: GatewayOptions,
+  { resolveOverride, assertTargetAllowed, onAuthenticationFailure, recoverRouter, env, contextWindow, readContextUsage, sseKeepAliveIntervalMs }: GatewayOptions,
   router: RouterOrigin,
   usageTracker: DeepSeekContextUsageTracker
 ): Promise<void> {
@@ -258,7 +261,32 @@ async function forwardRequest(
         (incoming.statusCode ?? 0) >= 200 && (incoming.statusCode ?? 0) < 300) {
       usageTracker.observeResponse(incoming)
     }
-    response.writeHead(incoming.statusCode ?? 502, endToEndHeaders(incoming.headers))
+    const targetModel = override?.model ?? (typeof message?.model === 'string' ? message.model : undefined)
+    const geminiKeepAlive = override?.streamKeepAlive ?? isGeminiModelId(targetModel)
+    const contentType = String(incoming.headers['content-type'] ?? '').toLowerCase()
+    const contentEncoding = String(incoming.headers['content-encoding'] ?? '').trim().toLowerCase()
+    const injectSseKeepAlive = Boolean(
+      geminiKeepAlive &&
+      request.method === 'POST' &&
+      route.path === '/v1/messages' &&
+      message?.stream === true &&
+      (incoming.statusCode ?? 0) >= 200 &&
+      (incoming.statusCode ?? 0) < 300 &&
+      contentType.includes('text/event-stream') &&
+      (contentEncoding === '' || contentEncoding === 'identity')
+    )
+    const outHeaders = endToEndHeaders(incoming.headers)
+    if (injectSseKeepAlive) delete outHeaders['content-length']
+    response.writeHead(incoming.statusCode ?? 502, outHeaders)
+    if (injectSseKeepAlive) {
+      const keepAlive = createGeminiSseKeepAliveStream(
+        sseKeepAliveIntervalMs === undefined ? undefined : { intervalMs: sseKeepAliveIntervalMs }
+      )
+      response.once('close', () => keepAlive.destroy())
+      incoming.once('error', () => keepAlive.destroy())
+      incoming.pipe(keepAlive).pipe(response)
+      return
+    }
     incoming.pipe(response)
   }
   const send = () => new Promise<NodeJS.ErrnoException | undefined>(resolve => {

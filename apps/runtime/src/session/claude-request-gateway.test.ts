@@ -361,6 +361,51 @@ describe('Claude request gateway', () => {
     })
   })
 
+  it('injects SSE ping keep-alives during silent gaps only for Gemini stream requests and leaves DeepSeek/other streams untouched', async () => {
+    const delayedSseUpstream = await listen((_request, response) => {
+      response.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8' })
+      response.write('event: message_start\ndata: {"type":"message_start","message":{"id":"m1","role":"assistant","content":[]}}\n\n')
+      setTimeout(() => {
+        if (!response.destroyed) {
+          response.end('event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"cpa_gemini_1","name":"Write","input":{"content":"<html></html>"}}}\n\nevent: message_stop\ndata: {"type":"message_stop"}\n\n')
+        }
+      }, 65)
+    })
+
+    const gateway = await startClaudeRequestGateway({
+      upstreamUrl: delayedSseUpstream,
+      env: {},
+      sseKeepAliveIntervalMs: 20,
+      resolveOverride: ({ model }) => model === 'matou-role/haiku'
+        ? { baseUrl: delayedSseUpstream, model: 'matou-antigravity/gemini-4-neon-high', streamKeepAlive: true }
+        : { baseUrl: delayedSseUpstream, model: 'deepseek-flash' }
+    })
+    dispose.unshift(gateway.close)
+
+    const geminiText = await (await fetch(gateway.baseUrl + '/v1/messages', {
+      method: 'POST',
+      body: JSON.stringify({ model: 'matou-role/haiku', stream: true, messages: [{ role: 'user', content: 'build mockup' }] })
+    })).text()
+    expect(geminiText).toContain('event: ping\ndata: {"type":"ping"}\n\n')
+    expect(geminiText).toContain('"id":"cpa_gemini_1"')
+    expect(geminiText.endsWith('event: message_stop\ndata: {"type":"message_stop"}\n\n')).toBe(true)
+
+    // Non-streaming Gemini request is untouched
+    const nonStreamGeminiText = await (await fetch(gateway.baseUrl + '/v1/messages', {
+      method: 'POST',
+      body: JSON.stringify({ model: 'matou-role/haiku', stream: false, messages: [{ role: 'user', content: 'build mockup' }] })
+    })).text()
+    expect(nonStreamGeminiText).not.toContain('event: ping')
+
+    // Streaming DeepSeek request with identical silent gap is untouched (no keep-alive pings injected)
+    const deepSeekText = await (await fetch(gateway.baseUrl + '/v1/messages', {
+      method: 'POST',
+      body: JSON.stringify({ model: 'matou-role/opus', stream: true, messages: [{ role: 'user', content: 'build mockup' }] })
+    })).text()
+    expect(deepSeekText).not.toContain('event: ping')
+    expect(deepSeekText).toContain('"id":"cpa_gemini_1"')
+  })
+
   it('reports incompatible inline tools as a client error before sending upstream', async () => {
     const upstream = await captureOfficialRequests()
     const gateway = await start(upstream.official)
