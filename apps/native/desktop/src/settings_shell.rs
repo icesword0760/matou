@@ -17,16 +17,27 @@
 //! GPUI has no ARIA surface; keyboard-operable buttons and the selected/pressed
 //! visual state stand in for `aria-pressed` / `aria-current` and this limitation
 //! is reported to the integrator.
-use std::{cell::RefCell, collections::HashMap, ops::Range, rc::Rc, time::Duration};
+use std::{
+    cell::{Cell, RefCell},
+    collections::{HashMap, HashSet},
+    ops::Range,
+    rc::Rc,
+    sync::atomic::{AtomicU64, Ordering},
+    time::Duration,
+};
 
 use gpui::{prelude::*, *};
-use matou_native_runtime::protocol::{ClaudeModelCatalogReply, ClaudeRoleAssignmentsReply};
-use serde_json::Value;
+use matou_native_core::sessions::{InterfaceLocale, LocalePreference};
+use matou_native_runtime::protocol::{
+    ClaudeModelCatalogReply, ClaudeRoleAssignmentsReply, TimeZoneSettingsReply,
+    TimeZoneSettingsSnapshot,
+};
+use serde_json::{Value, json};
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::provider_settings::{DELETE_FAILED, ProviderDraft, ProviderSettings, ProviderUpdate};
 use crate::rename_input::{RenameInput, RenameInputEvent};
-use crate::runtime_bridge::RuntimeCommands;
+use crate::runtime_bridge::{Command, RuntimeCommands};
 use crate::terminal_input::read_clipboard_text;
 
 // The desktop probes compile the settings shell directly alongside a test transport.
@@ -768,19 +779,17 @@ pub(crate) enum SettingsPage {
 }
 
 impl SettingsPage {
-    fn title(self) -> &'static str {
+    fn title(self, locale: InterfaceLocale) -> &'static str {
         match self {
             Self::ClaudeCode => "Claude Code",
-            Self::Language => "语言与时区",
+            Self::Language => locale.text("语言与时区", "Language & time zone"),
         }
     }
 
-    fn subtitle(self) -> Option<&'static str> {
+    fn subtitle(self, locale: InterfaceLocale) -> &'static str {
         match self {
-            Self::ClaudeCode => {
-                Some("配置 Claude Code 的服务供应商、各通道上下文窗口与对话压缩模型。")
-            }
-            Self::Language => Some("选择界面语言，并设置码头启动 CLI 进程的运行环境时区。"),
+            Self::ClaudeCode => locale.text("配置 Claude Code 的服务供应商、各通道上下文窗口与对话压缩模型。", "Configure Claude Code providers, context windows and compaction model."),
+            Self::Language => locale.text("选择界面语言，并设置码头启动 CLI 进程的运行环境时区。", "Choose the interface language and the time zone for CLI processes launched by Matou."),
         }
     }
 
@@ -936,6 +945,7 @@ fn subscribe_secret(
 
 impl Editor {
     fn new(
+        locale: InterfaceLocale,
         existing: Option<Value>,
         step: EditorStep,
         preset_id: Option<&'static str>,
@@ -958,12 +968,19 @@ impl Editor {
             }
         }
         let baseline = values_from_draft(&draft);
-        let query = input_entity(query_text, "搜索供应商", cx);
+        let query = input_entity(
+            query_text,
+            locale.text("搜索供应商", "Search providers"),
+            cx,
+        );
         let key = secret_entity(
             if draft.has_api_key {
-                "已配置 · 留空保持原密钥"
+                locale.text(
+                    "已配置 · 留空保持原密钥",
+                    "Configured · leave blank to keep",
+                )
             } else {
-                "粘贴 API Key"
+                locale.text("粘贴 API Key", "Paste API key")
             },
             cx,
         );
@@ -971,15 +988,19 @@ impl Editor {
         let model = input_entity(
             draft.model.clone(),
             if draft.built_in {
-                "使用 CLI 默认模型"
+                locale.text("使用 CLI 默认模型", "Use CLI default")
             } else {
-                "选择或填写模型名称"
+                locale.text("选择或填写模型名称", "Choose or enter model ID")
             },
             cx,
         );
         let name = input_entity(draft.name.clone(), "", cx);
         let mappings = std::array::from_fn(|index| {
-            input_entity(draft.model_mapping[index].clone(), "沿用 CLI 默认", cx)
+            input_entity(
+                draft.model_mapping[index].clone(),
+                locale.text("沿用 CLI 默认", "Use CLI default"),
+                cx,
+            )
         });
         let efforts = draft.effort_mapping.clone();
 
@@ -1285,11 +1306,26 @@ fn model_label(model: &str) -> &str {
 
 pub enum SettingsShellEvent {
     Close,
+    SaveLocale(LocalePreference),
 }
 
 impl EventEmitter<SettingsShellEvent> for SettingsShell {}
 
+static NEXT_TIME_ZONE_REQUEST: AtomicU64 = AtomicU64::new(1);
+
 pub struct SettingsShell {
+    commands: RuntimeCommands,
+    locale: InterfaceLocale,
+    language: LocalePreference,
+    language_draft: LocalePreference,
+    language_block: LanguageZoneBlock,
+    forced_locale: Option<InterfaceLocale>,
+    time_zone: Option<TimeZoneSettingsSnapshot>,
+    time_zone_draft: String,
+    time_zone_block: LanguageZoneBlock,
+    time_zone_request: Option<(u64, u64, bool)>,
+    time_zone_menu_open: bool,
+    language_zone_focus: LanguageZoneFocus,
     providers: ProviderSettings,
     assignments: ClaudeAssignments,
     assignment_view: Entity<AssignmentView>,
@@ -1319,6 +1355,21 @@ impl SettingsShell {
             });
         let assignment_updates = cx.observe(&assignment_view, |_, _, cx| cx.notify());
         let mut shell = Self {
+            commands: commands.clone(),
+            locale: InterfaceLocale::default(),
+            language: LocalePreference::default(),
+            language_draft: LocalePreference::default(),
+            language_block: LanguageZoneBlock {
+                available: true,
+                ..Default::default()
+            },
+            forced_locale: None,
+            time_zone: None,
+            time_zone_draft: "auto".into(),
+            time_zone_block: LanguageZoneBlock::default(),
+            time_zone_request: None,
+            time_zone_menu_open: false,
+            language_zone_focus: LanguageZoneFocus::new(cx),
             providers,
             assignments: ClaudeAssignments::new(commands),
             assignment_view,
@@ -1343,6 +1394,239 @@ impl SettingsShell {
         self.editor.is_none() && self.providers.switching().is_none()
     }
 
+    pub(crate) fn configure_locale(
+        &mut self,
+        preference: LocalePreference,
+        locale: InterfaceLocale,
+        saving: bool,
+    ) {
+        self.locale = locale;
+        self.language = preference;
+        self.language_draft = preference;
+        self.language_block.busy = saving;
+    }
+
+    pub(crate) fn locale_saved(
+        &mut self,
+        preference: LocalePreference,
+        locale: InterfaceLocale,
+        from_this_view: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.configure_locale(preference, locale, false);
+        self.language_block.saved = from_this_view;
+        self.language_block.error = LanguageZoneError::None;
+        self.forced_locale = (from_this_view
+            && preference != LocalePreference::System
+            && preference.value() != locale.value())
+        .then_some(locale);
+        cx.notify();
+    }
+
+    pub(crate) fn locale_save_failed(&mut self, cx: &mut Context<Self>) {
+        self.language_block.busy = false;
+        self.language_block.error = LanguageZoneError::Save;
+        cx.notify();
+    }
+
+    fn request_time_zone(&mut self, save: bool, cx: &mut Context<Self>) {
+        if self.time_zone_request.is_some() {
+            return;
+        }
+        let generation = self.commands.connection().0;
+        let request_id = NEXT_TIME_ZONE_REQUEST.fetch_add(1, Ordering::Relaxed);
+        let command = if save {
+            Command::SetTimeZoneSettings {
+                request_id,
+                time_zone: json!(self.time_zone_draft),
+            }
+        } else {
+            self.time_zone_block.available = false;
+            Command::GetTimeZoneSettings { request_id }
+        };
+        self.time_zone_block.saved = false;
+        self.time_zone_block.error = LanguageZoneError::None;
+        if self.commands.send_at(generation, command).is_err() {
+            self.time_zone_failed(save, true);
+            return;
+        }
+        self.time_zone_request = Some((request_id, generation, save));
+        self.time_zone_block.busy = save;
+        let timer = cx.background_executor().timer(Duration::from_secs(10));
+        cx.spawn(async move |shell, cx| {
+            timer.await;
+            let _ = shell.update(cx, |shell, cx| {
+                if shell.time_zone_request == Some((request_id, generation, save)) {
+                    shell.time_zone_failed(save, false);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn time_zone_failed(&mut self, save: bool, disconnected: bool) {
+        self.time_zone_request = None;
+        self.time_zone_block.busy = false;
+        self.time_zone_block.error = if save {
+            LanguageZoneError::Save
+        } else if disconnected {
+            LanguageZoneError::Unavailable
+        } else {
+            LanguageZoneError::Read
+        };
+    }
+
+    pub(crate) fn receive_time_zone(
+        &mut self,
+        reply: TimeZoneSettingsReply,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((request, generation, save)) = self.time_zone_request else {
+            return;
+        };
+        if reply.request_id != request || self.commands.connection().0 != generation {
+            return;
+        }
+        self.time_zone_request = None;
+        self.time_zone_block.busy = false;
+        match reply.result {
+            Ok(snapshot) => {
+                self.time_zone_draft.clone_from(&snapshot.time_zone);
+                self.time_zone = Some(snapshot);
+                self.time_zone_block = LanguageZoneBlock {
+                    available: true,
+                    saved: save,
+                    ..Default::default()
+                };
+            }
+            Err(_) => self.time_zone_failed(save, false),
+        }
+        cx.notify();
+    }
+
+    fn language_zone_action(
+        &mut self,
+        action: LanguageZoneAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use LanguageZoneAction::*;
+
+        match action {
+            SelectLanguage(_) | SaveLanguage | CancelLanguage | ResetLanguage | RetryLanguage
+                if self.language_block.busy =>
+            {
+                return;
+            }
+            SelectTimeZone(_) | SaveTimeZone | CancelTimeZone | ResetTimeZone | RetryTimeZone
+            | ToggleTimeZoneMenu
+                if self.time_zone_block.busy =>
+            {
+                return;
+            }
+            SelectLanguage(preference) => {
+                let Some(preference) = LocalePreference::from_value(&preference) else {
+                    return;
+                };
+                self.language_draft = preference;
+                self.language_block.saved = false;
+                self.language_block.error = LanguageZoneError::None;
+                self.forced_locale = None;
+            }
+            SaveLanguage if self.language_draft != self.language => {
+                self.language_block.busy = true;
+                self.language_block.saved = false;
+                self.language_block.error = LanguageZoneError::None;
+                cx.emit(SettingsShellEvent::SaveLocale(self.language_draft));
+            }
+            CancelLanguage | ResetLanguage => {
+                self.language_draft = if action == ResetLanguage {
+                    LocalePreference::System
+                } else {
+                    self.language
+                };
+                self.language_block.saved = false;
+                self.language_block.error = LanguageZoneError::None;
+                self.forced_locale = None;
+            }
+            RetryLanguage => self.language_block.error = LanguageZoneError::None,
+            SelectTimeZone(value) if self.time_zone_block.available => {
+                self.time_zone_draft = value;
+                self.time_zone_menu_open = false;
+                self.time_zone_block.saved = false;
+                self.time_zone_block.error = LanguageZoneError::None;
+            }
+            SaveTimeZone if self.time_zone_dirty() => self.request_time_zone(true, cx),
+            CancelTimeZone | ResetTimeZone if self.time_zone_block.available => {
+                let zone = self.time_zone.as_ref().unwrap();
+                self.time_zone_draft = if action == ResetTimeZone {
+                    "auto".into()
+                } else {
+                    zone.time_zone.clone()
+                };
+                self.time_zone_block.saved = false;
+                self.time_zone_block.error = LanguageZoneError::None;
+                window.focus(&self.language_zone_focus.time_zone_trigger);
+            }
+            RetryTimeZone => self.request_time_zone(false, cx),
+            ToggleTimeZoneMenu if self.time_zone_block.available => {
+                self.time_zone_menu_open = !self.time_zone_menu_open
+            }
+            _ => return,
+        }
+        cx.notify();
+    }
+
+    fn time_zone_dirty(&self) -> bool {
+        self.time_zone_block.available
+            && self
+                .time_zone
+                .as_ref()
+                .is_some_and(|zone| zone.time_zone != self.time_zone_draft)
+    }
+
+    fn render_language_zone(&self, window: &Window, cx: &Context<Self>) -> Div {
+        let snapshot = self
+            .time_zone
+            .as_ref()
+            .filter(|_| self.time_zone_block.available);
+        let mut view = LanguageZoneView {
+            english: self.locale == InterfaceLocale::English,
+            language: self.language_draft.value(),
+            time_zone: &self.time_zone_draft,
+            system_time_zone: snapshot.map_or("", |zone| zone.system_time_zone.as_str()),
+            auto_time_zone: snapshot.and_then(|zone| zone.auto_time_zone.as_deref()),
+            zones: snapshot.map_or(&[], |zone| zone.zones.as_slice()),
+            preview: None,
+            forced_locale: self.forced_locale.map(InterfaceLocale::value),
+            language_block: LanguageZoneBlock {
+                dirty: self.language_draft != self.language,
+                ..self.language_block
+            },
+            time_zone_block: LanguageZoneBlock {
+                dirty: self.time_zone_dirty(),
+                ..self.time_zone_block
+            },
+            time_zone_menu_open: self.time_zone_menu_open,
+            keyboard_focus: self.keyboard_focus,
+            focus: &self.language_zone_focus,
+        };
+        let preview = snapshot
+            .and_then(|_| format_time_zone_preview(view.effective_time_zone(), view.english));
+        view.preview = preview.as_deref();
+        let shell = cx.weak_entity();
+        language_zone_content(
+            view,
+            window,
+            Rc::new(move |action, window, cx| {
+                let _ = shell.update(cx, |shell, cx| {
+                    shell.language_zone_action(action, window, cx)
+                });
+            }),
+        )
+    }
+
     /// Workspace consults this before moving focus with Tab so focus cannot
     /// escape the dialog. The dialog registers its own Tab/Escape path.
     pub fn modal_open(&self) -> bool {
@@ -1350,6 +1634,10 @@ impl SettingsShell {
     }
 
     pub fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dismiss_time_zone_menu(cx) {
+            window.focus(&self.language_zone_focus.time_zone_trigger);
+            return;
+        }
         if let Some(editor) = &mut self.editor {
             if self.providers.saving() || self.providers.deleting() {
                 return;
@@ -1397,6 +1685,14 @@ impl SettingsShell {
             return;
         }
         cx.emit(SettingsShellEvent::Close);
+    }
+
+    pub(crate) fn dismiss_time_zone_menu(&mut self, cx: &mut Context<Self>) -> bool {
+        let open = std::mem::take(&mut self.time_zone_menu_open);
+        if open {
+            cx.notify();
+        }
+        open
     }
 
     fn load_assignments(&mut self, cx: &mut Context<Self>) {
@@ -1489,6 +1785,17 @@ impl SettingsShell {
             .connection_changed(self.page == SettingsPage::ClaudeCode);
         self.watch_assignment_reply(request, cx);
         self.load_assignment_catalog(false, cx);
+        if self.page == SettingsPage::Language {
+            let (generation, phase) = self.commands.connection();
+            if self
+                .time_zone_request
+                .is_none_or(|(_, request_generation, _)| request_generation != generation)
+                || !matches!(phase, crate::runtime_bridge::ConnectionPhase::Ready)
+            {
+                self.time_zone_request = None;
+                self.request_time_zone(false, cx);
+            }
+        }
         cx.notify();
     }
 
@@ -1605,6 +1912,7 @@ impl SettingsShell {
         let selection = current.selection;
         let opener = current.opener.clone();
         let editor = Editor::new(
+            self.locale,
             None,
             EditorStep::Pick,
             None,
@@ -1635,6 +1943,7 @@ impl SettingsShell {
             PickChoice::Custom => None,
         };
         let editor = Editor::new(
+            self.locale,
             None,
             EditorStep::Form,
             preset_id,
@@ -1693,6 +2002,7 @@ impl SettingsShell {
         }
         let opener = self.new_provider_focus.clone();
         let editor = Editor::new(
+            self.locale,
             None,
             EditorStep::Pick,
             None,
@@ -1721,6 +2031,7 @@ impl SettingsShell {
         let preset_id = preset_by_endpoint(provider["endpoint"].as_str().unwrap_or_default())
             .map(|preset| preset.id);
         let editor = Editor::new(
+            self.locale,
             Some(provider),
             EditorStep::Form,
             preset_id,
@@ -1757,8 +2068,11 @@ impl SettingsShell {
         self.page = page;
         self.scroll.set_offset(point(px(0.), px(0.)));
         if page == SettingsPage::ClaudeCode {
+            self.time_zone_menu_open = false;
             self.providers.load();
             self.load_assignments(cx);
+        } else if self.time_zone_request.is_none() {
+            self.request_time_zone(false, cx);
         }
         let focus = self.nav_focus[page.index()].clone();
         window.focus(&focus);
@@ -1796,6 +2110,40 @@ impl SettingsShell {
     #[allow(dead_code)]
     pub(crate) fn diagnostics_focus_assignment_provider(&self, window: &mut Window, cx: &App) {
         self.assignment_view.read(cx).focus_first_provider(window);
+    }
+
+    #[cfg(debug_assertions)]
+    #[allow(dead_code)]
+    pub(crate) fn probe_language_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.select_page(SettingsPage::Language, window, cx);
+    }
+
+    #[cfg(debug_assertions)]
+    #[allow(dead_code)]
+    pub(crate) fn probe_language_focus(&self, control: &str, window: &mut Window) {
+        let focus = &self.language_zone_focus;
+        window.focus(match control {
+            "english" => &focus.language_options[2],
+            "language-save" => &focus.language_save,
+            "language-reset" => &focus.language_reset,
+            "language-cancel" => &focus.language_cancel,
+            "zone" => &focus.time_zone_trigger,
+            "zone-reset" => &focus.time_zone_reset,
+            "zone-cancel" => &focus.time_zone_cancel,
+            "zone-save" => &focus.time_zone_save,
+            "zone-retry" => &focus.time_zone_retry,
+            _ => panic!("Unknown settings control"),
+        });
+    }
+
+    #[cfg(debug_assertions)]
+    #[allow(dead_code)]
+    pub(crate) fn probe_invalid_zone(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.language_zone_action(
+            LanguageZoneAction::SelectTimeZone("Mars/Olympus".into()),
+            window,
+            cx,
+        );
     }
 
     // Probe surface for hidden GPUI integration tests. These helpers expose
@@ -1872,7 +2220,7 @@ impl SettingsShell {
 
 /// Bottom-bar entry. The parent supplies the focus handle and mouse/keyboard
 /// wiring; this function owns only the frozen 30px visual and its content.
-pub fn settings_button(pressed: bool) -> Stateful<Div> {
+pub fn settings_button(pressed: bool, locale: InterfaceLocale) -> Stateful<Div> {
     let base = div()
         .id("settings-shell-toggle")
         .relative()
@@ -1910,7 +2258,7 @@ pub fn settings_button(pressed: bool) -> Stateful<Div> {
     };
     button
         .child(icon("settings-2", 16., icon_color))
-        .child("设置")
+        .child(locale.text("设置", "Settings"))
 }
 
 fn wire_button_with_ring<E: StatefulInteractiveElement + ParentElement + Styled>(
@@ -2117,7 +2465,9 @@ impl SettingsShell {
             .border_color(rgba(LINE))
             .bg(rgb(PANEL_MUTED));
 
-        nav = nav.child(nav_section_label("AI 服务"));
+        nav = nav.child(nav_section_label(
+            self.locale.text("AI 服务", "AI services"),
+        ));
         for (index, page) in [SettingsPage::ClaudeCode, SettingsPage::Language]
             .into_iter()
             .enumerate()
@@ -2166,11 +2516,11 @@ impl SettingsShell {
                     .child("Claude Code"),
                 SettingsPage::Language => row
                     .child(globe_icon(15., if active { ACCENT } else { NAV_TEXT }))
-                    .child("语言与时区"),
+                    .child(language_zone_label(page.title(self.locale))),
             };
             nav = nav.child(row);
             if page == SettingsPage::ClaudeCode {
-                nav = nav.child(nav_section_label("通用"));
+                nav = nav.child(nav_section_label(self.locale.text("通用", "General")));
             }
         }
         // Frozen DOM places the Claude note after the navigation entries.
@@ -2182,7 +2532,10 @@ impl SettingsShell {
                     .text_size(px(9.))
                     .line_height(px(14.))
                     .text_color(rgb(MUTED))
-                    .child("供应商与上下文配置将同步影响所有 码头 窗口。"),
+                    .child(self.locale.text(
+                        "供应商与上下文配置将同步影响所有 码头 窗口。",
+                        "Provider and context settings apply to every Matou window.",
+                    )),
             );
         }
         nav
@@ -2226,18 +2579,16 @@ impl SettingsShell {
                 .line_height(px(23.))
                 .font_weight(FontWeight(680.))
                 .text_color(rgb(TEXT))
-                .child(page.title()),
+                .child(language_zone_label(page.title(self.locale))),
         );
-        if let Some(subtitle) = page.subtitle() {
-            heading = heading.child(
-                div()
-                    .mt(px(4.))
-                    .text_size(px(10.))
-                    .line_height(px(13.5))
-                    .text_color(rgb(MUTED))
-                    .child(subtitle),
-            );
-        }
+        heading = heading.child(
+            div()
+                .mt(px(4.))
+                .text_size(px(10.))
+                .line_height(px(13.5))
+                .text_color(rgb(MUTED))
+                .child(language_zone_label(page.subtitle(self.locale))),
+        );
         div()
             .flex()
             .items_start()
@@ -2257,16 +2608,16 @@ impl SettingsShell {
         let body = if page == SettingsPage::ClaudeCode {
             self.claude_content(window, cx)
         } else {
-            // 内容待后续关卡：语言与时区只保留冻结页眉与副标题，内容区为空。
-            // No placeholder copy or fake controls are invented here.
-            div()
+            self.render_language_zone(window, cx)
         };
         div().flex().flex_col().w_full().child(header).child(body)
     }
 
     fn claude_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let mut content = div().flex().flex_col().w_full();
-        let panel = self.assignments.panel(&self.providers);
+        let panel = self
+            .assignments
+            .panel_localized(&self.providers, self.locale);
         let assignments = self.assignment_view.update(cx, |view, cx| {
             view.render_panel(panel, self.keyboard_focus, window, cx)
         });
@@ -2282,7 +2633,10 @@ impl SettingsShell {
                         .bg(rgb(PANEL))
                         .text_size(px(10.))
                         .text_color(rgb(MUTED))
-                        .child("正在载入供应商配置…"),
+                        .child(
+                            self.locale
+                                .text("正在载入供应商配置…", "Loading the provider configuration…"),
+                        ),
                 )
                 .child(assignments);
         }
@@ -2316,7 +2670,10 @@ impl SettingsShell {
                         div()
                             .font_weight(FontWeight(650.))
                             .text_color(rgb(0x6a7481))
-                            .child("切换会影响所有 码头 窗口。"),
+                            .child(self.locale.text(
+                                "切换会影响所有 码头 窗口。",
+                                "Switching affects every Matou window.",
+                            )),
                     ),
                 ),
         );
@@ -2372,7 +2729,7 @@ impl SettingsShell {
         if error && let Some(id) = retry_id {
             text = text.child(link_button(
                 "settings-notice-retry",
-                "重试",
+                self.locale.text("重试", "Retry"),
                 &self.notice_retry_focus,
                 true,
                 FocusRingStyle::Shell,
@@ -2428,7 +2785,7 @@ impl SettingsShell {
             .text_color(rgb(0xffffff))
             .bg(rgb(ACCENT))
             .shadow(vec![shadow(0x357bcc, 0.13, 4., 11.)])
-            .child("＋ 新增供应商");
+            .child(self.locale.text("＋ 新增供应商", "+ New provider"));
         if busy {
             add = add.opacity(0.55).cursor(CursorStyle::OperationNotAllowed);
         } else {
@@ -2458,14 +2815,18 @@ impl SettingsShell {
                             .text_size(px(13.))
                             .font_weight(FontWeight(650.))
                             .text_color(rgb(TEXT))
-                            .child("服务供应商"),
+                            .child(self.locale.text("服务供应商", "Providers")),
                     )
                     .child(
                         div()
                             .text_size(px(9.))
                             .font_weight(FontWeight(500.))
                             .text_color(rgb(MUTED))
-                            .child(format!("{count} 个配置")),
+                            .child(match self.locale {
+                                InterfaceLocale::Chinese => format!("{count} 个配置"),
+                                InterfaceLocale::English if count == 1 => "1 configuration".into(),
+                                InterfaceLocale::English => format!("{count} configurations"),
+                            }),
                     ),
             )
             .child(add)
@@ -2487,7 +2848,7 @@ impl SettingsShell {
                 .font_weight(FontWeight(600.))
                 .text_color(rgb(DANGER_TEXT))
                 .hover(|style| style.bg(rgb(0xfff7f6)))
-                .child("重试"),
+                .child(self.locale.text("重试", "Retry")),
             &self.load_retry_focus,
             6.,
             true,
@@ -2584,9 +2945,9 @@ impl SettingsShell {
                 .and_then(|row| row["displayName"].as_str())
                 .map(|_display| format!("{model} · "))
                 .unwrap_or_default(),
-            "默认模型",
+            self.locale.text("默认模型", "Default model"),
             if provider["hasApiKey"] == true {
-                " · Key 已配置"
+                self.locale.text(" · Key 已配置", " · Key configured")
             } else {
                 ""
             }
@@ -2629,7 +2990,7 @@ impl SettingsShell {
             .font_weight(FontWeight(650.))
             .text_color(rgb(0x525d6a))
             .bg(rgba(0xffffffd1))
-            .child("编辑");
+            .child(self.locale.text("编辑", "Edit"));
         if busy {
             edit = edit.opacity(0.55).cursor(CursorStyle::OperationNotAllowed);
         } else {
@@ -2668,11 +3029,11 @@ impl SettingsShell {
             .text_size(px(12.))
             .font_weight(FontWeight(650.))
             .child(if switching_this {
-                "切换中…"
+                self.locale.text("切换中…", "Switching…")
             } else if current {
-                "默认使用"
+                self.locale.text("默认使用", "Default")
             } else {
-                "切换"
+                self.locale.text("切换", "Switch")
             });
         if current || busy {
             switch = switch
@@ -2783,7 +3144,7 @@ impl SettingsShell {
                                 .font_weight(FontWeight(500.))
                                 .text_color(rgb(ACCENT))
                                 .bg(rgba(ACCENT_SOFT))
-                                .child("使用中"),
+                                .child(self.locale.text("使用中", "In use")),
                         )
                     }),
             )
@@ -2853,9 +3214,11 @@ impl SettingsShell {
         let account = &subscription["account"];
         let status = account["status"].as_str().unwrap_or("ready");
         let status_label = match status {
-            "needs-sign-in" => "需要重新登录",
-            "account-unavailable" => "账号不可用",
-            "router-not-running" => "模型路由未运行",
+            "needs-sign-in" => self.locale.text("需要重新登录", "Sign in again"),
+            "account-unavailable" => self.locale.text("账号不可用", "Account unavailable"),
+            "router-not-running" => self
+                .locale
+                .text("模型路由未运行", "Model router is not running"),
             _ => "",
         };
         let account_line = [account["email"].as_str(), account["plan"].as_str()]
@@ -2914,7 +3277,7 @@ impl SettingsShell {
                     .font_weight(FontWeight(500.))
                     .text_color(rgb(ACCENT))
                     .bg(rgba(ACCENT_SOFT))
-                    .child("使用中"),
+                    .child(self.locale.text("使用中", "In use")),
             );
         }
         if !status_label.is_empty() {
@@ -3256,14 +3619,17 @@ impl SettingsShell {
         let editing = editor.draft.id.is_some();
         let pick = editor.step == EditorStep::Pick;
         let title = if pick {
-            "添加供应商".to_owned()
+            self.locale.text("添加供应商", "Add provider").to_owned()
         } else if editing {
-            "编辑供应商".to_owned()
+            self.locale.text("编辑供应商", "Edit provider").to_owned()
         } else {
             match editor.selection {
                 Some(PickChoice::Preset(id)) => format!(
                     "配置 {}",
-                    preset_by_id(id).map_or("自定义服务", |preset| preset.name)
+                    preset_by_id(id).map_or(
+                        self.locale.text("自定义服务", "custom service"),
+                        |preset| preset.name
+                    )
                 ),
                 _ => "配置 自定义服务".to_owned(),
             }
@@ -3375,7 +3741,7 @@ impl SettingsShell {
         let footer = if pick {
             let cancel = dialog_button(
                 "provider-setup-cancel",
-                "取消",
+                self.locale.text("取消", "Cancel"),
                 false,
                 !busy,
                 &editor.focus.cancel,
@@ -3385,7 +3751,7 @@ impl SettingsShell {
             );
             let next = dialog_button(
                 "provider-setup-next",
-                "下一步",
+                self.locale.text("下一步", "Next"),
                 true,
                 editor.selection.is_some() && !busy,
                 &editor.focus.next,
@@ -3420,7 +3786,7 @@ impl SettingsShell {
                         .text_size(px(13.))
                         .font_weight(FontWeight(600.))
                         .text_color(rgb(DANGER_TEXT))
-                        .child("删除");
+                        .child(self.locale.text("删除", "Delete"));
                     if busy {
                         button
                             .opacity(0.55)
@@ -3439,9 +3805,9 @@ impl SettingsShell {
             let save = dialog_button(
                 "provider-setup-save",
                 if self.providers.saving() {
-                    "保存中…"
+                    self.locale.text("保存中…", "Saving…")
                 } else {
-                    "保存"
+                    self.locale.text("保存", "Save")
                 },
                 true,
                 save_enabled,
@@ -3453,9 +3819,9 @@ impl SettingsShell {
             let save_switch = dialog_button(
                 "provider-setup-save-switch",
                 if self.providers.saving() {
-                    "保存中…"
+                    self.locale.text("保存中…", "Saving…")
                 } else {
-                    "保存并切换"
+                    self.locale.text("保存并切换", "Save and switch")
                 },
                 false,
                 save_enabled,
@@ -3481,7 +3847,11 @@ impl SettingsShell {
         } else {
             let save_only = dialog_button(
                 "provider-setup-save-only",
-                if busy { "保存中…" } else { "仅保存" },
+                if busy {
+                    self.locale.text("保存中…", "Saving…")
+                } else {
+                    self.locale.text("仅保存", "Save only")
+                },
                 false,
                 save_enabled,
                 &editor.focus.save,
@@ -3492,9 +3862,9 @@ impl SettingsShell {
             let add_use = dialog_button(
                 "provider-setup-add-use",
                 if busy {
-                    "处理中…"
+                    self.locale.text("处理中…", "Working…")
                 } else {
-                    "添加并使用"
+                    self.locale.text("添加并使用", "Add and use")
                 },
                 true,
                 save_enabled,
@@ -3640,7 +4010,7 @@ impl SettingsShell {
                 .text_size(px(12.))
                 .font_weight(FontWeight(600.))
                 .text_color(rgb(0x6f7d91))
-                .child("API 服务"),
+                .child(self.locale.text("API 服务", "API services")),
         );
         let mut grid = div().flex().flex_wrap().w_full().gap(px(12.));
         let mut any = false;
@@ -3704,7 +4074,7 @@ impl SettingsShell {
                                 .line_height(px(15.4))
                                 .text_color(rgb(0x8190a4))
                                 .whitespace_normal()
-                                .child("预设接入配置"),
+                                .child(self.locale.text("预设接入配置", "Preset configuration")),
                         ),
                 )
                 .child(
@@ -3741,66 +4111,73 @@ impl SettingsShell {
                     .text_size(px(11.))
                     .line_height(px(18.15))
                     .text_color(rgb(DIALOG_MUTED))
-                    .child("没有匹配的 API 服务，试试自定义配置。"),
+                    .child(self.locale.text(
+                        "没有匹配的 API 服务，试试自定义配置。",
+                        "No matching service. Try a custom configuration.",
+                    )),
             );
         }
         let selected = editor.selection == Some(PickChoice::Custom);
-        let mut custom = div()
-            .id("provider-preset-custom")
-            .mt(px(14.))
-            .w_full()
-            .min_h(px(83.))
-            .flex()
-            .items_center()
-            .gap(px(10.))
-            .p(px(13.))
-            .rounded(px(10.))
-            .border_1()
-            .border_color(rgb(if selected { 0x4d92f3 } else { 0xdde4ed }))
-            .bg(rgb(if selected { 0xedf5ff } else { 0xffffff }))
-            .hover(|style| style.border_color(rgb(0x8cb7f1)).bg(rgb(0xf7faff)))
-            .child(
-                div()
-                    .size(px(38.))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(9.))
-                    .bg(rgb(PRESET_ICON_BG))
-                    .text_size(px(24.))
-                    .font_weight(FontWeight(650.))
-                    .text_color(rgb(PRESET_ICON_FG))
-                    .child("＋"),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .child(
-                        div()
-                            .text_size(px(13.))
-                            .font_weight(FontWeight(650.))
-                            .text_color(rgb(DIALOG_LABEL))
-                            .child("自定义服务"),
-                    )
-                    .child(
-                        div()
-                            .mt(px(5.))
-                            .text_size(px(11.))
-                            .line_height(px(15.4))
-                            .text_color(rgb(0x8190a4))
-                            .child("使用自己的 API 地址和密钥"),
-                    ),
-            )
-            .child(
-                div()
-                    .text_size(px(17.))
-                    .text_color(rgb(if selected { 0x3284ed } else { 0x9aaac0 }))
-                    .child("›"),
-            );
+        let mut custom =
+            div()
+                .id("provider-preset-custom")
+                .mt(px(14.))
+                .w_full()
+                .min_h(px(83.))
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .p(px(13.))
+                .rounded(px(10.))
+                .border_1()
+                .border_color(rgb(if selected { 0x4d92f3 } else { 0xdde4ed }))
+                .bg(rgb(if selected { 0xedf5ff } else { 0xffffff }))
+                .hover(|style| style.border_color(rgb(0x8cb7f1)).bg(rgb(0xf7faff)))
+                .child(
+                    div()
+                        .size(px(38.))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(9.))
+                        .bg(rgb(PRESET_ICON_BG))
+                        .text_size(px(24.))
+                        .font_weight(FontWeight(650.))
+                        .text_color(rgb(PRESET_ICON_FG))
+                        .child("＋"),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .text_size(px(13.))
+                                .font_weight(FontWeight(650.))
+                                .text_color(rgb(DIALOG_LABEL))
+                                .child(self.locale.text("自定义服务", "custom service")),
+                        )
+                        .child(
+                            div()
+                                .mt(px(5.))
+                                .text_size(px(11.))
+                                .line_height(px(15.4))
+                                .text_color(rgb(0x8190a4))
+                                .child(self.locale.text(
+                                    "使用自己的 API 地址和密钥",
+                                    "Use your own API URL and key",
+                                )),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_size(px(17.))
+                        .text_color(rgb(if selected { 0x3284ed } else { 0x9aaac0 }))
+                        .child("›"),
+                );
         if busy {
             custom = custom.opacity(0.55);
         } else {
@@ -3841,7 +4218,10 @@ impl SettingsShell {
         let values = editor.values(cx);
         let editing = editor.draft.id.is_some();
         let preset = preset_by_endpoint(&values.endpoint);
-        let display_name = preset.map_or("自定义服务", |preset| preset.name);
+        let display_name = preset.map_or(
+            self.locale.text("自定义服务", "custom service"),
+            |preset| preset.name,
+        );
         let mut body = div().flex().flex_col().w_full();
 
         let mut strip = div()
@@ -3905,7 +4285,7 @@ impl SettingsShell {
         if !editing && !busy {
             strip = strip.child(link_button(
                 "provider-setup-change",
-                "更换",
+                self.locale.text("更换", "Change"),
                 &editor.focus.change,
                 self.keyboard_focus,
                 FocusRingStyle::Dialog,
@@ -3920,14 +4300,17 @@ impl SettingsShell {
         body = body.child(
             field_label("API Key")
                 .child(secret_field(editor.key.clone(), 44., 13., window, cx))
-                .child(help_text("密钥保存在本机，仅向你配置的服务发送。")),
+                .child(help_text(self.locale.text(
+                    "密钥保存在本机，仅向你配置的服务发送。",
+                    "Stored locally and sent only to your configured service.",
+                ))),
         );
 
         body = body.child(
-            field_label("API 地址")
+            field_label(self.locale.text("API 地址", "API URL"))
                 .child(rename_field(editor.endpoint.clone(), 44., 13., window, cx))
                 .child(help_text(
-                    "填写基础地址，不含 /messages 或 /responses；需支持上方协议。",
+                    self.locale.text("填写基础地址，不含 /messages 或 /responses；需支持上方协议。", "Use a base URL without /messages or /responses, supporting the protocol above."),
                 )),
         );
         if values.endpoint.starts_with("http:") {
@@ -3942,13 +4325,16 @@ impl SettingsShell {
                     .text_size(px(12.))
                     .line_height(px(19.2))
                     .text_color(rgb(DANGER_TEXT))
-                    .child("当前为 HTTP，密钥将以明文传输。远程服务建议使用 HTTPS。"),
+                    .child(self.locale.text(
+                        "当前为 HTTP，密钥将以明文传输。远程服务建议使用 HTTPS。",
+                        "HTTP sends the key unencrypted. Use HTTPS for remote services.",
+                    )),
             );
         }
 
         let metadata = editor.metadata_for(&values.model, cx);
-        let selected_model_field =
-            field_label("默认模型").child(rename_field(editor.model.clone(), 44., 13., window, cx));
+        let selected_model_field = field_label(self.locale.text("默认模型", "Default model"))
+            .child(rename_field(editor.model.clone(), 44., 13., window, cx));
         let model_block = selected_model_field.child(model_source(
             metadata.as_ref(),
             &values.model,
@@ -3957,13 +4343,15 @@ impl SettingsShell {
         ));
         body = body.child(model_block);
 
-        body = body.child(field_label("供应商名称").child(rename_field(
-            editor.name.clone(),
-            44.,
-            13.,
-            window,
-            cx,
-        )));
+        body = body.child(
+            field_label(self.locale.text("供应商名称", "Provider name")).child(rename_field(
+                editor.name.clone(),
+                44.,
+                13.,
+                window,
+                cx,
+            )),
+        );
 
         let mut mapping = div().flex().flex_col().gap(px(10.)).mt(px(4.));
         for index in 0..3 {
@@ -4138,9 +4526,15 @@ impl SettingsShell {
             let mut column = div().flex().flex_col().gap(px(5.)).child(row);
             if !supported {
                 let message = if row_metadata.is_some() {
-                    "该模型不支持当前推理强度。"
+                    self.locale.text(
+                        "该模型不支持当前推理强度。",
+                        "This model does not support the selected reasoning effort.",
+                    )
                 } else {
-                    "该模型不支持当前推理强度。"
+                    self.locale.text(
+                        "该模型不支持当前推理强度。",
+                        "This model does not support the selected reasoning effort.",
+                    )
                 };
                 column = column.child(
                     div()
@@ -4165,7 +4559,7 @@ impl SettingsShell {
                     .text_size(px(11.))
                     .line_height(px(18.15))
                     .text_color(rgb(DIALOG_MUTED))
-                    .child("已获取模型的推理强度来自接口返回范围；其余模型仍为候选，待服务确认。"),
+                    .child(self.locale.text("已获取模型的推理强度来自接口返回范围；其余模型仍为候选，待服务确认。", "Fetched models use their returned effort ranges; other models remain candidates pending service confirmation.")),
             );
         } else {
             mapping = mapping.child(
@@ -4173,7 +4567,7 @@ impl SettingsShell {
                     .text_size(px(11.))
                     .line_height(px(18.15))
                     .text_color(rgb(DIALOG_MUTED))
-                    .child("推理强度选项为候选，实际可用性以供应商支持为准。"),
+                    .child(self.locale.text("推理强度选项为候选，实际可用性以供应商支持为准。", "Reasoning effort options are candidates; actual availability depends on provider support.")),
             );
         }
         body = body.child(mapping.mb(px(20.)));
@@ -4226,16 +4620,24 @@ impl SettingsShell {
                     .unwrap_or(&editor.draft.name);
                 (
                     format!("删除「{name}」？"),
-                    "此操作移除保存的配置，不会注销账户。",
+                    self.locale.text(
+                        "此操作移除保存的配置，不会注销账户。",
+                        "This removes the saved configuration, not your account.",
+                    ),
                     "provider-setup-confirm-delete",
-                    "确认删除",
+                    self.locale.text("确认删除", "Delete"),
                 )
             } else {
                 (
-                    "有尚未保存的修改".to_owned(),
-                    "离开后，这次填写的内容将被丢弃。",
+                    self.locale
+                        .text("有尚未保存的修改", "You have unsaved changes")
+                        .to_owned(),
+                    self.locale.text(
+                        "离开后，这次填写的内容将被丢弃。",
+                        "Leaving discards this draft.",
+                    ),
                     "provider-setup-discard",
-                    "放弃修改",
+                    self.locale.text("放弃修改", "Discard"),
                 )
             };
             let mut confirm = div()
@@ -4266,7 +4668,7 @@ impl SettingsShell {
                         .gap(px(10.))
                         .child(confirm_button(
                             "provider-setup-keep-editing",
-                            "继续编辑",
+                            self.locale.text("继续编辑", "Keep editing"),
                             !self.providers.deleting(),
                             &editor.focus.keep_editing,
                             self.keyboard_focus,
@@ -4639,4 +5041,1399 @@ impl Render for SettingsShell {
             .children(dialog)
             .children(menu)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Language & time zone view (SET-08)
+// ---------------------------------------------------------------------------
+//
+// This block is a projection only. The settings host owns the drafts, the
+// saved baselines, the preference reads/writes, and the effective locale.
+// `LanguageZoneView::english` is the language currently applied by the shell,
+// not the language draft: choosing another radio updates the draft, and the
+// shell switches its copy only after the host confirms a save.
+//
+// The two blocks are independent. Each carries its own availability, busy,
+// dirty, saved, and error state; a language save must not disable the time zone
+// controls, and vice versa.
+//
+// Menu contract: the trigger and Escape/Tab/outside-click emit
+// `ToggleTimeZoneMenu` (the host flips `time_zone_menu_open`). Choosing an
+// option emits `SelectTimeZone`; the host updates the draft and closes the menu
+// in that action. `Enter`/`Space` on the trigger opens the menu; while it is
+// open, Up/Down/Home/End move the highlighted row, Enter/Space commits it, and
+// Escape closes it. The highlighted row is view-local, like a native popup.
+//
+// Frozen copy is transcribed verbatim from
+// `apps/desktop/src/renderer/src/hierarchy/ModelSwitchSettings.tsx`,
+// `ClaudeTimeZoneSettings.tsx`, `hierarchyShell.ts`, `common.ts`, and
+// `claude-time-zone-settings.css`. The only non-frozen labels are the two
+// neutral save-state chips below (`已保存` / `Saved`), which reuse the frozen
+// word that opens the time zone confirmation sentence.
+
+/// One block's status. `available` is false while the first read is pending or
+/// the preference service is disconnected; `dirty` means the draft differs
+/// from the saved value; `saved` is set only after a write is confirmed and the
+/// draft still matches it; `busy` is one write in flight for this block.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LanguageZoneBlock {
+    pub available: bool,
+    pub busy: bool,
+    pub dirty: bool,
+    pub saved: bool,
+    pub error: LanguageZoneError,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LanguageZoneError {
+    #[default]
+    None,
+    /// Settings service disconnected. Controls are disabled and Retry is shown.
+    Unavailable,
+    /// The saved value could not be read. Controls are disabled and Retry is
+    /// shown. The time zone block uses its own frozen read sentence; the
+    /// language block has no frozen read-error sentence, so it reuses the
+    /// generic disconnected sentence instead of inventing new copy.
+    Read,
+    /// The last write was not confirmed. The draft is kept and Save can retry.
+    Save,
+}
+
+/// The user-visible choices emitted by the view.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LanguageZoneAction {
+    SelectLanguage(String),
+    SelectTimeZone(String),
+    SaveLanguage,
+    CancelLanguage,
+    ResetLanguage,
+    RetryLanguage,
+    SaveTimeZone,
+    CancelTimeZone,
+    ResetTimeZone,
+    RetryTimeZone,
+    ToggleTimeZoneMenu,
+}
+
+/// The focus and popup state the host keeps for the lifetime of the settings
+/// page. Build one with [`LanguageZoneFocus::new`] and pass a reference in each
+/// [`LanguageZoneView`]. It is separate from `LanguageZoneView` because focus
+/// handles and the menu scroll position must survive re-renders, while the
+/// projection is rebuilt from host state.
+pub struct LanguageZoneFocus {
+    language_options: [FocusHandle; 3],
+    language_save: FocusHandle,
+    language_cancel: FocusHandle,
+    language_reset: FocusHandle,
+    language_retry: FocusHandle,
+    time_zone_trigger: FocusHandle,
+    time_zone_save: FocusHandle,
+    time_zone_cancel: FocusHandle,
+    time_zone_reset: FocusHandle,
+    time_zone_retry: FocusHandle,
+    menu_scroll: ScrollHandle,
+    menu_active: Rc<Cell<usize>>,
+    menu_open_seen: Rc<Cell<bool>>,
+    trigger_bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
+}
+
+impl LanguageZoneFocus {
+    pub fn new(cx: &App) -> Self {
+        let handle = || cx.focus_handle().tab_stop(true);
+        Self {
+            language_options: std::array::from_fn(|_| handle()),
+            language_save: handle(),
+            language_cancel: handle(),
+            language_reset: handle(),
+            language_retry: handle(),
+            time_zone_trigger: handle(),
+            time_zone_save: handle(),
+            time_zone_cancel: handle(),
+            time_zone_reset: handle(),
+            time_zone_retry: handle(),
+            menu_scroll: ScrollHandle::new(),
+            menu_active: Rc::new(Cell::new(0)),
+            menu_open_seen: Rc::new(Cell::new(false)),
+            trigger_bounds: Rc::new(RefCell::new(None)),
+        }
+    }
+}
+
+/// One frame of the language and time zone blocks.
+///
+/// - `language` is the language draft (`system`, `zh-CN`, `en`).
+/// - `time_zone` is the time zone draft (`auto`, `system`, or an IANA name).
+/// - `system_time_zone` is the host zone used for `system` and as the fallback
+///   effective zone for `auto`.
+/// - `auto_time_zone` is the host-supplied automatic candidate.
+/// - `zones` is the host-supplied IANA list after the two fixed entries.
+/// - `preview` is the already formatted clock time. Format it with
+///   [`LanguageZoneView::effective_time_zone`] so the suffix and the reading
+///   agree.
+/// - `forced_locale` is the `MATOU_LOCALE` override code (`en`, `zh-CN`), not a
+///   display label.
+/// - `keyboard_focus` mirrors the shell's keyboard-focus flag.
+#[derive(Clone, Copy)]
+pub struct LanguageZoneView<'a> {
+    pub english: bool,
+    pub language: &'a str,
+    pub time_zone: &'a str,
+    pub system_time_zone: &'a str,
+    pub auto_time_zone: Option<&'a str>,
+    pub zones: &'a [String],
+    pub preview: Option<&'a str>,
+    pub forced_locale: Option<&'a str>,
+    pub language_block: LanguageZoneBlock,
+    pub time_zone_block: LanguageZoneBlock,
+    pub time_zone_menu_open: bool,
+    pub keyboard_focus: bool,
+    pub focus: &'a LanguageZoneFocus,
+}
+
+impl<'a> LanguageZoneView<'a> {
+    /// The zone the frozen preview uses. Keep the host formatter and this view
+    /// in sync by formatting the preview clock with this value.
+    pub fn effective_time_zone(&self) -> &'a str {
+        match self.time_zone {
+            "auto" => self
+                .auto_time_zone
+                .filter(|zone| !zone.is_empty())
+                .unwrap_or(self.system_time_zone),
+            "system" => self.system_time_zone,
+            zone => zone,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct TimeZoneChoice {
+    value: String,
+    label: String,
+}
+
+const VIEW_LANGUAGE_FOLLOW: &str = "跟随系统";
+const VIEW_LANGUAGE_FOLLOW_EN: &str = "Follow system";
+const VIEW_LANGUAGE_CHINESE: &str = "中文";
+const VIEW_LANGUAGE_ENGLISH: &str = "English";
+const VIEW_LANGUAGE_NOTE: &str = "界面立即切换；运行时消息在重启后切换";
+const VIEW_LANGUAGE_NOTE_EN: &str =
+    "The interface switches immediately; runtime messages switch after a restart";
+const VIEW_TIME_ZONE_LABEL: &str = "时区";
+const VIEW_TIME_ZONE_LABEL_EN: &str = "Time zone";
+const VIEW_TIME_ZONE_HELP: &str = "自动：本机是大陆时区时，Claude Code、Codex 和 Antigravity 使用同为东八区的新加坡时区（出口在台湾时用台北），时间读数不变。";
+const VIEW_TIME_ZONE_HELP_EN: &str = "Automatic: when this Mac uses a mainland China time zone, Claude Code, Codex and Antigravity use another UTC+8 zone (Singapore, or Taipei when your exit is in Taiwan), so clock times stay the same.";
+const VIEW_TIME_ZONE_AUTO: &str = "自动（隐藏大陆时区，推荐）";
+const VIEW_TIME_ZONE_AUTO_EN: &str = "Automatic (hide mainland China time zone, recommended)";
+const VIEW_TIME_ZONE_PREVIEW: &str = "当前时间";
+const VIEW_TIME_ZONE_PREVIEW_EN: &str = "Current time";
+const VIEW_TIME_ZONE_SCOPE: &str = "仅影响码头启动的 Claude Code、Codex、Antigravity 及其子进程。保存后，新建、恢复和重启的会话自动使用该时区。正在运行的会话需重启后生效；保存不会中断任务。";
+const VIEW_TIME_ZONE_SCOPE_EN: &str = "Applies only to Claude Code, Codex, Antigravity and their child processes launched by Matou. New, resumed and restarted sessions use the saved zone automatically. Running sessions need a restart; saving does not interrupt tasks.";
+const VIEW_SAVE: &str = "保存";
+const VIEW_SAVE_EN: &str = "Save";
+const VIEW_SAVING: &str = "保存中…";
+const VIEW_SAVING_EN: &str = "Saving…";
+const VIEW_CANCEL: &str = "取消";
+const VIEW_CANCEL_EN: &str = "Cancel";
+const VIEW_RESTORE: &str = "恢复默认";
+const VIEW_RESTORE_EN: &str = "Restore defaults";
+const VIEW_RETRY: &str = "重试";
+const VIEW_RETRY_EN: &str = "Retry";
+const VIEW_SAVED: &str = "已保存";
+const VIEW_SAVED_EN: &str = "Saved";
+const VIEW_TIME_ZONE_SAVED: &str = "已保存，下次启动 Claude Code 时自动生效。";
+const VIEW_TIME_ZONE_SAVED_EN: &str =
+    "Saved. Applies automatically on the next Claude Code launch.";
+const VIEW_DISCONNECTED: &str = "设置服务未连接，请重试。";
+const VIEW_DISCONNECTED_EN: &str = "Settings service is disconnected. Please retry.";
+const VIEW_TIME_ZONE_READ: &str = "无法读取时区设置，请重试。";
+const VIEW_TIME_ZONE_READ_EN: &str = "Could not load the time zone. Please retry.";
+const VIEW_SAVE_UNCONFIRMED: &str = "保存未确认，请重试。";
+const VIEW_SAVE_UNCONFIRMED_EN: &str = "Save was not confirmed. Please retry.";
+const VIEW_ERROR_COLOR: u32 = 0xb34d47;
+const VIEW_RADIO_BORDER: u32 = 0x9aa3ae;
+const VIEW_ROW_TEXT: u32 = 0x414a57;
+const VIEW_GROUP_BG: u32 = 0xf5f8fc;
+const VIEW_MENU_SELECTED_TEXT: u32 = 0x2679d8;
+const VIEW_MENU_SELECTED_BG: u32 = 0xe4efff;
+const VIEW_MENU_ACTIVE_BG: u32 = 0xeef5ff;
+const VIEW_TIME_ZONE_MAX_WIDTH: f32 = 520.;
+const VIEW_MENU_MIN_WIDTH: f32 = 240.;
+const VIEW_MENU_MAX_HEIGHT: f32 = 300.;
+
+fn language_zone_text<'a>(english: bool, zh: &'a str, en: &'a str) -> &'a str {
+    if english { en } else { zh }
+}
+
+fn language_zone_locale_label(locale: &str) -> &str {
+    match locale {
+        "en" => VIEW_LANGUAGE_ENGLISH,
+        "zh-CN" => VIEW_LANGUAGE_CHINESE,
+        _ => locale,
+    }
+}
+
+fn language_zone_error_text(
+    error: LanguageZoneError,
+    english: bool,
+    time_zone: bool,
+) -> Option<&'static str> {
+    match error {
+        LanguageZoneError::None => None,
+        LanguageZoneError::Unavailable => Some(language_zone_text(
+            english,
+            VIEW_DISCONNECTED,
+            VIEW_DISCONNECTED_EN,
+        )),
+        LanguageZoneError::Read => Some(if time_zone {
+            language_zone_text(english, VIEW_TIME_ZONE_READ, VIEW_TIME_ZONE_READ_EN)
+        } else {
+            // No frozen language read-error sentence exists. Reuse the generic
+            // disconnected sentence rather than inventing copy.
+            language_zone_text(english, VIEW_DISCONNECTED, VIEW_DISCONNECTED_EN)
+        }),
+        LanguageZoneError::Save => Some(language_zone_text(
+            english,
+            VIEW_SAVE_UNCONFIRMED,
+            VIEW_SAVE_UNCONFIRMED_EN,
+        )),
+    }
+}
+
+fn language_zone_id(mut element: Div, id: &'static str) -> Div {
+    element.interactivity().element_id = Some(ElementId::Name(SharedString::from(id)));
+    element
+}
+
+#[cfg(debug_assertions)]
+#[derive(Default)]
+pub(crate) struct LanguageZoneProbe {
+    pub labels: Vec<String>,
+    pub bounds: Vec<Bounds<Pixels>>,
+    pub enabled: HashMap<&'static str, bool>,
+}
+
+#[cfg(debug_assertions)]
+thread_local! {
+    static LANGUAGE_ZONE_PROBE: RefCell<Option<LanguageZoneProbe>> = const { RefCell::new(None) };
+}
+
+#[cfg(debug_assertions)]
+#[allow(dead_code)]
+pub(crate) fn probe_language_zone(draw: impl FnOnce()) -> LanguageZoneProbe {
+    LANGUAGE_ZONE_PROBE.set(Some(LanguageZoneProbe::default()));
+    draw();
+    LANGUAGE_ZONE_PROBE.take().unwrap()
+}
+
+fn language_zone_label<T: AsRef<str>>(text: T) -> T {
+    #[cfg(debug_assertions)]
+    LANGUAGE_ZONE_PROBE.with_borrow_mut(|probe| {
+        if let Some(probe) = probe {
+            probe.labels.push(text.as_ref().to_owned());
+        }
+    });
+    text
+}
+
+fn language_zone_status(id: &'static str, text: &'static str) -> Div {
+    language_zone_id(
+        div()
+            .min_w_0()
+            .text_size(px(11.))
+            .line_height(relative(1.5))
+            .text_color(rgb(MUTED))
+            .whitespace_normal()
+            .child(language_zone_label(text)),
+        id,
+    )
+}
+
+fn language_zone_radio(selected: bool) -> Div {
+    let mut radio = div()
+        .flex_none()
+        .size(px(13.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .border_1()
+        .border_color(rgb(if selected { ACCENT } else { VIEW_RADIO_BORDER }))
+        .bg(rgb(if selected { ACCENT } else { PANEL }));
+    if selected {
+        radio = radio.child(div().size(px(5.)).rounded_full().bg(rgb(PANEL)));
+    }
+    radio
+}
+
+fn language_zone_row_ring(focus: FocusHandle, keyboard_focus: bool) -> AnyElement {
+    canvas(
+        |_, _, _| (),
+        move |bounds, _, window, _| {
+            if keyboard_focus && focus.is_focused(window) {
+                window.paint_quad(
+                    outline(
+                        bounds.inset(px(1.)),
+                        rgba(ACCENT_LINE),
+                        BorderStyle::default(),
+                    )
+                    .corner_radii(px(0.))
+                    .border_widths(px(2.)),
+                );
+            }
+        },
+    )
+    .absolute()
+    .inset_0()
+    .size_full()
+    .into_any_element()
+}
+
+fn language_option_row(
+    index: usize,
+    value: &'static str,
+    label: &'static str,
+    selected: bool,
+    enabled: bool,
+    options: &[FocusHandle; 3],
+    keyboard_focus: bool,
+    on_action: Rc<dyn Fn(LanguageZoneAction, &mut Window, &mut App)>,
+) -> AnyElement {
+    let focus = options[index].clone();
+    let mut row = div()
+        .id(SharedString::from(format!(
+            "settings-language-option-{value}"
+        )))
+        .relative()
+        .w_full()
+        .h(px(42.))
+        .flex()
+        .items_center()
+        .gap(px(9.))
+        .px(px(13.))
+        .text_size(px(10.))
+        .font_weight(FontWeight(650.))
+        .text_color(rgb(if selected { ACCENT } else { VIEW_ROW_TEXT }))
+        .bg(rgb(if selected { VIEW_GROUP_BG } else { PANEL_MUTED }));
+    if index < 2 {
+        row = row.border_b_1().border_color(rgba(LINE));
+    }
+    if selected {
+        row = row.child(
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left_0()
+                .w(px(2.))
+                .bg(rgb(ACCENT)),
+        );
+    }
+    if enabled && !selected {
+        row = row.hover(|style| style.bg(rgb(PANEL)));
+    }
+    row = row
+        .child(language_zone_radio(selected))
+        .child(language_zone_label(label));
+
+    if !enabled {
+        return row.opacity(0.55).into_any_element();
+    }
+
+    let all_options = options.clone();
+    let mouse_focus = focus.clone();
+    let key_action = on_action.clone();
+    let click_action = on_action;
+    row.relative()
+        .track_focus(&focus)
+        .cursor_pointer()
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            window.focus(&mouse_focus);
+            cx.stop_propagation();
+        })
+        .on_key_down(move |event: &KeyDownEvent, window, cx| {
+            if event.keystroke.modifiers.modified() {
+                return;
+            }
+            match event.keystroke.key.as_str() {
+                "enter" | "space" => {
+                    cx.stop_propagation();
+                    key_action(
+                        LanguageZoneAction::SelectLanguage(value.to_owned()),
+                        window,
+                        cx,
+                    );
+                }
+                "down" | "right" => {
+                    cx.stop_propagation();
+                    window.focus(&all_options[(index + 1) % all_options.len()]);
+                }
+                "up" | "left" => {
+                    cx.stop_propagation();
+                    window.focus(&all_options[(index + all_options.len() - 1) % all_options.len()]);
+                }
+                "home" => {
+                    cx.stop_propagation();
+                    window.focus(&all_options[0]);
+                }
+                "end" => {
+                    cx.stop_propagation();
+                    window.focus(&all_options[all_options.len() - 1]);
+                }
+                _ => {}
+            }
+        })
+        .on_click(move |event, window, cx| {
+            if matches!(event, ClickEvent::Keyboard(_)) {
+                return;
+            }
+            cx.stop_propagation();
+            click_action(
+                LanguageZoneAction::SelectLanguage(value.to_owned()),
+                window,
+                cx,
+            );
+        })
+        .child(language_zone_row_ring(focus, keyboard_focus))
+        .into_any_element()
+}
+
+fn language_zone_action_button(
+    id: &'static str,
+    label: &'static str,
+    primary: bool,
+    enabled: bool,
+    focus: FocusHandle,
+    keyboard_focus: bool,
+    on_action: Rc<dyn Fn(LanguageZoneAction, &mut Window, &mut App)>,
+    action: LanguageZoneAction,
+) -> AnyElement {
+    #[cfg(debug_assertions)]
+    LANGUAGE_ZONE_PROBE.with_borrow_mut(|probe| {
+        if let Some(probe) = probe {
+            probe.enabled.insert(id, enabled);
+        }
+    });
+    let base = div()
+        .id(id)
+        .h(px(32.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .px(px(14.))
+        .rounded(px(7.))
+        .border_1()
+        .text_size(px(11.))
+        .font_weight(FontWeight(650.))
+        .whitespace_nowrap()
+        .child(language_zone_label(label));
+    let button = if primary {
+        base.border_color(rgb(ACCENT))
+            .text_color(rgb(0xffffff))
+            .bg(rgb(ACCENT))
+    } else {
+        base.border_color(rgba(LINE_STRONG))
+            .text_color(rgb(TEXT))
+            .bg(rgb(PANEL))
+    };
+    if !enabled {
+        return button
+            .opacity(0.5)
+            .cursor(CursorStyle::Arrow)
+            .into_any_element();
+    }
+    let button = if primary {
+        button
+            .hover(|style| style.bg(rgb(0x2f79df)))
+            .cursor_pointer()
+    } else {
+        button
+            .hover(|style| {
+                style
+                    .border_color(rgb(ACCENT))
+                    .text_color(rgb(ACCENT))
+                    .bg(rgb(0xf7faff))
+            })
+            .cursor_pointer()
+    };
+    let key_action = action.clone();
+    let click_action = action;
+    let key_activate = on_action.clone();
+    let click_activate = on_action;
+    let mouse_focus = focus.clone();
+    button
+        .relative()
+        .track_focus(&focus)
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            window.focus(&mouse_focus);
+            cx.stop_propagation();
+        })
+        .on_key_down(move |event: &KeyDownEvent, window, cx| {
+            if matches!(event.keystroke.key.as_str(), "enter" | "space")
+                && !event.keystroke.modifiers.modified()
+            {
+                cx.stop_propagation();
+                key_activate(key_action.clone(), window, cx);
+            }
+        })
+        .on_click(move |event, window, cx| {
+            if matches!(event, ClickEvent::Keyboard(_)) {
+                return;
+            }
+            cx.stop_propagation();
+            click_activate(click_action.clone(), window, cx);
+        })
+        .child(focus_ring_with(
+            focus,
+            7.,
+            keyboard_focus,
+            FocusRingStyle::Shell,
+        ))
+        .into_any_element()
+}
+
+fn language_zone_error_line(
+    id: &'static str,
+    retry_id: &'static str,
+    text: &'static str,
+    english: bool,
+    retry: Option<(FocusHandle, LanguageZoneAction)>,
+    retry_enabled: bool,
+    keyboard_focus: bool,
+    on_action: Rc<dyn Fn(LanguageZoneAction, &mut Window, &mut App)>,
+) -> Div {
+    let mut line = div()
+        .flex()
+        .items_center()
+        .flex_wrap()
+        .gap(px(8.))
+        .mt(px(14.))
+        .text_size(px(11.))
+        .line_height(relative(1.55))
+        .text_color(rgb(VIEW_ERROR_COLOR))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .whitespace_normal()
+                .child(language_zone_label(text)),
+        );
+    if let Some((focus, action)) = retry {
+        line = line.child(language_zone_action_button(
+            retry_id,
+            language_zone_text(english, VIEW_RETRY, VIEW_RETRY_EN),
+            retry_id == "settings-time-zone-retry",
+            retry_enabled,
+            focus,
+            keyboard_focus,
+            on_action,
+            action,
+        ));
+    }
+    language_zone_id(line, id)
+}
+
+fn language_zone_choices(view: &LanguageZoneView<'_>) -> Vec<TimeZoneChoice> {
+    let english = view.english;
+    let system_label = if view.system_time_zone.is_empty() {
+        language_zone_text(english, VIEW_LANGUAGE_FOLLOW, VIEW_LANGUAGE_FOLLOW_EN).to_owned()
+    } else {
+        format!(
+            "{} ({})",
+            language_zone_text(english, VIEW_LANGUAGE_FOLLOW, VIEW_LANGUAGE_FOLLOW_EN),
+            view.system_time_zone
+        )
+    };
+    let mut choices = vec![
+        TimeZoneChoice {
+            value: "auto".to_owned(),
+            label: language_zone_text(english, VIEW_TIME_ZONE_AUTO, VIEW_TIME_ZONE_AUTO_EN)
+                .to_owned(),
+        },
+        TimeZoneChoice {
+            value: "system".to_owned(),
+            label: system_label,
+        },
+    ];
+    let mut seen: HashSet<&str> = HashSet::new();
+    seen.insert("auto");
+    seen.insert("system");
+    for zone in view.zones {
+        if !seen.insert(zone.as_str()) {
+            continue;
+        }
+        choices.push(TimeZoneChoice {
+            value: zone.clone(),
+            label: zone.clone(),
+        });
+    }
+    choices
+}
+
+fn language_zone_selected_index(choices: &[TimeZoneChoice], time_zone: &str) -> usize {
+    choices
+        .iter()
+        .position(|choice| choice.value.as_str() == time_zone)
+        .unwrap_or(0)
+}
+
+fn language_zone_trigger_label(view: &LanguageZoneView<'_>, choices: &[TimeZoneChoice]) -> String {
+    match view.time_zone {
+        "auto" => choices
+            .first()
+            .map(|choice| choice.label.clone())
+            .unwrap_or_default(),
+        "system" => choices
+            .get(1)
+            .map(|choice| choice.label.clone())
+            .unwrap_or_default(),
+        zone => zone.to_owned(),
+    }
+}
+
+fn language_zone_language_section(
+    view: LanguageZoneView<'_>,
+    on_action: Rc<dyn Fn(LanguageZoneAction, &mut Window, &mut App)>,
+) -> Div {
+    let english = view.english;
+    let block = view.language_block;
+    let enabled = block.available && !block.busy;
+    let options: [(&'static str, &'static str); 3] = [
+        (
+            "system",
+            language_zone_text(english, VIEW_LANGUAGE_FOLLOW, VIEW_LANGUAGE_FOLLOW_EN),
+        ),
+        ("zh-CN", VIEW_LANGUAGE_CHINESE),
+        ("en", VIEW_LANGUAGE_ENGLISH),
+    ];
+
+    let mut card = div()
+        .flex()
+        .flex_col()
+        .w_full()
+        .overflow_hidden()
+        .rounded(px(10.))
+        .border_1()
+        .border_color(rgba(LINE))
+        .bg(rgb(PANEL_MUTED))
+        .shadow(vec![shadow(0x222d3c, 0.02, 1., 2.)]);
+    for (index, (value, label)) in options.into_iter().enumerate() {
+        card = card.child(language_option_row(
+            index,
+            value,
+            label,
+            view.language == value,
+            enabled,
+            &view.focus.language_options,
+            view.keyboard_focus,
+            on_action.clone(),
+        ));
+    }
+    card = language_zone_id(card, "settings-language-options");
+
+    let mut section = div().flex().flex_col().w_full().mt(px(23.)).child(card);
+    section = section.child(
+        div()
+            .id("settings-language-note")
+            .mt(px(11.))
+            .mx(px(2.))
+            .text_size(px(9.))
+            .line_height(relative(1.5))
+            .text_color(rgb(MUTED))
+            .whitespace_normal()
+            .child(language_zone_label(language_zone_text(
+                english,
+                VIEW_LANGUAGE_NOTE,
+                VIEW_LANGUAGE_NOTE_EN,
+            ))),
+    );
+    if let Some(forced) = view.forced_locale {
+        let label = language_zone_locale_label(forced);
+        let line = if english {
+            format!("Currently fixed to {label} by the MATOU_LOCALE environment variable")
+        } else {
+            format!("当前由环境变量 MATOU_LOCALE 固定为 {label}")
+        };
+        section = section.child(
+            div()
+                .id("settings-language-forced")
+                .mt(px(11.))
+                .mx(px(2.))
+                .text_size(px(9.))
+                .line_height(relative(1.5))
+                .text_color(rgb(MUTED))
+                .whitespace_normal()
+                .child(language_zone_label(line)),
+        );
+    }
+
+    let dirty = block.dirty;
+    let can_save = enabled && dirty;
+    let can_cancel = enabled && dirty;
+    let can_reset = enabled && (view.language != "system" || dirty);
+    let mut actions = div()
+        .flex()
+        .items_center()
+        .flex_wrap()
+        .gap(px(12.))
+        .mt(px(18.))
+        .child(language_zone_action_button(
+            "settings-language-reset",
+            language_zone_text(english, VIEW_RESTORE, VIEW_RESTORE_EN),
+            false,
+            can_reset,
+            view.focus.language_reset.clone(),
+            view.keyboard_focus,
+            on_action.clone(),
+            LanguageZoneAction::ResetLanguage,
+        ))
+        .child(language_zone_action_button(
+            "settings-language-cancel",
+            language_zone_text(english, VIEW_CANCEL, VIEW_CANCEL_EN),
+            false,
+            can_cancel,
+            view.focus.language_cancel.clone(),
+            view.keyboard_focus,
+            on_action.clone(),
+            LanguageZoneAction::CancelLanguage,
+        ))
+        .child(language_zone_action_button(
+            "settings-language-save",
+            if block.busy {
+                language_zone_text(english, VIEW_SAVING, VIEW_SAVING_EN)
+            } else {
+                language_zone_text(english, VIEW_SAVE, VIEW_SAVE_EN)
+            },
+            true,
+            can_save,
+            view.focus.language_save.clone(),
+            view.keyboard_focus,
+            on_action.clone(),
+            LanguageZoneAction::SaveLanguage,
+        ));
+    if block.available && block.saved && !dirty && !block.busy {
+        actions = actions.child(language_zone_status(
+            "settings-language-status",
+            language_zone_text(english, VIEW_SAVED, VIEW_SAVED_EN),
+        ));
+    }
+    section = section.child(actions);
+
+    if let Some(text) = language_zone_error_text(block.error, english, false) {
+        let retryable = matches!(
+            block.error,
+            LanguageZoneError::Unavailable | LanguageZoneError::Read
+        );
+        let retry = retryable.then(|| {
+            (
+                view.focus.language_retry.clone(),
+                LanguageZoneAction::RetryLanguage,
+            )
+        });
+        section = section.child(language_zone_error_line(
+            "settings-language-error",
+            "settings-language-retry",
+            text,
+            english,
+            retry,
+            !block.busy,
+            view.keyboard_focus,
+            on_action,
+        ));
+    }
+    section
+}
+
+fn language_zone_time_zone_section(
+    view: LanguageZoneView<'_>,
+    choices: &[TimeZoneChoice],
+    menu_open: bool,
+    on_action: Rc<dyn Fn(LanguageZoneAction, &mut Window, &mut App)>,
+) -> Div {
+    let english = view.english;
+    let block = view.time_zone_block;
+    let enabled = block.available && !block.busy;
+    #[cfg(debug_assertions)]
+    LANGUAGE_ZONE_PROBE.with_borrow_mut(|probe| {
+        if let Some(probe) = probe {
+            probe.enabled.insert("settings-time-zone-trigger", enabled);
+        }
+    });
+    let trigger_label = language_zone_trigger_label(&view, choices);
+
+    let trigger_focus = view.focus.time_zone_trigger.clone();
+    let bounds_cell = view.focus.trigger_bounds.clone();
+    let mut trigger = div()
+        .id("settings-time-zone-trigger")
+        .w_full()
+        .h(px(36.))
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap(px(6.))
+        .px(px(10.))
+        .rounded(px(7.))
+        .border_1()
+        .border_color(if menu_open {
+            rgba(ACCENT_LINE)
+        } else {
+            rgba(LINE_STRONG)
+        })
+        .bg(rgb(PANEL))
+        .text_size(px(12.))
+        .text_color(rgb(TEXT))
+        .child(
+            div()
+                .id("settings-time-zone-value")
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .child(language_zone_label(trigger_label)),
+        )
+        .child(icon("chevron-down", 12., MUTED))
+        .child(
+            canvas(
+                |_, _, _| (),
+                move |bounds, _, _, _| {
+                    *bounds_cell.borrow_mut() = Some(bounds);
+                },
+            )
+            .absolute()
+            .inset_0()
+            .size_full(),
+        );
+
+    let mut section = div()
+        .flex()
+        .flex_col()
+        .w_full()
+        .max_w(px(VIEW_TIME_ZONE_MAX_WIDTH));
+    section = section.child(
+        div()
+            .id("settings-time-zone-label")
+            .mt(px(18.))
+            .text_size(px(12.))
+            .font_weight(FontWeight(650.))
+            .text_color(rgb(TEXT))
+            .child(language_zone_label(language_zone_text(
+                english,
+                VIEW_TIME_ZONE_LABEL,
+                VIEW_TIME_ZONE_LABEL_EN,
+            ))),
+    );
+    section = section.child(
+        div()
+            .id("settings-time-zone-help")
+            .mt(px(6.))
+            .text_size(px(11.))
+            .line_height(relative(1.7))
+            .text_color(rgb(MUTED))
+            .whitespace_normal()
+            .child(language_zone_label(language_zone_text(
+                english,
+                VIEW_TIME_ZONE_HELP,
+                VIEW_TIME_ZONE_HELP_EN,
+            ))),
+    );
+
+    if enabled {
+        let key_choices = choices.to_vec();
+        let menu_active = view.focus.menu_active.clone();
+        let menu_scroll = view.focus.menu_scroll.clone();
+        let mouse_focus = trigger_focus.clone();
+        let click_focus = trigger_focus.clone();
+        let key_focus = trigger_focus.clone();
+        let click_action = on_action.clone();
+        let key_action = on_action.clone();
+        trigger = trigger
+            .relative()
+            .track_focus(&trigger_focus)
+            .cursor_pointer()
+            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                window.focus(&mouse_focus);
+                cx.stop_propagation();
+            })
+            .on_click(move |event, window, cx| {
+                if matches!(event, ClickEvent::Keyboard(_)) {
+                    return;
+                }
+                cx.stop_propagation();
+                window.focus(&click_focus);
+                click_action(LanguageZoneAction::ToggleTimeZoneMenu, window, cx);
+            })
+            .on_key_down(move |event: &KeyDownEvent, window, cx| {
+                if event.keystroke.modifiers.modified() {
+                    return;
+                }
+                let key = event.keystroke.key.as_str();
+                if menu_open {
+                    if key_choices.is_empty() {
+                        return;
+                    }
+                    match key {
+                        "escape" => {
+                            cx.stop_propagation();
+                            window.focus(&key_focus);
+                            key_action(LanguageZoneAction::ToggleTimeZoneMenu, window, cx);
+                        }
+                        "tab" => {
+                            key_action(LanguageZoneAction::ToggleTimeZoneMenu, window, cx);
+                        }
+                        "down" => {
+                            cx.stop_propagation();
+                            let next = (menu_active.get() + 1) % key_choices.len();
+                            menu_active.set(next);
+                            menu_scroll.scroll_to_item(next);
+                            window.refresh();
+                        }
+                        "up" => {
+                            cx.stop_propagation();
+                            let len = key_choices.len();
+                            let next = (menu_active.get() + len - 1) % len;
+                            menu_active.set(next);
+                            menu_scroll.scroll_to_item(next);
+                            window.refresh();
+                        }
+                        "home" => {
+                            cx.stop_propagation();
+                            menu_active.set(0);
+                            menu_scroll.scroll_to_item(0);
+                            window.refresh();
+                        }
+                        "end" => {
+                            cx.stop_propagation();
+                            let last = key_choices.len() - 1;
+                            menu_active.set(last);
+                            menu_scroll.scroll_to_item(last);
+                            window.refresh();
+                        }
+                        "enter" | "space" => {
+                            cx.stop_propagation();
+                            let index = menu_active.get().min(key_choices.len() - 1);
+                            let value = key_choices[index].value.clone();
+                            window.focus(&key_focus);
+                            key_action(LanguageZoneAction::SelectTimeZone(value), window, cx);
+                        }
+                        _ => {
+                            cx.stop_propagation();
+                        }
+                    }
+                } else if matches!(key, "enter" | "space" | "down" | "up") {
+                    cx.stop_propagation();
+                    window.focus(&key_focus);
+                    key_action(LanguageZoneAction::ToggleTimeZoneMenu, window, cx);
+                }
+            })
+            .child(focus_ring_with(
+                trigger_focus,
+                7.,
+                view.keyboard_focus,
+                FocusRingStyle::Shell,
+            ));
+    } else {
+        trigger = trigger.opacity(0.55).cursor(CursorStyle::Arrow);
+    }
+    section = section.child(trigger);
+
+    if let Some(preview) = view.preview.filter(|value| !value.is_empty()) {
+        let effective = view.effective_time_zone();
+        let line = if effective.is_empty() {
+            format!(
+                "{}：{}",
+                language_zone_text(english, VIEW_TIME_ZONE_PREVIEW, VIEW_TIME_ZONE_PREVIEW_EN),
+                preview
+            )
+        } else {
+            format!(
+                "{}：{} · {}",
+                language_zone_text(english, VIEW_TIME_ZONE_PREVIEW, VIEW_TIME_ZONE_PREVIEW_EN),
+                preview,
+                effective
+            )
+        };
+        section = section.child(
+            div()
+                .id("settings-time-zone-preview")
+                .mt(px(8.))
+                .text_size(px(11.))
+                .line_height(relative(1.7))
+                .text_color(rgb(MUTED))
+                .whitespace_normal()
+                .child(language_zone_label(line)),
+        );
+    }
+    section = section.child(
+        div()
+            .id("settings-time-zone-scope")
+            .mt(px(8.))
+            .text_size(px(11.))
+            .line_height(relative(1.7))
+            .text_color(rgb(MUTED))
+            .whitespace_normal()
+            .child(language_zone_label(language_zone_text(
+                english,
+                VIEW_TIME_ZONE_SCOPE,
+                VIEW_TIME_ZONE_SCOPE_EN,
+            ))),
+    );
+
+    let dirty = block.dirty;
+    let can_save = enabled && dirty;
+    let can_cancel = enabled && dirty;
+    let can_reset = enabled && (view.time_zone != "auto" || dirty);
+    let mut actions = div()
+        .flex()
+        .items_center()
+        .flex_wrap()
+        .gap(px(12.))
+        .mt(px(18.))
+        .child(language_zone_action_button(
+            "settings-time-zone-reset",
+            language_zone_text(english, VIEW_RESTORE, VIEW_RESTORE_EN),
+            false,
+            can_reset,
+            view.focus.time_zone_reset.clone(),
+            view.keyboard_focus,
+            on_action.clone(),
+            LanguageZoneAction::ResetTimeZone,
+        ))
+        .child(language_zone_action_button(
+            "settings-time-zone-cancel",
+            language_zone_text(english, VIEW_CANCEL, VIEW_CANCEL_EN),
+            false,
+            can_cancel,
+            view.focus.time_zone_cancel.clone(),
+            view.keyboard_focus,
+            on_action.clone(),
+            LanguageZoneAction::CancelTimeZone,
+        ))
+        .child(language_zone_action_button(
+            "settings-time-zone-save",
+            if block.busy {
+                language_zone_text(english, VIEW_SAVING, VIEW_SAVING_EN)
+            } else {
+                language_zone_text(english, VIEW_SAVE, VIEW_SAVE_EN)
+            },
+            true,
+            can_save,
+            view.focus.time_zone_save.clone(),
+            view.keyboard_focus,
+            on_action.clone(),
+            LanguageZoneAction::SaveTimeZone,
+        ));
+    if block.available && block.saved && !dirty && !block.busy {
+        actions = actions.child(language_zone_status(
+            "settings-time-zone-status",
+            language_zone_text(english, VIEW_TIME_ZONE_SAVED, VIEW_TIME_ZONE_SAVED_EN),
+        ));
+    }
+    section = section.child(actions);
+
+    if let Some(text) = language_zone_error_text(block.error, english, true) {
+        let retryable = matches!(
+            block.error,
+            LanguageZoneError::Unavailable | LanguageZoneError::Read
+        );
+        let retry = retryable.then(|| {
+            (
+                view.focus.time_zone_retry.clone(),
+                LanguageZoneAction::RetryTimeZone,
+            )
+        });
+        section = section.child(language_zone_error_line(
+            "settings-time-zone-error",
+            "settings-time-zone-retry",
+            text,
+            english,
+            retry,
+            !block.busy,
+            view.keyboard_focus,
+            on_action,
+        ));
+    }
+    section
+}
+
+fn language_zone_menu_backdrop(
+    window: &Window,
+    trigger_focus: FocusHandle,
+    on_action: Rc<dyn Fn(LanguageZoneAction, &mut Window, &mut App)>,
+) -> AnyElement {
+    let viewport = window.viewport_size();
+    deferred(
+        anchored().position(point(px(0.), px(0.))).child(
+            div()
+                .id("settings-time-zone-menu-backdrop")
+                .w(viewport.width)
+                .h(viewport.height)
+                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                    window.focus(&trigger_focus);
+                    cx.stop_propagation();
+                    on_action(LanguageZoneAction::ToggleTimeZoneMenu, window, cx);
+                })
+                .on_scroll_wheel(|_, _, cx| cx.stop_propagation()),
+        ),
+    )
+    .with_priority(100)
+    .into_any_element()
+}
+
+fn language_zone_menu(
+    choices: &[TimeZoneChoice],
+    selected_value: &str,
+    active: usize,
+    bounds: Bounds<Pixels>,
+    viewport: Size<Pixels>,
+    menu_scroll: &ScrollHandle,
+    trigger_focus: FocusHandle,
+    on_action: Rc<dyn Fn(LanguageZoneAction, &mut Window, &mut App)>,
+) -> AnyElement {
+    let width = f32::from(bounds.size.width)
+        .max(VIEW_MENU_MIN_WIDTH)
+        .min((f32::from(viewport.width) - 16.).max(160.));
+    let max_height = (f32::from(viewport.height) - 16.)
+        .min(VIEW_MENU_MAX_HEIGHT)
+        .max(96.);
+    let mut menu = div()
+        .id("settings-time-zone-menu")
+        .w(px(width))
+        .max_h(px(max_height))
+        .flex()
+        .flex_col()
+        .p(px(4.))
+        .rounded(px(8.))
+        .border_1()
+        .border_color(rgba(LINE))
+        .bg(rgb(PANEL))
+        .shadow(vec![shadow(0x1a304b, 0.16, 8., 24.)])
+        .overflow_y_scroll()
+        .track_scroll(menu_scroll)
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_scroll_wheel(|_, _, cx| cx.stop_propagation());
+
+    for (index, choice) in choices.iter().enumerate() {
+        let selected = choice.value.as_str() == selected_value;
+        let is_active = index == active;
+        let background = if selected {
+            VIEW_MENU_SELECTED_BG
+        } else if is_active {
+            VIEW_MENU_ACTIVE_BG
+        } else {
+            PANEL
+        };
+        let text_color = if selected {
+            VIEW_MENU_SELECTED_TEXT
+        } else {
+            TEXT
+        };
+        let value = choice.value.clone();
+        let item_focus = trigger_focus.clone();
+        let item_action = on_action.clone();
+        menu = menu.child(
+            div()
+                .id(SharedString::from(format!(
+                    "settings-time-zone-option-{index}"
+                )))
+                .flex_none()
+                .h(px(32.))
+                .flex()
+                .items_center()
+                .px(px(9.))
+                .rounded(px(5.))
+                .text_size(px(12.))
+                .text_color(rgb(text_color))
+                .bg(rgb(background))
+                .hover(|style| style.bg(rgb(VIEW_MENU_SELECTED_BG)))
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(move |event, window, cx| {
+                    if matches!(event, ClickEvent::Keyboard(_)) {
+                        return;
+                    }
+                    cx.stop_propagation();
+                    window.focus(&item_focus);
+                    item_action(
+                        LanguageZoneAction::SelectTimeZone(value.clone()),
+                        window,
+                        cx,
+                    );
+                })
+                .child(language_zone_label(choice.label.clone())),
+        );
+    }
+
+    deferred(
+        anchored()
+            .position(point(bounds.left(), bounds.bottom() + px(4.)))
+            .snap_to_window_with_margin(px(8.))
+            .child(menu),
+    )
+    .with_priority(101)
+    .into_any_element()
+}
+
+/// Render the language and time zone blocks. The caller owns all preference
+/// state and applies the returned actions; this function only draws the frozen
+/// controls and reports user intent.
+///
+/// The actual signature adds `window` before `on_action` because the popup's
+/// backdrop and maximum width need the current viewport. `&Window` is read-only;
+/// the action callback receives the live `&mut Window`.
+pub fn language_zone_content(
+    view: LanguageZoneView<'_>,
+    window: &Window,
+    on_action: Rc<dyn Fn(LanguageZoneAction, &mut Window, &mut App)>,
+) -> Div {
+    let choices = language_zone_choices(&view);
+    let menu_open =
+        view.time_zone_menu_open && view.time_zone_block.available && !view.time_zone_block.busy;
+    let active = if menu_open {
+        if !view.focus.menu_open_seen.replace(true) {
+            let index = language_zone_selected_index(&choices, view.time_zone);
+            view.focus.menu_active.set(index);
+            view.focus.menu_scroll.scroll_to_item(index);
+        }
+        let index = view
+            .focus
+            .menu_active
+            .get()
+            .min(choices.len().saturating_sub(1));
+        view.focus.menu_active.set(index);
+        index
+    } else {
+        view.focus.menu_open_seen.set(false);
+        0
+    };
+
+    let language = language_zone_language_section(view, on_action.clone());
+    let divider = div()
+        .w_full()
+        .mt(px(24.))
+        .pt(px(6.))
+        .border_t_1()
+        .border_color(rgba(LINE));
+    let time_zone = language_zone_time_zone_section(view, &choices, menu_open, on_action.clone());
+
+    let mut root = div().flex().flex_col().w_full();
+    root = language_zone_id(root, "settings-language-zone");
+    root = root.child(language).child(divider).child(time_zone);
+    #[cfg(debug_assertions)]
+    if LANGUAGE_ZONE_PROBE.with_borrow(|probe| probe.is_some()) {
+        root = root.on_children_prepainted(|bounds, _, _| {
+            LANGUAGE_ZONE_PROBE.with_borrow_mut(|probe| {
+                if let Some(probe) = probe {
+                    probe.bounds = bounds;
+                }
+            });
+        });
+    }
+
+    if menu_open {
+        if let Some(bounds) = (*view.focus.trigger_bounds.borrow()).clone() {
+            root = root.child(language_zone_menu_backdrop(
+                window,
+                view.focus.time_zone_trigger.clone(),
+                on_action.clone(),
+            ));
+            root = root.child(language_zone_menu(
+                &choices,
+                view.time_zone,
+                active,
+                bounds,
+                window.viewport_size(),
+                &view.focus.menu_scroll,
+                view.focus.time_zone_trigger.clone(),
+                on_action,
+            ));
+        }
+    }
+    root
+}
+
+#[cfg(target_os = "macos")]
+fn format_time_zone_preview(zone: &str, english: bool) -> Option<String> {
+    use std::ffi::{CStr, CString, c_char, c_void};
+
+    type CF = *const c_void;
+    const UTF8: u32 = 0x0800_0100;
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        static kCFDateFormatterTimeZone: CF;
+        fn CFAbsoluteTimeGetCurrent() -> f64;
+        fn CFDateFormatterCreate(
+            allocator: CF,
+            locale: CF,
+            date_style: isize,
+            time_style: isize,
+        ) -> CF;
+        fn CFDateFormatterSetFormat(formatter: CF, format: CF);
+        fn CFDateFormatterSetProperty(formatter: CF, key: CF, value: CF);
+        fn CFDateFormatterCreateStringWithAbsoluteTime(
+            allocator: CF,
+            formatter: CF,
+            time: f64,
+        ) -> CF;
+        fn CFLocaleCreate(allocator: CF, identifier: CF) -> CF;
+        fn CFStringCreateWithCString(allocator: CF, string: *const c_char, encoding: u32) -> CF;
+        fn CFStringGetCString(string: CF, buffer: *mut c_char, size: isize, encoding: u32) -> u8;
+        fn CFTimeZoneCreateWithName(allocator: CF, name: CF, try_abbreviation: u8) -> CF;
+        fn CFRelease(value: CF);
+    }
+
+    struct Owned(CF);
+    impl Owned {
+        fn new(pointer: CF) -> Option<Self> {
+            if pointer.is_null() {
+                None
+            } else {
+                Some(Self(pointer))
+            }
+        }
+    }
+    impl Drop for Owned {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                // This wrapper owns the reference returned by a Create function.
+                unsafe { CFRelease(self.0) };
+            }
+        }
+    }
+
+    let allocator = std::ptr::null();
+    let make_string =
+        |s: &CStr| Owned::new(unsafe { CFStringCreateWithCString(allocator, s.as_ptr(), UTF8) });
+    let zone_name = make_string(&CString::new(zone).ok()?)?;
+    let locale_id = make_string(if english { c"en_US" } else { c"zh_CN" })?;
+    let format = make_string(if english {
+        c"MMM d, HH:mm"
+    } else {
+        c"M月d日 HH:mm"
+    })?;
+    // Foundation formats the specified zone without modifying the process TZ.
+    unsafe {
+        let timezone = Owned::new(CFTimeZoneCreateWithName(allocator, zone_name.0, 0))?;
+        let locale = Owned::new(CFLocaleCreate(allocator, locale_id.0))?;
+        let formatter = Owned::new(CFDateFormatterCreate(allocator, locale.0, 0, 0))?;
+        CFDateFormatterSetFormat(formatter.0, format.0);
+        CFDateFormatterSetProperty(formatter.0, kCFDateFormatterTimeZone, timezone.0);
+        let value = Owned::new(CFDateFormatterCreateStringWithAbsoluteTime(
+            allocator,
+            formatter.0,
+            CFAbsoluteTimeGetCurrent(),
+        ))?;
+        let mut buffer = [0; 128];
+        (CFStringGetCString(value.0, buffer.as_mut_ptr(), 128, UTF8) != 0).then(|| {
+            CStr::from_ptr(buffer.as_ptr())
+                .to_string_lossy()
+                .into_owned()
+        })
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn format_time_zone_preview(_zone: &str, _english: bool) -> Option<String> {
+    None
 }

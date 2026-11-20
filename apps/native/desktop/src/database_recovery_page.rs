@@ -162,6 +162,7 @@ pub struct ConfirmationFocus<'a> {
 
 /// Everything the workspace projects into the recovery page.
 pub struct PagePresentation<'a> {
+    pub locale: matou_native_core::sessions::InterfaceLocale,
     pub available: bool,
     pub pending: Option<PageOperation>,
     pub selected_backup: Option<&'a str>,
@@ -243,6 +244,7 @@ pub fn render(
     on_action: impl Fn(&PageAction, &mut Window, &mut App) + 'static,
 ) -> Stateful<Div> {
     let PagePresentation {
+        locale,
         available,
         pending,
         selected_backup,
@@ -255,10 +257,10 @@ pub fn render(
 
     let on_action: PageActionHandler = Rc::new(on_action);
     let (title, description) = match details.map(|details| details.reason) {
-        Some(DatabaseRecoveryReason::Ownership) => (OWNERSHIP_TITLE, OWNERSHIP_DESCRIPTION),
-        Some(DatabaseRecoveryReason::Wal) => (TITLE, WAL_DESCRIPTION),
-        Some(DatabaseRecoveryReason::Integrity) => (TITLE, INTEGRITY_DESCRIPTION),
-        None => (TITLE, INVALID_MARKER_DESCRIPTION),
+        Some(DatabaseRecoveryReason::Ownership) => (locale.text(OWNERSHIP_TITLE, "The database ownership state needs attention"), locale.text(OWNERSHIP_DESCRIPTION, "The database ownership record or handover state is inconsistent. The original database is still in place and will not be moved aside as a damaged file before you act.")),
+        Some(DatabaseRecoveryReason::Wal) => (locale.text(TITLE, "The database needs recovery"), locale.text(WAL_DESCRIPTION, "The database log is incomplete. Matou kept the original database and log files, so you can restore a backup or export your data.")),
+        Some(DatabaseRecoveryReason::Integrity) => (locale.text(TITLE, "The database needs recovery"), locale.text(INTEGRITY_DESCRIPTION, "The database failed its integrity check. Matou kept the original files and will not start a blank workspace on its own.")),
+        None => (locale.text(TITLE, "The database needs recovery"), INVALID_MARKER_DESCRIPTION),
     };
     let backups = details.map(|details| visible_backups(&details.backups));
     let startup_error = match details {
@@ -276,7 +278,13 @@ pub fn render(
             text.to_owned()
         }
     });
-    let success = exported_path.map(|path| format!("{EXPORTED_TO}{}", path.display()));
+    let success = exported_path.map(|path| {
+        format!(
+            "{}{}",
+            locale.text(EXPORTED_TO, "Recovery bundle exported to "),
+            path.display()
+        )
+    });
     let confirm_enabled = available && pending.is_none() && details.is_some();
     let can_act = confirm_enabled && confirmation.is_none();
     let can_open = can_act && details.is_some_and(|details| !details.recovery_id.is_empty());
@@ -304,7 +312,7 @@ pub fn render(
                 .text_size(px(13.))
                 .font_weight(FontWeight::BOLD)
                 .whitespace_nowrap()
-                .child(ui_text(EYEBROW).normal_line_height()),
+                .child(ui_text(locale.text(EYEBROW, "Matou data recovery")).normal_line_height()),
         )
         .child(
             div()
@@ -389,7 +397,9 @@ pub fn render(
         if pending.is_some() {
             notices = notices.child(notice(
                 "database-recovery-progress",
-                WORKING.to_owned(),
+                locale
+                    .text(WORKING, "Recovering the database. Keep Matou open…")
+                    .to_owned(),
                 PROGRESS_TEXT,
                 PROGRESS_BACKGROUND,
             ));
@@ -427,7 +437,10 @@ pub fn render(
                             .text_size(px(15.))
                             .font_weight(FontWeight::BOLD)
                             .whitespace_nowrap()
-                            .child(ui_text(BACKUPS).normal_line_height()),
+                            .child(
+                                ui_text(locale.text(BACKUPS, "Available backups"))
+                                    .normal_line_height(),
+                            ),
                     )
                     .child(
                         div()
@@ -437,7 +450,10 @@ pub fn render(
                             .text_color(rgb(COUNT_TEXT))
                             .text_size(px(13.))
                             .whitespace_nowrap()
-                            .child(ui_text(format!("{} 份", backups.len())).normal_line_height()),
+                            .child(
+                                ui_text(format!("{}{}", backups.len(), locale.text(" 份", "")))
+                                    .normal_line_height(),
+                            ),
                     ),
             );
 
@@ -452,7 +468,10 @@ pub fn render(
                     .text_size(px(16.))
                     .line_height(relative(NORMAL_LINE_HEIGHT))
                     .whitespace_normal()
-                    .child(ui_text(NO_BACKUPS)),
+                    .child(ui_text(locale.text(
+                        NO_BACKUPS,
+                        "No backup has passed the integrity check yet.",
+                    ))),
             );
         } else {
             let mut list = div()
@@ -469,6 +488,7 @@ pub fn render(
                     backup,
                     selected_backup == Some(backup.id.as_str()),
                     can_act,
+                    locale,
                     on_action.clone(),
                 ));
             }
@@ -478,19 +498,19 @@ pub fn render(
     }
 
     let restore_label = if pending == Some(PageOperation::Restore) {
-        RESTORING
+        locale.text(RESTORING, "Restoring…")
     } else {
-        RESTORE_SELECTED
+        locale.text(RESTORE_SELECTED, "Restore backup")
     };
     let retry_label = if pending == Some(PageOperation::Retry) {
-        CHECKING
+        locale.text(CHECKING, "Checking…")
     } else {
-        RECHECK_DATABASE
+        locale.text(RECHECK_DATABASE, "Check database again")
     };
     let export_label = if pending == Some(PageOperation::Export) {
-        EXPORTING
+        locale.text(EXPORTING, "Exporting…")
     } else {
-        EXPORT_BUNDLE
+        locale.text(EXPORT_BUNDLE, "Export recovery bundle")
     };
 
     let restore = action_button(
@@ -541,7 +561,7 @@ pub fn render(
     let start_empty = action_button(
         "database-recovery-start-empty",
         "database-recovery-start-empty",
-        START_EMPTY,
+        locale.text(START_EMPTY, "Create new empty database"),
         can_open,
         ButtonStyle::DangerLink,
         PageAction::OpenConfirmation,
@@ -573,7 +593,7 @@ pub fn render(
                     .text_size(px(12.))
                     .line_height(relative(NORMAL_LINE_HEIGHT))
                     .whitespace_normal()
-                    .child(ui_text(START_EMPTY_HINT)),
+                    .child(ui_text(locale.text(START_EMPTY_HINT, "This runs only after you confirm it explicitly. The quarantined files and the backups are kept."))),
             ),
     );
 
@@ -610,6 +630,7 @@ pub fn render(
             confirmation.back,
             confirmation.confirm,
             confirm_enabled,
+            locale,
             on_action,
         ));
     }
@@ -617,10 +638,14 @@ pub fn render(
 }
 
 /// Render the error and disabled actions without a trusted recovery generation.
-pub fn render_invalid_marker(viewport_height: Pixels) -> Stateful<Div> {
+pub fn render_invalid_marker(
+    viewport_height: Pixels,
+    locale: matou_native_core::sessions::InterfaceLocale,
+) -> Stateful<Div> {
     render(
         None,
         PagePresentation {
+            locale,
             available: false,
             pending: None,
             selected_backup: None,
@@ -923,6 +948,7 @@ fn empty_confirmation_dialog(
     back: &FocusHandle,
     confirm: &FocusHandle,
     confirm_enabled: bool,
+    locale: matou_native_core::sessions::InterfaceLocale,
     on_action: PageActionHandler,
 ) -> Stateful<Div> {
     let back_focus = back.clone().tab_stop(true);
@@ -933,7 +959,7 @@ fn empty_confirmation_dialog(
     let back_button = action_button(
         "database-recovery-dialog-back",
         "database-recovery-dialog-back",
-        BACK,
+        locale.text(BACK, "Back"),
         true,
         ButtonStyle::DialogBack,
         PageAction::CancelConfirmation,
@@ -943,7 +969,7 @@ fn empty_confirmation_dialog(
     let confirm_button = action_button(
         "database-recovery-dialog-confirm",
         "database-recovery-dialog-confirm",
-        CONFIRM_EMPTY,
+        locale.text(CONFIRM_EMPTY, "Create empty database"),
         confirm_enabled,
         ButtonStyle::DialogDanger,
         PageAction::ConfirmEmpty,
@@ -959,7 +985,9 @@ fn empty_confirmation_dialog(
         .line_height(relative(NORMAL_LINE_HEIGHT))
         .text_color(rgb(PRIMARY_TEXT))
         .whitespace_normal()
-        .child(ui_text(CONFIRM_EMPTY_TITLE));
+        .child(ui_text(
+            locale.text(CONFIRM_EMPTY_TITLE, "Create a new empty database?"),
+        ));
     let body = div()
         .id("database-recovery-dialog-body")
         .debug_selector(|| "database-recovery-dialog-body".to_owned())
@@ -970,7 +998,7 @@ fn empty_confirmation_dialog(
         .text_size(px(16.))
         .line_height(relative(1.55))
         .whitespace_normal()
-        .child(ui_text(CONFIRM_EMPTY_BODY));
+        .child(ui_text(locale.text(CONFIRM_EMPTY_BODY, "Matou will show a brand-new empty workspace. The damaged files and the backups are kept so you can export and investigate them later.")));
     let footer = probe_children(div(), "confirmation-buttons")
         .id("database-recovery-dialog-actions")
         .debug_selector(|| "database-recovery-dialog-actions".to_owned())
@@ -1042,6 +1070,7 @@ fn empty_confirmation_dialog(
 pub fn render_read_only_banner(
     background: u32,
     foreground: u32,
+    locale: matou_native_core::sessions::InterfaceLocale,
     pending: bool,
     feedback: Option<Result<Option<&str>, &str>>,
     search_enabled: bool,
@@ -1060,14 +1089,20 @@ pub fn render_read_only_banner(
         .text_color(rgb(BANNER_HEADLINE_COLOR))
         .font_weight(FontWeight::BOLD)
         .whitespace_normal()
-        .child(ui_text(READ_ONLY_TITLE).normal_line_height());
+        .child(
+            ui_text(locale.text(
+                READ_ONLY_TITLE,
+                "The database is in read-only recovery mode",
+            ))
+            .normal_line_height(),
+        );
     let explanation = div()
         .id("read-only-recovery-banner-explanation")
         .debug_selector(|| "read-only-recovery-banner-explanation".to_owned())
         .min_w_0()
         .text_color(foreground.opacity(0.78))
         .whitespace_normal()
-        .child(ui_text(READ_ONLY_EXPLANATION));
+        .child(ui_text(locale.text(READ_ONLY_EXPLANATION, "Existing workspaces, tasks and sessions can still be browsed, searched and copied. Anything that would change data is paused.")));
     let message = div()
         .id("read-only-recovery-banner-message")
         .debug_selector(|| "read-only-recovery-banner-message".to_owned())
@@ -1085,7 +1120,7 @@ pub fn render_read_only_banner(
         .id("read-only-recovery-banner-search-label")
         .debug_selector(|| "read-only-recovery-banner-search-label".to_owned())
         .whitespace_nowrap()
-        .child(ui_text(SEARCH_TERMINAL).normal_line_height());
+        .child(ui_text(locale.text(SEARCH_TERMINAL, "Search this terminal")).normal_line_height());
     let search = div()
         .id("read-only-recovery-banner-search")
         .debug_selector(|| "read-only-recovery-banner-search".to_owned())
@@ -1108,7 +1143,11 @@ pub fn render_read_only_banner(
         search.opacity(0.55).cursor(CursorStyle::Arrow)
     };
 
-    let export_label = if pending { EXPORTING } else { EXPORT_DATABASE };
+    let export_label = if pending {
+        locale.text(EXPORTING, "Exporting…")
+    } else {
+        locale.text(EXPORT_DATABASE, "Export recovery bundle")
+    };
     let export_label = div()
         .id("read-only-recovery-banner-export-label")
         .debug_selector(|| "read-only-recovery-banner-export-label".to_owned())
@@ -1174,7 +1213,7 @@ pub fn render_read_only_banner(
         .text_color(foreground)
         .child(row);
 
-    if let Some((text, error)) = read_only_feedback(feedback) {
+    if let Some((text, error)) = read_only_feedback(feedback, locale) {
         let (id, selector, color) = if error {
             (
                 "read-only-recovery-banner-error",
@@ -1204,11 +1243,26 @@ pub fn render_read_only_banner(
     banner
 }
 
-fn read_only_feedback(feedback: Option<Result<Option<&str>, &str>>) -> Option<(String, bool)> {
+fn read_only_feedback(
+    feedback: Option<Result<Option<&str>, &str>>,
+    locale: matou_native_core::sessions::InterfaceLocale,
+) -> Option<(String, bool)> {
     feedback.map(|result| match result {
-        Ok(Some(path)) => (format!("数据库资料已导出到 {path}"), false),
-        Ok(None) => (EXPORTED.to_owned(), false),
-        Err(reason) => (format!("{EXPORT_FAILED}{reason}"), true),
+        Ok(Some(path)) => (
+            format!(
+                "{}{path}",
+                locale.text("数据库资料已导出到 ", "Recovery bundle exported to ")
+            ),
+            false,
+        ),
+        Ok(None) => (
+            locale.text(EXPORTED, "Recovery bundle exported").to_owned(),
+            false,
+        ),
+        Err(reason) => (
+            format!("{}{reason}", locale.text(EXPORT_FAILED, "Export failed: ")),
+            true,
+        ),
     })
 }
 
@@ -1288,11 +1342,13 @@ fn backup_row(
     backup: &DatabaseRecoveryBackup,
     selected: bool,
     enabled: bool,
+    locale: matou_native_core::sessions::InterfaceLocale,
     on_action: PageActionHandler,
 ) -> Stateful<Div> {
     let metadata = format!(
-        "{} · 数据版本 {} · {}",
+        "{} · {} {} · {}",
         format_backup_time(backup.created_at),
+        locale.text("数据版本", "Schema version"),
         backup.schema_version,
         format_backup_size(backup.size)
     );

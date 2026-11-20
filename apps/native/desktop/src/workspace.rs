@@ -17,6 +17,9 @@ use matou_native_core::geometry::GeometryUpdate;
 use matou_native_core::hierarchy::canvas::{ForkPlacement, ForkWorktreeMode};
 use matou_native_core::hierarchy::cards::RemoveScope;
 use matou_native_core::hierarchy::{HierarchyResult, Scene, Task, Workspace as HierarchyWorkspace};
+use matou_native_core::sessions::{
+    InterfaceLocale, LocalePreference, current_interface_locale, read_locale_preference,
+};
 use matou_native_core::workspace_paths::WorkspacePathState;
 use matou_native_runtime::history::{
     HistoryCursor, HistoryLine, HistoryPage as OfflineHistoryPage, HistorySearchOptions,
@@ -24,7 +27,7 @@ use matou_native_runtime::history::{
 use matou_native_runtime::history_worker::{HistoryReply, HistoryRequest};
 use matou_native_runtime::host::{
     DATABASE_RECOVERY_INTERRUPTED, RecentReplies, STORAGE_READ_ONLY_TITLE, StoragePhase,
-    database_recovery_request_id, deferred_summary_text,
+    database_recovery_request_id, deferred_summary_text, save_locale_preference,
 };
 use matou_native_runtime::protocol::{
     ClaudeModelCatalogReply, ClaudeRoleAssignmentsReply, ProviderSettingsReply,
@@ -1181,6 +1184,10 @@ fn read_only_navigation(active: ReadOnlyNavigation) -> Event {
 }
 
 pub struct Workspace {
+    locale: InterfaceLocale,
+    locale_preference: LocalePreference,
+    locale_data_root: Option<PathBuf>,
+    locale_save_pending: bool,
     history_view: Option<Entity<HistoryView>>,
     history_request: Option<HistoryContextRequest>,
     search: Option<TerminalSearchState>,
@@ -2177,7 +2184,22 @@ impl Workspace {
         });
         let launch_options =
             crate::runtime_bridge::LaunchOptions::from_args(std::env::args_os().skip(1)).ok();
+        let locale_data_root = launch_options
+            .as_ref()
+            .map(|options| options.data_root.clone());
+        let locale_preference = locale_data_root
+            .as_deref()
+            .map(read_locale_preference)
+            .unwrap_or_default();
         Self {
+            locale: locale_data_root
+                .as_ref()
+                .map_or(InterfaceLocale::default(), |_| {
+                    current_interface_locale(locale_preference)
+                }),
+            locale_preference,
+            locale_data_root,
+            locale_save_pending: false,
             history_view: None,
             history_request: None,
             search: None,
@@ -2368,18 +2390,94 @@ impl Workspace {
         self.fork_menu = None;
         self.permission_menu = None;
         let commands = self.commands.clone();
-        let settings = cx.new(|cx| SettingsShell::new(commands, window, cx));
+        let settings = cx.new(|cx| {
+            let mut settings = SettingsShell::new(commands, window, cx);
+            settings.configure_locale(
+                self.locale_preference,
+                self.locale,
+                self.locale_save_pending,
+            );
+            settings
+        });
         let subscription =
             cx.subscribe_in(
                 &settings,
                 window,
                 |this, _, event, window, cx| match event {
                     SettingsShellEvent::Close => this.close_settings(window, cx),
+                    SettingsShellEvent::SaveLocale(preference) => {
+                        this.save_interface_locale(*preference, window, cx);
+                    }
                 },
             );
         self.settings = Some((settings, subscription));
         self.sync_terminal_input(window, cx);
         cx.notify();
+    }
+
+    fn save_interface_locale(
+        &mut self,
+        preference: LocalePreference,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let settings = self
+            .settings
+            .as_ref()
+            .map(|(settings, _)| settings.downgrade());
+        let Some(root) = self.locale_data_root.clone() else {
+            if let Some(settings) = settings {
+                let _ = settings.update(cx, |settings, cx| settings.locale_save_failed(cx));
+            }
+            return;
+        };
+        if self.locale_save_pending {
+            return;
+        }
+        self.locale_save_pending = true;
+        let save = cx.background_spawn(async move { save_locale_preference(&root, preference) });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = save.await;
+            let _ = cx.update(|_, cx| {
+                this.update(cx, |this, cx| {
+                    this.locale_save_pending = false;
+                    match result {
+                        Ok(locale) => {
+                            this.locale_preference = preference;
+                            this.locale = locale;
+                            if let Some((current, _)) = &this.settings {
+                                let is_saving_view = settings
+                                    .as_ref()
+                                    .is_some_and(|original| *original == current.downgrade());
+                                current.update(cx, |settings, cx| {
+                                    settings.locale_saved(preference, locale, is_saving_view, cx);
+                                });
+                            }
+                            cx.emit(locale);
+                            cx.notify();
+                        }
+                        Err(_) => {
+                            if let Some((settings, _)) = &this.settings {
+                                settings.update(cx, |settings, cx| settings.locale_save_failed(cx));
+                            }
+                        }
+                    }
+                })
+            });
+        })
+        .detach();
+    }
+
+    fn workspace_path_unavailable(&self) -> &'static str {
+        self.locale.text(WORKSPACE_PATH_UNAVAILABLE, "The workspace directory is unavailable. Restore the original path locally, or remove the workspace.")
+    }
+
+    fn pin_label(&self, pinned: bool) -> &'static str {
+        if pinned {
+            self.locale.text("取消置顶", "Unpin")
+        } else {
+            self.locale.text("置顶", "Pin")
+        }
     }
 
     fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -3232,6 +3330,12 @@ impl Workspace {
             _ => {}
         }
         match event {
+            Event::TimeZoneSettings(reply) => {
+                if let Some((settings, _)) = &self.settings {
+                    settings.update(cx, |settings, cx| settings.receive_time_zone(reply, cx));
+                }
+                return;
+            }
             Event::DatabaseRecoveryResult(result) => {
                 if let Some(state) = &mut self.read_only
                     && state.pending_export.as_ref() == Some(&result.request_id)
@@ -5270,7 +5374,7 @@ impl Workspace {
                                     .text_size(px(9. * scale))
                                     .line_height(px(12.5 * scale))
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .child(ui_text("默认")),
+                                    .child(ui_text(self.locale.text("默认", "Default"))),
                             )
                         })
                         .when(workspace.is_pinned, |status| {
@@ -5287,7 +5391,7 @@ impl Workspace {
                                     .text_color(rgb(0xd99d3c))
                                     .text_size(px(9. * scale))
                                     .line_height(px(12.5 * scale))
-                                    .child(ui_text("路径失效")),
+                                    .child(ui_text(self.locale.text("路径失效", "Invalid path"))),
                             )
                         }),
                 ),
@@ -5417,7 +5521,7 @@ impl Workspace {
                             .justify_center()
                             .cursor_pointer()
                             .hover(|s| s.bg(rgba(0xd99d3c26)))
-                            .child(ui_text("恢复目录")),
+                            .child(ui_text(self.locale.text("恢复目录", "Restore directory"))),
                         &controls[2],
                         move |this, _, cx| {
                             this.relink_workspace_directory(relink_id.clone(), cx);
@@ -5632,9 +5736,9 @@ impl Workspace {
                     .whitespace_nowrap()
                     .text_ellipsis()
                     .child(if self.creating_workspace {
-                        "正在添加…"
+                        self.locale.text("正在添加…", "Adding…")
                     } else {
-                        "新增工作空间"
+                        self.locale.text("新增工作空间", "New workspace")
                     }),
             );
         let new_workspace = if self.creating_workspace {
@@ -5729,12 +5833,12 @@ impl Workspace {
                                 .items_center()
                                 .gap(px(7.))
                                 .child(icon("columns-3", 16., 0x989da7))
-                                .child("看板"),
+                                .child(self.locale.text("看板", "Board")),
                             "board",
                         ),
                     )
                     .child(self.button(
-                        settings_button(self.settings.is_some()),
+                        settings_button(self.settings.is_some(), self.locale),
                         &self.control_focus["settings"],
                         Self::toggle_settings,
                         cx,
@@ -6681,7 +6785,7 @@ impl Workspace {
 
     fn stopped_remove_blocked_reason(&self) -> Option<&'static str> {
         if !self.active_path_valid() {
-            return Some(WORKSPACE_PATH_UNAVAILABLE);
+            return Some(self.workspace_path_unavailable());
         }
         match self.commands.connection() {
             (generation, ConnectionPhase::Ready)
@@ -6733,7 +6837,7 @@ impl Workspace {
         if self.read_only.is_some() {
             Some(STORAGE_READ_ONLY_TITLE)
         } else if !self.active_path_valid() {
-            Some(WORKSPACE_PATH_UNAVAILABLE)
+            Some(self.workspace_path_unavailable())
         } else if self.storage_fault_sessions.contains(id) {
             Some("终端存储异常，请先恢复或结束当前会话")
         } else if node["environment"]["state"]
@@ -8763,7 +8867,7 @@ impl Workspace {
                 let tail = path.rsplit(['/', '\\']).find(|part| !part.is_empty())?;
                 Some((path, format!("~/{}", tail.replace(['\r', '\n', '\t'], " "))))
             });
-        let git = FooterGit::from_node(&node["git"]);
+        let git = FooterGit::from_node(&node["git"], self.locale);
         let environment = FooterEnvironment::from_node(&node["environment"]);
         Some(FooterFields {
             name,
@@ -9046,6 +9150,7 @@ impl Workspace {
                     && !settings.read(cx).modal_open()
                 {
                     self.keyboard_focus = true;
+                    settings.update(cx, |settings, cx| settings.dismiss_time_zone_menu(cx));
                     if mods.shift {
                         window.focus_prev();
                     } else {
@@ -9382,6 +9487,7 @@ impl Workspace {
                 .child(database_recovery_page::render_read_only_banner(
                     theme.background,
                     theme.foreground,
+                    self.locale,
                     state.pending_export.is_some(),
                     feedback,
                     self.focused.is_some() && available,
@@ -11832,15 +11938,21 @@ impl Workspace {
                 }))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
             if show_relink {
-                menu = menu.child(self.mutation_button(
-                    text_item("workspace-menu-relink", "重新关联工作空间目录"),
-                    &controls[next_focus],
-                    move |this, _, cx| {
-                        this.workspace_menu = None;
-                        this.relink_workspace_directory(relink_id.clone(), cx);
-                    },
-                    cx,
-                ));
+                menu = menu.child(
+                    self.mutation_button(
+                        text_item(
+                            "workspace-menu-relink",
+                            self.locale
+                                .text("重新关联工作空间目录", "Relink workspace directory"),
+                        ),
+                        &controls[next_focus],
+                        move |this, _, cx| {
+                            this.workspace_menu = None;
+                            this.relink_workspace_directory(relink_id.clone(), cx);
+                        },
+                        cx,
+                    ),
+                );
                 next_focus += 1;
             }
             menu = menu
@@ -11860,10 +11972,7 @@ impl Workspace {
                             .cursor_pointer()
                             .hover(|s| s.bg(rgb(0xeceef3)))
                             .child(icon("pin", 13., 0x2f3547))
-                            .child(
-                                ui_text(if pinned { "取消置顶" } else { "置顶" })
-                                    .normal_line_height(),
-                            ),
+                            .child(ui_text(self.pin_label(pinned)).normal_line_height()),
                         &controls[next_focus],
                         move |this, _, cx| {
                             this.workspace_menu = None;
@@ -11879,7 +11988,10 @@ impl Workspace {
                     ),
                 )
                 .child(self.button(
-                    text_item("workspace-menu-finder", "在 Finder 中显示"),
+                    text_item(
+                        "workspace-menu-finder",
+                        self.locale.text("在 Finder 中显示", "Show in Finder"),
+                    ),
                     &controls[next_focus + 1],
                     move |this, _, cx| {
                         this.workspace_menu = None;
@@ -11889,12 +12001,15 @@ impl Workspace {
                     cx,
                 ))
                 .child(self.button(
-                    text_item("workspace-menu-copy", "复制路径"),
+                    text_item(
+                        "workspace-menu-copy",
+                        self.locale.text("复制路径", "Copy path"),
+                    ),
                     &controls[next_focus + 2],
                     move |this, _, cx| {
                         this.workspace_menu = None;
                         cx.write_to_clipboard(ClipboardItem::new_string(copy_path.clone()));
-                        this.show_toast("路径已复制", cx);
+                        this.show_toast(this.locale.text("路径已复制", "Path copied"), cx);
                     },
                     cx,
                 ));
@@ -11919,7 +12034,10 @@ impl Workspace {
                             .cursor_pointer()
                             .hover(|s| s.bg(rgb(0xfff1f0)).text_color(rgb(0xa8322e)))
                             .child(icon("trash-2", 14., 0xc5443e))
-                            .child(ui_text("移出码头").normal_line_height()),
+                            .child(
+                                ui_text(self.locale.text("移出码头", "Remove from Matou"))
+                                    .normal_line_height(),
+                            ),
                         &controls[next_focus + 3],
                         move |this, window, cx| {
                             this.open_workspace_remove(remove_id.clone(), name.clone(), window, cx);
@@ -11975,7 +12093,7 @@ impl Workspace {
                     }))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child(self.mutation_button(
-                        menu_item("task-pin", if pinned { "取消置顶" } else { "置顶" }, "pin"),
+                        menu_item("task-pin", self.pin_label(pinned), "pin"),
                         &controls[0],
                         move |this, _, cx| {
                             this.task_menu = None;
@@ -11990,7 +12108,11 @@ impl Workspace {
                         cx,
                     ))
                     .child(self.mutation_button(
-                        menu_item("task-rename", "重命名", "pencil"),
+                        menu_item(
+                            "task-rename",
+                            self.locale.text("重命名", "Rename"),
+                            "pencil",
+                        ),
                         &controls[1],
                         move |this, window, cx| {
                             this.open_task_rename(rename_id.clone(), window, cx)
@@ -11999,7 +12121,7 @@ impl Workspace {
                     ))
                     .child(
                         self.mutation_button(
-                            menu_item("task-delete", "删除", "trash-2")
+                            menu_item("task-delete", self.locale.text("删除", "Delete"), "trash-2")
                                 .mt(px(4.))
                                 .border_t_1()
                                 .border_color(rgb(0xeceef2))
@@ -12025,7 +12147,10 @@ impl Workspace {
                         cx.notify();
                     }))
                     .child(self.mutation_button(
-                        tabs_ui::menu_item("tab-rename-menu", "重命名页签"),
+                        tabs_ui::menu_item(
+                            "tab-rename-menu",
+                            self.locale.text("重命名页签", "Rename tab"),
+                        ),
                         focus,
                         move |this, window, cx| this.open_rename(id.clone(), window, cx),
                         cx,
@@ -12855,11 +12980,14 @@ fn workspace_frame(root: Stateful<Div>) -> AnyElement {
     root.into_any_element()
 }
 
+impl EventEmitter<InterfaceLocale> for Workspace {}
+
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.invalid_recovery_marker {
             return workspace_frame(database_recovery_page::render_invalid_marker(
                 window.viewport_size().height,
+                self.locale,
             ));
         }
         if let Some(state) = &self.database_recovery {
@@ -12867,6 +12995,7 @@ impl Render for Workspace {
             return workspace_frame(database_recovery_page::render(
                 Some(&state.details),
                 PagePresentation {
+                    locale: self.locale,
                     available: state.available,
                     pending: state.pending.as_ref().map(|(_, operation)| *operation),
                     selected_backup: state.selected_backup.as_deref(),
@@ -13468,7 +13597,7 @@ impl Render for Workspace {
                             .text_color(rgb(0xe4aa78))
                             .text_size(px(11.))
                             .line_height(px(15.4))
-                            .child(WORKSPACE_PATH_UNAVAILABLE),
+                            .child(self.workspace_path_unavailable()),
                     )
                 })
                 .children(provider_banner.map(|banner| {
@@ -15128,11 +15257,16 @@ struct FooterGit {
 }
 
 impl FooterGit {
-    fn from_node(git: &Value) -> Option<Self> {
+    fn from_node(git: &Value, locale: InterfaceLocale) -> Option<Self> {
         if git["state"] == "unavailable" {
             return Some(Self {
-                label: "Git 不可用".into(),
-                title: "当前目录不是可用的 Git 工作区".into(),
+                label: locale.text("Git 不可用", "Git unavailable").into(),
+                title: locale
+                    .text(
+                        "当前目录不是可用的 Git 工作区",
+                        "This directory is not a Git repository",
+                    )
+                    .into(),
                 available: false,
             });
         }
@@ -15140,13 +15274,19 @@ impl FooterGit {
             return None;
         }
         let (mut label, title) = if let Some(branch) = trimmed_graph_text(&git["branch"]) {
-            (branch.to_owned(), format!("Git 分支：{branch}"))
+            (
+                branch.to_owned(),
+                format!("{}{branch}", locale.text("Git 分支：", "Git branch: ")),
+            )
         } else {
             let revision = trimmed_graph_text(&git["detachedHead"])?;
             let short = revision.get(..7).unwrap_or(revision);
             (
                 format!("HEAD {short}"),
-                format!("Git detached HEAD：{revision}"),
+                format!(
+                    "{}{revision}",
+                    locale.text("Git detached HEAD：", "Git detached HEAD: ")
+                ),
             )
         };
         if git["dirty"] == true {

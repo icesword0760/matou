@@ -1,4 +1,6 @@
 //! Persistent lifecycle of sessions and their process runs.
+use std::{fs, path::Path};
+
 use anyhow::{Context, Result, bail, ensure};
 use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
@@ -15,6 +17,189 @@ use crate::{
 };
 
 const AGENT_MODEL_PREFERENCES: &str = "agent.modelPreferences";
+const CLAUDE_TIME_ZONE: &str = "claude.timeZone";
+pub const LOCALE_FILE: &str = "locale.json";
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub enum LocalePreference {
+    #[default]
+    #[serde(rename = "system")]
+    System,
+    #[serde(rename = "zh-CN")]
+    Chinese,
+    #[serde(rename = "en")]
+    English,
+}
+
+impl LocalePreference {
+    pub fn from_value(value: &str) -> Option<Self> {
+        match value {
+            "system" => Some(Self::System),
+            "zh-CN" => Some(Self::Chinese),
+            "en" => Some(Self::English),
+            _ => None,
+        }
+    }
+
+    pub fn value(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::Chinese => "zh-CN",
+            Self::English => "en",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum InterfaceLocale {
+    #[default]
+    Chinese,
+    English,
+}
+
+impl InterfaceLocale {
+    pub fn text(self, chinese: &'static str, english: &'static str) -> &'static str {
+        match self {
+            Self::Chinese => chinese,
+            Self::English => english,
+        }
+    }
+
+    pub fn value(self) -> &'static str {
+        self.text("zh-CN", "en")
+    }
+}
+
+pub fn read_locale_preference(data_root: &Path) -> LocalePreference {
+    fs::read(data_root.join(LOCALE_FILE))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .and_then(|value| {
+            value["preference"]
+                .as_str()
+                .and_then(LocalePreference::from_value)
+        })
+        .unwrap_or_default()
+}
+
+pub fn resolve_interface_locale(
+    preference: LocalePreference,
+    environment: Option<&str>,
+    system: Option<&str>,
+) -> InterfaceLocale {
+    use InterfaceLocale::{Chinese, English};
+    match environment {
+        Some("en") => English,
+        Some("zh-CN") => Chinese,
+        _ => match preference {
+            LocalePreference::English => English,
+            LocalePreference::Chinese => Chinese,
+            LocalePreference::System => match system.filter(|locale| !locale.is_empty()) {
+                Some(locale) if !locale.to_ascii_lowercase().starts_with("zh") => English,
+                _ => Chinese,
+            },
+        },
+    }
+}
+
+pub fn current_interface_locale(preference: LocalePreference) -> InterfaceLocale {
+    let environment = std::env::var("MATOU_LOCALE").ok();
+    let system = (preference == LocalePreference::System
+        && !matches!(environment.as_deref(), Some("zh-CN" | "en")))
+    .then(system_locale)
+    .flatten();
+    resolve_interface_locale(preference, environment.as_deref(), system.as_deref())
+}
+
+#[cfg(target_os = "macos")]
+fn system_locale() -> Option<String> {
+    use std::ffi::{CStr, c_char, c_void};
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        fn CFLocaleCopyPreferredLanguages() -> *const c_void;
+        fn CFArrayGetCount(array: *const c_void) -> isize;
+        fn CFArrayGetValueAtIndex(array: *const c_void, index: isize) -> *const c_void;
+        fn CFStringGetCString(
+            string: *const c_void,
+            buffer: *mut c_char,
+            size: isize,
+            encoding: u32,
+        ) -> u8;
+        fn CFRelease(value: *const c_void);
+    }
+
+    // The language array owns its elements. Copy the first string before releasing it.
+    unsafe {
+        let languages = CFLocaleCopyPreferredLanguages();
+        if languages.is_null() {
+            return None;
+        }
+        let mut buffer = [0; 128];
+        let locale = if CFArrayGetCount(languages) > 0
+            && CFStringGetCString(
+                CFArrayGetValueAtIndex(languages, 0),
+                buffer.as_mut_ptr(),
+                128,
+                0x0800_0100,
+            ) != 0
+        {
+            CStr::from_ptr(buffer.as_ptr())
+                .to_str()
+                .ok()
+                .map(str::to_owned)
+        } else {
+            None
+        };
+        CFRelease(languages);
+        locale
+    }
+}
+
+#[cfg(windows)]
+fn system_locale() -> Option<String> {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetUserDefaultLocaleName(name: *mut u16, count: i32) -> i32;
+    }
+    let mut buffer = [0; 85];
+    let length = unsafe { GetUserDefaultLocaleName(buffer.as_mut_ptr(), buffer.len() as i32) };
+    (length > 1).then(|| String::from_utf16_lossy(&buffer[..length as usize - 1]))
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+fn system_locale() -> Option<String> {
+    ["LC_ALL", "LC_MESSAGES", "LANG"]
+        .into_iter()
+        .find_map(|key| std::env::var(key).ok().filter(|value| !value.is_empty()))
+}
+
+pub fn read_claude_time_zone(db: &Connection) -> Result<String> {
+    let row = db
+        .query_row(
+            "SELECT CAST(value_json AS BLOB) FROM preferences WHERE key = ?",
+            [CLAUDE_TIME_ZONE],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .optional()?;
+    Ok(row
+        .and_then(|bytes| serde_json::from_slice::<String>(&bytes).ok())
+        .filter(|value| crate::provider_launch::valid_claude_time_zone(value))
+        .unwrap_or_else(|| "auto".into()))
+}
+
+pub fn save_claude_time_zone(db: &Connection, time_zone: &str, updated_at: i64) -> Result<()> {
+    ensure!(
+        crate::provider_launch::valid_claude_time_zone(time_zone),
+        "Invalid Claude Code time zone"
+    );
+    db.execute(
+        "INSERT INTO preferences (key, value_json, updated_at) VALUES (?, ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at",
+        params![CLAUDE_TIME_ZONE, serde_json::to_string(time_zone)?, updated_at],
+    )?;
+    Ok(())
+}
 
 fn validate_model_preferences(
     value: &Value,

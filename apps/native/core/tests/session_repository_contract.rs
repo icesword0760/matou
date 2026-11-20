@@ -26,6 +26,182 @@ const TABLES: [&str; 4] = [
 ];
 
 #[test]
+fn time_zone_launch_policy_matches_the_frozen_profile_capabilities() {
+    use matou_native_core::provider_launch::cli_time_zone;
+    for (id, profile, time_zone, system, exit, official, expected) in [
+        (
+            "timezone-save-explicit-claude",
+            "claude-code",
+            "UTC",
+            "Asia/Shanghai",
+            Some("TW"),
+            true,
+            Some("UTC"),
+        ),
+        (
+            "timezone-save-explicit-antigravity",
+            "antigravity",
+            "UTC",
+            "Asia/Shanghai",
+            Some("TW"),
+            true,
+            Some("Asia/Taipei"),
+        ),
+        (
+            "timezone-save-explicit-codex",
+            "codex",
+            "UTC",
+            "Asia/Shanghai",
+            Some("US"),
+            true,
+            Some("Asia/Singapore"),
+        ),
+        (
+            "timezone-save-system",
+            "antigravity",
+            "system",
+            "Asia/Shanghai",
+            Some("US"),
+            true,
+            Some("Asia/Singapore"),
+        ),
+        (
+            "timezone-non-mainland-auto",
+            "antigravity",
+            "auto",
+            "America/New_York",
+            Some("TW"),
+            true,
+            None,
+        ),
+        (
+            "claude-system-inherits-launch-environment",
+            "claude-code",
+            "system",
+            "Asia/Shanghai",
+            Some("TW"),
+            true,
+            None,
+        ),
+        (
+            "claude-hong-kong-region-sample",
+            "claude-code",
+            "auto",
+            "Asia/Hong_Kong",
+            Some("tw"),
+            true,
+            Some("Asia/Taipei"),
+        ),
+        (
+            "claude-third-party-auto-uses-existing-environment",
+            "claude-code",
+            "auto",
+            "Asia/Shanghai",
+            Some("TW"),
+            false,
+            None,
+        ),
+        (
+            "claude-third-party-explicit",
+            "claude-code",
+            "Europe/London",
+            "Asia/Shanghai",
+            None,
+            false,
+            Some("Europe/London"),
+        ),
+        (
+            "codex-third-party-uses-existing-environment",
+            "codex",
+            "UTC",
+            "Asia/Shanghai",
+            Some("TW"),
+            false,
+            None,
+        ),
+        (
+            "antigravity-malaysia-region-sample",
+            "antigravity",
+            "system",
+            "Asia/Shanghai",
+            Some("MY"),
+            true,
+            Some("Asia/Kuala_Lumpur"),
+        ),
+        (
+            "antigravity-philippines-region-sample",
+            "antigravity",
+            "auto",
+            "Asia/Shanghai",
+            Some("PH"),
+            true,
+            Some("Asia/Manila"),
+        ),
+        (
+            "dsh-no-override-capability",
+            "dsh",
+            "UTC",
+            "Asia/Shanghai",
+            Some("TW"),
+            true,
+            None,
+        ),
+        (
+            "shell-keeps-parent-tz",
+            "shell",
+            "UTC",
+            "Asia/Shanghai",
+            Some("TW"),
+            true,
+            None,
+        ),
+    ] {
+        assert_eq!(
+            cli_time_zone(profile, time_zone, system, exit, official),
+            expected,
+            "{id}"
+        );
+        println!("{id}  {expected:?}");
+    }
+}
+
+#[test]
+fn interface_locale_prefers_the_environment_then_explicit_choice_then_system() {
+    use matou_native_core::sessions::{
+        InterfaceLocale::*, LocalePreference, resolve_interface_locale,
+    };
+    for (preference, environment, system, expected) in [
+        (
+            LocalePreference::English,
+            Some("zh-CN"),
+            Some("en-US"),
+            Chinese,
+        ),
+        (
+            LocalePreference::Chinese,
+            Some("en"),
+            Some("zh-Hans-CN"),
+            English,
+        ),
+        (
+            LocalePreference::Chinese,
+            Some("en-US"),
+            Some("en-US"),
+            Chinese,
+        ),
+        (LocalePreference::English, None, Some("zh-TW"), English),
+        (LocalePreference::System, None, Some("ZH-Hant"), Chinese),
+        (LocalePreference::System, None, Some("ja-JP"), English),
+        (LocalePreference::System, None, None, Chinese),
+    ] {
+        assert_eq!(
+            resolve_interface_locale(preference, environment, system),
+            expected
+        );
+    }
+}
+
+#[test]
 fn role_assignments_merge_with_existing_preferences_and_fill_missing_defaults() -> Result<()> {
     let mut db = Connection::open_in_memory()?;
     configure_connection(&db)?;

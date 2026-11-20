@@ -45,6 +45,39 @@ mod workspace {
     include!("../src/workspace.rs");
 
     impl Workspace {
+        pub(super) fn expose_settings_fixture(&mut self) {
+            self.runtime_generation = 1;
+            self.transport_connected = true;
+            self.domain_ready = true;
+            self.hierarchy = Some(serde_json::from_value(serde_json::json!({
+                "navigation": { "windowId": "settings-probe", "taskByWorkspace": {}, "sceneByTask": {}, "sessionByScene": {} }
+            })).unwrap());
+        }
+
+        pub(super) fn set_locale_data_root(&mut self, path: PathBuf) {
+            self.locale_data_root = Some(path);
+        }
+
+        pub(super) fn probe_locale(&self) -> InterfaceLocale {
+            self.locale
+        }
+
+        pub(super) fn time_zone_reply(
+            &mut self,
+            reply: matou_native_runtime::protocol::TimeZoneSettingsReply,
+            window: &mut Window,
+            cx: &mut Context<Self>,
+        ) {
+            self.apply(
+                BridgeEvent::Runtime {
+                    generation: 1,
+                    event: Event::TimeZoneSettings(reply),
+                },
+                window,
+                cx,
+            );
+        }
+
         pub(super) fn model_catalog_reply(
             &mut self,
             reply: Value,
@@ -127,8 +160,10 @@ mod workspace {
 mod probe {
     use gpui::*;
     use matou_native_core::provider_config::{ProviderConfigLocale, ProviderConfigStore};
+    use matou_native_core::sessions::{InterfaceLocale, LocalePreference, read_locale_preference};
     use matou_native_runtime::protocol::{
         ClaudeRoleAssignmentsReply, ProviderSettingsReply, ProviderSettingsResult,
+        TimeZoneSettingsError, TimeZoneSettingsReply, TimeZoneSettingsSnapshot,
     };
     use serde_json::{Value, json};
 
@@ -137,7 +172,7 @@ mod probe {
         provider_settings::{ProviderDraft, ProviderSettings, ProviderUpdate},
         runtime_bridge::{self, Command, ProbeReceiver},
         settings_shell::claude_role_assignments::{AssignmentAction, AssignmentStatus},
-        settings_shell::{EditorStep, SettingsPage, SettingsShell},
+        settings_shell::{EditorStep, SettingsPage, SettingsShell, probe_language_zone},
         workspace::Workspace,
     };
 
@@ -348,9 +383,17 @@ mod probe {
         visible_state: Option<&str>,
         cx: &mut App,
     ) -> (WindowHandle<Workspace>, ProbeReceiver) {
+        open_window_at(visible_state, 1200., cx)
+    }
+
+    fn open_window_at(
+        visible_state: Option<&str>,
+        width: f32,
+        cx: &mut App,
+    ) -> (WindowHandle<Workspace>, ProbeReceiver) {
         let (commands, sink) = runtime_bridge::probe_channel();
         let (_events, incoming) = async_channel::unbounded();
-        let bounds = Bounds::centered(None, size(px(1200.), px(780.)), cx);
+        let bounds = Bounds::centered(None, size(px(width), px(780.)), cx);
         let window = cx
             .open_window(
                 WindowOptions {
@@ -367,7 +410,13 @@ mod probe {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     ..Default::default()
                 },
-                |window, cx| cx.new(|cx| Workspace::new(commands, incoming, window, cx)),
+                |window, cx| {
+                    cx.new(|cx| {
+                        let mut workspace = Workspace::new(commands, incoming, window, cx);
+                        workspace.expose_settings_fixture();
+                        workspace
+                    })
+                },
             )
             .unwrap();
         (window, sink)
@@ -466,6 +515,10 @@ mod probe {
         check_shell(window, cx, |shell, _| {
             assert!(shell.page() == SettingsPage::Language);
         });
+        assert!(matches!(
+            sink.try_recv(),
+            Ok(Command::GetTimeZoneSettings { .. })
+        ));
         press(window, "shift-tab", cx);
         press(window, "enter", cx);
         let reentry = request_id(&sink);
@@ -901,11 +954,11 @@ mod probe {
         action(cx, AssignmentAction::Restore);
         let (panel, _) = data(cx);
         assert!(
-            panel
-                .rows
+            panel.rows[..3]
                 .iter()
                 .all(|row| row.target.starts_with("最终："))
         );
+        assert_eq!(panel.rows[3].target, "未指定：搜索请求使用当前档位供应商");
         let restored = save(cx, json!({}));
         reply(cx, restored, Some(json!({})));
         assert_eq!(data(cx).1, (false, false, true, false));
@@ -1142,6 +1195,208 @@ mod probe {
         );
     }
 
+    async fn verify_language_zone_window(cx: &mut AsyncApp, width: f32) {
+        use std::time::{Duration, Instant};
+
+        let root = std::env::temp_dir().join(format!("timezone-probe-{}", uuid::Uuid::new_v4()));
+        let (window, sink) = cx.update(|cx| open_window_at(None, width, cx)).unwrap();
+        window
+            .update(cx, |view, window, cx| {
+                view.set_locale_data_root(root.clone());
+                view.open_settings(window, cx);
+            })
+            .unwrap();
+        request_id(&sink);
+        assignment_request_id(&sink);
+        let update =
+            |cx: &mut AsyncApp,
+             f: fn(&mut SettingsShell, &mut Window, &mut Context<SettingsShell>)| {
+                window
+                    .update(cx, |view, window, cx| {
+                        view.settings_entity()
+                            .unwrap()
+                            .update(cx, |settings, cx| f(settings, window, cx));
+                    })
+                    .unwrap();
+            };
+        update(cx, SettingsShell::probe_language_page);
+        let get = || match sink.try_recv().unwrap() {
+            Command::GetTimeZoneSettings { request_id } => request_id,
+            _ => panic!("time-zone read expected"),
+        };
+        let set = |expected: &str| match sink.try_recv().unwrap() {
+            Command::SetTimeZoneSettings {
+                request_id,
+                time_zone,
+            } => {
+                assert_eq!(time_zone, expected);
+                request_id
+            }
+            _ => panic!("time-zone write expected"),
+        };
+        let snapshot = |zone: &str| TimeZoneSettingsSnapshot {
+            time_zone: zone.into(),
+            system_time_zone: "Asia/Shanghai".into(),
+            auto_time_zone: Some("Asia/Singapore".into()),
+            zones: vec!["UTC".into(), "Europe/London".into()],
+        };
+        let reply = |cx: &mut AsyncApp, request_id, result| {
+            window
+                .update(cx, |view, window, cx| {
+                    view.time_zone_reply(TimeZoneSettingsReply { request_id, result }, window, cx);
+                })
+                .unwrap();
+        };
+        let frame = |cx: &mut AsyncApp| probe_language_zone(|| draw(window, cx));
+        let activate = |cx: &mut AsyncApp, control| {
+            window
+                .update(cx, |view, window, cx| {
+                    view.settings_entity()
+                        .unwrap()
+                        .read(cx)
+                        .probe_language_focus(control, window);
+                })
+                .unwrap();
+            press(window, "enter", cx);
+        };
+        let has = |labels: &[String], wanted: &str| {
+            assert!(
+                labels.iter().any(|label| label == wanted),
+                "{width}pt missing {wanted:?}: {labels:?}"
+            );
+        };
+
+        let read = get();
+        let loading = frame(cx);
+        assert!(!loading.enabled["settings-time-zone-trigger"]);
+        assert!(!loading.enabled["settings-time-zone-save"]);
+        has(&loading.labels, "跟随系统");
+        has(&loading.labels, "中文");
+        has(&loading.labels, "English");
+        reply(cx, read, Err(TimeZoneSettingsError::Storage));
+        let failure = frame(cx);
+        has(&failure.labels, "无法读取时区设置，请重试。");
+        assert!(failure.enabled["settings-time-zone-retry"]);
+        activate(cx, "zone-retry");
+        let retry = get();
+        reply(cx, read, Ok(snapshot("Europe/London")));
+        assert!(!frame(cx).enabled["settings-time-zone-trigger"]);
+        reply(cx, retry, Ok(snapshot("auto")));
+
+        let ready = frame(cx);
+        assert!(ready.enabled["settings-time-zone-trigger"]);
+        assert!(!ready.enabled["settings-time-zone-save"]);
+        has(&ready.labels, "自动（隐藏大陆时区，推荐）");
+        assert!(
+            ready
+                .labels
+                .iter()
+                .any(|label| label.starts_with("当前时间：") && label.ends_with("Asia/Singapore"))
+        );
+        let zone_bounds = ready.bounds[2];
+        assert!(zone_bounds.size.width > px(185.) && zone_bounds.size.width <= px(520.));
+        assert!(
+            zone_bounds.right() <= px(width + 2.),
+            "{width}: {zone_bounds:?}"
+        );
+        activate(cx, "zone");
+        let menu = frame(cx);
+        for label in ["跟随系统 (Asia/Shanghai)", "UTC", "Europe/London"] {
+            has(&menu.labels, label);
+        }
+        press(window, "down", cx);
+        press(window, "down", cx);
+        press(window, "enter", cx);
+        let draft = frame(cx);
+        has(&draft.labels, "UTC");
+        assert!(draft.enabled["settings-time-zone-save"]);
+        activate(cx, "zone-save");
+        let save = set("UTC");
+        assert!(!frame(cx).enabled["settings-time-zone-trigger"]);
+        reply(cx, save, Ok(snapshot("UTC")));
+        has(
+            &frame(cx).labels,
+            "已保存，下次启动 Claude Code 时自动生效。",
+        );
+
+        update(cx, SettingsShell::probe_invalid_zone);
+        frame(cx);
+        activate(cx, "zone-save");
+        let invalid = set("Mars/Olympus");
+        reply(cx, invalid, Err(TimeZoneSettingsError::InvalidRequest));
+        let rejected = frame(cx);
+        has(&rejected.labels, "Mars/Olympus");
+        has(&rejected.labels, "保存未确认，请重试。");
+        assert!(rejected.enabled["settings-time-zone-save"]);
+        activate(cx, "zone-cancel");
+        assert!(!frame(cx).enabled["settings-time-zone-save"]);
+        assert!(sink.try_recv().is_err());
+        activate(cx, "zone-reset");
+        frame(cx);
+        activate(cx, "zone-save");
+        let reset = set("auto");
+        reply(cx, reset, Ok(snapshot("auto")));
+
+        frame(cx);
+        activate(cx, "english");
+        let before_save = frame(cx);
+        has(&before_save.labels, "语言与时区");
+        assert!(before_save.enabled["settings-language-save"]);
+        activate(cx, "language-cancel");
+        assert!(!frame(cx).enabled["settings-language-save"]);
+        activate(cx, "english");
+        frame(cx);
+        activate(cx, "language-save");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while window.update(cx, |view, _, _| view.probe_locale()).unwrap()
+            != InterfaceLocale::English
+        {
+            assert!(
+                Instant::now() < deadline,
+                "language was not applied to the existing workspace"
+            );
+            cx.background_executor()
+                .timer(Duration::from_millis(5))
+                .await;
+        }
+        assert_eq!(read_locale_preference(&root), LocalePreference::English);
+        assert!(
+            sink.try_recv().is_err(),
+            "language save must send no runtime command"
+        );
+        let english = frame(cx);
+        for label in [
+            "Language & time zone",
+            "Follow system",
+            "The interface switches immediately; runtime messages switch after a restart",
+            "Time zone",
+            "Automatic (hide mainland China time zone, recommended)",
+            "Save",
+            "Cancel",
+            "Restore defaults",
+        ] {
+            has(&english.labels, label);
+        }
+        assert!(
+            english
+                .labels
+                .iter()
+                .any(|label| label.starts_with("Current time：")
+                    && label.ends_with("Asia/Singapore"))
+        );
+        activate(cx, "language-reset");
+        assert!(frame(cx).enabled["settings-language-save"]);
+        println!(
+            "Hidden GPUI SET-08 {width}pt: language and time-zone options, preview/copy, save/cancel/defaults, invalid/retry, disabled states, instant English and zone width {}pt",
+            f32::from(zone_bounds.size.width)
+        );
+        window
+            .update(cx, |_, window, _| window.remove_window())
+            .unwrap();
+        std::fs::remove_file(root.join("locale.json")).unwrap();
+        std::fs::remove_dir(root).unwrap();
+    }
+
     pub(super) fn run() {
         let args = std::env::args().skip(1).collect::<Vec<_>>();
         let state = match args.as_slice() {
@@ -1186,6 +1441,9 @@ mod probe {
                     verify_delete_window(cx);
                     verify_assignments_window(cx);
                     verify_model_catalog_window(cx);
+                    for width in [720., 900., 1200.] {
+                        verify_language_zone_window(cx, width).await;
+                    }
                     cx.update(|cx| cx.quit()).unwrap();
                 })
                 .detach();
