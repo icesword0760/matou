@@ -20,7 +20,7 @@
 use std::{cell::RefCell, collections::HashMap, ops::Range, rc::Rc, time::Duration};
 
 use gpui::{prelude::*, *};
-use matou_native_runtime::protocol::ClaudeRoleAssignmentsReply;
+use matou_native_runtime::protocol::{ClaudeModelCatalogReply, ClaudeRoleAssignmentsReply};
 use serde_json::Value;
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -1415,7 +1415,14 @@ impl SettingsShell {
 
     fn assignment_action(&mut self, action: &AssignmentAction, cx: &mut Context<Self>) {
         match action {
-            AssignmentAction::Retry => {
+            AssignmentAction::RetryCatalog(index)
+                if self
+                    .assignments
+                    .uses_native_catalog(*index, &self.providers) =>
+            {
+                self.load_assignment_catalog(true, cx);
+            }
+            AssignmentAction::Retry | AssignmentAction::RetryCatalog(_) => {
                 self.providers.load();
                 self.load_assignments(cx);
             }
@@ -1425,6 +1432,23 @@ impl SettingsShell {
             }
             _ => self.assignments.change(action, &self.providers),
         }
+        self.load_assignment_catalog(false, cx);
+        cx.notify();
+    }
+
+    fn load_assignment_catalog(&mut self, retry: bool, cx: &mut Context<Self>) {
+        if self.page == SettingsPage::ClaudeCode {
+            let request = self.assignments.load_catalog(&self.providers, retry);
+            self.watch_assignment_reply(request, cx);
+        }
+    }
+
+    pub fn receive_model_catalog(
+        &mut self,
+        reply: ClaudeModelCatalogReply,
+        cx: &mut Context<Self>,
+    ) {
+        self.assignments.receive_catalog(reply);
         cx.notify();
     }
 
@@ -1434,6 +1458,7 @@ impl SettingsShell {
         cx: &mut Context<Self>,
     ) {
         self.assignments.receive(reply);
+        self.load_assignment_catalog(false, cx);
         cx.notify();
     }
 
@@ -1445,6 +1470,7 @@ impl SettingsShell {
     ) {
         let update = self.providers.receive(reply);
         self.apply_update(update, window, cx);
+        self.load_assignment_catalog(false, cx);
         cx.notify();
     }
 
@@ -1455,6 +1481,7 @@ impl SettingsShell {
             .assignments
             .connection_changed(self.page == SettingsPage::ClaudeCode);
         self.watch_assignment_reply(request, cx);
+        self.load_assignment_catalog(false, cx);
         cx.notify();
     }
 

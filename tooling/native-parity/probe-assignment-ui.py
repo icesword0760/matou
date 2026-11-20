@@ -46,25 +46,34 @@ TARGET = {
         }
     ],
 }
+OFFICIAL = {
+    "id": "anthropic-official",
+    "cli": "claude-code",
+    "name": "Anthropic 官方",
+    "endpoint": "https://api.anthropic.com",
+    "model": "",
+    "builtIn": True,
+}
 
 
 def write_json(path, value):
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n")
 
 
-def prepare(run, no_key):
+def prepare(run):
     run.mkdir(parents=True, exist_ok=False)
     root = Path(tempfile.mkdtemp(prefix="fixture-", dir=run))
     data = root / "data"
     data.mkdir()
     target = dict(TARGET)
-    if no_key:
+    if run.name == "native-no-key":
         del target["apiKey"]
+    providers = [OFFICIAL] if run.name == "native-official" else [FALLBACK, target]
     provider_config = data / "provider-config.json"
     write_json(provider_config, {
         "version": 1,
-        "providers": {"claude-code": [FALLBACK, target]},
-        "activeProviderIds": {"claude-code": FALLBACK["id"]},
+        "providers": {"claude-code": providers},
+        "activeProviderIds": {"claude-code": providers[0]["id"]},
     })
     provider_config.chmod(0o600)
     write_json(run / "environment.json", {"root": str(root)})
@@ -78,14 +87,14 @@ def fixture_root(run):
     return root
 
 
-def launch(run):
+def launch(run, target, cli):
     root = fixture_root(run)
     paths = {name: root / name for name in ("data", "home", "workspace", "cache", "tmp")}
     for path in paths.values():
         path.mkdir(exist_ok=True)
 
-    target = OUTPUT / "build-source/apps/native/target/debug"
-    app = run / ("AssignmentKeyState.app" if run.name.endswith("no-key") else "AssignmentUI.app")
+    app_name = {"native-no-key": "AssignmentKeyState", "native-official": "AssignmentOfficial"}
+    app = run / (app_name.get(run.name, "AssignmentUI") + ".app")
     executable = app / "Contents/MacOS/MatouAssignment"
     runtime = executable.parent / "matou-native-runtime"
     launch_file = run / "launch.json"
@@ -117,7 +126,7 @@ def launch(run):
            if not key.startswith(("MATOU_", "ANTHROPIC_", "CLAUDE_"))}
     env.update(HOME=str(paths["home"]), ZDOTDIR=str(paths["home"]),
                TMPDIR=str(paths["tmp"]), XDG_CACHE_HOME=str(paths["cache"]),
-               MATOU_CLAUDE_COMMAND="/usr/bin/false")
+               MATOU_CLAUDE_COMMAND=str(cli))
     command = [
         str(executable), "--data-root", str(paths["data"]), "--workspace",
         str(paths["workspace"]), "--shell-home", str(paths["home"]),
@@ -127,7 +136,7 @@ def launch(run):
                                    stdin=subprocess.DEVNULL, stdout=log,
                                    stderr=subprocess.STDOUT, start_new_session=True)
     record = {"pid": process.pid, "app": str(app), "bundleIdentifier": identifier,
-              "data": str(paths["data"])}
+              "data": str(paths["data"]), "cli": str(cli)}
     write_json(launch_file, record)
     print(json.dumps(record))
 
@@ -154,14 +163,16 @@ def readback(run):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("prepare", "launch", "readback"))
-    parser.add_argument("run", choices=("native", "native-no-key"))
-    parser.add_argument("--record", choices=("default", "saved", "restored", "no-key"))
+    parser.add_argument("run", choices=("native", "native-no-key", "native-official"))
+    parser.add_argument("--target", type=Path, default=OUTPUT / "build-source/apps/native/target/debug")
+    parser.add_argument("--cli", type=Path, default=Path("/usr/bin/false"))
+    parser.add_argument("--record", choices=("default", "saved", "restored", "no-key", "official-saved"))
     args = parser.parse_args()
     run = OUTPUT / args.run
     if args.action == "prepare":
-        prepare(run, no_key=args.run == "native-no-key")
+        prepare(run)
     elif args.action == "launch":
-        launch(run)
+        launch(run, args.target.resolve(strict=True), args.cli.resolve(strict=True))
     else:
         value = readback(run)
         if args.record:
@@ -172,6 +183,7 @@ def main():
                 }},
                 "restored": {},
                 "no-key": None,
+                "official-saved": {"opus": {"providerId": OFFICIAL["id"], "model": "opus"}},
             }
             if value["storedAssignments"] != expected[args.record]:
                 raise SystemExit(f"Unexpected stored assignments: {value}")

@@ -129,6 +129,7 @@ pub(crate) enum AssignmentAction {
     Effort(usize, String),
     Manual(usize, String),
     Retry,
+    RetryCatalog(usize),
     Restore,
     Save,
 }
@@ -1163,8 +1164,12 @@ impl AssignmentView {
             focus,
             keyboard_focus,
             cx,
-            |_, _, cx| {
-                cx.emit(AssignmentAction::Retry);
+            move |_, _, cx| {
+                cx.emit(if slot == 0 {
+                    AssignmentAction::Retry
+                } else {
+                    AssignmentAction::RetryCatalog(slot - 1)
+                });
                 cx.notify();
             },
         )
@@ -1484,7 +1489,9 @@ where
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use matou_native_core::provider_launch::{ClaudeRoleAssignment, ClaudeRoleAssignments, EFFORTS};
-use matou_native_runtime::protocol::ClaudeRoleAssignmentsReply;
+use matou_native_runtime::protocol::{
+    ClaudeModelCatalogReply, ClaudeModelCatalogResult, ClaudeRoleAssignmentsReply,
+};
 use serde_json::Value;
 
 use super::effort_name;
@@ -1539,7 +1546,10 @@ fn official(provider: &Value) -> bool {
         })
 }
 
-fn catalog(provider: &Value) -> Option<&[Value]> {
+fn catalog<'a>(provider: &'a Value, native: &'a [Value]) -> Option<&'a [Value]> {
+    if official(provider) {
+        return Some(native);
+    }
     provider["subscription"]
         .get("modelMetadata")
         .or_else(|| provider.get("modelMetadata"))
@@ -1565,9 +1575,9 @@ fn inherited_effort<'a>(provider: &'a Value, role: &str) -> &'a str {
         .unwrap_or("follow")
 }
 
-fn effort_choices(provider: &Value, model: &str) -> Vec<&'static str> {
+fn effort_choices(provider: &Value, model: &str, native: &[Value]) -> Vec<&'static str> {
     let mut choices = vec!["follow"];
-    if let Some(supported) = model_metadata(catalog(provider).unwrap_or_default(), model)
+    if let Some(supported) = model_metadata(catalog(provider, native).unwrap_or_default(), model)
         .and_then(|metadata| metadata["supportedEfforts"].as_array())
     {
         for level in supported.iter().filter_map(Value::as_str) {
@@ -1608,6 +1618,7 @@ fn row_problem(
     model: &str,
     effort: &str,
     assigned: bool,
+    native: &[Value],
 ) -> Option<Problem> {
     let Some(provider) = provider else {
         return Some(Problem::Provider);
@@ -1619,8 +1630,8 @@ fn row_problem(
         return Some(Problem::Key);
     }
 
-    // The native runtime does not expose the dynamic official model directory.
-    if official(provider) && (assigned || model.is_empty()) {
+    let official = official(provider);
+    if official && native.is_empty() && (assigned || model.is_empty()) {
         return Some(Problem::Catalog);
     }
     let id = trim_name(model);
@@ -1634,12 +1645,13 @@ fn row_problem(
     if model.encode_utf16().count() > 240 || model.chars().any(|ch| ch.is_ascii_control()) {
         return Some(Problem::Invalid);
     }
-    if let Some(models) = catalog(provider)
+    if let Some(models) = catalog(provider, native)
+        && !(official && models.is_empty())
         && model_metadata(models, id).is_none()
     {
         return Some(Problem::Model);
     }
-    (!effort_choices(provider, id).contains(&effort)).then_some(Problem::Effort)
+    (!effort_choices(provider, id, native).contains(&effort)).then_some(Problem::Effort)
 }
 
 fn account_caption(provider: Option<&Value>, assigned: bool) -> String {
@@ -1670,8 +1682,8 @@ fn option(value: impl Into<String>, label: impl Into<String>) -> AssignmentOptio
     }
 }
 
-fn available_models(provider: &Value) -> Vec<AssignmentOption> {
-    if let Some(models) = catalog(provider) {
+fn available_models(provider: &Value, native: &[Value]) -> Vec<AssignmentOption> {
+    if let Some(models) = catalog(provider, native) {
         return models
             .iter()
             .filter_map(|model| {
@@ -1681,7 +1693,7 @@ fn available_models(provider: &Value) -> Vec<AssignmentOption> {
             .collect();
     }
     let mut models = Vec::new();
-    if !official(provider) && !subscription(provider) {
+    if !subscription(provider) {
         let ids = std::iter::once(provider["model"].as_str()).chain(
             ROLES
                 .into_iter()
@@ -1700,7 +1712,27 @@ fn available_models(provider: &Value) -> Vec<AssignmentOption> {
 }
 
 fn allows_manual(provider: &Value) -> bool {
-    !subscription(provider) && provider["builtIn"] != true && catalog(provider).is_none()
+    !subscription(provider) && provider["builtIn"] != true && catalog(provider, &[]).is_none()
+}
+
+fn default_model<'a>(provider: &'a Value, role: &str, native: &'a [Value]) -> Option<&'a str> {
+    if let Some(mapped) = provider["modelMapping"][role]
+        .as_str()
+        .filter(|id| !id.is_empty())
+    {
+        return Some(mapped);
+    }
+    if !official(provider) {
+        return None;
+    }
+    let prefix = format!("claude-{role}-");
+    model_metadata(native, role)
+        .or_else(|| {
+            native
+                .iter()
+                .find(|row| row["id"].as_str().is_some_and(|id| id.starts_with(&prefix)))
+        })
+        .and_then(|row| row["id"].as_str())
 }
 
 fn select(items: Vec<AssignmentOption>, selected: &str, enabled: bool) -> AssignmentSelect {
@@ -1729,6 +1761,26 @@ struct PendingAssignment {
     operation: AssignmentRequest,
 }
 
+#[derive(Default)]
+enum NativeCatalog {
+    #[default]
+    Unrequested,
+    Pending {
+        id: u64,
+        generation: u64,
+    },
+    Loaded(Vec<Value>),
+}
+
+impl NativeCatalog {
+    fn models(&self) -> &[Value] {
+        match self {
+            Self::Loaded(models) => models,
+            _ => &[],
+        }
+    }
+}
+
 pub(crate) struct ClaudeAssignments {
     commands: RuntimeCommands,
     pending: Option<PendingAssignment>,
@@ -1738,6 +1790,7 @@ pub(crate) struct ClaudeAssignments {
     load_error: bool,
     save_error: bool,
     saved: bool,
+    native_catalog: NativeCatalog,
 }
 
 impl ClaudeAssignments {
@@ -1751,11 +1804,14 @@ impl ClaudeAssignments {
             load_error: false,
             save_error: false,
             saved: false,
+            native_catalog: NativeCatalog::default(),
         }
     }
 
     pub(crate) fn reset(&mut self) {
+        let native_catalog = std::mem::take(&mut self.native_catalog);
         *self = Self::new(self.commands.clone());
+        self.native_catalog = native_catalog;
     }
 
     fn send(
@@ -1789,11 +1845,67 @@ impl ClaudeAssignments {
     }
 
     pub(crate) fn expire(&mut self, request_id: u64) -> bool {
+        if matches!(self.native_catalog, NativeCatalog::Pending { id, .. } if id == request_id) {
+            self.native_catalog = NativeCatalog::Loaded(Vec::new());
+            return true;
+        }
         let Some(pending) = self.pending.take_if(|pending| pending.id == request_id) else {
             return false;
         };
         self.fail(pending.operation);
         true
+    }
+
+    pub(crate) fn load_catalog(
+        &mut self,
+        providers: &ProviderSettings,
+        retry: bool,
+    ) -> Option<u64> {
+        if matches!(self.native_catalog, NativeCatalog::Pending { .. })
+            || (!retry && !matches!(self.native_catalog, NativeCatalog::Unrequested))
+        {
+            return None;
+        }
+        let needed = providers.providers().iter().any(|provider| {
+            official(provider)
+                && provider["id"].as_str().is_some_and(|id| {
+                    providers.active_id() == Some(id)
+                        || self.draft.values().any(|row| row.provider_id == id)
+                })
+        });
+        let (generation, phase) = self.commands.connection();
+        if !needed || phase != ConnectionPhase::Ready {
+            return None;
+        }
+        let id = NEXT_ASSIGNMENT_REQUEST.fetch_add(1, Ordering::Relaxed);
+        self.commands
+            .send_at(
+                generation,
+                Command::GetClaudeModelCatalog { request_id: id },
+            )
+            .ok()?;
+        self.native_catalog = NativeCatalog::Pending { id, generation };
+        Some(id)
+    }
+
+    pub(crate) fn receive_catalog(&mut self, reply: ClaudeModelCatalogReply) {
+        let NativeCatalog::Pending { id, generation } = self.native_catalog else {
+            return;
+        };
+        if id != reply.request_id
+            || self.commands.connection() != (generation, ConnectionPhase::Ready)
+        {
+            return;
+        }
+        // The protocol already uses the persisted metadata field names.
+        let models = match reply.result {
+            ClaudeModelCatalogResult::Models(models) => models
+                .into_iter()
+                .filter_map(|model| serde_json::to_value(model).ok())
+                .collect(),
+            ClaudeModelCatalogResult::Error(_) => Vec::new(),
+        };
+        self.native_catalog = NativeCatalog::Loaded(models);
     }
 
     pub(crate) fn saving(&self) -> bool {
@@ -1836,10 +1948,15 @@ impl ClaudeAssignments {
     }
 
     pub(crate) fn connection_changed(&mut self, visible: bool) -> Option<u64> {
+        let (generation, phase) = self.commands.connection();
+        if matches!(self.native_catalog, NativeCatalog::Pending { generation: pending, .. }
+            if pending != generation || phase != ConnectionPhase::Ready)
+        {
+            self.native_catalog = NativeCatalog::Loaded(Vec::new());
+        }
         if !visible {
             return None;
         }
-        let (generation, phase) = self.commands.connection();
         if self.pending.as_ref().is_some_and(|pending| {
             pending.generation != generation || phase != ConnectionPhase::Ready
         }) {
@@ -1900,40 +2017,57 @@ impl ClaudeAssignments {
         }
     }
 
+    fn row_provider<'a>(&self, index: usize, providers: &'a ProviderSettings) -> Option<&'a Value> {
+        let provider_id = self
+            .draft
+            .get(ROLES[index])
+            .map(|row| row.provider_id.as_str());
+        let effective_id = provider_id.or(providers.active_id());
+        providers.providers().iter().find(|provider| {
+            provider["id"]
+                .as_str()
+                .is_some_and(|id| Some(id) == effective_id)
+        })
+    }
+
+    pub(crate) fn uses_native_catalog(&self, index: usize, providers: &ProviderSettings) -> bool {
+        self.row_provider(index, providers).is_some_and(official)
+    }
+
     fn row(&self, index: usize, providers: &ProviderSettings, enabled: bool) -> AssignmentRow {
         let role = ROLES[index];
         let tier = TIERS[index];
         let assigned = self.draft.get(role);
         let provider_id = assigned.map(|row| row.provider_id.as_str());
-        let effective_id = provider_id.or(providers.active_id());
-        let provider = providers.providers().iter().find(|provider| {
-            provider["id"]
-                .as_str()
-                .is_some_and(|id| Some(id) == effective_id)
-        });
+        let provider = self.row_provider(index, providers);
         let provider_value = provider.unwrap_or(&Value::Null);
         let provider_name = provider_value["name"]
             .as_str()
             .or(provider_id)
             .unwrap_or("—");
-        let models = catalog(provider_value).unwrap_or_default();
-        let mapped = provider_value["modelMapping"][role]
-            .as_str()
-            .filter(|id| !id.is_empty());
+        let native = self.native_catalog.models();
+        let models = catalog(provider_value, native).unwrap_or_default();
+        let default = default_model(provider_value, role, native);
         let selected = assigned.map(|row| row.model.as_str()).unwrap_or_default();
-        let effective_model = assigned.map(|_| selected).or(mapped).unwrap_or_default();
+        let effective_model = assigned.map(|_| selected).or(default).unwrap_or_default();
         let effort = assigned
             .and_then(|row| row.effort.as_deref())
             .unwrap_or_else(|| inherited_effort(provider_value, role));
         let manual_allowed = provider.is_some_and(allows_manual);
-        let choices = available_models(provider_value);
+        let choices = available_models(provider_value, native);
         let unavailable_model =
             !selected.is_empty() && !choices.iter().any(|model| model.value == selected);
         let manual = manual_allowed && (self.manual[index] || unavailable_model);
         let problem = if self.draft.is_empty() {
             None
         } else {
-            row_problem(provider, effective_model, effort, assigned.is_some())
+            row_problem(
+                provider,
+                effective_model,
+                effort,
+                assigned.is_some(),
+                native,
+            )
         };
         let selectable = enabled
             && assigned.is_some()
@@ -1952,7 +2086,7 @@ impl ClaudeAssignments {
         }));
         let mut model_items = vec![option("", CHOOSE_MODEL)];
         let model_selection = if assigned.is_none() {
-            model_items[0].label = mapped
+            model_items[0].label = default
                 .map(|id| model_name(models, id).to_owned())
                 .unwrap_or_else(|| format!("{tier} 原生默认档位（目录暂不可用）"));
             ""
@@ -1970,7 +2104,7 @@ impl ClaudeAssignments {
                 selected
             }
         };
-        let mut efforts: Vec<_> = effort_choices(provider_value, effective_model)
+        let mut efforts: Vec<_> = effort_choices(provider_value, effective_model, native)
             .into_iter()
             .map(|level| option(level, effort_name(level)))
             .collect();
@@ -1983,7 +2117,7 @@ impl ClaudeAssignments {
         if assigned.is_none() {
             efforts = vec![option(effort, effort_name(effort))];
         }
-        let target_model = if assigned.is_some() || mapped.is_some() {
+        let target_model = if assigned.is_some() || default.is_some() {
             model_name(models, effective_model)
         } else {
             "原生默认档位待确认"
@@ -2002,7 +2136,7 @@ impl ClaudeAssignments {
             if assigned.is_some() {
                 problem.text().to_owned()
             } else {
-                let id = mapped.unwrap_or(tier);
+                let id = default.unwrap_or(tier);
                 format!(
                     "沿用默认：{provider_name} · {id}。{}请为此档位重新选择供应商和模型。",
                     problem.text()
@@ -2140,35 +2274,35 @@ mod assignment_validation_tests {
         });
         assert!(allows_manual(&custom));
         assert_eq!(
-            available_models(&custom)
+            available_models(&custom, &[])
                 .iter()
                 .map(|model| model.value.as_str())
                 .collect::<Vec<_>>(),
             vec!["custom-opus"]
         );
         assert_eq!(
-            row_problem(Some(&custom), "", "follow", true),
+            row_problem(Some(&custom), "", "follow", true, &[]),
             Some(Problem::Empty)
         );
         assert_eq!(
-            row_problem(Some(&custom), "", "follow", false),
+            row_problem(Some(&custom), "", "follow", false, &[]),
             Some(Problem::Catalog)
         );
         assert_eq!(
-            row_problem(Some(&custom), "actual-model-id", "follow", true),
+            row_problem(Some(&custom), "actual-model-id", "follow", true, &[]),
             None
         );
         assert_eq!(
-            row_problem(Some(&custom), "bad\tmodel", "follow", true),
+            row_problem(Some(&custom), "bad\tmodel", "follow", true, &[]),
             Some(Problem::Invalid)
         );
         assert_eq!(
-            row_problem(Some(&custom), &"🙂".repeat(121), "follow", true),
+            row_problem(Some(&custom), &"🙂".repeat(121), "follow", true, &[]),
             Some(Problem::Invalid)
         );
         custom["hasApiKey"] = json!(false);
         assert_eq!(
-            row_problem(Some(&custom), "", "follow", true),
+            row_problem(Some(&custom), "", "follow", true, &[]),
             Some(Problem::Key)
         );
     }
@@ -2180,18 +2314,24 @@ mod assignment_validation_tests {
             "modelMetadata": [{"id": "known", "supportedEfforts": ["medium", "medium"]}],
         });
         assert!(!allows_manual(&provider));
-        assert_eq!(effort_choices(&provider, "known"), ["follow", "medium"]);
         assert_eq!(
-            row_problem(Some(&provider), "missing", "medium", true),
+            effort_choices(&provider, "known", &[]),
+            ["follow", "medium"]
+        );
+        assert_eq!(
+            row_problem(Some(&provider), "missing", "medium", true, &[]),
             Some(Problem::Model)
         );
         assert_eq!(
-            row_problem(Some(&provider), "known", "high", true),
+            row_problem(Some(&provider), "known", "high", true, &[]),
             Some(Problem::Effort)
         );
-        assert_eq!(row_problem(Some(&provider), "known", "medium", true), None);
         assert_eq!(
-            row_problem(None, "known", "medium", true),
+            row_problem(Some(&provider), "known", "medium", true, &[]),
+            None
+        );
+        assert_eq!(
+            row_problem(None, "known", "medium", true, &[]),
             Some(Problem::Provider)
         );
     }
@@ -2200,9 +2340,9 @@ mod assignment_validation_tests {
     fn official_without_installed_model_directory_reports_catalog_unavailable() {
         let provider = json!({"builtIn": true, "endpoint": "https://api.anthropic.com/"});
         assert!(!allows_manual(&provider));
-        assert!(available_models(&provider).is_empty());
+        assert!(available_models(&provider, &[]).is_empty());
         assert_eq!(
-            row_problem(Some(&provider), "", "follow", true),
+            row_problem(Some(&provider), "", "follow", true, &[]),
             Some(Problem::Catalog)
         );
     }
