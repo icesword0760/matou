@@ -1655,3 +1655,7 @@ On 2026-11-16 the user explicitly chose `保持原样` after the concrete scenar
 ### HUD/footer/AGENTS.md fix — real pass with one Esc edge (2026-11-21)
 
 - Real 720/900/1200: the breadcrumb and environment icons stay intact, cwd tail-ellipsizes or hides below a 64 pt slot, the model slot expands to show the full model and `(high)` at 1200 while context/tools stay at narrow widths (recorded deliberate deviation from the reference's model-first occlusion), and the AGENTS.md entry is the frozen grey chip reading the outer execution workspace file. Open-then-Esc and click-body-then-Esc both close at all three widths. Remaining edge: typing `a` before the first Esc needs a second press to close; cause not yet located. Runtime/core/desktop suites, fmt/check/identifiers/whitespace pass.
+
+### AGENTS.md preview Esc edge fixed (2026-11-21)
+
+- Root cause: after typing `a` the overlay let the key through while the body kept focus, so the first Esc never reached the dialog handler. Read-only previews now consume printable keys in the overlay; the first Esc closes in two real rounds, direct/click-body/unreadable/missing paths still close once, and with no overlay Esc reaches the terminal (`0x1b`). Hidden probes cover Chinese preedit commit/cancel and focus restoration. Runtime 207 / desktop 54 with 0 failures; fmt/check/identifiers/whitespace. The real preview did not enter Chinese preedit (same keys in the terminal did); that path is hidden-probe only.
