@@ -401,3 +401,114 @@ fn invalid_tail_snapshots_and_decreasing_sequences_are_rejected() -> Result<()> 
     }
     Ok(())
 }
+
+#[derive(Deserialize)]
+struct GateCodecInput {
+    now: i64,
+    codec: Vec<GateCodecCase>,
+}
+
+#[derive(Deserialize)]
+struct GateCodecCase {
+    id: String,
+    name: String,
+    base64: String,
+    repair: bool,
+}
+
+fn gate_codec_error(error: &anyhow::Error) -> Value {
+    use serde_json::json;
+
+    if let Some(fault) = error.downcast_ref::<JournalCorruptionError>() {
+        return json!({
+            "type": "JournalCorruptionError",
+            "message": fault.message,
+            "offset": fault.offset,
+            "quarantined": fault.quarantine_path.is_some(),
+        });
+    }
+    if let Some(io_error) = error.downcast_ref::<std::io::Error>() {
+        return json!({
+            "type": "std::io::Error",
+            "message": io_error.to_string(),
+            "code": format!("{:?}", io_error.kind()),
+        });
+    }
+    json!({ "type": "anyhow::Error", "message": error.to_string() })
+}
+
+fn gate_strict_read(path: &std::path::Path) -> Value {
+    use serde_json::json;
+
+    let mut frames = Vec::new();
+    let result = read_segment(path).and_then(|reader| {
+        for result in reader {
+            frames.push(result?.frame);
+        }
+        Ok(())
+    });
+    json!({ "frames": frames, "error": result.err().as_ref().map(gate_codec_error) })
+}
+
+#[test]
+#[ignore = "requires K-storage-journal run.sh to supply the fixed inputs"]
+fn export_fixed_journal_codec() -> Result<()> {
+    use std::path::PathBuf;
+
+    use serde_json::json;
+
+    let stage = PathBuf::from(
+        std::env::var_os("MATOU_JOURNAL_GATE_RUN").context("MATOU_JOURNAL_GATE_RUN is required")?,
+    );
+    let input: GateCodecInput = serde_json::from_slice(&fs::read(stage.join("inputs.json"))?)?;
+    let directory = tempfile::tempdir_in(&stage)?;
+    let mut observations = Vec::new();
+    for case in input.codec {
+        let path = directory.path().join(&case.name);
+        let bytes = STANDARD.decode(&case.base64)?;
+        fs::write(&path, &bytes)?;
+        let strict = gate_strict_read(&path);
+        assert_eq!(
+            fs::read(&path)?,
+            bytes,
+            "{} strict read mutated input",
+            case.id
+        );
+
+        let repair = if case.repair {
+            match repair_segment_tail(&path, input.now) {
+                Ok(report) => json!({
+                    "report": { "lastSequence": report.last_sequence, "truncatedBytes": report.truncated_bytes },
+                    "bytes": STANDARD.encode(fs::read(&path)?),
+                    "after": gate_strict_read(&path),
+                }),
+                Err(error) => {
+                    let mut observation = json!({ "error": gate_codec_error(&error) });
+                    if let Some(quarantine) = error
+                        .downcast_ref::<JournalCorruptionError>()
+                        .and_then(|fault| fault.quarantine_path.as_ref())
+                    {
+                        observation["quarantine"] = json!(
+                            quarantine
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                .context("fixed quarantine filename is UTF-8")?
+                        );
+                        observation["quarantinedBytes"] =
+                            json!(STANDARD.encode(fs::read(quarantine)?));
+                        observation["originalPresent"] = json!(path.try_exists()?);
+                    }
+                    observation
+                }
+            }
+        } else {
+            Value::Null
+        };
+        observations.push(json!({ "id": case.id, "strict": strict, "repair": repair }));
+    }
+    fs::write(
+        stage.join("codec.native.json"),
+        serde_json::to_vec(&observations)?,
+    )?;
+    Ok(())
+}
