@@ -3,6 +3,15 @@ use matou_native_core::sessions::{get_session, list_runs};
 use serde_json::{Value, json};
 
 fn fixture(root: &Path, executable: &str, exit: Option<u8>) -> Result<(RuntimeChild, PathBuf)> {
+    fixture_with_events(root, executable, exit, false)
+}
+
+pub(super) fn fixture_with_events(
+    root: &Path,
+    executable: &str,
+    exit: Option<u8>,
+    events: bool,
+) -> Result<(RuntimeChild, PathBuf)> {
     let bin = root.join("fixture bin");
     let codex_home = root.join("隔离 Codex home");
     fs::create_dir(&bin)?;
@@ -35,7 +44,8 @@ alias cc='claude --dangerously-skip-permissions'
                 .env("MATOU_AGENT_STATUS_DIR", "/old-fixture/status")
                 .env("CLAUDECODE", "1")
                 .env_remove("OPENAI_API_KEY")
-                .env_remove("CODEX_FIXTURE_EXIT_CODE");
+                .env_remove("CODEX_FIXTURE_EXIT_CODE")
+                .env("CODEX_FIXTURE_EVENTS", if events { "1" } else { "0" });
             if executable == "codex" {
                 // A desktop launcher can omit /usr/sbin and inherit the C locale.
                 let path =
@@ -65,6 +75,27 @@ fn graph_for(child: &mut RuntimeChild, profile: &str) -> Result<Value> {
             Event::Diagnostic(error) => bail!("{error}"),
             _ => {}
         }
+    }
+}
+
+fn assert_hook_argv(actual: &[String], expected: &[&str]) {
+    assert_eq!(&actual[..actual.len() - 3], expected);
+    let [flag, hooks, trust] = &actual[actual.len() - 3..] else {
+        unreachable!()
+    };
+    assert_eq!(flag, "-c");
+    assert_eq!(trust, "--dangerously-bypass-hook-trust");
+    assert!(hooks.starts_with("hooks={ "));
+    for event in [
+        "SessionStart",
+        "UserPromptSubmit",
+        "PreToolUse",
+        "PermissionRequest",
+        "PostToolUse",
+        "Stop",
+        "SessionEnd",
+    ] {
+        assert!(hooks.contains(&format!("{event} = [")), "{event}");
     }
 }
 
@@ -238,7 +269,7 @@ fn codex_launch_promotes_exact_commands_on_the_same_card() -> Result<()> {
             "https://api.openai.com/v1"
         };
         expected.extend_from_slice(permission_flags);
-        assert_eq!(actual, expected);
+        assert_hook_argv(&actual, &expected);
         assert_eq!(
             fs::read_to_string(codex_home.join("cwd"))?.trim_end(),
             cwd.to_str().unwrap()
@@ -258,7 +289,7 @@ fn codex_launch_promotes_exact_commands_on_the_same_card() -> Result<()> {
             assert_eq!(previous_binding, ("unknown".to_owned(), 1));
         }
         println!(
-            "exact {mode}: old_pid={old_pid}, new_pid={new_pid}, cwd suffix=项目 路径, argv={actual:?}, screen=FIXTURE CODEX TUI, same card/node/grid, binding pending"
+            "exact {mode}: old_pid={old_pid}, new_pid={new_pid}, cwd suffix=项目 路径, launch args={expected:?}, seven run hooks, screen=FIXTURE CODEX TUI, same card/node/grid, binding pending"
         );
         child.send(Command::Shutdown)?;
         assert!(child.closed()?.is_empty());
@@ -377,16 +408,16 @@ fn codex_launch_rolls_back_missing_and_immediately_exiting_commands() -> Result<
                 ("codex", "exited", Some(i64::from(code)))
             );
             assert_shell_gone(u32::try_from(runs[1].pid.context("early Codex PID")?)?)?;
-            assert_eq!(
-                argv(&codex_home.join("argv"))?,
-                [
+            assert_hook_argv(
+                &argv(&codex_home.join("argv"))?,
+                &[
                     "-c",
                     "check_for_update_on_startup=false",
                     "--ask-for-approval",
                     "on-request",
                     "--sandbox",
                     "workspace-write",
-                ]
+                ],
             );
         }
         let current = runs.last().unwrap();

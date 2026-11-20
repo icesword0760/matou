@@ -26,6 +26,7 @@ use serde_json::{Value, json};
 use crate::{
     SessionEvent, SessionOptions,
     claude_request_gateway::Gateway,
+    codex_events,
     codex_launch::CodexLaunch,
     derived::{CwdTracker, WorkStatusTracker, terminal_summary_lines, utf16_tail},
     host_control::{RunControl, clear_control_environment},
@@ -55,8 +56,6 @@ struct RunningShell {
     promotion_process_check: Option<Arc<OnceLock<Result<()>>>>,
     cwd_capture: Option<(Instant, bool)>,
     hook: Option<RunHook>,
-    // Fresh Codex runs have launch metadata before a hook confirms a UUID.
-    codex_launch_metadata: Option<Value>,
     gateway: Option<Gateway>,
 }
 
@@ -72,6 +71,7 @@ impl RunningShell {
 
 struct RunHook {
     _registration: Registration,
+    codex: Option<codex_events::Run>,
     launch_metadata: Value,
     secrets: Vec<String>,
     uses_gateway: bool,
@@ -1383,6 +1383,14 @@ impl ShellOwner {
             "permissionMode": plan.permission_mode,
             "cwd": launch.cwd,
         });
+        let secrets = launch
+            .env
+            .get(std::ffi::OsStr::new("OPENAI_API_KEY"))
+            .and_then(|value| value.to_str())
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .into_iter()
+            .collect();
         self.launch_run(
             SessionOptions {
                 session_id: session_id.to_owned(),
@@ -1394,10 +1402,9 @@ impl ShellOwner {
             },
             false,
             "",
-            None,
+            Some((metadata, secrets, None, None)),
         )?;
         let shell = self.shells.get_mut(session_id).unwrap();
-        shell.codex_launch_metadata = Some(metadata);
         shell.provider_startup_pending = true;
         Ok(shell.run_id.clone())
     }
@@ -1605,10 +1612,13 @@ impl ShellOwner {
             }
             Some(RunHook {
                 _registration: registration,
+                codex: (profile == LaunchProfile::Codex)
+                    .then(|| codex_events::Run::new(&options.launch)),
                 launch_metadata,
                 secrets,
                 uses_gateway: gateway.is_some(),
-                deadline: Some(Instant::now() + identity_wait),
+                deadline: (profile == LaunchProfile::ClaudeCode)
+                    .then(|| Instant::now() + identity_wait),
                 last_observation: None,
                 last_submission: None,
                 resume,
@@ -1704,7 +1714,6 @@ impl ShellOwner {
                 promotion_process_check: None,
                 cwd_capture: None,
                 hook,
-                codex_launch_metadata: None,
                 gateway,
             },
         );
@@ -1726,6 +1735,7 @@ impl ShellOwner {
         let registration = self.hook_server.as_ref().unwrap().register(
             &options.launch.data_root,
             Scope {
+                profile: options.launch.profile,
                 session_id: options.session_id.clone(),
                 run_id: run_id.to_owned(),
                 generation: self.generation.clone(),
@@ -1734,7 +1744,11 @@ impl ShellOwner {
             },
             permission_respawn,
         )?;
-        attach_claude_settings(&mut options.launch, &registration.settings_path)?;
+        if options.launch.profile == LaunchProfile::Codex {
+            registration.attach_codex(&mut options.launch)?;
+        } else {
+            attach_claude_settings(&mut options.launch, &registration.settings_path)?;
+        }
         Ok(registration)
     }
 
@@ -1882,6 +1896,22 @@ impl ShellOwner {
 
     fn poll_provider_hooks(&mut self, events: &mut Vec<OwnerEvent>) {
         self.poll_provider_hook_messages(events, 64, |_, _, _| true);
+        let mut codex_effects = Vec::new();
+        if !self.closing {
+            for (id, shell) in &mut self.shells {
+                if !shell.ended
+                    && !shell.retiring
+                    && let Some(hook) = &mut shell.hook
+                    && let Some(codex) = &mut hook.codex
+                    && let Some(effect) = codex.poll_error(&shell.cwd, false)
+                {
+                    codex_effects.push((id.clone(), shell.run_id.clone(), effect));
+                }
+            }
+        }
+        for (id, run_id, effect) in codex_effects {
+            self.apply_codex_effect(&id, &run_id, effect, None, events);
+        }
         let mut expired_forks = Vec::new();
         let mut expired_permission_restores = Vec::new();
         for (session_id, shell) in &mut self.shells {
@@ -1971,6 +2001,10 @@ impl ShellOwner {
             reject_identity(events, &scope, "retired-run");
             return;
         };
+        if hook.codex.is_some() {
+            self.apply_codex_hook(scope, observation, events);
+            return;
+        }
         if hook.permission_identity_error.is_some() {
             return;
         }
@@ -2195,6 +2229,164 @@ impl ShellOwner {
         }
     }
 
+    fn apply_codex_hook(
+        &mut self,
+        scope: Scope,
+        mut observation: Observation,
+        events: &mut Vec<OwnerEvent>,
+    ) {
+        let shell = self
+            .shells
+            .get_mut(&scope.session_id)
+            .expect("admitted run");
+        let hook = shell.hook.as_mut().expect("admitted hook");
+        if observation.event == "unknown" || observation.codex.is_none() {
+            return;
+        }
+        if shell.provider_startup_pending {
+            // Keep the same early-exit fence as a Shell-to-Claude promotion.
+            if hook.pending_startup_observations.len() < HOOK_QUEUE_CAPACITY {
+                hook.pending_startup_observations.push((scope, observation));
+            }
+            return;
+        }
+        let Some(identity) = observation
+            .identity
+            .as_deref()
+            .and_then(|identity| uuid::Uuid::parse_str(identity.trim()).ok())
+        else {
+            return;
+        };
+        let identity_text = identity.to_string();
+        let codex = hook.codex.as_mut().expect("Codex run");
+        let payload = observation.codex.take().expect("Codex payload");
+        if let Some(confirmed) = &hook.last_observation {
+            if confirmed.identity.as_deref() != Some(identity_text.as_str()) {
+                return;
+            }
+            let Some(effect) = codex.apply(observation.event, payload, &shell.cwd) else {
+                return;
+            };
+            let notification = observation.notification.map(|(notice, _)| notice.payload());
+            self.apply_codex_effect(
+                &scope.session_id,
+                &scope.run_id,
+                effect,
+                notification,
+                events,
+            );
+            return;
+        }
+        if observation.event != "SessionStart" || shell.worker.is_finished() {
+            return;
+        }
+        let Some(rollout) = codex.start_rollout(&payload, identity) else {
+            return;
+        };
+        let observed = observation
+            .model
+            .as_deref()
+            .and_then(|model| safe_hook_text(model, &hook.secrets))
+            .map_or_else(|| json!({}), |model| json!({"model": model}));
+        let id = (self.next_id)();
+        let commit = sessions::record_codex_identity(
+            &mut self.connection,
+            &command(
+                format!("provider-hook-{}-{id}", scope.run_id),
+                "provider-hook.identity",
+                id.clone(),
+            ),
+            &sessions::ProviderIdentity {
+                binding_id: &id,
+                session_id: &scope.session_id,
+                run_id: &scope.run_id,
+                generation: &scope.generation,
+                provider_session_id: &identity_text,
+                expected_id: None,
+                launch_metadata: &hook.launch_metadata,
+                observed_metadata: &observed,
+                event_name: observation.event,
+                first_for_run: true,
+            },
+            now(),
+        );
+        let Ok(commit) = commit else {
+            events.push(OwnerEvent::ProviderIdentity(json!({
+                "result": "rejected", "sessionId": scope.session_id, "runId": scope.run_id,
+                "provider": "codex", "reason": "binding-write-failed",
+            })));
+            return;
+        };
+        codex.confirm(rollout);
+        observation.identity = Some(identity_text);
+        hook.last_observation = Some(observation);
+        let mut confirmed = commit.result.clone();
+        confirmed["result"] = json!("confirmed");
+        events.push(OwnerEvent::ProviderIdentity(confirmed));
+        events.push(OwnerEvent::Domain(commit));
+    }
+
+    fn apply_codex_effect(
+        &mut self,
+        session_id: &str,
+        run_id: &str,
+        effect: codex_events::Effect,
+        hook_notification: Option<Value>,
+        events: &mut Vec<OwnerEvent>,
+    ) {
+        if let Err(error) = self.set_work_status(session_id, events, |_| effect.status) {
+            diagnostic(
+                events,
+                session_id,
+                format!("persist Codex work status: {error:#}"),
+            );
+            return;
+        }
+        let notification = effect
+            .error
+            .or_else(|| hook_notification.filter(|_| effect.notify));
+        if let Some(mut notification) = notification {
+            let secrets = &self.shells[session_id]
+                .hook
+                .as_ref()
+                .expect("Codex hook")
+                .secrets;
+            for field in ["body", "subtitle", "replacementKey"] {
+                if let Some(value) = notification[field].as_str()
+                    && safe_hook_text(value, secrets).is_none()
+                {
+                    notification[field] = json!("[redacted]");
+                }
+            }
+            let id = (self.next_id)();
+            let commit = sessions::publish_provider_notification(
+                &mut self.connection,
+                &command(
+                    format!("agent-notification-{id}"),
+                    "agent.notification.publish",
+                    id,
+                ),
+                session_id,
+                run_id,
+                &self.generation,
+                "codex",
+                notification,
+                now(),
+            );
+            match commit {
+                Ok(commit) if !commit.replayed && commit.first_event_sequence.is_some() => {
+                    events.push(OwnerEvent::Domain(commit));
+                }
+                Ok(_) => {}
+                Err(error) => diagnostic(
+                    events,
+                    session_id,
+                    format!("persist Codex notification: {error:#}"),
+                ),
+            }
+        }
+    }
+
     fn park_provider_run(
         &mut self,
         session_id: &str,
@@ -2283,7 +2475,7 @@ impl ShellOwner {
         }
         let result = match &event.event {
             SessionEvent::InputSubmitted(submitted_at) => {
-                if shell.ended || shell.codex_launch_metadata.is_some() {
+                if shell.ended || shell.hook.as_ref().is_some_and(|hook| hook.codex.is_some()) {
                     return;
                 }
                 let shell = self
@@ -2397,6 +2589,16 @@ impl ShellOwner {
             .deadline
             .get_or_insert_with(|| Instant::now() + Duration::from_millis(180));
         if !shell.is_shell {
+            if !self.closing
+                && let Some(effect) = shell
+                    .hook
+                    .as_mut()
+                    .and_then(|hook| hook.codex.as_mut())
+                    .and_then(|codex| codex.output(data))
+            {
+                let run_id = shell.run_id.clone();
+                self.apply_codex_effect(id, &run_id, effect, None, events);
+            }
             return;
         }
         let mut completed = false;
@@ -2810,7 +3012,7 @@ fn safe_hook_text<'a>(value: &'a str, secrets: &[String]) -> Option<&'a str> {
 fn reject_identity(events: &mut Vec<OwnerEvent>, scope: &Scope, reason: &str) {
     events.push(OwnerEvent::ProviderIdentity(json!({
         "result": "rejected", "sessionId": scope.session_id, "runId": scope.run_id,
-        "provider": "claude-code", "reason": reason,
+        "provider": scope.profile.kind(), "reason": reason,
     })));
 }
 
@@ -3169,6 +3371,7 @@ mod provider_tests {
                 target.source_id,
             )?;
             Ok(Scope {
+                profile: LaunchProfile::ClaudeCode,
                 session_id: label.into(),
                 run_id: owner.shells[label].run_id.clone(),
                 generation: owner.generation.clone(),
@@ -3617,6 +3820,7 @@ mod provider_tests {
                 .is_err()
         );
         let scope = Scope {
+            profile: LaunchProfile::ClaudeCode,
             session_id: session.into(),
             run_id: owner.shells[session].run_id.clone(),
             generation: owner.generation.clone(),
@@ -3799,6 +4003,7 @@ mod provider_tests {
         assert!(owner.change_claude_restore(session, ClaudeRestore::Begin(&binding.id))?);
         owner.launch_claude(session.into(), terminal, plan(), Some(&binding))?;
         let resume = Scope {
+            profile: LaunchProfile::ClaudeCode,
             session_id: session.into(),
             run_id: owner.shells[session].run_id.clone(),
             generation: owner.generation.clone(),

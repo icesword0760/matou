@@ -1,5 +1,6 @@
 mod claude_model_catalog;
 mod claude_request_gateway;
+mod codex_events;
 mod codex_launch;
 pub mod derived;
 pub mod flow;

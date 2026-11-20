@@ -107,6 +107,28 @@ impl WorkStatusTracker {
     }
 }
 
+#[derive(Default)]
+pub(crate) struct CodexInterruption {
+    buffer: String,
+}
+
+impl CodexInterruption {
+    pub fn ingest(&mut self, chunk: &str) -> bool {
+        static INTERRUPTED: LazyLock<Regex> =
+            LazyLock::new(|| regex(r"(?:^|[\r\n])[ \t]*(?:■[ \t]*)?Conversation interrupted\b"));
+        self.buffer.push_str(chunk);
+        self.buffer = utf16_tail(&self.buffer, 8192);
+        let without_osc = OSC_DISPLAY.replace_all(&self.buffer, "");
+        let without_csi = CSI_DISPLAY.replace_all(&without_osc, "");
+        let visible = HIDDEN_DISPLAY.replace_all(&without_csi, "");
+        if INTERRUPTED.is_match(&visible) {
+            self.buffer.clear();
+            return true;
+        }
+        false
+    }
+}
+
 fn is_blocking_prompt(raw: &str) -> bool {
     let without_osc = OSC_DISPLAY.replace_all(raw, "");
     let without_csi = CSI_DISPLAY.replace_all(&without_osc, "");
