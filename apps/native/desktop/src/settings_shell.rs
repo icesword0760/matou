@@ -10,7 +10,7 @@
 //! Deferred by the assignment and deliberately not rendered as fake controls:
 //! - model discovery / refresh (`provider-config.models` and subscription
 //!   `models-refresh`) is left for the next level;
-//! - delete, subscription sign-in/refresh and subscription interaction;
+//! - subscription sign-in/refresh and subscription interaction;
 //! - context-window writing (the runtime has no write path yet);
 //! - the compaction and dispatch blocks below the Claude model assignments.
 //!
@@ -24,7 +24,7 @@ use matou_native_runtime::protocol::{ClaudeModelCatalogReply, ClaudeRoleAssignme
 use serde_json::Value;
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::provider_settings::{ProviderDraft, ProviderSettings, ProviderUpdate};
+use crate::provider_settings::{DELETE_FAILED, ProviderDraft, ProviderSettings, ProviderUpdate};
 use crate::rename_input::{RenameInput, RenameInputEvent};
 use crate::runtime_bridge::RuntimeCommands;
 use crate::terminal_input::read_clipboard_text;
@@ -808,6 +808,7 @@ enum PickChoice {
 enum ConfirmKind {
     Close,
     Back,
+    Delete,
 }
 
 #[derive(Clone, PartialEq)]
@@ -834,10 +835,11 @@ struct EditorFocus {
     name: FocusHandle,
     mappings: [FocusHandle; 3],
     efforts: [FocusHandle; 3],
+    delete: FocusHandle,
     save: FocusHandle,
     save_switch: FocusHandle,
     keep_editing: FocusHandle,
-    discard: FocusHandle,
+    confirm_action: FocusHandle,
     error: FocusHandle,
 }
 
@@ -1007,10 +1009,11 @@ impl Editor {
                 .each_ref()
                 .map(|input| input.read(cx).focus.clone()),
             efforts: std::array::from_fn(|_| cx.focus_handle().tab_stop(true)),
+            delete: cx.focus_handle().tab_stop(true),
             save: cx.focus_handle().tab_stop(true),
             save_switch: cx.focus_handle().tab_stop(true),
             keep_editing: cx.focus_handle().tab_stop(true),
-            discard: cx.focus_handle().tab_stop(true),
+            confirm_action: cx.focus_handle().tab_stop(true),
             error: cx.focus_handle().tab_stop(false),
         };
         let editor = Self {
@@ -1348,14 +1351,18 @@ impl SettingsShell {
 
     pub fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(editor) = &mut self.editor {
-            if self.providers.saving() {
+            if self.providers.saving() || self.providers.deleting() {
                 return;
             }
             // Escape is a keyboard path; keep the focus ring visible when this
             // opens the discard confirmation or returns focus to a control.
             self.keyboard_focus = true;
-            // Frozen order: cancel the discard confirmation first, then close
+            // Frozen order: cancel the confirmation first, then close
             // the effort picker, then request the dialog close.
+            if editor.confirm == Some(ConfirmKind::Delete) {
+                self.editor_keep_editing(window, cx);
+                return;
+            }
             if editor.confirm.take().is_some() {
                 let focus = editor.focus.keep_editing.clone();
                 window.focus(&focus);
@@ -1496,6 +1503,18 @@ impl SettingsShell {
             ProviderUpdate::Saved => {
                 self.close_editor(window, cx);
             }
+            ProviderUpdate::Deleted => {
+                self.editor = None;
+                self.keyboard_focus = false;
+                window.focus(&self.new_provider_focus);
+            }
+            ProviderUpdate::DeleteFailed => {
+                if let Some(editor) = &mut self.editor {
+                    editor.error = Some(DELETE_FAILED.into());
+                    editor.body_scroll.scroll_to_bottom();
+                    window.focus(&editor.focus.error);
+                }
+            }
             ProviderUpdate::SaveFailed(message) => {
                 let committed = self.providers.take_committed_provider();
                 if let Some(editor) = &mut self.editor {
@@ -1537,7 +1556,7 @@ impl SettingsShell {
     }
 
     fn editor_request_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.providers.saving() {
+        if self.editor_busy() {
             return;
         }
         let Some(editor) = &mut self.editor else {
@@ -1632,7 +1651,7 @@ impl SettingsShell {
     }
 
     fn editor_save(&mut self, activate: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if self.providers.saving() {
+        if self.editor_busy() {
             return;
         }
         let Some(editor) = &self.editor else {
@@ -1746,8 +1765,12 @@ impl SettingsShell {
         cx.notify();
     }
 
+    fn editor_busy(&self) -> bool {
+        self.providers.saving() || self.providers.deleting()
+    }
+
     fn busy(&self) -> bool {
-        self.providers.saving() || self.providers.switching().is_some()
+        self.editor_busy() || self.providers.switching().is_some()
     }
 
     #[cfg(any(test, debug_assertions))]
@@ -1803,6 +1826,33 @@ impl SettingsShell {
         self.editor
             .as_ref()
             .is_some_and(|editor| editor.confirm.is_some())
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    #[allow(dead_code)]
+    pub(crate) fn diagnostics_focus_provider_edit(&self, id: &str, window: &mut Window) {
+        window.focus(&self.card_controls[id][0]);
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    #[allow(dead_code)]
+    pub(crate) fn diagnostics_delete_editor(
+        &self,
+        window: &Window,
+        cx: &App,
+    ) -> (bool, bool, String) {
+        let editor = self.editor.as_ref().expect("provider editor is open");
+        (
+            editor.focus.delete.is_focused(window),
+            editor.confirm == Some(ConfirmKind::Delete),
+            editor.key.read(cx).text().to_owned(),
+        )
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    #[allow(dead_code)]
+    pub(crate) fn diagnostics_providers(&self) -> (&[Value], Option<(&str, &str, bool)>) {
+        (self.providers.providers(), self.providers.notice())
     }
 
     #[cfg(any(test, debug_assertions))]
@@ -3060,25 +3110,61 @@ fn globe_icon(size: f32, color: u32) -> AnyElement {
 }
 
 impl SettingsShell {
-    fn editor_discard_confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let kind = self
-            .editor
-            .as_mut()
-            .and_then(|editor| editor.confirm.take());
-        match kind {
+    fn editor_request_delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.editor_busy() {
+            return;
+        }
+        if let Some(editor) = &mut self.editor
+            && self
+                .providers
+                .deletable_provider(editor.draft.id.as_deref())
+                .is_some()
+        {
+            editor.confirm = Some(ConfirmKind::Delete);
+            editor.effort_open = None;
+            editor.body_scroll.scroll_to_bottom();
+            window.focus(&editor.focus.keep_editing);
+            cx.notify();
+        }
+    }
+
+    fn editor_confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.editor_busy() {
+            return;
+        }
+        let Some(editor) = &mut self.editor else {
+            return;
+        };
+        match editor.confirm {
             Some(ConfirmKind::Close) => self.close_editor(window, cx),
             Some(ConfirmKind::Back) => self.editor_back_to_pick(window, cx),
+            Some(ConfirmKind::Delete) => {
+                editor.error = None;
+                if !editor
+                    .draft
+                    .id
+                    .as_deref()
+                    .is_some_and(|id| self.providers.delete(id))
+                {
+                    self.apply_update(ProviderUpdate::DeleteFailed, window, cx);
+                }
+                cx.notify();
+            }
             None => {}
         }
     }
 
     fn editor_keep_editing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.providers.deleting() {
+            return;
+        }
         let Some(editor) = &mut self.editor else {
             return;
         };
         let kind = editor.confirm.take();
         let focus = match kind {
             Some(ConfirmKind::Back) => editor.focus.back.clone(),
+            Some(ConfirmKind::Delete) => editor.focus.delete.clone(),
             _ => editor.focus.key.clone(),
         };
         window.focus(&focus);
@@ -3086,7 +3172,7 @@ impl SettingsShell {
     }
 
     fn cycle_modal_focus(&mut self, reverse: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if self.providers.saving() {
+        if self.editor_busy() {
             return;
         }
         let Some(editor) = &self.editor else {
@@ -3125,7 +3211,14 @@ impl SettingsShell {
                 order.extend(editor.focus.efforts.iter().cloned());
                 if editor.confirm.is_some() {
                     order.push(editor.focus.keep_editing.clone());
-                    order.push(editor.focus.discard.clone());
+                    order.push(editor.focus.confirm_action.clone());
+                }
+                if self
+                    .providers
+                    .deletable_provider(editor.draft.id.as_deref())
+                    .is_some()
+                {
+                    order.push(editor.focus.delete.clone());
                 }
                 order.push(editor.focus.save.clone());
                 order.push(editor.focus.save_switch.clone());
@@ -3159,7 +3252,7 @@ impl SettingsShell {
         // 720px minimum window instead of overflowing into the sidebar.
         let panel_width = 520.0_f32.min((self.shell_width(window) - 44.).max(0.));
         let panel_height = 820.0_f32.min((viewport_height - 44.).max(0.));
-        let busy = self.providers.saving();
+        let busy = self.editor_busy();
         let editing = editor.draft.id.is_some();
         let pick = editor.step == EditorStep::Pick;
         let title = if pick {
@@ -3314,9 +3407,42 @@ impl SettingsShell {
                 .child(cancel)
                 .child(next)
         } else if editing {
+            let delete = self
+                .providers
+                .deletable_provider(editor.draft.id.as_deref())
+                .map(|_| {
+                    let button = div()
+                        .id("provider-setup-delete")
+                        .min_h(px(42.))
+                        .flex()
+                        .items_center()
+                        .pr(px(12.))
+                        .text_size(px(13.))
+                        .font_weight(FontWeight(600.))
+                        .text_color(rgb(DANGER_TEXT))
+                        .child("删除");
+                    if busy {
+                        button
+                            .opacity(0.55)
+                            .cursor(CursorStyle::OperationNotAllowed)
+                    } else {
+                        wire_dialog_button(
+                            button.cursor_pointer().hover(|style| style.underline()),
+                            &editor.focus.delete,
+                            7.,
+                            self.keyboard_focus,
+                            |this, window, cx| this.editor_request_delete(window, cx),
+                            cx,
+                        )
+                    }
+                });
             let save = dialog_button(
                 "provider-setup-save",
-                if busy { "保存中…" } else { "保存" },
+                if self.providers.saving() {
+                    "保存中…"
+                } else {
+                    "保存"
+                },
                 true,
                 save_enabled,
                 &editor.focus.save,
@@ -3326,7 +3452,7 @@ impl SettingsShell {
             );
             let save_switch = dialog_button(
                 "provider-setup-save-switch",
-                if busy {
+                if self.providers.saving() {
                     "保存中…"
                 } else {
                     "保存并切换"
@@ -3348,6 +3474,7 @@ impl SettingsShell {
                 .border_t_1()
                 .border_color(rgb(DIALOG_FOOTER_LINE))
                 .bg(rgb(0xffffff))
+                .children(delete)
                 .child(div().flex_1())
                 .child(save)
                 .child(save_switch)
@@ -3710,7 +3837,7 @@ impl SettingsShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Div {
-        let busy = self.providers.saving();
+        let busy = self.editor_busy();
         let values = editor.values(cx);
         let editing = editor.draft.id.is_some();
         let preset = preset_by_endpoint(&values.endpoint);
@@ -4090,6 +4217,27 @@ impl SettingsShell {
         }
 
         if let Some(kind) = editor.confirm {
+            let deleting = kind == ConfirmKind::Delete;
+            let (title, description, action_id, action) = if deleting {
+                let name = self
+                    .providers
+                    .deletable_provider(editor.draft.id.as_deref())
+                    .and_then(|provider| provider["name"].as_str())
+                    .unwrap_or(&editor.draft.name);
+                (
+                    format!("删除「{name}」？"),
+                    "此操作移除保存的配置，不会注销账户。",
+                    "provider-setup-confirm-delete",
+                    "确认删除",
+                )
+            } else {
+                (
+                    "有尚未保存的修改".to_owned(),
+                    "离开后，这次填写的内容将被丢弃。",
+                    "provider-setup-discard",
+                    "放弃修改",
+                )
+            };
             let mut confirm = div()
                 .mt(px(14.))
                 .p(px(14.))
@@ -4102,14 +4250,14 @@ impl SettingsShell {
                     div()
                         .font_weight(FontWeight(650.))
                         .text_color(rgb(DIALOG_LABEL))
-                        .child("有尚未保存的修改"),
+                        .child(title),
                 )
                 .child(
                     div()
                         .mt(px(6.))
                         .line_height(px(19.2))
                         .text_color(rgb(0x596575))
-                        .child("离开后，这次填写的内容将被丢弃。"),
+                        .child(description),
                 )
                 .child(
                     div()
@@ -4119,21 +4267,20 @@ impl SettingsShell {
                         .child(confirm_button(
                             "provider-setup-keep-editing",
                             "继续编辑",
+                            !self.providers.deleting(),
                             &editor.focus.keep_editing,
                             self.keyboard_focus,
                             cx,
                             |this, window, cx| this.editor_keep_editing(window, cx),
                         ))
                         .child(confirm_button(
-                            "provider-setup-discard",
-                            "放弃修改",
-                            &editor.focus.discard,
+                            action_id,
+                            action,
+                            !self.providers.deleting(),
+                            &editor.focus.confirm_action,
                             self.keyboard_focus,
                             cx,
-                            move |this, window, cx| {
-                                let _ = kind;
-                                this.editor_discard_confirm(window, cx)
-                            },
+                            |this, window, cx| this.editor_confirm(window, cx),
                         )),
                 );
             confirm = confirm.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
@@ -4389,6 +4536,7 @@ fn link_button(
 fn confirm_button(
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
+    enabled: bool,
     focus: &FocusHandle,
     keyboard_focus: bool,
     cx: &mut Context<SettingsShell>,
@@ -4407,10 +4555,18 @@ fn confirm_button(
         .bg(rgb(0xffffff))
         .text_size(px(12.))
         .text_color(rgb(DIALOG_LABEL))
-        .cursor_pointer()
-        .hover(|style| style.bg(rgb(0xf7faff)))
         .child(label.into());
-    wire_dialog_button(button, focus, 7., keyboard_focus, activate, cx).into_any_element()
+    if enabled {
+        let button = button
+            .cursor_pointer()
+            .hover(|style| style.bg(rgb(0xf7faff)));
+        wire_dialog_button(button, focus, 7., keyboard_focus, activate, cx).into_any_element()
+    } else {
+        button
+            .opacity(0.55)
+            .cursor(CursorStyle::OperationNotAllowed)
+            .into_any_element()
+    }
 }
 
 impl Render for SettingsShell {
