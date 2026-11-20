@@ -149,12 +149,16 @@ impl HistoryView {
 
         // Keep the same text order as the panel's block and flex children.
         // The row numbers are rendered separately and never enter this list.
-        self.entries = vec![
-            SelectableText::new("历史记录"),
-            SelectableText::new("只读"),
-            SelectableText::new(format!("{}/{result_count}", result_index + 1)),
-            SelectableText::new("返回实时终端"),
-        ];
+        let previous_body = self.body_entries.clone();
+        let previous_entries = std::mem::replace(
+            &mut self.entries,
+            vec![
+                SelectableText::new("历史记录"),
+                SelectableText::new("只读"),
+                SelectableText::new(format!("{}/{result_count}", result_index + 1)),
+                SelectableText::new("返回实时终端"),
+            ],
+        );
         let body_start = self.entries.len();
         if let Some(page) = page {
             if page.has_more_before == Some(true) {
@@ -183,10 +187,59 @@ impl HistoryView {
         }
         self.entries.push(SelectableText::new("Esc 返回"));
         self.return_bounds.set(None);
-        self.selection = None;
+        self.selection = self.selection_after_state(&previous_entries, previous_body, page);
         self.stop_drag();
         self.state = Some(state);
         cx.notify();
+    }
+
+    fn selection_after_state(
+        &self,
+        previous_entries: &[SelectableText],
+        previous_body: Range<usize>,
+        page: Option<&HistoryPage>,
+    ) -> Option<TextSelection> {
+        let selection = self.selection?;
+        let ordered = selection.ordered();
+        if ordered.is_empty() {
+            return None;
+        }
+
+        let remap_row = |row| {
+            if ordered.start.row >= previous_body.end {
+                // The range and Escape labels keep their roles when the optional gap changes.
+                let footer = self.body_entries.end;
+                if row == previous_body.end {
+                    Some(footer)
+                } else if row == previous_entries.len() - 1 {
+                    Some(self.entries.len() - 1)
+                } else if self.entries.len() - footer == 3 {
+                    Some(footer + 1)
+                } else {
+                    None
+                }
+            } else {
+                let previous_page = self.page()?;
+                let page = page?;
+                let previous_lines = history_line_entries(previous_body.start, previous_page);
+                if !previous_lines.contains(&row) {
+                    return None;
+                }
+                // The frozen view keys each row by archive cursor, even if its position changes.
+                let cursor = previous_page.lines[row - previous_lines.start].cursor;
+                let index = page.lines.iter().position(|line| line.cursor == cursor)?;
+                Some(history_line_entries(self.body_entries.start, page).start + index)
+            }
+        };
+        let remap = |point: TextPoint| {
+            let row = remap_row(point.row)?;
+            (previous_entries[point.row].source == self.entries[row].source)
+                .then_some(TextPoint { row, ..point })
+        };
+        Some(TextSelection {
+            anchor: remap(selection.anchor)?,
+            head: remap(selection.head)?,
+        })
     }
 
     fn page(&self) -> Option<&HistoryPage> {
@@ -273,6 +326,17 @@ impl HistoryView {
     }
 
     fn unit_range(&self, point: TextPoint, unit: SelectionUnit) -> Range<TextPoint> {
+        if matches!(unit, SelectionUnit::Line)
+            && self.page().is_some_and(|page| {
+                history_line_entries(self.body_entries.start, page).next_back() == Some(point.row)
+            })
+        {
+            // End at the start of the next block to include the final line break.
+            return TextPoint { byte: 0, ..point }..TextPoint {
+                row: point.row + 1,
+                byte: 0,
+            };
+        }
         let text = &self.entries[point.row].source;
         let bytes = match unit {
             SelectionUnit::Character => point.byte..point.byte,
@@ -628,7 +692,7 @@ impl HistoryView {
     ) -> Stateful<Div> {
         let view = cx.entity().downgrade();
         let before = page.has_more_before == Some(true);
-        let line_start = self.body_entries.start + usize::from(before);
+        let line_start = history_line_entries(self.body_entries.start, page).start;
         let rows = page.lines.iter().enumerate().map(|(index, _)| {
             let current = page.anchor_index == Some(index);
             let entry = line_start + index;
@@ -738,6 +802,11 @@ impl HistoryView {
     }
 }
 
+fn history_line_entries(body_start: usize, page: &HistoryPage) -> Range<usize> {
+    let start = body_start + usize::from(page.has_more_before == Some(true));
+    start..start + page.lines.len()
+}
+
 // Frozen Chromium 150's ordinary DOM selection scrolls a 1-device-pixel
 // target to the nearest edge each frame. The 20px belt is in Blink space,
 // so it is 10 logical pixels on the reference 2x display. This deliberately
@@ -829,6 +898,146 @@ mod tests {
                 "{}",
                 case["name"]
             );
+        }
+    }
+
+    #[allow(unexpected_cfgs)]
+    #[cfg(matou_history_selection_gate)]
+    mod selection {
+        use super::super::{
+            HistoryPage, HistoryView, HistoryViewState, SelectionUnit, TextPoint, TextSelection,
+        };
+        use gpui::{AppContext, Context, TestAppContext};
+        use matou_native_runtime::history::{
+            HistoryCursor, HistoryGap, HistoryGapCode, HistoryLine,
+        };
+
+        fn ready(first: u64, last: u64, before: bool, after: bool) -> HistoryViewState {
+            HistoryViewState::Ready {
+                result_index: 0,
+                result_count: 1,
+                page: HistoryPage {
+                    lines: (first..=last)
+                        .map(|sequence| HistoryLine {
+                            sequence,
+                            cursor: HistoryCursor {
+                                sequence,
+                                line_index: 0,
+                            },
+                            text: if sequence == 5 {
+                                "A中文🙂 e\u{301} Z".into()
+                            } else {
+                                format!("record {sequence} tail")
+                            },
+                        })
+                        .collect(),
+                    gaps: vec![HistoryGap {
+                        segment_index: 0,
+                        code: HistoryGapCode::MissingSegment,
+                        message: String::new(),
+                    }],
+                    has_more_before: Some(before),
+                    has_more_after: Some(after),
+                    ..HistoryPage::default()
+                },
+            }
+        }
+
+        fn with_view(f: impl FnOnce(&mut HistoryView, &mut Context<HistoryView>)) {
+            TestAppContext::single().update(|cx| cx.new(HistoryView::new).update(cx, f));
+        }
+
+        #[test]
+        fn last_line_triple_click_includes_only_the_trailing_newline() {
+            with_view(|view, cx| {
+                for has_more_after in [false, true] {
+                    view.set_state(ready(4, 5, false, has_more_after), cx);
+                    let first = view.body_entries.start;
+                    for (row, expected) in [
+                        (first, "record 4 tail"),
+                        (first + 1, "A中文🙂 e\u{301} Z\n"),
+                    ] {
+                        let range =
+                            view.unit_range(TextPoint { row, byte: 1 }, SelectionUnit::Line);
+                        view.selection = Some(TextSelection {
+                            anchor: range.start,
+                            head: range.end,
+                        });
+                        assert_eq!(
+                            view.selected_text().unwrap().as_bytes(),
+                            expected.as_bytes()
+                        );
+                        if row == first + 1 {
+                            assert_eq!(range.end.row, row + 1);
+                            assert_eq!(range.end.byte, 0);
+                            assert_eq!(range.end.row == view.body_entries.end, !has_more_after);
+                        }
+                    }
+                }
+            });
+        }
+
+        #[test]
+        fn footer_selection_survives_loading_and_ready() {
+            with_view(|view, cx| {
+                view.set_state(ready(1, 3, false, false), cx);
+                let select_footer = |view: &HistoryView| TextSelection {
+                    anchor: TextPoint {
+                        row: view.entries.len() - 1,
+                        byte: 3,
+                    },
+                    head: TextPoint {
+                        row: view.body_entries.end,
+                        byte: "命".len(),
+                    },
+                };
+                view.selection = Some(select_footer(view));
+                let expected = "中行前后各最多 250 行\n1 处历史缺口\nEsc";
+                for state in [
+                    HistoryViewState::Loading {
+                        result_index: 0,
+                        result_count: 1,
+                        gap_count: 1,
+                    },
+                    ready(1, 3, false, false),
+                ] {
+                    view.set_state(state, cx);
+                    assert!(view.selection == Some(select_footer(view)));
+                    assert_eq!(view.selected_text().as_deref(), Some(expected));
+                }
+            });
+        }
+
+        #[test]
+        fn refreshed_history_selection_follows_archive_cursors() {
+            with_view(|view, cx| {
+                view.set_state(ready(2, 6, false, false), cx);
+                let selection = |first: usize| TextSelection {
+                    anchor: TextPoint {
+                        row: first + 3,
+                        byte: "A中文🙂".len(),
+                    },
+                    head: TextPoint {
+                        row: first + 2,
+                        byte: 2,
+                    },
+                };
+                let expected = "cord 4 tail\nA中文🙂";
+                let first = view.body_entries.start;
+                view.selection = Some(selection(first));
+
+                view.set_state(ready(2, 16, false, false), cx);
+                assert!(view.selection == Some(selection(first)));
+                assert_eq!(view.selected_text().as_deref(), Some(expected));
+
+                // One new row and the leading boundary shift both endpoints two entries.
+                view.set_state(ready(1, 16, true, false), cx);
+                assert!(view.selection == Some(selection(first + 2)));
+                assert_eq!(view.selected_text().as_deref(), Some(expected));
+
+                view.set_state(ready(5, 16, true, false), cx);
+                assert!(view.selection.is_none());
+            });
         }
     }
 }
