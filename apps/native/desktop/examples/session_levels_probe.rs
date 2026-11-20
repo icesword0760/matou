@@ -219,6 +219,118 @@ mod workspace {
             }
         }
 
+        pub(super) fn configure_footer_shell(&mut self, shell: &str) {
+            self.footer_shell = footer_shell_name(shell).map(str::to_owned);
+        }
+
+        pub(super) fn assert_footer_fields(
+            &self,
+            expected_name: Option<&str>,
+            expected_cwd: Option<(&str, &str)>,
+            expected_git: Option<(&str, bool)>,
+            expected_environment: Option<&str>,
+            account: bool,
+        ) {
+            let fields = self.footer_fields().expect("focused footer fields");
+            assert_eq!(fields.name.as_deref(), expected_name);
+            assert_eq!(
+                fields
+                    .cwd
+                    .as_ref()
+                    .map(|(full, short)| (*full, short.as_str())),
+                expected_cwd,
+            );
+            assert_eq!(
+                fields
+                    .git
+                    .as_ref()
+                    .map(|git| (git.label.as_str(), git.available)),
+                expected_git,
+            );
+            assert_eq!(
+                fields
+                    .environment
+                    .as_ref()
+                    .map(|environment| environment.label),
+                expected_environment,
+            );
+            assert_eq!(fields.account, account);
+        }
+
+        pub(super) fn assert_footer_empty(&self) {
+            assert!(self.footer_fields().is_none());
+            assert_eq!(
+                self.breadcrumb_labels(),
+                ("根会话".into(), "· 0 个会话".into())
+            );
+        }
+
+        pub(super) fn footer_card_point(&self, id: &str, window: &Window) -> Point<Pixels> {
+            let index = self.order.iter().position(|entry| entry == id).unwrap();
+            let bounds = self.carousel_scroll.bounds_for_item(index).unwrap();
+            let left = (bounds.left() + self.carousel_scroll.offset().x).max(px(260.));
+            let right = (bounds.right() + self.carousel_scroll.offset().x)
+                .min(window.viewport_size().width);
+            assert!(right - left > px(20.));
+            point((left + right) / 2., bounds.top() + px(31.))
+        }
+
+        pub(super) fn open_footer_child_level(
+            &mut self,
+            window: &mut Window,
+            cx: &mut Context<Self>,
+        ) {
+            self.open_child_level(PARENT, window, cx);
+        }
+
+        pub(super) fn select_footer_parent(&mut self, window: &Window, cx: &mut Context<Self>) {
+            self.activate_session_card(PARENT, window, cx);
+        }
+
+        pub(super) fn clear_footer_readings() {
+            FOOTER_READINGS.with_borrow_mut(|readings| *readings = Some(FooterReadings::default()));
+        }
+
+        pub(super) fn footer_bounds(key: &'static str) -> Option<Bounds<Pixels>> {
+            FOOTER_READINGS
+                .with_borrow(|readings| readings.as_ref()?.bounds.borrow().get(key).copied())
+        }
+
+        pub(super) fn assert_painted_footer_text(
+            key: &'static str,
+            expected: &str,
+            ellipsis: bool,
+        ) -> String {
+            FOOTER_READINGS.with_borrow(|readings| {
+                let readings = readings.as_ref().unwrap();
+                let labels = readings.text.borrow();
+                let (source, text) = labels
+                    .get(key)
+                    .unwrap_or_else(|| panic!("missing footer label {key}"));
+                assert_eq!(source.as_ref(), expected);
+                let text = text.borrow();
+                let geometry = text.as_ref().unwrap_or_else(|| {
+                    panic!(
+                        "no painted footer text for {key} in {:?}",
+                        Self::footer_bounds(key)
+                    )
+                });
+                assert!(geometry.layout.width <= geometry.bounds.size.width + px(0.5));
+                assert!(geometry.bounds.size.height <= px(18.));
+                if ellipsis {
+                    let length = geometry.layout.len.checked_sub("…".len()).unwrap();
+                    let prefix = expected
+                        .get(..length)
+                        .expect("ellipsis followed a text character");
+                    assert!(!prefix.is_empty() && geometry.layout.len < expected.len());
+                    format!("{prefix}…")
+                } else {
+                    assert_eq!(geometry.layout.len, expected.len());
+                    expected.into()
+                }
+            })
+        }
+
         pub(super) fn assert_permission_chip(&self, expected: Option<(&str, &str, bool)>) {
             let chip = self.permission_chip();
             assert_eq!(
@@ -290,17 +402,20 @@ mod workspace {
         }
 
         pub(super) fn permission_chip_point(&self, window: &Window) -> Point<Pixels> {
-            let viewport = window.viewport_size();
-            point(viewport.width - px(182.), viewport.height - px(18.5))
+            let bounds = Self::footer_bounds("permission").expect("permission chip was prepainted");
+            assert!(bounds.right() < window.viewport_size().width);
+            bounds.center()
         }
 
         pub(super) fn permission_row_point(&self, index: usize, window: &Window) -> Point<Pixels> {
-            let viewport = window.viewport_size();
-            let row_center_from_bottom = 7. + 26. * (4 - index) as f32 + 13.;
-            point(
-                viewport.width - px(140.),
-                viewport.height - px(34.5 + row_center_from_bottom),
-            )
+            let menu =
+                Self::footer_bounds("permission-menu").expect("permission menu was prepainted");
+            assert!(menu.right() <= window.viewport_size().width + px(0.5));
+            let mode = self.permission_chip().unwrap().modes[index];
+            let row = Self::footer_bounds(mode.value()).expect("permission row was prepainted");
+            assert!((row.size.width - menu.size.width + px(14.)).abs() <= px(0.5));
+            assert!(menu.contains(&row.center()));
+            row.center()
         }
 
         pub(super) fn assert_permission_colors(
@@ -323,7 +438,7 @@ mod workspace {
             );
             assert_eq!(
                 permission_chip_text(mode).as_ref(),
-                mode.label().to_ascii_uppercase()
+                ["D", "A", "AE", "PM", "BP"][index]
             );
             assert_eq!(PERMISSION_CHIP_TRACKING, 0.2);
             assert_eq!(PERMISSION_MENU_MIN_WIDTH, 180.);
@@ -1275,6 +1390,10 @@ mod workspace {
             }
         }
 
+        pub(super) fn provider_restore_pending(&self, session_id: &str) -> bool {
+            self.pending_provider_restores.contains_key(session_id)
+        }
+
         pub(super) fn assert_no_provider_restore(&self, id: &str) {
             assert!(
                 self.graph_node(id)
@@ -2056,6 +2175,7 @@ mod probe {
     fn draw(window: WindowHandle<Workspace>, cx: &mut AsyncApp) {
         AnyWindowHandle::from(window)
             .update(cx, |_, window, cx| {
+                Workspace::clear_footer_readings();
                 window.refresh();
                 window.draw(cx).clear();
             })
@@ -3458,9 +3578,16 @@ mod probe {
             [Command::RetryProviderRestore { session_id }] if session_id == PEER
         ));
         inspect(cx, Some(BACKGROUND_ZH), true, NO_BLOCK);
-        cx.background_executor()
-            .timer(Duration::from_millis(8200))
-            .await;
+        let deadline = Instant::now() + Duration::from_secs(12);
+        while window
+            .update(cx, |view, _, _| view.provider_restore_pending(PEER))
+            .unwrap()
+            && Instant::now() < deadline
+        {
+            cx.background_executor()
+                .timer(Duration::from_millis(100))
+                .await;
+        }
         inspect(cx, Some(BACKGROUND_ZH), false, NO_BLOCK);
         assert!(fixture.process(window, cx, &sink).is_empty());
         println!("Missing runtime acknowledgement unlocks both controls without another command");
@@ -5030,6 +5157,356 @@ mod probe {
         );
     }
 
+    fn footer_bounds(
+        window: WindowHandle<Workspace>,
+        cx: &mut AsyncApp,
+        key: &'static str,
+    ) -> Option<Bounds<Pixels>> {
+        window
+            .update(cx, |_, _, _| Workspace::footer_bounds(key))
+            .unwrap()
+    }
+
+    fn assert_footer_text(
+        window: WindowHandle<Workspace>,
+        cx: &mut AsyncApp,
+        key: &'static str,
+        expected: &str,
+        ellipsis: bool,
+    ) -> String {
+        window
+            .update(cx, |_, _, _| {
+                Workspace::assert_painted_footer_text(key, expected, ellipsis)
+            })
+            .unwrap()
+    }
+
+    fn assert_shell_footer_layout(
+        window: WindowHandle<Workspace>,
+        cx: &mut AsyncApp,
+        width: f32,
+        shell: &str,
+        short_cwd: &str,
+        long: bool,
+    ) {
+        let status = footer_bounds(window, cx, "status").unwrap();
+        let egress = footer_bounds(window, cx, "egress").unwrap();
+        let account = footer_bounds(window, cx, "account").unwrap();
+        assert_eq!(account.right(), px(width - 20.));
+        assert!(egress.right() < account.left());
+        assert!(egress.left() >= status.left());
+        assert_eq!(account.center().y, egress.center().y);
+        for (label, expected) in [
+            ("label", "根会话"),
+            ("count", "· 2 个会话"),
+            ("name", shell),
+            ("egress", "出口"),
+            ("account", "Claude 账户"),
+        ] {
+            assert_footer_text(window, cx, label, expected, false);
+        }
+        let cwd = if width == 720. {
+            assert!(footer_bounds(window, cx, "cwd").is_none());
+            "省略".to_owned()
+        } else {
+            let bounds = footer_bounds(window, cx, "cwd").unwrap();
+            assert!(bounds.size.width <= px(130.) && bounds.right() < egress.left());
+            assert_footer_text(window, cx, "cwd", short_cwd, long)
+        };
+        println!(
+            "footer {width} | root count 2 | shell={shell} | cwd={short_cwd} -> {cwd} | status={:?}, egress={egress:?}, account={account:?}",
+            status.size.width
+        );
+    }
+
+    fn verify_footer_base(cx: &mut AsyncApp) {
+        const TITLE: &str = "父会话的超长标题，用于在不同窗口宽度检查面包屑保留会话数量并在同一行截断，标题末尾不应覆盖底栏中的其他字段";
+        const TAIL: &str = "current-directory-with-a-name-long-enough-to-require-ellipsis";
+
+        for width in [720., 900., 1200.] {
+            let mut fixture = Fixture::new();
+            let long_cwd = format!("/fixture/{TAIL}");
+            let short_cwd = format!("~/{TAIL}");
+            let Some(BootstrapResult::Writable { connection, .. }) = &fixture.db else {
+                unreachable!()
+            };
+            connection
+                .execute(
+                    "UPDATE sessions SET cwd = ? WHERE id = ?",
+                    (&long_cwd, PEER),
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "UPDATE sessions SET cwd = '/fixture/alpha', title = ? WHERE id = ?",
+                    (TITLE, PARENT),
+                )
+                .unwrap();
+            connection
+                .execute("UPDATE sessions SET cwd = '' WHERE id = ?", [CHILD])
+                .unwrap();
+            connection
+                .execute(
+                    "UPDATE session_environment_bindings SET state = 'failed' WHERE session_id = ?",
+                    [CHILD],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO provider_bindings (
+                        id, session_id, provider, provider_session_id, resume_state,
+                        metadata_json, created_at, updated_at, validated_at
+                    ) VALUES ('footer-model-fixture', ?, 'claude-code', 'footer-model',
+                        'resumed', '{\"model\":\"Claude Sonnet\",\"permissionMode\":\"plan\"}', 20, 20, 20)",
+                    [CHILD],
+                )
+                .unwrap();
+
+            let (window, sink) = open_hidden(cx, width);
+            window
+                .update(cx, |view, window, _| {
+                    assert!(!crate::macos::is_window_visible(window).unwrap());
+                    assert_eq!(window.viewport_size().width, px(width));
+                    view.configure_footer_shell(if width == 900. {
+                        "/bin/bash"
+                    } else {
+                        "/bin/zsh"
+                    });
+                })
+                .unwrap();
+            let shell = if width == 900. { "bash" } else { "zsh" };
+            deliver(window, cx, fixture.event(true));
+            draw(window, cx);
+            window
+                .update(cx, |view, _, _| {
+                    view.assert_level(None, ROOTS, "根会话", "· 2 个会话", PEER);
+                    view.assert_footer_fields(
+                        Some(shell),
+                        Some((&long_cwd, &short_cwd)),
+                        None,
+                        Some("Local"),
+                        true,
+                    );
+                    view.assert_permission_chip(None);
+                })
+                .unwrap();
+            assert_shell_footer_layout(window, cx, width, shell, &short_cwd, true);
+
+            if width < 1000. {
+                let activate_parent = window
+                    .update(cx, |view, window, _| view.footer_card_point(PARENT, window))
+                    .unwrap();
+                click(window, cx, activate_parent);
+            } else {
+                window
+                    .update(cx, |view, window, cx| view.select_footer_parent(window, cx))
+                    .unwrap();
+            }
+            assert_focus(fixture.process(window, cx, &sink), PARENT);
+            draw(window, cx);
+            window
+                .update(cx, |view, _, _| {
+                    view.assert_level(None, ROOTS, "根会话", "· 2 个会话", PARENT);
+                    view.assert_footer_fields(
+                        Some(shell),
+                        Some(("/fixture/alpha", "~/alpha")),
+                        None,
+                        Some("Local"),
+                        true,
+                    );
+                })
+                .unwrap();
+            assert_shell_footer_layout(window, cx, width, shell, "~/alpha", false);
+            let egress = footer_bounds(window, cx, "egress").unwrap().center();
+            let account = footer_bounds(window, cx, "account").unwrap().center();
+            click(window, cx, egress);
+            click(window, cx, account);
+            assert!(fixture.process(window, cx, &sink).is_empty());
+            println!("footer {width} | inactive exit & account slots did not dispatch commands");
+
+            window
+                .update(cx, |view, window, cx| {
+                    view.open_footer_child_level(window, cx)
+                })
+                .unwrap();
+            assert_focus(fixture.process(window, cx, &sink), CHILD);
+            draw(window, cx);
+            window
+                .update(cx, |view, window, cx| view.qualify(CHILD, window, cx))
+                .unwrap();
+            draw(window, cx);
+            window
+                .update(cx, |view, _, _| {
+                    view.assert_level(
+                        Some(PARENT),
+                        CHILDREN,
+                        &format!("{TITLE} 的子会话"),
+                        "· 4 个会话",
+                        CHILD,
+                    );
+                    view.assert_footer_fields(Some("Sonnet"), None, None, Some("待处理"), true);
+                })
+                .unwrap();
+            for key in [
+                "label",
+                "count",
+                "status",
+                "permission",
+                "name",
+                "environment",
+                "egress",
+                "account",
+            ] {
+                println!(
+                    "footer {width} | child {key}={:?}",
+                    footer_bounds(window, cx, key)
+                );
+            }
+            let title = assert_footer_text(window, cx, "label", &format!("{TITLE} 的子会话"), true);
+            println!("footer {width} | painted child title={title}");
+            assert_footer_text(window, cx, "count", "· 4 个会话", false);
+            let name = assert_footer_text(window, cx, "name", "Sonnet", width == 720.);
+            let environment =
+                assert_footer_text(window, cx, "environment", "待处理", width == 720.);
+            let secondary = footer_bounds(window, cx, "secondary").unwrap();
+            let environment_bounds = footer_bounds(window, cx, "environment").unwrap();
+            assert!(environment_bounds.left() >= secondary.left() - px(0.5));
+            assert!(environment_bounds.right() <= secondary.right() + px(0.5));
+            assert!(footer_bounds(window, cx, "cwd").is_none());
+            window
+                .update(cx, |view, _, _| {
+                    view.assert_permission_chip(Some((
+                        "Plan Mode",
+                        "当前运行环境需要先恢复或交接",
+                        true,
+                    )))
+                })
+                .unwrap();
+            let permission = footer_bounds(window, cx, "permission").unwrap();
+            click(window, cx, permission.center());
+            draw(window, cx);
+            window
+                .update(cx, |view, _, _| view.assert_permission_menu(false))
+                .unwrap();
+            println!(
+                "footer {width} | child count 4 (includes stopped card), missing cwd omitted, model={name}, environment={environment}, disabled permission"
+            );
+
+            let Event::Graph(mut recovered) = fixture.graph_event() else {
+                unreachable!()
+            };
+            let node = recovered["nodes"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|node| node["sessionId"] == CHILD)
+                .unwrap();
+            node["environment"]["state"] = "ready".into();
+            node["cwd"] = "/fixture/recovered".into();
+            deliver(window, cx, Event::Graph(recovered));
+            draw(window, cx);
+            window
+                .update(cx, |view, _, _| {
+                    view.assert_permission_chip(Some((
+                        "Plan Mode",
+                        "当前权限模式：Plan Mode，点击切换",
+                        false,
+                    )))
+                })
+                .unwrap();
+            let chip = footer_bounds(window, cx, "permission").unwrap();
+            click(window, cx, chip.center());
+            draw(window, cx);
+            window
+                .update(cx, |view, _, _| view.assert_permission_menu(true))
+                .unwrap();
+            let menu = footer_bounds(window, cx, "permission-menu").unwrap();
+            let anchor = chip.left().min(px(width) - menu.size.width);
+            assert!((menu.left() - anchor).abs() <= px(0.5));
+            assert!(menu.right() <= px(width));
+            assert!((chip.top() - menu.bottom() - px(8.)).abs() <= px(0.5));
+            let plan = window
+                .update(cx, |view, window, _| view.permission_row_point(3, window))
+                .unwrap();
+            click(window, cx, plan);
+            draw(window, cx);
+            window
+                .update(cx, |view, _, _| view.assert_permission_menu(false))
+                .unwrap();
+            assert!(fixture.process(window, cx, &sink).is_empty());
+            println!(
+                "footer {width} | measured permission chip opened anchored menu, selecting current Plan closed it without a command"
+            );
+
+            if width == 1200. {
+                fixture.focus(SCENE, "child-running");
+                deliver(window, cx, fixture.event(false));
+                let Event::Graph(mut graph) = fixture.graph_event() else {
+                    unreachable!()
+                };
+                let node = graph["nodes"]
+                    .as_array_mut()
+                    .unwrap()
+                    .iter_mut()
+                    .find(|node| node["sessionId"] == "child-running")
+                    .unwrap();
+                node["cwd"] = "/".into();
+                node["git"] = serde_json::json!({"state": "unavailable", "dirty": false});
+                deliver(window, cx, Event::Graph(graph));
+                draw(window, cx);
+                window
+                    .update(cx, |view, _, _| {
+                        view.assert_footer_fields(
+                            None,
+                            None,
+                            Some(("Git 不可用", false)),
+                            Some("Local"),
+                            false,
+                        );
+                    })
+                    .unwrap();
+                assert!(footer_bounds(window, cx, "name").is_none());
+                assert!(footer_bounds(window, cx, "cwd").is_none());
+                assert!(footer_bounds(window, cx, "account").is_none());
+                assert_footer_text(window, cx, "git", "Git 不可用", false);
+                let git = footer_bounds(window, cx, "git").unwrap().center();
+                click(window, cx, git);
+                assert!(fixture.process(window, cx, &sink).is_empty());
+                println!(
+                    "footer {width} | Codex with no model and root-only cwd: both omitted, Git 不可用 inert, account omitted"
+                );
+            }
+
+            let back = footer_bounds(window, cx, "return").unwrap();
+            click(window, cx, back.center());
+            assert_focus(fixture.process(window, cx, &sink), PARENT);
+            draw(window, cx);
+            window
+                .update(cx, |view, _, _| {
+                    view.assert_level(None, ROOTS, "根会话", "· 2 个会话", PARENT);
+                })
+                .unwrap();
+            println!("footer {width} | mouse on measured breadcrumb returned to parent Shell");
+
+            let Event::Graph(mut empty) = fixture.graph_event() else {
+                unreachable!()
+            };
+            empty["nodes"].as_array_mut().unwrap().clear();
+            deliver(window, cx, Event::Graph(empty));
+            draw(window, cx);
+            window
+                .update(cx, |view, _, _| view.assert_footer_empty())
+                .unwrap();
+            assert_footer_text(window, cx, "count", "· 0 个会话", false);
+            assert!(footer_bounds(window, cx, "status").is_none());
+            println!("footer {width} | empty graph: root count zero, no stale HUD");
+            window
+                .update(cx, |_, window, _| window.remove_window())
+                .unwrap();
+        }
+        println!("Footer base hidden GPUI probe passed");
+    }
+
     async fn verify_permission_mode(cx: &mut AsyncApp) {
         const LABELS: [(&str, &str, u32); 5] = [
             ("default", "Default", 0x8b949e),
@@ -5077,6 +5554,7 @@ mod probe {
             let at = window
                 .update(cx, |view, window, _| view.permission_chip_point(window))
                 .unwrap();
+            println!("Permission | click chip at {at:?}");
             click(window, cx, at);
             draw(window, cx);
         };
@@ -5088,6 +5566,7 @@ mod probe {
                     view.permission_row_point(index, window)
                 })
                 .unwrap();
+            println!("Permission | click row {index} at {at:?}");
             click(window, cx, at);
             draw(window, cx);
             assert_menu(cx, false);
@@ -5138,7 +5617,9 @@ mod probe {
         deliver(window, cx, fixture.event(true));
         draw(window, cx);
         assert_chip(cx, None);
-        click_chip(cx);
+        assert!(footer_bounds(window, cx, "permission").is_none());
+        let shell_hud = footer_bounds(window, cx, "status").unwrap();
+        click(window, cx, shell_hud.center());
         assert_menu(cx, false);
         fixture.focus(SCENE, PARENT);
         deliver(window, cx, fixture.event(false));
@@ -5896,6 +6377,7 @@ mod probe {
     }
 
     pub(super) fn run() {
+        let footer_only = std::env::args().any(|arg| arg == "--footer-base");
         let header_only = std::env::args().any(|arg| arg == "--card-header");
         let codex_title_only = std::env::args().any(|arg| arg == "--codex-title");
         let water_pointer_only = std::env::args().any(|arg| arg == "--recovery-water-pointer");
@@ -5908,6 +6390,13 @@ mod probe {
         let codex_loader_only = std::env::args().any(|arg| arg == "--codex-loader");
         let codex_history_only = std::env::args().any(|arg| arg == "--codex-history");
         Application::new().with_assets(NativeAssets).run(move |cx| {
+            if footer_only {
+                cx.spawn(async |cx| {
+                    verify_footer_base(cx);
+                    cx.update(|cx| cx.quit()).unwrap();
+                }).detach();
+                return;
+            }
             if codex_title_only {
                 cx.spawn(async |cx| {
                     verify_codex_title_layout(cx);

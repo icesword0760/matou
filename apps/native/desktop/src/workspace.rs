@@ -1204,6 +1204,7 @@ pub struct Workspace {
     task_toast: Option<String>,
     toast_generation: u64,
     permission_menu: Option<String>,
+    footer_shell: Option<String>,
     permission_changes: HashMap<String, PermissionChange>,
     permission_identities: HashSet<String>,
     permission_toast: Option<String>,
@@ -2148,6 +2149,8 @@ impl Workspace {
                 let _ = view.update(cx, |this, cx| this.tab_key(&event.keystroke, window, cx));
             }
         });
+        let launch_options =
+            crate::runtime_bridge::LaunchOptions::from_args(std::env::args_os().skip(1)).ok();
         Self {
             history_view: None,
             history_request: None,
@@ -2189,8 +2192,8 @@ impl Workspace {
             sidebar_overflow: false,
             sidebar_scrollbar: SidebarScrollbarState::default(),
             notifications: Notifications::new(
-                crate::runtime_bridge::LaunchOptions::from_args(std::env::args_os().skip(1))
-                    .ok()
+                launch_options
+                    .as_ref()
                     .map(|options| options.data_root.join("notification-sound")),
             ),
             notification_open: false,
@@ -2198,6 +2201,10 @@ impl Workspace {
             task_toast: None,
             toast_generation: 0,
             permission_menu: None,
+            footer_shell: launch_options
+                .as_ref()
+                .and_then(|options| footer_shell_name(options.shell.to_str()?))
+                .map(str::to_owned),
             permission_changes: HashMap::new(),
             permission_identities: HashSet::new(),
             permission_toast: None,
@@ -8474,6 +8481,43 @@ impl Workspace {
         (label, format!("· {} 个会话", self.order.len()))
     }
 
+    fn footer_fields(&self) -> Option<FooterFields<'_>> {
+        let node = self.graph_node(self.level_focus()?)?;
+        let mode = node["currentMode"].as_str()?;
+        let name = if mode == "shell" {
+            self.footer_shell.clone()
+        } else {
+            trimmed_graph_text(&node["model"]).map(|model| {
+                let model = if mode == "claude-code"
+                    && let Some((prefix, rest)) = model.split_once(char::is_whitespace)
+                    && prefix.eq_ignore_ascii_case("claude")
+                {
+                    rest.trim_start()
+                } else {
+                    model
+                };
+                model.replace(['\r', '\n', '\t'], " ")
+            })
+        };
+        let cwd = node["cwd"]
+            .as_str()
+            .filter(|path| !path.trim().is_empty())
+            .and_then(|path| {
+                let tail = path.rsplit(['/', '\\']).find(|part| !part.is_empty())?;
+                Some((path, format!("~/{}", tail.replace(['\r', '\n', '\t'], " "))))
+            });
+        let git = FooterGit::from_node(&node["git"]);
+        let environment = FooterEnvironment::from_node(&node["environment"]);
+        Some(FooterFields {
+            name,
+            is_shell: mode == "shell",
+            cwd,
+            git,
+            environment,
+            account: !matches!(mode, "codex" | "dsh" | "antigravity"),
+        })
+    }
+
     fn child_badge(&self, id: &str) -> Option<session_levels::ChildBadge> {
         session_levels::child_badge(session_levels::children_of(
             session_levels::nodes(&self.graph),
@@ -11936,6 +11980,41 @@ impl Workspace {
         }
 
         let (label, count) = self.breadcrumb_labels();
+        let label = SharedString::from(label.replace(['\r', '\n', '\t'], " "));
+        let count = SharedString::from(count);
+        let viewport_width = window.viewport_size().width;
+        let width = f32::from(viewport_width);
+        let child_level = self.level_parent().is_some();
+        let breadcrumb_max = (width * 0.44).min(520.);
+        let footer_room =
+            width - FOOTER_SIDEBAR_WIDTH - 2. * PERMISSION_FOOTER_PADDING_X - FOOTER_GAP;
+        // Keep enough room for the count, the first title glyph plus ellipsis,
+        // and the back arrow on child levels.
+        let breadcrumb_chrome = if child_level { 39. } else { 20. };
+        let count_width = footer_text_estimate(&count);
+        let status_max = (footer_room - count_width - breadcrumb_chrome - 34.).max(0.);
+        let fields = self.footer_fields();
+        let chip = self.permission_chip();
+        let menu_open =
+            self.permission_menu.is_some() && chip.as_ref().is_some_and(|chip| !chip.disabled);
+        let status_measure = window.use_keyed_state("footer-status-measure", cx, |_, _| {
+            None::<FooterStatusMeasure>
+        });
+        let measure_key = (viewport_width, label.clone(), count.clone());
+        let show_cwd = status_measure
+            .read(cx)
+            .as_ref()
+            .filter(|measure| measure.key == measure_key)
+            .map_or_else(
+                || {
+                    let breadcrumb_width =
+                        (footer_text_estimate(&label) + count_width + breadcrumb_chrome)
+                            .min(breadcrumb_max);
+                    footer_room - breadcrumb_width - FOOTER_STATUS_PADDING_LEFT - 1.
+                        > FOOTER_CWD_HIDE_BELOW
+                },
+                |measure| measure.show_cwd,
+            );
         let content = div()
             .min_w_0()
             .flex_1()
@@ -11943,34 +12022,38 @@ impl Workspace {
             .items_center()
             .child(
                 div()
+                    .children(footer_bounds_probe("label"))
+                    .id("footer-breadcrumb-label")
                     .min_w_0()
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_ellipsis()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child(label),
+                    .child(footer_text("label", label.clone())),
             )
             .child(
                 div()
+                    .children(footer_bounds_probe("count"))
+                    .id("footer-breadcrumb-count")
                     .flex_none()
                     .ml(px(4.))
+                    .whitespace_nowrap()
                     .text_color(rgba(0x00000061))
-                    .child(count),
+                    .child(footer_text("count", count.clone())),
             );
         let breadcrumb = div()
             .h_full()
             .min_w_0()
-            .max_w(px(
-                (f32::from(window.viewport_size().width) * 0.44).min(520.)
-            ))
+            .max_w(px(breadcrumb_max))
             .flex()
             .items_center()
             .text_size(px(11.))
             .text_color(rgba(0x000000ad));
-        let breadcrumb = if self.level_parent().is_some() {
+        let breadcrumb = if child_level {
             breadcrumb.child(
                 self.button(
                     div()
+                        .children(footer_bounds_probe("return"))
                         .id("session-return-parent")
                         .h(px(26.))
                         .min_w_0()
@@ -12011,52 +12094,237 @@ impl Workspace {
             .flex()
             .items_center()
             .px(px(PERMISSION_FOOTER_PADDING_X))
-            .gap(px(8.))
+            .gap(px(FOOTER_GAP))
             .border_t_1()
             .border_color(rgb(0xe8e8e8))
             .bg(rgb(0xffffff))
             .text_size(px(10.))
             .text_color(rgb(0x606572))
-            .child(breadcrumb)
-            .child(div().flex_1());
-        if let Some(chip) = self.permission_chip() {
-            let menu_open = self.permission_menu.is_some() && !chip.disabled;
-            // The dismiss layer is mounted before the status area so the chip
-            // and the anchored menu paint (and receive input) above it.
-            if menu_open {
-                footer = footer.child(self.permission_menu_overlay(window, cx));
-            }
-            footer = footer.child(self.permission_status(&chip, menu_open, window, cx));
+            .when(self.graph.is_object(), |footer| footer.child(breadcrumb));
+        if chip.is_none() && fields.is_none() {
+            return footer;
         }
-        footer
+        // The dismiss layer is mounted before the status area so the chip and
+        // the deferred menu keep their own input handling above it.
+        if menu_open {
+            footer = footer.child(self.permission_menu_overlay(window, cx));
+        }
+
+        let mut primary = div()
+            .id("footer-primary")
+            .flex_shrink()
+            .min_w_0()
+            .flex()
+            .items_center()
+            .gap(px(FOOTER_GAP));
+        if let Some(chip) = chip.as_ref() {
+            primary = primary.child(self.permission_primary(chip, menu_open, window, cx));
+        }
+        if let Some(fields) = fields.as_ref()
+            && let Some(name) = fields
+                .name
+                .as_deref()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+        {
+            primary = primary.child(
+                div()
+                    .children(footer_bounds_probe("name"))
+                    .id("footer-name")
+                    .flex_shrink()
+                    .min_w_0()
+                    .max_w(px(FOOTER_NAME_MAX_WIDTH))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_color(rgb(if fields.is_shell { 0x606572 } else { 0x79c0ff }))
+                    .child(footer_text("name", name.to_owned())),
+            );
+        }
+
+        // Secondary stays right-aligned. The optional fields shrink and clip
+        // from the left first, while egress and account sit in a flex-none
+        // right group so the frozen right edge survives narrow windows.
+        let mut optional = div()
+            .children(footer_bounds_probe("secondary"))
+            .flex_auto()
+            .min_w_0()
+            .h_full()
+            .flex()
+            .items_center()
+            .justify_end()
+            .gap(px(FOOTER_GAP))
+            .overflow_hidden();
+        let mut fixed = div()
+            .flex_none()
+            .h_full()
+            .flex()
+            .items_center()
+            .gap(px(FOOTER_GAP));
+        if let Some(fields) = fields.as_ref() {
+            if show_cwd && let Some((full, short)) = fields.cwd.as_ref() {
+                let tooltip: SharedString = SharedString::from((*full).to_owned());
+                optional = optional.child(
+                    div()
+                        .children(footer_bounds_probe("cwd"))
+                        .id("footer-cwd")
+                        .flex_none()
+                        .max_w(px(FOOTER_CWD_MAX_WIDTH))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .child(footer_text("cwd", short.as_str().to_owned()))
+                        .tooltip(move |_, cx| cx.new(|_| CardTooltip(tooltip.clone())).into()),
+                );
+            }
+            if let Some(git) = fields.git.as_ref() {
+                let tooltip: SharedString = git.title.clone().into();
+                optional = optional.child(
+                    div()
+                        .children(footer_bounds_probe("git"))
+                        .id("footer-git")
+                        .flex_none()
+                        .max_w(px(FOOTER_GIT_MAX_WIDTH))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .text_color(rgb(0xff6b35))
+                        .when(!git.available, |element| element.opacity(0.7))
+                        .child(footer_text("git", git.label.clone()))
+                        .tooltip(move |_, cx| cx.new(|_| CardTooltip(tooltip.clone())).into()),
+                );
+            }
+            if let Some(environment) = fields.environment.as_ref() {
+                if environment.local_icon {
+                    optional = optional.child(
+                        div()
+                            .children(footer_bounds_probe("environment"))
+                            .id("footer-environment")
+                            .flex_none()
+                            .size(px(22.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_color(rgb(0x8b949e))
+                            .tooltip(|_, cx| {
+                                cx.new(|_| CardTooltip(SharedString::from("运行环境")))
+                                    .into()
+                            })
+                            .child(footer_monitor_icon(13., 0x8b949e)),
+                    );
+                } else {
+                    let label = environment.label;
+                    optional = optional.child(
+                        div()
+                            .children(footer_bounds_probe("environment"))
+                            .id("footer-environment")
+                            .flex_shrink()
+                            .min_w_0()
+                            .max_w(px(FOOTER_ENVIRONMENT_MAX_WIDTH))
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(environment.color))
+                            .child(footer_text("environment", label))
+                            .tooltip(|_, cx| {
+                                cx.new(|_| CardTooltip(SharedString::from("运行环境")))
+                                    .into()
+                            }),
+                    );
+                }
+            }
+            fixed = fixed.child(footer_egress());
+            if fields.account {
+                fixed = fixed.child(footer_account());
+            }
+        }
+
+        let measure = status_measure.clone();
+        let status = div()
+            .id("footer-status")
+            .relative()
+            .flex_grow()
+            .flex_shrink_0()
+            .min_w_0()
+            .max_w(px(status_max))
+            .h_full()
+            .ml_auto()
+            .pl(px(FOOTER_STATUS_PADDING_LEFT))
+            .border_l_1()
+            .border_color(rgb(0xe8e8e8))
+            .flex()
+            .items_center()
+            .gap(px(FOOTER_GAP))
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_size(px(10.))
+            .text_color(rgb(0x606572))
+            .child(primary)
+            .when(fields.is_some(), |status| {
+                status.child(optional).child(fixed)
+            })
+            .child(
+                // Measure the real status content box after layout. The next
+                // frame hides the cwd when it is at or below the frozen 440pt
+                // budget; the observer on this keyed state repaints the view.
+                canvas(
+                    |_, _, _| (),
+                    move |bounds, _, _, cx| {
+                        record_footer_bounds("status", bounds);
+                        let actual_show_cwd =
+                            f32::from(bounds.size.width) - FOOTER_STATUS_PADDING_LEFT - 1.
+                                > FOOTER_CWD_HIDE_BELOW;
+                        measure.update(cx, |state, cx| {
+                            *state = Some(FooterStatusMeasure {
+                                key: measure_key.clone(),
+                                show_cwd: actual_show_cwd,
+                            });
+                            if actual_show_cwd != show_cwd {
+                                cx.notify();
+                            }
+                        });
+                    },
+                )
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full(),
+            );
+        footer.child(status)
     }
 
-    /// The right-hand footer cell reserved for the permission control. The
-    /// 180px width is the frozen menu's minimum width so an open menu can sit
-    /// flush above the chip without overlapping the breadcrumb.
-    fn permission_status(
+    /// Wrap the permission chip so the menu can be laid out from the chip's
+    /// real bounds instead of a guessed right-hand cell.
+    fn permission_primary(
         &self,
         chip: &PermissionChip,
         menu_open: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        div()
-            .id("permission-status")
-            .w(px(PERMISSION_STATUS_WIDTH))
-            .h_full()
+        let wrapper = div()
+            .id("permission-chip-wrap")
+            .relative()
             .flex_none()
             .flex()
             .items_center()
             .child(self.permission_chip_view(chip, cx))
-            .when(menu_open, |status| {
-                status.child(self.permission_menu_view(chip, window, cx))
-            })
+            .children(footer_bounds_probe("permission"));
+        if !menu_open {
+            return wrapper;
+        }
+        wrapper.child(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .child(self.permission_menu_view(chip, window, cx)),
+        )
     }
 
     /// `.status-perm-badge` + `.is-clickable` + `.status-field:disabled`.
-    /// The label is uppercased and tracked here because GPUI has no
-    /// `text-transform` / `letter-spacing`; the tooltip keeps the whole title.
+    /// Use the frozen abbreviations in the row and the full title in the tooltip.
     fn permission_chip_view(&self, chip: &PermissionChip, cx: &mut Context<Self>) -> Stateful<Div> {
         let tooltip: SharedString = chip.title.clone().into();
         let cell = div()
@@ -12127,9 +12395,9 @@ impl Workspace {
             )
     }
 
-    /// `.perm-menu` in a deferred anchored layer. The window-space anchor is
-    /// the chip's top-left minus the frozen 8px gap; `BottomLeft` grows the
-    /// menu upward and left-aligns it with the chip.
+    /// `.perm-menu` in a deferred anchored layer. The anchor is the permission
+    /// wrapper's top-left (local layout), lifted by the frozen 8px gap;
+    /// `BottomLeft` grows the menu upward and left-aligns it with the chip.
     fn permission_menu_view(
         &self,
         chip: &PermissionChip,
@@ -12149,7 +12417,8 @@ impl Workspace {
             .read(cx)
             .clone();
         let items = chip.modes.iter().copied().enumerate().map(|(index, mode)| {
-            let item = permission_menu_item(mode, chip.mode);
+            let item =
+                permission_menu_item(mode, chip.mode).children(footer_bounds_probe(mode.value()));
             self.button(
                 item,
                 &focuses[index],
@@ -12176,9 +12445,16 @@ impl Workspace {
         deferred(
             anchored()
                 .anchor(Corner::BottomLeft)
-                .position(permission_menu_anchor(window.viewport_size()))
+                .position_mode(AnchoredPositionMode::Local)
+                .position(point(px(0.), px(0.)))
+                .offset(point(px(0.), px(-PERMISSION_MENU_GAP)))
                 .snap_to_window()
-                .child(panel),
+                .child(
+                    div()
+                        .relative()
+                        .child(panel)
+                        .children(footer_bounds_probe("permission-menu")),
+                ),
         )
         .with_priority(2)
     }
@@ -14014,9 +14290,80 @@ fn loader_relative_time(updated_at: i64) -> String {
 
 const PERMISSION_FOOTER_HEIGHT: f32 = 38.;
 const PERMISSION_FOOTER_PADDING_X: f32 = 20.;
-/// The frozen `.perm-menu { min-width: 180px }`; the footer keeps this much
-/// room on the right so the left-aligned menu never clips at the window edge.
-const PERMISSION_STATUS_WIDTH: f32 = 180.;
+const FOOTER_GAP: f32 = 8.;
+const FOOTER_STATUS_PADDING_LEFT: f32 = 12.;
+const FOOTER_CWD_MAX_WIDTH: f32 = 130.;
+const FOOTER_GIT_MAX_WIDTH: f32 = 150.;
+const FOOTER_NAME_MAX_WIDTH: f32 = 180.;
+const FOOTER_ENVIRONMENT_MAX_WIDTH: f32 = 150.;
+/// `.status-info` hides the cwd once its layout content box is this narrow.
+/// The comparison uses the measured status width, not the whole window.
+const FOOTER_CWD_HIDE_BELOW: f32 = 440.;
+const FOOTER_SIDEBAR_WIDTH: f32 = 260.;
+const FOOTER_EGRESS_LABEL: &str = "出口";
+const FOOTER_ACCOUNT_LABEL: &str = "Claude 账户";
+
+/// Measured cwd visibility for the current window width and breadcrumb.
+struct FooterStatusMeasure {
+    key: (Pixels, SharedString, SharedString),
+    show_cwd: bool,
+}
+
+// Hidden probes install this sink before drawing a frame.
+#[derive(Default)]
+struct FooterReadings {
+    bounds: Rc<std::cell::RefCell<HashMap<&'static str, Bounds<Pixels>>>>,
+    text: std::cell::RefCell<
+        HashMap<&'static str, (SharedString, crate::ui_text::TextGeometryHandle)>,
+    >,
+}
+
+thread_local! {
+    static FOOTER_READINGS: std::cell::RefCell<Option<FooterReadings>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn footer_text(key: &'static str, text: impl Into<SharedString>) -> UiText {
+    let text = text.into();
+    let geometry = FOOTER_READINGS.with_borrow(|readings| {
+        let readings = readings.as_ref()?;
+        let geometry = crate::ui_text::TextGeometryHandle::default();
+        readings
+            .text
+            .borrow_mut()
+            .insert(key, (text.clone(), geometry.clone()));
+        Some(geometry)
+    });
+    match geometry {
+        Some(geometry) => ui_text(text).track_geometry(geometry),
+        None => ui_text(text),
+    }
+}
+
+fn record_footer_bounds(key: &'static str, bounds: Bounds<Pixels>) {
+    FOOTER_READINGS.with_borrow(|readings| {
+        if let Some(readings) = readings.as_ref() {
+            readings.bounds.borrow_mut().insert(key, bounds);
+        }
+    });
+}
+
+fn footer_bounds_probe(key: &'static str) -> Option<Canvas<()>> {
+    let readings = FOOTER_READINGS
+        .with_borrow(|slot| slot.as_ref().map(|readings| readings.bounds.clone()))?;
+    Some(
+        canvas(
+            move |bounds, _, _| {
+                readings.borrow_mut().insert(key, bounds);
+            },
+            |_, _, _, _| (),
+        )
+        .absolute()
+        .inset_0()
+        .size_full(),
+    )
+}
+
 const PERMISSION_MENU_MIN_WIDTH: f32 = 180.;
 const PERMISSION_MENU_PADDING: f32 = 6.;
 /// Frozen item padding (6px) plus a 12px/14px line box: the browser's normal
@@ -14052,10 +14399,16 @@ fn permission_menu_dot_color(mode: PermissionMode) -> u32 {
     }
 }
 
-/// Uppercased chip label. CSS `text-transform: uppercase`; the tooltip keeps
-/// the original mixed-case label supplied in `PermissionChip::title`.
+/// Matches the frozen HUD's permissionAbbreviation.
 fn permission_chip_text(mode: PermissionMode) -> SharedString {
-    mode.label().to_uppercase().into()
+    match mode {
+        PermissionMode::Default => "D",
+        PermissionMode::Auto => "A",
+        PermissionMode::AcceptEdits => "AE",
+        PermissionMode::Plan => "PM",
+        PermissionMode::Bypass => "BP",
+    }
+    .into()
 }
 
 fn permission_mode_slug(mode: PermissionMode) -> &'static str {
@@ -14123,7 +14476,6 @@ fn permission_menu_item(mode: PermissionMode, active: PermissionMode) -> Statefu
         .id(permission_menu_item_id(mode))
         .flex()
         .items_center()
-        .w_full()
         .h(px(PERMISSION_MENU_ITEM_HEIGHT))
         .gap(px(8.))
         .px(px(10.))
@@ -14178,14 +14530,239 @@ fn permission_menu_item(mode: PermissionMode, active: PermissionMode) -> Statefu
     }
 }
 
-/// Window-space bottom-left anchor for the menu: chip's left/top edge, 8px up.
-/// The chip is vertically centred in the 38px footer and left-aligned in the
-/// 180px status cell, so this is exact without per-frame measurement.
-fn permission_menu_anchor(viewport: Size<Pixels>) -> Point<Pixels> {
-    let chip_top_from_bottom = (PERMISSION_FOOTER_HEIGHT - 1. + PERMISSION_CHIP_HEIGHT) / 2.;
-    point(
-        viewport.width - px(PERMISSION_FOOTER_PADDING_X + PERMISSION_STATUS_WIDTH),
-        viewport.height - px(chip_top_from_bottom + PERMISSION_MENU_GAP),
+fn footer_text_estimate(text: &str) -> f32 {
+    text.chars()
+        .map(|ch| match ch {
+            ' ' | '·' => 3.,
+            ch if ch.is_ascii() => 6.2,
+            _ => 11.,
+        })
+        .sum()
+}
+
+/// Neutral, non-interactive egress slot: frozen 5px dot, 10px label, 5px gap,
+/// 2px/7px padding and 5px radius. It never reports health or egress state.
+fn footer_egress() -> Stateful<Div> {
+    div()
+        .children(footer_bounds_probe("egress"))
+        .id("footer-egress")
+        .flex_none()
+        .child(
+            div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(5.))
+                .px(px(7.))
+                .py(px(2.))
+                .border_1()
+                .border_color(rgba(0x00000000))
+                .rounded(px(5.))
+                .text_color(rgb(0x606572))
+                .text_size(px(10.))
+                .line_height(px(14.))
+                .whitespace_nowrap()
+                .child(
+                    div()
+                        .flex_none()
+                        .size(px(5.))
+                        .rounded_full()
+                        .bg(rgb(0x606572)),
+                )
+                .child(
+                    div()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .child(footer_text("egress", FOOTER_EGRESS_LABEL)),
+                ),
+        )
+}
+
+/// Frozen `.ca-trigger` without an account name: 14px line user icon, "Claude
+/// 账户", and the upward chevron. Non-interactive until the accounts gate
+/// supplies real state.
+fn footer_account() -> Stateful<Div> {
+    div()
+        .children(footer_bounds_probe("account"))
+        .id("footer-account")
+        .flex_none()
+        .ml(px(8.))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(7.))
+                .px(px(8.))
+                .py(px(5.))
+                .rounded(px(5.))
+                .text_color(rgb(0x647e9f))
+                .whitespace_nowrap()
+                .child(footer_user_icon(14., 0x647e9f))
+                .child(
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .child(footer_text("account", FOOTER_ACCOUNT_LABEL)),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_size(px(11.))
+                        .line_height(px(11.))
+                        .child(ui_text("⌃")),
+                ),
+        )
+}
+
+/// `.status-environment.is-local-icon svg` without adding an asset: the
+/// frozen 16px monitor outline scaled to 13px.
+fn footer_monitor_icon(size: f32, color: u32) -> impl IntoElement {
+    canvas(
+        |_, _, _| (),
+        move |bounds, _, window, _| {
+            let scale = f32::from(bounds.size.width) / 16.;
+            let at = |x: f32, y: f32| bounds.origin + point(px(x * scale), px(y * scale));
+            let mut path = PathBuilder::stroke(px(1.3 * scale));
+            path.move_to(at(2.5, 2.5));
+            path.line_to(at(13.5, 2.5));
+            path.line_to(at(13.5, 11.));
+            path.line_to(at(2.5, 11.));
+            path.close();
+            path.move_to(at(5., 13.5));
+            path.line_to(at(11., 13.5));
+            path.move_to(at(8., 11.));
+            path.line_to(at(8., 13.5));
+            if let Ok(path) = path.build() {
+                window.paint_path(path, rgb(color));
+            }
+        },
+    )
+    .size(px(size))
+    .flex_none()
+}
+
+/// 14px line user glyph for the account slot, drawn with GPUI's painter.
+fn footer_user_icon(size: f32, color: u32) -> impl IntoElement {
+    canvas(
+        |_, _, _| (),
+        move |bounds, _, window, _| {
+            let scale = f32::from(bounds.size.width) / 16.;
+            let at = |x: f32, y: f32| bounds.origin + point(px(x * scale), px(y * scale));
+            let mut path = PathBuilder::stroke(px(1.3 * scale));
+            path.move_to(at(5.5, 4.5));
+            path.arc_to(
+                point(px(2.5 * scale), px(2.5 * scale)),
+                px(0.),
+                false,
+                true,
+                at(10.5, 4.5),
+            );
+            path.arc_to(
+                point(px(2.5 * scale), px(2.5 * scale)),
+                px(0.),
+                false,
+                true,
+                at(5.5, 4.5),
+            );
+            path.move_to(at(2.5, 13.));
+            path.cubic_bezier_to(at(13.5, 13.), at(4.5, 8.5), at(11.5, 8.5));
+            if let Ok(path) = path.build() {
+                window.paint_path(path, rgb(color));
+            }
+        },
+    )
+    .size(px(size))
+    .flex_none()
+}
+
+struct FooterFields<'a> {
+    name: Option<String>,
+    is_shell: bool,
+    cwd: Option<(&'a str, String)>,
+    git: Option<FooterGit>,
+    environment: Option<FooterEnvironment>,
+    account: bool,
+}
+
+struct FooterGit {
+    label: String,
+    title: String,
+    available: bool,
+}
+
+impl FooterGit {
+    fn from_node(git: &Value) -> Option<Self> {
+        if git["state"] == "unavailable" {
+            return Some(Self {
+                label: "Git 不可用".into(),
+                title: "当前目录不是可用的 Git 工作区".into(),
+                available: false,
+            });
+        }
+        if git["state"] != "ready" {
+            return None;
+        }
+        let (mut label, title) = if let Some(branch) = trimmed_graph_text(&git["branch"]) {
+            (branch.to_owned(), format!("Git 分支：{branch}"))
+        } else {
+            let revision = trimmed_graph_text(&git["detachedHead"])?;
+            let short = revision.get(..7).unwrap_or(revision);
+            (
+                format!("HEAD {short}"),
+                format!("Git detached HEAD：{revision}"),
+            )
+        };
+        if git["dirty"] == true {
+            label.push('*');
+        }
+        Some(Self {
+            label,
+            title,
+            available: true,
+        })
+    }
+}
+
+struct FooterEnvironment {
+    label: &'static str,
+    local_icon: bool,
+    color: u32,
+}
+
+impl FooterEnvironment {
+    fn from_node(environment: &Value) -> Option<Self> {
+        let local = environment["kind"] == "local";
+        let state = environment["state"].as_str()?;
+        let label = match state {
+            "missing" => "待恢复",
+            "recovering" => "恢复中",
+            "handoff" => "交接中",
+            "failed" => "待处理",
+            "ready" if local => "Local",
+            "ready" if environment["kind"] == "worktree" => "Worktree",
+            _ => return None,
+        };
+        Some(Self {
+            label,
+            local_icon: state == "ready" && local,
+            color: match state {
+                "missing" | "failed" => 0xd29922,
+                "recovering" | "handoff" => 0xa5c8f4,
+                _ => 0x79c0ff,
+            },
+        })
+    }
+}
+
+fn footer_shell_name(shell: &str) -> Option<&str> {
+    let name = shell.rsplit(['/', '\\']).find(|part| !part.is_empty())?;
+    Some(
+        if cfg!(windows) && name.eq_ignore_ascii_case("powershell.exe") {
+            "PowerShell"
+        } else {
+            name
+        },
     )
 }
 
