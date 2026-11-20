@@ -1189,7 +1189,8 @@ fn project_environment(provider: &Provider, environment: &mut BTreeMap<OsString,
     }
 }
 
-fn resolve_claude_executable(
+/// Resolve the Claude executable and recover its PATH using the regular launch rules.
+pub fn resolve_claude_executable(
     cwd: &Path,
     environment: &mut BTreeMap<OsString, OsString>,
 ) -> Result<PathBuf> {

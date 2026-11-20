@@ -16,10 +16,13 @@ use std::{
 };
 
 use crate::{
-    SessionEvent, SessionOptions,
+    SessionEvent, SessionOptions, claude_model_catalog,
     history_worker::{HistoryReply, HistoryRequest, HistoryWorker},
     owner::{OwnerEvent, ShellOwner},
-    protocol::{ClaudeRoleAssignmentsReply, ProviderSettingsReply, ProviderSettingsResult},
+    protocol::{
+        ClaudeModelCatalogReply, ClaudeModelCatalogResult, ClaudeRoleAssignmentsReply,
+        ProviderSettingsReply, ProviderSettingsResult,
+    },
     provider_catalog,
     provider_hook::HookSetup,
     search::{SearchRequest, SearchResult},
@@ -125,6 +128,9 @@ impl LaunchOptions {
 #[derive(Serialize, Deserialize)]
 pub enum Command {
     History(HistoryRequest),
+    GetClaudeModelCatalog {
+        request_id: u64,
+    },
     GetClaudeRoleAssignments {
         request_id: u64,
     },
@@ -892,6 +898,22 @@ fn run(
     let mut permission_changes = HashMap::<String, PermissionChange>::new();
     let mut permission_results = Vec::new();
     let (catalog_requests, catalog_replies) = start_provider_catalog()?;
+    let (model_catalog_requests, model_catalog_commands) = mpsc::channel();
+    let (model_catalog_results, model_catalog_replies) = mpsc::channel();
+    let worker_results = model_catalog_results.clone();
+    let model_catalog_worker = thread::Builder::new()
+        .name("claude-model-catalog".into())
+        .spawn(move || {
+            for request_id in model_catalog_commands {
+                let result = ClaudeModelCatalogResult::Models(claude_model_catalog::models());
+                if worker_results
+                    .send(ClaudeModelCatalogReply { request_id, result })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
     let (role_requests, role_commands) = mpsc::channel();
     let (role_results, role_replies) = mpsc::channel();
     let role_data_root = data_root.clone();
@@ -1667,6 +1689,19 @@ fn run(
             }
             let (reply, result) = mpsc::channel();
             let (session_id, request, refresh) = match command {
+                Command::GetClaudeModelCatalog { request_id } => {
+                    if model_catalog_worker.is_err()
+                        || model_catalog_requests.send(request_id).is_err()
+                    {
+                        model_catalog_results.send(ClaudeModelCatalogReply {
+                            request_id,
+                            result: ClaudeModelCatalogResult::Error(
+                                "Claude model catalog worker is unavailable".into(),
+                            ),
+                        })?;
+                    }
+                    continue;
+                }
                 Command::GetClaudeRoleAssignments { request_id } => {
                     role_requests.send(RoleAssignmentsRequest::Get(request_id))?;
                     continue;
@@ -2866,7 +2901,13 @@ fn run(
             .replies
             .try_iter()
             .map(|reply| ("providerSettingsResult", serde_json::to_value(reply)));
-        for (field, reply) in role_graph_replies.chain(provider_graph_replies) {
+        let model_catalog_graph_replies = model_catalog_replies
+            .try_iter()
+            .map(|reply| ("claudeModelCatalogResult", serde_json::to_value(reply)));
+        for (field, reply) in role_graph_replies
+            .chain(provider_graph_replies)
+            .chain(model_catalog_graph_replies)
+        {
             let mut graph =
                 active_graph(&owner, scene_id.as_deref(), window_id, &startup_deferred)?;
             graph[field] = reply?;
@@ -3056,12 +3097,17 @@ fn run(
             eprintln!("[permission-respawn:{id}] {error:#}");
         }
     }
+    drop(model_catalog_requests);
+    drop(model_catalog_replies);
     drop(role_requests);
     let role_worker = role_worker
         .join()
         .map_err(|_| anyhow!("Claude role assignment worker panicked"));
     let provider_worker = provider_settings.shutdown();
     let mut sessions = owner.shutdown().context("stop native runtime sessions");
+    if let Ok(worker) = model_catalog_worker {
+        let _ = worker.join();
+    }
     for (id, promotion) in shell_promotions {
         if !promotion.promoted {
             continue;

@@ -1,5 +1,8 @@
 #![cfg(target_os = "macos")]
 
+#[path = "process_contract/claude_model_catalog.rs"]
+mod claude_model_catalog;
+
 use std::{
     fs,
     io::{Read, Write},
