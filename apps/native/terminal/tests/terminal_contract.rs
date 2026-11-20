@@ -1,13 +1,66 @@
-use std::{thread, time::Instant};
+use std::{env, fs, thread, time::Instant};
 
 use anyhow::{Result, ensure};
 use matou_native_terminal::{
     Cell, Color, CursorStyle, Screen, Scrollbar, Terminal, TerminalOptions, Theme,
 };
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 const REFERENCE: &str = include_str!("fixtures/reference.json");
+
+#[derive(Deserialize)]
+struct PaintInputs {
+    cases: Vec<PaintCase>,
+}
+
+#[derive(Deserialize)]
+struct PaintCase {
+    id: String,
+    cols: u16,
+    rows: u16,
+    steps: Vec<PaintStep>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+enum PaintStep {
+    Write { bytes: Vec<u8> },
+    Resize { cols: u16, rows: u16 },
+    Scroll { lines: i32 },
+}
+
+#[test]
+#[ignore = "evidence capture; run with the K-terminal-paint fixture paths"]
+fn capture_terminal_paint() -> Result<()> {
+    let input = env::var("MATOU_TERMINAL_PAINT_INPUT")?;
+    let output = env::var("MATOU_TERMINAL_PAINT_OUTPUT")?;
+    let inputs: PaintInputs = serde_json::from_slice(&fs::read(input)?)?;
+    let mut cases = Vec::new();
+    for case in inputs.cases {
+        let mut terminal = Terminal::new(TerminalOptions::new(case.cols, case.rows, 10, 19))?;
+        let mut steps = Vec::new();
+        for step in case.steps {
+            match step {
+                PaintStep::Write { bytes } => terminal.feed(&bytes),
+                PaintStep::Resize { cols, rows } => terminal.resize(cols, rows, 10, 19)?,
+                PaintStep::Scroll { lines } => terminal.scroll(lines)?,
+            }
+            steps.push(json!({
+                "screen": terminal.screen()?,
+                "modes": terminal.input_modes()?,
+                "replies": terminal.drain_responses(),
+            }));
+        }
+        cases.push(json!({ "id": case.id, "steps": steps }));
+    }
+    fs::write(
+        output,
+        serde_json::to_string(&json!({ "cases": cases }))? + "\n",
+    )?;
+    println!("Captured {} native terminal cases", cases.len());
+    Ok(())
+}
 
 #[derive(Deserialize)]
 struct Reference {
