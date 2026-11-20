@@ -59,12 +59,19 @@ fn recovery(child: &mut RuntimeChild) -> Result<DatabaseRecoveryDetails> {
 }
 
 fn retry(child: &mut RuntimeChild, id: &str) -> Result<String> {
+    send_recovery(
+        child,
+        DatabaseRecoveryAction::RetryOpen {
+            expected_recovery_id: id.into(),
+        },
+    )
+}
+
+fn send_recovery(child: &mut RuntimeChild, action: DatabaseRecoveryAction) -> Result<String> {
     let request_id = database_recovery_request_id();
     child.send(Command::DatabaseRecovery {
         request_id: request_id.clone(),
-        action: DatabaseRecoveryAction::RetryOpen {
-            expected_recovery_id: id.into(),
-        },
+        action,
     })?;
     Ok(request_id)
 }
@@ -414,6 +421,286 @@ fn file_tree(root: &Path) -> Result<std::collections::BTreeMap<PathBuf, Vec<u8>>
     let mut tree = std::collections::BTreeMap::new();
     visit(root, root, &mut tree)?;
     Ok(tree)
+}
+
+fn parked_database(root: &Path) -> Result<(RuntimeChild, DatabaseRecoveryDetails)> {
+    let mut child = RuntimeChild::spawn(root)?;
+    let mut damaged = seed(&child.data)?;
+    damaged[..16].fill(0x7f);
+    fs::write(child.data.join(DB), damaged)?;
+    hello(&mut child)?;
+    let details = recovery(&mut child)?;
+    Ok((child, details))
+}
+
+fn settlement_path(data: &Path, details: &DatabaseRecoveryDetails) -> PathBuf {
+    data.join(format!("{MARKER}.resolved-{}", details.recovery_id))
+}
+
+#[test]
+fn recovery_rejects_all_concurrent_requests_before_any_files_change() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let (mut child, details) = parked_database(root.path())?;
+    let fence = Connection::open(child.data.join(format!("{DB}.recovery-action.sqlite")))?;
+    fence.execute_batch("BEGIN EXCLUSIVE")?;
+    let before = file_tree(&child.data)?;
+    let first = retry(&mut child, &details.recovery_id)?;
+    for action in [
+        DatabaseRecoveryAction::RestoreBackup {
+            backup_id: "unused".into(),
+            expected_recovery_id: details.recovery_id.clone(),
+        },
+        DatabaseRecoveryAction::StartEmptyDatabase {
+            expected_recovery_id: details.recovery_id.clone(),
+        },
+        DatabaseRecoveryAction::ExportRecoveryBundle,
+    ] {
+        let duplicate = send_recovery(&mut child, action)?;
+        let error = result(&mut child, &duplicate)?
+            .error
+            .context("concurrent request rejected")?;
+        ensure!(error.code == "RECOVERY_BUSY", "{error:?}");
+        ensure!(file_tree(&child.data)? == before);
+    }
+    fence.execute_batch("ROLLBACK")?;
+    drop(fence);
+    ensure!(
+        result(&mut child, &first)?
+            .error
+            .context("original is absent")?
+            .code
+            == "open"
+    );
+    ensure!(file_tree(&child.data)? == before);
+    shutdown(&mut child)
+}
+
+#[test]
+fn only_one_runtime_can_archive_and_settle_the_same_recovery() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let (mut first, details) = parked_database(root.path())?;
+    let mut second = RuntimeChild::spawn(root.path())?;
+    hello(&mut second)?;
+    ensure!(recovery(&mut second)?.recovery_id == details.recovery_id);
+    let original = seed(&first.data)?;
+    let marker = fs::read(first.data.join(MARKER))?;
+    let fence = Connection::open(first.data.join(format!("{DB}.recovery-action.sqlite")))?;
+    fence.execute_batch("BEGIN EXCLUSIVE")?;
+    let command = || DatabaseRecoveryAction::StartEmptyDatabase {
+        expected_recovery_id: details.recovery_id.clone(),
+    };
+    let a = send_recovery(&mut first, command())?;
+    let b = send_recovery(&mut second, command())?;
+    fence.execute_batch("ROLLBACK")?;
+    drop(fence);
+
+    let a = result(&mut first, &a)?;
+    let b = result(&mut second, &b)?;
+    let (winner, loser) = match (a.error, b.error) {
+        (None, Some(error)) => (a.request_id, error),
+        (Some(error), None) => (b.request_id, error),
+        outcomes => bail!("expected exactly one settlement: {outcomes:?}"),
+    };
+    ensure!(
+        matches!(loser.code.as_str(), "marker" | "lease"),
+        "{loser:?}"
+    );
+    let evidence = first.data.join("recovery-evidence");
+    ensure!(fs::read(evidence.join(winner).join(DB))? == original);
+    ensure!(fs::read_dir(evidence)?.count() == 1);
+    ensure!(settlement_path(&first.data, &details).is_file());
+    ensure!(fs::read(first.data.join(MARKER))? == marker);
+    shutdown(&mut first)?;
+    shutdown(&mut second)
+}
+
+#[test]
+fn restore_uses_the_selected_workspace_and_preserves_evidence_on_post_replace_failure() -> Result<()>
+{
+    let root = tempfile::tempdir()?;
+    let (mut child, details) = parked_database(root.path())?;
+    let old = seed(&child.data)?;
+    let marker = fs::read(child.data.join(MARKER))?;
+    let quarantine = fs::read(&details.quarantined_path)?;
+    let mut source = Connection::open(root.path().join("selected.sqlite"))?;
+    matou_native_core::storage::configure_connection(&source)?;
+    matou_native_core::storage::migrate(&mut source, 1)?;
+    source.execute(
+        "INSERT INTO workspaces (id, name, root_directory, created_at, updated_at)
+         VALUES ('selected-workspace', 'Selected Backup', ?, 1, 1)",
+        [root.path().to_string_lossy().as_ref()],
+    )?;
+    let mut backups = BackupService::new(&child.data)?;
+    let good = backups.create(&source, BackupReason::CleanExit, 100)?;
+    source.execute(
+        "UPDATE schema_migrations SET checksum = 'mismatch' WHERE version = 1",
+        [],
+    )?;
+    let poisoned = backups.create(&source, BackupReason::CleanExit, 101)?;
+    let restore = |backup: &str| DatabaseRecoveryAction::RestoreBackup {
+        backup_id: backup.into(),
+        expected_recovery_id: details.recovery_id.clone(),
+    };
+
+    let before_bad_id = file_tree(&child.data)?;
+    let wrong = send_recovery(&mut child, restore("../not-a-backup"))?;
+    let error = result(&mut child, &wrong)?
+        .error
+        .context("invalid backup must fail")?;
+    ensure!(error.code == "restore" && error.message.contains("missing or invalid"));
+    ensure!(file_tree(&child.data)? == before_bad_id);
+
+    let request = send_recovery(&mut child, restore(&poisoned.id))?;
+    let error = result(&mut child, &request)?
+        .error
+        .context("checksum mismatch must fail")?;
+    ensure!(
+        error.code == "open" && error.message.contains("checksum"),
+        "{error:?}"
+    );
+    let settlement = settlement_path(&child.data, &details);
+    ensure!(!settlement.exists());
+    let restored = startup::open_read_only(&child.data.join(DB))?;
+    ensure!(
+        restored.query_row("SELECT name FROM workspaces", [], |row| row
+            .get::<_, String>(0))?
+            == "Selected Backup"
+    );
+    drop(restored);
+    let rollback = fs::read_dir(&child.data)?
+        .filter_map(|entry| entry.ok())
+        .find(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("matou.sqlite.replaced-")
+        })
+        .context("published rollback copy")?;
+    let rollback = startup::open_read_only(&rollback.path())?;
+    ensure!(
+        rollback.query_row("SELECT value FROM gate_payload", [], |row| row
+            .get::<_, String>(0))?
+            == "sentinel"
+    );
+    drop(rollback);
+    ensure!(fs::read(child.data.join(DB))? != old);
+
+    let request = send_recovery(&mut child, restore(&good.id))?;
+    let event = next(&mut child, |event| {
+        matches!(
+            event,
+            Event::Ready { .. } | Event::DatabaseRecoveryResult(_)
+        )
+    })?;
+    ensure!(
+        matches!(event, Event::Ready { .. }),
+        "restoration never reached Ready"
+    );
+    ensure!(result(&mut child, &request)?.error.is_none());
+    ensure!(settlement.is_file() && fs::read(child.data.join(MARKER))? == marker);
+    ensure!(fs::read(&details.quarantined_path)? == quarantine);
+    let restored = startup::open_read_only(&child.data.join(DB))?;
+    let workspace: String = restored.query_row(
+        "SELECT name FROM workspaces WHERE id = 'selected-workspace'",
+        [],
+        |row| row.get(0),
+    )?;
+    ensure!(workspace == "Selected Backup");
+    drop(restored);
+    shutdown(&mut child)
+}
+
+#[test]
+fn start_empty_archives_original_files_and_rotates_seven_backups_at_normal_lifecycle_points()
+-> Result<()> {
+    let root = tempfile::tempdir()?;
+    let (mut child, details) = parked_database(root.path())?;
+    let original = seed(&child.data)?;
+    let source = Connection::open(root.path().join("retention.sqlite"))?;
+    source.execute_batch(
+        "CREATE TABLE old_payload(value TEXT); INSERT INTO old_payload VALUES ('history')",
+    )?;
+    let mut backups = BackupService::new(&child.data)?;
+    let mut old_ids = (100..107)
+        .map(|ts| {
+            backups
+                .create(&source, BackupReason::CleanExit, ts)
+                .map(|backup| backup.id)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    old_ids.reverse();
+    let wal = format!("{DB}-wal");
+    let shm = format!("{DB}-shm");
+    fs::write(child.data.join(&wal), b"archived WAL")?;
+    fs::write(child.data.join(&shm), b"archived SHM")?;
+    let evidence = child.data.join("recovery-evidence");
+    let quarantine = fs::read(&details.quarantined_path)?;
+    let marker = fs::read(child.data.join(MARKER))?;
+    let action = || DatabaseRecoveryAction::StartEmptyDatabase {
+        expected_recovery_id: details.recovery_id.clone(),
+    };
+    fs::write(&evidence, b"blocked evidence location")?;
+    let before = file_tree(&child.data)?;
+    let request = send_recovery(&mut child, action())?;
+    let error = result(&mut child, &request)?
+        .error
+        .context("blocked archive must fail")?;
+    ensure!(error.code == "archive-original", "{error:?}");
+    ensure!(file_tree(&child.data)? == before);
+    fs::remove_file(&evidence)?;
+
+    let settlement = settlement_path(&child.data, &details);
+    fs::create_dir(&settlement)?;
+    let request = send_recovery(&mut child, action())?;
+    let error = result(&mut child, &request)?
+        .error
+        .context("blocked settlement must fail")?;
+    ensure!(error.code == "marker-commit", "{error:?}");
+    let archived = evidence.join(&request);
+    ensure!(fs::read(archived.join(DB))? == original);
+    ensure!(fs::read(archived.join(&wal))? == b"archived WAL");
+    ensure!(fs::read(archived.join(&shm))? == b"archived SHM");
+    ensure!(fs::read(&details.quarantined_path)? == quarantine);
+    ensure!(fs::read(child.data.join(MARKER))? == marker);
+    ensure!(!child.data.join(format!("{DB}.owner")).exists());
+    let after_open = backups.list_valid()?;
+    ensure!(after_open.len() == 7 && after_open[0].reason == BackupReason::PreMigration);
+    ensure!(after_open[1..].iter().map(|b| &b.id).eq(&old_ids[..6]));
+    fs::remove_dir(settlement)?;
+    // The new initialized file can be rechecked in the same recovery cycle.
+    let request = retry(&mut child, &details.recovery_id)?;
+    let event = next(&mut child, |event| {
+        matches!(
+            event,
+            Event::Ready { .. } | Event::DatabaseRecoveryResult(_)
+        )
+    })?;
+    ensure!(matches!(event, Event::Ready { .. }));
+    ensure!(result(&mut child, &request)?.error.is_none());
+    let database = startup::open_read_only(&child.data.join(DB))?;
+    ensure!(
+        database.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name IN ('gate_payload', 'old_payload')",
+            [],
+            |row| row.get::<_, i64>(0)
+        )? == 0
+    );
+    drop(database);
+    shutdown(&mut child)?;
+    let after_exit = backups.list_valid()?;
+    ensure!(after_exit.len() == 7 && after_exit[0].reason == BackupReason::CleanExit);
+    ensure!(
+        after_exit[1..]
+            .iter()
+            .map(|b| &b.id)
+            .eq(after_open[..6].iter().map(|b| &b.id))
+    );
+    println!(
+        "seven backups: before={old_ids:?}, on_open={:?}, after_exit={:?}",
+        after_open.iter().map(|b| &b.id).collect::<Vec<_>>(),
+        after_exit.iter().map(|b| &b.id).collect::<Vec<_>>()
+    );
+    Ok(())
 }
 
 #[test]

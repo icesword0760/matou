@@ -19,6 +19,12 @@ use crate::{
 
 pub const RECOVERY_ID_CHANGED: &str = "数据库恢复周期已更新，本次操作已停止";
 
+pub enum OpeningAction<'a> {
+    Retry,
+    Restore(&'a str),
+    StartEmpty,
+}
+
 #[derive(Debug)]
 pub struct RecoveryActionError {
     pub stage: &'static str,
@@ -45,12 +51,13 @@ pub struct RecoveryActions {
 }
 
 impl RecoveryActions {
-    pub fn retry_open(
+    pub fn open(
         &mut self,
         recovery: &RecoveryRequired,
         generation: &str,
         request_id: Uuid,
         expected_recovery_id: &str,
+        action: OpeningAction<'_>,
     ) -> std::result::Result<(Connection, DatabaseOwner, PathBuf), RecoveryActionError> {
         let error = |stage, cause| RecoveryActionError { stage, cause };
         if expected_recovery_id != recovery.recovery_id
@@ -66,12 +73,7 @@ impl RecoveryActions {
         })?;
         // Reject a stale, missing or invalid marker before even opening the fence.
         recovery_marker::authorize_action(expected).map_err(|cause| error("marker", cause))?;
-        self.cleanup().map_err(|cause| {
-            error(
-                "cleanup",
-                cause.context("数据库恢复失败，资源清理将在下一次操作前重试"),
-            )
-        })?;
+        self.retry_pending_cleanup()?;
 
         let database = &expected.durable_database_path;
         let root = database.parent().expect("validated database root");
@@ -80,22 +82,64 @@ impl RecoveryActions {
             stage = "marker";
             let marker = recovery_marker::authorize_action(expected)?;
             stage = "open";
-            require_original(database)?;
+            if matches!(action, OpeningAction::Retry) {
+                require_original(database)?;
+                ensure!(
+                    startup::is_writable(database),
+                    io::Error::from(io::ErrorKind::PermissionDenied)
+                );
+            }
             ensure!(
-                startup::is_writable(root) && startup::is_writable(database),
+                startup::is_writable(root),
                 io::Error::from(io::ErrorKind::PermissionDenied)
             );
-            if let Some(issue) = marker.ownership_issue.as_deref() {
-                stage = "ownership-evidence";
-                archive_ownership(database, root, request_id, issue)?;
+            let mut backups = BackupService::new(root)?;
+            if let OpeningAction::Restore(id) = action {
+                stage = "restore";
+                // Acquiring the lease can replace a stale owner. Reject an
+                // invalid selection first when there is a record to preserve.
+                let owner = fs::symlink_metadata(append_suffix(database, ".owner"));
+                let has_owner = match owner {
+                    Ok(_) => true,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+                    Err(error) => return Err(error.into()),
+                };
+                if has_owner || marker.ownership_issue.is_some() {
+                    ensure!(
+                        backups.list_valid()?.iter().any(|backup| backup.id == id),
+                        "backup {id} is missing or invalid"
+                    );
+                }
             }
+            let ownership_evidence = if let Some(issue) = marker.ownership_issue.as_deref() {
+                stage = "ownership-evidence";
+                archive_ownership(database, root, request_id, issue)?
+            } else {
+                None
+            };
             stage = "lease";
             let lease = self
                 .lease
                 .insert(DatabaseOwner::acquire(database, generation)?);
+            let mut flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW;
+            match action {
+                OpeningAction::Retry => {}
+                OpeningAction::Restore(id) => {
+                    stage = "restore";
+                    backups.restore(id, database, startup::now())?;
+                }
+                OpeningAction::StartEmpty => {
+                    stage = "archive-original";
+                    let directory = match ownership_evidence {
+                        Some(path) => path,
+                        None => create_evidence_directory(root, request_id)?,
+                    };
+                    archive_original(database, &directory)?;
+                    flags |= OpenFlags::SQLITE_OPEN_CREATE;
+                }
+            }
             stage = "open";
             startup::assert_wal_bundle_ready(database)?;
-            let mut backups = BackupService::new(root)?;
             let sqlite_path = root
                 .canonicalize()?
                 .join(database.file_name().expect("database filename"));
@@ -105,7 +149,7 @@ impl RecoveryActions {
                 lease,
                 &mut backups,
                 true,
-                OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+                flags,
             )?);
             stage = "fence-finalization";
             Ok(())
@@ -114,19 +158,32 @@ impl RecoveryActions {
             recovery_marker::resolve_action(expected, startup::now())
                 .map_err(|cause| error("marker-commit", cause))
         });
-        if let Err(mut failure) = settled {
-            if let Err(cause) = self.cleanup() {
-                failure.cause = failure.cause.context(format!(
-                    "数据库恢复失败，资源清理将在下一次操作前重试（{cause:#}）"
-                ));
+        match settled {
+            Ok(Some(error)) => {
+                eprintln!("database recovery marker-directory-sync (committed): {error:#}");
             }
-            return Err(failure);
+            Ok(None) => {}
+            Err(mut failure) => {
+                if let Err(cause) = self.cleanup() {
+                    failure.cause = failure.cause.context(format!(
+                        "数据库恢复失败，资源清理将在下一次操作前重试（{cause:#}）"
+                    ));
+                }
+                return Err(failure);
+            }
         }
         Ok((
             self.connection.take().expect("reopened database"),
             self.lease.take().expect("reopened database lease"),
             root.to_owned(),
         ))
+    }
+
+    pub fn retry_pending_cleanup(&mut self) -> std::result::Result<(), RecoveryActionError> {
+        self.cleanup().map_err(|cause| RecoveryActionError {
+            stage: "cleanup",
+            cause: cause.context("数据库恢复失败，资源清理将在下一次操作前重试"),
+        })
     }
 
     fn cleanup(&mut self) -> Result<()> {
@@ -154,7 +211,12 @@ fn require_original(database: &Path) -> Result<()> {
     }
 }
 
-fn archive_ownership(database: &Path, root: &Path, request_id: Uuid, issue: &str) -> Result<()> {
+fn archive_ownership(
+    database: &Path,
+    root: &Path,
+    request_id: Uuid,
+    issue: &str,
+) -> Result<Option<PathBuf>> {
     let owner = append_suffix(database, ".owner");
     let sidecar = append_suffix(&owner, ".takeover.sqlite");
     let sources = [owner.as_path(), sidecar.as_path()];
@@ -172,11 +234,28 @@ fn archive_ownership(database: &Path, root: &Path, request_id: Uuid, issue: &str
         }
     }
     if present.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
     let moving_owner = present.contains(&owner.as_path());
     check_owner_for_archive(database, &owner, &sidecar, issue, moving_owner)?;
 
+    let directory = create_evidence_directory(root, request_id)?;
+
+    // Recheck locally immediately before moving the owner. A malformed owner
+    // cannot be taken over, and a stale valid owner behind a broken sidecar
+    // remains protected until that sidecar is moved last.
+    check_owner_for_archive(database, &owner, &sidecar, issue, moving_owner)?;
+    for path in present {
+        fs::rename(
+            path,
+            directory.join(path.file_name().expect("managed evidence filename")),
+        )
+        .with_context(|| format!("archive database ownership evidence {}", path.display()))?;
+    }
+    Ok(Some(directory))
+}
+
+fn create_evidence_directory(root: &Path, request_id: Uuid) -> Result<PathBuf> {
     let evidence = root.join("recovery-evidence");
     match fs::create_dir(&evidence) {
         Ok(()) => {}
@@ -190,17 +269,24 @@ fn archive_ownership(database: &Path, root: &Path, request_id: Uuid, issue: &str
     }
     let directory = evidence.join(request_id.to_string());
     fs::create_dir(&directory)?;
+    Ok(directory)
+}
 
-    // Recheck locally immediately before moving the owner. A malformed owner
-    // cannot be taken over, and a stale valid owner behind a broken sidecar
-    // remains protected until that sidecar is moved last.
-    check_owner_for_archive(database, &owner, &sidecar, issue, moving_owner)?;
-    for path in present {
-        fs::rename(
-            path,
-            directory.join(path.file_name().expect("managed evidence filename")),
-        )
-        .with_context(|| format!("archive database ownership evidence {}", path.display()))?;
+fn archive_original(database: &Path, directory: &Path) -> Result<()> {
+    for path in [
+        database.to_owned(),
+        append_suffix(database, "-wal"),
+        append_suffix(database, "-shm"),
+    ] {
+        match fs::symlink_metadata(&path) {
+            Ok(_) => fs::rename(
+                &path,
+                directory.join(path.file_name().expect("managed evidence filename")),
+            )
+            .with_context(|| format!("archive database evidence {}", path.display()))?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
     }
     Ok(())
 }
@@ -269,5 +355,34 @@ fn takeover_sidecar_is_broken(path: &Path) -> Result<bool> {
             Ok(true)
         }
         Err(error) => Err(error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_archive_keeps_first_file_if_later_rename_fails() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let database = root.path().join("matou.sqlite");
+        let wal = append_suffix(&database, "-wal");
+        let shm = append_suffix(&database, "-shm");
+        fs::write(&database, b"database")?;
+        fs::write(&wal, b"WAL")?;
+        fs::write(&shm, b"SHM")?;
+        let directory = create_evidence_directory(root.path(), Uuid::new_v4())?;
+        let blocked = directory.join(wal.file_name().unwrap());
+        fs::create_dir(&blocked)?;
+        fs::write(blocked.join("existing-evidence"), b"keep")?;
+
+        let error = archive_original(&database, &directory).expect_err("blocked WAL rename");
+        assert!(error.chain().any(|cause| cause.is::<io::Error>()));
+        assert_eq!(fs::read(directory.join("matou.sqlite"))?, b"database");
+        assert!(!database.exists());
+        assert_eq!(fs::read(wal)?, b"WAL");
+        assert_eq!(fs::read(shm)?, b"SHM");
+        assert_eq!(fs::read(blocked.join("existing-evidence"))?, b"keep");
+        Ok(())
     }
 }

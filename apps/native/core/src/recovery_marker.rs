@@ -162,7 +162,8 @@ pub(crate) fn authorize_action(expected: &RecoveryMarker) -> Result<RecoveryMark
     Ok(current)
 }
 
-pub(crate) fn resolve_action(expected: &RecoveryMarker, now: i64) -> Result<()> {
+/// An error in the returned value occurred after the hard-link commit point.
+pub(crate) fn resolve_action(expected: &RecoveryMarker, now: i64) -> Result<Option<anyhow::Error>> {
     let required = authorize_action(expected)?;
     commit_resolution(&required, now, |_| Ok(()))
 }
@@ -509,14 +510,14 @@ fn resolve_with(
     let required = read_canonical(&database_path)?
         .filter(|marker| marker.recovery_id == recovery_id && is_active(marker))
         .ok_or_else(|| anyhow!(state_changed_message.to_owned()))?;
-    commit_resolution(&required, now, observe)
+    commit_resolution(&required, now, observe).map(|_| ())
 }
 
 fn commit_resolution(
     required: &RecoveryMarker,
     now: i64,
     mut observe: impl FnMut(ResolveStage) -> Result<()>,
-) -> Result<()> {
+) -> Result<Option<anyhow::Error>> {
     let tombstone_path = tombstone_path(required);
     let tombstone = json!({
         "version": 1,
@@ -537,11 +538,11 @@ fn commit_resolution(
     }
     // The hard link is the commit point. A later sync failure can at most
     // reopen the same generation after a crash; the required marker is intact.
-    let _ = observe(ResolveStage::AfterPublish);
-    if observe(ResolveStage::BeforeDirectorySync).is_ok() {
-        let _ = parent(&tombstone_path).and_then(|path| Ok(sync_directory(path)?));
-    }
-    Ok(())
+    let publication_warning = observe(ResolveStage::AfterPublish).err();
+    let sync_warning = observe(ResolveStage::BeforeDirectorySync)
+        .and_then(|()| Ok(sync_directory(parent(&tombstone_path)?)?))
+        .err();
+    Ok(publication_warning.or(sync_warning))
 }
 
 pub fn is_resolved(marker_path: &Path, recovery_id: &str) -> Result<bool> {
@@ -867,21 +868,21 @@ mod tests {
             };
             let published = publish(marker)?;
             let canonical = fs::read(&published.marker_path)?;
-            let result = resolve_with(
-                &published.marker_path,
-                &published.recovery_id,
-                2,
-                "state changed",
-                |current| {
-                    ensure!(current != stage, "injected resolution fault");
-                    Ok(())
-                },
-            );
+            let result = commit_resolution(&published, 2, |current| {
+                ensure!(current != stage, "injected resolution fault");
+                Ok(())
+            });
             let committed = matches!(
                 stage,
                 ResolveStage::AfterPublish | ResolveStage::BeforeDirectorySync
             );
             assert_eq!(result.is_ok(), committed);
+            if committed {
+                assert_eq!(
+                    result?.expect("post-commit diagnostic").to_string(),
+                    "injected resolution fault"
+                );
+            }
             assert_eq!(
                 is_resolved(&published.marker_path, &published.recovery_id)?,
                 committed

@@ -78,7 +78,12 @@ mod workspace {
             self.apply(BridgeEvent::Connection { generation, phase }, window, cx);
         }
 
-        pub(super) fn retry(&mut self, cx: &mut Context<Self>) {
+        pub(super) fn recovery_action(
+            &mut self,
+            action: &PageAction,
+            window: &mut Window,
+            cx: &mut Context<Self>,
+        ) {
             let id = self
                 .database_recovery
                 .as_ref()
@@ -86,7 +91,69 @@ mod workspace {
                 .details
                 .recovery_id
                 .clone();
-            self.retry_database_recovery(&id, cx);
+            self.database_recovery_action(&id, action, window, cx);
+        }
+
+        pub(super) fn assert_modal_return_focus(&self, window: &Window) {
+            let state = self.database_recovery.as_ref().unwrap();
+            let confirmation = state.confirmation.as_ref().expect("active modal");
+            assert!(confirmation.back.is_focused(window));
+            assert!(!confirmation.confirm.is_focused(window));
+        }
+
+        pub(super) fn assert_trigger_focus(&self, window: &Window) {
+            let state = self.database_recovery.as_ref().unwrap();
+            assert!(state.confirmation.is_none());
+            assert!(state.empty_trigger.is_focused(window));
+        }
+
+        pub(super) fn assert_modal_tab_order(&self, window: &mut Window) {
+            let state = self.database_recovery.as_ref().unwrap();
+            let confirmation = state.confirmation.as_ref().expect("active modal");
+            assert!(confirmation.back.is_focused(window));
+            window.focus_next();
+            assert!(confirmation.confirm.is_focused(window));
+            window.focus_next();
+            assert!(confirmation.back.is_focused(window));
+            window.focus_prev();
+            assert!(confirmation.confirm.is_focused(window));
+            window.focus_prev();
+            assert!(confirmation.back.is_focused(window));
+            let focus = ConfirmationFocus {
+                back: &confirmation.back,
+                confirm: &confirmation.confirm,
+            };
+            for (key, expected) in [
+                ("tab", focus.confirm),
+                ("tab", focus.back),
+                ("shift-tab", focus.confirm),
+                ("shift-tab", focus.back),
+            ] {
+                assert!(focus.handle_key(
+                    &Keystroke::parse(key).unwrap(),
+                    true,
+                    window,
+                    |_| panic!("Tab canceled confirmation")
+                ));
+                assert!(expected.is_focused(window));
+            }
+        }
+
+        pub(super) fn escape_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+            let state = self.database_recovery.as_ref().unwrap();
+            let confirmation = state.confirmation.as_ref().expect("active modal");
+            let focus = ConfirmationFocus {
+                back: &confirmation.back,
+                confirm: &confirmation.confirm,
+            };
+            let mut cancel = false;
+            assert!(
+                focus.handle_key(&Keystroke::parse("escape").unwrap(), true, window, |_| {
+                    cancel = true
+                })
+            );
+            assert!(cancel);
+            self.recovery_action(&PageAction::CancelConfirmation, window, cx);
         }
 
         pub(super) fn recovery_selected(&self) -> bool {
@@ -168,7 +235,7 @@ mod probe {
         self, Command, ConnectionPhase, DatabaseRecoveryAction, DatabaseRecoveryDetails,
         DatabaseRecoveryResult, Event, LaunchOptions, ReadOnlyNavigation,
     };
-    use crate::workspace::Workspace;
+    use crate::workspace::{Workspace, database_recovery_page::PageAction};
 
     thread_local! {
         pub static LABELS: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
@@ -252,12 +319,13 @@ mod probe {
             details.recovery_id = format!("probe-{index}");
             synthetic_recovery(cx, &details, 1);
             let labels = draw(window, cx, true);
-            for expected in ["Matou 数据恢复", title, description, "可用备份", "0 份", "暂未找到通过完整性校验的备份。", "重新检查数据库"] {
+            for expected in ["Matou 数据恢复", title, description, "可用备份", "0 份", "暂未找到通过完整性校验的备份。", "恢复所选备份", "重新检查数据库", "导出恢复资料", "创建全新空数据库"] {
                 has(&labels, expected);
             }
-            for hidden in ["恢复所选备份", "导出恢复资料", "创建全新空数据库"] {
-                assert!(!labels.iter().any(|text| text == hidden));
-            }
+            window.update(cx, |view, window, cx| {
+                view.recovery_action(&PageAction::Restore, window, cx);
+            }).unwrap();
+            assert!(sink.try_recv().is_err(), "restore without a backup");
             println!("hidden rendered {reason:?}: {title} / {description}");
         }
 
@@ -298,9 +366,9 @@ mod probe {
         );
 
         window
-            .update(cx, |view, _, cx| {
-                view.retry(cx);
-                view.retry(cx);
+            .update(cx, |view, window, cx| {
+                view.recovery_action(&PageAction::Retry, window, cx);
+                view.recovery_action(&PageAction::Retry, window, cx);
             })
             .unwrap();
         let Command::DatabaseRecovery {
@@ -356,6 +424,201 @@ mod probe {
         has(&labels, "重新检查数据库");
         assert!(!labels.iter().any(|text| text == "正在检查…"));
 
+        sink.database_recovery(1, Arc::new(details.clone()));
+        window
+            .update(cx, |view, window, cx| {
+                view.recovery_action(&PageAction::SelectBackup("backup-4".into()), window, cx);
+                view.recovery_action(&PageAction::Restore, window, cx);
+                view.recovery_action(&PageAction::Export, window, cx);
+                view.recovery_action(&PageAction::OpenConfirmation, window, cx);
+            })
+            .unwrap();
+        let Command::DatabaseRecovery {
+            request_id,
+            action:
+                DatabaseRecoveryAction::RestoreBackup {
+                    backup_id,
+                    expected_recovery_id,
+                },
+        } = sink.try_recv().unwrap()
+        else {
+            panic!("expected exactly one restore");
+        };
+        assert_eq!(
+            (backup_id.as_str(), expected_recovery_id.as_str()),
+            ("backup-4", details.recovery_id.as_str())
+        );
+        assert!(sink.try_recv().is_err());
+        let labels = draw(window, cx, true);
+        has(&labels, "正在恢复…");
+        has(&labels, "正在处理数据库恢复，请保持 Matou 开启…");
+        window
+            .update(cx, |view, window, cx| {
+                view.receive(
+                    1,
+                    Event::DatabaseRecoveryResult(DatabaseRecoveryResult::failed(
+                        request_id,
+                        "restore",
+                        "备份校验失败",
+                    )),
+                    window,
+                    cx,
+                );
+                view.recovery_action(&PageAction::OpenConfirmation, window, cx);
+                view.assert_modal_return_focus(window);
+                view.recovery_action(&PageAction::Export, window, cx);
+            })
+            .unwrap();
+        assert!(sink.try_recv().is_err(), "modal blocks underlying actions");
+        let labels = draw(window, cx, true);
+        has(&labels, "确认创建全新空数据库？");
+        has(&labels, "返回");
+        has(&labels, "确认创建空数据库");
+        has(&labels, "备份校验失败");
+        window
+            .update(cx, |view, window, cx| {
+                view.assert_modal_tab_order(window);
+                view.recovery_action(&PageAction::CancelConfirmation, window, cx);
+                view.assert_trigger_focus(window);
+                view.recovery_action(&PageAction::OpenConfirmation, window, cx);
+                view.escape_modal(window, cx);
+                view.assert_trigger_focus(window);
+                view.recovery_action(&PageAction::ConfirmEmpty, window, cx);
+            })
+            .unwrap();
+        assert!(
+            sink.try_recv().is_err(),
+            "cancel or an out-of-dialog confirmation cannot open a database"
+        );
+
+        for (path, failure, text) in [
+            (
+                Some("/isolated/recovery/bundle"),
+                None,
+                "恢复资料已导出到 /isolated/recovery/bundle",
+            ),
+            (
+                None,
+                Some("创建导出位置失败: Not a directory"),
+                "创建导出位置失败: Not a directory",
+            ),
+        ] {
+            sink.database_recovery(1, Arc::new(details.clone()));
+            window
+                .update(cx, |view, window, cx| {
+                    view.recovery_action(&PageAction::Export, window, cx);
+                })
+                .unwrap();
+            let Command::DatabaseRecovery {
+                request_id,
+                action: DatabaseRecoveryAction::ExportRecoveryBundle,
+            } = sink.try_recv().unwrap()
+            else {
+                panic!("expected export");
+            };
+            has(&draw(window, cx, true), "正在导出…");
+            window
+                .update(cx, |view, window, cx| {
+                    view.receive(
+                        1,
+                        Event::DatabaseRecoveryResult(match failure {
+                            Some(message) => DatabaseRecoveryResult::failed(
+                                request_id,
+                                "DATABASE_EXPORT_FAILED",
+                                message,
+                            ),
+                            None => DatabaseRecoveryResult {
+                                request_id,
+                                exported_path: path.map(Into::into),
+                                error: None,
+                            },
+                        }),
+                        window,
+                        cx,
+                    );
+                })
+                .unwrap();
+            has(&draw(window, cx, true), text);
+        }
+
+        // An old generation's confirmation and reply must never target a new recovery.
+        window
+            .update(cx, |view, window, cx| {
+                view.recovery_action(&PageAction::OpenConfirmation, window, cx);
+            })
+            .unwrap();
+        let mut other = details.clone();
+        other.recovery_id = "probe-new-cycle".into();
+        synthetic_recovery(cx, &other, 2);
+        window
+            .update(cx, |view, window, cx| {
+                view.recovery_action(&PageAction::ConfirmEmpty, window, cx);
+                view.receive(
+                    1,
+                    Event::DatabaseRecoveryResult(DatabaseRecoveryResult::failed(
+                        "old".into(),
+                        "restore",
+                        "上一代错误",
+                    )),
+                    window,
+                    cx,
+                );
+            })
+            .unwrap();
+        let labels = draw(window, cx, true);
+        assert!(
+            !labels
+                .iter()
+                .any(|text| text == "确认创建全新空数据库？" || text == "上一代错误")
+        );
+        assert!(sink.try_recv().is_err());
+        synthetic_recovery(cx, &details, 2);
+        window
+            .update(cx, |view, window, cx| {
+                view.recovery_action(&PageAction::OpenConfirmation, window, cx);
+                view.assert_modal_return_focus(window);
+                view.recovery_action(&PageAction::ConfirmEmpty, window, cx);
+                view.recovery_action(&PageAction::ConfirmEmpty, window, cx);
+            })
+            .unwrap();
+        let Command::DatabaseRecovery {
+            request_id: empty_request,
+            action:
+                DatabaseRecoveryAction::StartEmptyDatabase {
+                    expected_recovery_id,
+                },
+        } = sink.try_recv().unwrap()
+        else {
+            panic!("expected one confirmed empty action");
+        };
+        assert_eq!(expected_recovery_id, details.recovery_id);
+        assert!(sink.try_recv().is_err());
+        has(
+            &draw(window, cx, true),
+            "正在处理数据库恢复，请保持 Matou 开启…",
+        );
+        window
+            .update(cx, |view, window, cx| {
+                view.receive(
+                    2,
+                    Event::DatabaseRecoveryResult(DatabaseRecoveryResult {
+                        request_id: empty_request,
+                        exported_path: None,
+                        error: None,
+                    }),
+                    window,
+                    cx,
+                );
+            })
+            .unwrap();
+        has(
+            &draw(window, cx, true),
+            "正在处理数据库恢复，请保持 Matou 开启…",
+        );
+        println!(
+            "hidden verified recovery requests, confirmation and return focus, progress, feedback and generation isolation"
+        );
+
         // Use the real writable startup projection. A bridge/connection Ready
         // announcement alone must leave the current recovery page selected.
         let scratch = std::env::current_dir()
@@ -402,16 +665,19 @@ mod probe {
             graph: graph.clone(),
             geometry: geometry.clone(),
         };
-        sink.generation(1);
+        sink.generation(2);
         window
             .update(cx, |view, window, cx| {
-                view.change(1, ConnectionPhase::Ready, window, cx);
+                view.change(2, ConnectionPhase::Ready, window, cx);
             })
             .unwrap();
-        has(&draw(window, cx, true), "本次检查失败");
+        has(
+            &draw(window, cx, true),
+            "正在处理数据库恢复，请保持 Matou 开启…",
+        );
         window
             .update(cx, |view, window, cx| {
-                view.receive(1, ready, window, cx);
+                view.receive(2, ready, window, cx);
                 assert!(view.workspaces_ready());
             })
             .unwrap();
