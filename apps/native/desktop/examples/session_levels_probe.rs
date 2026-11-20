@@ -717,7 +717,11 @@ mod workspace {
                 assert_eq!(
                     latest
                         .iter()
-                        .map(|event| loader_event_label(&event.kind, event.tool_name.as_deref()))
+                        .map(|event| loader_event_label(
+                            &event.kind,
+                            event.tool_name.as_deref(),
+                            "Claude"
+                        ))
                         .collect::<Vec<_>>(),
                     ["你", "Claude", "工具 · Read", "系统"]
                 );
@@ -734,6 +738,64 @@ mod workspace {
                 let length = input.text.encode_utf16().count();
                 input.replace_text_in_range(Some(0..length), query, window, cx);
             });
+        }
+
+        pub(super) fn open_codex_history_direct(
+            &mut self,
+            id: &str,
+            window: &mut Window,
+            cx: &mut Context<Self>,
+        ) {
+            assert!(!matou_native_desktop::macos::is_window_visible(window).unwrap());
+            let card = self.deferred_card(id).unwrap();
+            assert_eq!(card.agent, Some("Codex"));
+            assert!(card.can_open_history);
+            self.open_deferred_history(id, window, cx);
+            assert!(self.loader().history);
+            assert_eq!(self.loader().provider, "codex");
+            assert!(!self.session_loader_can_submit(self.loader()));
+        }
+
+        pub(super) fn codex_history_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+            self.loader().content_input.update(cx, |input, cx| {
+                input.replace_text_in_range(Some(0..0), "祖先", window, cx);
+            });
+        }
+
+        pub(super) fn codex_history_earlier(&mut self, cx: &mut Context<Self>) {
+            self.load_earlier_session_events(cx);
+            assert!(self.loader().loading_earlier);
+        }
+
+        pub(super) fn codex_history_open_hit(&mut self, cx: &mut Context<Self>) {
+            let state = self.loader();
+            assert_eq!(state.search_hits[0].excerpt, "祖先线索");
+            self.select_loader_hit(state.search_hits[0].index, cx);
+        }
+
+        pub(super) fn codex_history_more_hits(&mut self, cx: &mut Context<Self>) {
+            assert!(self.loader().has_more_hits);
+            self.load_more_loader_hits(cx);
+        }
+
+        pub(super) fn assert_codex_history_jump(&self) {
+            let state = self.loader();
+            assert_eq!(state.events[1].text, "祖先线索");
+            let scroll = &state.preview_scroll;
+            let hit = scroll.bounds_for_item(1).unwrap();
+            assert_eq!(hit.top() + scroll.offset().y, scroll.bounds().top());
+        }
+
+        pub(super) fn close_codex_history(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+            self.close_dialog(window, cx);
+            assert!(self.dialog.is_none());
+        }
+
+        pub(super) fn assert_codex_history_empty(&self) {
+            let state = self.loader();
+            assert!(!state.loading_detail);
+            assert!(state.events.is_empty() && state.error.is_none());
+            assert_eq!(state.preview_scroll.children_count(), 1);
         }
 
         pub(super) fn focus_loader_control(&self, index: usize, window: &mut Window) {
@@ -4766,6 +4828,205 @@ mod probe {
         );
     }
 
+    fn verify_codex_history(cx: &mut AsyncApp) {
+        use serde_json::{Value, json};
+
+        const CHILD: &str = "00000000-0000-4000-8000-000000000001";
+        let mut fixture = Fixture::new();
+        fixture.fork_source(false, "idle");
+        fixture.codex_permission_state("idle", "none");
+        fixture.focus(SCENE, PARENT);
+        let with_binding = |mut event: Event, detail: Option<Value>| {
+            let (Event::Ready { graph, .. } | Event::Graph(graph)) = &mut event else {
+                unreachable!()
+            };
+            graph["nodes"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|node| node["sessionId"] == PARENT)
+                .unwrap()["historyProviderSessionId"] = json!(CHILD);
+            if let Some(detail) = detail {
+                graph["providerSessionDetailResults"] = json!([detail]);
+            }
+            event
+        };
+        let (window, sink) = open_hidden(cx, 1250.);
+        deliver(window, cx, with_binding(fixture.event(true), None));
+        deliver(
+            window,
+            cx,
+            Event::Recovery {
+                session_id: PARENT.into(),
+                state: RecoveryState::Deferred,
+            },
+        );
+        draw(window, cx);
+        let open = |cx: &mut AsyncApp| {
+            window
+                .update(cx, |view, window, cx| {
+                    view.open_codex_history_direct(PARENT, window, cx)
+                })
+                .unwrap();
+        };
+        let request_detail = |start, around, page_limit| {
+            std::iter::from_fn(|| sink.try_recv().ok())
+                .find_map(|command| match command {
+                    Command::GetCodexSession {
+                        request_id,
+                        cwd,
+                        provider_session_id,
+                        start_event_index,
+                        around_event_index,
+                        limit,
+                    } => {
+                        assert_eq!(provider_session_id, CHILD);
+                        assert_eq!(cwd, fixture.root.to_str().unwrap());
+                        assert_eq!(
+                            (start_event_index, around_event_index, limit),
+                            (start, around, page_limit)
+                        );
+                        Some(request_id)
+                    }
+                    Command::LoadCodexSession { .. } | Command::RetryRecovery { .. } => {
+                        panic!("history changed the session")
+                    }
+                    _ => None,
+                })
+                .expect("Codex history detail")
+        };
+        let reply = |cx: &mut AsyncApp, request, events: Value, start, end, total| {
+            deliver(
+                window,
+                cx,
+                with_binding(
+                    fixture.graph_event(),
+                    Some(json!({
+                        "provider":"codex", "requestId":request, "providerSessionId":CHILD,
+                        "events":events, "page":{"startEventIndex":start,"endEventIndex":end,
+                            "total":total,"hasEarlier":start > 1,"hasLater":end < total}
+                    })),
+                ),
+            );
+            draw(window, cx);
+        };
+        open(cx);
+        let request = request_detail(None, None, None);
+        reply(
+            cx,
+            request,
+            json!([{"index":3,"kind":"assistant","text":"本会话答案"}]),
+            3,
+            3,
+            3,
+        );
+        window
+            .update(cx, |view, _, cx| {
+                view.assert_loader_preview(&[3], 3, true);
+                view.codex_history_earlier(cx);
+            })
+            .unwrap();
+        let tall = "样例\n".repeat(120);
+        let older = json!([
+            {"index":1,"kind":"assistant","text":tall},
+            {"index":2,"kind":"user","text":"祖先线索"}
+        ]);
+        let request = request_detail(Some(1), None, Some(2));
+        reply(cx, request, older.clone(), 1, 2, 3);
+        window
+            .update(cx, |view, window, cx| {
+                view.assert_loader_preview(&[1, 2, 3], 3, false);
+                view.codex_history_search(window, cx);
+            })
+            .unwrap();
+        println!(
+            "hidden Codex history | existing deferred panel opened child UUID, loaded latest and prepended earlier events"
+        );
+
+        let request_search = |expected_offset| {
+            std::iter::from_fn(|| sink.try_recv().ok())
+                .find_map(|command| {
+                    if let Command::SearchCodexSession {
+                        request_id,
+                        provider_session_id,
+                        query,
+                        offset,
+                        ..
+                    } = command
+                    {
+                        assert_eq!(provider_session_id, CHILD);
+                        assert_eq!(query, "祖先");
+                        assert_eq!(offset, Some(expected_offset));
+                        Some(request_id)
+                    } else {
+                        None
+                    }
+                })
+                .expect("history content search")
+        };
+        let search_reply = |cx: &mut AsyncApp, request, hits, has_more, next_offset| {
+            deliver(
+                window,
+                cx,
+                with_binding(
+                    fixture.graph_event(),
+                    Some(json!({
+                        "provider":"codex", "requestId":request, "providerSessionId":CHILD, "search":true,
+                        "hits":hits,"hasMore":has_more,"nextOffset":next_offset
+                    })),
+                ),
+            );
+            draw(window, cx);
+        };
+        search_reply(
+            cx,
+            request_search(0),
+            json!([{"eventIndex":2,"excerpt":"祖先线索"}]),
+            true,
+            1,
+        );
+        window
+            .update(cx, |view, _, cx| view.codex_history_more_hits(cx))
+            .unwrap();
+        search_reply(
+            cx,
+            request_search(1),
+            json!([{"eventIndex":3,"excerpt":"本会话也有祖先字样"}]),
+            false,
+            2,
+        );
+        window
+            .update(cx, |view, _, cx| view.codex_history_open_hit(cx))
+            .unwrap();
+        let request = request_detail(None, Some(2), None);
+        let mut events = older;
+        events
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"index":3,"kind":"assistant","text":tall}));
+        reply(cx, request, events, 1, 3, 3);
+        window
+            .update(cx, |view, window, cx| {
+                view.assert_codex_history_jump();
+                view.close_codex_history(window, cx);
+            })
+            .unwrap();
+        println!(
+            "hidden Codex history | paged search hit requested around index 2 and scrolled to its ancestor event"
+        );
+
+        open(cx);
+        let request = request_detail(None, None, None);
+        reply(cx, request, json!([]), 0, 0, 0);
+        window
+            .update(cx, |view, window, _| {
+                view.assert_codex_history_empty();
+                window.remove_window();
+            })
+            .unwrap();
+        println!("hidden Codex history | empty event page rendered the existing empty state");
+    }
+
     fn verify_codex_loader(cx: &mut AsyncApp) {
         use serde_json::{Value, json};
         let mut fixture = Fixture::new();
@@ -5120,6 +5381,7 @@ mod probe {
         let permission_only = std::env::args().any(|arg| arg == "--permission");
         let codex_permission_only = std::env::args().any(|arg| arg == "--codex-permission");
         let codex_loader_only = std::env::args().any(|arg| arg == "--codex-loader");
+        let codex_history_only = std::env::args().any(|arg| arg == "--codex-history");
         Application::new().with_assets(NativeAssets).run(move |cx| {
             if water_pointer_only {
                 cx.spawn(async |cx| {
@@ -5140,6 +5402,13 @@ mod probe {
             if codex_loader_only {
                 cx.spawn(async |cx| {
                     verify_codex_loader(cx);
+                    cx.update(|cx| cx.quit()).unwrap();
+                }).detach();
+                return;
+            }
+            if codex_history_only {
+                cx.spawn(async |cx| {
+                    verify_codex_history(cx);
                     cx.update(|cx| cx.quit()).unwrap();
                 }).detach();
                 return;

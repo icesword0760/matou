@@ -1,9 +1,10 @@
 //! Read the Codex catalog on the shared provider-catalog worker.
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     fs::{self, File, Metadata},
     io::{self, BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
+    rc::Rc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -13,9 +14,14 @@ use serde_json::{Value, json};
 
 const MAX_LINE: u64 = 8 * 1024 * 1024;
 const HEADER_CACHE_LIMIT: usize = 256;
-const NOT_FOUND: &str = "Provider session was not found in this working directory";
+const ANCESTOR_LIMIT: usize = 5;
+const NOT_FOUND: &str = "Codex 会话不存在或不属于当前工作目录";
+const INVALID_ID: &str = "Codex 会话标识必须是完整 UUID";
 const CORRUPT: &str = "Codex 会话文件已损坏";
 const UNREADABLE: &str = "无法读取 Codex 会话文件";
+const MISSING_ANCESTOR: &str = "祖先历史不完整：祖先文件缺失或不可读，仅显示当前会话。";
+const CYCLE: &str = "祖先历史存在循环，已停止回溯并显示可读取的历史。";
+const DEPTH_LIMIT: &str = "祖先历史超过 5 层，仅显示已读取的历史。";
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -31,6 +37,7 @@ struct Header {
     path: PathBuf,
     id: String,
     cwd: PathBuf,
+    created_at: Option<i64>,
     updated_at: i64,
     modified: SystemTime,
     size: u64,
@@ -115,11 +122,13 @@ struct EventRef {
     offset: u64,
     length: usize,
     kind: &'static str,
+    id: Option<String>,
+    ordinal: Option<u64>,
+    timestamp: Option<i64>,
 }
 
 struct Candidate {
     event: EventRef,
-    id: Option<String>,
     turn: String,
     structured: bool,
 }
@@ -127,14 +136,35 @@ struct Candidate {
 #[derive(Default)]
 struct Index {
     events: Vec<EventRef>,
+    sort_default: i64,
     model: Option<String>,
     has_completed_turn: bool,
+}
+
+struct History {
+    sources: Vec<(File, Rc<Index>)>,
+    events: Vec<(usize, usize)>,
+    warning: Option<&'static str>,
+}
+
+impl History {
+    fn total(&self) -> usize {
+        self.events.len() + usize::from(self.warning.is_some())
+    }
+
+    fn event(&mut self, position: usize) -> Result<(&EventRef, String), &'static str> {
+        let (source, event) = self.events[position];
+        let (file, index) = &mut self.sources[source];
+        let event = &index.events[event];
+        let (_, text) = visible(&read_event(file, event)?).ok_or(CORRUPT)?;
+        Ok((event, text))
+    }
 }
 
 pub(crate) struct Catalog {
     root: Option<PathBuf>,
     headers: HashMap<PathBuf, Header>,
-    index: Option<(Header, Index)>,
+    indexes: VecDeque<(Header, Rc<Index>)>,
 }
 
 impl Catalog {
@@ -142,7 +172,7 @@ impl Catalog {
         Self {
             root,
             headers: HashMap::new(),
-            index: None,
+            indexes: VecDeque::new(),
         }
     }
 
@@ -152,17 +182,26 @@ impl Catalog {
         options: &ListOptions,
     ) -> Result<Page<CatalogEntry>, &'static str> {
         let db = dates()?;
-        let headers = self.headers(cwd, &db)?;
-        let titles = self.titles(cwd, &db)?;
         let query = normalized(&options.query);
+        let full_text = !query.is_empty() && options.full_text;
+        let headers = self.headers(
+            cwd,
+            &db,
+            |_, error| {
+                if full_text { Ok(()) } else { Err(error) }
+            },
+        )?;
+        let in_workspace = workspace_headers(cwd, &headers)?;
+        let archive = full_text.then(|| newest_headers(headers.iter()));
+        let titles = self.titles(cwd, &db)?;
         let mut entries = Vec::new();
-        for header in headers {
-            let mut entry = entry(&header, &titles, &db);
+        for header in in_workspace.into_values() {
+            let mut entry = entry(header, &titles, &db);
             let metadata_match = !query.is_empty()
                 && normalized(&format!("{} {}", entry.title, entry.provider_session_id))
                     .contains(&query);
-            if !query.is_empty() && options.full_text {
-                let (window, hits) = self.search_header(&header, &query, 0, 4)?;
+            if let Some(archive) = &archive {
+                let (window, hits) = self.search_header(&db, archive, header, &query, 0, 4)?;
                 entry.match_count = window.total;
                 entry.hits = hits;
             }
@@ -186,10 +225,19 @@ impl Catalog {
     }
 
     pub(crate) fn load(&mut self, cwd: &str, id: &str) -> Result<CatalogEntry, &'static str> {
+        self.load_entry(cwd, id).map_err(|error| match error {
+            NOT_FOUND => "Provider session was not found in this working directory",
+            INVALID_ID => "Invalid provider session ID",
+            _ => error,
+        })
+    }
+
+    fn load_entry(&mut self, cwd: &str, id: &str) -> Result<CatalogEntry, &'static str> {
         let db = dates()?;
-        let header = self.selected(cwd, id, &db)?;
-        let mut entry = entry(&header, &self.titles(cwd, &db)?, &db);
-        let (_, index) = self.open_index(&header)?;
+        let headers = self.selection_headers(cwd, id, &db)?;
+        let header = selected(cwd, id, &headers)?;
+        let mut entry = entry(header, &self.titles(cwd, &db)?, &db);
+        let (_, index) = self.open_index(&db, header)?;
         entry.model.clone_from(&index.model);
         entry.has_completed_turn = index.has_completed_turn;
         Ok(entry)
@@ -204,9 +252,10 @@ impl Catalog {
         max: Option<i64>,
     ) -> Result<Value, &'static str> {
         let db = dates()?;
-        let header = self.selected(cwd, id, &db)?;
-        let (mut file, index) = self.open_index(&header)?;
-        let total = index.events.len();
+        let headers = self.selection_headers(cwd, id, &db)?;
+        let header = selected(cwd, id, &headers)?;
+        let mut history = self.open_history(&db, &newest_headers(headers.iter()), header)?;
+        let total = history.total();
         let limit = limit(max, 200, 500);
         let newest = total.saturating_sub(limit);
         let start = if let Some(around) = around {
@@ -220,30 +269,33 @@ impl Catalog {
         };
         let end = start.saturating_add(limit).min(total);
         let mut events = Vec::with_capacity(end - start);
-        for (position, event_ref) in index.events[start..end].iter().enumerate() {
-            let row = read_event(&mut file, event_ref)?;
-            let (kind, text) = visible(&row).ok_or(CORRUPT)?;
+        for position in start..end.min(history.events.len()) {
+            let (event, text) = history.event(position)?;
+            let kind = event.kind;
             events.push(json!({
-                "index": start + position + 1, "kind": kind, "role": (kind != "tool").then_some(kind),
-                "text": truncate(&text, 32_768), "timestamp": timestamp(&db, &row["timestamp"]),
+                "index": position + 1, "kind": kind, "role": (kind != "tool").then_some(kind),
+                "text": truncate(&text, 32_768), "timestamp": event.timestamp,
                 "toolName": (kind == "tool").then_some("Bash"), "matched": false,
             }));
         }
-        let first_prompt = index
+        if let Some(warning) = history.warning.filter(|_| start < total && end == total) {
+            events
+                .push(json!({"index": total, "kind": "system", "text": warning, "matched": false}));
+        }
+        let first_prompt = history
             .events
             .iter()
-            .find(|event| event.kind == "user")
-            .map(|event| read_event(&mut file, event))
+            .position(|&(source, event)| history.sources[source].1.events[event].kind == "user")
+            .map(|position| history.event(position).map(|(_, text)| text))
             .transpose()?
-            .and_then(|row| visible(&row))
-            .map(|(_, text)| truncate(&text, 32_768).to_owned());
+            .map(|text| truncate(&text, 32_768).to_owned());
         Ok(json!({
-            "model": index.model, "permissionMode": "default", "events": events,
+            "model": history.sources[0].1.model, "permissionMode": "default", "events": events,
             "firstPrompt": first_prompt,
             "page": {
                 "startEventIndex": if start < end { start + 1 } else { 0 },
                 "endEventIndex": if start < end { end } else { 0 },
-                "total": total, "hasEarlier": start > 0, "hasLater": end < total,
+                "total": total, "hasEarlier": start < end && start > 0, "hasLater": end < total,
             },
         }))
     }
@@ -256,9 +308,13 @@ impl Catalog {
         from: Option<i64>,
         max: Option<i64>,
     ) -> Result<Page<Hit>, &'static str> {
-        let header = self.selected(cwd, id, &dates()?)?;
+        let db = dates()?;
+        let headers = self.selection_headers(cwd, id, &db)?;
+        let header = selected(cwd, id, &headers)?;
         let (window, items) = self.search_header(
-            &header,
+            &db,
+            &newest_headers(headers.iter()),
+            header,
             &normalized(query),
             offset(from),
             limit(max, 100, 200),
@@ -268,6 +324,8 @@ impl Catalog {
 
     fn search_header(
         &mut self,
+        db: &Connection,
+        archive: &HashMap<&str, &Header>,
         header: &Header,
         query: &str,
         offset: usize,
@@ -276,10 +334,10 @@ impl Catalog {
         let mut hits = Vec::new();
         let mut total = 0;
         if !query.is_empty() {
-            let (mut file, index) = self.open_index(header)?;
-            for (position, event_ref) in index.events.iter().enumerate() {
-                let row = read_event(&mut file, event_ref)?;
-                let (kind, text) = visible(&row).ok_or(CORRUPT)?;
+            let mut history = self.open_history(db, archive, header)?;
+            for position in 0..history.events.len() {
+                let (event, text) = history.event(position)?;
+                let kind = event.kind;
                 let tool = if kind == "tool" { "Bash " } else { "" };
                 if normalized(&format!("{tool}{text}")).contains(query) {
                     if total >= offset && hits.len() < limit {
@@ -296,29 +354,38 @@ impl Catalog {
         Ok((Window::new(total, offset, limit), hits))
     }
 
-    fn selected(&mut self, cwd: &str, id: &str, db: &Connection) -> Result<Header, &'static str> {
-        if uuid(id).is_none() {
-            return Err("Invalid provider session ID");
-        }
-        self.headers(cwd, db)?
-            .into_iter()
-            .find(|header| header.id.eq_ignore_ascii_case(id))
-            .ok_or(NOT_FOUND)
+    fn selection_headers(
+        &mut self,
+        cwd: &str,
+        id: &str,
+        db: &Connection,
+    ) -> Result<Vec<Header>, &'static str> {
+        let id = uuid(id).ok_or(INVALID_ID)?;
+        self.headers(cwd, db, |path, error| {
+            if path
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.to_ascii_lowercase().ends_with(&id))
+            {
+                Err(error)
+            } else {
+                Ok(())
+            }
+        })
     }
 
-    fn headers(&mut self, cwd: &str, dates: &Connection) -> Result<Vec<Header>, &'static str> {
+    fn headers(
+        &mut self,
+        cwd: &str,
+        dates: &Connection,
+        on_error: impl FnMut(&Path, &'static str) -> Result<(), &'static str>,
+    ) -> Result<Vec<Header>, &'static str> {
         let root = sessions_root(self.effective_root(cwd).as_deref())?;
         let Some(root) = root else {
             return Ok(Vec::new());
         };
-        let cwd = match fs::canonicalize(cwd) {
-            Ok(path) if path.is_dir() => path,
-            Ok(_) => return Ok(Vec::new()),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(_) => return Err(UNREADABLE),
-        };
-        let mut entries: HashMap<String, Header> = HashMap::new();
-        scan_rollouts(&root, &root, &mut |path, file, metadata| {
+        let mut entries = Vec::new();
+        scan_rollouts(&root, on_error, |path, file, metadata| {
             let modified = metadata.modified().map_err(|_| UNREADABLE)?;
             let size = metadata.len();
             let header = match self.headers.get(&path) {
@@ -356,14 +423,14 @@ impl Catalog {
                                 end_ordinal_exclusive: base["end_ordinal_exclusive"].as_u64(),
                                 end_byte_offset: base["end_byte_offset"].as_u64(),
                             });
+                    let created_at = timestamp(dates, &payload["timestamp"]);
                     let header = Header {
                         root: root.clone(),
                         path: path.clone(),
                         id,
                         cwd: fs::canonicalize(raw_cwd).unwrap_or_else(|_| PathBuf::from(raw_cwd)),
-                        updated_at: millis(modified)
-                            .or_else(|| timestamp(dates, &payload["timestamp"]))
-                            .unwrap_or_default(),
+                        created_at,
+                        updated_at: millis(modified).or(created_at).unwrap_or_default(),
                         modified,
                         size,
                         forked_from_id: payload["forked_from_id"].as_str().and_then(uuid),
@@ -379,16 +446,10 @@ impl Catalog {
                     header
                 }
             };
-            if header.cwd == cwd
-                && entries.get(&header.id).is_none_or(|current| {
-                    (header.modified, &header.path) > (current.modified, &current.path)
-                })
-            {
-                entries.insert(header.id.clone(), header);
-            }
+            entries.push(header);
             Ok(())
         })?;
-        Ok(entries.into_values().collect())
+        Ok(entries)
     }
 
     fn effective_root(&self, cwd: &str) -> Option<PathBuf> {
@@ -442,20 +503,128 @@ impl Catalog {
         Ok(titles)
     }
 
-    fn open_index(&mut self, header: &Header) -> Result<(File, &Index), &'static str> {
+    fn open_index(
+        &mut self,
+        dates: &Connection,
+        header: &Header,
+    ) -> Result<(File, Rc<Index>), &'static str> {
         let (mut file, meta) = open_file(&header.root, &header.path)?.ok_or(NOT_FOUND)?;
         let modified = meta.modified().map_err(|_| UNREADABLE)?;
-        if self.index.as_ref().is_none_or(|(cached, _)| {
-            cached.path != header.path || cached.modified != modified || cached.size != meta.len()
-        }) {
-            let index = index(&mut file, meta.len(), header)?;
-            let mut current = header.clone();
-            current.modified = modified;
-            current.size = meta.len();
-            self.index = Some((current, index));
+        let cached = self.indexes.iter().position(|(cached, _)| {
+            cached.path == header.path && cached.modified == modified && cached.size == meta.len()
+        });
+        let (current, index) =
+            if let Some(entry) = cached.and_then(|position| self.indexes.remove(position)) {
+                entry
+            } else {
+                let index = index(&mut file, meta.len(), header, dates)?;
+                let mut current = header.clone();
+                current.modified = modified;
+                current.size = meta.len();
+                (current, Rc::new(index))
+            };
+        if self.indexes.len() > ANCESTOR_LIMIT {
+            self.indexes.pop_front();
         }
-        Ok((file, &self.index.as_ref().expect("index initialized").1))
+        self.indexes.push_back((current, index.clone()));
+        Ok((file, index))
     }
+
+    fn open_history(
+        &mut self,
+        dates: &Connection,
+        archive: &HashMap<&str, &Header>,
+        child: &Header,
+    ) -> Result<History, &'static str> {
+        let mut sources = vec![self.open_index(dates, child)?];
+        let mut bounds = vec![None];
+        let mut base = child.history_base.as_ref();
+        let mut visited = HashSet::from([child.id.as_str()]);
+        let mut warning = None;
+        while let Some(link) = base {
+            if sources.len() > ANCESTOR_LIMIT {
+                warning = Some(DEPTH_LIMIT);
+                break;
+            }
+            if !visited.insert(&link.thread_id) {
+                warning = Some(CYCLE);
+                break;
+            }
+            let parent = archive.get(link.thread_id.as_str());
+            let readable = parent.and_then(|parent| self.open_index(dates, parent).ok());
+            let Some((parent, source)) = parent.zip(readable) else {
+                sources.truncate(1);
+                bounds.truncate(1);
+                warning = Some(MISSING_ANCESTOR);
+                break;
+            };
+            sources.push(source);
+            bounds.push(Some(link));
+            base = parent.history_base.as_ref();
+        }
+
+        let mut events = Vec::new();
+        let mut seen = HashSet::new();
+        for (source, (_, index)) in sources.iter().enumerate().rev() {
+            for (position, event) in index.events.iter().enumerate() {
+                let inherited = bounds[source].is_none_or(|link| {
+                    link.end_byte_offset
+                        .is_none_or(|end| event.offset + event.length as u64 <= end)
+                        && link
+                            .end_ordinal_exclusive
+                            .is_none_or(|end| event.ordinal.is_none_or(|ordinal| ordinal < end))
+                });
+                if inherited && event.id.as_deref().is_none_or(|id| seen.insert(id)) {
+                    events.push((source, position));
+                }
+            }
+        }
+        if child.history_base.is_some() {
+            events.sort_by_key(|&(source, event)| {
+                let index = &sources[source].1;
+                index.events[event].timestamp.unwrap_or(index.sort_default)
+            });
+        }
+        Ok(History {
+            sources,
+            events,
+            warning,
+        })
+    }
+}
+
+fn newest_headers<'a>(headers: impl Iterator<Item = &'a Header>) -> HashMap<&'a str, &'a Header> {
+    let mut result = HashMap::<&str, &Header>::new();
+    for header in headers {
+        if result.get(header.id.as_str()).is_none_or(|current| {
+            (header.modified, &header.path) > (current.modified, &current.path)
+        }) {
+            result.insert(&header.id, header);
+        }
+    }
+    result
+}
+
+fn workspace_headers<'a>(
+    cwd: &str,
+    headers: &'a [Header],
+) -> Result<HashMap<&'a str, &'a Header>, &'static str> {
+    let cwd = match fs::canonicalize(cwd) {
+        Ok(path) if path.is_dir() => path,
+        Ok(_) => return Ok(HashMap::new()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(HashMap::new()),
+        Err(_) => return Err(UNREADABLE),
+    };
+    Ok(newest_headers(
+        headers.iter().filter(|header| header.cwd == cwd),
+    ))
+}
+
+fn selected<'a>(cwd: &str, id: &str, headers: &'a [Header]) -> Result<&'a Header, &'static str> {
+    workspace_headers(cwd, headers)?
+        .get(id.to_ascii_lowercase().as_str())
+        .copied()
+        .ok_or(NOT_FOUND)
 }
 
 pub(crate) fn root() -> Option<PathBuf> {
@@ -485,12 +654,20 @@ fn sessions_root(root: Option<&Path>) -> Result<Option<PathBuf>, &'static str> {
 
 fn scan_rollouts(
     root: &Path,
-    directory: &Path,
-    read: &mut impl FnMut(PathBuf, File, Metadata) -> Result<(), &'static str>,
+    mut on_error: impl FnMut(&Path, &'static str) -> Result<(), &'static str>,
+    mut read: impl FnMut(PathBuf, File, Metadata) -> Result<(), &'static str>,
 ) -> Result<(), &'static str> {
-    let mut directories = vec![directory.to_path_buf()];
+    let mut directories = vec![root.to_path_buf()];
     while let Some(directory) = directories.pop() {
-        for item in fs::read_dir(directory).map_err(|_| UNREADABLE)? {
+        let items = match fs::read_dir(&directory) {
+            Ok(items) => items,
+            Err(_) if directory == root => return Err(UNREADABLE),
+            Err(_) => {
+                on_error(&directory, UNREADABLE)?;
+                continue;
+            }
+        };
+        for item in items {
             let item = item.map_err(|_| UNREADABLE)?;
             let kind = item.file_type().map_err(|_| UNREADABLE)?;
             let path = item.path();
@@ -503,9 +680,15 @@ fn scan_rollouts(
                     .file_name()
                     .to_str()
                     .is_some_and(|name| name.starts_with("rollout-") && name.ends_with(".jsonl"))
-                && let Some((file, metadata)) = open_file(root, &path)?
             {
-                read(path, file, metadata)?;
+                let result = match open_file(root, &path) {
+                    Ok(Some((file, metadata))) => read(path.clone(), file, metadata),
+                    Ok(None) => Ok(()),
+                    Err(error) => Err(error),
+                };
+                if let Err(error) = result {
+                    on_error(&path, error)?;
+                }
             }
         }
     }
@@ -561,11 +744,9 @@ fn timestamp(dates: &Connection, value: &Value) -> Option<i64> {
         return Some(at);
     }
     dates
-        .query_row(
-            "SELECT CAST(ROUND(unixepoch(?1, 'subsec') * 1000) AS INTEGER)",
-            [value.as_str()?],
-            |row| row.get(0),
-        )
+        .prepare_cached("SELECT CAST(ROUND(unixepoch(?1, 'subsec') * 1000) AS INTEGER)")
+        .ok()?
+        .query_row([value.as_str()?], |row| row.get(0))
         .ok()
         .flatten()
 }
@@ -630,10 +811,18 @@ fn entry(
     }
 }
 
-fn index(file: &mut File, size: u64, header: &Header) -> Result<Index, &'static str> {
+fn index(
+    file: &mut File,
+    size: u64,
+    header: &Header,
+    dates: &Connection,
+) -> Result<Index, &'static str> {
     let mut reader = BufReader::new(file.take(size));
     let mut line = Vec::new();
-    let mut result = Index::default();
+    let mut result = Index {
+        sort_default: header.created_at.unwrap_or(header.updated_at),
+        ..Index::default()
+    };
     let mut offset = 0;
     let mut current_turn = String::new();
     let mut turns = HashMap::<String, Turn>::new();
@@ -716,13 +905,17 @@ fn index(file: &mut File, size: u64, header: &Header) -> Result<Index, &'static 
                 structured_users.insert(current_turn.clone());
             }
         }
+        let record = line.strip_suffix(b"\n").unwrap_or(&line);
+        let record = record.strip_suffix(b"\r").unwrap_or(record);
         candidates.push(Candidate {
             event: EventRef {
                 offset: start,
-                length: line.len(),
+                length: record.len(),
                 kind,
+                id,
+                ordinal: row["ordinal"].as_u64(),
+                timestamp: timestamp(dates, &row["timestamp"]),
             },
-            id,
             turn: current_turn.clone(),
             structured,
         });
@@ -736,6 +929,7 @@ fn index(file: &mut File, size: u64, header: &Header) -> Result<Index, &'static 
         .filter_map(|candidate| {
             if !candidate.structured
                 && (candidate
+                    .event
                     .id
                     .as_ref()
                     .is_some_and(|id| structured_ids.contains(id))
@@ -745,8 +939,10 @@ fn index(file: &mut File, size: u64, header: &Header) -> Result<Index, &'static 
                 return None;
             }
             candidate
+                .event
                 .id
-                .is_none_or(|id| seen.insert(id))
+                .as_ref()
+                .is_none_or(|id| seen.insert(id.clone()))
                 .then_some(candidate.event)
         })
         .collect();
@@ -892,6 +1088,303 @@ mod tests {
     }
 
     use std::io::Write;
+
+    #[test]
+    fn codex_history_replays_frozen_cases() -> TestResult {
+        let frozen: Value = serde_json::from_str(include_str!(
+            "../../../../tooling/native-parity/fixtures/provider-history-reference.json"
+        ))?;
+        for case in frozen["cases"].as_array().unwrap() {
+            let name = case["id"].as_str().unwrap();
+            if !name.starts_with("codex-") {
+                continue;
+            }
+            let root = tempfile::tempdir()?;
+            let home = root.path().join("codex");
+            let sessions = home.join("sessions");
+            let workspace = root.path().join("workspace");
+            fs::create_dir_all(&sessions)?;
+            fs::create_dir(&workspace)?;
+            let cwd = workspace.to_str().unwrap();
+            let mut paths = Vec::new();
+            for dataset in case["input"]["datasets"].as_array().unwrap() {
+                for input in frozen["datasets"][dataset.as_str().unwrap()]
+                    .as_array()
+                    .unwrap()
+                {
+                    let id = input["id"].as_str().unwrap();
+                    let path = input["path"].as_str().map_or_else(
+                        || sessions.join(format!("rollout-{id}.jsonl")),
+                        |path| home.join(path),
+                    );
+                    let mut rows = input["rows"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|row| {
+                            if row["type"] == "session_meta" && row["payload"]["cwd"] == "workspace"
+                            {
+                                let mut row = row.clone();
+                                row["payload"]["cwd"] = json!(cwd);
+                                row.to_string()
+                            } else {
+                                row.as_str().map_or_else(|| row.to_string(), str::to_owned)
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    if input["noFinalNewline"] != true {
+                        rows.push('\n');
+                    }
+                    fs::write(&path, rows.as_bytes())?;
+                    if let Some(at) = input["mtimeMs"].as_u64() {
+                        File::open(&path)?
+                            .set_modified(UNIX_EPOCH + std::time::Duration::from_millis(at))?;
+                    }
+                    paths.push((path, rows));
+                }
+            }
+            let mut catalog = Catalog::new(Some(home));
+            let steps = case["input"]["steps"].as_array().unwrap();
+            let expected = case["expected"]["steps"].as_array().unwrap();
+            for (step, expected) in steps.iter().zip(expected) {
+                let args = &step["args"];
+                let id = args["providerSessionId"].as_str().unwrap_or_default();
+                let query = args["query"].as_str().unwrap_or_default();
+                match step["operation"].as_str().unwrap() {
+                    "list" => {
+                        let got = catalog
+                            .list(
+                                cwd,
+                                &ListOptions {
+                                    query: query.to_owned(),
+                                    full_text: args["searchScope"] == "all",
+                                    ..Default::default()
+                                },
+                            )
+                            .checked()?;
+                        assert_eq!(json!(got.window.total), expected["total"], "{name}");
+                        for (entry, expected) in got
+                            .items
+                            .iter()
+                            .zip(expected["sessions"].as_array().unwrap())
+                        {
+                            assert_eq!(entry.provider_session_id, expected["providerSessionId"]);
+                            assert_eq!(json!(entry.hits), expected["hits"]);
+                        }
+                    }
+                    "detail" => {
+                        let result = catalog.detail(
+                            cwd,
+                            id,
+                            None,
+                            args["aroundEventIndex"].as_i64(),
+                            args["limit"].as_i64(),
+                        );
+                        if expected["error"].is_object() {
+                            assert_eq!(result.unwrap_err(), CORRUPT, "{name}");
+                        } else {
+                            let got = result.checked()?;
+                            assert_eq!(got["page"], expected["page"], "{name}");
+                            let project = |events: &Value| {
+                                events
+                                    .as_array()
+                                    .unwrap()
+                                    .iter()
+                                    .map(|event| {
+                                        let mut event = event.as_object().unwrap().clone();
+                                        event.retain(|_, field| !field.is_null());
+                                        event
+                                    })
+                                    .collect::<Vec<_>>()
+                            };
+                            assert_eq!(
+                                project(&got["events"]),
+                                project(&expected["events"]),
+                                "{name}"
+                            );
+                        }
+                    }
+                    "search" => {
+                        let got = catalog
+                            .search(cwd, id, query, None, args["limit"].as_i64())
+                            .checked()?;
+                        assert_eq!(json!(got.window.total), expected["total"], "{name}");
+                        assert_eq!(json!(got.window.has_more), expected["hasMore"], "{name}");
+                        assert_eq!(json!(got.items), expected["hits"], "{name}");
+                    }
+                    "load" => assert_eq!(catalog.load(cwd, id).checked()?.provider_session_id, id),
+                    operation => panic!("unexpected {operation} in {name}"),
+                }
+            }
+            for (path, bytes) in paths {
+                assert_eq!(fs::read(path)?, bytes.as_bytes(), "{name}: read-only");
+            }
+            println!("frozen history matched: {name}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn codex_history_clamps_bounds_and_reselects_duplicate_parent() -> TestResult {
+        let root = tempfile::tempdir()?;
+        let dir = root.path().join("sessions");
+        let other = root.path().join("worktree");
+        fs::create_dir(&other)?;
+        let cwd = root.path().to_str().unwrap();
+        let parent = "10000000-0000-4000-8000-000000000001";
+        let child = "10000000-0000-4000-8000-000000000002";
+        let row = |text: &str, timestamp: i64, ordinal: Option<u64>| {
+            json!({"type":"response_item","ordinal":ordinal,"timestamp":timestamp,
+                   "payload":{"type":"message","role":"assistant","content":text}})
+        };
+        let latest = fixture(&dir, &other, parent, "new", json!({}), &[], 30)?;
+        let first = row("祖先 needle 🧩", 101, None);
+        let byte_end = fs::metadata(&latest)?.len() + first.to_string().len() as u64;
+        let mut parent_file = fs::OpenOptions::new().append(true).open(&latest)?;
+        writeln!(parent_file, "{first}\r")?;
+        writeln!(parent_file, "{}", row("祖先后续 needle", 102, Some(5)))?;
+        parent_file.set_modified(UNIX_EPOCH + std::time::Duration::from_secs(30))?;
+        fixture(
+            &dir,
+            root.path(),
+            parent,
+            "stale",
+            json!({}),
+            &[row("较旧重复 UUID", 100, None)],
+            20,
+        )?;
+        let mut catalog = Catalog::new(Some(root.path().to_owned()));
+        let set_bounds = |byte, ordinal, mtime| {
+            fixture(
+                &dir,
+                root.path(),
+                child,
+                "child",
+                json!({"history_base":{"thread_id":parent, "end_byte_offset":byte, "end_ordinal_exclusive":ordinal}}),
+                &[row("本会话 needle", 103, None)],
+                mtime,
+            )
+        };
+        for (byte, ordinal, mtime, total) in [
+            (byte_end - 1, u64::MAX, 40, 1),
+            (byte_end, u64::MAX, 41, 2),
+            (u64::MAX, 5, 42, 2),
+            (u64::MAX, u64::MAX, 43, 3),
+            (0, 0, 44, 1),
+        ] {
+            set_bounds(byte, ordinal, mtime)?;
+            let page = catalog.detail(cwd, child, None, None, None).checked()?;
+            assert_eq!(page["page"]["total"], total);
+            if total > 1 {
+                assert_eq!(page["events"][0]["text"], "祖先 needle 🧩");
+            }
+            assert_eq!(page["events"][total - 1]["text"], "本会话 needle");
+        }
+        println!(
+            "exact CRLF UTF-8 byte boundary, split record, missing ordinal, exclusive ordinal, zero and beyond EOF"
+        );
+        set_bounds(u64::MAX, u64::MAX, 45)?;
+        let hits = catalog
+            .search(cwd, child, " needle ", Some(1), Some(1))
+            .checked()?;
+        assert_eq!(
+            (
+                hits.window.total,
+                hits.window.next_offset,
+                hits.items[0].event_index
+            ),
+            (3, 2, 2)
+        );
+        let around = catalog
+            .detail(
+                cwd,
+                child,
+                None,
+                Some(hits.items[0].event_index as i64),
+                Some(1),
+            )
+            .checked()?;
+        assert_eq!(around["events"][0]["text"], "祖先后续 needle");
+        assert_eq!(
+            around["page"],
+            json!({"startEventIndex":2,"endEventIndex":2,"total":3,"hasEarlier":true,"hasLater":true})
+        );
+        let before = catalog
+            .detail(cwd, child, Some(1), None, Some(1))
+            .checked()?;
+        assert_eq!(before["events"][0]["index"], 1);
+        let beyond = catalog
+            .detail(cwd, child, Some(999), None, Some(1))
+            .checked()?;
+        assert_eq!(beyond["events"], json!([]));
+        assert_eq!(beyond["page"]["hasEarlier"], false);
+        println!("ancestor search offset and hit-index jump share detail order and earlier page");
+        fs::remove_file(latest)?;
+        let page = catalog.detail(cwd, child, None, None, None).checked()?;
+        assert_eq!(page["events"][0]["text"], "较旧重复 UUID");
+        println!("archive selects the newest UUID across worktrees and refreshes after removal");
+        Ok(())
+    }
+
+    #[test]
+    fn codex_history_bad_ancestor_header_and_oversized_body_fall_back() -> TestResult {
+        let root = tempfile::tempdir()?;
+        let dir = root.path().join("sessions");
+        let cwd = root.path().to_str().unwrap();
+        let parent = "20000000-0000-4000-8000-000000000001";
+        let child = "20000000-0000-4000-8000-000000000002";
+        fixture(
+            &dir,
+            root.path(),
+            child,
+            "child",
+            json!({"history_base":{"thread_id":parent}}),
+            &[
+                json!({"type":"response_item","payload":{"type":"message","role":"user","content":"当前正文"}}),
+            ],
+            10,
+        )?;
+        let path = fixture(&dir, root.path(), parent, "parent", json!({}), &[], 11)?;
+        let mut catalog = Catalog::new(Some(root.path().to_owned()));
+        let assert_fallback = |catalog: &mut Catalog| -> TestResult {
+            let page = catalog.detail(cwd, child, None, None, None).checked()?;
+            assert_eq!(page["events"][0]["text"], "当前正文");
+            assert_eq!(page["events"][1]["text"], MISSING_ANCESTOR);
+            assert_eq!(page["page"]["total"], 2);
+            assert_eq!(
+                catalog
+                    .search(cwd, child, "当前正文", None, None)
+                    .checked()?
+                    .items[0]
+                    .event_index,
+                1
+            );
+            Ok(())
+        };
+        assert_eq!(
+            catalog.detail(cwd, child, None, None, None).checked()?["page"]["total"],
+            1
+        );
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&path)?
+            .write_all(&vec![b'x'; MAX_LINE as usize + 1])?;
+        assert_eq!(
+            catalog.search(cwd, parent, "anything", None, None).err(),
+            Some(CORRUPT)
+        );
+        assert_fallback(&mut catalog)?;
+        println!("oversized ancestor row falls back while direct search reports corruption");
+        fs::write(&path, b"bad header\n")?;
+        assert_eq!(
+            catalog.detail(cwd, parent, None, None, None).unwrap_err(),
+            CORRUPT
+        );
+        assert_fallback(&mut catalog)?;
+        println!("malformed ancestor header falls back while direct detail reports corruption");
+        Ok(())
+    }
 
     #[test]
     fn codex_catalog_pages_metadata_and_workspace_filter() -> TestResult {
@@ -1132,7 +1625,7 @@ mod tests {
             catalog
                 .detail(cwd, "../other", None, None, None)
                 .unwrap_err(),
-            "Invalid provider session ID"
+            INVALID_ID
         );
         println!(
             "middle corruption localized, header list usable, removed and invalid UUID rejected"

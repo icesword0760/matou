@@ -5092,10 +5092,11 @@ fn start_provider_catalog() -> Result<(mpsc::SyncSender<CatalogRequest>, Receive
     let (requests, incoming) = mpsc::sync_channel::<CatalogRequest>(16);
     let (outgoing, replies) = mpsc::channel();
     let root = provider_catalog::projects_root();
-    let mut codex = codex_catalog::Catalog::new(codex_catalog::root());
+    let codex_root = codex_catalog::root();
     thread::Builder::new()
         .name("provider-catalog".into())
         .spawn(move || {
+            let mut codex = codex_catalog::Catalog::new(codex_root);
             for request in incoming {
                 let reply = match request {
                     CatalogRequest::Index { cwd, load: None } => {
@@ -5839,11 +5840,18 @@ fn active_graph(
                     let Some(session) = owner.session(id)? else {
                         continue;
                     };
-                    let binding = owner.claude_binding(id)?;
+                    let provider_session_id = if node["currentMode"] == "codex" {
+                        owner
+                            .codex_binding(id)?
+                            .map(|binding| binding.provider_session_id)
+                    } else {
+                        owner
+                            .claude_binding(id)?
+                            .map(|binding| binding.provider_session_id)
+                    };
                     node["titleSource"] = json!(session.title_source);
                     node["providerTitle"] = json!(session.provider_title);
-                    node["historyProviderSessionId"] =
-                        json!(binding.map(|binding| binding.provider_session_id));
+                    node["historyProviderSessionId"] = json!(provider_session_id);
                 }
             }
             Ok(graph)

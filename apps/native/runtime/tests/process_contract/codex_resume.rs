@@ -1142,9 +1142,28 @@ fn catalog_sibling(
 
 #[test]
 fn codex_catalog_load_replaces_same_card_and_rejects_duplicate_and_occupied() -> Result<()> {
+    const ANCESTOR: &str = "01a1ddc1-88fd-7fc1-8c66-ab8d38719daf";
     let root = tempfile::tempdir()?;
     let (mut child, home) = spawn_catalog_fixture(root.path())?;
     let path = catalog_fixture(&home, &child.workspace, UUID, "续聊历史")?;
+    let other_worktree = root.path().join("ancestor-worktree");
+    fs::create_dir(&other_worktree)?;
+    let parent = transcript(&home, ANCESTOR)?;
+    fs::write(
+        parent,
+        format!(
+            "{}\n{}\n",
+            json!({"type":"session_meta","payload":{"id":ANCESTOR,"cwd":other_worktree}}),
+            json!({"type":"response_item","timestamp":1,"payload":{
+                "type":"message","role":"assistant","content":"祖先线索 needle"
+            }})
+        ),
+    )?;
+    let transcript = fs::read_to_string(&path)?;
+    let (meta, events) = transcript.split_once('\n').context("rollout body")?;
+    let mut meta: Value = serde_json::from_str(meta)?;
+    meta["payload"]["history_base"] = json!({"thread_id":ANCESTOR});
+    fs::write(&path, format!("{meta}\n{events}"))?;
     let session = child.session.clone();
     let initial = list_catalog(&mut child, 10, "续聊")?;
     assert_eq!(initial["total"], 1);
@@ -1162,7 +1181,9 @@ fn codex_catalog_load_replaces_same_card_and_rejects_duplicate_and_occupied() ->
     let search = catalog_receipt(&mut child, "providerSessionDetailResults", |row| {
         row["requestId"] == 11
     })?;
+    assert_eq!(search["total"], 2);
     assert_eq!(search["hits"][0]["eventIndex"], 1);
+    assert_eq!(search["hits"][0]["excerpt"], "祖先线索 needle");
     child.send(Command::GetCodexSession {
         request_id: 12,
         cwd,
@@ -1174,8 +1195,12 @@ fn codex_catalog_load_replaces_same_card_and_rejects_duplicate_and_occupied() ->
     let detail = catalog_receipt(&mut child, "providerSessionDetailResults", |row| {
         row["requestId"] == 12
     })?;
-    assert_eq!(detail["events"][0]["text"], "Find the synthetic needle");
-    println!("shared worker routed Codex list, search and preview via correlated graph receipts");
+    assert_eq!(detail["providerSessionId"], UUID);
+    assert_eq!(detail["events"][0]["text"], "祖先线索 needle");
+    assert_eq!(detail["events"][1]["text"], "Find the synthetic needle");
+    println!(
+        "shared worker routed Codex list, ancestor search and preview for the selected child UUID"
+    );
 
     let db = open_data(&child)?;
     let old = list_runs(&db, &session)?.pop().context("initial shell")?;
