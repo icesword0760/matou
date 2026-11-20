@@ -505,6 +505,7 @@ mod probe {
         draw(window, cx);
         window.update(cx, |view, window, cx| {
             assert_eq!(view.caret, Some(caret));
+            assert_eq!(view.composition_caret(view.grid.unwrap()), Some(caret));
             let marked = view.bounds_for_range(0..1, caret, window, cx).unwrap();
             assert_eq!(marked.origin, caret.origin);
             // Model an acknowledged return to live, then another wheel scroll
@@ -521,6 +522,7 @@ mod probe {
         window.update(cx, |view, window, cx| {
             view.unmark_text(window, cx);
             assert_eq!(view.marked_text_range(window, cx), None);
+            assert!(view.composition_caret(view.grid.unwrap()).is_none());
         })?;
         assert!(events.take().is_empty());
         println!("Cancelling preedit never writes to the terminal.");
@@ -541,11 +543,13 @@ mod probe {
             assert_eq!(live_caret.left(), caret.left() + view.metrics.width * 4.);
             assert_eq!(live_caret.top(), caret.top());
             assert!(view.composition.is_active());
+            assert_eq!(view.composition_caret(view.grid.unwrap()), Some(live_caret));
             let mark = view.bounds_for_range(0..2, live_caret, window, cx).unwrap();
             assert_eq!(mark.origin, live_caret.origin);
             view.replace_text_in_range(None, "你", window, cx);
-            view.unmark_text(window, cx);
             assert!(!view.composition.is_active());
+            assert!(view.composition_caret(view.grid.unwrap()).is_none());
+            view.unmark_text(window, cx);
         })?;
         assert_eq!(events.take(), [Observed::Input("你".as_bytes().to_vec())]);
         println!(
@@ -590,6 +594,43 @@ mod probe {
         assert!(events.take().is_empty());
         println!(
             "Disabled input ignores marking, normal keys, and commits without scrolling or sending bytes."
+        );
+
+        terminal.feed(b"\x1b[1;4H");
+        let live = terminal.screen()?;
+        assert_eq!((live.cursor_col, live.cursor_row), (3, 0));
+        window.update(cx, |view, window, cx| {
+            view.set_screen(live, modes, None, view.scroll_request_id, cx);
+            view.replace_and_mark_text_in_range(None, "ni'hao", Some(6..6), window, cx);
+        })?;
+        draw(window, cx);
+        let anchor = window.update(cx, |view, _, _| {
+            let grid = view.grid.unwrap();
+            let anchor = view.composition_caret(grid).unwrap();
+            assert_eq!(anchor, view.metrics.cell(grid.bounds.origin, 3, 0, 1));
+            anchor
+        })?;
+        for (lines, visible) in [(1, true), (20, false)] {
+            terminal.scroll(lines)?;
+            let scrolled = terminal.screen()?;
+            assert_eq!(scrolled.cursor_has_position, visible);
+            window.update(cx, |view, _, cx| {
+                view.set_screen(scrolled, modes, None, view.scroll_request_id, cx);
+            })?;
+            draw(window, cx);
+            window.update(cx, |view, _, _| {
+                let grid = view.grid.unwrap();
+                assert_eq!(view.composition_caret(grid), Some(anchor));
+                assert_eq!(
+                    view.caret.unwrap(),
+                    view.metrics.cell(grid.bounds.origin, 3, 1, 1)
+                );
+            })?;
+        }
+        window.update(cx, |view, window, cx| view.unmark_text(window, cx))?;
+        assert!(events.take().is_empty());
+        println!(
+            "The composition view stays on the active row across partial and full scrollback."
         );
         Ok(())
     }
