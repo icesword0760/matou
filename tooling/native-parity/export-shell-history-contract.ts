@@ -1,17 +1,94 @@
 // Cross-language contract from frozen source on disposable SQLite only.
 import { createHash } from 'node:crypto'
-import { mkdtempSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { RuntimeDatabase } from '../../apps/runtime/src/storage/database'
 import { FOUNDATION_MIGRATIONS } from '../../apps/runtime/src/storage/migrations'
 import { MigrationRunner } from '../../apps/runtime/src/storage/migration-runner'
 import { ShellCommandBlockCollector, ShellHistoryRepository, encodeShellCommandMarker,
   formatShellHistoryForTerminal } from '../../apps/runtime/src/shell-history/shell-history'
+import type { CollectedShellBlock, ShellHistoryBlock } from '../../apps/runtime/src/shell-history/shell-history'
 
 type Part = string | { repeat: string, count: number } | { lines: number, start: number, trailing: boolean }
 const expand = (parts: Part[]) => parts.map(p => typeof p === 'string' ? p : 'repeat' in p ? p.repeat.repeat(p.count)
   : Array.from({ length: p.lines }, (_, i) => `line-${i + p.start}`).join('\n') + (p.trailing ? '\n' : '')).join('')
+
+type GateOperation =
+  | { op: 'ingest', parts: Part[], now: number }
+  | { op: 'insert', block: CollectedShellBlock, sessionId: string }
+  | { op: 'list' | 'purge', sessionId: string }
+  | { op: 'launch', sessionId: string, enabled: boolean }
+  | { op: 'reopen' }
+
+async function exportGate(inputPath: string, outputPath: string) {
+  const input: { seed: string[], cases: { name: string, operations: GateOperation[] }[] } =
+    JSON.parse(readFileSync(inputPath, 'utf8'))
+  const cases = []
+  for (const [index, test] of input.cases.entries()) {
+    const file = join(dirname(outputPath), `frozen-${index}.sqlite`)
+    let db = RuntimeDatabase.open(file)
+    try {
+      await new MigrationRunner(db, FOUNDATION_MIGRATIONS).migrate()
+      input.seed.forEach(sql => db.run(sql))
+      let repository = new ShellHistoryRepository(db)
+      let collector = new ShellCommandBlockCollector()
+      const ids = new Map<string, string>()
+      let writes = 0
+      const normalized = (row: ShellHistoryBlock) => {
+        const id = ids.get(row.id)
+        if (id === undefined) throw new Error('Unmapped history row ID')
+        return { ...row, id }
+      }
+      const insert = (block: CollectedShellBlock, sessionId: string) => {
+        const id = `row-${++writes}`
+        try {
+          const row = repository.complete({ ...block, sessionId, cwd: '/tmp/workspace' })
+          ids.set(row.id, id)
+          return { row: normalized(row), error: null }
+        } catch (error) {
+          if (!(error instanceof Error) || !('errcode' in error)) throw error
+          return { row: null, error: { sqliteCode: error.errcode, message: error.message } }
+        }
+      }
+      const steps = test.operations.map(operation => {
+        switch (operation.op) {
+          case 'ingest': {
+            const completed = collector.ingest(expand(operation.parts), operation.now)
+            return { completed, writes: completed.map(block => insert(block, 's')) }
+          }
+          case 'insert':
+            return insert(operation.block, operation.sessionId)
+          case 'list':
+            return repository.list(operation.sessionId).map(normalized)
+          case 'launch': {
+            const rows = repository.listForLaunch(operation.sessionId, operation.enabled)
+            return { rows: rows.map(normalized), payload: formatShellHistoryForTerminal(rows) }
+          }
+          case 'purge':
+            repository.purge(operation.sessionId)
+            return null
+          case 'reopen':
+            db.close()
+            db = RuntimeDatabase.open(file)
+            repository = new ShellHistoryRepository(db)
+            collector = new ShellCommandBlockCollector()
+            return null
+        }
+      })
+      cases.push({ name: test.name, steps })
+    } finally {
+      db.close()
+    }
+  }
+  writeFileSync(outputPath, JSON.stringify({ cases }, null, 2) + '\n')
+}
+
+if (process.argv[2] === '--gate') {
+  await exportGate(process.argv[3]!, process.argv[4]!)
+  process.exit(0)
+}
+
 const describe = (output: string) => ({ sha256: createHash('sha256').update(output).digest('hex'),
   utf16Length: output.length, lines: output.split('\n').length, prefix: output.slice(0, 40), suffix: output.slice(-40) })
 const marker = encodeShellCommandMarker('printf "你好 🙂"')
