@@ -101,7 +101,7 @@ guard args.count >= 3 else { stop("Usage: hud-real-ui launch.json inspect | <id>
 let launchURL = URL(fileURLWithPath: args[1]).standardizedFileURL
 let evidenceSegment = "/artifacts/native-parity/native/evidence/hud-real-01/"
 let trial = launchURL.deletingLastPathComponent().deletingLastPathComponent().lastPathComponent
-let trialPrefix = ["before-fix", "after-fix"].contains(trial) ? trial + "/" : ""
+let trialPrefix = ["before-fix", "after-fix", "esc-before", "esc-after"].contains(trial) ? trial + "/" : ""
 guard let data = try? Data(contentsOf: launchURL),
       let record = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
       let rawPID = record["pid"] as? Int, rawPID > 1, rawPID <= Int(Int32.max),

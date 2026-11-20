@@ -12,7 +12,7 @@ import time
 ROOT = Path(__file__).resolve().parents[2]
 BASE_EVIDENCE = ROOT / "artifacts/native-parity/native/evidence/hud-real-01"
 TRIAL = os.environ.get("HUD_REAL_01_TRIAL", "")
-if TRIAL not in ("", "before-fix", "after-fix"):
+if TRIAL not in ("", "before-fix", "after-fix", "esc-before", "esc-after"):
     raise SystemExit("Invalid HUD_REAL_01_TRIAL")
 EVIDENCE = BASE_EVIDENCE / TRIAL
 ARCHIVE = "Contents/Resources/app.asar"
@@ -114,7 +114,7 @@ def prepare(side):
         macos = app / "Contents/MacOS"
         macos.mkdir(parents=True)
         target = BASE_EVIDENCE / ".build/debug"
-        if TRIAL == "after-fix":
+        if TRIAL in ("after-fix", "esc-before", "esc-after"):
             target = ROOT / "apps/native/target/debug"
         if TRIAL == "before-fix":
             old = read(BASE_EVIDENCE / "native/prepared.json")
