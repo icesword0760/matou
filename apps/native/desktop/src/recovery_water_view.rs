@@ -115,6 +115,7 @@ struct MacState {
     revision: u64,
     sequence: u64,
     spec: Option<Spec>,
+    images_spec: Option<Spec>,
     effective_visible: bool,
     reset_previous: Option<f64>,
     needs_frame: bool,
@@ -160,6 +161,7 @@ impl RecoveryWater {
                 revision: 1,
                 sequence: 0,
                 spec: None,
+                images_spec: None,
                 effective_visible: false,
                 reset_previous: Some(0.),
                 needs_frame: true,
@@ -215,14 +217,9 @@ impl RecoveryWater {
         }
         self.generation = generation;
         #[cfg(target_os = "macos")]
-        {
-            self.state.origin = Instant::now();
-            self.state.reset_previous = Some(0.);
-            if !self.state.inflight {
-                self.state.fluid = Some(Fluid::default());
-            }
-            self.invalidate(true, cx);
-        }
+        // Reconnecting and starting the replacement are one visible recovery.
+        // Drop stale jobs, keeping the last painted water and its running clock.
+        self.invalidate(false, cx);
         cx.notify();
     }
     #[cfg(target_os = "macos")]
@@ -237,6 +234,7 @@ impl RecoveryWater {
             serde_json::json!({"revision":s.revision,"generation":self.generation,"inflight":s.inflight,"clear":clear}),
         );
         if clear {
+            s.images_spec = None;
             let images = s.images.drain().collect::<Vec<_>>();
             let id = s.id;
             cx.defer(move |cx| {
@@ -288,8 +286,8 @@ impl RecoveryWater {
     fn layout(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         let mask = bounds.intersect(&window.content_mask().bounds);
         let spec = Spec {
-            width: f64::from(f32::from(bounds.size.width)).max(0.).round(),
-            height: f64::from(f32::from(bounds.size.height)).max(0.).round(),
+            width: f64::from(f32::from(bounds.size.width)).max(0.),
+            height: f64::from(f32::from(bounds.size.height)).max(0.),
             dpr: f64::from(window.scale_factor()).min(2.),
         };
         let in_mask = self.requested_visible
@@ -299,7 +297,10 @@ impl RecoveryWater {
             && spec.height > 0.;
         if self.state.spec != Some(spec) {
             self.state.spec = Some(spec);
-            self.invalidate(true, cx);
+            // Card activation can change the bounds every display frame.
+            // Paint results at the current bounds while the next size renders.
+            // Cancelling every in-flight job here can starve the first image.
+            self.state.needs_frame = true;
             trace!(
                 self.state.id,
                 "size",
@@ -311,11 +312,7 @@ impl RecoveryWater {
     }
     #[cfg(target_os = "macos")]
     fn background_color(&self) -> u32 {
-        if self.theme.background == Theme::LIGHT.background {
-            0xfafcff
-        } else {
-            self.theme.background
-        }
+        cg::water_base_color(self.theme)
     }
     #[cfg(target_os = "macos")]
     fn schedule(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -347,15 +344,14 @@ impl RecoveryWater {
         };
         s.inflight = true;
         s.sequence += 1;
-        let (id, sequence, revision, generation, origin) =
-            (s.id, s.sequence, s.revision, self.generation, s.origin);
+        let (id, sequence, revision, origin) = (s.id, s.sequence, s.revision, s.origin);
         let reset_previous = std::mem::take(&mut s.reset_previous);
-        let statics = s.images.background.is_none();
+        let statics = s.images_spec != Some(spec);
         let (theme, reduced) = (self.theme, self.reduced_motion);
         trace!(
             id,
             "request",
-            serde_json::json!({"sequence":sequence,"revision":revision,"generation":generation,"elapsed_ms":origin.elapsed().as_secs_f64()*1000.,"statics":statics,"width":spec.width,"height":spec.height,"dpr":spec.dpr,"reduced":reduced}),
+            serde_json::json!({"sequence":sequence,"revision":revision,"generation":self.generation,"elapsed_ms":origin.elapsed().as_secs_f64()*1000.,"statics":statics,"width":spec.width,"height":spec.height,"dpr":spec.dpr,"reduced":reduced}),
         );
         let job = cx.background_executor().spawn(async move {
             let start = Instant::now();
@@ -385,12 +381,13 @@ impl RecoveryWater {
             let updated = cx.update(|window,cx| weak.update(cx, |this,cx| {
                 let mut output = output.take().unwrap();
                 this.state.inflight = false;
-                this.state.fluid = Some(if this.generation == generation { std::mem::take(&mut output.fluid) } else { Fluid::default() });
+                this.state.fluid = Some(std::mem::take(&mut output.fluid));
                 let visible = this.requested_visible && this.state.effective_visible && this.native_visible(window);
                 this.visibility(visible,cx);
                 if this.state.revision == revision && visible {
                     if let Some(error) = error { this.fail(error); }
                     else {
+                        if statics { this.state.images_spec = Some(spec); }
                         for (old,new) in [(&mut this.state.images.background,&mut output.images.background),(&mut this.state.images.dynamic,&mut output.images.dynamic),(&mut this.state.images.edges,&mut output.images.edges)] {
                             if new.is_some() {
                                 if let Some(image) = old.take() {
@@ -400,7 +397,7 @@ impl RecoveryWater {
                                 *old = new.take();
                             }
                         }
-                        this.state.needs_frame = false;
+                        this.state.needs_frame = this.state.spec != Some(spec);
                         this.state.painted_sequence = sequence;
                         trace!(id,"accept",serde_json::json!({"sequence":sequence,"sampled_ms":output.sampled_ms}));
                     }

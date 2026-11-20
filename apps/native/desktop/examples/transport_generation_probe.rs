@@ -139,37 +139,32 @@ mod workspace {
         }
 
         #[cfg(debug_assertions)]
-        pub(super) fn probe_water_ready(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        pub(super) fn probe_water_frame(
+            &mut self,
+            content: &[u8],
+            sequence: u64,
+            window: &mut Window,
+            cx: &mut Context<Self>,
+        ) {
             let id = self.order[0].clone();
             let (cols, rows, w, h) = self.terminals[&id].read(cx).target_dimensions().unwrap();
             let mut terminal = Terminal::new(TerminalOptions::new(cols, rows, w, h)).unwrap();
-            for event in [
-                Event::Recovery {
-                    session_id: id.clone(),
-                    state: RecoveryState::Ready,
-                },
-                Event::Frame {
-                    session_id: id.clone(),
-                    screen: terminal.screen().unwrap(),
-                    modes: terminal.input_modes().unwrap(),
-                    selection: None,
-                    sequence: 1,
-                    scroll_request_id: 0,
-                },
-            ] {
-                assert!(self.recovery_blocked(&id));
-                assert!(self.probe_water_id().is_some());
-                self.apply(
-                    BridgeEvent::Runtime {
-                        generation: self.runtime_generation,
-                        event,
+            terminal.feed(content);
+            self.apply(
+                BridgeEvent::Runtime {
+                    generation: self.runtime_generation,
+                    event: Event::Frame {
+                        session_id: id,
+                        screen: terminal.screen().unwrap(),
+                        modes: terminal.input_modes().unwrap(),
+                        selection: None,
+                        sequence,
+                        scroll_request_id: 0,
                     },
-                    window,
-                    cx,
-                );
-            }
-            assert!(!self.recovery_blocked(&id));
-            assert!(self.probe_water_id().is_none());
+                },
+                window,
+                cx,
+            );
         }
 
         #[cfg(debug_assertions)]
@@ -829,8 +824,10 @@ fn run_water_probe(cx: &mut gpui::App, fixture: serde_json::Value) {
             cx.update(draw).unwrap();
         }
         while sink.try_recv().is_ok() {}
-        assert_eq!(click_hidden_card(window, cx, 32.), (false, false, false), "water click activated card");
-        assert!(!std::iter::from_fn(|| sink.try_recv().ok()).any(|cmd| matches!(cmd, Command::FocusSession { .. })));
+        assert!(window.update(cx, |view, _, _| view.probe_water_id()).unwrap().is_some());
+        let (body_activated, body_geometry, body_terminal_focus) = click_hidden_card(window, cx, 64.);
+        assert!(body_activated && body_geometry, "water body click did not activate the card and capture geometry");
+        assert!(std::iter::from_fn(|| sink.try_recv().ok()).any(|cmd| matches!(cmd, Command::FocusSession { .. })));
         assert_eq!(click_hidden_card(window, cx, 16.), (true, true, false), "header click did not activate card");
         assert!(std::iter::from_fn(|| sink.try_recv().ok()).any(|cmd| matches!(cmd, Command::FocusSession { .. })));
         cx.update(|cx| {
@@ -839,7 +836,20 @@ fn run_water_probe(cx: &mut gpui::App, fixture: serde_json::Value) {
         }).unwrap();
         assert!(!std::iter::from_fn(|| sink.try_recv().ok()).any(|cmd| matches!(cmd, Command::Input { .. })));
         cx.update(|cx| {
-            window.update(cx, |view, window, cx| view.probe_water_ready(window, cx)).unwrap();
+            window.update(cx, |view, window, cx| {
+                view.probe_water_recovery(RecoveryState::Ready, window, cx);
+                view.probe_water_frame(b"   ", 1, window, cx);
+                assert!(view.probe_water_id().is_some());
+            }).unwrap();
+            draw(cx);
+            press(cx, "u");
+        }).unwrap();
+        assert!(!std::iter::from_fn(|| sink.try_recv().ok()).any(|cmd| matches!(cmd, Command::Input { .. })));
+        cx.update(|cx| {
+            window.update(cx, |view, window, cx| {
+                view.probe_water_frame(b"RW first real output", 2, window, cx);
+                assert!(view.probe_water_id().is_none());
+            }).unwrap();
             draw(cx);
         }).unwrap();
         assert_eq!(click_hidden_card(window, cx, 64.), (true, true, true), "ready terminal click did not focus");
@@ -847,6 +857,10 @@ fn run_water_probe(cx: &mut gpui::App, fixture: serde_json::Value) {
         assert!(std::iter::from_fn(|| sink.try_recv().ok()).any(|cmd| matches!(cmd, Command::Input { bytes, .. } if bytes == b"v")));
         let hidden_id = cx.update(|cx| {
             window.update(cx, |view, window, cx| {
+                view.probe_water_frame(b"", 3, window, cx);
+                assert!(view.probe_water_id().is_none());
+                view.probe_water_recovery(RecoveryState::Ready, window, cx);
+                assert!(view.probe_water_id().is_none());
                 view.probe_water_recovery(RecoveryState::Restoring, window, cx);
             }).unwrap();
             draw(cx);
@@ -882,7 +896,7 @@ fn run_water_probe(cx: &mut gpui::App, fixture: serde_json::Value) {
             assert_eq!(layout["width"], 560.);
             assert_eq!(layout["height"], 600.);
             assert_eq!(layout["dpr"], 2.);
-            assert_eq!(layout["background"], "fafcff");
+            assert_eq!(layout["background"], "fbfcff");
             assert_eq!(layout["bottom_radius"], 12.);
             let card = window.update(cx, |view, _, _| view.probe_water_card()).unwrap();
             let (left, top) = (f64::from(f32::from(card.left())), f64::from(f32::from(card.top())));
@@ -897,23 +911,33 @@ fn run_water_probe(cx: &mut gpui::App, fixture: serde_json::Value) {
             let mut inflight = false;
             let mut generation = 1;
             let mut painted = HashSet::new();
-            let mut accepted = std::collections::HashMap::new();
+            let mut requested = std::collections::HashMap::new();
+            let mut last_painted = None;
             for row in &rows {
                 let data = &row["data"];
+                let sequence = data["sequence"].as_u64();
                 match row["event"].as_str().unwrap() {
                     "revision" => generation = data["generation"].as_u64().unwrap(),
                     "request" => {
                         assert!(!inflight);
                         inflight = true;
-                        accepted.insert(data["sequence"].as_u64().unwrap(), generation);
+                        requested.insert(sequence.unwrap(), generation);
                     }
                     "finish" => {
                         assert!(inflight);
                         inflight = false;
                     }
-                    "paint" if data["images"].as_array().unwrap().iter().all(|image| !image.is_null()) => {
-                        assert_eq!(accepted[&data["sequence"].as_u64().unwrap()], generation);
-                        painted.insert(generation);
+                    "accept" => assert_eq!(requested[&sequence.unwrap()], generation, "stale animation job accepted"),
+                    "paint" => {
+                        let sequence = sequence.unwrap();
+                        let complete = data["images"].as_array().unwrap().iter().all(|image| !image.is_null());
+                        if let Some(last) = last_painted {
+                            assert!(complete && sequence >= last, "water flattened or restarted during reconnect");
+                        }
+                        if complete {
+                            painted.insert(requested[&sequence]);
+                            last_painted = Some(sequence);
+                        }
                     }
                     _ => {}
                 }
@@ -930,7 +954,7 @@ fn run_water_probe(cx: &mut gpui::App, fixture: serde_json::Value) {
             let light = recovery_water_macos::draw_background(560., 600., 2., Theme::LIGHT);
             let dark = recovery_water_macos::draw_background(560., 600., 2., Theme::DARK);
             let edges = recovery_water_macos::draw_edges(560., 600., 2.);
-            assert_eq!(pixel(&light, 0, 0), [250, 252, 255, 255]);
+            assert_eq!(pixel(&light, 0, 0), [251, 252, 255, 255]);
             assert_eq!(pixel(&dark, 0, 0), [27, 27, 27, 255]);
             assert_ne!(pixel(&light, 560, 420), pixel(&light, 0, 0));
             assert_ne!(pixel(&dark, 560, 420), pixel(&dark, 0, 0));
@@ -945,8 +969,11 @@ fn run_water_probe(cx: &mut gpui::App, fixture: serde_json::Value) {
                     "corner_alpha":pixel(&edges,0,0)[3], "bottom_alpha":pixel(&edges,560,1180)[3]},
                 "same_entity_generations": [1,2], "ready_removed":true, "hidden_removed_without_draw":true,
                 "failed_removed":true, "invalid_path_suppressed":true,
-                "mouse": {"body_at_32_blocked":true, "title_at_16_activates":true, "ready_body_activates_and_focuses":true},
+                "mouse": {"body_at_64_activates":body_activated, "body_geometry_saved":body_geometry,
+                    "body_terminal_focused":body_terminal_focus, "title_at_16_activates":true,
+                    "ready_body_activates_and_focuses":true},
                 "keyboard": {"during_recovery_blocked":true, "after_ready_forwarded":true},
+                "handoff": {"ready_and_blank_frames_keep_water":true,"first_content_removes_water":true,"later_blank_does_not_remount":true},
                 "images_created":created.len(), "images_dropped":dropped.len(), "inflight":inflight,
                 "trace":trace
             }));
