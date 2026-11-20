@@ -4,6 +4,8 @@
 mod claude_gateway_restart;
 #[path = "process_contract/claude_model_catalog.rs"]
 mod claude_model_catalog;
+#[path = "process_contract/database_recovery.rs"]
+mod database_recovery;
 
 use std::{
     fs,
@@ -382,7 +384,7 @@ fn assert_no_clean_exit_backup(data: &Path) -> Result<()> {
 #[test]
 fn invalid_or_missing_hello_cannot_create_database_or_pty() -> Result<()> {
     for first in [
-        b"{\"Hello\":{\"version\":2}}".as_slice(),
+        b"{\"Hello\":{\"version\":1}}".as_slice(),
         b"{\"Command\":\"Refresh\"}".as_slice(),
         b"".as_slice(),
     ] {

@@ -2,6 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
     rc::Rc,
+    sync::Arc,
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -17,7 +18,10 @@ use matou_native_core::hierarchy::{HierarchyResult, Scene, Task, Workspace as Hi
 use matou_native_core::workspace_paths::WorkspacePathState;
 use matou_native_runtime::history::{HistoryCursor, HistoryLine, HistorySearchOptions};
 use matou_native_runtime::history_worker::{HistoryReply, HistoryRequest};
-use matou_native_runtime::host::{RecentReplies, deferred_summary_text};
+use matou_native_runtime::host::{
+    DATABASE_RECOVERY_INTERRUPTED, RecentReplies, database_recovery_request_id,
+    deferred_summary_text,
+};
 use matou_native_runtime::protocol::{
     ClaudeModelCatalogReply, ClaudeRoleAssignmentsReply, ProviderSettingsReply,
 };
@@ -27,6 +31,9 @@ use serde_json::Value;
 mod deferred_recovery_card {
     include!("deferred_recovery_card.rs");
 }
+
+#[path = "database_recovery_page.rs"]
+pub mod database_recovery_page;
 
 mod session_levels {
     include!("session_levels.rs");
@@ -39,8 +46,8 @@ use crate::{
     },
     rename_input::{RenameInput, RenameInputEvent, trim_name},
     runtime_bridge::{
-        BridgeEvent, Command, ConnectionPhase, Event, RecoveryState, RuntimeCommands,
-        StartupBlockKind,
+        BridgeEvent, Command, ConnectionPhase, DatabaseRecoveryAction, DatabaseRecoveryDetails,
+        Event, RecoveryState, RuntimeCommands, StartupBlockKind,
     },
     settings_shell::{SettingsShell, SettingsShellEvent, settings_button},
     sidebar_scrollbar::{self, SidebarScrollbarState},
@@ -910,6 +917,22 @@ impl Notifications {
     }
 }
 
+struct DatabaseRecoveryPageState {
+    details: Arc<DatabaseRecoveryDetails>,
+    available: bool,
+    pending: Option<String>,
+    error: Option<String>,
+}
+
+impl DatabaseRecoveryPageState {
+    fn disconnect(&mut self) {
+        self.available = false;
+        if self.pending.take().is_some() {
+            self.error = Some(DATABASE_RECOVERY_INTERRUPTED.into());
+        }
+    }
+}
+
 pub struct Workspace {
     history_view: Option<Entity<HistoryView>>,
     history_request: Option<HistoryContextRequest>,
@@ -917,6 +940,7 @@ pub struct Workspace {
     settings: Option<(Entity<SettingsShell>, Subscription)>,
     commands: RuntimeCommands,
     runtime_generation: u64,
+    database_recovery: Option<DatabaseRecoveryPageState>,
     transport_connected: bool,
     domain_ready: bool,
     session_frames: HashSet<String>,
@@ -1713,6 +1737,7 @@ impl Workspace {
             search: None,
             settings: None,
             runtime_generation: 0,
+            database_recovery: None,
             transport_connected: false,
             domain_ready: false,
             session_frames: HashSet::new(),
@@ -2091,7 +2116,40 @@ impl Workspace {
         }
     }
 
+    fn retry_database_recovery(&mut self, expected_recovery_id: &str, cx: &mut Context<Self>) {
+        let Some(state) = &mut self.database_recovery else {
+            return;
+        };
+        if !state.available
+            || state.pending.is_some()
+            || state.details.recovery_id != expected_recovery_id
+        {
+            return;
+        }
+        let request_id = database_recovery_request_id();
+        let result = self.commands.send_at(
+            self.runtime_generation,
+            Command::DatabaseRecovery {
+                request_id: request_id.clone(),
+                action: DatabaseRecoveryAction::RetryOpen {
+                    expected_recovery_id: expected_recovery_id.into(),
+                },
+            },
+        );
+        match result {
+            Ok(()) => {
+                state.error = None;
+                state.pending = Some(request_id);
+            }
+            Err(error) => state.error = Some(error.to_string()),
+        }
+        cx.notify();
+    }
+
     fn retire_transport(&mut self, generation: u64, cx: &mut Context<Self>) {
+        if let Some(recovery) = &mut self.database_recovery {
+            recovery.disconnect();
+        }
         let reason = crate::runtime_bridge::SendError::NotReady.to_string();
         self.fail_pending_forks(&reason);
         self.fail_pending_permission_modes(&reason, cx);
@@ -2321,6 +2379,34 @@ impl Workspace {
                 return;
             }
             BridgeEvent::Connection { phase, .. } => {
+                match &phase {
+                    ConnectionPhase::DatabaseRecovery { details, .. } => {
+                        if let Some(state) = &mut self.database_recovery
+                            && state.details.recovery_id == details.recovery_id
+                        {
+                            state.details = details.clone();
+                            state.available = true;
+                        } else {
+                            window.blur();
+                            self.database_recovery = Some(DatabaseRecoveryPageState {
+                                details: details.clone(),
+                                available: true,
+                                pending: None,
+                                error: None,
+                            });
+                        }
+                    }
+                    ConnectionPhase::Starting | ConnectionPhase::Reconnecting => {
+                        if let Some(recovery) = &mut self.database_recovery {
+                            recovery.disconnect();
+                        }
+                    }
+                    ConnectionPhase::Blocked(_) | ConnectionPhase::Stopped => {
+                        self.database_recovery = None;
+                    }
+                    // Only the Ready projection may replace the recovery page.
+                    ConnectionPhase::Ready => {}
+                }
                 if let Some((settings, _)) = &self.settings {
                     settings.update(cx, |settings, cx| settings.connection_changed(window, cx));
                 }
@@ -2363,6 +2449,7 @@ impl Workspace {
         };
         let fresh_ready = matches!(&event, Event::Ready { .. });
         if fresh_ready {
+            self.database_recovery = None;
             self.domain_ready = true;
             self.transport_connected = true;
             self.transport_fault = None;
@@ -2377,6 +2464,16 @@ impl Workspace {
             _ => {}
         }
         match event {
+            Event::DatabaseRecoveryResult(result) => {
+                if let Some(state) = &mut self.database_recovery
+                    && state.pending.as_ref() == Some(&result.request_id)
+                    && let Some(error) = result.error
+                {
+                    state.pending = None;
+                    state.error = Some(error.message);
+                }
+            }
+            Event::DatabaseRecoveryRequired(_) | Event::StorageCommandRejected { .. } => {}
             Event::Workspaces(workspaces) => {
                 self.workspace_drag_motion
                     .retain(|id, _| workspaces.iter().any(|w| &w.id == id));
@@ -3732,7 +3829,7 @@ impl Workspace {
     }
 
     fn sync_terminal_input(&self, window: &mut Window, cx: &mut Context<Self>) {
-        let disabled = !self.active_path_valid();
+        let disabled = self.database_recovery.is_some() || !self.active_path_valid();
         if self.history_request.as_ref().is_some_and(|request| {
             disabled
                 || self.recovery_blocked(&request.session_id)
@@ -7182,6 +7279,21 @@ impl Workspace {
     }
 
     fn tab_key(&mut self, stroke: &Keystroke, window: &mut Window, cx: &mut Context<Self>) {
+        if self.database_recovery.is_some() {
+            if stroke.key == "tab"
+                && !stroke.modifiers.alt
+                && !stroke.modifiers.control
+                && !stroke.modifiers.platform
+            {
+                if stroke.modifiers.shift {
+                    window.focus_prev();
+                } else {
+                    window.focus_next();
+                }
+                cx.stop_propagation();
+            }
+            return;
+        }
         let mods = stroke.modifiers;
         if stroke.key == "escape" && self.notification_open {
             self.close_notifications(cx);
@@ -10216,6 +10328,37 @@ impl Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(state) = &self.database_recovery {
+            let recovery_id = state.details.recovery_id.clone();
+            return database_recovery_page::render(
+                &state.details,
+                state.pending.is_some(),
+                state.error.as_deref(),
+                state.available,
+                cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    this.retry_database_recovery(&recovery_id, cx);
+                }),
+            )
+            .into_any_element();
+        }
+        if self.hierarchy.is_none()
+            && matches!(
+                self.commands.connection().1,
+                ConnectionPhase::Starting
+                    | ConnectionPhase::Reconnecting
+                    | ConnectionPhase::DatabaseRecovery { .. }
+            )
+        {
+            return div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(rgb(0xf7f8fa))
+                .text_color(rgb(0x303744))
+                .child("正在打开工作区…")
+                .into_any_element();
+        }
         const CARD_RADIUS: Pixels = px(12.);
         let level_focus = self.level_focus().map(str::to_owned);
         let active_level_focus = self.active_level_focus().map(str::to_owned);
@@ -11143,6 +11286,7 @@ impl Render for Workspace {
             )
             .children(window_overlay)
             .children(permission_toast)
+            .into_any_element()
     }
 }
 

@@ -1,7 +1,12 @@
 // Desktop facade over a supervised private runtime child. No in-process fallback.
 use anyhow::{Context, Result, anyhow, bail, ensure};
+use matou_native_core::database_recovery::RECOVERY_ID_CHANGED;
 pub use matou_native_runtime::host::{
-    Command, Event, LaunchOptions, RecoveryState, StartupBlock, StartupBlockKind,
+    Command, DatabaseRecoveryAction, DatabaseRecoveryDetails, DatabaseRecoveryResult, Event,
+    LaunchOptions, RecoveryState, StartupBlock, StartupBlockKind,
+};
+use matou_native_runtime::host::{
+    DATABASE_RECOVERY_BUSY, DATABASE_RECOVERY_INTERRUPTED, STORAGE_RECOVERY_WAITING,
 };
 use matou_native_runtime::protocol::{
     ClientMessage, ServerMessage, VERSION, check_version, read_messages, write_message,
@@ -21,6 +26,10 @@ use std::{
 pub enum ConnectionPhase {
     Starting,
     Ready,
+    DatabaseRecovery {
+        details: Arc<DatabaseRecoveryDetails>,
+        pending: Option<String>,
+    },
     Reconnecting,
     Blocked(StartupBlock),
     Stopped,
@@ -54,9 +63,18 @@ pub enum SendError {
     WrongGeneration { expected: u64, actual: u64 },
     NotReady,
     LifecycleCommand,
+    StorageReadOnly,
+    RecoveryIdChanged,
+    RecoveryBusy,
 }
 impl std::fmt::Display for SendError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::StorageReadOnly => return f.write_str(STORAGE_RECOVERY_WAITING),
+            Self::RecoveryIdChanged => return f.write_str(RECOVERY_ID_CHANGED),
+            Self::RecoveryBusy => return f.write_str(DATABASE_RECOVERY_BUSY),
+            _ => {}
+        }
         write!(f, "native runtime command rejected: {self:?}")
     }
 }
@@ -72,6 +90,29 @@ struct State {
     stopping: bool,
     retry: bool,
     pid: u32,
+}
+
+fn qualify_command(phase: &ConnectionPhase, command: &Command) -> Result<(), SendError> {
+    match (phase, command) {
+        (_, Command::Shutdown) => Err(SendError::LifecycleCommand),
+        (ConnectionPhase::Ready, Command::DatabaseRecovery { .. }) => Err(SendError::NotReady),
+        (ConnectionPhase::Ready, _) => Ok(()),
+        (
+            ConnectionPhase::DatabaseRecovery { details, .. },
+            Command::DatabaseRecovery { action, .. },
+        ) => {
+            if action
+                .expected_recovery_id()
+                .is_some_and(|id| id != details.recovery_id)
+            {
+                Err(SendError::RecoveryIdChanged)
+            } else {
+                Ok(())
+            }
+        }
+        (ConnectionPhase::DatabaseRecovery { .. }, _) => Err(SendError::StorageReadOnly),
+        _ => Err(SendError::NotReady),
+    }
 }
 #[cfg(test)]
 #[derive(Default)]
@@ -107,7 +148,7 @@ impl RuntimeCommands {
         expected_generation: u64,
         command: Command,
     ) -> std::result::Result<(), SendError> {
-        let state = self.shared.state.lock().unwrap();
+        let mut state = self.shared.state.lock().unwrap();
         if state.stopping {
             return Err(SendError::Stopped);
         }
@@ -117,18 +158,26 @@ impl RuntimeCommands {
                 actual: state.generation,
             });
         }
-        if state.phase != ConnectionPhase::Ready {
-            return Err(SendError::NotReady);
-        }
-        if matches!(command, Command::Shutdown) {
-            return Err(SendError::LifecycleCommand);
+        qualify_command(&state.phase, &command)?;
+        let mut recovery_request = None;
+        if let ConnectionPhase::DatabaseRecovery { pending, .. } = &state.phase {
+            if pending.is_some() {
+                return Err(SendError::RecoveryBusy);
+            }
+            if let Command::DatabaseRecovery { request_id, .. } = &command {
+                recovery_request = Some(request_id.clone());
+            }
         }
         state
             .sender
             .as_ref()
             .ok_or(SendError::NotReady)?
             .send(Outgoing::Business(command))
-            .map_err(|_| SendError::NotReady)
+            .map_err(|_| SendError::NotReady)?;
+        if let ConnectionPhase::DatabaseRecovery { pending, .. } = &mut state.phase {
+            *pending = recovery_request;
+        }
+        Ok(())
     }
     pub fn connection(&self) -> (u64, ConnectionPhase) {
         let state = self.shared.state.lock().unwrap();
@@ -260,15 +309,29 @@ fn publish(
     shared: &Shared,
     events: &async_channel::Sender<BridgeEvent>,
     generation: u64,
-    phase: ConnectionPhase,
+    mut phase: ConnectionPhase,
 ) {
+    {
+        let mut state = shared.state.lock().unwrap();
+        if let (
+            ConnectionPhase::DatabaseRecovery {
+                details: old,
+                pending: old_pending,
+            },
+            ConnectionPhase::DatabaseRecovery { details, pending },
+        ) = (&state.phase, &mut phase)
+            && old.recovery_id == details.recovery_id
+        {
+            *pending = old_pending.clone();
+        }
+        state.phase = phase.clone();
+    }
     #[cfg(test)]
     shared.hooks.transitions.lock().unwrap().push((
         generation,
         phase.clone(),
         std::time::Instant::now(),
     ));
-    shared.state.lock().unwrap().phase = phase.clone();
     if events
         .send_blocking(BridgeEvent::Connection { generation, phase })
         .is_err()
@@ -464,10 +527,12 @@ fn run_child(
     let mut ready = false;
     let mut blocked = None;
     let mut writer = None;
+    let mut missing_hello = false;
     let result = (|| -> Result<()> {
         let mut stdin = child.stdin.take().context("native runtime stdin")?;
         let stdout = child.stdout.take().context("native runtime stdout")?;
         let writer_shared = shared.clone();
+        let writer_events = events.clone();
         writer = Some(
             thread::Builder::new()
                 .name("matou-runtime-writer".into())
@@ -492,12 +557,31 @@ fn run_child(
                                 let state = writer_shared.state.lock().unwrap();
                                 // Normal stop closes admission, then drains accepted FIFO
                                 // before Stop. Failure retirement changes phase instead.
-                                if state.generation != generation
-                                    || state.phase != ConnectionPhase::Ready
-                                {
+                                let qualified = state.generation == generation
+                                    && qualify_command(&state.phase, &command).is_ok()
+                                    && match (&state.phase, &command) {
+                                        (
+                                            ConnectionPhase::DatabaseRecovery { pending, .. },
+                                            Command::DatabaseRecovery { request_id, .. },
+                                        ) => pending.as_ref() == Some(request_id),
+                                        _ => true,
+                                    };
+                                drop(state);
+                                if !qualified {
+                                    if let Command::DatabaseRecovery { request_id, .. } = command {
+                                        let _ = writer_events.send_blocking(BridgeEvent::Runtime {
+                                            generation,
+                                            event: Event::DatabaseRecoveryResult(
+                                                DatabaseRecoveryResult::failed(
+                                                    request_id,
+                                                    "RECOVERY_INTERRUPTED",
+                                                    DATABASE_RECOVERY_INTERRUPTED,
+                                                ),
+                                            ),
+                                        });
+                                    }
                                     continue;
                                 }
-                                drop(state);
                                 // Once written to the old pipe bytes cannot be retracted;
                                 // that pipe and queue are never reused by a new attempt.
                                 write_message(&mut stdin, &ClientMessage::Command(command))?;
@@ -512,10 +596,9 @@ fn run_child(
             let _ = started.send(Ok(()));
         }
         let mut messages = read_messages::<ServerMessage>(stdout);
-        match messages
-            .next()
-            .context("native runtime EOF before Hello")??
-        {
+        let first = messages.next();
+        missing_hello = first.is_none();
+        match first.context("native runtime EOF before Hello")?? {
             ServerMessage::Hello { version } => {
                 if let Err(error) = check_version(version) {
                     blocked = Some(StartupBlock {
@@ -543,6 +626,27 @@ fn run_child(
             if let Event::StartupBlocked(reason) = &event {
                 blocked = Some(reason.clone());
             }
+            if let Event::DatabaseRecoveryRequired(details) = &event
+                && !shared.state.lock().unwrap().stopping
+            {
+                publish(
+                    shared,
+                    events,
+                    generation,
+                    ConnectionPhase::DatabaseRecovery {
+                        details: Arc::new(details.clone()),
+                        pending: None,
+                    },
+                );
+            }
+            if let Event::DatabaseRecoveryResult(result) = &event {
+                let mut state = shared.state.lock().unwrap();
+                if let ConnectionPhase::DatabaseRecovery { pending, .. } = &mut state.phase
+                    && pending.as_ref() == Some(&result.request_id)
+                {
+                    *pending = None;
+                }
+            }
             if matches!(event, Event::Ready { .. }) {
                 ready = true;
                 if !shared.state.lock().unwrap().stopping {
@@ -567,10 +671,23 @@ fn run_child(
         }
     }
     // Retire this attempt before waking its writer; its entire queue dies with it.
-    {
+    let pending_recovery = {
         let mut state = shared.state.lock().unwrap();
         state.sender = None;
-        state.phase = ConnectionPhase::Reconnecting;
+        match std::mem::replace(&mut state.phase, ConnectionPhase::Reconnecting) {
+            ConnectionPhase::DatabaseRecovery { pending, .. } => pending,
+            _ => None,
+        }
+    };
+    if let Some(request_id) = pending_recovery {
+        let _ = events.send_blocking(BridgeEvent::Runtime {
+            generation,
+            event: Event::DatabaseRecoveryResult(DatabaseRecoveryResult::failed(
+                request_id,
+                "RECOVERY_INTERRUPTED",
+                DATABASE_RECOVERY_INTERRUPTED,
+            )),
+        });
     }
     let _ = sender.send(Outgoing::Stop);
     drop(child.stdin.take());
@@ -585,6 +702,14 @@ fn run_child(
         .unwrap_or(Ok(()));
     // A protocol failure closes stdin and the child exits. Never start a second owner before wait.
     let waited = child.wait();
+    // A mismatched legacy child rejects our Hello before sending its own.
+    // Signal deaths before Hello remain transient supervisor failures.
+    if missing_hello && waited.as_ref().is_ok_and(|status| status.code() == Some(1)) {
+        blocked = Some(StartupBlock {
+            kind: StartupBlockKind::Protocol,
+            message: format!("native runtime exited before accepting protocol version {VERSION}"),
+        });
+    }
     let mut failures = Vec::new();
     if let Err(error) = &result {
         failures.push(format!("reader: {error:#}"));
@@ -895,7 +1020,7 @@ mod supervisor_tests {
             .sender
             .as_ref()
             .unwrap()
-            .send(Outgoing::Business(Command::Shutdown))?;
+            .send(Outgoing::Stop)?;
         paused.recv_timeout(LIMIT)?;
         let (g2, phase) = bridge.commands.connection();
         ensure!(g2 == g1 + 1 && phase == ConnectionPhase::Starting);

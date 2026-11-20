@@ -35,6 +35,8 @@ pub struct RecoveryError {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RecoveryRequired {
+    #[serde(skip)]
+    pub(crate) marker: Option<RecoveryMarker>,
     pub recovery_id: String,
     pub reason: String,
     pub durable_database_path: PathBuf,
@@ -84,7 +86,15 @@ pub fn open(data_root: &Path, runtime_generation: &str) -> Result<BootstrapResul
         if database_path.exists() {
             if is_writable(&root) {
                 match DatabaseOwner::acquire(&database_path, runtime_generation) {
-                    Ok(lease) => ownership = Some(lease),
+                    Ok(lease) => {
+                        ownership = Some(lease);
+                        if let Some(marker) = recovery_marker::read_active(&database_path)? {
+                            release(&mut ownership)?;
+                            return Ok(BootstrapResult::RecoveryRequired(recovery_result(
+                                marker, &backups,
+                            )));
+                        }
+                    }
                     Err(error) => {
                         if let Some(marker) = wait_for_recovery_marker(&database_path)? {
                             return Ok(BootstrapResult::RecoveryRequired(recovery_result(
@@ -135,19 +145,17 @@ pub fn open(data_root: &Path, runtime_generation: &str) -> Result<BootstrapResul
                 return open(&root, runtime_generation);
             }
         }
-        let mut connection = Connection::open(&database_path)?;
-        configure_connection(&connection)?;
-        connection.execute(
-            "INSERT OR REPLACE INTO _runtime_meta (key,value) VALUES ('runtime_generation',?)",
-            [runtime_generation],
+        let lease = ownership
+            .as_ref()
+            .context("missing writable database lease")?;
+        let connection = open_writable(
+            &database_path,
+            runtime_generation,
+            lease,
+            &mut backups,
+            !integrity_verified,
+            OpenFlags::default(),
         )?;
-        if !integrity_verified {
-            assert_startup_integrity(&connection)?;
-        }
-        migrate_with_backup(&mut connection, now(), |connection| {
-            backups.create(connection, BackupReason::PreMigration, now())?;
-            backups.rotate(DEFAULT_MAX_BACKUPS)
-        })?;
         Ok(BootstrapResult::Writable {
             connection,
             ownership: ownership
@@ -211,6 +219,30 @@ pub fn open(data_root: &Path, runtime_generation: &str) -> Result<BootstrapResul
     }
 }
 
+pub(crate) fn open_writable(
+    database_path: &Path,
+    generation: &str,
+    _lease: &DatabaseOwner,
+    backups: &mut BackupService,
+    check_integrity: bool,
+    flags: OpenFlags,
+) -> Result<Connection> {
+    let mut connection = Connection::open_with_flags(database_path, flags)?;
+    if check_integrity {
+        assert_startup_integrity(&connection)?;
+    }
+    configure_connection(&connection)?;
+    connection.execute(
+        "INSERT OR REPLACE INTO _runtime_meta (key,value) VALUES ('runtime_generation',?)",
+        [generation],
+    )?;
+    migrate_with_backup(&mut connection, now(), |connection| {
+        backups.create(connection, BackupReason::PreMigration, now())?;
+        backups.rotate(DEFAULT_MAX_BACKUPS)
+    })?;
+    Ok(connection)
+}
+
 fn publish_recovery(
     path: &Path,
     backups: &BackupService,
@@ -266,6 +298,7 @@ fn recovery_result(marker: RecoveryMarker, backups: &BackupService) -> RecoveryR
         ),
     };
     RecoveryRequired {
+        marker: Some(marker.clone()),
         recovery_id: marker.recovery_id,
         reason: marker.reason,
         durable_database_path: marker.durable_database_path,
@@ -385,7 +418,7 @@ fn committed_wal(path: &Path) -> bool {
     fs::metadata(append_suffix(path, "-wal")).is_ok_and(|metadata| metadata.len() > 32)
 }
 
-fn assert_wal_bundle_ready(path: &Path) -> Result<()> {
+pub(crate) fn assert_wal_bundle_ready(path: &Path) -> Result<()> {
     if !committed_wal(path) {
         return Ok(());
     }
@@ -462,13 +495,13 @@ fn wait_for_recovery_marker(path: &Path) -> Result<Option<RecoveryMarker>> {
 }
 
 #[cfg(unix)]
-fn is_writable(path: &Path) -> bool {
+pub(crate) fn is_writable(path: &Path) -> bool {
     use std::os::unix::ffi::OsStrExt;
     std::ffi::CString::new(path.as_os_str().as_bytes())
         .is_ok_and(|path| unsafe { libc::access(path.as_ptr(), libc::W_OK) == 0 })
 }
 #[cfg(windows)]
-fn is_writable(path: &Path) -> bool {
+pub(crate) fn is_writable(path: &Path) -> bool {
     use std::os::windows::ffi::OsStrExt;
     unsafe extern "C" {
         fn _waccess(path: *const u16, mode: i32) -> i32;
@@ -477,12 +510,12 @@ fn is_writable(path: &Path) -> bool {
     unsafe { _waccess(path.as_ptr(), 2) == 0 }
 }
 
-fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
+pub(crate) fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
     let mut path = path.as_os_str().to_owned();
     path.push(suffix);
     path.into()
 }
-fn now() -> i64 {
+pub(crate) fn now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()

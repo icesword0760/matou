@@ -10,6 +10,7 @@ pub mod terminal_input;
 mod terminal_scrollbar;
 pub mod terminal_surface;
 pub mod workspace;
+pub use workspace::database_recovery_page;
 
 pub mod tab_dialog_style;
 

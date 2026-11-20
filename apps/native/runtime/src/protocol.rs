@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::host::{Command, Event};
 
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 #[derive(Serialize, Deserialize)]
 pub enum ClientMessage {

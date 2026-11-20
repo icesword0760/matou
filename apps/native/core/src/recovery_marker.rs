@@ -140,6 +140,33 @@ pub fn read_active(database_path: &Path) -> Result<Option<RecoveryMarker>> {
     Ok(read_canonical(database_path)?.and_then(active_marker))
 }
 
+/// Read-only authorization for recovery actions, including under their fence.
+/// A legacy document or a claim awaiting canonical publication cannot authorize writes.
+pub(crate) fn authorize_action(expected: &RecoveryMarker) -> Result<RecoveryMarker> {
+    const CHANGED: &str = "数据库恢复状态已更新，请使用最新恢复页面重试";
+    const TAKEN_OVER: &str = "数据库恢复已由其他 Runtime 完成，本次操作已停止";
+    let metadata =
+        optional_read(fs::symlink_metadata(&expected.marker_path).map_err(anyhow::Error::from))?;
+    let metadata = metadata.context(TAKEN_OVER)?;
+    ensure!(metadata.is_file(), "{INVALID_MARKER}");
+    let current = read_shape(&expected.durable_database_path)?
+        .context(TAKEN_OVER)?
+        .marker;
+    if current.recovery_id == expected.recovery_id
+        && (current.state == RESOLVED || matching_tombstone(&current))
+    {
+        return Err(anyhow!(TAKEN_OVER));
+    }
+    ensure!(&current == expected, "{CHANGED}");
+    ensure!(current.state == REQUIRED, "{CHANGED}");
+    Ok(current)
+}
+
+pub(crate) fn resolve_action(expected: &RecoveryMarker, now: i64) -> Result<()> {
+    let required = authorize_action(expected)?;
+    commit_resolution(&required, now, |_| Ok(()))
+}
+
 pub fn publish(marker: RecoveryMarker) -> Result<RecoveryMarker> {
     let database_path = marker.durable_database_path.clone();
     let proposed = parse_shape(serde_json::to_string(&marker)?, &database_path)?;
@@ -476,18 +503,26 @@ fn resolve_with(
     recovery_id: &str,
     now: i64,
     state_changed_message: &str,
-    mut observe: impl FnMut(ResolveStage) -> Result<()>,
+    observe: impl FnMut(ResolveStage) -> Result<()>,
 ) -> Result<()> {
     let database_path = database_path_from_marker(marker_path)?;
     let required = read_canonical(&database_path)?
         .filter(|marker| marker.recovery_id == recovery_id && is_active(marker))
         .ok_or_else(|| anyhow!(state_changed_message.to_owned()))?;
-    let tombstone_path = tombstone_path(&required);
+    commit_resolution(&required, now, observe)
+}
+
+fn commit_resolution(
+    required: &RecoveryMarker,
+    now: i64,
+    mut observe: impl FnMut(ResolveStage) -> Result<()>,
+) -> Result<()> {
+    let tombstone_path = tombstone_path(required);
     let tombstone = json!({
         "version": 1,
         "state": "resolved",
-        "recoveryId": recovery_id,
-        "markerPath": marker_path,
+        "recoveryId": required.recovery_id,
+        "markerPath": required.marker_path,
         "resolvedAt": now,
     });
     let partial = PartialFile::prepare(&tombstone_path, &tombstone, || {
@@ -497,7 +532,7 @@ fn resolve_with(
     match fs::hard_link(&partial.0, &tombstone_path) {
         Ok(()) => {}
         Err(error)
-            if error.kind() == io::ErrorKind::AlreadyExists && matching_tombstone(&required) => {}
+            if error.kind() == io::ErrorKind::AlreadyExists && matching_tombstone(required) => {}
         Err(error) => return Err(error.into()),
     }
     // The hard link is the commit point. A later sync failure can at most
@@ -698,7 +733,7 @@ fn parse_shape(bytes: String, database_path: &Path) -> Result<MarkerDocument> {
     })
 }
 
-fn valid_recovery_id(id: &str) -> bool {
+pub(crate) fn valid_recovery_id(id: &str) -> bool {
     let mut bytes = id.bytes();
     id.len() <= 160
         && bytes
