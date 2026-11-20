@@ -4,6 +4,7 @@ pub mod geometry;
 pub mod hierarchy;
 pub mod journal;
 pub mod ownership;
+pub mod provider_config;
 pub mod provider_launch;
 pub mod pty;
 pub mod recovery_marker;
