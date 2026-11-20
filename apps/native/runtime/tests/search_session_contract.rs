@@ -133,6 +133,7 @@ fn worker_search_selects_cycles_and_refreshes_without_scrolling() -> Result<()> 
     })?;
     assert!(missing.active.is_none());
     assert!(missing.matches.is_empty());
+    assert_eq!(missing.result_index, -1);
     assert!(selected_text(&worker)?.is_empty());
 
     worker.search(SearchRequest {
@@ -219,6 +220,13 @@ fn worker_search_selects_cycles_and_refreshes_without_scrolling() -> Result<()> 
         }
     }
 
+    let empty = worker.search(SearchRequest {
+        query: String::new(),
+        ..request(10, false)
+    })?;
+    assert_eq!(empty.result_index, 0);
+    assert!(empty.active.is_none());
+    assert!(empty.matches.is_empty());
     worker.shutdown()
 }
 

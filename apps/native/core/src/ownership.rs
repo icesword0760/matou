@@ -101,8 +101,9 @@ impl DatabaseOwner {
         if self.released {
             return Ok(());
         }
+        release_matching(&self.owner_path, &self.runtime_generation)?;
         self.released = true;
-        release_matching(&self.owner_path, &self.runtime_generation)
+        Ok(())
     }
 }
 
@@ -362,7 +363,9 @@ fn release_matching(path: &Path, generation: &str) -> Result<()> {
     if matches!(inspect(path), Inspection::Valid(OwnerFormat::File, record)
         if record.runtime_generation == generation)
     {
-        remove_owner(path, OwnerFormat::File)?;
+        remove_owner(path, OwnerFormat::File).with_context(|| {
+            format!("failed to remove database owner lock at {}", path.display())
+        })?;
         sync_directory(parent(path))?;
     }
     Ok(())

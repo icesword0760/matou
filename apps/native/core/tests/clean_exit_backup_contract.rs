@@ -116,28 +116,110 @@ fn clean_exit_manifest_publication_error_preserves_existing_backup_and_source() 
     let source = source(root.path())?;
     let mut backups = BackupService::new(root.path())?;
     let previous = backups.create(&source, BackupReason::PreMigration, 1)?;
-    let before = fs::read(&previous.path)?;
     let directory = root.path().join("backups");
+    let unchanged = [
+        previous.path.clone(),
+        previous.path.with_extension("json"),
+        root.path().join("source.sqlite"),
+        root.path().join("source.sqlite-wal"),
+    ]
+    .map(|path| Ok((fs::read(&path)?, path)))
+    .into_iter()
+    .collect::<std::io::Result<Vec<_>>>()?;
     fs::create_dir(directory.join("matou-2-clean-exit-v0.json"))?;
-    backups
+    let error = backups
         .backup_for_clean_exit(&source, 2, CLEAN_EXIT_BACKUP_TIMEOUT)
         .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "failed to publish backup manifest at matou-2-clean-exit-v0.json"
+    );
+    assert_rename_os_error(&error);
     assert_eq!(backups.list_valid()?, vec![previous.clone()]);
-    assert_eq!(fs::read(&previous.path)?, before);
+    for (bytes, path) in unchanged {
+        assert_eq!(fs::read(&path)?, bytes, "{}", path.display());
+    }
     assert_eq!(
         source.query_row("SELECT count(*) FROM marker", [], |row| row
             .get::<_, i64>(0))?,
         1
     );
-    assert!(directory.join("matou-2-clean-exit-v0.sqlite").is_file());
     let mut expected = BTreeSet::from(backup_names(&previous));
-    expected.extend([
-        OsString::from("matou-2-clean-exit-v0.sqlite"),
-        OsString::from("matou-2-clean-exit-v0.json"),
-    ]);
+    expected.insert("matou-2-clean-exit-v0.json".into());
     let entries = names(&directory)?;
     assert_eq!(entries, expected);
     println!("failed manifest publication directory: {entries:?}");
+    Ok(())
+}
+
+fn assert_rename_os_error(error: &anyhow::Error) {
+    let code = error
+        .downcast_ref::<std::io::Error>()
+        .unwrap()
+        .raw_os_error();
+    #[cfg(unix)]
+    assert_eq!(code, Some(libc::EISDIR));
+    #[cfg(windows)]
+    assert!(code.is_some());
+}
+
+#[test]
+fn database_and_rollback_rename_errors_identify_the_stage_and_target() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let source = source(root.path())?;
+    let mut backups = BackupService::new(root.path())?;
+    let previous = backups.create(&source, BackupReason::PreMigration, 1)?;
+    let blocked = root.path().join("backups/matou-2-clean-exit-v0.sqlite");
+    fs::create_dir(&blocked)?;
+    let error = backups
+        .create(&source, BackupReason::CleanExit, 2)
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "failed to publish backup database at matou-2-clean-exit-v0.sqlite"
+    );
+    assert_rename_os_error(&error);
+    assert!(blocked.is_dir());
+
+    let target = root.path().join("source.sqlite");
+    fs::create_dir(root.path().join("source.sqlite.replaced-3"))?;
+    let error = backups.restore(&previous.id, &target, 3).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "failed to publish restore rollback at source.sqlite.replaced-3"
+    );
+    assert_rename_os_error(&error);
+    assert_eq!(backups.list_valid()?, vec![previous]);
+    Ok(())
+}
+
+#[test]
+fn colliding_backup_name_preserves_the_existing_open_backup() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let source = source(root.path())?;
+    let previous = BackupService::new(root.path())?.create(&source, BackupReason::CleanExit, 1)?;
+    let held = Connection::open_with_flags(&previous.path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let before = fs::read(&previous.path)?;
+    let manifest_before = fs::read(previous.path.with_extension("json"))?;
+    source.execute("INSERT INTO marker VALUES ('later')", [])?;
+
+    let mut restarted = BackupService::new(root.path())?;
+    assert!(
+        restarted
+            .create(&source, BackupReason::CleanExit, 1)
+            .is_err()
+    );
+    assert_eq!(fs::read(&previous.path)?, before);
+    assert_eq!(
+        fs::read(previous.path.with_extension("json"))?,
+        manifest_before
+    );
+    assert_eq!(
+        held.query_row("SELECT count(*) FROM marker", [], |row| row
+            .get::<_, i64>(0))?,
+        1
+    );
+    assert_eq!(restarted.list_valid()?, vec![previous]);
     Ok(())
 }
 

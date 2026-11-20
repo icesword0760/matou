@@ -1,6 +1,6 @@
 use std::{
     fs::{self, File, OpenOptions},
-    io::{self, BufReader, Read},
+    io::{self, BufRead, BufReader, Read},
     path::Path,
 };
 
@@ -285,7 +285,20 @@ pub fn read_segment(path: &Path) -> Result<FrameReader<Box<dyn Read>>> {
     let file = File::open(path)?;
     let raw = BufReader::new(file);
     let source: Box<dyn Read> = if path.extension().is_some_and(|extension| extension == "gz") {
-        Box::new(BufReader::new(MultiGzDecoder::new(raw)))
+        let mut decoded = BufReader::new(MultiGzDecoder::new(raw));
+        // Preserve the decoder's EOF before the journal magic check treats a short read as bad magic.
+        match decoded.fill_buf() {
+            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
+                return Err(
+                    anyhow::Error::from(error).context(JournalCorruptionError::new(
+                        "unexpected end of file while reading gzip journal",
+                        0,
+                    )),
+                );
+            }
+            result => result?,
+        };
+        Box::new(decoded)
     } else {
         Box::new(raw)
     };

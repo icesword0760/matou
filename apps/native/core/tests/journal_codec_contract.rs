@@ -1,4 +1,7 @@
-use std::{fs, io::Read};
+use std::{
+    fs,
+    io::{self, Read},
+};
 
 use anyhow::{Context, Result};
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -11,6 +14,30 @@ use serde::Deserialize;
 use serde_json::Value;
 
 const REFERENCE: &str = include_str!("fixtures/journal-reference.json");
+
+#[test]
+fn truncated_gzip_header_preserves_the_decoder_eof() -> Result<()> {
+    let reference: Reference = serde_json::from_str(REFERENCE)?;
+    let gzip = STANDARD.decode(&reference.segments[0].gzip_base64)?;
+    let root = tempfile::tempdir()?;
+    let path = root.path().join("segment.mtj.gz");
+    fs::write(&path, &gzip[..5])?;
+
+    let error = read_segment(&path)
+        .err()
+        .context("expected truncated gzip header")?;
+    let corruption = error.downcast_ref::<JournalCorruptionError>().unwrap();
+    assert_eq!(corruption.offset, 0);
+    assert_eq!(
+        corruption.message,
+        "unexpected end of file while reading gzip journal"
+    );
+    assert_eq!(
+        error.downcast_ref::<io::Error>().unwrap().kind(),
+        io::ErrorKind::UnexpectedEof
+    );
+    Ok(())
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
