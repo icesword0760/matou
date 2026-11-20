@@ -7,11 +7,14 @@ use matou_native_core::{
 };
 use rusqlite::{Connection, types::ValueRef};
 use serde_json::{Map, Value, json};
-use std::{fs, os::unix::fs::PermissionsExt};
+use std::{collections::BTreeMap, fs, os::unix::fs::PermissionsExt, path::PathBuf};
 #[test]
 fn paths_match_frozen_service_through_loss_and_reopen() -> Result<()> {
-    let fixture: Value =
-        serde_json::from_str(include_str!("fixtures/workspace-path-reference.json"))?;
+    let gate = std::env::var_os("MATOU_WORKSPACE_PATH_GATE").map(PathBuf::from);
+    let fixture: Value = match &gate {
+        Some(gate) => serde_json::from_slice(&fs::read(gate.join("frozen-path.json"))?)?,
+        None => serde_json::from_str(include_str!("fixtures/workspace-path-reference.json"))?,
+    };
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("matou.sqlite");
     let workspace = temp.path().join("workspace");
@@ -27,6 +30,7 @@ fn paths_match_frozen_service_through_loss_and_reopen() -> Result<()> {
         "UPDATE workspaces SET root_directory=? WHERE id=?",
         [workspace.to_str().unwrap(), workspace_id],
     )?;
+    let mut captures = Vec::new();
     for step in fixture["steps"].as_array().unwrap() {
         let label = step["action"].as_str().unwrap();
         match label {
@@ -45,31 +49,59 @@ fn paths_match_frozen_service_through_loss_and_reopen() -> Result<()> {
             }
             _ => {}
         }
-        let state: WorkspacePathState = serde_json::from_value(step["state"].clone())?;
-        assert_eq!(
-            workspace_paths::inspect(&workspace),
-            state.reason,
-            "{label}: actual OS inspection"
-        );
+        let checked_at = step["state"]["checkedAt"].as_i64().context("check clock")?;
+        let reason = workspace_paths::inspect(&workspace);
         let generation =
             workspace_paths::get(&db, workspace_id)?.map_or(0, |s| s.validation_generation) + 1;
-        assert_eq!(
-            generation, state.validation_generation,
-            "{label}: persisted generation"
-        );
-        workspace_paths::commit(
+        let state = WorkspacePathState {
+            workspace_id: workspace_id.into(),
+            status: if reason.is_empty() {
+                "valid"
+            } else {
+                "invalid"
+            }
+            .into(),
+            reason: reason.into(),
+            checked_at,
+            validation_generation: generation,
+        };
+        let commit = workspace_paths::commit(
             &mut db,
             step["commandId"].as_str().unwrap().into(),
             &state,
             step["committedAt"].as_i64().unwrap(),
         )?;
+        let mut snapshot = BTreeMap::new();
         for (table, expected) in step["snapshot"].as_object().unwrap() {
-            assert_eq!(
-                normalize_json_columns(read_rows(&db, table)?)?,
-                normalize_json_columns(serde_json::from_value(expected.clone())?)?,
-                "{label}: {table}"
-            );
+            let rows = read_rows(&db, table)?;
+            if gate.is_none() {
+                assert_eq!(
+                    normalize_json_columns(rows.clone())?,
+                    normalize_json_columns(serde_json::from_value(expected.clone())?)?,
+                    "{label}: {table}"
+                );
+            }
+            snapshot.insert(table, rows);
         }
+        if gate.is_none() {
+            assert_eq!(commit.result, step["state"], "{label}: return value");
+        }
+        println!(
+            "{label}: {} {:?}, generation {generation}",
+            state.status, reason
+        );
+        captures.push(json!({
+            "action": label, "state": commit.result, "commandId": step["commandId"],
+            "committedAt": step["committedAt"], "snapshot": snapshot
+        }));
+    }
+    if let Some(gate) = gate {
+        fs::write(
+            gate.join("native-path.json"),
+            serde_json::to_string_pretty(&json!({
+                "workspaceId": workspace_id, "sqliteVersion": rusqlite::version(), "steps": captures
+            }))? + "\n",
+        )?;
     }
     Ok(())
 }

@@ -4,8 +4,8 @@ use anyhow::{Context, Result, bail};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use matou_native_core::{
     hierarchy::{
-        HierarchyIds,
-        tasks::create_task,
+        HierarchyIds, bootstrap_window,
+        tasks::{TaskError, create_task},
         workspaces::{
             WorkspaceError, create_workspace, relink_workspace, remove_workspace, rename_workspace,
             reorder_pinned_workspace, select_workspace, set_workspace_pinned,
@@ -70,7 +70,11 @@ struct Step {
 
 #[test]
 fn workspace_lifecycle_matches_the_frozen_database() -> Result<()> {
-    let reference: Reference = serde_json::from_str(REFERENCE)?;
+    let live_reference = std::env::var_os("MATOU_WORKSPACE_LIFECYCLE_REFERENCE")
+        .map(fs::read_to_string)
+        .transpose()?;
+    let reference: Reference =
+        serde_json::from_str(live_reference.as_deref().unwrap_or(REFERENCE))?;
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("matou.sqlite");
     fs::write(&path, STANDARD.decode(reference.seed_base64)?)?;
@@ -179,6 +183,131 @@ fn workspace_lifecycle_matches_the_frozen_database() -> Result<()> {
         }
     }
     assert!(reopened, "reopen SQLite before replaying workspace removal");
+    Ok(())
+}
+
+#[test]
+#[ignore = "run the K-workspace-path gate to supply isolated input and capture paths"]
+fn capture_workspace_path_gate_lifecycle() -> Result<()> {
+    let gate = std::path::PathBuf::from(std::env::var("MATOU_WORKSPACE_PATH_GATE")?);
+    let frozen: Value = serde_json::from_slice(&fs::read(gate.join("frozen-lifecycle.json"))?)?;
+    let paths: BTreeMap<String, String> =
+        serde_json::from_slice(&fs::read(gate.join("native-resolved-paths.json"))?)?;
+    let root = std::path::Path::new(frozen["root"].as_str().context("fixture root")?);
+    let files = || {
+        ["Default", "Alpha", "Beta", "Recovered"]
+            .into_iter()
+            .map(|name| Ok((name, fs::read_to_string(root.join(name).join("keep.txt"))?)))
+            .collect::<Result<BTreeMap<_, _>>>()
+    };
+    let mut captures = Vec::new();
+    for fixture in frozen["cases"].as_array().context("lifecycle cases")? {
+        let id = fixture["id"].as_str().context("case ID")?;
+        let op = fixture["op"].as_str().context("operation")?;
+        let scratch = tempfile::tempdir()?;
+        let path = scratch.path().join("matou.sqlite");
+        fs::copy(fixture["seed"].as_str().context("seed path")?, &path)?;
+        let mut db = Connection::open(&path)?;
+        configure_connection(&db)?;
+        let tables = fixture["before"].as_object().context("SQL tables")?;
+        let snapshot = |db: &Connection| {
+            tables
+                .keys()
+                .map(|table| Ok((table, read_rows(db, table)?)))
+                .collect::<Result<BTreeMap<_, _>>>()
+        };
+        let before = snapshot(&db)?;
+        let files_before = files()?;
+        let command: CommandMetadata = serde_json::from_value(fixture["command"].clone())?;
+        let ids = if fixture["ids"].is_null() {
+            HierarchyIds {
+                workspace_id: format!("{id}-workspace"),
+                execution_context_id: format!("{id}-context"),
+                task_id: format!("{id}-task"),
+                scene_id: format!("{id}-scene"),
+                root_node_id: format!("{id}-root"),
+                session_id: format!("{id}-session"),
+                mount_id: format!("{id}-mount"),
+            }
+        } else {
+            serde_json::from_value(fixture["ids"].clone())?
+        };
+        let now = fixture["committedAt"].as_i64().context("commit clock")?;
+        let mut input = fixture["input"].clone();
+        if matches!(op, "create" | "relink") {
+            input["rootDirectory"] =
+                json!(paths.get(id).with_context(|| format!("{id} host path"))?);
+        }
+        let result = match op {
+            "bootstrap" => bootstrap_window(
+                &mut db,
+                &command,
+                &serde_json::from_value(input.clone())?,
+                &ids,
+                "默认",
+                now,
+            )
+            .and_then(|value| Ok(serde_json::to_value(value)?)),
+            "create" => create_workspace(
+                &mut db,
+                &command,
+                &serde_json::from_value(input.clone())?,
+                &ids,
+                "默认",
+                now,
+            ),
+            "relink" => relink_workspace(
+                &mut db,
+                &command,
+                &serde_json::from_value(input.clone())?,
+                "默认工作空间始终指向 macOS 用户目录",
+                "该目录已经属于另一个工作空间",
+                now,
+            ),
+            "createTask" => create_task(
+                &mut db,
+                &command,
+                &serde_json::from_value(input.clone())?,
+                &ids,
+                "新事项",
+                "工作区目录不可用，请先在本地恢复原路径，或移出该工作区",
+                now,
+            ),
+            "remove" => remove_workspace(
+                &mut db,
+                &command,
+                &serde_json::from_value(input.clone())?,
+                "默认工作空间会保留在侧栏中",
+                now,
+            ),
+            _ => bail!("unexpected operation {op}"),
+        };
+        let (result, error) = match result {
+            Ok(result) => (result, Value::Null),
+            Err(error) => {
+                let code = error
+                    .downcast_ref::<WorkspaceError>()
+                    .map(|error| error.code)
+                    .or_else(|| error.downcast_ref::<TaskError>().map(|error| error.code));
+                (
+                    Value::Null,
+                    json!({"message": error.to_string(), "code": code}),
+                )
+            }
+        };
+        println!("{id} {op} {}", error["message"].as_str().unwrap_or("OK"));
+        captures.push(json!({
+            "id": id, "op": op, "input": input, "command": command, "committedAt": now,
+            "result": result, "error": error, "before": before, "after": snapshot(&db)?,
+            "filesBefore": files_before, "filesAfter": files()?,
+        }));
+    }
+    fs::write(
+        gate.join("native-lifecycle.json"),
+        serde_json::to_string_pretty(&json!({
+            "root": root, "sqliteVersion": rusqlite::version(), "cases": captures
+        }))? + "\n",
+    )?;
     Ok(())
 }
 
