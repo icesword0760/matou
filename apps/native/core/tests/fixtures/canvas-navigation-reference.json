@@ -4353,7 +4353,8 @@
             "latestLines": [],
             "siblingCreatedSeq": 2,
             "lastUserInteractionSeq": 0,
-            "lastActivityAt": 2000
+            "lastActivityAt": 2000,
+            "sharedSessionCount": 4
           },
           {
             "sessionId": "47112485-d938-4a21-ba2a-1ddcc7fbec6e",
@@ -4381,7 +4382,8 @@
             "latestLines": [],
             "siblingCreatedSeq": 5,
             "lastUserInteractionSeq": 0,
-            "lastActivityAt": 2100
+            "lastActivityAt": 2100,
+            "sharedSessionCount": 4
           },
           {
             "sessionId": "f2f9c443-77fb-4ca1-a0e7-155e8502c9cb",
@@ -4409,7 +4411,8 @@
             "latestLines": [],
             "siblingCreatedSeq": 8,
             "lastUserInteractionSeq": 0,
-            "lastActivityAt": 2103
+            "lastActivityAt": 2103,
+            "sharedSessionCount": 1
           },
           {
             "sessionId": "bb49e3e3-26b4-4f68-9b9a-c6a993fc6443",
@@ -4439,7 +4442,8 @@
             "latestLines": [],
             "siblingCreatedSeq": 6,
             "lastUserInteractionSeq": 0,
-            "lastActivityAt": 2101
+            "lastActivityAt": 2101,
+            "sharedSessionCount": 4
           },
           {
             "sessionId": "cfd0a423-f193-4865-8300-90d9e5f568e0",
@@ -4469,7 +4473,8 @@
             "latestLines": [],
             "siblingCreatedSeq": 7,
             "lastUserInteractionSeq": 0,
-            "lastActivityAt": 2102
+            "lastActivityAt": 2102,
+            "sharedSessionCount": 4
           }
         ],
         "edges": [
@@ -5869,7 +5874,8 @@
             "latestLines": [],
             "siblingCreatedSeq": 2,
             "lastUserInteractionSeq": 0,
-            "lastActivityAt": 2000
+            "lastActivityAt": 2000,
+            "sharedSessionCount": 4
           },
           {
             "sessionId": "47112485-d938-4a21-ba2a-1ddcc7fbec6e",
@@ -5897,7 +5903,8 @@
             "latestLines": [],
             "siblingCreatedSeq": 5,
             "lastUserInteractionSeq": 0,
-            "lastActivityAt": 2100
+            "lastActivityAt": 2100,
+            "sharedSessionCount": 4
           },
           {
             "sessionId": "f2f9c443-77fb-4ca1-a0e7-155e8502c9cb",
@@ -5925,7 +5932,8 @@
             "latestLines": [],
             "siblingCreatedSeq": 8,
             "lastUserInteractionSeq": 0,
-            "lastActivityAt": 2103
+            "lastActivityAt": 2103,
+            "sharedSessionCount": 1
           },
           {
             "sessionId": "bb49e3e3-26b4-4f68-9b9a-c6a993fc6443",
@@ -5955,7 +5963,8 @@
             "latestLines": [],
             "siblingCreatedSeq": 6,
             "lastUserInteractionSeq": 0,
-            "lastActivityAt": 2101
+            "lastActivityAt": 2101,
+            "sharedSessionCount": 4
           },
           {
             "sessionId": "cfd0a423-f193-4865-8300-90d9e5f568e0",
@@ -5985,7 +5994,8 @@
             "latestLines": [],
             "siblingCreatedSeq": 7,
             "lastUserInteractionSeq": 0,
-            "lastActivityAt": 2102
+            "lastActivityAt": 2102,
+            "sharedSessionCount": 4
           }
         ],
         "edges": [
@@ -7417,7 +7427,8 @@
             "latestLines": [],
             "siblingCreatedSeq": 2,
             "lastUserInteractionSeq": 0,
-            "lastActivityAt": 2000
+            "lastActivityAt": 2000,
+            "sharedSessionCount": 4
           },
           {
             "sessionId": "47112485-d938-4a21-ba2a-1ddcc7fbec6e",
@@ -7445,7 +7456,8 @@
             "latestLines": [],
             "siblingCreatedSeq": 5,
             "lastUserInteractionSeq": 0,
-            "lastActivityAt": 2100
+            "lastActivityAt": 2100,
+            "sharedSessionCount": 4
           },
           {
             "sessionId": "f2f9c443-77fb-4ca1-a0e7-155e8502c9cb",
@@ -7473,7 +7485,8 @@
             "latestLines": [],
             "siblingCreatedSeq": 8,
             "lastUserInteractionSeq": 0,
-            "lastActivityAt": 2103
+            "lastActivityAt": 2103,
+            "sharedSessionCount": 1
           },
           {
             "sessionId": "bb49e3e3-26b4-4f68-9b9a-c6a993fc6443",
@@ -7503,7 +7516,8 @@
             "latestLines": [],
             "siblingCreatedSeq": 6,
             "lastUserInteractionSeq": 0,
-            "lastActivityAt": 2101
+            "lastActivityAt": 2101,
+            "sharedSessionCount": 4
           },
           {
             "sessionId": "cfd0a423-f193-4865-8300-90d9e5f568e0",
@@ -7533,7 +7547,8 @@
             "latestLines": [],
             "siblingCreatedSeq": 7,
             "lastUserInteractionSeq": 0,
-            "lastActivityAt": 2102
+            "lastActivityAt": 2102,
+            "sharedSessionCount": 4
           }
         ],
         "edges": [
@@ -8963,7 +8978,8 @@
             "latestLines": [],
             "siblingCreatedSeq": 2,
             "lastUserInteractionSeq": 77,
-            "lastActivityAt": 2000
+            "lastActivityAt": 2000,
+            "sharedSessionCount": 4
           },
           {
             "sessionId": "47112485-d938-4a21-ba2a-1ddcc7fbec6e",
@@ -8991,7 +9007,8 @@
             "latestLines": [],
             "siblingCreatedSeq": 5,
             "lastUserInteractionSeq": 0,
-            "lastActivityAt": 2100
+            "lastActivityAt": 2100,
+            "sharedSessionCount": 4
           },
           {
             "sessionId": "f2f9c443-77fb-4ca1-a0e7-155e8502c9cb",
@@ -9019,7 +9036,8 @@
             "latestLines": [],
             "siblingCreatedSeq": 8,
             "lastUserInteractionSeq": 0,
-            "lastActivityAt": 2103
+            "lastActivityAt": 2103,
+            "sharedSessionCount": 1
           },
           {
             "sessionId": "bb49e3e3-26b4-4f68-9b9a-c6a993fc6443",
@@ -9049,7 +9067,8 @@
             "latestLines": [],
             "siblingCreatedSeq": 6,
             "lastUserInteractionSeq": 0,
-            "lastActivityAt": 2101
+            "lastActivityAt": 2101,
+            "sharedSessionCount": 4
           },
           {
             "sessionId": "cfd0a423-f193-4865-8300-90d9e5f568e0",
@@ -9079,7 +9098,8 @@
             "latestLines": [],
             "siblingCreatedSeq": 7,
             "lastUserInteractionSeq": 0,
-            "lastActivityAt": 2102
+            "lastActivityAt": 2102,
+            "sharedSessionCount": 4
           }
         ],
         "edges": [

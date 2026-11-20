@@ -70,7 +70,8 @@
             "latestLines": [],
             "siblingCreatedSeq": 1,
             "lastUserInteractionSeq": 0,
-            "lastActivityAt": 1000
+            "lastActivityAt": 1000,
+            "sharedSessionCount": 1
           }
         ],
         "edges": [],
@@ -124,7 +125,8 @@
               "latestLines": [],
               "siblingCreatedSeq": 1,
               "lastUserInteractionSeq": 0,
-              "lastActivityAt": 1000
+              "lastActivityAt": 1000,
+              "sharedSessionCount": 1
             }
           ],
           "edges": []
@@ -246,7 +248,7 @@
             "workspace_id": "0c14b1ee-5df6-4072-8248-43dcb6cd76bf",
             "task_id": "43b88e4d-a245-4294-9bf0-6f76eedb5298",
             "session_id": "6095773e-2a1a-4af2-ae0f-c61120ecce90",
-            "payload_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"idle\",\"workStatus\":\"running\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"running\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000}],\"edges\":[]}}",
+            "payload_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"idle\",\"workStatus\":\"running\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"running\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000,\"sharedSessionCount\":1}],\"edges\":[]}}",
             "schema_version": 1,
             "required_terminal_sequence": null,
             "command_id": "status-0",
@@ -269,7 +271,7 @@
             "command_id": "status-0",
             "command_type": "session.work-status",
             "request_hash": "status-0",
-            "response_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"idle\",\"workStatus\":\"running\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"running\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000}],\"edges\":[]}}",
+            "response_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"idle\",\"workStatus\":\"running\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"running\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000,\"sharedSessionCount\":1}],\"edges\":[]}}",
             "first_event_seq": 6,
             "last_event_seq": 6,
             "committed_at": 1794724569870
@@ -324,7 +326,8 @@
               "latestLines": [],
               "siblingCreatedSeq": 1,
               "lastUserInteractionSeq": 0,
-              "lastActivityAt": 1000
+              "lastActivityAt": 1000,
+              "sharedSessionCount": 1
             }
           ],
           "edges": []
@@ -446,7 +449,7 @@
             "workspace_id": "0c14b1ee-5df6-4072-8248-43dcb6cd76bf",
             "task_id": "43b88e4d-a245-4294-9bf0-6f76eedb5298",
             "session_id": "6095773e-2a1a-4af2-ae0f-c61120ecce90",
-            "payload_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"idle\",\"workStatus\":\"running\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"running\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000}],\"edges\":[]}}",
+            "payload_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"idle\",\"workStatus\":\"running\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"running\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000,\"sharedSessionCount\":1}],\"edges\":[]}}",
             "schema_version": 1,
             "required_terminal_sequence": null,
             "command_id": "status-0",
@@ -469,7 +472,7 @@
             "command_id": "status-0",
             "command_type": "session.work-status",
             "request_hash": "status-0",
-            "response_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"idle\",\"workStatus\":\"running\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"running\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000}],\"edges\":[]}}",
+            "response_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"idle\",\"workStatus\":\"running\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"running\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000,\"sharedSessionCount\":1}],\"edges\":[]}}",
             "first_event_seq": 6,
             "last_event_seq": 6,
             "committed_at": 1794724569870
@@ -524,7 +527,8 @@
               "latestLines": [],
               "siblingCreatedSeq": 1,
               "lastUserInteractionSeq": 0,
-              "lastActivityAt": 1000
+              "lastActivityAt": 1000,
+              "sharedSessionCount": 1
             }
           ],
           "edges": []
@@ -646,7 +650,7 @@
             "workspace_id": "0c14b1ee-5df6-4072-8248-43dcb6cd76bf",
             "task_id": "43b88e4d-a245-4294-9bf0-6f76eedb5298",
             "session_id": "6095773e-2a1a-4af2-ae0f-c61120ecce90",
-            "payload_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"idle\",\"workStatus\":\"running\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"running\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000}],\"edges\":[]}}",
+            "payload_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"idle\",\"workStatus\":\"running\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"running\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000,\"sharedSessionCount\":1}],\"edges\":[]}}",
             "schema_version": 1,
             "required_terminal_sequence": null,
             "command_id": "status-0",
@@ -663,7 +667,7 @@
             "workspace_id": "0c14b1ee-5df6-4072-8248-43dcb6cd76bf",
             "task_id": "43b88e4d-a245-4294-9bf0-6f76eedb5298",
             "session_id": "6095773e-2a1a-4af2-ae0f-c61120ecce90",
-            "payload_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"running\",\"workStatus\":\"needs-input\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"needs-input\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000}],\"edges\":[]}}",
+            "payload_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"running\",\"workStatus\":\"needs-input\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"needs-input\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000,\"sharedSessionCount\":1}],\"edges\":[]}}",
             "schema_version": 1,
             "required_terminal_sequence": null,
             "command_id": "status-1",
@@ -686,7 +690,7 @@
             "command_id": "status-0",
             "command_type": "session.work-status",
             "request_hash": "status-0",
-            "response_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"idle\",\"workStatus\":\"running\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"running\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000}],\"edges\":[]}}",
+            "response_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"idle\",\"workStatus\":\"running\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"running\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000,\"sharedSessionCount\":1}],\"edges\":[]}}",
             "first_event_seq": 6,
             "last_event_seq": 6,
             "committed_at": 1794724569870
@@ -695,7 +699,7 @@
             "command_id": "status-1",
             "command_type": "session.work-status",
             "request_hash": "status-1",
-            "response_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"running\",\"workStatus\":\"needs-input\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"needs-input\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000}],\"edges\":[]}}",
+            "response_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"running\",\"workStatus\":\"needs-input\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"needs-input\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000,\"sharedSessionCount\":1}],\"edges\":[]}}",
             "first_event_seq": 7,
             "last_event_seq": 7,
             "committed_at": 1794724569871
@@ -750,7 +754,8 @@
               "latestLines": [],
               "siblingCreatedSeq": 1,
               "lastUserInteractionSeq": 0,
-              "lastActivityAt": 1000
+              "lastActivityAt": 1000,
+              "sharedSessionCount": 1
             }
           ],
           "edges": []
@@ -872,7 +877,7 @@
             "workspace_id": "0c14b1ee-5df6-4072-8248-43dcb6cd76bf",
             "task_id": "43b88e4d-a245-4294-9bf0-6f76eedb5298",
             "session_id": "6095773e-2a1a-4af2-ae0f-c61120ecce90",
-            "payload_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"idle\",\"workStatus\":\"running\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"running\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000}],\"edges\":[]}}",
+            "payload_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"idle\",\"workStatus\":\"running\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"running\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000,\"sharedSessionCount\":1}],\"edges\":[]}}",
             "schema_version": 1,
             "required_terminal_sequence": null,
             "command_id": "status-0",
@@ -889,7 +894,7 @@
             "workspace_id": "0c14b1ee-5df6-4072-8248-43dcb6cd76bf",
             "task_id": "43b88e4d-a245-4294-9bf0-6f76eedb5298",
             "session_id": "6095773e-2a1a-4af2-ae0f-c61120ecce90",
-            "payload_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"running\",\"workStatus\":\"needs-input\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"needs-input\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000}],\"edges\":[]}}",
+            "payload_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"running\",\"workStatus\":\"needs-input\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"needs-input\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000,\"sharedSessionCount\":1}],\"edges\":[]}}",
             "schema_version": 1,
             "required_terminal_sequence": null,
             "command_id": "status-1",
@@ -906,7 +911,7 @@
             "workspace_id": "0c14b1ee-5df6-4072-8248-43dcb6cd76bf",
             "task_id": "43b88e4d-a245-4294-9bf0-6f76eedb5298",
             "session_id": "6095773e-2a1a-4af2-ae0f-c61120ecce90",
-            "payload_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"needs-input\",\"workStatus\":\"idle\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"idle\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000}],\"edges\":[]}}",
+            "payload_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"needs-input\",\"workStatus\":\"idle\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"idle\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000,\"sharedSessionCount\":1}],\"edges\":[]}}",
             "schema_version": 1,
             "required_terminal_sequence": null,
             "command_id": "status-2",
@@ -929,7 +934,7 @@
             "command_id": "status-0",
             "command_type": "session.work-status",
             "request_hash": "status-0",
-            "response_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"idle\",\"workStatus\":\"running\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"running\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000}],\"edges\":[]}}",
+            "response_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"idle\",\"workStatus\":\"running\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"running\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000,\"sharedSessionCount\":1}],\"edges\":[]}}",
             "first_event_seq": 6,
             "last_event_seq": 6,
             "committed_at": 1794724569870
@@ -938,7 +943,7 @@
             "command_id": "status-1",
             "command_type": "session.work-status",
             "request_hash": "status-1",
-            "response_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"running\",\"workStatus\":\"needs-input\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"needs-input\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000}],\"edges\":[]}}",
+            "response_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"running\",\"workStatus\":\"needs-input\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"needs-input\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000,\"sharedSessionCount\":1}],\"edges\":[]}}",
             "first_event_seq": 7,
             "last_event_seq": 7,
             "committed_at": 1794724569871
@@ -947,7 +952,7 @@
             "command_id": "status-2",
             "command_type": "session.work-status",
             "request_hash": "status-2",
-            "response_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"needs-input\",\"workStatus\":\"idle\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"idle\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000}],\"edges\":[]}}",
+            "response_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"needs-input\",\"workStatus\":\"idle\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"idle\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000,\"sharedSessionCount\":1}],\"edges\":[]}}",
             "first_event_seq": 8,
             "last_event_seq": 8,
             "committed_at": 1794724569871
@@ -1002,7 +1007,8 @@
               "latestLines": [],
               "siblingCreatedSeq": 1,
               "lastUserInteractionSeq": 0,
-              "lastActivityAt": 1000
+              "lastActivityAt": 1000,
+              "sharedSessionCount": 1
             }
           ],
           "edges": []
@@ -1124,7 +1130,7 @@
             "workspace_id": "0c14b1ee-5df6-4072-8248-43dcb6cd76bf",
             "task_id": "43b88e4d-a245-4294-9bf0-6f76eedb5298",
             "session_id": "6095773e-2a1a-4af2-ae0f-c61120ecce90",
-            "payload_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"idle\",\"workStatus\":\"running\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"running\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000}],\"edges\":[]}}",
+            "payload_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"idle\",\"workStatus\":\"running\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"running\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000,\"sharedSessionCount\":1}],\"edges\":[]}}",
             "schema_version": 1,
             "required_terminal_sequence": null,
             "command_id": "status-0",
@@ -1141,7 +1147,7 @@
             "workspace_id": "0c14b1ee-5df6-4072-8248-43dcb6cd76bf",
             "task_id": "43b88e4d-a245-4294-9bf0-6f76eedb5298",
             "session_id": "6095773e-2a1a-4af2-ae0f-c61120ecce90",
-            "payload_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"running\",\"workStatus\":\"needs-input\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"needs-input\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000}],\"edges\":[]}}",
+            "payload_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"running\",\"workStatus\":\"needs-input\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"needs-input\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000,\"sharedSessionCount\":1}],\"edges\":[]}}",
             "schema_version": 1,
             "required_terminal_sequence": null,
             "command_id": "status-1",
@@ -1158,7 +1164,7 @@
             "workspace_id": "0c14b1ee-5df6-4072-8248-43dcb6cd76bf",
             "task_id": "43b88e4d-a245-4294-9bf0-6f76eedb5298",
             "session_id": "6095773e-2a1a-4af2-ae0f-c61120ecce90",
-            "payload_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"needs-input\",\"workStatus\":\"idle\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"idle\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000}],\"edges\":[]}}",
+            "payload_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"needs-input\",\"workStatus\":\"idle\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"idle\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000,\"sharedSessionCount\":1}],\"edges\":[]}}",
             "schema_version": 1,
             "required_terminal_sequence": null,
             "command_id": "status-2",
@@ -1175,7 +1181,7 @@
             "workspace_id": "0c14b1ee-5df6-4072-8248-43dcb6cd76bf",
             "task_id": "43b88e4d-a245-4294-9bf0-6f76eedb5298",
             "session_id": "6095773e-2a1a-4af2-ae0f-c61120ecce90",
-            "payload_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"idle\",\"workStatus\":\"error\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"error\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000}],\"edges\":[]}}",
+            "payload_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"idle\",\"workStatus\":\"error\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"error\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000,\"sharedSessionCount\":1}],\"edges\":[]}}",
             "schema_version": 1,
             "required_terminal_sequence": null,
             "command_id": "status-3",
@@ -1198,7 +1204,7 @@
             "command_id": "status-0",
             "command_type": "session.work-status",
             "request_hash": "status-0",
-            "response_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"idle\",\"workStatus\":\"running\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"running\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000}],\"edges\":[]}}",
+            "response_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"idle\",\"workStatus\":\"running\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"running\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000,\"sharedSessionCount\":1}],\"edges\":[]}}",
             "first_event_seq": 6,
             "last_event_seq": 6,
             "committed_at": 1794724569870
@@ -1207,7 +1213,7 @@
             "command_id": "status-1",
             "command_type": "session.work-status",
             "request_hash": "status-1",
-            "response_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"running\",\"workStatus\":\"needs-input\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"needs-input\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000}],\"edges\":[]}}",
+            "response_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"running\",\"workStatus\":\"needs-input\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"needs-input\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000,\"sharedSessionCount\":1}],\"edges\":[]}}",
             "first_event_seq": 7,
             "last_event_seq": 7,
             "committed_at": 1794724569871
@@ -1216,7 +1222,7 @@
             "command_id": "status-2",
             "command_type": "session.work-status",
             "request_hash": "status-2",
-            "response_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"needs-input\",\"workStatus\":\"idle\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"idle\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000}],\"edges\":[]}}",
+            "response_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"needs-input\",\"workStatus\":\"idle\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"idle\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000,\"sharedSessionCount\":1}],\"edges\":[]}}",
             "first_event_seq": 8,
             "last_event_seq": 8,
             "committed_at": 1794724569871
@@ -1225,7 +1231,7 @@
             "command_id": "status-3",
             "command_type": "session.work-status",
             "request_hash": "status-3",
-            "response_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"idle\",\"workStatus\":\"error\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"error\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000}],\"edges\":[]}}",
+            "response_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"idle\",\"workStatus\":\"error\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"error\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000,\"sharedSessionCount\":1}],\"edges\":[]}}",
             "first_event_seq": 9,
             "last_event_seq": 9,
             "committed_at": 1794724569872
@@ -1280,7 +1286,8 @@
               "latestLines": [],
               "siblingCreatedSeq": 1,
               "lastUserInteractionSeq": 0,
-              "lastActivityAt": 1000
+              "lastActivityAt": 1000,
+              "sharedSessionCount": 1
             }
           ],
           "edges": []
@@ -1402,7 +1409,7 @@
             "workspace_id": "0c14b1ee-5df6-4072-8248-43dcb6cd76bf",
             "task_id": "43b88e4d-a245-4294-9bf0-6f76eedb5298",
             "session_id": "6095773e-2a1a-4af2-ae0f-c61120ecce90",
-            "payload_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"idle\",\"workStatus\":\"running\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"running\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000}],\"edges\":[]}}",
+            "payload_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"idle\",\"workStatus\":\"running\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"running\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000,\"sharedSessionCount\":1}],\"edges\":[]}}",
             "schema_version": 1,
             "required_terminal_sequence": null,
             "command_id": "status-0",
@@ -1419,7 +1426,7 @@
             "workspace_id": "0c14b1ee-5df6-4072-8248-43dcb6cd76bf",
             "task_id": "43b88e4d-a245-4294-9bf0-6f76eedb5298",
             "session_id": "6095773e-2a1a-4af2-ae0f-c61120ecce90",
-            "payload_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"running\",\"workStatus\":\"needs-input\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"needs-input\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000}],\"edges\":[]}}",
+            "payload_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"running\",\"workStatus\":\"needs-input\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"needs-input\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000,\"sharedSessionCount\":1}],\"edges\":[]}}",
             "schema_version": 1,
             "required_terminal_sequence": null,
             "command_id": "status-1",
@@ -1436,7 +1443,7 @@
             "workspace_id": "0c14b1ee-5df6-4072-8248-43dcb6cd76bf",
             "task_id": "43b88e4d-a245-4294-9bf0-6f76eedb5298",
             "session_id": "6095773e-2a1a-4af2-ae0f-c61120ecce90",
-            "payload_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"needs-input\",\"workStatus\":\"idle\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"idle\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000}],\"edges\":[]}}",
+            "payload_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"needs-input\",\"workStatus\":\"idle\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"idle\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000,\"sharedSessionCount\":1}],\"edges\":[]}}",
             "schema_version": 1,
             "required_terminal_sequence": null,
             "command_id": "status-2",
@@ -1453,7 +1460,7 @@
             "workspace_id": "0c14b1ee-5df6-4072-8248-43dcb6cd76bf",
             "task_id": "43b88e4d-a245-4294-9bf0-6f76eedb5298",
             "session_id": "6095773e-2a1a-4af2-ae0f-c61120ecce90",
-            "payload_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"idle\",\"workStatus\":\"error\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"error\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000}],\"edges\":[]}}",
+            "payload_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"idle\",\"workStatus\":\"error\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"error\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000,\"sharedSessionCount\":1}],\"edges\":[]}}",
             "schema_version": 1,
             "required_terminal_sequence": null,
             "command_id": "status-3",
@@ -1470,7 +1477,7 @@
             "workspace_id": "0c14b1ee-5df6-4072-8248-43dcb6cd76bf",
             "task_id": "43b88e4d-a245-4294-9bf0-6f76eedb5298",
             "session_id": "6095773e-2a1a-4af2-ae0f-c61120ecce90",
-            "payload_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"error\",\"workStatus\":\"interrupted\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"interrupted\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000}],\"edges\":[]}}",
+            "payload_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"error\",\"workStatus\":\"interrupted\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"interrupted\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000,\"sharedSessionCount\":1}],\"edges\":[]}}",
             "schema_version": 1,
             "required_terminal_sequence": null,
             "command_id": "status-4",
@@ -1493,7 +1500,7 @@
             "command_id": "status-0",
             "command_type": "session.work-status",
             "request_hash": "status-0",
-            "response_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"idle\",\"workStatus\":\"running\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"running\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000}],\"edges\":[]}}",
+            "response_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"idle\",\"workStatus\":\"running\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"running\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000,\"sharedSessionCount\":1}],\"edges\":[]}}",
             "first_event_seq": 6,
             "last_event_seq": 6,
             "committed_at": 1794724569870
@@ -1502,7 +1509,7 @@
             "command_id": "status-1",
             "command_type": "session.work-status",
             "request_hash": "status-1",
-            "response_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"running\",\"workStatus\":\"needs-input\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"needs-input\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000}],\"edges\":[]}}",
+            "response_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"running\",\"workStatus\":\"needs-input\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"needs-input\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000,\"sharedSessionCount\":1}],\"edges\":[]}}",
             "first_event_seq": 7,
             "last_event_seq": 7,
             "committed_at": 1794724569871
@@ -1511,7 +1518,7 @@
             "command_id": "status-2",
             "command_type": "session.work-status",
             "request_hash": "status-2",
-            "response_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"needs-input\",\"workStatus\":\"idle\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"idle\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000}],\"edges\":[]}}",
+            "response_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"needs-input\",\"workStatus\":\"idle\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"idle\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000,\"sharedSessionCount\":1}],\"edges\":[]}}",
             "first_event_seq": 8,
             "last_event_seq": 8,
             "committed_at": 1794724569871
@@ -1520,7 +1527,7 @@
             "command_id": "status-3",
             "command_type": "session.work-status",
             "request_hash": "status-3",
-            "response_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"idle\",\"workStatus\":\"error\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"error\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000}],\"edges\":[]}}",
+            "response_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"idle\",\"workStatus\":\"error\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"error\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000,\"sharedSessionCount\":1}],\"edges\":[]}}",
             "first_event_seq": 9,
             "last_event_seq": 9,
             "committed_at": 1794724569872
@@ -1529,7 +1536,7 @@
             "command_id": "status-4",
             "command_type": "session.work-status",
             "request_hash": "status-4",
-            "response_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"error\",\"workStatus\":\"interrupted\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"interrupted\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000}],\"edges\":[]}}",
+            "response_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"error\",\"workStatus\":\"interrupted\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"interrupted\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000,\"sharedSessionCount\":1}],\"edges\":[]}}",
             "first_event_seq": 10,
             "last_event_seq": 10,
             "committed_at": 1794724569872
@@ -1584,7 +1591,8 @@
               "latestLines": [],
               "siblingCreatedSeq": 1,
               "lastUserInteractionSeq": 0,
-              "lastActivityAt": 1000
+              "lastActivityAt": 1000,
+              "sharedSessionCount": 1
             }
           ],
           "edges": []
@@ -1706,7 +1714,7 @@
             "workspace_id": "0c14b1ee-5df6-4072-8248-43dcb6cd76bf",
             "task_id": "43b88e4d-a245-4294-9bf0-6f76eedb5298",
             "session_id": "6095773e-2a1a-4af2-ae0f-c61120ecce90",
-            "payload_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"idle\",\"workStatus\":\"running\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"running\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000}],\"edges\":[]}}",
+            "payload_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"idle\",\"workStatus\":\"running\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"running\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000,\"sharedSessionCount\":1}],\"edges\":[]}}",
             "schema_version": 1,
             "required_terminal_sequence": null,
             "command_id": "status-0",
@@ -1723,7 +1731,7 @@
             "workspace_id": "0c14b1ee-5df6-4072-8248-43dcb6cd76bf",
             "task_id": "43b88e4d-a245-4294-9bf0-6f76eedb5298",
             "session_id": "6095773e-2a1a-4af2-ae0f-c61120ecce90",
-            "payload_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"running\",\"workStatus\":\"needs-input\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"needs-input\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000}],\"edges\":[]}}",
+            "payload_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"running\",\"workStatus\":\"needs-input\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"needs-input\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000,\"sharedSessionCount\":1}],\"edges\":[]}}",
             "schema_version": 1,
             "required_terminal_sequence": null,
             "command_id": "status-1",
@@ -1740,7 +1748,7 @@
             "workspace_id": "0c14b1ee-5df6-4072-8248-43dcb6cd76bf",
             "task_id": "43b88e4d-a245-4294-9bf0-6f76eedb5298",
             "session_id": "6095773e-2a1a-4af2-ae0f-c61120ecce90",
-            "payload_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"needs-input\",\"workStatus\":\"idle\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"idle\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000}],\"edges\":[]}}",
+            "payload_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"needs-input\",\"workStatus\":\"idle\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"idle\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000,\"sharedSessionCount\":1}],\"edges\":[]}}",
             "schema_version": 1,
             "required_terminal_sequence": null,
             "command_id": "status-2",
@@ -1757,7 +1765,7 @@
             "workspace_id": "0c14b1ee-5df6-4072-8248-43dcb6cd76bf",
             "task_id": "43b88e4d-a245-4294-9bf0-6f76eedb5298",
             "session_id": "6095773e-2a1a-4af2-ae0f-c61120ecce90",
-            "payload_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"idle\",\"workStatus\":\"error\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"error\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000}],\"edges\":[]}}",
+            "payload_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"idle\",\"workStatus\":\"error\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"error\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000,\"sharedSessionCount\":1}],\"edges\":[]}}",
             "schema_version": 1,
             "required_terminal_sequence": null,
             "command_id": "status-3",
@@ -1774,7 +1782,7 @@
             "workspace_id": "0c14b1ee-5df6-4072-8248-43dcb6cd76bf",
             "task_id": "43b88e4d-a245-4294-9bf0-6f76eedb5298",
             "session_id": "6095773e-2a1a-4af2-ae0f-c61120ecce90",
-            "payload_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"error\",\"workStatus\":\"interrupted\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"interrupted\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000}],\"edges\":[]}}",
+            "payload_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"error\",\"workStatus\":\"interrupted\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"interrupted\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000,\"sharedSessionCount\":1}],\"edges\":[]}}",
             "schema_version": 1,
             "required_terminal_sequence": null,
             "command_id": "status-4",
@@ -1791,7 +1799,7 @@
             "workspace_id": "0c14b1ee-5df6-4072-8248-43dcb6cd76bf",
             "task_id": "43b88e4d-a245-4294-9bf0-6f76eedb5298",
             "session_id": "6095773e-2a1a-4af2-ae0f-c61120ecce90",
-            "payload_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"interrupted\",\"workStatus\":\"interrupted\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"interrupted\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000}],\"edges\":[]}}",
+            "payload_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"interrupted\",\"workStatus\":\"interrupted\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"interrupted\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000,\"sharedSessionCount\":1}],\"edges\":[]}}",
             "schema_version": 1,
             "required_terminal_sequence": null,
             "command_id": "status-5",
@@ -1814,7 +1822,7 @@
             "command_id": "status-0",
             "command_type": "session.work-status",
             "request_hash": "status-0",
-            "response_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"idle\",\"workStatus\":\"running\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"running\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000}],\"edges\":[]}}",
+            "response_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"idle\",\"workStatus\":\"running\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"running\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000,\"sharedSessionCount\":1}],\"edges\":[]}}",
             "first_event_seq": 6,
             "last_event_seq": 6,
             "committed_at": 1794724569870
@@ -1823,7 +1831,7 @@
             "command_id": "status-1",
             "command_type": "session.work-status",
             "request_hash": "status-1",
-            "response_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"running\",\"workStatus\":\"needs-input\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"needs-input\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000}],\"edges\":[]}}",
+            "response_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"running\",\"workStatus\":\"needs-input\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"needs-input\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000,\"sharedSessionCount\":1}],\"edges\":[]}}",
             "first_event_seq": 7,
             "last_event_seq": 7,
             "committed_at": 1794724569871
@@ -1832,7 +1840,7 @@
             "command_id": "status-2",
             "command_type": "session.work-status",
             "request_hash": "status-2",
-            "response_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"needs-input\",\"workStatus\":\"idle\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"idle\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000}],\"edges\":[]}}",
+            "response_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"needs-input\",\"workStatus\":\"idle\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"idle\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000,\"sharedSessionCount\":1}],\"edges\":[]}}",
             "first_event_seq": 8,
             "last_event_seq": 8,
             "committed_at": 1794724569871
@@ -1841,7 +1849,7 @@
             "command_id": "status-3",
             "command_type": "session.work-status",
             "request_hash": "status-3",
-            "response_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"idle\",\"workStatus\":\"error\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"error\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000}],\"edges\":[]}}",
+            "response_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"idle\",\"workStatus\":\"error\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"error\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000,\"sharedSessionCount\":1}],\"edges\":[]}}",
             "first_event_seq": 9,
             "last_event_seq": 9,
             "committed_at": 1794724569872
@@ -1850,7 +1858,7 @@
             "command_id": "status-4",
             "command_type": "session.work-status",
             "request_hash": "status-4",
-            "response_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"error\",\"workStatus\":\"interrupted\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"interrupted\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000}],\"edges\":[]}}",
+            "response_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"error\",\"workStatus\":\"interrupted\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"interrupted\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000,\"sharedSessionCount\":1}],\"edges\":[]}}",
             "first_event_seq": 10,
             "last_event_seq": 10,
             "committed_at": 1794724569872
@@ -1859,7 +1867,7 @@
             "command_id": "status-5",
             "command_type": "session.work-status",
             "request_hash": "status-5",
-            "response_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"interrupted\",\"workStatus\":\"interrupted\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"interrupted\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000}],\"edges\":[]}}",
+            "response_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"interrupted\",\"workStatus\":\"interrupted\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"interrupted\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000,\"sharedSessionCount\":1}],\"edges\":[]}}",
             "first_event_seq": 11,
             "last_event_seq": 11,
             "committed_at": 1794724569873
@@ -1918,7 +1926,8 @@
             "latestLines": [],
             "siblingCreatedSeq": 1,
             "lastUserInteractionSeq": 0,
-            "lastActivityAt": 1000
+            "lastActivityAt": 1000,
+            "sharedSessionCount": 3
           },
           {
             "sessionId": "archived",
@@ -1949,7 +1958,8 @@
             "siblingCreatedSeq": 12,
             "lastUserInteractionSeq": 2,
             "lastActivityAt": 12,
-            "archivedAt": 9
+            "archivedAt": 9,
+            "sharedSessionCount": 3
           },
           {
             "sessionId": "agent",
@@ -1979,7 +1989,8 @@
             "latestLines": [],
             "siblingCreatedSeq": 11,
             "lastUserInteractionSeq": 1,
-            "lastActivityAt": 11
+            "lastActivityAt": 11,
+            "sharedSessionCount": 3
           },
           {
             "sessionId": "child",
@@ -2014,7 +2025,8 @@
             ],
             "siblingCreatedSeq": 10,
             "lastUserInteractionSeq": 0,
-            "lastActivityAt": 10
+            "lastActivityAt": 10,
+            "sharedSessionCount": 3
           }
         ],
         "edges": [
@@ -2083,7 +2095,8 @@
             "latestLines": [],
             "siblingCreatedSeq": 1,
             "lastUserInteractionSeq": 0,
-            "lastActivityAt": 1000
+            "lastActivityAt": 1000,
+            "sharedSessionCount": 3
           },
           {
             "sessionId": "archived",
@@ -2119,7 +2132,8 @@
             "siblingCreatedSeq": 12,
             "lastUserInteractionSeq": 2,
             "lastActivityAt": 12,
-            "archivedAt": 9
+            "archivedAt": 9,
+            "sharedSessionCount": 3
           },
           {
             "sessionId": "agent",
@@ -2154,7 +2168,8 @@
             "latestLines": [],
             "siblingCreatedSeq": 11,
             "lastUserInteractionSeq": 1,
-            "lastActivityAt": 11
+            "lastActivityAt": 11,
+            "sharedSessionCount": 3
           },
           {
             "sessionId": "child",
@@ -2194,7 +2209,8 @@
             ],
             "siblingCreatedSeq": 10,
             "lastUserInteractionSeq": 0,
-            "lastActivityAt": 10
+            "lastActivityAt": 10,
+            "sharedSessionCount": 3
           }
         ],
         "edges": [
@@ -2263,7 +2279,8 @@
             "latestLines": [],
             "siblingCreatedSeq": 1,
             "lastUserInteractionSeq": 0,
-            "lastActivityAt": 1000
+            "lastActivityAt": 1000,
+            "sharedSessionCount": 3
           },
           {
             "sessionId": "archived",
@@ -2299,7 +2316,8 @@
             "siblingCreatedSeq": 12,
             "lastUserInteractionSeq": 2,
             "lastActivityAt": 12,
-            "archivedAt": 9
+            "archivedAt": 9,
+            "sharedSessionCount": 3
           },
           {
             "sessionId": "agent",
@@ -2334,7 +2352,8 @@
             "latestLines": [],
             "siblingCreatedSeq": 11,
             "lastUserInteractionSeq": 1,
-            "lastActivityAt": 11
+            "lastActivityAt": 11,
+            "sharedSessionCount": 3
           },
           {
             "sessionId": "child",
@@ -2375,7 +2394,8 @@
             ],
             "siblingCreatedSeq": 10,
             "lastUserInteractionSeq": 0,
-            "lastActivityAt": 10
+            "lastActivityAt": 10,
+            "sharedSessionCount": 3
           }
         ],
         "edges": [
@@ -2444,7 +2464,8 @@
             "latestLines": [],
             "siblingCreatedSeq": 1,
             "lastUserInteractionSeq": 0,
-            "lastActivityAt": 1000
+            "lastActivityAt": 1000,
+            "sharedSessionCount": 3
           },
           {
             "sessionId": "archived",
@@ -2480,7 +2501,8 @@
             "siblingCreatedSeq": 12,
             "lastUserInteractionSeq": 2,
             "lastActivityAt": 12,
-            "archivedAt": 9
+            "archivedAt": 9,
+            "sharedSessionCount": 3
           },
           {
             "sessionId": "agent",
@@ -2515,7 +2537,8 @@
             "latestLines": [],
             "siblingCreatedSeq": 11,
             "lastUserInteractionSeq": 1,
-            "lastActivityAt": 11
+            "lastActivityAt": 11,
+            "sharedSessionCount": 3
           },
           {
             "sessionId": "child",
@@ -2556,7 +2579,8 @@
             ],
             "siblingCreatedSeq": 10,
             "lastUserInteractionSeq": 0,
-            "lastActivityAt": 10
+            "lastActivityAt": 10,
+            "sharedSessionCount": 3
           }
         ],
         "edges": [
@@ -2624,7 +2648,8 @@
             "latestLines": [],
             "siblingCreatedSeq": 1,
             "lastUserInteractionSeq": 0,
-            "lastActivityAt": 1000
+            "lastActivityAt": 1000,
+            "sharedSessionCount": 3
           },
           {
             "sessionId": "archived",
@@ -2659,7 +2684,8 @@
             "siblingCreatedSeq": 12,
             "lastUserInteractionSeq": 2,
             "lastActivityAt": 12,
-            "archivedAt": 9
+            "archivedAt": 9,
+            "sharedSessionCount": 3
           },
           {
             "sessionId": "agent",
@@ -2693,7 +2719,8 @@
             "latestLines": [],
             "siblingCreatedSeq": 11,
             "lastUserInteractionSeq": 1,
-            "lastActivityAt": 11
+            "lastActivityAt": 11,
+            "sharedSessionCount": 3
           },
           {
             "sessionId": "child",
@@ -2733,7 +2760,8 @@
             ],
             "siblingCreatedSeq": 10,
             "lastUserInteractionSeq": 0,
-            "lastActivityAt": 10
+            "lastActivityAt": 10,
+            "sharedSessionCount": 3
           }
         ],
         "edges": [
@@ -2799,7 +2827,8 @@
             "latestLines": [],
             "siblingCreatedSeq": 1,
             "lastUserInteractionSeq": 0,
-            "lastActivityAt": 1000
+            "lastActivityAt": 1000,
+            "sharedSessionCount": 3
           },
           {
             "sessionId": "archived",
@@ -2834,7 +2863,8 @@
             "siblingCreatedSeq": 12,
             "lastUserInteractionSeq": 2,
             "lastActivityAt": 12,
-            "archivedAt": 9
+            "archivedAt": 9,
+            "sharedSessionCount": 3
           },
           {
             "sessionId": "agent",
@@ -2868,7 +2898,8 @@
             "latestLines": [],
             "siblingCreatedSeq": 11,
             "lastUserInteractionSeq": 1,
-            "lastActivityAt": 11
+            "lastActivityAt": 11,
+            "sharedSessionCount": 3
           },
           {
             "sessionId": "child",
@@ -2908,7 +2939,8 @@
             ],
             "siblingCreatedSeq": 10,
             "lastUserInteractionSeq": 0,
-            "lastActivityAt": 10
+            "lastActivityAt": 10,
+            "sharedSessionCount": 3
           }
         ],
         "edges": [
@@ -3121,7 +3153,7 @@
             "workspace_id": "0c14b1ee-5df6-4072-8248-43dcb6cd76bf",
             "task_id": "43b88e4d-a245-4294-9bf0-6f76eedb5298",
             "session_id": "6095773e-2a1a-4af2-ae0f-c61120ecce90",
-            "payload_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"idle\",\"workStatus\":\"running\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"running\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000}],\"edges\":[]}}",
+            "payload_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"idle\",\"workStatus\":\"running\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"running\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000,\"sharedSessionCount\":1}],\"edges\":[]}}",
             "schema_version": 1,
             "required_terminal_sequence": null,
             "command_id": "status-0",
@@ -3138,7 +3170,7 @@
             "workspace_id": "0c14b1ee-5df6-4072-8248-43dcb6cd76bf",
             "task_id": "43b88e4d-a245-4294-9bf0-6f76eedb5298",
             "session_id": "6095773e-2a1a-4af2-ae0f-c61120ecce90",
-            "payload_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"running\",\"workStatus\":\"needs-input\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"needs-input\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000}],\"edges\":[]}}",
+            "payload_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"running\",\"workStatus\":\"needs-input\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"needs-input\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000,\"sharedSessionCount\":1}],\"edges\":[]}}",
             "schema_version": 1,
             "required_terminal_sequence": null,
             "command_id": "status-1",
@@ -3155,7 +3187,7 @@
             "workspace_id": "0c14b1ee-5df6-4072-8248-43dcb6cd76bf",
             "task_id": "43b88e4d-a245-4294-9bf0-6f76eedb5298",
             "session_id": "6095773e-2a1a-4af2-ae0f-c61120ecce90",
-            "payload_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"needs-input\",\"workStatus\":\"idle\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"idle\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000}],\"edges\":[]}}",
+            "payload_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"needs-input\",\"workStatus\":\"idle\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"idle\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000,\"sharedSessionCount\":1}],\"edges\":[]}}",
             "schema_version": 1,
             "required_terminal_sequence": null,
             "command_id": "status-2",
@@ -3172,7 +3204,7 @@
             "workspace_id": "0c14b1ee-5df6-4072-8248-43dcb6cd76bf",
             "task_id": "43b88e4d-a245-4294-9bf0-6f76eedb5298",
             "session_id": "6095773e-2a1a-4af2-ae0f-c61120ecce90",
-            "payload_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"idle\",\"workStatus\":\"error\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"error\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000}],\"edges\":[]}}",
+            "payload_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"idle\",\"workStatus\":\"error\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"error\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000,\"sharedSessionCount\":1}],\"edges\":[]}}",
             "schema_version": 1,
             "required_terminal_sequence": null,
             "command_id": "status-3",
@@ -3189,7 +3221,7 @@
             "workspace_id": "0c14b1ee-5df6-4072-8248-43dcb6cd76bf",
             "task_id": "43b88e4d-a245-4294-9bf0-6f76eedb5298",
             "session_id": "6095773e-2a1a-4af2-ae0f-c61120ecce90",
-            "payload_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"error\",\"workStatus\":\"interrupted\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"interrupted\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000}],\"edges\":[]}}",
+            "payload_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"error\",\"workStatus\":\"interrupted\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"interrupted\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000,\"sharedSessionCount\":1}],\"edges\":[]}}",
             "schema_version": 1,
             "required_terminal_sequence": null,
             "command_id": "status-4",
@@ -3206,7 +3238,7 @@
             "workspace_id": "0c14b1ee-5df6-4072-8248-43dcb6cd76bf",
             "task_id": "43b88e4d-a245-4294-9bf0-6f76eedb5298",
             "session_id": "6095773e-2a1a-4af2-ae0f-c61120ecce90",
-            "payload_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"interrupted\",\"workStatus\":\"interrupted\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"interrupted\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000}],\"edges\":[]}}",
+            "payload_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"interrupted\",\"workStatus\":\"interrupted\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"interrupted\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000,\"sharedSessionCount\":1}],\"edges\":[]}}",
             "schema_version": 1,
             "required_terminal_sequence": null,
             "command_id": "status-5",
@@ -3229,7 +3261,7 @@
             "command_id": "status-0",
             "command_type": "session.work-status",
             "request_hash": "status-0",
-            "response_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"idle\",\"workStatus\":\"running\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"running\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000}],\"edges\":[]}}",
+            "response_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"idle\",\"workStatus\":\"running\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"running\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000,\"sharedSessionCount\":1}],\"edges\":[]}}",
             "first_event_seq": 6,
             "last_event_seq": 6,
             "committed_at": 1794724569870
@@ -3238,7 +3270,7 @@
             "command_id": "status-1",
             "command_type": "session.work-status",
             "request_hash": "status-1",
-            "response_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"running\",\"workStatus\":\"needs-input\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"needs-input\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000}],\"edges\":[]}}",
+            "response_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"running\",\"workStatus\":\"needs-input\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"needs-input\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000,\"sharedSessionCount\":1}],\"edges\":[]}}",
             "first_event_seq": 7,
             "last_event_seq": 7,
             "committed_at": 1794724569871
@@ -3247,7 +3279,7 @@
             "command_id": "status-2",
             "command_type": "session.work-status",
             "request_hash": "status-2",
-            "response_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"needs-input\",\"workStatus\":\"idle\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"idle\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000}],\"edges\":[]}}",
+            "response_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"needs-input\",\"workStatus\":\"idle\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"idle\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000,\"sharedSessionCount\":1}],\"edges\":[]}}",
             "first_event_seq": 8,
             "last_event_seq": 8,
             "committed_at": 1794724569871
@@ -3256,7 +3288,7 @@
             "command_id": "status-3",
             "command_type": "session.work-status",
             "request_hash": "status-3",
-            "response_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"idle\",\"workStatus\":\"error\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"error\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000}],\"edges\":[]}}",
+            "response_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"idle\",\"workStatus\":\"error\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"error\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000,\"sharedSessionCount\":1}],\"edges\":[]}}",
             "first_event_seq": 9,
             "last_event_seq": 9,
             "committed_at": 1794724569872
@@ -3265,7 +3297,7 @@
             "command_id": "status-4",
             "command_type": "session.work-status",
             "request_hash": "status-4",
-            "response_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"error\",\"workStatus\":\"interrupted\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"interrupted\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000}],\"edges\":[]}}",
+            "response_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"error\",\"workStatus\":\"interrupted\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"interrupted\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000,\"sharedSessionCount\":1}],\"edges\":[]}}",
             "first_event_seq": 10,
             "last_event_seq": 10,
             "committed_at": 1794724569872
@@ -3274,7 +3306,7 @@
             "command_id": "status-5",
             "command_type": "session.work-status",
             "request_hash": "status-5",
-            "response_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"interrupted\",\"workStatus\":\"interrupted\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"interrupted\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000}],\"edges\":[]}}",
+            "response_json": "{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"previousStatus\":\"interrupted\",\"workStatus\":\"interrupted\",\"graph\":{\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"layoutRevision\":1,\"nodes\":[{\"sessionId\":\"6095773e-2a1a-4af2-ae0f-c61120ecce90\",\"sceneId\":\"f3b77582-f81d-4fa1-9684-45d9ee38fc2f\",\"currentMode\":\"shell\",\"workStatus\":\"interrupted\",\"providerRestoreState\":\"none\",\"canFork\":false,\"title\":\"Shell\",\"cwd\":\"/tmp/graph-workspace\",\"environment\":{\"kind\":\"local\",\"state\":\"ready\",\"path\":\"/tmp/graph-workspace\",\"localExecutionContextId\":\"b27d950c-f0e9-499d-a84a-deff965633f6\"},\"hasOwnedWorktree\":false,\"sharedWorkingDirectory\":false,\"activeChildCount\":0,\"stoppedChildCount\":0,\"childModeCounts\":{\"shell\":0,\"claudeCode\":0},\"latestLines\":[],\"siblingCreatedSeq\":1,\"lastUserInteractionSeq\":0,\"lastActivityAt\":1000,\"sharedSessionCount\":1}],\"edges\":[]}}",
             "first_event_seq": 11,
             "last_event_seq": 11,
             "committed_at": 1794724569873
