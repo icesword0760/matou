@@ -2902,8 +2902,9 @@ impl Workspace {
                         !node["archivedAt"].is_null()
                             || node["cwd"] != state.cwd
                             || (state.history
-                                && trimmed_graph_text(&node["historyProviderSessionId"])
-                                    != state.selected.as_deref())
+                                && (deferred_history_provider(node) != Some(state.provider)
+                                    || trimmed_graph_text(&node["historyProviderSessionId"])
+                                        != state.selected.as_deref()))
                     })
             }
             TabDialog::PermissionMode(state) => !self.permission_confirmation_valid(state),
@@ -4774,7 +4775,7 @@ impl Workspace {
             updated_label: result.and_then(|detail| detail.updated_label.clone()),
             replies,
             loading: state.is_some_and(|state| state.loading),
-            can_open_history: agent == Some("Claude Code"),
+            can_open_history: deferred_history_provider(node).is_some(),
             can_restore: self.launch_action_blocked_reason(id, node).is_none(),
         })
     }
@@ -7001,10 +7002,11 @@ impl Workspace {
         let Some((scene_id, node)) = self.active_scene_id().zip(self.graph_node(id)) else {
             return;
         };
+        let history_provider = deferred_history_provider(node);
         if !self.order.iter().any(|card| card == id)
             || !node["archivedAt"].is_null()
             || if history {
-                node["currentMode"] != "claude-code"
+                history_provider.is_none()
             } else {
                 self.session_loader_blocked_reason(id, node).is_some()
             }
@@ -7021,7 +7023,7 @@ impl Workspace {
             "claude-code"
         };
         let provider = if history {
-            "claude-code"
+            history_provider.expect("history provider validated")
         } else {
             remembered.provider.unwrap_or(initial_provider)
         };
@@ -10252,7 +10254,9 @@ impl Workspace {
             )
             .child(list_results);
 
-        let preview_title = if state.history {
+        let preview_title = if state.history && is_codex {
+            provider_name.to_owned()
+        } else if state.history {
             "包含压缩前的消息，不影响当前会话".to_owned()
         } else {
             selected
@@ -10260,7 +10264,7 @@ impl Workspace {
                 .unwrap_or_else(|| SESSION_LOADER_SELECT_SESSION.to_owned())
         };
         // Keep the Codex list compact while preserving permission in its preview.
-        let preview_meta = if !is_codex {
+        let preview_meta = if !is_codex || state.history {
             state
                 .first_event
                 .map(|_| format!("{} 条内容", state.total_events))
@@ -10382,7 +10386,8 @@ impl Workspace {
                 "user" => (0x343b46, 0x252b32),
                 _ => (0x343b46, 0x20242a),
             };
-            let label = loader_event_label(&event.kind, event.tool_name.as_deref());
+            let assistant = if is_codex { "Codex" } else { "Claude" };
+            let label = loader_event_label(&event.kind, event.tool_name.as_deref(), assistant);
             let is_user = event.kind == "user";
             events = events.child(
                 div()
@@ -14022,10 +14027,24 @@ fn loader_permission_label(mode: &str) -> &str {
     }
 }
 
-fn loader_event_label(kind: &str, tool_name: Option<&str>) -> SharedString {
+fn deferred_history_provider(node: &Value) -> Option<&'static str> {
+    match node["currentMode"].as_str() {
+        Some("claude-code") => Some("claude-code"),
+        Some("codex") if trimmed_graph_text(&node["historyProviderSessionId"]).is_some() => {
+            Some("codex")
+        }
+        _ => None,
+    }
+}
+
+fn loader_event_label(
+    kind: &str,
+    tool_name: Option<&str>,
+    assistant: &'static str,
+) -> SharedString {
     match kind {
         "user" => "你".into(),
-        "assistant" => "Claude".into(),
+        "assistant" => assistant.into(),
         "tool" => tool_name
             .filter(|name| !name.is_empty())
             .map_or_else(|| "工具".into(), |name| format!("工具 · {name}").into()),

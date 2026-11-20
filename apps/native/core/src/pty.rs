@@ -248,16 +248,42 @@ pub struct ForegroundProcessGroup {
 impl ForegroundProcessGroup {
     pub fn hang_up(&self) -> io::Result<()> {
         // The direct Shell receives its own HUP through PtyProcess::terminate.
-        if self.pgid != self.session && self.is_running()? {
-            send_signal(-self.pgid, libc::SIGCONT)?;
-            send_signal(-self.pgid, libc::SIGHUP)?;
+        if self.pgid == self.session {
+            return Ok(());
         }
-        Ok(())
+        self.signal_if_running(
+            &[libc::SIGCONT, libc::SIGHUP],
+            || self.is_running(),
+            try_send_signal,
+        )
     }
 
     pub fn force_kill(&self) -> io::Result<()> {
-        if self.is_running()? {
-            send_signal(-self.pgid, libc::SIGKILL)?;
+        self.signal_if_running(&[libc::SIGKILL], || self.is_running(), try_send_signal)
+    }
+
+    fn signal_if_running(
+        &self,
+        signals: &[libc::c_int],
+        mut is_running: impl FnMut() -> io::Result<bool>,
+        mut send: impl FnMut(libc::pid_t, libc::c_int) -> io::Result<()>,
+    ) -> io::Result<()> {
+        for &signal in signals {
+            let sent = is_running().and_then(|running| {
+                if running {
+                    send(-self.pgid, signal)?;
+                }
+                Ok(running)
+            });
+            match sent {
+                Ok(true) => {}
+                Ok(false) => break,
+                // Membership can change between the check and the signal.
+                Err(error) if matches!(error.raw_os_error(), Some(libc::ESRCH | libc::EPERM)) => {
+                    break;
+                }
+                Err(error) => return Err(error),
+            }
         }
         Ok(())
     }
@@ -579,15 +605,19 @@ fn unix_pid(child: &dyn Child) -> Result<libc::pid_t> {
 
 #[cfg(unix)]
 fn send_signal(pid: libc::pid_t, signal: libc::c_int) -> io::Result<()> {
+    match try_send_signal(pid, signal) {
+        Err(error) if error.raw_os_error() == Some(libc::ESRCH) => Ok(()),
+        result => result,
+    }
+}
+
+#[cfg(unix)]
+fn try_send_signal(pid: libc::pid_t, signal: libc::c_int) -> io::Result<()> {
     // portable-pty establishes the Shell as a new session and process-group leader.
     if unsafe { libc::kill(pid, signal) } == 0 {
-        return Ok(());
-    }
-    let error = io::Error::last_os_error();
-    if error.raw_os_error() == Some(libc::ESRCH) {
         Ok(())
     } else {
-        Err(error)
+        Err(io::Error::last_os_error())
     }
 }
 
@@ -639,5 +669,50 @@ fn wait_bounded(child: &mut dyn Child, allowance: Duration) -> io::Result<bool> 
             return Ok(false);
         }
         thread::sleep(remaining.min(Duration::from_millis(10)));
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn foreground_group_can_stop_accepting_signals_after_the_membership_check() {
+        let group = ForegroundProcessGroup {
+            pgid: 42,
+            session: 41,
+        };
+        for signals in [&[libc::SIGCONT, libc::SIGHUP][..], &[libc::SIGKILL][..]] {
+            for failed_at in 0..signals.len() {
+                for errno in [libc::ESRCH, libc::EPERM, libc::EINVAL] {
+                    let checked = Cell::new(false);
+                    let mut attempted = Vec::new();
+                    let result = group.signal_if_running(
+                        signals,
+                        || {
+                            checked.set(true);
+                            Ok(true)
+                        },
+                        |target, signal| {
+                            assert_eq!(target, -group.pgid);
+                            assert!(checked.replace(false));
+                            attempted.push(signal);
+                            if attempted.len() == failed_at + 1 {
+                                Err(io::Error::from_raw_os_error(errno))
+                            } else {
+                                Ok(())
+                            }
+                        },
+                    );
+                    assert_eq!(attempted, signals[..=failed_at]);
+                    if errno == libc::EINVAL {
+                        assert_eq!(result.unwrap_err().raw_os_error(), Some(errno));
+                    } else {
+                        result.unwrap();
+                    }
+                }
+            }
+        }
     }
 }
