@@ -43,3 +43,6 @@ server.pid
 
 # Short macOS socket aliases for isolated packaged acceptance
 /.c5/
+
+/.rw*/
+/.tmp*/

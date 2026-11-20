@@ -1,9 +1,12 @@
-use anyhow::{Result, bail};
+use std::{collections::HashMap, env, fs, path::Path};
+
+use anyhow::{Context, Result, bail};
 use matou_native_core::storage::{
-    CommandMetadata, CommandReplayConflictError, DomainEventInput, configure_connection, execute,
-    migrate,
+    CommandMetadata, CommandReplayConflictError, DomainEventInput, MigrationChecksumMismatch,
+    configure_connection, execute, migrate, migrate_with_backup,
 };
 use rusqlite::{Connection, OptionalExtension, params, types::ValueRef};
+use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 const REFERENCE: &str = include_str!("fixtures/storage-reference.json");
@@ -222,6 +225,91 @@ fn domain_transaction_matches_frozen_source_and_replays_after_reopen() -> Result
 }
 
 #[test]
+fn domain_transaction_writes_and_returns_js_object_key_order() -> Result<()> {
+    let mut db = configured_memory_db()?;
+    migrate(&mut db, 1000)?;
+    let command: CommandMetadata = serde_json::from_value(json!({
+        "commandId": "numeric-keys",
+        "commandType": "parity.contract",
+        "requestHash": "numeric-keys-v1",
+    }))?;
+    let input: Value = serde_json::from_str(concat!(
+        r#"{"z":true,"4294967295":null,"4294967294":2.5,"01":"前导零","10":"十","#,
+        r#""a":[{"z":2,"2":"二","1":"一","a":1},[{"1":1,"0":0}],false],"2":"二","#,
+        r#""4294967296":-1,"+1":1,"-0":0,"0":"零"}"#,
+    ))?;
+    let expected = concat!(
+        r#"{"0":"零","2":"二","10":"十","4294967294":2.5,"z":true,"4294967295":null,"01":"前导零","#,
+        r#""a":[{"1":"一","2":"二","z":2,"a":1},[{"0":0,"1":1}],false],"4294967296":-1,"+1":1,"-0":0}"#,
+    );
+
+    let committed = execute(&mut db, &command, 1100, |_, events| {
+        events.push(event("numeric-key-event", input.clone(), 1100));
+        Ok(input)
+    })?;
+    assert_eq!(serde_json::to_string(&committed.result)?, expected);
+    assert_eq!(
+        query_json(&db, "SELECT payload_json FROM domain_events")?,
+        json!([{ "payload_json": expected }])
+    );
+    assert_eq!(
+        query_json(&db, "SELECT response_json FROM command_deduplication")?,
+        json!([{ "response_json": expected }])
+    );
+
+    let replayed = execute(&mut db, &command, 1200, |_, _| {
+        panic!("replay ran the mutation")
+    })?;
+    assert!(replayed.replayed);
+    assert_eq!(serde_json::to_string(&replayed.result)?, expected);
+    Ok(())
+}
+
+#[test]
+fn domain_transaction_orders_legacy_replay_without_rewriting_stored_json() -> Result<()> {
+    let mut db = configured_memory_db()?;
+    migrate(&mut db, 1000)?;
+    let command: CommandMetadata = serde_json::from_value(json!({
+        "commandId": "legacy-numeric-keys",
+        "commandType": "parity.contract",
+        "requestHash": "legacy-numeric-keys-v1",
+    }))?;
+    let committed = execute(&mut db, &command, 1100, |_, events| {
+        events.push(event("legacy-numeric-key-event", Value::Null, 1100));
+        Ok(Value::Null)
+    })?;
+    let stored = r#"{"entries":{"10":"十","2":"二","01":"前导零","1":"一"}}"#;
+    db.execute("UPDATE domain_events SET payload_json = ?", [stored])?;
+    db.execute(
+        "UPDATE command_deduplication SET response_json = ?",
+        [stored],
+    )?;
+
+    let replayed = execute(&mut db, &command, 1200, |_, _| {
+        panic!("legacy replay ran the mutation")
+    })?;
+    assert!(replayed.replayed);
+    assert_eq!(
+        replayed.first_event_sequence,
+        committed.first_event_sequence
+    );
+    assert_eq!(replayed.last_event_sequence, committed.last_event_sequence);
+    assert_eq!(
+        serde_json::to_string(&replayed.result)?,
+        r#"{"entries":{"1":"一","2":"二","10":"十","01":"前导零"}}"#
+    );
+    assert_eq!(
+        query_json(&db, "SELECT payload_json FROM domain_events")?,
+        json!([{ "payload_json": stored }])
+    );
+    assert_eq!(
+        query_json(&db, "SELECT response_json FROM command_deduplication")?,
+        json!([{ "response_json": stored }])
+    );
+    Ok(())
+}
+
+#[test]
 fn event_order_and_defaults_survive_partial_event_failure() -> Result<()> {
     let mut db = configured_memory_db()?;
     migrate(&mut db, 1000)?;
@@ -415,5 +503,235 @@ fn migration_35_rolls_back_on_foreign_key_violation_and_can_be_retried() -> Resu
         .optional()?;
     assert_eq!(cwd.as_deref(), Some("/tmp/workspace"));
     assert_eq!(query_json(&db, "PRAGMA foreign_key_check")?, json!([]));
+    Ok(())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FixedInputs {
+    catalog: String,
+    queries: HashMap<String, String>,
+    groups: Vec<FixedGroup>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FixedGroup {
+    id: String,
+    seed_through: Option<usize>,
+    #[serde(default)]
+    setup: Vec<String>,
+    steps: Vec<FixedStep>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FixedStep {
+    id: String,
+    at: i64,
+    #[serde(default)]
+    reopen: bool,
+    #[serde(default)]
+    setup: Vec<String>,
+    #[serde(default)]
+    history_edits: Vec<HistoryEdit>,
+    migration: Option<MigrationInput>,
+    transaction: Option<TransactionInput>,
+    #[serde(default)]
+    before: Vec<String>,
+    read: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct HistoryEdit {
+    version: i64,
+    name: Option<String>,
+    checksum: String,
+}
+
+#[derive(Deserialize)]
+struct MigrationInput {
+    backup: BackupInput,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum BackupInput {
+    None,
+    Ready,
+    Fail,
+}
+
+#[derive(Deserialize)]
+struct TransactionInput {
+    command: CommandMetadata,
+    sql: Option<String>,
+    #[serde(default)]
+    events: Vec<DomainEventInput>,
+    failure: Option<String>,
+    result: Value,
+}
+
+fn read_fixed_queries(
+    db: &Connection,
+    queries: &HashMap<String, String>,
+    keys: &[String],
+) -> Result<Map<String, Value>> {
+    keys.iter()
+        .map(|key| {
+            let sql = queries
+                .get(key)
+                .with_context(|| format!("missing query {key}"))?;
+            Ok((
+                key.clone(),
+                query_json(db, sql).with_context(|| key.clone())?,
+            ))
+        })
+        .collect()
+}
+
+fn describe_fixed_error(error: &anyhow::Error) -> Value {
+    let mut result = json!({"message": error.to_string()});
+    if error.is::<CommandReplayConflictError>() {
+        result["code"] = json!(CommandReplayConflictError::CODE);
+        result["driver"] = json!({"type": "CommandReplayConflictError"});
+    } else if error.is::<MigrationChecksumMismatch>() {
+        result["driver"] = json!({"type": "MigrationChecksumMismatch"});
+    } else if let Some(sqlite_error) = error
+        .downcast_ref::<rusqlite::Error>()
+        .and_then(rusqlite::Error::sqlite_error)
+    {
+        result["sqliteCode"] = json!(sqlite_error.extended_code);
+        result["driver"] = json!({"category": format!("{:?}", sqlite_error.code)});
+    } else {
+        result["driver"] = json!({"type": "anyhow::Error"});
+    }
+    result
+}
+
+#[test]
+#[ignore = "evidence export; run with MATOU_STORAGE_GATE and --include-ignored"]
+fn export_fixed_storage_cases() -> Result<()> {
+    let directory = env::var_os("MATOU_STORAGE_GATE").context("MATOU_STORAGE_GATE is required")?;
+    let directory = Path::new(&directory);
+    let inputs: FixedInputs = serde_json::from_slice(&fs::read(directory.join("inputs.json"))?)?;
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let catalog: Vec<Value> = serde_json::from_slice(&fs::read(repo.join(&inputs.catalog))?)?;
+    let temporary = tempfile::tempdir_in(directory.join(".work"))?;
+    let mut cases = Map::new();
+
+    for group in inputs.groups {
+        let path = temporary.path().join(format!("{}.sqlite", group.id));
+        let mut db = Connection::open(&path)?;
+        configure_connection(&db)?;
+        if let Some(version) = group.seed_through {
+            db.execute_batch(
+                "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY,
+                 name TEXT NOT NULL, checksum TEXT NOT NULL, applied_at INTEGER NOT NULL) STRICT",
+            )?;
+            for migration in &catalog[..version] {
+                db.execute_batch(migration["sql"].as_str().unwrap())?;
+                db.execute(
+                    "INSERT INTO schema_migrations VALUES (?, ?, ?, 1000)",
+                    params![
+                        migration["version"].as_i64().unwrap(),
+                        migration["name"].as_str().unwrap(),
+                        migration["checksum"].as_str().unwrap()
+                    ],
+                )?;
+            }
+        }
+        for sql in group.setup {
+            db.execute_batch(&sql)?;
+        }
+
+        for step in group.steps {
+            if step.reopen {
+                drop(db);
+                db = Connection::open(&path)?;
+                configure_connection(&db)?;
+            }
+            for edit in step.history_edits {
+                let entry = &catalog[(edit.version - 1) as usize];
+                assert_eq!(entry["version"], edit.version);
+                let checksum = if edit.checksum == "acceptedLegacyChecksums" {
+                    &entry[&edit.checksum][0]
+                } else {
+                    &entry[&edit.checksum]
+                };
+                db.execute(
+                    "UPDATE schema_migrations SET name = COALESCE(?, name), checksum = ? WHERE version = ?",
+                    params![edit.name, checksum.as_str().unwrap(), edit.version],
+                )?;
+            }
+            for sql in step.setup {
+                db.execute_batch(&sql).with_context(|| step.id.clone())?;
+            }
+            let before = read_fixed_queries(&db, &inputs.queries, &step.before)?;
+            let mut callback_calls = 0;
+            let result = match (step.migration, step.transaction) {
+                (
+                    Some(MigrationInput {
+                        backup: BackupInput::None,
+                    }),
+                    None,
+                ) => migrate(&mut db, step.at).map(serde_json::to_value),
+                (Some(MigrationInput { backup }), None) => {
+                    migrate_with_backup(&mut db, step.at, |_| {
+                        callback_calls += 1;
+                        if matches!(backup, BackupInput::Fail) {
+                            bail!("fixture backup refused");
+                        }
+                        Ok(())
+                    })
+                    .map(serde_json::to_value)
+                }
+                (None, Some(transaction)) => {
+                    execute(&mut db, &transaction.command, step.at, |tx, events| {
+                        callback_calls += 1;
+                        if let Some(sql) = transaction.sql {
+                            tx.execute_batch(&sql)?;
+                        }
+                        events.extend(transaction.events);
+                        if let Some(message) = transaction.failure {
+                            bail!("{message}");
+                        }
+                        Ok(transaction.result)
+                    })
+                    .map(serde_json::to_value)
+                }
+                _ => bail!("expected one operation for {}", step.id),
+            };
+            let outcome = match result {
+                Ok(value) => json!({"kind": "ok", "value": value?}),
+                Err(error) => json!({"kind": "error", "error": describe_fixed_error(&error)}),
+            };
+            let after = read_fixed_queries(&db, &inputs.queries, &step.read)?;
+            assert!(
+                cases
+                    .insert(
+                        step.id,
+                        json!({
+                            "outcome": outcome,
+                            "callbackCalls": callback_calls,
+                            "before": before,
+                            "after": after
+                        })
+                    )
+                    .is_none(),
+                "duplicate fixed case ID"
+            );
+        }
+    }
+
+    fs::write(
+        directory.join("native.json"),
+        format!("{}\n", serde_json::to_string_pretty(&cases)?),
+    )?;
+    println!(
+        "native SQLite {} · {} fixed cases",
+        rusqlite::version(),
+        cases.len()
+    );
     Ok(())
 }

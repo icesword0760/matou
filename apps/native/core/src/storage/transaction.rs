@@ -101,7 +101,7 @@ pub fn execute(
             .into());
         }
         return Ok(DomainCommit {
-            result: serde_json::from_str(&response)?,
+            result: js_object_order(serde_json::from_str(&response)?),
             first_event_sequence,
             last_event_sequence,
             replayed: true,
@@ -110,7 +110,7 @@ pub fn execute(
 
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let mut events = Vec::new();
-    let result = mutation(&transaction, &mut events)?;
+    let result = js_object_order(mutation(&transaction, &mut events)?);
 
     let mut first_event_sequence = None;
     let mut last_event_sequence = None;
@@ -131,7 +131,7 @@ pub fn execute(
                 event.workspace_id,
                 event.task_id,
                 event.session_id,
-                serde_json::to_string(&event.payload)?,
+                serde_json::to_string(&js_object_order(event.payload))?,
                 event.schema_version.unwrap_or(1),
                 event.required_terminal_sequence,
                 command.command_id,
@@ -167,4 +167,30 @@ pub fn execute(
         last_event_sequence,
         replayed: false,
     })
+}
+
+fn js_object_order(value: Value) -> Value {
+    match value {
+        Value::Object(mut object) => {
+            if object.keys().any(|key| array_index(key).is_some()) {
+                let mut entries: Vec<_> = object.into_iter().collect();
+                // The stable sort keeps all non-index keys in their original order.
+                entries.sort_by_cached_key(|(key, _)| array_index(key).unwrap_or(u32::MAX));
+                object = entries.into_iter().collect();
+            }
+            for value in object.values_mut() {
+                *value = js_object_order(value.take());
+            }
+            Value::Object(object)
+        }
+        Value::Array(array) => Value::Array(array.into_iter().map(js_object_order).collect()),
+        scalar => scalar,
+    }
+}
+
+fn array_index(key: &str) -> Option<u32> {
+    if !matches!(key.as_bytes(), [b'0'] | [b'1'..=b'9', ..]) {
+        return None;
+    }
+    key.parse::<u32>().ok().filter(|&index| index < u32::MAX)
 }
