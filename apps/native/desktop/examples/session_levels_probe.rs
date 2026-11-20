@@ -296,6 +296,35 @@ mod workspace {
                 .with_borrow(|readings| readings.as_ref()?.bounds.borrow().get(key).copied())
         }
 
+        pub(super) fn instructions_focus(&self, control: &str, window: &Window) -> bool {
+            self.control_focus[control].is_focused(window)
+        }
+
+        pub(super) fn instructions_ready(&self) -> bool {
+            self.project_instructions_request.is_none()
+        }
+
+        pub(super) fn assert_instructions_preview(
+            &self,
+            path: &std::path::Path,
+            expected: Result<Option<&str>, &str>,
+        ) -> ScrollHandle {
+            let (_, target) = self.project_instructions_target.as_ref().unwrap();
+            assert_eq!(target, path);
+            let preview = self.project_instructions_preview.as_ref().unwrap();
+            match (preview.result.as_ref(), expected) {
+                (Some(ProjectInstructionsRead::Missing), Ok(None)) => {}
+                (Some(ProjectInstructionsRead::Content(text)), Ok(Some(expected))) => {
+                    assert_eq!(text.as_ref(), expected)
+                }
+                (Some(ProjectInstructionsRead::Failed(error)), Err(expected)) => {
+                    assert!(error.starts_with(expected), "{error}")
+                }
+                _ => panic!("unexpected instruction preview state"),
+            }
+            preview.scroll.clone()
+        }
+
         pub(super) fn assert_painted_footer_text(
             key: &'static str,
             expected: &str,
@@ -2219,7 +2248,7 @@ mod probe {
         use core_foundation::base::CFRelease;
         use core_graphics::{
             display::CGDisplay,
-            event::{CGEventType, CGMouseButton},
+            event::{CGEventType, CGMouseButton, CGScrollEventUnit, ScrollEventUnit},
             geometry::CGPoint,
         };
         use objc::{msg_send, sel, sel_impl};
@@ -2233,6 +2262,15 @@ mod probe {
                 location: CGPoint,
                 button: CGMouseButton,
             ) -> *mut c_void;
+            fn CGEventCreateScrollWheelEvent2(
+                source: *const c_void,
+                units: CGScrollEventUnit,
+                wheel_count: u32,
+                wheel1: i32,
+                wheel2: i32,
+                wheel3: i32,
+            ) -> *mut c_void;
+            fn CGEventSetLocation(event: *mut c_void, location: CGPoint);
         }
 
         let (view, location, number) = window
@@ -2256,6 +2294,30 @@ mod probe {
             .unwrap();
         // Target only the probe NSView. The event never enters the desktop queue.
         unsafe {
+            if kind == NSEventType::NSScrollWheel {
+                let event = CGEventCreateScrollWheelEvent2(
+                    std::ptr::null(),
+                    ScrollEventUnit::PIXEL,
+                    2,
+                    -130,
+                    -100,
+                    0,
+                );
+                assert!(!event.is_null());
+                CGEventSetLocation(
+                    event,
+                    CGPoint::new(
+                        location.x,
+                        CGDisplay::main().bounds().size.height - location.y,
+                    ),
+                );
+                let native = NSEvent::eventWithCGEvent_(nil, event);
+                CFRelease(event);
+                assert_eq!(native.locationInWindow().x, location.x);
+                assert_eq!(native.locationInWindow().y, location.y);
+                let _: () = msg_send![view, scrollWheel: native];
+                return;
+            }
             if matches!(
                 kind,
                 NSEventType::NSRightMouseDown | NSEventType::NSRightMouseUp
@@ -5736,6 +5798,327 @@ mod probe {
         println!("Codex HUD hidden GPUI probe passed");
     }
 
+    async fn wait_for_instructions(window: WindowHandle<Workspace>, cx: &mut AsyncApp) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            draw(window, cx);
+            let ready = window
+                .update(cx, |view, _, _| view.instructions_ready())
+                .unwrap();
+            if ready {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "instruction file check did not finish"
+            );
+            cx.background_executor()
+                .timer(Duration::from_millis(10))
+                .await;
+        }
+    }
+
+    async fn verify_project_instructions(cx: &mut AsyncApp) {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        for width in [720., 900., 1200.] {
+            let mut fixture = Fixture::new();
+            let repository = fixture.root.join("project");
+            let root_cwd = repository.join("当前项目");
+            let absent_cwd = root_cwd.join("nested");
+            let child_cwd = absent_cwd.join("child");
+            let unreadable_cwd = repository.join("unreadable");
+            let changed_cwd = repository.join("changed");
+            for dir in [&child_cwd, &unreadable_cwd, &changed_cwd] {
+                fs::create_dir_all(dir).unwrap();
+            }
+            let root_file = root_cwd.join("AGENTS.md");
+            let child_file = child_cwd.join("AGENTS.md");
+            let denied_file = unreadable_cwd.join("AGENTS.md");
+            let changed_file = changed_cwd.join("AGENTS.md");
+            let missing_file = absent_cwd.join("AGENTS.md");
+            let mut contents = (1..=250)
+                .map(|line| format!("{line:03}  测试指令\n"))
+                .collect::<String>();
+            contents.push_str(&"一行很长的指令 ".repeat(100));
+            fs::write(&root_file, &contents).unwrap();
+            fs::write(&child_file, "# Child instructions\n").unwrap();
+            fs::write(&changed_file, "# Updated cwd\n").unwrap();
+            fs::write(&denied_file, "# Unreadable\n").unwrap();
+            fs::set_permissions(&denied_file, fs::Permissions::from_mode(0o000)).unwrap();
+            assert_eq!(
+                fs::read(&denied_file).unwrap_err().kind(),
+                std::io::ErrorKind::PermissionDenied
+            );
+
+            let set_card = |fixture: &Fixture, id: &str, mode: &str, cwd: &std::path::Path| {
+                let Some(BootstrapResult::Writable { connection, .. }) = &fixture.db else {
+                    unreachable!()
+                };
+                assert_eq!(
+                    connection
+                        .execute(
+                            "UPDATE sessions SET kind = ?, cwd = ? WHERE id = ?",
+                            (mode, cwd.to_str().unwrap(), id),
+                        )
+                        .unwrap(),
+                    1
+                );
+            };
+            set_card(&fixture, PEER, "codex", &root_cwd);
+            set_card(&fixture, PARENT, "codex", &absent_cwd);
+            set_card(&fixture, CHILD, "codex", &child_cwd);
+            let (window, sink) = open_hidden(cx, width);
+            let viewport = window
+                .update(cx, |_, window, _| {
+                    assert!(!crate::macos::is_window_visible(window).unwrap());
+                    window.viewport_size()
+                })
+                .unwrap();
+            assert_eq!(viewport.width, px(width));
+            deliver(window, cx, fixture.event(true));
+            let Event::Graph(mut graph) = fixture.graph_event() else {
+                unreachable!()
+            };
+            let peer = graph["nodes"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|node| node["sessionId"] == PEER)
+                .unwrap();
+            peer["codexHud"] = serde_json::json!({
+                "model": "test-model-with-a-long-name-to-exercise-the-hud",
+                "effort": "high",
+                "contextPercent": 80.0,
+                "toolCounts": [{"name": "Bash", "count": 4}]
+            });
+            deliver(window, cx, Event::Graph(graph));
+            wait_for_instructions(window, cx).await;
+            let entry = footer_bounds(window, cx, "instructions").unwrap();
+            let permission = footer_bounds(window, cx, "permission").unwrap();
+            let status = footer_bounds(window, cx, "status").unwrap();
+            let egress = footer_bounds(window, cx, "egress").unwrap();
+            assert!(entry.left() >= status.left() && entry.right() < permission.left());
+            assert_eq!(entry.center().y, permission.center().y);
+            assert_eq!(egress.right(), px(width - 20.));
+            assert_footer_text(window, cx, "instructions", "AGENTS.md", false);
+            let tools = footer_bounds(window, cx, "tools").unwrap();
+            assert!(tools.left() > permission.right() && tools.right() < egress.left());
+            assert_footer_text(window, cx, "tools", "4 Tools", false);
+
+            click(window, cx, entry.center());
+            wait_for_instructions(window, cx).await;
+            let panel = footer_bounds(window, cx, "instructions-dialog").unwrap();
+            let panel_width = px((width - 64.).min(760.));
+            let panel_height = (viewport.height - px(80.)).min(px(640.));
+            // The bounds canvas fills the content box inside the 1 pt border.
+            assert_eq!(
+                panel.size,
+                size(panel_width - px(2.), panel_height - px(2.))
+            );
+            assert_eq!(
+                panel.center(),
+                point(viewport.width / 2., viewport.height / 2.)
+            );
+            let scroll = window
+                .update(cx, |view, window, _| {
+                    assert!(view.instructions_focus("project-instructions-preview", window));
+                    view.assert_instructions_preview(&root_file, Ok(Some(&contents)))
+                })
+                .unwrap();
+            println!(
+                "instructions | {width} pt | present: AGENTS.md before permission, tools and exit aligned, {:.0}×{:.0} panel, cwd path and exact UTF-8, preview autofocused",
+                f32::from(panel_width),
+                f32::from(panel_height),
+            );
+
+            assert!(scroll.max_offset().height > px(500.));
+            assert_eq!(scroll.max_offset().width, px(0.));
+            assert_eq!(scroll.offset().y, px(0.));
+            let carousel_before = window.update(cx, |view, _, _| view.scroll_left()).unwrap();
+            mouse(
+                window,
+                cx,
+                scroll.bounds().center(),
+                NSEventType::NSScrollWheel,
+            );
+            draw(window, cx);
+            assert_eq!(scroll.offset().y, px(-130.));
+            assert_eq!(
+                window.update(cx, |view, _, _| view.scroll_left()).unwrap(),
+                carousel_before
+            );
+            press(window, cx, "end");
+            draw(window, cx);
+            assert_eq!(scroll.offset().y, -scroll.max_offset().height);
+            println!(
+                "instructions | {width} pt | long preview: wheel moved 130 pt without moving cards, End reached the final line"
+            );
+
+            let assert_control_focus = |cx: &mut AsyncApp, control: &str| {
+                assert!(
+                    window
+                        .update(cx, |view, window, _| view
+                            .instructions_focus(control, window))
+                        .unwrap()
+                );
+            };
+            press(window, cx, "tab");
+            draw(window, cx);
+            assert_control_focus(cx, "project-instructions-cancel");
+            press(window, cx, "tab");
+            draw(window, cx);
+            assert_control_focus(cx, "project-instructions-close");
+            press(window, cx, "shift-tab");
+            draw(window, cx);
+            assert_control_focus(cx, "project-instructions-cancel");
+            press(window, cx, "escape");
+            draw(window, cx);
+            assert!(footer_bounds(window, cx, "instructions-dialog").is_none());
+            assert_control_focus(cx, "project-instructions");
+            press(window, cx, "enter");
+            wait_for_instructions(window, cx).await;
+            assert_control_focus(cx, "project-instructions-preview");
+            let cancel = footer_bounds(window, cx, "instructions-cancel")
+                .unwrap()
+                .center();
+            click(window, cx, cancel);
+            draw(window, cx);
+            assert!(footer_bounds(window, cx, "instructions-dialog").is_none());
+            assert_control_focus(cx, "project-instructions");
+            println!(
+                "instructions | {width} pt | keyboard: Tab/Shift-Tab cycle, Esc returns to entry, Enter reopens, Cancel dismisses"
+            );
+
+            if width == 900. {
+                click(window, cx, entry.center());
+                wait_for_instructions(window, cx).await;
+                let close = footer_bounds(window, cx, "instructions-close")
+                    .unwrap()
+                    .center();
+                click(window, cx, close);
+                draw(window, cx);
+                assert!(footer_bounds(window, cx, "instructions-dialog").is_none());
+                click(window, cx, entry.center());
+                wait_for_instructions(window, cx).await;
+                click(window, cx, point(px(10.), px(10.)));
+                draw(window, cx);
+                assert!(footer_bounds(window, cx, "instructions-dialog").is_none());
+                println!(
+                    "instructions | {width} pt | close icon and backdrop dismiss; preview wheel stays inside"
+                );
+
+                // Deliver the same projection the runtime sends after an effective
+                // cwd change, while the read-only preview is still open.
+                click(window, cx, entry.center());
+                wait_for_instructions(window, cx).await;
+                set_card(&fixture, PEER, "codex", &changed_cwd);
+                deliver(window, cx, fixture.graph_event());
+                wait_for_instructions(window, cx).await;
+                let new_scroll = window
+                    .update(cx, |view, _, _| {
+                        view.assert_instructions_preview(&changed_file, Ok(Some("# Updated cwd\n")))
+                    })
+                    .unwrap();
+                assert_eq!(new_scroll.offset().y, px(0.));
+                println!(
+                    "instructions | {width} pt | same card cwd change: new path, new content, reset scroll"
+                );
+
+                set_card(&fixture, PEER, "codex", &unreadable_cwd);
+                deliver(window, cx, fixture.graph_event());
+                wait_for_instructions(window, cx).await;
+                window
+                    .update(cx, |view, _, _| {
+                        view.assert_instructions_preview(&denied_file, Err("读取失败："));
+                    })
+                    .unwrap();
+                assert!(footer_bounds(window, cx, "instructions").is_some());
+                println!(
+                    "instructions | {width} pt | unreadable mode 000: existing entry retained, 读取失败, old text cleared"
+                );
+
+                set_card(&fixture, PEER, "codex", &absent_cwd);
+                deliver(window, cx, fixture.graph_event());
+                wait_for_instructions(window, cx).await;
+                window
+                    .update(cx, |view, _, _| {
+                        view.assert_instructions_preview(&missing_file, Ok(None));
+                    })
+                    .unwrap();
+                assert!(footer_bounds(window, cx, "instructions").is_none());
+                assert!(footer_bounds(window, cx, "instructions-dialog").is_some());
+                press(window, cx, "escape");
+                draw(window, cx);
+                assert!(footer_bounds(window, cx, "instructions-dialog").is_none());
+                println!(
+                    "instructions | {width} pt | missing after cwd change: no entry, expected path and blank preview; ancestor file ignored"
+                );
+
+                set_card(&fixture, PEER, "codex", &root_cwd);
+                deliver(window, cx, fixture.graph_event());
+                wait_for_instructions(window, cx).await;
+            }
+
+            if width < 1000. {
+                let card = window
+                    .update(cx, |view, window, _| view.footer_card_point(PARENT, window))
+                    .unwrap();
+                click(window, cx, card);
+            } else {
+                window
+                    .update(cx, |view, window, cx| view.select_footer_parent(window, cx))
+                    .unwrap();
+            }
+            assert_focus(fixture.process(window, cx, &sink), PARENT);
+            wait_for_instructions(window, cx).await;
+            assert!(footer_bounds(window, cx, "instructions").is_none());
+            println!(
+                "instructions | {width} pt | active parent card: no current-file entry even with AGENTS.md one directory up"
+            );
+            window
+                .update(cx, |view, window, cx| {
+                    view.open_footer_child_level(window, cx)
+                })
+                .unwrap();
+            assert_focus(fixture.process(window, cx, &sink), CHILD);
+            wait_for_instructions(window, cx).await;
+            let child_entry = footer_bounds(window, cx, "instructions").unwrap().center();
+            click(window, cx, child_entry);
+            wait_for_instructions(window, cx).await;
+            window
+                .update(cx, |view, _, _| {
+                    view.assert_instructions_preview(
+                        &child_file,
+                        Ok(Some("# Child instructions\n")),
+                    );
+                })
+                .unwrap();
+            press(window, cx, "escape");
+            draw(window, cx);
+            let back = footer_bounds(window, cx, "return").unwrap().center();
+            click(window, cx, back);
+            assert_focus(fixture.process(window, cx, &sink), PARENT);
+            wait_for_instructions(window, cx).await;
+            assert!(footer_bounds(window, cx, "instructions").is_none());
+            println!(
+                "instructions | {width} pt | child level: shows child AGENTS.md only; return restores the parent with no entry"
+            );
+
+            fs::write(&missing_file, "# same path, shell mode\n").unwrap();
+            set_card(&fixture, PARENT, "shell", &absent_cwd);
+            deliver(window, cx, fixture.graph_event());
+            wait_for_instructions(window, cx).await;
+            assert!(footer_bounds(window, cx, "instructions").is_none());
+            println!("instructions | {width} pt | Shell with physical AGENTS.md: entry omitted");
+            window
+                .update(cx, |_, window, _| window.remove_window())
+                .unwrap();
+        }
+        println!("Project instructions hidden GPUI probe passed");
+    }
+
     async fn verify_permission_mode(cx: &mut AsyncApp) {
         const LABELS: [(&str, &str, u32); 5] = [
             ("default", "Default", 0x8b949e),
@@ -6607,6 +6990,7 @@ mod probe {
 
     pub(super) fn run() {
         let footer_only = std::env::args().any(|arg| arg == "--footer-base");
+        let instructions_only = std::env::args().any(|arg| arg == "--project-instructions");
         let codex_hud_only = std::env::args().any(|arg| arg == "--codex-hud");
         let header_only = std::env::args().any(|arg| arg == "--card-header");
         let codex_title_only = std::env::args().any(|arg| arg == "--codex-title");
@@ -6620,6 +7004,13 @@ mod probe {
         let codex_loader_only = std::env::args().any(|arg| arg == "--codex-loader");
         let codex_history_only = std::env::args().any(|arg| arg == "--codex-history");
         Application::new().with_assets(NativeAssets).run(move |cx| {
+            if instructions_only {
+                cx.spawn(async |cx| {
+                    verify_project_instructions(cx).await;
+                    cx.update(|cx| cx.quit()).unwrap();
+                }).detach();
+                return;
+            }
             if codex_hud_only {
                 cx.spawn(async |cx| {
                     verify_codex_hud(cx);

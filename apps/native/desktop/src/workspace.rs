@@ -47,6 +47,9 @@ mod codex_hud {
     include!("codex_hud.rs");
 }
 
+#[path = "project_instructions.rs"]
+mod project_instructions;
+
 use crate::{
     carousel_motion::{
         CardWidth, CarouselLayout, Curve, Transition, centered_scroll, focus_scroll_step,
@@ -814,9 +817,24 @@ const CONTROLS: &[&str] = &[
     "graph",
     "split",
     "update",
+    "project-instructions",
+    "project-instructions-close",
+    "project-instructions-preview",
+    "project-instructions-cancel",
     "permission-mode",
     "session-return-parent",
 ];
+
+enum ProjectInstructionsRead {
+    Missing,
+    Content(SharedString),
+    Failed(String),
+}
+
+struct ProjectInstructionsPreview {
+    result: Option<ProjectInstructionsRead>,
+    scroll: ScrollHandle,
+}
 
 struct ArchivedMatches {
     query: String,
@@ -1209,6 +1227,10 @@ pub struct Workspace {
     toast_generation: u64,
     permission_menu: Option<String>,
     footer_shell: Option<String>,
+    project_instructions_target: Option<(String, PathBuf)>,
+    project_instructions_available: bool,
+    project_instructions_request: Option<gpui::Task<()>>,
+    project_instructions_preview: Option<ProjectInstructionsPreview>,
     permission_changes: HashMap<String, PermissionChange>,
     permission_identities: HashSet<String>,
     permission_toast: Option<String>,
@@ -2209,6 +2231,10 @@ impl Workspace {
                 .as_ref()
                 .and_then(|options| footer_shell_name(options.shell.to_str()?))
                 .map(str::to_owned),
+            project_instructions_target: None,
+            project_instructions_available: false,
+            project_instructions_request: None,
+            project_instructions_preview: None,
             permission_changes: HashMap::new(),
             permission_identities: HashSet::new(),
             permission_toast: None,
@@ -8485,6 +8511,206 @@ impl Workspace {
         (label, format!("· {} 个会话", self.order.len()))
     }
 
+    fn refresh_project_instructions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let target = self.active_level_focus().and_then(|id| {
+            let node = self.graph_node(id)?;
+            let cwd = std::path::Path::new(node["cwd"].as_str()?);
+            (node["currentMode"] == "codex" && cwd.is_absolute())
+                .then(|| (id.to_owned(), cwd.join("AGENTS.md")))
+        });
+        if self.project_instructions_target == target {
+            return;
+        }
+        self.project_instructions_target = target;
+        self.project_instructions_available = false;
+        self.project_instructions_request = None;
+        if self.project_instructions_target.is_none() {
+            self.close_project_instructions(window, cx);
+        } else if let Some(preview) = &mut self.project_instructions_preview {
+            preview.result = None;
+            preview.scroll = ScrollHandle::new();
+        }
+        self.request_project_instructions(cx);
+    }
+
+    fn request_project_instructions(&mut self, cx: &mut Context<Self>) {
+        let Some((_, path)) = &self.project_instructions_target else {
+            return;
+        };
+        let path = path.clone();
+        let preview = self.project_instructions_preview.is_some();
+        let read = cx.background_executor().spawn(async move {
+            if preview {
+                let result = read_project_instructions(&path);
+                (
+                    !matches!(result, ProjectInstructionsRead::Missing),
+                    Some(result),
+                )
+            } else {
+                (path.exists(), None)
+            }
+        });
+        // Replacing the foreground task cancels its update, so an earlier
+        // card's read can't commit after a scope change or a new request.
+        self.project_instructions_request = Some(cx.spawn(async move |this, cx| {
+            let (available, result) = read.await;
+            let _ = this.update(cx, |this, cx| {
+                this.project_instructions_request = None;
+                this.project_instructions_available = available;
+                if let Some(preview) = &mut this.project_instructions_preview {
+                    preview.result = result;
+                }
+                cx.notify();
+            });
+        }));
+    }
+
+    fn open_project_instructions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.refresh_project_instructions(window, cx);
+        if !self.project_instructions_available || self.project_instructions_preview.is_some() {
+            return;
+        }
+        self.permission_menu = None;
+        self.project_instructions_preview = Some(ProjectInstructionsPreview {
+            result: None,
+            scroll: ScrollHandle::new(),
+        });
+        window.focus(&self.control_focus["project-instructions-preview"]);
+        self.request_project_instructions(cx);
+        cx.notify();
+    }
+
+    fn close_project_instructions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.project_instructions_preview.take().is_none() {
+            return;
+        }
+        if self.project_instructions_available {
+            window.focus(&self.control_focus["project-instructions"]);
+        } else if self.control_focus["project-instructions-preview"].is_focused(window)
+            || self.control_focus["project-instructions-close"].is_focused(window)
+            || self.control_focus["project-instructions-cancel"].is_focused(window)
+        {
+            if let Some(terminal) = self.level_focus().and_then(|id| self.terminals.get(id)) {
+                window.focus(&terminal.read(cx).focus);
+            } else {
+                window.blur();
+            }
+        }
+        cx.notify();
+    }
+
+    fn project_instructions_overlay(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Stateful<Div>> {
+        let preview = self.project_instructions_preview.as_ref()?;
+        let (_, path) = self.project_instructions_target.as_ref()?;
+        let fallback = || SharedString::from("当前项目 / AGENTS.md");
+        let (path, content, error) = match &preview.result {
+            Some(ProjectInstructionsRead::Content(content)) => (
+                SharedString::from(path.display().to_string()),
+                content.clone(),
+                None,
+            ),
+            Some(ProjectInstructionsRead::Missing) => (
+                SharedString::from(path.display().to_string()),
+                SharedString::default(),
+                None,
+            ),
+            Some(ProjectInstructionsRead::Failed(error)) => {
+                (fallback(), SharedString::default(), Some(error.as_str()))
+            }
+            None => (fallback(), SharedString::default(), None),
+        };
+        let focus = &self.control_focus["project-instructions-preview"];
+        let body = if preview.result.is_some() {
+            let click_focus = focus.clone();
+            project_instructions::preview(content, focus, &preview.scroll, focus.is_focused(window))
+                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                    window.focus(&click_focus);
+                    cx.stop_propagation();
+                })
+        } else {
+            project_instructions::loading().track_focus(focus)
+        };
+        let close = self.button(
+            project_instructions::close_button()
+                .children(footer_bounds_probe("instructions-close")),
+            &self.control_focus["project-instructions-close"],
+            Self::close_project_instructions,
+            cx,
+        );
+        let cancel = self.button(
+            project_instructions::cancel_button()
+                .children(footer_bounds_probe("instructions-cancel")),
+            &self.control_focus["project-instructions-cancel"],
+            Self::close_project_instructions,
+            cx,
+        );
+        let panel =
+            project_instructions::panel(window.viewport_size(), path, close, body, error, cancel)
+                .children(footer_bounds_probe("instructions-dialog"))
+                .on_any_mouse_down(|_, _, cx| cx.stop_propagation());
+        Some(project_instructions::overlay(panel).on_any_mouse_down(
+            cx.listener(|this, _, window, cx| this.close_project_instructions(window, cx)),
+        ))
+    }
+
+    fn project_instructions_key(
+        &mut self,
+        stroke: &Keystroke,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(preview) = &self.project_instructions_preview else {
+            return;
+        };
+        let controls = [
+            &self.control_focus["project-instructions-close"],
+            &self.control_focus["project-instructions-preview"],
+            &self.control_focus["project-instructions-cancel"],
+        ];
+        match stroke.key.as_str() {
+            "escape" => self.close_project_instructions(window, cx),
+            "tab"
+                if !stroke.modifiers.alt
+                    && !stroke.modifiers.control
+                    && !stroke.modifiers.platform =>
+            {
+                let current = controls.iter().position(|focus| focus.is_focused(window));
+                let next = match (current, stroke.modifiers.shift) {
+                    (Some(i), true) => (i + controls.len() - 1) % controls.len(),
+                    (Some(i), false) => (i + 1) % controls.len(),
+                    (None, true) => controls.len() - 1,
+                    (None, false) => 0,
+                };
+                window.focus(controls[next]);
+                self.keyboard_focus = true;
+                cx.notify();
+            }
+            key if controls[1].is_focused(window) && !stroke.modifiers.modified() => {
+                let scroll = &preview.scroll;
+                let mut offset = scroll.offset();
+                let page = scroll.bounds().size.height;
+                offset.y = match key {
+                    "up" => offset.y + px(20.8),
+                    "down" => offset.y - px(20.8),
+                    "pageup" => offset.y + page,
+                    "pagedown" => offset.y - page,
+                    "home" => px(0.),
+                    "end" => -scroll.max_offset().height,
+                    _ => return,
+                }
+                .clamp(-scroll.max_offset().height, px(0.));
+                scroll.set_offset(offset);
+                cx.notify();
+            }
+            _ => return,
+        }
+        cx.stop_propagation();
+    }
+
     fn footer_fields(&self) -> Option<FooterFields<'_>> {
         let node = self.graph_node(self.level_focus()?)?;
         let mode = node["currentMode"].as_str()?;
@@ -8767,6 +8993,10 @@ impl Workspace {
             return;
         }
         let mods = stroke.modifiers;
+        if self.project_instructions_preview.is_some() {
+            self.project_instructions_key(stroke, window, cx);
+            return;
+        }
         if stroke.key == "escape" && self.notification_open {
             self.close_notifications(cx);
             cx.stop_propagation();
@@ -12296,6 +12526,17 @@ impl Workspace {
             .whitespace_nowrap()
             .text_size(px(10.))
             .text_color(rgb(0x606572))
+            .when(self.project_instructions_available, |status| {
+                status.child(
+                    self.button(
+                        project_instructions::entry(footer_text("instructions", "AGENTS.md"))
+                            .children(footer_bounds_probe("instructions")),
+                        &self.control_focus["project-instructions"],
+                        Self::open_project_instructions,
+                        cx,
+                    ),
+                )
+            })
             .child(primary)
             .when(fields.is_some(), |status| {
                 status.child(optional).child(fixed)
@@ -12552,6 +12793,7 @@ impl Render for Workspace {
             return workspace_frame(div().id("startup-neutral").size_full().bg(rgb(0xf7f8fa)));
         }
         let level_focus = self.level_focus().map(str::to_owned);
+        self.refresh_project_instructions(window, cx);
         let active_level_focus = self.active_level_focus().map(str::to_owned);
         let viewport_width = f64::from(f32::from(window.viewport_size().width)) - 260.;
         let layout = CarouselLayout::for_viewport(viewport_width);
@@ -13238,7 +13480,7 @@ impl Render for Workspace {
                     {
                         return;
                     }
-                    let _ = view.update(cx, |this, cx| { if this.dialog.is_none() && this.hidden_tabs.is_none() { this.scroll_carousel(event, window, cx); } });
+                    let _ = view.update(cx, |this, cx| { if this.dialog.is_none() && this.hidden_tabs.is_none() && this.project_instructions_preview.is_none() { this.scroll_carousel(event, window, cx); } });
                 });
                 if direction == 0 {
                     return;
@@ -13430,8 +13672,41 @@ impl Render for Workspace {
                     .map(fork_readiness_toast),
             )
             .children(window_overlay)
+            .children(self.project_instructions_overlay(window, cx))
             .children(permission_toast);
         workspace_frame(root)
+    }
+}
+
+fn read_project_instructions(path: &std::path::Path) -> ProjectInstructionsRead {
+    use std::io::{self, Read as _};
+
+    const LIMIT: usize = 2 * 1024 * 1024;
+    let too_large = || io::Error::other("instruction file exceeds the 2 MB editor limit");
+    let read = || -> io::Result<SharedString> {
+        // A directory or special file can exist at the expected path, but
+        // only a regular file can supply a preview.
+        let metadata = std::fs::metadata(path)?;
+        if !metadata.is_file() {
+            return Err(io::Error::other("AGENTS.md 不是普通文件"));
+        }
+        if metadata.len() > LIMIT as u64 {
+            return Err(too_large());
+        }
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)?
+            .take(LIMIT as u64 + 1)
+            .read_to_end(&mut bytes)?;
+        let content = String::from_utf8_lossy(&bytes);
+        if content.len() > LIMIT {
+            return Err(too_large());
+        }
+        Ok(content.into_owned().into())
+    };
+    match read() {
+        Ok(content) => ProjectInstructionsRead::Content(content),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => ProjectInstructionsRead::Missing,
+        Err(error) => ProjectInstructionsRead::Failed(format!("读取失败：{error}")),
     }
 }
 
