@@ -157,7 +157,7 @@ mod workspace {
         }
 
         pub(super) fn recovery_selected(&self) -> bool {
-            self.database_recovery.is_some()
+            self.database_recovery.is_some() || self.invalid_recovery_marker
         }
 
         pub(super) fn workspaces_ready(&self) -> bool {
@@ -218,7 +218,7 @@ mod workspace {
 
 #[cfg(all(target_os = "macos", debug_assertions))]
 mod probe {
-    use std::{cell::RefCell, sync::Arc};
+    use std::{cell::RefCell, path::Path, sync::Arc, time::Duration};
 
     use gpui::*;
     use matou_native_core::{
@@ -235,7 +235,10 @@ mod probe {
         self, Command, ConnectionPhase, DatabaseRecoveryAction, DatabaseRecoveryDetails,
         DatabaseRecoveryResult, Event, LaunchOptions, ReadOnlyNavigation,
     };
-    use crate::workspace::{Workspace, database_recovery_page::PageAction};
+    use crate::workspace::{
+        Workspace,
+        database_recovery_page::{PageAction, probe_draw},
+    };
 
     thread_local! {
         pub static LABELS: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
@@ -264,23 +267,167 @@ mod probe {
         );
     }
 
+    fn expect_root(
+        window: WindowHandle<Workspace>,
+        cx: &mut AsyncApp,
+        expected: &'static str,
+    ) -> Vec<String> {
+        let (labels, frame) = probe_draw(|| draw(window, cx, expected == "database-recovery-page"));
+        assert_eq!(frame.root, Some(ElementId::from(expected)));
+        labels
+    }
+
+    fn near(actual: Pixels, expected: f32) {
+        assert!(
+            (f32::from(actual) - expected).abs() <= 1.0,
+            "expected {expected} pt, got {actual:?}",
+        );
+    }
+
+    fn hidden_window(
+        cx: &mut AsyncApp,
+        commands: runtime_bridge::RuntimeCommands,
+        incoming: async_channel::Receiver<runtime_bridge::BridgeEvent>,
+        viewport: Size<Pixels>,
+    ) -> WindowHandle<Workspace> {
+        cx.open_window(
+            WindowOptions {
+                show: false,
+                focus: false,
+                window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                    point(px(0.), px(0.)),
+                    viewport,
+                ))),
+                titlebar: Some(TitlebarOptions {
+                    appears_transparent: true,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            |window, cx| cx.new(|cx| Workspace::new(commands, incoming, window, cx)),
+        )
+        .unwrap()
+    }
+
+    async fn verify_invalid_marker(cx: &mut AsyncApp, scratch: &Path) {
+        let root = scratch.join("m");
+        let data = root.join("d");
+        let home = root.join("home");
+        let workspace = scratch.join("workspace");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir(&home).unwrap();
+        let database = data.join("matou.sqlite");
+        let good_database = std::fs::read(scratch.join("data/matou.sqlite")).unwrap();
+        std::fs::write(&database, &good_database).unwrap();
+        let marker = data.join("matou.sqlite.recovery.json");
+        std::fs::write(&marker, b"{").unwrap();
+
+        let executable = std::env::current_exe().unwrap();
+        let binary = executable
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("matou-native-runtime");
+        let mut bridge = runtime_bridge::RuntimeBridge::start_with_binary(
+            LaunchOptions {
+                data_root: data.clone(),
+                workspace,
+                shell_home: home,
+                shell: "/bin/zsh".into(),
+            },
+            &binary,
+        )
+        .unwrap();
+        let commands = bridge.commands.clone();
+        let window = hidden_window(
+            cx,
+            commands.clone(),
+            bridge.events.clone(),
+            size(px(1200.), px(780.)),
+        );
+        let mut first_error_generation = None;
+        for _ in 0..200 {
+            if window
+                .update(cx, |view, _, _| view.recovery_selected())
+                .unwrap()
+            {
+                let generation = commands.connection().0;
+                expect_root(window, cx, "database-recovery-page");
+                let (labels, snapshot) = probe_draw(|| draw(window, cx, true));
+                has(
+                    &labels,
+                    "数据库恢复记录无效。当前无法验证恢复状态，暂不能恢复备份、导出恢复资料或创建空数据库。",
+                );
+                has(&labels, "Matou 已保留原数据库和恢复记录，会自动重新检查。");
+                has(&labels, "重新检查数据库");
+                has(&labels, "导出恢复资料");
+                has(&labels, "创建全新空数据库");
+                has(&labels, "恢复所选备份");
+                assert_eq!(snapshot.buttons.len(), 4);
+                assert!(snapshot.buttons.values().all(|(enabled, _)| !enabled));
+                let first = *first_error_generation.get_or_insert(generation);
+                if generation > first {
+                    break;
+                }
+            }
+            cx.background_executor()
+                .timer(Duration::from_millis(25))
+                .await;
+        }
+        let first = first_error_generation.expect("invalid marker did not reach the error page");
+        assert!(
+            commands.connection().0 > first,
+            "automatic retry did not start"
+        );
+        assert_eq!(std::fs::read(&marker).unwrap(), b"{");
+        assert_eq!(std::fs::read(&database).unwrap(), good_database);
+        assert!(!data.join("recovery-evidence").exists());
+        assert!(std::fs::read_dir(&data).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains(".corrupt-")
+        }));
+        let preserved = root.join("invalid-marker.fixture");
+        std::fs::rename(&marker, &preserved).unwrap();
+        for _ in 0..400 {
+            if window
+                .update(cx, |view, _, _| view.workspaces_ready())
+                .unwrap()
+            {
+                break;
+            }
+            cx.background_executor()
+                .timer(Duration::from_millis(25))
+                .await;
+        }
+        assert!(
+            window
+                .update(cx, |view, _, _| view.workspaces_ready())
+                .unwrap()
+        );
+        expect_root(window, cx, "workspace-root");
+        draw(window, cx, false);
+        assert_eq!(std::fs::read(preserved).unwrap(), b"{");
+        bridge.shutdown().unwrap();
+        println!(
+            "hidden invalid marker: error visible across runtime generations, input bytes intact, automatic retry reached workspace after fixture repair"
+        );
+    }
+
     async fn verify(cx: &mut AsyncApp) {
         let (commands, sink) = runtime_bridge::probe_channel();
         let (_event_sender, incoming) = async_channel::unbounded();
-        let window = cx
-            .open_window(
-                WindowOptions {
-                    show: false,
-                    focus: false,
-                    window_bounds: Some(WindowBounds::Windowed(Bounds::new(
-                        point(px(0.), px(0.)),
-                        size(px(460.), px(430.)),
-                    ))),
-                    ..Default::default()
-                },
-                |window, cx| cx.new(|cx| Workspace::new(commands, incoming, window, cx)),
-            )
+        sink.starting();
+        let window = hidden_window(cx, commands, incoming, size(px(1200.), px(780.)));
+        window
+            .update(cx, |_, window, _| {
+                assert_eq!(window.viewport_size(), size(px(1200.), px(780.)));
+            })
             .unwrap();
+        assert!(expect_root(window, cx, "startup-neutral").is_empty());
 
         let mut details = DatabaseRecoveryDetails {
             recovery_id: String::new(),
@@ -309,6 +456,30 @@ mod probe {
                     })
                     .unwrap();
             };
+
+        details.recovery_id = "probe-first-frame".into();
+        synthetic_recovery(cx, &details, 1);
+        expect_root(window, cx, "database-recovery-page");
+        let (labels, snapshot) = probe_draw(|| draw(window, cx, true));
+        has(&labels, "数据库需要恢复");
+        let card = snapshot.bounds["recovery-card"][0];
+        let top = card.origin.y + px(1.);
+        let bottom = card.origin.y + card.size.height - px(1.);
+        println!("hidden viewport 1200×780 pt, card {card:?}, white interior y={top:?}–{bottom:?}");
+        near(card.origin.x, 240.);
+        near(card.size.width, 720.);
+        near(top, 183.);
+        near(bottom, 597.);
+        near(card.center().y, 390.);
+        let (enabled, style) = snapshot.buttons["database-recovery-restore"];
+        assert!(!enabled);
+        println!("hidden disabled restore: {style:?}");
+        assert_eq!(style.font_weight, FontWeight::NORMAL);
+        assert_eq!(style.border_width, 1.);
+        assert_eq!(style.border, Some(0x9ebefb));
+        assert_eq!(style.background, style.border);
+        assert_eq!(style.text, 0xffffff);
+        println!("hidden recovery startup roots: startup-neutral -> database-recovery-page");
 
         for (index, (reason, title, description)) in [
             (DatabaseRecoveryReason::Ownership, "数据库占用状态需要处理", "数据库占用记录或接管状态异常，原数据库仍保留在原位置。处理前不会将其当作损坏文件移动。"),
@@ -345,7 +516,15 @@ mod probe {
             retryable: true,
         });
         synthetic_recovery(cx, &details, 1);
-        let labels = draw(window, cx, true);
+        let (labels, snapshot) = probe_draw(|| draw(window, cx, true));
+        let (enabled, style) = snapshot.buttons["database-recovery-restore"];
+        assert!(enabled);
+        println!("hidden enabled restore: {style:?}");
+        assert_eq!(style.font_weight, FontWeight::NORMAL);
+        assert_eq!(style.border_width, 1.);
+        assert_eq!(style.border, Some(0x3478f6));
+        assert_eq!(style.background, style.border);
+        assert_eq!(style.text, 0xffffff);
         has(&labels, "7 份");
         has(&labels, "备份读取警告");
         let backups: Vec<_> = labels
@@ -470,11 +649,29 @@ mod probe {
             })
             .unwrap();
         assert!(sink.try_recv().is_err(), "modal blocks underlying actions");
-        let labels = draw(window, cx, true);
+        let (labels, snapshot) = probe_draw(|| draw(window, cx, true));
         has(&labels, "确认创建全新空数据库？");
         has(&labels, "返回");
         has(&labels, "确认创建空数据库");
         has(&labels, "备份校验失败");
+        let [back, confirm] = snapshot.bounds["confirmation-buttons"].as_slice() else {
+            panic!("expected two confirmation button bounds");
+        };
+        println!("hidden confirmation buttons: back {back:?}, confirm {confirm:?}");
+        near(back.size.width, 48.);
+        near(confirm.size.width, 144.);
+        near(back.size.height, 28.);
+        near(confirm.size.height, 28.);
+        near(confirm.origin.x - back.origin.x - back.size.width, 10.);
+        for id in [
+            "database-recovery-dialog-back",
+            "database-recovery-dialog-confirm",
+        ] {
+            let (enabled, style) = snapshot.buttons[id];
+            assert!(enabled);
+            assert_eq!(style.radius, 0.);
+            assert_eq!(style.border_width, 1.);
+        }
         window
             .update(cx, |view, window, cx| {
                 view.assert_modal_tab_order(window);
@@ -621,10 +818,9 @@ mod probe {
 
         // Use the real writable startup projection. A bridge/connection Ready
         // announcement alone must leave the current recovery page selected.
-        let scratch = std::env::current_dir()
-            .unwrap()
-            .join(".tmp/g-storage-recovery")
-            .join(format!("gpui-{}", uuid::Uuid::new_v4()));
+        // Keep the fixture path short enough for the runtime's Unix socket.
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        let scratch = std::env::current_dir().unwrap().join(".tmp").join(&id[..8]);
         let mut host = RuntimeHost::start(LaunchOptions {
             data_root: scratch.join("data"),
             workspace: scratch.join("workspace"),
@@ -665,6 +861,41 @@ mod probe {
             graph: graph.clone(),
             geometry: geometry.clone(),
         };
+        let (normal_commands, normal_sink) = runtime_bridge::probe_channel();
+        let (_normal_events, normal_incoming) = async_channel::unbounded();
+        normal_sink.starting();
+        let normal = hidden_window(
+            cx,
+            normal_commands,
+            normal_incoming,
+            size(px(1200.), px(780.)),
+        );
+        assert!(expect_root(normal, cx, "startup-neutral").is_empty());
+        normal_sink.generation(1);
+        normal
+            .update(cx, |view, window, cx| {
+                view.change(1, ConnectionPhase::Ready, window, cx);
+            })
+            .unwrap();
+        assert!(expect_root(normal, cx, "startup-neutral").is_empty());
+        let normal_projection = Event::Ready {
+            hierarchy: hierarchy.clone(),
+            scenes: scenes.clone(),
+            graph: graph.clone(),
+            geometry: geometry.clone(),
+        };
+        normal
+            .update(cx, |view, window, cx| {
+                view.receive(1, normal_projection, window, cx);
+                assert!(view.workspaces_ready());
+            })
+            .unwrap();
+        expect_root(normal, cx, "workspace-root");
+        draw(normal, cx, false);
+        println!(
+            "hidden normal startup roots: startup-neutral -> startup-neutral at bridge Ready -> workspace-root at projection"
+        );
+
         sink.generation(2);
         window
             .update(cx, |view, window, cx| {
@@ -937,6 +1168,7 @@ mod probe {
             "hidden verified read-only banner, disabled controls, paging, export progress/success/failure and writable handoff"
         );
         host.shutdown().unwrap();
+        verify_invalid_marker(cx, &scratch).await;
         std::fs::remove_dir_all(scratch).unwrap();
     }
 
