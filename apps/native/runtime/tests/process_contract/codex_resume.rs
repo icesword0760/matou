@@ -571,3 +571,441 @@ fn codex_resume_no_binding_stays_retryable_across_restarts() -> Result<()> {
     );
     shutdown(child)
 }
+
+fn set_permission(child: &mut RuntimeChild, mode: &str) -> Result<()> {
+    child.send(Command::SetProviderPermissionMode {
+        session_id: child.session.clone(),
+        mode: mode.to_owned(),
+    })
+}
+
+fn permission_receipt(graph: &Value, mode: &str) -> Option<Value> {
+    graph["providerPermissionModeResults"]
+        .as_array()?
+        .iter()
+        .find(|receipt| receipt["permissionMode"] == mode)
+        .cloned()
+}
+
+fn wait_permission(child: &mut RuntimeChild, mode: &str) -> Result<(Value, Value)> {
+    let mut receipt = Value::Null;
+    let graph = graph(child, "permission receipt", |graph, _| {
+        if let Some(found) = permission_receipt(graph, mode) {
+            receipt = found;
+            return true;
+        }
+        false
+    })?;
+    assert_eq!(receipt["sessionId"], child.session);
+    Ok((graph, receipt))
+}
+
+fn assert_permission_argv(home: &Path, expected: &[&str]) -> Result<()> {
+    let raw = fs::read_to_string(home.join("argv"))?;
+    let argv: Vec<_> = raw.split_terminator('\0').collect();
+    let hook = argv
+        .iter()
+        .position(|arg| arg.starts_with("hooks={ "))
+        .context("Codex run hooks")?;
+    assert_eq!(&argv[..2], ["-c", "check_for_update_on_startup=false"]);
+    assert_eq!(&argv[2..hook - 1], expected);
+    assert_eq!(
+        &argv[hook + 1..],
+        ["--dangerously-bypass-hook-trust", "resume", UUID]
+    );
+    assert_eq!(
+        fs::read_to_string(home.join("environment"))?.lines().nth(2),
+        Some("https://api.openai.com/v1")
+    );
+    Ok(())
+}
+
+#[test]
+fn codex_permission_switches_keep_card_uuid_and_retire_each_replaced_run() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let (mut child, home, rollout, db) = establish(root.path())?;
+    let session = child.session.clone();
+    let binding = codex_binding(&db, &session)?.unwrap();
+    let mut old = list_runs(&db, &session)?.pop().unwrap();
+    let mut old_url = current_hook_url(&home)?;
+    let config_path = home.join("config.toml");
+    fs::write(
+        &config_path,
+        "approval_policy='never'\nsandbox_mode='danger-full-access'\n",
+    )?;
+    for invalid in ["auto", "unknown"] {
+        set_permission(&mut child, invalid)?;
+        let (_, receipt) = wait_permission(&mut child, invalid)?;
+        assert_eq!(receipt["error"], "invalid permission mode");
+    }
+    set_permission(&mut child, "bypassPermissions")?;
+    assert!(
+        wait_permission(&mut child, "bypassPermissions")?
+            .1
+            .get("error")
+            .is_none()
+    );
+    assert_eq!(list_runs(&db, &session)?.last().unwrap().id, old.id);
+    println!("unsupported Auto and unknown modes rejected; current mode is a no-op");
+
+    for (mode, flags) in [
+        (
+            "acceptEdits",
+            [
+                "--ask-for-approval",
+                "on-request",
+                "--sandbox",
+                "workspace-write",
+            ]
+            .as_slice(),
+        ),
+        (
+            "plan",
+            &["--ask-for-approval", "on-request", "--sandbox", "read-only"],
+        ),
+        (
+            "bypassPermissions",
+            &["--dangerously-bypass-approvals-and-sandbox"],
+        ),
+        (
+            "default",
+            &[
+                "--ask-for-approval",
+                "untrusted",
+                "--sandbox",
+                "danger-full-access",
+            ],
+        ),
+    ] {
+        if mode == "default" {
+            fs::write(
+                &config_path,
+                "approval_policy='untrusted'\nsandbox_mode='danger-full-access'\n[profiles.test]\nsandbox_mode='read-only'\n",
+            )?;
+        }
+        let config = fs::read(&config_path)?;
+        set_permission(&mut child, mode)?;
+        set_permission(&mut child, mode)?;
+        graph(&mut child, "stopping or restoring", |graph, card| {
+            assert!(
+                permission_receipt(graph, mode).is_none(),
+                "confirmed before hook"
+            );
+            card["providerRestoreState"] == "restoring" && card["workStatus"] == "starting"
+        })?;
+        child.frame(|_, screen, _| screen_has_line(screen, "FIXTURE CODEX RESUME"))?;
+        let cwd = fs::read_to_string(home.join("cwd"))?;
+        assert_eq!(
+            Path::new(cwd.trim()).canonicalize()?,
+            child.workspace.canonicalize()?
+        );
+        let environment = fs::read_to_string(home.join("environment"))?;
+        assert_eq!(
+            Path::new(environment.lines().next().unwrap()).canonicalize()?,
+            home.canonicalize()?
+        );
+        assert_eq!(environment.lines().nth(1), Some("xterm-256color"));
+        assert_permission_argv(&home, flags)?;
+        assert_eq!(fs::read(&config_path)?, config);
+        let new = replacement(&db, &session, &old)?;
+        let current_url = current_hook_url(&home)?;
+        assert_ne!(old_url, current_url);
+        assert!(matches!(
+            post_hook(&old_url, started(UUID, &rollout))?,
+            200 | 404
+        ));
+        assert_eq!(
+            codex_binding(&db, &session)?.unwrap().restore_state,
+            "restoring"
+        );
+        assert_eq!(post_hook(&current_url, started(UUID, &rollout))?, 200);
+        let (graph, receipt) = wait_permission(&mut child, mode)?;
+        assert!(receipt.get("error").is_none(), "{receipt}");
+        let card = node(&graph, &session).unwrap();
+        assert_eq!(card["permissionMode"], mode);
+        assert_eq!(card["workStatus"], "idle");
+        assert_eq!(card["providerRestoreState"], "none");
+        let confirmed = graph["providerIdentityEvents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|event| event["result"] == "confirmed" && event["runId"] == new.id)
+            .unwrap();
+        assert_eq!(confirmed["bindingId"], binding.id);
+        assert_eq!(confirmed["providerSessionId"], UUID);
+        assert_eq!(codex_binding(&db, &session)?.unwrap().id, binding.id);
+        println!(
+            "switch {mode}: {flags:?}; same card/scene/binding/UUID, run {} → {}, PID {:?} → {:?}; retired hook cannot confirm",
+            old.ordinal, new.ordinal, old.pid, new.pid
+        );
+        if mode == "default" {
+            let deadline = Instant::now() + TIMEOUT;
+            while post_hook(&old_url, started(UUID, &rollout))? != 404 {
+                ensure!(Instant::now() < deadline, "retired hook still registered");
+                thread::sleep(Duration::from_millis(25));
+            }
+            println!("retired hook endpoint returned HTTP 404 after its existing grace period");
+        }
+        old = new;
+        old_url = current_url;
+    }
+    assert_eq!(list_runs(&db, &session)?.len(), 6);
+    for (event, expected) in [("UserPromptSubmit", "running"), ("Stop", "idle")] {
+        emit(
+            &mut child,
+            &home,
+            expected,
+            json!({
+                "hook_event_name": event, "session_id": UUID, "transcript_path": rollout,
+                "turn_id": "turn-after-switch", "result": "Completed after permission switch",
+            }),
+        )?;
+        graph(&mut child, expected, |graph, card| {
+            card["workStatus"] == expected
+                && (event != "Stop"
+                    || graph["agentNotifications"][0]["body"]
+                        == "Completed after permission switch")
+        })?;
+    }
+    println!(
+        "replacement's actual command hook updated card running → idle and published completion notification"
+    );
+    shutdown(child)
+}
+
+#[test]
+fn codex_permission_failed_switch_stays_on_card_and_retries_target_mode() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let (mut child, home, rollout, db) = establish(root.path())?;
+    let session = child.session.clone();
+    let binding = codex_binding(&db, &session)?.unwrap();
+    let stub = root.path().join("fixture Codex");
+    let held_stub = root.path().join("held fixture Codex");
+    for (mode, flags, reason) in [
+        (
+            "plan",
+            ["--ask-for-approval", "on-request", "--sandbox", "read-only"],
+            "provider resume exited with code 23",
+        ),
+        (
+            "acceptEdits",
+            [
+                "--ask-for-approval",
+                "on-request",
+                "--sandbox",
+                "workspace-write",
+            ],
+            "provider process could not start",
+        ),
+    ] {
+        let previous = list_runs(&db, &session)?.pop().unwrap();
+        if mode == "plan" {
+            fs::write(home.join("early-exit"), "")?;
+        } else {
+            fs::rename(&stub, &held_stub)?;
+        }
+        set_permission(&mut child, mode)?;
+        let mut receipt = false;
+        let mut notice = false;
+        graph(&mut child, "permission failure", |graph, card| {
+            if let Some(result) = permission_receipt(graph, mode) {
+                assert!(result["error"].is_string(), "{result}");
+                receipt = true;
+            }
+            notice |= graph["agentNotifications"]
+                .as_array()
+                .is_some_and(|events| {
+                    events.iter().any(|event| {
+                        event["operation"] == "upsert"
+                            && event["title"] == "Codex 恢复失败"
+                            && event["body"]
+                                .as_str()
+                                .is_some_and(|body| body.contains(reason))
+                    })
+                });
+            receipt
+                && notice
+                && card["workStatus"] == "error"
+                && card["providerRestoreState"] == "failed"
+                && card["providerRestoreError"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains(reason)
+        })?;
+        assert_shell_gone(previous.pid.unwrap() as u32)?;
+        let failed = list_runs(&db, &session)?.pop().unwrap();
+        if mode == "plan" {
+            assert_eq!(failed.exit_code, Some(23));
+            assert_eq!(failed.ordinal, previous.ordinal + 1);
+            assert_shell_gone(failed.pid.unwrap() as u32)?;
+            fs::remove_file(home.join("early-exit"))?;
+        } else {
+            assert_eq!(failed.id, previous.id);
+            fs::rename(&held_stub, &stub)?;
+        }
+        let persisted = codex_binding(&db, &session)?.unwrap();
+        assert_eq!(
+            (&persisted.id, persisted.provider_session_id.as_str()),
+            (&binding.id, UUID)
+        );
+        assert_eq!(persisted.metadata["permissionMode"], mode);
+        assert!(!persisted.resumable);
+        child.send(Command::RetryProviderRestore {
+            session_id: session.clone(),
+        })?;
+        graph(&mut child, "retry dismissed the failure", |graph, card| {
+            card["providerRestoreState"] == "restoring"
+                && graph["agentNotifications"][0]["operation"] == "dismiss"
+        })?;
+        first_screen(&mut child, &home, Some(UUID), false)?;
+        assert_permission_argv(&home, &flags)?;
+        let retried = replacement(&db, &session, &failed)?;
+        emit(&mut child, &home, "retry-start", started(UUID, &rollout))?;
+        confirmed(&mut child, UUID)?;
+        let persisted = codex_binding(&db, &session)?.unwrap();
+        assert_eq!(persisted.id, binding.id);
+        assert_eq!(persisted.metadata["permissionMode"], mode);
+        assert_eq!(persisted.restore_state, "none");
+        println!(
+            "failed {mode}: {reason}; failure card and notification; retry used {flags:?} in run {} and confirmed the same binding/UUID",
+            retried.ordinal
+        );
+    }
+    shutdown(child)
+}
+
+#[test]
+fn codex_permission_invalid_defaults_and_stored_mode_emit_safe_launch_warnings() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let (mut child, home, rollout, db) = establish(root.path())?;
+    let session = child.session.clone();
+    let config = home.join("config.toml");
+    let invalid = "approval_policy='untrusted'\nsandbox_mode='private-fixture-value'\n";
+    fs::write(&config, invalid)?;
+    set_permission(&mut child, "default")?;
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        if let Event::Diagnostic(message) = child.event(deadline, true)? {
+            assert_eq!(
+                message,
+                "Codex 权限配置无法读取或包含无效值，受影响的设置已使用默认值。"
+            );
+            break;
+        }
+    }
+    child.frame(|_, screen, _| screen_has_line(screen, "FIXTURE CODEX RESUME"))?;
+    assert_permission_argv(
+        &home,
+        &[
+            "--ask-for-approval",
+            "untrusted",
+            "--sandbox",
+            "workspace-write",
+        ],
+    )?;
+    assert_eq!(fs::read_to_string(&config)?, invalid);
+    assert_eq!(
+        post_hook(&current_hook_url(&home)?, started(UUID, &rollout))?,
+        200
+    );
+    assert!(
+        wait_permission(&mut child, "default")?
+            .1
+            .get("error")
+            .is_none()
+    );
+    println!(
+        "invalid root sandbox left the valid approval in place and published the safe warning"
+    );
+
+    fs::write(&config, "[profiles.test]\napproval_policy='never'\n")?;
+    assert_eq!(db.execute(
+        "UPDATE provider_bindings SET metadata_json=json_set(metadata_json, '$.permissionMode', 'unknown-private-mode')
+         WHERE session_id=? AND provider='codex'",
+        [&session],
+    )?, 1);
+    restart(&mut child)?;
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        if let Event::Diagnostic(message) = child.event(deadline, true)? {
+            assert_eq!(message, "Codex 权限模式无效，已回退到 Default。");
+            break;
+        }
+    }
+    first_screen(&mut child, &home, Some(UUID), false)?;
+    assert_permission_argv(
+        &home,
+        &[
+            "--ask-for-approval",
+            "on-request",
+            "--sandbox",
+            "workspace-write",
+        ],
+    )?;
+    assert_eq!(
+        post_hook(&current_hook_url(&home)?, started(UUID, &rollout))?,
+        200
+    );
+    confirmed(&mut child, UUID)?;
+    assert_eq!(
+        codex_binding(&db, &session)?.unwrap().metadata["permissionMode"],
+        "default"
+    );
+    println!(
+        "unknown stored mode fell back to Default, gave a generic warning and confirmation canonicalized the binding"
+    );
+    shutdown(child)
+}
+
+#[test]
+fn codex_permission_requires_session_start_and_times_out_to_retryable_failure() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let (mut child, home, rollout, db) = establish(root.path())?;
+    let session = child.session.clone();
+    let binding = codex_binding(&db, &session)?.unwrap();
+    set_permission(&mut child, "plan")?;
+    first_screen(&mut child, &home, Some(UUID), false)?;
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let reason = "provider resume identity confirmation timed out";
+    loop {
+        match child.event(deadline, true)? {
+            Event::Recovery {
+                state: matou_native_runtime::host::RecoveryState::Ready,
+                ..
+            } => {
+                bail!("permission switch became ready without a matching hook");
+            }
+            Event::Graph(graph) if permission_receipt(&graph, "plan").is_some() => {
+                assert_eq!(permission_receipt(&graph, "plan").unwrap()["error"], reason);
+                assert_eq!(
+                    node(&graph, &session).unwrap()["providerRestoreState"],
+                    "failed"
+                );
+                assert_eq!(graph["agentNotifications"][0]["body"], reason);
+                break;
+            }
+            _ => {}
+        }
+    }
+    let failed = list_runs(&db, &session)?.pop().unwrap();
+    assert_shell_gone(failed.pid.unwrap() as u32)?;
+    assert_eq!(codex_binding(&db, &session)?.unwrap().id, binding.id);
+    child.send(Command::RetryProviderRestore {
+        session_id: session.clone(),
+    })?;
+    first_screen(&mut child, &home, Some(UUID), false)?;
+    assert_permission_argv(
+        &home,
+        &["--ask-for-approval", "on-request", "--sandbox", "read-only"],
+    )?;
+    assert_eq!(
+        post_hook(&current_hook_url(&home)?, started(UUID, &rollout))?,
+        200
+    );
+    confirmed(&mut child, UUID)?;
+    assert_eq!(codex_binding(&db, &session)?.unwrap().id, binding.id);
+    println!(
+        "no SessionStart: confirmation timed out and the same card failed; Plan retry succeeded"
+    );
+    shutdown(child)
+}

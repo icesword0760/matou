@@ -18,6 +18,7 @@ use std::{
 use crate::{
     SessionEvent, SessionOptions, claude_model_catalog,
     codex_launch::{self, CodexLaunch},
+    codex_permissions,
     codex_resume::{self, Resume as CodexResume},
     history_worker::{HistoryReply, HistoryRequest, HistoryWorker},
     host_control::ControlServer,
@@ -59,7 +60,7 @@ use matou_native_core::{
     },
     pty::{LaunchProfile, ShellLaunch},
     sessions::{
-        ClaudeBinding, ClaudeCatalogLoad, ClaudeRestore, ClaudeRoleLaunchPreferences,
+        ClaudeCatalogLoad, ClaudeRestore, ClaudeRoleLaunchPreferences, ProviderBinding,
         read_claude_role_launch_preferences, save_claude_model_preferences,
     },
     startup::{self, BootstrapResult, ReadOnlyReason, RecoveryError, RecoveryRequired},
@@ -3020,7 +3021,15 @@ fn run_writable(
                     )
                 }
                 Command::SetProviderPermissionMode { session_id, mode } => {
-                    if !CLAUDE_PERMISSION_MODES.contains(&mode.as_str()) {
+                    let codex = owner
+                        .session(&session_id)?
+                        .is_some_and(|session| session.kind == "codex");
+                    let modes: &[&str] = if codex {
+                        &codex_permissions::MODES
+                    } else {
+                        &CLAUDE_PERMISSION_MODES
+                    };
+                    if !modes.contains(&mode.as_str()) {
                         permission_results.push(permission_result(
                             &session_id,
                             &mode,
@@ -3049,16 +3058,22 @@ fn run_writable(
                         );
                         let binding = owner.permission_binding(&session_id)?;
                         if binding.as_ref().is_some_and(|binding| {
-                            binding.metadata["permissionMode"]
-                                .as_str()
-                                .filter(|mode| CLAUDE_PERMISSION_MODES.contains(mode))
-                                .unwrap_or("default")
-                                == mode
+                            let permission = binding.metadata.get("permissionMode");
+                            let current = if codex {
+                                codex_permissions::selected_mode(permission)
+                            } else {
+                                permission
+                                    .and_then(Value::as_str)
+                                    .filter(|mode| CLAUDE_PERMISSION_MODES.contains(mode))
+                                    .unwrap_or("default")
+                            };
+                            current == mode
                         }) {
                             return Ok(None);
                         }
                         let stopped = owner.stop_for_permission_change(&session_id)?;
                         Ok(Some(PermissionChange {
+                            codex,
                             mode: mode.clone(),
                             binding,
                             phase: PermissionPhase::Stopping(stopped),
@@ -3980,7 +3995,18 @@ fn run_writable(
                     views.remove(&id);
                     awaiting_ui.remove(&id);
                     let message = format!("{error:#}");
-                    let failure = report_launch_failure(send, &id, false, message.clone())?;
+                    let failure = if change.codex {
+                        report_session_launch_failure(
+                            &mut owner,
+                            send,
+                            &id,
+                            true,
+                            false,
+                            message.clone(),
+                        )?
+                    } else {
+                        report_launch_failure(send, &id, false, message.clone())?
+                    };
                     failed_launches.insert(id.clone(), failure);
                     Some(message)
                 }
@@ -4459,8 +4485,9 @@ fn poll_promotion_result<T>(result: &Receiver<Result<T>>) -> Result<Option<T>> {
 }
 
 struct PermissionChange {
+    codex: bool,
     mode: String,
-    binding: Option<ClaudeBinding>,
+    binding: Option<ProviderBinding>,
     phase: PermissionPhase,
 }
 
@@ -4505,7 +4532,7 @@ impl PermissionChange {
                     }
                 }
                 if let Some(binding) = &self.binding {
-                    owner.write_claude_permission(
+                    owner.write_provider_permission(
                         session_id,
                         &binding.id,
                         Some(&json!(self.mode)),
@@ -4537,6 +4564,34 @@ impl PermissionChange {
                         return Err(error).context("prepare the AI Session permission respawn");
                     }
                 };
+                if let PreparedLaunch::Codex(plan, Some(mut resume)) = launch {
+                    ensure!(
+                        self.codex
+                            && plan.permission_mode == self.mode
+                            && self.binding.as_ref().is_some_and(|binding| {
+                                resume.binding_id == binding.id
+                                    && resume.provider_session_id == binding.provider_session_id
+                            }),
+                        "AI Session permission respawn lost its binding"
+                    );
+                    ensure!(
+                        owner.change_codex_restore(
+                            session_id,
+                            ClaudeRestore::Begin(&resume.binding_id)
+                        )?,
+                        "AI Session permission respawn lost its binding"
+                    );
+                    resume.permission_respawn = true;
+                    let run_id =
+                        owner.launch_codex(session_id, terminal, plan, Some(resume), false)?;
+                    self.phase = PermissionPhase::AwaitingIdentity {
+                        run_id,
+                        startup_until: None,
+                        consent_shown: false,
+                        outcome: None,
+                    };
+                    return Ok(PermissionProgress::Launched);
+                }
                 let PreparedLaunch::ClaudeCode {
                     launch: plan,
                     fork_source: None,
@@ -4579,6 +4634,14 @@ impl PermissionChange {
             } => {
                 if let Some(Err(error)) = outcome {
                     return Ok(PermissionProgress::RestoreFailed(std::mem::take(error)));
+                }
+                if self.codex {
+                    // Codex's owner settles the restore on the matching hook, exit or timeout.
+                    return Ok(if outcome.is_some() {
+                        PermissionProgress::Confirmed
+                    } else {
+                        PermissionProgress::Pending
+                    });
                 }
                 if let Some(until) = *startup_until {
                     if Instant::now() < until {
@@ -4635,7 +4698,8 @@ impl PermissionChange {
     }
 
     fn rollback_if_pending(&self, owner: &mut ShellOwner, session_id: &str) -> Result<()> {
-        if let Some(binding) = &self.binding
+        if !self.codex
+            && let Some(binding) = &self.binding
             && matches!(
                 self.phase,
                 PermissionPhase::Preparing(_)
@@ -4645,7 +4709,7 @@ impl PermissionChange {
                     }
             )
         {
-            owner.write_claude_permission(
+            owner.write_provider_permission(
                 session_id,
                 &binding.id,
                 binding.metadata.get("permissionMode"),
@@ -5294,7 +5358,11 @@ fn prepare_launch(
                     profile: LaunchProfile::Codex,
                     mode,
                 }) => Some(mode),
-                LaunchIntent::Start | LaunchIntent::FreshCodex => None,
+                LaunchIntent::Start
+                | LaunchIntent::FreshCodex
+                | LaunchIntent::PermissionRestart {
+                    fresh_mode: None, ..
+                } => None,
                 _ => bail!("unsupported Codex launch intent"),
             };
             let fresh = matches!(intent, LaunchIntent::FreshCodex);
@@ -5313,7 +5381,7 @@ fn prepare_launch(
                         codex_launch::prepare(
                             &data_root,
                             cwd,
-                            mode,
+                            Some(&json!(mode)),
                             env,
                             terminal.cols,
                             terminal.rows,
@@ -6002,6 +6070,7 @@ mod tests {
         );
         let (role_requests, requests) = mpsc::channel();
         let mut change = PermissionChange {
+            codex: false,
             mode: "plan".into(),
             binding: None,
             phase: PermissionPhase::Stopping(None),
