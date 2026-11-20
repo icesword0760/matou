@@ -43,12 +43,13 @@ use matou_native_core::{
     provider_config::{ProviderConfigLocale, ProviderConfigStore},
     provider_launch::{
         CLAUDE_PERMISSION_MODES, ClaudeLaunch, ClaudeRoleAssignments, prepare_claude_fork,
-        prepare_claude_launch, prepare_claude_permission_restart, prepare_new_claude_launch,
-        validate_claude_role_assignments, validate_cwd,
+        prepare_claude_launch, prepare_claude_permission_restart,
+        prepare_new_claude_launch_with_budget, validate_claude_role_assignments, validate_cwd,
     },
     pty::{LaunchProfile, ShellLaunch},
     sessions::{
-        ClaudeBinding, ClaudeCatalogLoad, ClaudeRestore, read_claude_role_assignments,
+        ClaudeBinding, ClaudeCatalogLoad, ClaudeRestore, ClaudeRoleLaunchPreferences,
+        read_claude_role_assignments, read_claude_role_launch_preferences,
         save_claude_role_assignments,
     },
     startup::{self, BootstrapResult},
@@ -564,7 +565,7 @@ struct LaunchRetry {
 enum RoleAssignmentsRequest {
     Get(u64),
     Set(u64, Value),
-    ForLaunch(Sender<ClaudeRoleAssignments>),
+    ForLaunch(Sender<ClaudeRoleLaunchPreferences>),
 }
 
 enum ProviderSettingsRequest {
@@ -906,7 +907,11 @@ fn run(
                         (id, save_role_assignments(&role_data_root, &value))
                     }
                     RoleAssignmentsRequest::ForLaunch(reply) => {
-                        let _ = reply.send(load_role_assignments(&role_data_root));
+                        let preferences =
+                            startup::open_read_only(&role_data_root.join("matou.sqlite"))
+                                .map(|db| read_claude_role_launch_preferences(&db))
+                                .unwrap_or_default();
+                        let _ = reply.send(preferences);
                         continue;
                     }
                 };
@@ -3941,7 +3946,7 @@ fn prepare_launch(
                     .filter(|binding| binding.resumable)
                     .map(|binding| binding.provider_session_id)
             };
-            let assignments = if fork.is_none()
+            let role_preferences = if fork.is_none()
                 && resume_id.is_none()
                 && matches!(
                     intent,
@@ -3985,14 +3990,14 @@ fn prepare_launch(
                     }
                     let cwd = Path::new(&session.cwd);
                     let environment = std::env::vars_os().collect();
-                    let result = if let Some(assignments) = assignments {
+                    let result = if let Some(role_preferences) = role_preferences {
                         (|| {
-                            let assignments = assignments.recv()?;
-                            prepare_new_claude_launch(
+                            let preferences = role_preferences.recv()?;
+                            prepare_new_claude_launch_with_budget(
                                 &data_root,
                                 cwd,
                                 &metadata,
-                                Some(&assignments),
+                                &preferences,
                                 environment,
                                 terminal.cols,
                                 terminal.rows,

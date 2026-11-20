@@ -10,14 +10,18 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::pty::{
-    CALLER_SESSION_MARKERS, LaunchProfile, ShellLaunch, get_var, remove_var, set_var,
+use crate::{
+    claude_role_budget::{
+        CLAUDE_ROLES as ROLES, ClaudeBudgetCompaction, ClaudeBudgetTarget, MAXIMUM_CONTEXT,
+        claude_role_budget,
+    },
+    pty::{CALLER_SESSION_MARKERS, LaunchProfile, ShellLaunch, get_var, remove_var, set_var},
+    sessions::ClaudeRoleLaunchPreferences,
 };
 
 const OFFICIAL_ID: &str = "anthropic-official";
 const OFFICIAL_ENDPOINT: &str = "https://api.anthropic.com";
 const CLI_DEFAULT_MODEL: &str = "CLI 默认";
-const ROLES: [&str; 3] = ["opus", "sonnet", "haiku"];
 pub const EFFORTS: [&str; 6] = ["follow", "low", "medium", "high", "xhigh", "max"];
 pub const CLAUDE_PERMISSION_MODES: [&str; 5] = [
     "default",
@@ -213,7 +217,33 @@ pub fn prepare_new_claude_launch(
         data_root,
         cwd,
         binding,
-        Some(ClaudeTarget::New(assignments)),
+        Some(ClaudeTarget::New {
+            assignments,
+            budget_preferences: None,
+        }),
+        environment,
+        cols,
+        rows,
+    )
+}
+
+pub fn prepare_new_claude_launch_with_budget(
+    data_root: &Path,
+    cwd: &Path,
+    binding: &Value,
+    preferences: &ClaudeRoleLaunchPreferences,
+    environment: BTreeMap<OsString, OsString>,
+    cols: u16,
+    rows: u16,
+) -> Result<ClaudeLaunch> {
+    prepare_claude(
+        data_root,
+        cwd,
+        binding,
+        Some(ClaudeTarget::New {
+            assignments: Some(&preferences.assignments),
+            budget_preferences: Some(preferences),
+        }),
         environment,
         cols,
         rows,
@@ -266,8 +296,13 @@ pub fn prepare_claude_fork(
 
 #[derive(Clone, Copy)]
 enum ClaudeTarget<'a> {
-    New(Option<&'a ClaudeRoleAssignments>),
-    PermissionRestart { remembered: bool },
+    New {
+        assignments: Option<&'a ClaudeRoleAssignments>,
+        budget_preferences: Option<&'a ClaudeRoleLaunchPreferences>,
+    },
+    PermissionRestart {
+        remembered: bool,
+    },
     Resume(&'a str),
     Fork(&'a str),
 }
@@ -284,7 +319,7 @@ fn prepare_claude(
     validate_cwd(cwd)?;
     let config = read_provider_config(data_root)?;
     let (provider_binding, assignments) = match target {
-        Some(ClaudeTarget::New(assignments)) => (&Value::Null, assignments),
+        Some(ClaudeTarget::New { assignments, .. }) => (&Value::Null, assignments),
         _ => (binding, None),
     };
     let remembered = matches!(
@@ -327,6 +362,13 @@ fn prepare_claude(
     let assigned = match assignments {
         Some(assignments) => resolve_startup_assignment(&config, &provider, assignments)?,
         None => None,
+    };
+    let context_window = match target {
+        Some(ClaudeTarget::New {
+            budget_preferences: Some(preferences),
+            ..
+        }) if assigned.is_some() => new_assigned_context_window(&config, &provider, preferences)?,
+        _ => None,
     };
     let model = match provider_binding["model"].as_str() {
         Some(bound)
@@ -380,6 +422,18 @@ fn prepare_claude(
         // Cross-role switching and per-role subagent routing need the request
         // gateway. Native only aligns the role selected for this launch.
         project_assigned_role(provider, role, model, &mut environment);
+    }
+    if let Some(window) = context_window {
+        for (key, value) in [
+            ("CLAUDE_CODE_MAX_CONTEXT_TOKENS", window.to_string()),
+            ("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", "90".to_owned()),
+            (
+                "CLAUDE_CODE_DISABLE_1M_CONTEXT",
+                u8::from(window < MAXIMUM_CONTEXT).to_string(),
+            ),
+        ] {
+            set_var(&mut environment, key.into(), value.into());
+        }
     }
     #[cfg(unix)]
     set_var(&mut environment, "PWD".into(), cwd.as_os_str().into());
@@ -644,6 +698,73 @@ fn resolve_startup_assignment<'a>(
     let provider =
         assignment_provider(config, assignment).with_context(|| format!("{role} assignment"))?;
     Ok(Some((role, assignment, provider)))
+}
+
+fn new_assigned_context_window(
+    config: &Value,
+    source: &Provider,
+    preferences: &ClaudeRoleLaunchPreferences,
+) -> Result<Option<u64>> {
+    let providers = provider_entries(config).unwrap_or_default();
+    let roles = ROLES.map(|role| {
+        if let Some(assignment) = preferences.assignments.get(role) {
+            return budget_target(providers, &assignment.provider_id, Some(&assignment.model));
+        }
+        // Only a role mapping identifies a stored model for an unassigned tier.
+        // Native has no live catalog fallback. The startup model belongs to no
+        // other tier just because it was selected for this invocation.
+        let model = source.model_mapping.get(role).map(String::as_str);
+        budget_target(providers, &source.id, model)
+    });
+    let compaction = &preferences.compaction;
+    let compaction = if compaction["mode"] == "custom" {
+        ClaudeBudgetCompaction::Custom(budget_target(
+            providers,
+            compaction["providerId"].as_str().unwrap_or_default(),
+            compaction["model"].as_str(),
+        ))
+    } else {
+        ClaudeBudgetCompaction::Follow
+    };
+    Ok(claude_role_budget(roles, compaction, &preferences.context_windows)?.context_window)
+}
+
+fn budget_target<'a>(
+    providers: &'a [Value],
+    provider_id: &'a str,
+    model: Option<&str>,
+) -> ClaudeBudgetTarget<'a> {
+    let provider = providers
+        .iter()
+        .find(|provider| provider["id"].as_str() == Some(provider_id));
+    let metadata = provider
+        .and_then(|provider| {
+            provider["subscription"]["modelMetadata"]
+                .as_array()
+                .or_else(|| provider["modelMetadata"].as_array())
+        })
+        .and_then(|models| {
+            let model = model.filter(|model| !model.is_empty())?;
+            models
+                .iter()
+                .find(|item| item["id"].as_str() == Some(model))
+        });
+    let tokens = |field: &str| {
+        metadata
+            .and_then(|metadata| metadata[field].as_f64())
+            .filter(|count| {
+                *count > 0.0 && *count <= 9_007_199_254_740_991.0 && count.fract() == 0.0
+            })
+            .map(|count| count as u64)
+    };
+    ClaudeBudgetTarget {
+        provider_id,
+        provider_name: provider
+            .and_then(|provider| provider["name"].as_str())
+            .unwrap_or(provider_id),
+        context_window: tokens("contextWindow"),
+        max_context_window: tokens("maxContextWindow"),
+    }
 }
 
 fn claude_argv(

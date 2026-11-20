@@ -1,4 +1,5 @@
 pub mod backup;
+pub mod claude_role_budget;
 pub mod durability;
 pub mod geometry;
 pub mod hierarchy;

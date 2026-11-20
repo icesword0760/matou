@@ -109,6 +109,25 @@ pub fn read_claude_role_assignments(db: &Connection) -> ClaudeRoleAssignments {
     assignments
 }
 
+#[derive(Default)]
+pub struct ClaudeRoleLaunchPreferences {
+    pub(crate) assignments: ClaudeRoleAssignments,
+    pub(crate) context_windows: Map<String, Value>,
+    pub(crate) compaction: Value,
+}
+
+pub fn read_claude_role_launch_preferences(db: &Connection) -> ClaudeRoleLaunchPreferences {
+    let (mut fields, assignments) = model_preferences(db);
+    ClaudeRoleLaunchPreferences {
+        assignments,
+        context_windows: fields["contextWindows"]
+            .as_object()
+            .cloned()
+            .unwrap_or_default(),
+        compaction: fields.remove("compaction").unwrap_or_default(),
+    }
+}
+
 pub fn save_claude_role_assignments(
     db: &mut Connection,
     assignments: &ClaudeRoleAssignments,
