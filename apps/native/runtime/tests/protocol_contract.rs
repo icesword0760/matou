@@ -132,6 +132,22 @@ fn real_terminal_frame_preserves_cells_palette_modes_selection_and_ack_tags() ->
 }
 
 #[test]
+fn legacy_scroll_target_defaults_to_line_coordinates() -> Result<()> {
+    let command = serde_json::from_value::<Command>(serde_json::json!({
+        "ScrollTo": { "session_id": "shell", "row": 37, "request_id": 1 }
+    }))?;
+    assert!(matches!(
+        command,
+        Command::ScrollTo {
+            row: 37,
+            pixel_target: false,
+            ..
+        }
+    ));
+    Ok(())
+}
+
+#[test]
 fn continuous_client_values_preserve_scroll_input_ack_and_unicode_order() -> Result<()> {
     let session = "会话\n🙂";
     let bytes = vec![0, 255, 128, 27, 13, 10];
@@ -141,6 +157,7 @@ fn continuous_client_values_preserve_scroll_input_ack_and_unicode_order() -> Res
             session_id: session.into(),
             row: u64::MAX - 2,
             request_id: u64::MAX,
+            pixel_target: true,
         }),
         ClientMessage::Command(Command::Scroll {
             session_id: session.into(),
@@ -192,12 +209,14 @@ fn continuous_client_values_preserve_scroll_input_ack_and_unicode_order() -> Res
         session_id,
         row,
         request_id,
+        pixel_target,
     }) = decoded.next().context("ScrollTo")??
     else {
         bail!("ScrollTo")
     };
     assert_eq!(session_id, session);
     assert_eq!((row, request_id), (u64::MAX - 2, u64::MAX));
+    assert!(pixel_target);
     let ClientMessage::Command(Command::Scroll { lines, .. }) =
         decoded.next().context("Scroll")??
     else {

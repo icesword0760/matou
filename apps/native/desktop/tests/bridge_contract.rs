@@ -55,11 +55,13 @@ fn coalesced_scroll_frames_identify_the_requests_already_applied() -> Result<()>
         Command::ScrollTo {
             session_id: session_id.clone(),
             row: 30,
+            pixel_target: false,
             request_id: 1,
         },
         Command::ScrollTo {
             session_id: session_id.clone(),
             row: 0,
+            pixel_target: false,
             request_id: 2,
         },
         Command::Scroll {

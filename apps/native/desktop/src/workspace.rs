@@ -3213,7 +3213,7 @@ impl Workspace {
             }
             let disabled = !self.active_path_valid();
             let terminal = cx.new(|cx| {
-                let mut surface = TerminalSurface::new(cx);
+                let mut surface = TerminalSurface::new(cx).with_canvas_inset();
                 surface.begin_transport_generation(self.runtime_generation, cx);
                 surface.set_input_disabled(disabled || self.recovery_blocked(id), cx);
                 surface
@@ -3323,6 +3323,7 @@ impl Workspace {
                     session_id: session_id.clone(),
                     row: *row,
                     request_id: *request_id,
+                    pixel_target: true,
                 },
                 cx,
             ),

@@ -198,6 +198,9 @@ pub enum Command {
         session_id: String,
         row: u64,
         request_id: u64,
+        /// The desktop already resolved the track position to a viewport row.
+        #[serde(default)]
+        pixel_target: bool,
     },
     Theme {
         session_id: String,
@@ -1916,12 +1919,21 @@ fn run(
                     session_id,
                     row,
                     request_id,
+                    pixel_target,
                 } => {
                     if !sessions.contains(&session_id) {
                         continue;
                     }
                     scroll_requests.insert(session_id.clone(), request_id);
-                    (session_id, WorkerCommand::ScrollTo { row, reply }, false)
+                    (
+                        session_id,
+                        WorkerCommand::ScrollTo {
+                            row,
+                            pixel_target,
+                            reply,
+                        },
+                        false,
+                    )
                 }
                 Command::Theme { session_id, theme } => {
                     let live = sessions.contains(&session_id);

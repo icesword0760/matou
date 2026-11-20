@@ -565,6 +565,38 @@ fn scroll_move_and_resize_pull_are_independent() -> Result<()> {
 }
 
 #[test]
+fn resize_anchors_the_visible_rows_and_keeps_the_track_position() -> Result<()> {
+    let mut options = TerminalOptions::new(80, 20, 9, 14);
+    options.resize_pull_scrollback = true;
+    let mut terminal = Terminal::new(options)?;
+    let contents = (0..80)
+        .map(|row| format!("ROW_{row:05}"))
+        .collect::<Vec<_>>()
+        .join("\r\n");
+    terminal.feed(contents.as_bytes());
+    terminal.scroll_to(16, false)?;
+    terminal.resize(80, 30, 9, 14)?;
+    let screen = terminal.screen()?;
+    assert_eq!(screen.scrollbar.offset, 6);
+    assert_eq!(screen.resize_position_row, Some(16));
+
+    terminal.scroll_to(37, false)?;
+    assert_eq!(terminal.screen()?.scrollbar.offset, 47);
+    terminal.resize(80, 15, 9, 14)?;
+    let screen = terminal.screen()?;
+    assert_eq!(screen.scrollbar.offset, 62);
+    assert_eq!(screen.resize_position_row, Some(47));
+
+    terminal.scroll_to(42, true)?;
+    let screen = terminal.screen()?;
+    assert_eq!(screen.scrollbar.offset, 42);
+    assert_eq!(screen.resize_position_row, None);
+    terminal.scroll_to(0, false)?;
+    assert_eq!(terminal.screen()?.scrollbar.offset, 0);
+    Ok(())
+}
+
+#[test]
 fn synchronized_output_ends_on_sequence_resize_and_expiry() -> Result<()> {
     let mut terminal = Terminal::new(TerminalOptions::new(12, 3, 10, 19))?;
     terminal.feed(b"\x1b[?2026h");

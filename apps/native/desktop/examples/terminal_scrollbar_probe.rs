@@ -89,6 +89,7 @@ mod probe {
             let outer = view
                 .scrollbar_bounds
                 .expect("real painted scrollbar bounds");
+            assert_eq!(outer.top(), px(14.));
             assert_eq!(outer.size.height, view.metrics.height * 16.);
             let track = view.scrollbar_metrics().unwrap();
             let click = point(outer.right() - px(2.5), outer.center().y);
@@ -195,6 +196,7 @@ mod probe {
 
         window.update(cx, |view, _, cx| {
             view.scroll_to_pixels(latest_raw, cx);
+            let expected = view.scrollbar_metrics().unwrap().clamp(latest_raw - 100.);
             view.on_scroll(
                 &ScrollWheelEvent {
                     position: click,
@@ -203,17 +205,19 @@ mod probe {
                 },
                 cx,
             );
-            assert!(view.scrollbar_position.is_none());
+            assert_position(view, expected, 6);
         })?;
-        assert_eq!(
-            events.take(),
-            [Observed::Absolute(latest_row, 5), Observed::Lines(2)]
+        let wheel_events = events.take();
+        assert_eq!(wheel_events.len(), 2);
+        assert_eq!(wheel_events[0], Observed::Absolute(latest_row, 5));
+        assert!(matches!(wheel_events[1], Observed::Absolute(row, 6) if row < latest_row));
+        println!(
+            "Viewport wheel advances the pending pixel position and queues an absolute target."
         );
-        println!("Ordinary wheel scroll drops the optimistic thumb and queues its own delta.");
 
         window.update(cx, |view, _, cx| {
             view.surface_hovered = false;
-            view.set_screen(authority, modes, None, 5, cx);
+            view.set_screen(authority, modes, None, 6, cx);
             assert!(view.scrollbar_fade.is_some());
         })?;
         draw(window, cx);
@@ -308,6 +312,7 @@ mod probe {
             latest_raw,
         )?;
         verify_ime_drag(window, cx, &events, bottom, modes)?;
+        verify_resized_targets(window, cx, &events)?;
         window.update(cx, |view, _, cx| {
             let old_generation = view.transport_generation;
             let dimensions = view
@@ -328,6 +333,92 @@ mod probe {
         println!(
             "Generation reset preserves the painted screen/target, retires interaction tasks and rejects an old deferred resize."
         );
+        Ok(())
+    }
+
+    fn verify_resized_targets(
+        window: WindowHandle<TerminalSurface>,
+        cx: &mut App,
+        events: &RefCell<Vec<Observed>>,
+    ) -> anyhow::Result<()> {
+        for gesture in ["wheel", "track", "drag"] {
+            let mut terminal = Terminal::new(TerminalOptions::new(48, 16, 9, 18))?;
+            for index in 0..80 {
+                terminal.feed(format!("screen row {index:03}\r\n").as_bytes());
+            }
+            let modes = terminal.input_modes()?;
+            terminal.scroll_to(16, false)?;
+            terminal.resize(48, 20, 9, 18)?;
+            let resized = terminal.screen()?;
+            assert_eq!(resized.scrollbar.offset, 12);
+            assert_eq!(resized.resize_position_row, Some(16));
+            window.update(cx, |view, _, cx| {
+                view.scrollbar_position = None;
+                view.scrollbar_drag = None;
+                view.set_screen(resized, modes, None, view.scroll_request_id, cx);
+            })?;
+            draw(window, cx);
+            events.borrow_mut().clear();
+            let (row, request_id) = window.update(cx, |view, _, cx| {
+                view.reveal_scrollbar();
+                let outer = view.scrollbar_bounds.unwrap();
+                let metrics = view.scrollbar_metrics().unwrap();
+                let left = outer.right() - px(2.5);
+                let row_height = f64::from(f32::from(view.metrics.height));
+                assert_eq!(metrics.position, 16. * row_height);
+                let expected = match gesture {
+                    "wheel" => {
+                        view.on_scroll(
+                            &ScrollWheelEvent {
+                                position: outer.center(),
+                                delta: ScrollDelta::Pixels(point(px(0.), px(-4.))),
+                                ..Default::default()
+                            },
+                            cx,
+                        );
+                        metrics.position + 5.
+                    }
+                    _ => {
+                        let y = if gesture == "drag" {
+                            metrics.thumb_top + metrics.thumb_size / 2.
+                        } else {
+                            metrics.viewport * 0.75
+                        };
+                        let grip = point(left, outer.top() + px(y as f32));
+                        assert!(view.scrollbar_down(
+                            &MouseDownEvent {
+                                button: MouseButton::Left,
+                                position: grip,
+                                click_count: 1,
+                                ..Default::default()
+                            },
+                            cx,
+                        ));
+                        if gesture == "drag" {
+                            assert!(view.scrollbar_move(
+                                &MouseMoveEvent {
+                                    position: grip + point(px(0.), px(12.)),
+                                    pressed_button: Some(MouseButton::Left),
+                                    ..Default::default()
+                                },
+                                true,
+                                true,
+                                cx,
+                            ));
+                            metrics.drag_position(12.)
+                        } else {
+                            metrics.track_position(f64::from(f32::from(grip.y - outer.top())))
+                        }
+                    }
+                };
+                let request = view.scroll_request_id;
+                (assert_position(view, expected, request), request)
+            })?;
+            assert_eq!(events.take(), [Observed::Absolute(row, request_id)]);
+            terminal.scroll_to(row, true)?;
+            assert_eq!(terminal.screen()?.scrollbar.offset, row);
+            println!("First {gesture} after growing the window lands on viewport row {row}.");
+        }
         Ok(())
     }
 

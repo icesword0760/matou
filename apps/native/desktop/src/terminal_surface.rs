@@ -27,6 +27,8 @@ use crate::terminal_input::{
 use crate::terminal_scrollbar::ScrollbarMetrics;
 
 const FONT_SIZE: Pixels = px(11.);
+const DEFAULT_VERTICAL_INSET: Pixels = px(14.);
+const CANVAS_VERTICAL_INSET: Pixels = px(12.);
 const BLINK_INTERVAL: Duration = Duration::from_millis(500);
 const FAMILIES: &[&str] = &["SF Mono", "Monaco", "Menlo", "Consolas", "Courier New"];
 
@@ -68,6 +70,64 @@ struct Dimensions {
 struct Metrics {
     width: Pixels,
     height: Pixels,
+}
+
+fn page_scroll_lines(key: &str, shift: bool, rows: usize) -> Option<f64> {
+    if !shift {
+        return None;
+    }
+    let page = rows.saturating_sub(1) as f64;
+    match key {
+        "pageup" => Some(-page),
+        "pagedown" => Some(page),
+        _ => None,
+    }
+}
+
+fn wheel_scroll_pixels(delta: gpui::ScrollDelta, alt: bool) -> f64 {
+    let delta = match delta {
+        gpui::ScrollDelta::Pixels(delta) => f64::from(f32::from(delta.y)) * (50. / 40.),
+        gpui::ScrollDelta::Lines(delta) => f64::from(delta.y) * 50.,
+    } * if alt { 5. } else { 1. };
+    delta.signum() * delta.abs().ceil()
+}
+
+#[cfg(test)]
+mod scroll_tests {
+    use super::*;
+
+    #[test]
+    fn wheel_uses_the_same_pixel_scale_for_line_and_precise_events() {
+        let notched = gpui::ScrollDelta::Lines(point(0., -1.));
+        let precise = gpui::ScrollDelta::Pixels(point(px(0.), px(-4.)));
+        assert_eq!(wheel_scroll_pixels(notched, false), -50.);
+        assert_eq!(wheel_scroll_pixels(notched, true), -250.);
+        assert_eq!(wheel_scroll_pixels(precise, false), -5.);
+        assert_eq!(
+            wheel_scroll_pixels(gpui::ScrollDelta::Pixels(point(px(0.), px(1.))), false),
+            2.
+        );
+    }
+
+    #[test]
+    fn only_shift_page_keys_request_a_local_page() {
+        let modes = InputModes {
+            application_cursor_keys: false,
+            bracketed_paste: false,
+            input_epoch: 0,
+            mouse_protocol: MouseProtocol::None,
+            mouse_encoding: MouseEncoding::Default,
+        };
+        for (key, lines, bytes) in [("pageup", -19., b"\x1b[5~"), ("pagedown", 19., b"\x1b[6~")] {
+            assert_eq!(page_scroll_lines(key, true, 20), Some(lines));
+            assert_eq!(page_scroll_lines(key, true, 1), Some(0.));
+            assert_eq!(page_scroll_lines(key, false, 20), None);
+            assert_eq!(
+                terminal_key(key, false, false, false, modes).as_deref(),
+                Some(bytes.as_slice()),
+            );
+        }
+    }
 }
 
 impl Metrics {
@@ -174,6 +234,7 @@ pub struct TerminalSurface {
     pub focus: FocusHandle,
     font: Font,
     metrics: Metrics,
+    vertical_inset: Pixels,
     last_dimensions: Option<Dimensions>,
     screen: Option<Screen>,
     modes: InputModes,
@@ -187,7 +248,6 @@ pub struct TerminalSurface {
     composition: Composition,
     composition_cell: Option<(usize, usize)>,
     caret: Option<Bounds<Pixels>>,
-    wheel_lines: f32,
     mouse_reporter: MouseReporter,
     mouse_wheel: MouseWheel,
     mouse_buttons: u8,
@@ -237,7 +297,6 @@ impl TerminalSurface {
         self.mouse_reporter = MouseReporter::default();
         self.mouse_wheel = MouseWheel::default();
         self.mouse_buttons = 0;
-        self.wheel_lines = 0.;
         self.reset_blink();
         self.scrollbar_position = None;
         self.scrollbar_drag = None;
@@ -336,6 +395,7 @@ impl TerminalSurface {
                 width: width.max(px(1.)),
                 height: px(f32::from(height).ceil()).max(px(1.)),
             },
+            vertical_inset: DEFAULT_VERTICAL_INSET,
             last_dimensions: None,
             screen: None,
             modes: InputModes {
@@ -355,7 +415,6 @@ impl TerminalSurface {
             composition: Composition::default(),
             composition_cell: None,
             caret: None,
-            wheel_lines: 0.,
             mouse_reporter: MouseReporter::default(),
             mouse_wheel: MouseWheel::default(),
             mouse_buttons: 0,
@@ -375,6 +434,11 @@ impl TerminalSurface {
             scrollbar_frame_pending: false,
             scroll_request_id: 0,
         }
+    }
+
+    pub(crate) fn with_canvas_inset(mut self) -> Self {
+        self.vertical_inset = CANVAS_VERTICAL_INSET;
+        self
     }
 
     pub fn set_input_disabled(&mut self, disabled: bool, cx: &mut Context<Self>) {
@@ -428,7 +492,22 @@ impl TerminalSurface {
                     && screen.scrollbar.offset != position.row)
         });
         if clear_position {
-            self.scrollbar_position = None;
+            self.scrollbar_position = self.scrollbar_position.and_then(|position| {
+                let old = self.screen.as_ref()?;
+                let new_anchor = screen.resize_position_row?;
+                if !extent_changed || old.scrollbar.offset != position.row {
+                    return None;
+                }
+                let cell = f64::from(f32::from(self.metrics.height));
+                let old_anchor = old.resize_position_row.unwrap_or(old.scrollbar.offset);
+                let fraction = position.pixels - old_anchor as f64 * cell;
+                let limit = screen.scrollbar.total.saturating_sub(screen.rows as u64) as f64 * cell;
+                Some(ScrollbarPosition {
+                    pixels: (new_anchor as f64 * cell + fraction).clamp(0., limit),
+                    row: screen.scrollbar.offset,
+                    request_id: scroll_request_id,
+                })
+            });
         }
         if !modes_changed && self.screen.as_ref() == Some(&screen) && self.selection == selection {
             if clear_position {
@@ -536,6 +615,12 @@ impl TerminalSurface {
         }
         let key = event.keystroke.key.as_str();
         let mods = event.keystroke.modifiers;
+        let rows = self.screen.as_ref().map_or(0, |screen| screen.rows);
+        if let Some(lines) = page_scroll_lines(key, mods.shift, rows) {
+            self.move_scrollbar(lines * f64::from(f32::from(self.metrics.height)), cx);
+            cx.stop_propagation();
+            return;
+        }
         let mac = cfg!(target_os = "macos");
         let copy_mod = if mac { mods.platform } else { mods.control };
         if key == "c" && copy_mod && !mods.alt && !mods.shift {
@@ -631,7 +716,10 @@ impl TerminalSurface {
             self.scrollbar_position
                 .filter(|position| position.row == screen.scrollbar.offset)
                 .map_or(
-                    screen.scrollbar.offset as f64 * f64::from(f32::from(self.metrics.height)),
+                    screen
+                        .resize_position_row
+                        .unwrap_or(screen.scrollbar.offset) as f64
+                        * f64::from(f32::from(self.metrics.height)),
                     |position| position.pixels,
                 ),
         )
@@ -721,6 +809,10 @@ impl TerminalSurface {
             .is_some_and(|screen| screen.scrollbar.offset == row);
         if let Some(current) = &mut self.scrollbar_position
             && current.row == row
+            && self
+                .screen
+                .as_ref()
+                .is_none_or(|screen| screen.resize_position_row.is_none())
         {
             current.pixels = position;
             if row_is_visible {
@@ -1075,47 +1167,31 @@ impl TerminalSurface {
             return;
         }
 
-        if event.modifiers.control || event.modifiers.platform {
-            return;
-        }
-        let delta = f32::from(event.delta.pixel_delta(self.metrics.height).y / self.metrics.height);
-        if delta == 0. {
-            return;
-        }
-        if delta.signum() != self.wheel_lines.signum() {
-            self.wheel_lines = 0.;
-        }
-        self.wheel_lines += delta;
-        let lines = self.wheel_lines.trunc() as i32;
-        if lines != 0 {
-            self.scrollbar_position = None;
-            self.wheel_lines -= lines as f32;
-            self.emit(SurfaceEventKind::Scroll(lines), cx);
-        }
-        cx.stop_propagation();
+        self.scrollbar_wheel(event, cx);
     }
 
     fn scrollbar_wheel(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
         if event.modifiers.control || event.modifiers.platform {
             return;
         }
+        let movement = wheel_scroll_pixels(event.delta, event.modifiers.alt);
+        if movement != 0. && self.move_scrollbar(-movement, cx) {
+            cx.stop_propagation();
+        }
+    }
+
+    fn move_scrollbar(&mut self, movement: f64, cx: &mut Context<Self>) -> bool {
+        if movement == 0. {
+            return false;
+        }
         let Some(metrics) = self.scrollbar_metrics() else {
-            return;
+            return false;
         };
         let position = self
             .scrollbar_position
             .map_or(metrics.position, |position| position.pixels);
-        // Match the viewport's 50px per wheel unit. A precise unit is 40px.
-        let delta = match event.delta {
-            gpui::ScrollDelta::Pixels(delta) => f64::from(f32::from(delta.y)) * (50. / 40.),
-            gpui::ScrollDelta::Lines(delta) => f64::from(delta.y) * 50.,
-        } * if event.modifiers.alt { 5. } else { 1. };
-        if delta == 0. {
-            return;
-        }
-        let movement = delta.signum() * delta.abs().ceil();
-        self.scroll_to_pixels(metrics.clamp(position - movement), cx);
-        cx.stop_propagation();
+        self.scroll_to_pixels(metrics.clamp(position + movement), cx);
+        true
     }
 
     fn paint(
@@ -1393,7 +1469,7 @@ impl Render for TerminalSurface {
             .size_full()
             .relative()
             .px(px(14.))
-            .py(px(12.))
+            .py(self.vertical_inset)
             .overflow_hidden()
             .cursor(if self.modes.mouse_protocol == MouseProtocol::None {
                 PointerStyle::IBeam

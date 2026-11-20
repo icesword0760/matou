@@ -151,6 +151,9 @@ pub struct Screen {
     pub palette: [u32; 256],
     pub history_lines: usize,
     pub scrollbar: Scrollbar,
+    /// The track can retain its previous position when resize moves the first visible row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resize_position_row: Option<u64>,
     pub alternate: bool,
 }
 

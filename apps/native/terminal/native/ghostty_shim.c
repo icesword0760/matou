@@ -354,6 +354,15 @@ int matou_vt_history_trimmed_rows(const MatouVt *vt, size_t *out) {
     return ghostty_terminal_get(vt->terminal, history_trimmed, out);
 }
 
+int matou_vt_scrollbar(const MatouVt *vt, uint64_t *offset, uint64_t *total, uint64_t *len) {
+    GhosttyTerminalScrollbar scrollbar;
+    TRY(ghostty_terminal_get(vt->terminal, GHOSTTY_TERMINAL_DATA_SCROLLBAR, &scrollbar));
+    *offset = scrollbar.offset;
+    *total = scrollbar.total;
+    *len = scrollbar.len;
+    return GHOSTTY_SUCCESS;
+}
+
 int matou_vt_screen(MatouVt *vt, MatouScreen *screen, MatouRow emit_row,
                      MatouCell emit, void *userdata) {
     GhosttyRenderStateCursor cursor = GHOSTTY_INIT_SIZED(GhosttyRenderStateCursor);
