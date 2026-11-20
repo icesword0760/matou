@@ -11,6 +11,38 @@ const cases: { name: string, max?: number, failures?: Record<number, number>, si
   { name: 'repeat-fault-and-end', failures:{1:3}, actions:[{op:'append',sequence:1,bytes:1},{op:'retry'},{op:'end'},{op:'retry'},{op:'append',sequence:2,bytes:1}] },
   { name: 'side-effect-once', sideFailure:1, actions:[{op:'append',sequence:1,bytes:0},{op:'retry'},{op:'append',sequence:3,bytes:1},{op:'append',sequence:2,bytes:1}] },
   { name: 'resume-failure', failures:{1:1}, resumeFailures:1, actions:[{op:'append',sequence:1,bytes:1},{op:'retry'},{op:'retry'}] },
+  ...(process.env.MATOU_DURABILITY_GATE === '1' ? [
+    {
+      name: 'end-discards-pending',
+      failures: { 2: 1 },
+      actions: [
+        { op: 'append', sequence: 1, bytes: 4 },
+        { op: 'append', sequence: 2, bytes: 5 },
+        { op: 'append', sequence: 3, bytes: 6 },
+        { op: 'end' },
+      ],
+    },
+    {
+      name: 'empty-frame-at-limit',
+      max: 1,
+      failures: { 1: 1 },
+      actions: [
+        { op: 'append', sequence: 1, bytes: 0 },
+        { op: 'append', sequence: 2, bytes: 0 },
+        { op: 'retry' },
+        { op: 'append', sequence: 2, bytes: 0 },
+      ],
+    },
+    {
+      name: 'duplicate-and-sequence-gap',
+      actions: [
+        { op: 'append', sequence: 1, bytes: 1 },
+        { op: 'append', sequence: 1, bytes: 1 },
+        { op: 'append', sequence: 3, bytes: 1 },
+        { op: 'append', sequence: 2, bytes: 1 },
+      ],
+    },
+  ] satisfies { name: string, max?: number, failures?: Record<number, number>, actions: Action[] }[] : []),
 ]
 const results=[]
 for (const input of cases) {
