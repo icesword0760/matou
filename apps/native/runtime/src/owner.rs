@@ -1504,13 +1504,13 @@ impl ShellOwner {
             };
             // The listener belongs to this owner generation, this session_id
             // and this run_id. Publish the environment only after bind succeeds.
-            let gateway_env = if let Some(plan) = gateway_plan {
+            let gateway_settings = if let Some(plan) = gateway_plan {
                 let plan = Arc::new(plan);
                 let listener = Gateway::start(Arc::clone(&plan))?;
                 let env = plan.project_environment(&mut options.launch, listener.base_url());
                 secrets.push(listener.base_url().to_owned());
                 gateway = Some(listener);
-                Some(env)
+                Some((env, plan.model_picker()))
             } else {
                 None
             };
@@ -1523,11 +1523,12 @@ impl ShellOwner {
                     permission_starting,
                 )
                 .context(HookSetup)?;
-            if let Some(env) = gateway_env {
+            if let Some((env, model_picker)) = gateway_settings {
                 let path = &registration.settings_path;
                 let mut settings: Value = serde_json::from_slice(&std::fs::read(path)?)
                     .map_err(|_| anyhow::anyhow!("Read Claude gateway launch settings"))?;
                 settings["env"] = env;
+                settings["modelPicker"] = model_picker;
                 settings["modelOverrides"] = json!({
                     "claude-fable-5": "matou-role/opus-fallback",
                     "claude-fable-5-2": "matou-role/opus-fallback",

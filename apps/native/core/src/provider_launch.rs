@@ -147,6 +147,7 @@ pub struct ClaudeLaunch {
 pub struct ClaudeGatewayProjection {
     pub source: Option<ClaudeGatewayConnection>,
     pub roles: [Option<ClaudeGatewayRole>; 3],
+    source_provider_id: String,
     source_models: [Option<String>; 3],
     source_efforts: [Option<String>; 3],
     source_effort: Option<String>,
@@ -162,6 +163,7 @@ pub struct ClaudeGatewayRole {
     pub connection: ClaudeGatewayConnection,
     pub model: String,
     catalog_model: String,
+    provider_id: String,
     pub effort: Option<String>,
     pub supported_efforts: Option<Vec<String>>,
     pub max_output_tokens: Option<u64>,
@@ -240,10 +242,7 @@ impl ClaudeGatewayProjection {
         ]);
         for (alias, index) in [("OPUS", 0), ("SONNET", 1), ("HAIKU", 2), ("FABLE", 0)] {
             let key = format!("ANTHROPIC_DEFAULT_{alias}_MODEL");
-            let name = self.roles[index]
-                .as_ref()
-                .map_or(ROLES[index], |role| &role.catalog_model);
-            projected.insert(format!("{key}_NAME"), name.into());
+            projected.insert(format!("{key}_NAME"), self.catalog_model(index).into());
             projected.insert(key, format!("matou-role/{}", ROLES[index]));
         }
         for (name, value) in &projected {
@@ -257,6 +256,34 @@ impl ClaudeGatewayProjection {
             *model = format!("matou-role/{}", self.startup_role);
         }
         serde_json::json!(projected)
+    }
+
+    pub fn model_picker(&self) -> Value {
+        let options: [Value; ROLES.len()] = std::array::from_fn(|index| {
+            let role = ROLES[index];
+            let (first, rest) = role.split_at(1);
+            let model = self.catalog_model(index);
+            let provider_id = self.roles[index]
+                .as_ref()
+                .map_or(self.source_provider_id.as_str(), |target| {
+                    &target.provider_id
+                });
+            serde_json::json!({
+                "model": role,
+                "label": format!("{}{rest} · {model}", first.to_ascii_uppercase()),
+                "description": provider_id,
+            })
+        });
+        serde_json::json!({
+            "replaceBuiltInOptions": true,
+            "options": options,
+        })
+    }
+
+    fn catalog_model(&self, index: usize) -> &str {
+        self.roles[index]
+            .as_ref()
+            .map_or(ROLES[index], |target| &target.catalog_model)
     }
 }
 
@@ -627,6 +654,7 @@ fn gateway_projection(
             connection,
             model,
             catalog_model: catalog_model.into(),
+            provider_id: provider.id.clone(),
             effort,
             supported_efforts: metadata
                 .and_then(|item| item["supportedEfforts"].as_array())
@@ -662,6 +690,7 @@ fn gateway_projection(
     Some(ClaudeGatewayProjection {
         source: source_connection,
         roles,
+        source_provider_id: source.id.clone(),
         source_models: ROLES.map(|role| source.model_mapping.get(role).cloned()),
         source_efforts: ROLES.map(|role| source.effort_mapping.get(role).cloned()),
         source_effort: source.reasoning_effort.clone(),

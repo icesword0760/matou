@@ -21,6 +21,7 @@
 | 场景 | 冻结行为 | 原生证据 |
 | --- | --- | --- |
 | 同卡跨档 | 每次按请求模型选择目标，同名模型可有不同凭据 | HTTP 金样断言两条回环路径的 Key，真实 CLI 在同 PID/run/generation 中完成 `/model sonnet` 并实际出站 A、B |
+| CLI 档位菜单 | 网关 settings 按冻结 `pty-session.ts:388` 依次写入 Opus、Sonnet、Haiku，标签用目录模型名，说明用供应商 ID | 进程读回三条配置。原生初始 hook settings 只有 `hooks` 和 `statusLine`，因此无需清理旧 settings 环境键。Claude Code 2.1.329 展示这三条模型项，并由 CLI 自身额外展示 `Default (recommended)` |
 | 字面和未知 | 已知档位匹配，未知保留前缀失败，字面模型可走源 | HTTP 金样覆盖别名、带窗口后缀、源映射、任意字面、无模型和错误前缀 |
 | 计数 | 与普通消息同档，生成参数不覆盖 | HTTP 金样比对正文，进程测试验证 B 的计数入口成功 |
 | 头与错误 | 清认证和逐跳头，合并 Beta，429 与 gzip 实体保持，拒绝跳转 | HTTP 金样断言头和字节。被重定向的地址和断线重试探针均为零连接 |

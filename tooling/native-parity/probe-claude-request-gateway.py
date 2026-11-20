@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import queue
+import re
 import sqlite3
 import subprocess
 import tempfile
@@ -252,6 +253,28 @@ def probe(runtime_path, cli, root):
                 before = latest_run(db, session)
                 runtime.submit(session, "Reply with the fixture response for turn one.")
                 runtime.until(lambda _event: "loopback-reply-a" in runtime.frame, 25)
+                # Keep all model rows visible in the isolated PTY.
+                runtime.command("Resize", session_id=session, cols=100, rows=42,
+                                cell_width_px=7, cell_height_px=14)
+                menu_labels = [f"{role} · {MODEL}" for role in ("Opus", "Sonnet", "Haiku")]
+                runtime.submit(session, "/model")
+                runtime.until(lambda _event: "Select model" in runtime.frame
+                              and all(label in runtime.frame for label in menu_labels), 15)
+                menu = runtime.frame.split("Select model", 1)[1]
+                menu_choices = [
+                    match.group(1) for row in menu.splitlines()
+                    if (match := re.match(r"\s*(?:❯\s*)?\d+\.\s+(.*)", row))
+                ]
+                # The CLI can prepend its own Default action to the supplied models.
+                cli_default = (menu_choices.pop(0) if menu_choices
+                               and menu_choices[0].startswith("Default (recommended)") else None)
+                if len(menu_choices) != 3 or not all(
+                    re.fullmatch(rf"{re.escape(label)}(?:\s+[✔✓])?\s+{provider}", choice)
+                    for choice, label, provider in zip(menu_choices, menu_labels, ("a", "b", "a"))
+                ):
+                    raise RuntimeError("the CLI menu did not show the three configured model rows")
+                runtime.input(session, "\x1b")
+                runtime.until(lambda _event: "Select model" not in runtime.frame, 15)
                 runtime.submit(session, "/model sonnet")
                 def switched():
                     screen = runtime.frame.lower()
@@ -274,6 +297,8 @@ def probe(runtime_path, cli, root):
                     raise RuntimeError("a fake upstream received an unexpected route")
                 return {"cli_version": version, "same_pid": before[1], "same_run": before[0],
                         "same_generation": before[2], "model_change": "/model sonnet",
+                        "model_menu": menu_choices,
+                        "cli_default_menu_entry": cli_default,
                         "cli_api_key_confirmation": api_key_prompt,
                         "cli_model_switch_confirmation": model_switch_prompt,
                         "assistant_replies": ["loopback-reply-a", "loopback-reply-b"],

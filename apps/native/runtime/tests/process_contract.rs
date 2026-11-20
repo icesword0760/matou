@@ -3253,7 +3253,7 @@ exec /bin/sleep 60
 
 #[test]
 fn start_fresh_uses_the_queued_assignment_or_the_active_provider() -> Result<()> {
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     for scenario in [
         "save",
@@ -3397,6 +3397,19 @@ exec /bin/sleep 60
             }
         }
         let argv = fs::read_to_string(stub.with_extension("argv"))?;
+        let settings: Value = serde_json::from_slice(&fs::read(
+            argv.lines().nth(1).context("direct CLI settings path")?,
+        )?)?;
+        assert_eq!(
+            settings
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["hooks", "statusLine"],
+            "{scenario}: direct launch only writes the hook settings",
+        );
         let expected: &[&str] = if scenario == "save" {
             &[
                 "--model",
@@ -4639,8 +4652,13 @@ fn assigned_claude_gateway_changes_target_without_restarting_the_cli() -> Result
 
     let provider = |id, endpoint, key| {
         json!({
-            "id": id, "endpoint": endpoint, "apiKey": key, "model": "source-opus",
-            "modelMapping": {"opus": "source-opus", "haiku": "source-haiku"}
+            "id": id, "name": format!("Fixture provider {id}"),
+            "endpoint": endpoint, "apiKey": key, "model": "source-opus",
+            "modelMapping": {"opus": "source-opus", "haiku": "source-haiku"},
+            "modelMetadata": [
+                {"id": "shared-model"},
+                {"id": "source-haiku", "resolvedModel": "upstream-haiku"}
+            ]
         })
     };
     fs::write(seed.data.join("provider-config.json"), json!({
@@ -4698,9 +4716,17 @@ done
     let run = &initial[0];
     let pid = run.pid.context("substitute CLI PID")?;
     assert_eq!(run.status, "running");
-    let settings = fs::read_to_string(stub.with_extension("settings"))?;
+    let settings_path = fs::read_to_string(stub.with_extension("settings"))?;
+    let settings_path = Path::new(settings_path.trim());
+    let settings: Value = serde_json::from_slice(&fs::read(settings_path)?)?;
+    let model_picker = serde_json::to_string(&settings["modelPicker"])?;
+    assert_eq!(
+        model_picker,
+        r#"{"replaceBuiltInOptions":true,"options":[{"model":"opus","label":"Opus · shared-model","description":"a"},{"model":"sonnet","label":"Sonnet · shared-model","description":"b"},{"model":"haiku","label":"Haiku · source-haiku","description":"a"}]}"#
+    );
+    println!("modelPicker from the live CLI settings file = {model_picker}");
     post_claude_identity(
-        Path::new(settings.trim()),
+        settings_path,
         "gateway-test-conversation",
         "default",
         "matou-role/opus",
