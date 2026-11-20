@@ -82,6 +82,51 @@ const cases = [
   },
 ]
 
+const next = (term, options) => ({ op: 'next', term, ...(options && { options }) })
+const previous = term => ({ op: 'previous', term })
+const findAll = term => ({ op: 'all', term })
+const bufferCases = [
+  {
+    name: 'soft-wrap-versus-hard-break', cols: 8, rows: 4,
+    text: '123456ABCD\r\n654321AB\r\nCD',
+    probes: [findAll('ABCD'), findAll('AB\nCD'), findAll('miss')],
+  },
+  ...['\x1b[2J', '\x1b[2J\x1b[3J'].map((erase, index) => ({
+    name: index === 0 ? 'erase-visible-screen' : 'erase-visible-and-scrollback',
+    cols: 16, rows: 2, history: 10,
+    text: 'archive-key\r\nolder\r\nscreen-key\r\n' + erase + '\x1b[Hafter-key',
+    probes: ['archive-key', 'screen-key', 'after-key'].map(findAll),
+  })),
+  ...['', '\x1b[?1049l'].map((leave, index) => ({
+    name: index === 0 ? 'alternate-screen-active' : 'primary-restored-after-alternate',
+    cols: 16, rows: 3, history: 10,
+    text: 'primary-key\x1b[?1049h\x1b[Halternate-key' + leave,
+    probes: ['primary-key', 'alternate-key'].map(findAll),
+  })),
+]
+
+const sessionCases = [
+  {
+    name: 'decoration-count-direction-and-empty', cols: 24, rows: 4,
+    text: 'KEY key Key\r\nkeypad [key] key',
+    probes: [next('key'), ...Array.from({ length: 6 }, () => next('key')), previous('key'),
+      next('key', { caseSensitive: true, wholeWord: true }), next('KEY', { caseSensitive: true }),
+      next('missing'), next('')],
+  },
+  {
+    name: 'decoration-regex-error-and-correction', cols: 24, rows: 3,
+    text: '[cat42] Cat27\r\ncat009',
+    probes: [next('['), next('[', { regex: true }), next('cat\\d+', { regex: true }),
+      { ...previous('cat\\d+'), options: { regex: true } }, next('')],
+  },
+  {
+    name: 'decoration-wrap-wide-and-emoji', cols: 8, rows: 5,
+    text: 'abc1234中文🙂e\u0301fin\r\nlast',
+    probes: [next('4中文'), next('🙂e\u0301'), next('.', { regex: true }),
+      next('🙂.', { regex: true }), next('fin')],
+  },
+]
+
 const entry = `
 import { SearchAddon } from 'addon/SearchAddon'
 import { SearchEngine } from 'addon/SearchEngine'
@@ -165,11 +210,82 @@ async function main(cases) {
     cache.dispose()
     terminal.dispose()
   }
+  const sessionCases = await captureSessions(${JSON.stringify(sessionCases)})
   const path = resolve('apps/native/terminal/tests/fixtures/search-reference.json')
-  writeFileSync(path, JSON.stringify({ source: 'Frozen SearchEngine, SearchLineCache and SearchAddon', cases: results }, null, 2) + '\\n')
+  writeFileSync(path, JSON.stringify({ source: 'Frozen SearchEngine, SearchLineCache and SearchAddon', cases: results, sessionCases }, null, 2) + '\\n')
   console.log(JSON.stringify({ path, cases: results.length, probes: results.reduce((n, c) => n + c.probes.length, 0) }))
 }
-main(${JSON.stringify(cases)}).catch(error => {
+
+async function captureSessions(cases) {
+  const results = []
+  for (const { probes, ...input } of cases) {
+    const terminal = new Terminal({ cols: input.cols, rows: input.rows, scrollback: 0, allowProposedApi: true })
+    const selection = new SelectionModel(terminal._core._bufferService)
+    terminal.clearSelection = () => selection.clearSelection()
+    terminal.getSelectionPosition = () => {
+      const start = selection.finalSelectionStart
+      const end = selection.finalSelectionEnd
+      if (!start || !end || (start[0] === end[0] && start[1] === end[1])) return undefined
+      return { start: point(start), end: point(end) }
+    }
+    terminal.select = (col, row, size) => {
+      selection.clearSelection()
+      selection.selectionStart = [col, row]
+      selection.selectionStartLength = size
+    }
+    // Headless has a buffer and markers. Only the browser decoration registration
+    // needs a host adapter. The addon still computes its real decoration ranges.
+    const disposable = () => ({ dispose() {} })
+    terminal.registerMarker = offset => ({
+      ...disposable(), line: terminal.buffer.active.baseY + terminal.buffer.active.cursorY + offset
+    })
+    terminal.registerDecoration = ({ marker }) => ({
+      ...disposable(), marker, onRender: disposable, onDispose: disposable,
+    })
+    await new Promise(done => terminal.write(input.text, done))
+    const addon = new SearchAddon()
+    terminal.loadAddon(addon)
+    let change
+    addon.onDidChangeResults(event => { change = event })
+    const outcomes = []
+    for (const action of probes) {
+      const { op, term, options = {} } = action
+      change = undefined
+      let expected
+      try {
+        if (term === '') {
+          // The frozen TerminalSurface handles an empty field at this boundary.
+          addon.clearDecorations()
+          terminal.clearSelection()
+          change = { resultIndex: 0, resultCount: 0 }
+        } else {
+          const searchOptions = { ...options, incremental: op === 'next', decorations: {
+            matchBackground: '#ffe792', matchBorder: '#d6a800', matchOverviewRuler: '#d6a800',
+            activeMatchBackground: '#ff9632', activeMatchBorder: '#c86400', activeMatchColorOverviewRuler: '#ff9632',
+          } }
+          if (op === 'previous') addon.findPrevious(term, searchOptions)
+          else addon.findNext(term, searchOptions)
+        }
+        const tracker = addon._resultTracker
+        expected = {
+          matches: tracker.searchResults.map(match),
+          active: tracker.selectedDecoration ? match(tracker.selectedDecoration.match) : null,
+          ...change,
+        }
+        if (change === undefined) throw new Error('missing addon result event')
+      } catch (error) {
+        if (!(error instanceof SyntaxError)) throw error
+        expected = { error: error.message }
+      }
+      outcomes.push({ ...action, expected })
+    }
+    results.push({ ...input, probes: outcomes })
+    terminal.dispose()
+  }
+  return results
+}
+
+main(${JSON.stringify([...cases, ...bufferCases])}).catch(error => {
   console.error(error)
   process.exitCode = 1
 })

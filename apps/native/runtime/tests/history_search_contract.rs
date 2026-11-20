@@ -1,4 +1,4 @@
-use std::fs;
+use std::{env, fs, path::Path};
 
 use matou_native_runtime::history::{HistoryPageInput, HistorySearchInput, JournalHistoryReader};
 use serde::Deserialize;
@@ -37,6 +37,33 @@ enum Probe {
     },
 }
 
+fn write_segments(root: &Path, case: &Case) {
+    let directory = root.join("journal").join(&case.session_id);
+    fs::create_dir_all(&directory).unwrap();
+    for segment in &case.segments {
+        fs::write(
+            directory.join(&segment.name),
+            decode_base64(&segment.base64),
+        )
+        .unwrap();
+    }
+}
+
+fn history_probe(reader: &JournalHistoryReader, session_id: &str, probe: Probe) -> (Value, Value) {
+    let (result, expected) = match probe {
+        Probe::Page { input, expected } => (
+            reader.page(session_id, input).map(|page| json!(page)),
+            expected,
+        ),
+        Probe::Search { input, expected } => (
+            reader.search(session_id, input).map(|result| json!(result)),
+            expected,
+        ),
+    };
+    let actual = result.unwrap_or_else(|error| json!({ "error": error.to_string() }));
+    (actual, expected)
+}
+
 #[test]
 fn matches_frozen_journal_history_reader() {
     let fixture: Fixture =
@@ -45,33 +72,42 @@ fn matches_frozen_journal_history_reader() {
     let reader = JournalHistoryReader::new(root.path());
 
     for case in fixture.cases {
-        let directory = root.path().join("journal").join(&case.session_id);
-        fs::create_dir_all(&directory).unwrap();
-        for segment in case.segments {
-            fs::write(directory.join(segment.name), decode_base64(&segment.base64)).unwrap();
-        }
-
+        write_segments(root.path(), &case);
         for (index, probe) in case.probes.into_iter().enumerate() {
-            let (actual, expected) = match probe {
-                Probe::Page { input, expected } => {
-                    let page = reader.page(&case.session_id, input).unwrap();
-                    (json!(page), expected)
-                }
-                Probe::Search { input, expected } => {
-                    let result = reader.search(&case.session_id, input);
-                    if let Some(message) = expected.get("error").and_then(Value::as_str) {
-                        // V8 and regress describe invalid pattern syntax differently.
-                        let category = "invalid terminal history search pattern";
-                        assert!(message.starts_with(category));
-                        assert!(result.unwrap_err().to_string().starts_with(category));
-                        continue;
-                    }
-                    (json!(result.unwrap()), expected)
-                }
-            };
+            let (actual, expected) = history_probe(&reader, &case.session_id, probe);
+            if let Some(message) = expected["error"].as_str() {
+                // V8 and regress describe invalid pattern syntax differently.
+                let category = "invalid terminal history search pattern";
+                assert!(message.starts_with(category));
+                assert!(actual["error"].as_str().unwrap().starts_with(category));
+                continue;
+            }
             assert_eq!(actual, expected, "{} probe {index}", case.variant);
         }
     }
+}
+
+#[test]
+#[ignore = "capture via K-search-policy/run.sh"]
+fn capture_history_search_policy() {
+    let input = fs::read(env::var_os("MATOU_HISTORY_SEARCH_INPUT").unwrap()).unwrap();
+    let fixture: Fixture = serde_json::from_slice(&input).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let reader = JournalHistoryReader::new(root.path());
+
+    let mut cases = Vec::new();
+    for case in fixture.cases {
+        write_segments(root.path(), &case);
+        let outcomes: Vec<Value> = case
+            .probes
+            .into_iter()
+            .map(|probe| history_probe(&reader, &case.session_id, probe).0)
+            .collect();
+        cases.push(json!({ "variant": case.variant, "outcomes": outcomes }));
+    }
+    let output = json!({ "cases": cases });
+    let path = env::var_os("MATOU_HISTORY_SEARCH_OUTPUT").unwrap();
+    fs::write(path, serde_json::to_string_pretty(&output).unwrap() + "\n").unwrap();
 }
 
 fn decode_base64(encoded: &str) -> Vec<u8> {
