@@ -142,6 +142,67 @@ fn projection_and_status_transactions_match_the_frozen_database() -> Result<()> 
 }
 
 #[test]
+fn directory_sharing_counts_active_sessions_across_workspace_tasks() -> Result<()> {
+    let reference: Reference = serde_json::from_str(REFERENCE)?;
+    let Step::Project { scene_id, .. } = &reference.steps[0] else {
+        bail!("expected initial graph fixture");
+    };
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("matou.sqlite");
+    fs::write(&path, STANDARD.decode(reference.seed_base64)?)?;
+    let db = Connection::open(path)?;
+    configure_connection(&db)?;
+    db.execute_batch(
+        "UPDATE execution_contexts SET kind = 'git-worktree';
+         INSERT INTO worktrees (id, execution_context_id, repository_root, worktree_path,
+                                branch_name, state, created_at, updated_at)
+           SELECT 'worktree', id, '/tmp/repository', cwd, 'feature', 'ready', 1, 1
+           FROM execution_contexts;
+         INSERT INTO tasks (id, workspace_id, execution_context_id, title, status,
+                            sort_key, created_at, updated_at)
+           SELECT 'sibling-task', workspace_id, id, 'Sibling task', 'planned', 'a1', 1, 1
+           FROM execution_contexts;
+         INSERT INTO workspaces (id, name, root_directory, created_at, updated_at)
+           VALUES ('other-workspace', 'Other workspace', '/tmp/other-workspace', 1, 1);
+         INSERT INTO execution_contexts (id, workspace_id, kind, cwd, created_at)
+           VALUES ('other-context', 'other-workspace', 'plain-directory', '/tmp/graph-workspace', 1);
+         INSERT INTO tasks (id, workspace_id, execution_context_id, title, status, created_at, updated_at)
+           VALUES ('other-task', 'other-workspace', 'other-context', 'Other task', 'planned', 1, 1);
+         INSERT INTO sessions (id, task_id, execution_context_id, kind, status, cwd,
+                               created_at, updated_at, last_activity_at)
+           SELECT tasks.id || '-session', tasks.id, execution_contexts.id, 'shell', 'created',
+                  execution_contexts.cwd, 1, 1, 1
+           FROM tasks JOIN execution_contexts ON execution_contexts.id = tasks.execution_context_id
+           WHERE tasks.id IN ('sibling-task', 'other-task');",
+    )?;
+
+    let graph = project_scene_graph(&db, scene_id, None)?;
+    let node = &graph["nodes"][0];
+    assert_eq!(node["sharedSessionCount"], 2);
+    assert_eq!(node["sharedWorkingDirectory"], true);
+    assert_eq!(node["worktree"]["shared"], true);
+
+    db.execute(
+        "UPDATE sessions SET status = 'archived', archived_at = 2 WHERE id = 'sibling-task-session'",
+        [],
+    )?;
+    let graph = project_scene_graph(&db, scene_id, None)?;
+    let node = &graph["nodes"][0];
+    assert_eq!(node["sharedSessionCount"], 1);
+    assert_eq!(node["sharedWorkingDirectory"], false);
+    assert_eq!(node["worktree"]["shared"], false);
+
+    db.execute(
+        "UPDATE sessions SET status = 'archived', archived_at = 3
+         WHERE id = (SELECT session_id FROM session_canvas_memberships WHERE scene_id = ?)",
+        [scene_id],
+    )?;
+    let graph = project_scene_graph(&db, scene_id, None)?;
+    assert_eq!(graph["nodes"][0]["sharedSessionCount"], 1);
+    Ok(())
+}
+
+#[test]
 #[ignore = "requires a fresh K-storage-session frozen export"]
 fn export_native_session_graph() -> Result<()> {
     let gate = PathBuf::from(env::var("MATOU_SESSION_GATE")?);

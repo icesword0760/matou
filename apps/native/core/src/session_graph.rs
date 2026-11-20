@@ -82,8 +82,12 @@ const CHILD_COUNTS_SQL: &str = r#"SELECT
 
 const DIRECTORY_COUNTS_SQL: &str = r#"SELECT sessions.cwd, COUNT(*) AS count
          FROM sessions
-         JOIN session_canvas_memberships AS membership ON membership.session_id = sessions.id
-         WHERE membership.scene_id = ? AND sessions.archived_at IS NULL
+         JOIN tasks ON tasks.id = sessions.task_id
+         WHERE tasks.workspace_id = (
+           SELECT task.workspace_id
+           FROM scenes JOIN tasks AS task ON task.id = scenes.task_id
+           WHERE scenes.id = ?
+         ) AND sessions.archived_at IS NULL
          GROUP BY sessions.cwd"#;
 
 const EDGES_SQL: &str = r#"SELECT
@@ -234,7 +238,7 @@ pub fn project_scene_graph(
         })?
         .collect::<rusqlite::Result<HashMap<_, _>>>()?;
     let mut statement = connection.prepare(DIRECTORY_COUNTS_SQL)?;
-    let sharing = statement
+    let directory_counts = statement
         .query_map([scene_id], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
         })?
@@ -242,7 +246,9 @@ pub fn project_scene_graph(
     let sql = node_query(has_environment, has_git, has_fork_progress);
     let mut statement = connection.prepare(&sql)?;
     let nodes = statement
-        .query_map([scene_id], |row| map_node(row, &children, &sharing))?
+        .query_map([scene_id], |row| {
+            map_node(row, &children, &directory_counts)
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut statement = connection.prepare(EDGES_SQL)?;
     let edges = statement
@@ -299,7 +305,7 @@ pub(crate) fn binding_can_fork(metadata: &Value) -> bool {
 fn map_node(
     row: &Row<'_>,
     children: &HashMap<String, ChildCount>,
-    sharing: &HashMap<String, i64>,
+    directory_counts: &HashMap<String, i64>,
 ) -> rusqlite::Result<Value> {
     let session_id: String = row.get("session_id")?;
     let kind: String = row.get("kind")?;
@@ -329,7 +335,8 @@ fn map_node(
         && restore_state.as_deref() == Some("none")
         && metadata.as_ref().is_some_and(binding_can_fork);
     let cwd: String = row.get("cwd")?;
-    let shared = sharing.get(&cwd).is_some_and(|&count| count > 1);
+    let shared_session_count = directory_counts.get(&cwd).copied().unwrap_or(0).max(1);
+    let shared = shared_session_count > 1;
     let counts = children.get(&session_id).copied().unwrap_or_default();
 
     let mut node = json!({"sessionId": session_id, "sceneId": row.get::<_, String>("scene_id")?});
@@ -387,6 +394,7 @@ fn map_node(
     );
     insert_optional(&mut node, "git", map_git(row)?);
     node["sharedWorkingDirectory"] = json!(shared);
+    node["sharedSessionCount"] = json!(shared_session_count);
     if let (Some(path), Some(branch)) = (
         row.get::<_, Option<String>>("worktree_path")?,
         row.get::<_, Option<String>>("branch_name")?,
