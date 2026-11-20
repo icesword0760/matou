@@ -17,17 +17,19 @@ use std::{
 
 use crate::{
     SessionEvent, SessionOptions, claude_model_catalog,
+    codex_launch::{self, CodexLaunch},
     history_worker::{HistoryReply, HistoryRequest, HistoryWorker},
     host_control::ControlServer,
     owner::{OwnerEvent, ShellOwner},
     protocol::{
-        ClaudeModelCatalogReply, ClaudeModelCatalogResult, ClaudeRoleAssignmentsReply,
-        ProviderSettingsReply, ProviderSettingsResult, deserialize_present,
+        ClaudeModelCatalogReply, ClaudeModelCatalogResult, ClaudeModelPreferencesReply,
+        ClaudeRoleAssignmentsReply, ProviderSettingsReply, ProviderSettingsResult,
+        deserialize_present,
     },
     provider_catalog,
     provider_hook::HookSetup,
     search::{SearchRequest, SearchResult},
-    shell_input::ShellInput,
+    shell_input::{InteractiveLaunch, ShellInput},
     worker::{SelectionCopy, ShellSubmission, WorkerCommand},
     workspace_paths::WorkspacePathChecks,
 };
@@ -51,12 +53,13 @@ use matou_native_core::{
     provider_launch::{
         CLAUDE_PERMISSION_MODES, ClaudeLaunch, prepare_claude_fork, prepare_claude_launch,
         prepare_claude_permission_restart, prepare_new_claude_launch_with_budget,
-        validate_claude_role_assignments, validate_claude_web_search, validate_cwd,
+        validate_claude_compaction, validate_claude_role_assignments, validate_claude_web_search,
+        validate_cwd,
     },
     pty::{LaunchProfile, ShellLaunch},
     sessions::{
         ClaudeBinding, ClaudeCatalogLoad, ClaudeRestore, ClaudeRoleLaunchPreferences,
-        read_claude_role_launch_preferences, save_claude_model_assignments,
+        read_claude_role_launch_preferences, save_claude_model_preferences,
     },
     startup::{self, BootstrapResult, ReadOnlyReason, RecoveryError, RecoveryRequired},
     storage::{CommandMetadata, configure_connection},
@@ -153,6 +156,9 @@ pub enum Command {
     GetClaudeRoleAssignments {
         request_id: u64,
     },
+    GetClaudeModelPreferences {
+        request_id: u64,
+    },
     SetClaudeRoleAssignments {
         request_id: u64,
         assignments: Value,
@@ -163,6 +169,23 @@ pub enum Command {
             deserialize_with = "deserialize_present"
         )]
         web_search: Option<Value>,
+    },
+    SetClaudeModelPreferences {
+        request_id: u64,
+        assignments: Value,
+        #[serde(
+            rename = "webSearch",
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "deserialize_present"
+        )]
+        web_search: Option<Value>,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "deserialize_present"
+        )]
+        compaction: Option<Value>,
     },
     GetProviderSettings {
         request_id: u64,
@@ -827,8 +850,17 @@ struct LaunchRetry {
 }
 
 enum RoleAssignmentsRequest {
-    Get(u64),
-    Set(u64, Value, Option<Value>),
+    Get {
+        request_id: u64,
+        include_compaction: bool,
+    },
+    Set {
+        request_id: u64,
+        assignments: Value,
+        web_search: Option<Value>,
+        compaction: Option<Value>,
+        include_compaction: bool,
+    },
     ForLaunch(Sender<ClaudeRoleLaunchPreferences>),
 }
 
@@ -973,7 +1005,9 @@ pub fn storage_command_rejected(command: Command, code: &str, message: &str) -> 
     let request_id = match &command {
         Command::GetClaudeModelCatalog { request_id }
         | Command::GetClaudeRoleAssignments { request_id }
+        | Command::GetClaudeModelPreferences { request_id }
         | Command::SetClaudeRoleAssignments { request_id, .. }
+        | Command::SetClaudeModelPreferences { request_id, .. }
         | Command::GetProviderSettings { request_id }
         | Command::SaveProvider { request_id, .. }
         | Command::DeleteProvider { request_id, .. }
@@ -1775,31 +1809,49 @@ fn run_writable(
         .spawn(move || {
             for request in role_commands {
                 let reply = match request {
-                    RoleAssignmentsRequest::Get(request_id) => {
+                    RoleAssignmentsRequest::Get {
+                        request_id,
+                        include_compaction,
+                    } => {
                         let preferences = load_role_preferences(&role_data_root);
-                        ClaudeRoleAssignmentsReply {
-                            request_id,
-                            assignments: Some(preferences.assignments),
-                            web_search: preferences.web_search.map(Some),
-                            error: None,
+                        ClaudeModelPreferencesReply {
+                            roles: ClaudeRoleAssignmentsReply {
+                                request_id,
+                                assignments: Some(preferences.assignments),
+                                web_search: preferences.web_search.map(Some),
+                                error: None,
+                            },
+                            compaction: include_compaction.then_some(preferences.compaction),
                         }
                     }
-                    RoleAssignmentsRequest::Set(request_id, value, web_search) => {
-                        save_role_assignments(
-                            &role_data_root,
+                    RoleAssignmentsRequest::Set {
+                        request_id,
+                        assignments,
+                        web_search,
+                        compaction,
+                        include_compaction,
+                    } => save_role_assignments(
+                        &role_data_root,
+                        request_id,
+                        &assignments,
+                        web_search.as_ref(),
+                        compaction.as_ref(),
+                    )
+                    .map(|mut reply| {
+                        if !include_compaction {
+                            reply.compaction = None;
+                        }
+                        reply
+                    })
+                    .unwrap_or_else(|error| ClaudeModelPreferencesReply {
+                        roles: ClaudeRoleAssignmentsReply {
                             request_id,
-                            &value,
-                            web_search.as_ref(),
-                        )
-                        .unwrap_or_else(|error| {
-                            ClaudeRoleAssignmentsReply {
-                                request_id,
-                                assignments: None,
-                                web_search: None,
-                                error: Some(format!("{error:#}")),
-                            }
-                        })
-                    }
+                            assignments: None,
+                            web_search: None,
+                            error: Some(format!("{error:#}")),
+                        },
+                        compaction: None,
+                    }),
                     RoleAssignmentsRequest::ForLaunch(reply) => {
                         let _ = reply.send(load_role_preferences(&role_data_root));
                         continue;
@@ -2144,6 +2196,7 @@ fn run_writable(
                     }
                     owner.launch_claude(session_id.clone(), terminal, launch, binding.as_ref())
                 }
+                PreparedLaunch::Codex(_) => bail!("Codex requires a fresh Shell promotion"),
             });
             match result {
                 Ok(()) => {
@@ -2182,7 +2235,7 @@ fn run_writable(
             match pending.decision.try_recv() {
                 Ok(decision) => {
                     if let Some(ShellSubmission {
-                        mode,
+                        launch,
                         before,
                         cleared,
                     }) = decision
@@ -2190,7 +2243,7 @@ fn run_writable(
                         shell_promotions.insert(
                             session_id.clone(),
                             ShellPromotion {
-                                mode,
+                                launch,
                                 phase: ShellPromotionPhase::Clearing {
                                     result: cleared,
                                     before,
@@ -2634,8 +2687,15 @@ fn run_writable(
                     }
                     continue;
                 }
-                Command::GetClaudeRoleAssignments { request_id } => {
-                    role_requests.send(RoleAssignmentsRequest::Get(request_id))?;
+                Command::GetClaudeRoleAssignments { request_id }
+                | Command::GetClaudeModelPreferences { request_id } => {
+                    role_requests.send(RoleAssignmentsRequest::Get {
+                        request_id,
+                        include_compaction: matches!(
+                            command,
+                            Command::GetClaudeModelPreferences { .. }
+                        ),
+                    })?;
                     continue;
                 }
                 Command::SetClaudeRoleAssignments {
@@ -2643,11 +2703,28 @@ fn run_writable(
                     assignments,
                     web_search,
                 } => {
-                    role_requests.send(RoleAssignmentsRequest::Set(
+                    role_requests.send(RoleAssignmentsRequest::Set {
                         request_id,
                         assignments,
                         web_search,
-                    ))?;
+                        compaction: None,
+                        include_compaction: false,
+                    })?;
+                    continue;
+                }
+                Command::SetClaudeModelPreferences {
+                    request_id,
+                    assignments,
+                    web_search,
+                    compaction,
+                } => {
+                    role_requests.send(RoleAssignmentsRequest::Set {
+                        request_id,
+                        assignments,
+                        web_search,
+                        compaction,
+                        include_compaction: true,
+                    })?;
                     continue;
                 }
                 Command::GetProviderSettings { request_id } => {
@@ -3739,6 +3816,11 @@ fn run_writable(
                         pending_input.retain(|input| &input.session_id != id);
                         finished_promotions.push(id.clone());
                     } else {
+                        if promotion.launch.profile == LaunchProfile::Codex {
+                            send.send_blocking(Event::Diagnostic(codex_launch::failure_message(
+                                &error,
+                            )))?;
+                        }
                         owner.retire_sessions(std::slice::from_ref(id));
                         promotion.phase = ShellPromotionPhase::RollingBack;
                     }
@@ -4107,13 +4189,11 @@ static PERMISSION_STARTUP_WINDOW: LazyLock<Duration> = LazyLock::new(|| {
     Duration::from_millis(millis)
 });
 
-// Give an immediately failing child time to exit before checking it on its
-// worker. The replacement's frames can already be displayed.
-const SHELL_PROMOTION_STARTUP_WINDOW: Duration = Duration::from_millis(150);
+// Preserve the Claude handoff even if its process stays quiet at launch.
 const SHELL_PROMOTION_SILENT_STARTUP_WINDOW: Duration = Duration::from_secs(2);
 
 struct ShellPromotion {
-    mode: &'static str,
+    launch: InteractiveLaunch,
     phase: ShellPromotionPhase,
     promoted: bool,
     inputs: VecDeque<PendingInput>,
@@ -4174,13 +4254,13 @@ impl ShellPromotion {
                 let Some(()) = poll_promotion_result(result)? else {
                     return Ok(ShellPromotionProgress::Pending);
                 };
-                owner.promote_shell_to_claude(session_id)?;
+                owner.promote_shell_to_agent(session_id, self.launch.profile)?;
                 self.promoted = true;
                 self.phase = ShellPromotionPhase::Preparing(prepare_launch(
                     owner,
                     options,
                     session_id,
-                    LaunchIntent::ShellPromotion(self.mode),
+                    LaunchIntent::ShellPromotion(self.launch),
                     role_requests,
                 )?);
                 Ok(ShellPromotionProgress::Pending)
@@ -4189,20 +4269,24 @@ impl ShellPromotion {
                 let Some(launch) = poll_promotion_result(result)? else {
                     return Ok(ShellPromotionProgress::Pending);
                 };
-                let PreparedLaunch::ClaudeCode {
-                    launch,
-                    fork_source: None,
-                } = launch
-                else {
-                    bail!("promotion requires a fresh Claude launch");
-                };
                 let terminal = terminal_layouts
                     .get(session_id)
                     .copied()
                     .unwrap_or_else(default_terminal_options);
-                claude_launch_targets
-                    .insert(session_id.to_owned(), claude_target_metadata(&launch));
-                let run_id = owner.launch_promoted_claude(session_id, terminal, launch)?;
+                let run_id = match launch {
+                    PreparedLaunch::ClaudeCode {
+                        launch,
+                        fork_source: None,
+                    } => {
+                        claude_launch_targets
+                            .insert(session_id.to_owned(), claude_target_metadata(&launch));
+                        owner.launch_promoted_claude(session_id, terminal, launch)?
+                    }
+                    PreparedLaunch::Codex(launch) => {
+                        owner.launch_codex(session_id, terminal, launch)?
+                    }
+                    _ => bail!("promotion requires a fresh provider launch"),
+                };
                 self.phase = ShellPromotionPhase::Starting {
                     run_id,
                     started_at: Instant::now(),
@@ -4212,9 +4296,10 @@ impl ShellPromotion {
             ShellPromotionPhase::Starting { run_id, started_at } => {
                 let has_output = owner.check_provider_startup(session_id, run_id)?;
                 let elapsed = started_at.elapsed();
-                if elapsed < SHELL_PROMOTION_STARTUP_WINDOW
-                    || (!has_output && elapsed < SHELL_PROMOTION_SILENT_STARTUP_WINDOW)
-                {
+                let ready = codex_launch::first_screen_ready(elapsed, has_output)
+                    || (self.launch.profile == LaunchProfile::ClaudeCode
+                        && elapsed >= SHELL_PROMOTION_SILENT_STARTUP_WINDOW);
+                if !ready {
                     return Ok(ShellPromotionProgress::Pending);
                 }
                 owner.begin_promotion_process_check(session_id)?;
@@ -4275,7 +4360,7 @@ impl ShellPromotion {
         // RestoringShell has already rolled the kind back, but the handoff
         // still happened and counts when shutting down that pending restart.
         if self.promoted && !matches!(self.phase, ShellPromotionPhase::RestoringShell(_)) {
-            owner.return_promoted_claude_to_shell(session_id)?;
+            owner.return_promoted_agent_to_shell(session_id, self.launch.profile)?;
         }
         Ok(())
     }
@@ -4830,6 +4915,7 @@ enum PreparedLaunch {
         launch: ClaudeLaunch,
         fork_source: Option<String>,
     },
+    Codex(CodexLaunch),
 }
 
 // A binding may be missing or stale before SessionStart confirms this launch.
@@ -4845,7 +4931,7 @@ fn claude_target_metadata(plan: &ClaudeLaunch) -> Value {
 
 enum LaunchIntent<'a> {
     Start,
-    ShellPromotion(&'a str),
+    ShellPromotion(InteractiveLaunch),
     PermissionRestart {
         fresh_mode: Option<&'a str>,
         previous_target: Option<&'a Value>,
@@ -4858,7 +4944,7 @@ fn load_role_preferences(data_root: &Path) -> ClaudeRoleLaunchPreferences {
         .unwrap_or_default()
 }
 
-fn native_role_catalog() -> Vec<Value> {
+pub(crate) fn native_role_catalog() -> Vec<Value> {
     claude_model_catalog::models()
         .into_iter()
         .filter_map(|model| serde_json::to_value(model).ok())
@@ -4870,7 +4956,8 @@ fn save_role_assignments(
     request_id: u64,
     value: &Value,
     web_search: Option<&Value>,
-) -> Result<ClaudeRoleAssignmentsReply> {
+    compaction: Option<&Value>,
+) -> Result<ClaudeModelPreferencesReply> {
     let assignments = validate_claude_role_assignments(data_root, value)?;
     let search_patch = web_search
         .map(|target| {
@@ -4882,25 +4969,38 @@ fn save_role_assignments(
             }
         })
         .transpose()?;
-    let saved = (|| {
+    let compaction_patch = compaction
+        .map(|target| {
+            if target.is_null() {
+                Ok(None)
+            } else {
+                validate_claude_compaction(data_root, target, &native_role_catalog).map(Some)
+            }
+        })
+        .transpose()?;
+    let (saved_search, saved_compaction) = (|| {
         let mut connection = open_role_assignments_writer(data_root)?;
-        save_claude_model_assignments(
+        save_claude_model_preferences(
             &mut connection,
             &assignments,
             search_patch.as_ref().map(Option::as_ref),
+            compaction_patch.as_ref().map(Option::as_ref),
             now(),
         )
     })()
     .context("保存未确认，请重试。原选择已保留。")?;
-    Ok(ClaudeRoleAssignmentsReply {
-        request_id,
-        assignments: Some(assignments),
-        web_search: if web_search.is_some() {
-            Some(saved)
-        } else {
-            saved.map(Some)
+    Ok(ClaudeModelPreferencesReply {
+        roles: ClaudeRoleAssignmentsReply {
+            request_id,
+            assignments: Some(assignments),
+            web_search: if web_search.is_some() {
+                Some(saved_search)
+            } else {
+                saved_search.map(Some)
+            },
+            error: None,
         },
-        error: None,
+        compaction: Some(saved_compaction),
     })
 }
 
@@ -4959,7 +5059,11 @@ fn prepare_launch(
                 .as_ref()
                 .map_or(Value::Null, |binding| binding.metadata.clone());
             let mut remembered = false;
-            if let LaunchIntent::ShellPromotion(mode) = intent {
+            if let LaunchIntent::ShellPromotion(InteractiveLaunch {
+                profile: LaunchProfile::ClaudeCode,
+                mode,
+            }) = intent
+            {
                 metadata = json!({"permissionMode": mode});
             }
             let resume_id = if let LaunchIntent::PermissionRestart {
@@ -5059,6 +5163,31 @@ fn prepare_launch(
                             fork_source: fork.map(|fork| fork.source_id),
                         })
                     })();
+                    let _ = send.send(result);
+                })?;
+        }
+        "codex" => {
+            let LaunchIntent::ShellPromotion(InteractiveLaunch {
+                profile: LaunchProfile::Codex,
+                mode,
+            }) = intent
+            else {
+                bail!("Codex requires a fresh Shell promotion");
+            };
+            let data_root = options.data_root.clone();
+            thread::Builder::new()
+                .name("codex-launch".into())
+                .spawn(move || {
+                    let terminal = default_terminal_options();
+                    let result = codex_launch::prepare(
+                        &data_root,
+                        Path::new(&session.cwd),
+                        mode,
+                        std::env::vars_os().collect(),
+                        terminal.cols,
+                        terminal.rows,
+                    )
+                    .map(PreparedLaunch::Codex);
                     let _ = send.send(result);
                 })?;
         }

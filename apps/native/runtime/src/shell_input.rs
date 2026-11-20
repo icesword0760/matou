@@ -1,4 +1,11 @@
 use crate::flow::Utf8Decoder;
+use matou_native_core::pty::LaunchProfile;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct InteractiveLaunch {
+    pub profile: LaunchProfile,
+    pub mode: &'static str,
+}
 
 #[derive(Clone, Default)]
 pub(crate) struct ShellInput {
@@ -7,7 +14,7 @@ pub(crate) struct ShellInput {
 }
 
 impl ShellInput {
-    pub(crate) fn observe(&mut self, bytes: &[u8]) -> Option<&'static str> {
+    pub(crate) fn observe(&mut self, bytes: &[u8]) -> Option<InteractiveLaunch> {
         let mut submitted = None;
         for character in self.decoder.feed(bytes).chars() {
             match character {
@@ -29,7 +36,7 @@ impl ShellInput {
         String::from_utf16(&command)
             .ok()
             .as_deref()
-            .and_then(permission_mode)
+            .and_then(interactive_launch)
     }
 
     pub(crate) fn clear(&mut self) {
@@ -37,16 +44,23 @@ impl ShellInput {
     }
 }
 
-fn permission_mode(command: &str) -> Option<&'static str> {
+pub(crate) const CODEX_BYPASS: &str = "--dangerously-bypass-approvals-and-sandbox";
+
+fn interactive_launch(command: &str) -> Option<InteractiveLaunch> {
     // Match the frozen JavaScript trim and whitespace folding.
     let mut words = command
         .split(|c: char| c == '\u{feff}' || (c.is_whitespace() && c != '\u{0085}'))
         .filter(|word| !word.is_empty());
-    match (words.next(), words.next(), words.next()) {
-        (Some("claude"), None, None) => Some("default"),
-        (Some("claude"), Some("--dangerously-skip-permissions"), None) => Some("bypassPermissions"),
-        _ => None,
-    }
+    let (profile, mode) = match (words.next(), words.next(), words.next()) {
+        (Some("claude"), None, None) => (LaunchProfile::ClaudeCode, "default"),
+        (Some("claude"), Some("--dangerously-skip-permissions"), None) => {
+            (LaunchProfile::ClaudeCode, "bypassPermissions")
+        }
+        (Some("codex"), None, None) => (LaunchProfile::Codex, "default"),
+        (Some("codex"), Some(CODEX_BYPASS), None) => (LaunchProfile::Codex, "bypassPermissions"),
+        _ => return None,
+    };
+    Some(InteractiveLaunch { profile, mode })
 }
 
 #[cfg(test)]
@@ -54,7 +68,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_the_two_exact_commands_are_recognized() {
+    fn only_the_exact_provider_commands_are_recognized() {
         for (line, expected) in [
             ("claude", Some("default")),
             ("  claude  ", Some("default")),
@@ -72,12 +86,60 @@ mod tests {
             ("echo claude", None),
             ("CLAUDE", None),
             ("cc", None),
-            ("codex", None),
             ("dsh", None),
             ("agy", None),
         ] {
-            assert_eq!(permission_mode(line), expected, "{line:?}");
+            assert_eq!(
+                interactive_launch(line).map(|launch| (launch.profile, launch.mode)),
+                expected.map(|mode| (LaunchProfile::ClaudeCode, mode)),
+                "{line:?}"
+            );
         }
+    }
+
+    #[test]
+    fn codex_requires_the_exact_command_after_normalization() {
+        for (command, expected) in [
+            ("codex", Some("default")),
+            ("  codex\u{a0}", Some("default")),
+            (
+                "codex --dangerously-bypass-approvals-and-sandbox",
+                Some("bypassPermissions"),
+            ),
+            (
+                " \u{feff}codex   \t--dangerously-bypass-approvals-and-sandbox ",
+                Some("bypassPermissions"),
+            ),
+            ("codex --model fixture", None),
+            (
+                "codex --dangerously-bypass-approvals-and-sandbox extra",
+                None,
+            ),
+            ("codex --dangerously-skip-permissions", None),
+            ("env codex", None),
+            ("echo codex", None),
+            ("./codex", None),
+            ("CODEX", None),
+        ] {
+            assert_eq!(
+                interactive_launch(command),
+                expected.map(|mode| InteractiveLaunch {
+                    profile: LaunchProfile::Codex,
+                    mode
+                }),
+                "{command:?}"
+            );
+        }
+        let mut buffer = ShellInput::default();
+        assert_eq!(buffer.observe(b"  co"), None);
+        assert_eq!(buffer.observe(b"dex  "), None);
+        assert_eq!(
+            buffer.observe(b"\r"),
+            Some(InteractiveLaunch {
+                profile: LaunchProfile::Codex,
+                mode: "default"
+            })
+        );
     }
 
     #[test]
@@ -91,7 +153,10 @@ mod tests {
             let mut buffer = ShellInput::default();
             assert!(buffer.observe(keys[0].as_bytes()).is_none());
             assert!(buffer.observe(keys[1].as_bytes()).is_none());
-            assert_eq!(buffer.observe(keys[2].as_bytes()), Some("default"));
+            assert_eq!(
+                buffer.observe(keys[2].as_bytes()).map(|launch| launch.mode),
+                Some("default")
+            );
             assert!(buffer.observe(b"\r").is_none());
         }
         let mut buffer = ShellInput::default();
@@ -99,7 +164,9 @@ mod tests {
         assert!(buffer.observe(b"claude\x15\n").is_none());
         assert!(buffer.observe(b"CLAUDE\r").is_none());
         assert_eq!(
-            buffer.observe(b"  claude   --dangerously-skip-permissions  \n"),
+            buffer
+                .observe(b"  claude   --dangerously-skip-permissions  \n")
+                .map(|launch| launch.mode),
             Some("bypassPermissions")
         );
     }
@@ -113,7 +180,13 @@ mod tests {
             (&b"touch x\rclaude\r"[..], Some("default")),
             (&b"ls\rclaude\rtail"[..], Some("default")),
         ] {
-            assert_eq!(ShellInput::default().observe(bytes), expected, "{bytes:?}");
+            assert_eq!(
+                ShellInput::default()
+                    .observe(bytes)
+                    .map(|launch| launch.mode),
+                expected,
+                "{bytes:?}"
+            );
         }
         let mut buffer = ShellInput::default();
         assert_eq!(buffer.observe(b"ls\rclaude"), None);
@@ -128,7 +201,12 @@ mod tests {
             ("claude😀\x7f\x08\r", Some("default")),
             ("claude\x1b\t\x01\r", Some("default")),
         ] {
-            assert_eq!(ShellInput::default().observe(keys.as_bytes()), expected);
+            assert_eq!(
+                ShellInput::default()
+                    .observe(keys.as_bytes())
+                    .map(|launch| launch.mode),
+                expected
+            );
         }
     }
 
@@ -139,7 +217,10 @@ mod tests {
         assert_eq!(buffer.observe(b"claude"), None);
         assert_eq!(buffer.observe(first), None);
         assert_eq!(buffer.observe(second), None);
-        assert_eq!(buffer.observe(b"\x7f\r"), Some("default"));
+        assert_eq!(
+            buffer.observe(b"\x7f\r").map(|launch| launch.mode),
+            Some("default")
+        );
     }
 
     #[test]
@@ -151,6 +232,9 @@ mod tests {
         buffer.clear();
         assert_eq!(buffer.observe(second), None);
         assert_eq!(buffer.line, ['你' as u16]);
-        assert_eq!(buffer.observe(b"\x7fclaude\r"), Some("default"));
+        assert_eq!(
+            buffer.observe(b"\x7fclaude\r").map(|launch| launch.mode),
+            Some("default")
+        );
     }
 }

@@ -97,7 +97,9 @@ fn frozen_shell_entry_fixture() -> Result<()> {
         let mut input = shell_input::ShellInput::default();
         for (index, (write, step)) in writes.iter().zip(steps).enumerate() {
             assert_eq!(
-                input.observe(write.as_text().as_bytes()),
+                input
+                    .observe(write.as_text().as_bytes())
+                    .map(|launch| launch.mode),
                 step["launch"]["permissionMode"].as_str(),
                 "{id}, write {}",
                 index + 1

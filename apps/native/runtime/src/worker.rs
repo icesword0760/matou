@@ -15,7 +15,7 @@ use crate::{
     SessionEvent, SessionOptions,
     search::{SearchRequest, SearchResult},
     session::{Session, SessionWaker},
-    shell_input::ShellInput,
+    shell_input::{InteractiveLaunch, ShellInput},
 };
 
 const MAX_POLL_WAIT: Duration = Duration::from_millis(250);
@@ -33,7 +33,7 @@ pub struct SelectionCopy {
 }
 
 pub struct ShellSubmission {
-    pub(crate) mode: &'static str,
+    pub(crate) launch: InteractiveLaunch,
     pub(crate) before: ShellInput,
     pub(crate) cleared: Receiver<Result<bool>>,
 }
@@ -327,11 +327,11 @@ fn write_shell_input(
     if let Some(submission) = submission {
         session.ensure_writable()?;
         let mut next = shared.lock().unwrap().clone();
-        if let Some(mode) = next.observe(bytes) {
+        if let Some(launch) = next.observe(bytes) {
             let before = std::mem::replace(&mut *shared.lock().unwrap(), next);
             let (reply, cleared) = mpsc::channel();
             let _ = submission.send(Some(ShellSubmission {
-                mode,
+                launch,
                 before,
                 cleared,
             }));

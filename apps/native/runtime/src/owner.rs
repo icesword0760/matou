@@ -26,6 +26,7 @@ use serde_json::{Value, json};
 use crate::{
     SessionEvent, SessionOptions,
     claude_request_gateway::Gateway,
+    codex_launch::CodexLaunch,
     derived::{CwdTracker, WorkStatusTracker, terminal_summary_lines, utf16_tail},
     host_control::{RunControl, clear_control_environment},
     provider_hook::{
@@ -54,6 +55,8 @@ struct RunningShell {
     promotion_process_check: Option<Arc<OnceLock<Result<()>>>>,
     cwd_capture: Option<(Instant, bool)>,
     hook: Option<RunHook>,
+    // Fresh Codex runs have launch metadata before a hook confirms a UUID.
+    codex_launch_metadata: Option<Value>,
     gateway: Option<Gateway>,
 }
 
@@ -986,24 +989,34 @@ impl ShellOwner {
         }
     }
 
-    pub(crate) fn promote_shell_to_claude(&mut self, session_id: &str) -> Result<()> {
+    pub(crate) fn promote_shell_to_agent(
+        &mut self,
+        session_id: &str,
+        profile: LaunchProfile,
+    ) -> Result<()> {
         let id = (self.next_id)();
-        let commit = sessions::promote_shell_to_claude(
+        let commit = sessions::promote_shell_to_agent(
             &mut self.connection,
             &command(id.clone(), "session.shell-promote-agent", id),
             session_id,
+            profile,
             now(),
         )?;
         self.pending.push(OwnerEvent::Domain(commit));
         Ok(())
     }
 
-    pub(crate) fn return_promoted_claude_to_shell(&mut self, session_id: &str) -> Result<()> {
+    pub(crate) fn return_promoted_agent_to_shell(
+        &mut self,
+        session_id: &str,
+        profile: LaunchProfile,
+    ) -> Result<()> {
         let id = (self.next_id)();
-        let commit = sessions::return_promoted_claude_to_shell(
+        let commit = sessions::return_promoted_agent_to_shell(
             &mut self.connection,
             &command(id.clone(), "session.shell-promote-rollback", id),
             session_id,
+            profile,
             now(),
         )?;
         self.pending.push(OwnerEvent::Domain(commit));
@@ -1354,6 +1367,41 @@ impl ShellOwner {
         Ok(shell.run_id.clone())
     }
 
+    pub(crate) fn launch_codex(
+        &mut self,
+        session_id: &str,
+        terminal: matou_native_terminal::TerminalOptions,
+        plan: CodexLaunch,
+    ) -> Result<String> {
+        let mut launch = plan.launch;
+        launch.cols = terminal.cols;
+        launch.rows = terminal.rows;
+        let metadata = json!({
+            "provider": "codex",
+            "providerConfigId": plan.provider_config_id,
+            "model": plan.model,
+            "permissionMode": plan.permission_mode,
+            "cwd": launch.cwd,
+        });
+        self.launch_run(
+            SessionOptions {
+                session_id: session_id.to_owned(),
+                terminal,
+                launch,
+                journal: Default::default(),
+                restored_history: Vec::new(),
+                collect_history: false,
+            },
+            false,
+            "",
+            None,
+        )?;
+        let shell = self.shells.get_mut(session_id).unwrap();
+        shell.codex_launch_metadata = Some(metadata);
+        shell.provider_startup_pending = true;
+        Ok(shell.run_id.clone())
+    }
+
     pub(crate) fn launch_claude_fork(
         &mut self,
         session_id: String,
@@ -1656,6 +1704,7 @@ impl ShellOwner {
                 promotion_process_check: None,
                 cwd_capture: None,
                 hook,
+                codex_launch_metadata: None,
                 gateway,
             },
         );
@@ -2234,7 +2283,7 @@ impl ShellOwner {
         }
         let result = match &event.event {
             SessionEvent::InputSubmitted(submitted_at) => {
-                if shell.ended {
+                if shell.ended || shell.codex_launch_metadata.is_some() {
                     return;
                 }
                 let shell = self
@@ -2809,7 +2858,9 @@ fn diagnostic(events: &mut Vec<OwnerEvent>, id: &str, message: String) {
 fn process_working_directory(pid: u32) -> Option<String> {
     #[cfg(target_os = "macos")]
     let cwd = {
-        let output = std::process::Command::new("lsof")
+        // lsof escapes non-ASCII path bytes under the C locale.
+        let output = std::process::Command::new("/usr/sbin/lsof")
+            .env("LC_ALL", "en_US.UTF-8")
             .args(["-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"])
             .output()
             .ok()?;
@@ -3381,7 +3432,7 @@ mod provider_tests {
         let mut owner =
             ShellOwner::new(connection, ownership, || uuid::Uuid::new_v4().to_string())?;
         owner.set_shell_launch_directory(session, &root.path().to_string_lossy())?;
-        owner.promote_shell_to_claude(session)?;
+        owner.promote_shell_to_agent(session, LaunchProfile::ClaudeCode)?;
         let run = owner.launch_promoted_claude(
             session,
             TerminalOptions::new(80, 24, 7, 14),

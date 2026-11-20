@@ -60,10 +60,11 @@ preexec_functions=(_matou_preexec ${preexec_functions:#_matou_preexec})
 precmd_functions=(_matou_precmd ${precmd_functions:#_matou_precmd})
 "#;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LaunchProfile {
     Shell,
     ClaudeCode,
+    Codex,
 }
 
 impl LaunchProfile {
@@ -71,6 +72,7 @@ impl LaunchProfile {
         match self {
             Self::Shell => "shell",
             Self::ClaudeCode => "claude-code",
+            Self::Codex => "codex",
         }
     }
 }
@@ -242,6 +244,7 @@ impl PtyProcess {
         let label = match launch.profile {
             LaunchProfile::Shell => "Shell",
             LaunchProfile::ClaudeCode => "Claude Code",
+            LaunchProfile::Codex => "Codex",
         };
         // portable-pty falls back to HOME if cwd is invalid. Check it at spawn.
         let metadata = fs::metadata(&launch.cwd)
@@ -275,6 +278,16 @@ impl PtyProcess {
                 environment
             }
             LaunchProfile::ClaudeCode => launch.env.clone(),
+            LaunchProfile::Codex => {
+                let mut environment = launch.env.clone();
+                for key in INHERITED_PROVIDER_MARKERS
+                    .into_iter()
+                    .chain(CALLER_SESSION_MARKERS)
+                {
+                    remove_var(&mut environment, OsStr::new(key));
+                }
+                environment
+            }
         };
         command.args(&launch.argv);
         command.cwd(&launch.cwd);

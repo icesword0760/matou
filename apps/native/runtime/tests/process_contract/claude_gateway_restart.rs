@@ -139,11 +139,12 @@ fn upstream_request(upstream: &TcpListener, provider: &str, expected: Value) -> 
     Ok(())
 }
 
-fn search_request(
+fn independent_request(
     upstream: &TcpListener,
     launch: &Launch,
     provider: &str,
     model: &str,
+    marker: &str,
 ) -> Result<()> {
     let body = json!({
         "model": "matou-role/haiku",
@@ -156,7 +157,7 @@ fn search_request(
     let bytes = body.to_string();
     write!(
         client,
-        "POST {}/v1/messages HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{bytes}",
+        "POST {}/v1/messages HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n{marker}\r\n{bytes}",
         url.path(),
         bytes.len()
     )?;
@@ -206,12 +207,28 @@ fn save_sonnet(
     provider: &str,
     model: &str,
     search: Option<(&str, &str)>,
+    compaction: Option<(&str, &str)>,
 ) -> Result<()> {
-    runtime.send(Command::SetClaudeRoleAssignments {
-        request_id,
-        web_search: search.map(|(provider, model)| json!({"providerId": provider, "model": model})),
-        assignments: json!({"sonnet": {"providerId": provider, "model": model}}),
-    })?;
+    let assignments = json!({"sonnet": {"providerId": provider, "model": model}});
+    let web_search =
+        search.map(|(provider, model)| json!({"providerId": provider, "model": model}));
+    let command = if let Some((provider, model)) = compaction {
+        Command::SetClaudeModelPreferences {
+            request_id,
+            assignments,
+            web_search,
+            compaction: Some(json!({
+                "mode": "custom", "providerId": provider, "model": model, "effort": "follow"
+            })),
+        }
+    } else {
+        Command::SetClaudeRoleAssignments {
+            request_id,
+            assignments,
+            web_search,
+        }
+    };
+    runtime.send(command)?;
     let deadline = Instant::now() + TIMEOUT;
     loop {
         if let Event::Graph(graph) = runtime.event(deadline, true)?
@@ -224,6 +241,12 @@ fn save_sonnet(
                 assert_eq!(
                     result["webSearch"],
                     json!({"providerId": provider, "model": model})
+                );
+            }
+            if let Some((provider, model)) = compaction {
+                assert_eq!(
+                    result["compaction"],
+                    json!({"mode": "custom", "providerId": provider, "model": model, "effort": "follow"})
                 );
             }
             return Ok(());
@@ -241,15 +264,22 @@ fn refused(launch: &Launch) {
 
 #[test]
 fn claude_gateway_rebuilds_on_cold_resume_fork_and_permission_restart() -> Result<()> {
-    assert_gateway_restarts(false)
+    assert_gateway_restarts(None)
 }
 
 #[test]
 fn web_search_gateway_rebuilds_on_cold_resume_fork_and_permission_restart() -> Result<()> {
-    assert_gateway_restarts(true)
+    assert_gateway_restarts(Some("search"))
 }
 
-fn assert_gateway_restarts(web_search: bool) -> Result<()> {
+#[test]
+fn compaction_gateway_rebuilds_on_cold_resume_fork_and_permission_restart() -> Result<()> {
+    assert_gateway_restarts(Some("compaction"))
+}
+
+fn assert_gateway_restarts(independent: Option<&str>) -> Result<()> {
+    let web_search = independent == Some("search");
+    let compaction = independent == Some("compaction");
     let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR"))?;
     let no_shell = root.path().join("missing-shell");
     let mut seed = RuntimeChild::spawn_configured(root.path(), "", &no_shell, None)?;
@@ -265,7 +295,7 @@ fn assert_gateway_restarts(web_search: bool) -> Result<()> {
             "id": id, "endpoint": format!("http://{}/{id}", upstream.local_addr()?),
             "apiKey": format!("synthetic-restart-{id}"), "model": "initial-model"
         });
-        if web_search {
+        if independent.is_some() {
             provider["modelMapping"] = json!({"opus": "default-opus", "sonnet": "default-sonnet", "haiku": "default-haiku"});
         }
         Ok(provider)
@@ -290,6 +320,10 @@ fn assert_gateway_restarts(web_search: bool) -> Result<()> {
     });
     if web_search {
         preferences["claudeWebSearch"] = json!({"providerId": "b", "model": "first-search"});
+    }
+    if compaction {
+        preferences["compaction"] =
+            json!({"mode": "custom", "providerId": "b", "model": "first-compaction"});
     }
     db.execute(
         "INSERT INTO preferences VALUES ('agent.modelPreferences', ?1, 1)",
@@ -327,15 +361,26 @@ exec /bin/sleep 60
                 .env("NO_PROXY", "overridden.invalid");
         })
     };
+    let check_independent = |launch: &Launch, provider: &str, phase: &str| -> Result<()> {
+        if let Some(kind) = independent {
+            let marker = if compaction {
+                "x-claude-code-compaction: manual\r\n"
+            } else {
+                ""
+            };
+            let model = format!("{phase}-{kind}");
+            independent_request(&upstream, launch, provider, &model, marker)?;
+            println!("PASS {phase} gateway forwards {kind} to {provider}/{model}");
+        }
+        Ok(())
+    };
     let mut parent = spawn()?;
     parent.connect()?;
     let (parent_session, initial) =
         started(&mut parent, &stub, "initial", &["--model", "initial-model"])?;
     assert_eq!(parent_session, seed.session);
     upstream_request(&upstream, "a", json!({"model": "first-sonnet"}))?;
-    if web_search {
-        search_request(&upstream, &initial, "b", "first-search")?;
-    }
+    check_independent(&initial, "b", "first")?;
     let binding = confirm(
         &mut parent,
         &db,
@@ -351,10 +396,9 @@ exec /bin/sleep 60
         "b",
         "resumed-sonnet",
         web_search.then_some(("a", "resumed-search")),
+        compaction.then_some(("a", "resumed-compaction")),
     )?;
-    if web_search {
-        search_request(&upstream, &initial, "b", "first-search")?;
-    }
+    check_independent(&initial, "b", "first")?;
     parent.send(Command::Shutdown)?;
     parent.closed()?;
     assert!(parent.wait()?.0.success());
@@ -372,9 +416,7 @@ exec /bin/sleep 60
     assert_ne!(initial.url, resumed.url);
     refused(&initial);
     upstream_request(&upstream, "b", json!({"model": "resumed-sonnet"}))?;
-    if web_search {
-        search_request(&upstream, &resumed, "a", "resumed-search")?;
-    }
+    check_independent(&resumed, "a", "resumed")?;
     assert_eq!(
         confirm(
             &mut runtime,
@@ -421,6 +463,7 @@ exec /bin/sleep 60
         "a",
         "forked-sonnet",
         web_search.then_some(("b", "forked-search")),
+        compaction.then_some(("b", "forked-compaction")),
     )?;
     runtime.send(Command::ForkSession {
         scene_id: runtime.scene.clone(),
@@ -446,10 +489,8 @@ exec /bin/sleep 60
     assert_ne!(forked.url, resumed.url);
     TcpStream::connect_timeout(&resumed.address, Duration::from_secs(1))?;
     upstream_request(&upstream, "a", json!({"model": "forked-sonnet"}))?;
-    if web_search {
-        search_request(&upstream, &forked, "b", "forked-search")?;
-        search_request(&upstream, &resumed, "a", "resumed-search")?;
-    }
+    check_independent(&forked, "b", "forked")?;
+    check_independent(&resumed, "a", "resumed")?;
     confirm(
         &mut runtime,
         &db,
@@ -474,6 +515,7 @@ exec /bin/sleep 60
         "b",
         "permission-sonnet",
         web_search.then_some(("a", "permission-search")),
+        compaction.then_some(("a", "permission-compaction")),
     )?;
     runtime.send(Command::SetProviderPermissionMode {
         session_id: parent_session.clone(),
@@ -501,10 +543,8 @@ exec /bin/sleep 60
         resumed_run.pid.context("resumed CLI process id")?,
     )?)?;
     upstream_request(&upstream, "b", json!({"model": "permission-sonnet"}))?;
-    if web_search {
-        search_request(&upstream, &restarted, "a", "permission-search")?;
-        search_request(&upstream, &forked, "b", "forked-search")?;
-    }
+    check_independent(&restarted, "a", "permission")?;
+    check_independent(&forked, "b", "forked")?;
     post_claude_identity(&restarted.settings, PARENT_ID, "plan", RESTORED_MODEL)?;
     let result = permission_mode_result(&mut runtime, "plan")?;
     assert!(result.get("error").is_none(), "{result}");
@@ -522,5 +562,181 @@ exec /bin/sleep 60
     assert!(runtime.wait()?.0.success());
     refused(&restarted);
     refused(&forked);
+    Ok(())
+}
+
+#[test]
+fn compaction_preferences_wire_round_trip_is_atomic_and_validates_exact_targets() -> Result<()> {
+    let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR"))?;
+    let mut runtime =
+        RuntimeChild::spawn_configured(root.path(), "", &root.path().join("no-shell"), None)?;
+    runtime.ready()?;
+    let config_path = runtime.data.join("provider-config.json");
+    let mut config = json!({
+        "version": 1, "activeProviderIds": {"claude-code":"work"},
+        "providers": {"claude-code": [
+            {"id":"work", "apiKey":"test-secret", "endpoint":"http://127.0.0.1:1/work", "model":"normal",
+                "modelMapping":{"opus":"normal","sonnet":"normal","haiku":"normal"}},
+            {"id":"catalog", "apiKey":"test-secret", "endpoint":"http://127.0.0.1:1/catalog", "model":"listed",
+                "modelMetadata":[{"id":"listed", "resolvedModel":"claude-listed", "supportedEfforts":["high"]}]},
+            {"id":"manual", "apiKey":"test-secret", "endpoint":"http://127.0.0.1:1/manual", "model":"default"},
+            {"id":"empty", "apiKey":"test-secret", "endpoint":"http://127.0.0.1:1/empty", "model":"none", "modelMetadata":[]},
+            {"id":"no-key", "endpoint":"http://127.0.0.1:1/no-key", "model":"none"},
+            {"id":"account", "kind":"subscription", "endpoint":"https://example.invalid", "model":"none"}
+        ]}
+    });
+    fs::write(&config_path, config.to_string())?;
+    let db = Connection::open(runtime.data.join("matou.sqlite"))?;
+    let mut request_id = 0;
+    let mut send = |runtime: &mut RuntimeChild,
+                    assignments: Option<Value>,
+                    search: Option<Value>,
+                    compaction: Option<Value>|
+     -> Result<Value> {
+        request_id += 1;
+        let wire = if let Some(assignments) = assignments {
+            let mut body = json!({"request_id": request_id, "assignments": assignments});
+            if let Some(search) = search {
+                body["webSearch"] = search;
+            }
+            if let Some(compaction) = compaction {
+                body["compaction"] = compaction;
+            }
+            json!({"SetClaudeModelPreferences": body})
+        } else {
+            json!({"GetClaudeModelPreferences":{"request_id":request_id}})
+        };
+        let command: Command = serde_json::from_value(wire.clone())?;
+        assert_eq!(serde_json::to_value(&command)?, wire);
+        runtime.send(command)?;
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            if let Event::Graph(graph) = runtime.event(deadline, true)?
+                && let Some(reply) = graph.get("claudeRoleAssignmentsResult")
+            {
+                assert_eq!(reply["requestId"], request_id);
+                assert!(!reply.to_string().contains("test-secret"));
+                return Ok(reply.clone());
+            }
+        }
+    };
+    let read = || -> Result<String> {
+        Ok(db.query_row(
+            "SELECT value_json FROM preferences WHERE key='agent.modelPreferences'",
+            [],
+            |row| row.get(0),
+        )?)
+    };
+    let default = json!({"mode":"follow","effort":"follow"});
+    let assignments = json!({"sonnet":{"providerId":"work","model":"normal"}});
+    let web = json!({"providerId":"catalog","model":"listed","effort":"high"});
+    let custom = json!({"mode":"custom","providerId":"catalog","model":"listed","effort":"high"});
+    assert_eq!(send(&mut runtime, None, None, None)?["compaction"], default);
+    println!("PASS default settings read");
+    let saved = send(
+        &mut runtime,
+        Some(assignments.clone()),
+        Some(web.clone()),
+        Some(json!({"mode":"custom","providerId":" catalog ","model":" listed ","effort":"high"})),
+    )?;
+    assert_eq!(saved["assignments"], assignments);
+    assert_eq!(saved["webSearch"], web);
+    assert_eq!(saved["compaction"], custom);
+    let stored: Value = serde_json::from_str(&read()?)?;
+    assert_eq!(stored["claudeRoleAssignments"], assignments);
+    assert_eq!(stored["claudeWebSearch"], web);
+    assert_eq!(stored["compaction"], custom);
+    println!("PASS normalized cross-provider compaction, assignments and search saved together");
+
+    let old = send(&mut runtime, Some(assignments.clone()), None, None)?;
+    assert_eq!(old["compaction"], custom);
+    assert_eq!(old["webSearch"], web);
+    println!("PASS omission preserves compaction and search");
+    let before = read()?;
+    for (provider, model, effort, error) in [
+        ("missing", "listed", "follow", "供应商已不存在"),
+        ("no-key", "none", "follow", "API Key 未配置"),
+        ("empty", "none", "follow", "模型目录暂不可用"),
+        ("account", "none", "follow", "供应商已不存在"),
+        ("catalog", "claude-listed", "follow", "模型已不可用"),
+        ("catalog", "listed", "low", "当前模型不支持所选推理强度"),
+        ("catalog", "listed", "invalid", "Invalid compaction effort"),
+        (
+            "in ternal",
+            "listed",
+            "follow",
+            "Invalid compaction providerId",
+        ),
+        ("catalog", "lis\u{7f}ted", "follow", "control character"),
+        ("catalog", "  ", "follow", "model is empty"),
+    ] {
+        let reply = send(
+            &mut runtime,
+            Some(json!({})),
+            Some(Value::Null),
+            Some(json!({"mode":"custom","providerId":provider,"model":model,"effort":effort})),
+        )?;
+        assert!(
+            reply["error"].as_str().unwrap_or_default().contains(error),
+            "{reply}"
+        );
+        assert_eq!(read()?, before);
+        println!(
+            "PASS {provider}/{model:?}/{effort}: rejected and whole preferences row unchanged"
+        );
+    }
+
+    config["providers"]["claude-code"][1]
+        .as_object_mut()
+        .unwrap()
+        .remove("apiKey");
+    fs::write(&config_path, config.to_string())?;
+    assert_eq!(send(&mut runtime, None, None, None)?["compaction"], custom);
+    assert_eq!(read()?, before);
+    println!("PASS target invalidated after save retains exact preference");
+
+    let hand_entered = json!({"mode":"custom","providerId":"manual","model":"entered"});
+    let value = send(
+        &mut runtime,
+        Some(assignments.clone()),
+        None,
+        Some(hand_entered),
+    )?;
+    assert_eq!(
+        value["compaction"],
+        json!({"mode":"custom","providerId":"manual","model":"entered","effort":"follow"})
+    );
+    println!("PASS hand-entered target with absent catalog and omitted effort");
+
+    let mut damaged: Value = serde_json::from_str(&read()?)?;
+    damaged["compaction"]["effort"] = json!(42);
+    db.execute(
+        "UPDATE preferences SET value_json=?1 WHERE key='agent.modelPreferences'",
+        [damaged.to_string()],
+    )?;
+    let read_back = send(&mut runtime, None, None, None)?;
+    assert_eq!(read_back["assignments"], json!({}));
+    assert!(read_back.get("webSearch").is_none());
+    assert_eq!(read_back["compaction"], default);
+    println!("PASS malformed compaction reads default for the whole row");
+
+    let cleared = send(
+        &mut runtime,
+        Some(json!({})),
+        Some(Value::Null),
+        Some(Value::Null),
+    )?;
+    assert_eq!(cleared["webSearch"], Value::Null);
+    assert_eq!(cleared["compaction"], default);
+    let stored: Value = serde_json::from_str(&read()?)?;
+    assert_eq!(stored["claudeRoleAssignments"], json!({}));
+    assert!(stored.get("claudeWebSearch").is_none());
+    assert_eq!(stored["compaction"], default);
+    println!(
+        "PASS null restores compaction default in the same transaction as search and assignments"
+    );
+    runtime.send(Command::Shutdown)?;
+    runtime.closed()?;
+    assert!(runtime.wait()?.0.success());
     Ok(())
 }

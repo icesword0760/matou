@@ -7,7 +7,8 @@ use std::{
 
 use anyhow::ensure;
 use matou_native_core::provider_launch::{
-    parse_claude_role_assignments, prepare_new_claude_launch, prepare_new_claude_launch_with_budget,
+    parse_claude_role_assignments, prepare_claude_launch, prepare_new_claude_launch,
+    prepare_new_claude_launch_with_budget,
 };
 use matou_native_core::sessions::read_claude_role_launch_preferences;
 
@@ -1628,5 +1629,589 @@ fn deepseek_tool_conversion_follows_final_url_and_preserves_search_marker_preced
     for task in work_tasks.into_iter().chain(search_tasks) {
         task.join().unwrap()?;
     }
+    Ok(())
+}
+
+const MANUAL: &str = "x-claude-code-compaction: manual\r\n";
+const AUTO: &str = "x-claude-code-compaction: auto\r\n";
+const CONTEXT_ENV: &str = "CLAUDE_CODE_MAX_CONTEXT_TOKENS";
+
+fn compaction_config(work: SocketAddr, search: SocketAddr, compact: &str) -> Value {
+    json!({
+        "version": 1, "activeProviderIds": {"claude-code": "work"},
+        "providers": {"claude-code": [
+            {"id": "work", "endpoint": format!("http://{work}/work"), "apiKey": "synthetic-work",
+             "model": "work-sonnet", "reasoningEffort": "medium",
+             "modelMapping": {"opus": "work-opus", "sonnet": "work-sonnet", "haiku": "work-haiku"},
+             "effortMapping": {"opus": "low", "sonnet": "high", "haiku": "follow"}},
+            {"id": "search", "endpoint": format!("http://{search}/search"), "apiKey": "synthetic-search",
+             "model": "search-model",
+             "modelMetadata": [{"id": "search-model", "contextWindow": 50_000}]},
+            {"id": "compact", "name": "Compact fixture", "endpoint": compact,
+             "apiKey": "synthetic-compact", "model": "unused", "reasoningEffort": "medium",
+             "modelMetadata": [
+                {"id": "compact-alias", "resolvedModel": "claude-compact", "contextWindow": 190_000,
+                 "supportedEfforts": ["high", "medium"], "maxOutputTokens": 512},
+                {"id": "other", "resolvedModel": "other-exact",
+                 "supportedEfforts": ["low", "medium", "high"], "maxOutputTokens": 256}
+             ]}
+        ]}
+    })
+}
+
+fn compaction_preferences(search: bool, mode: &str, effort: &str) -> Value {
+    let mut preferences =
+        json!({"contextWindows": {}, "compaction": {"mode": mode, "effort": effort}});
+    if mode == "custom" {
+        preferences["compaction"]["providerId"] = json!("compact");
+        preferences["compaction"]["model"] = json!("compact-alias");
+    }
+    if search {
+        preferences["claudeWebSearch"] = json!({"providerId": "search", "model": "search-model"});
+    }
+    preferences
+}
+
+fn persist_compaction(data: &std::path::Path, config: &Value, preferences: &Value) -> Result<()> {
+    std::fs::write(data.join("provider-config.json"), config.to_string())?;
+    let db = rusqlite::Connection::open(data.join("matou.sqlite"))?;
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS preferences (key TEXT PRIMARY KEY, value_json TEXT)",
+    )?;
+    db.execute(
+        "INSERT OR REPLACE INTO preferences VALUES ('agent.modelPreferences', ?)",
+        [preferences.to_string()],
+    )?;
+    Ok(())
+}
+
+fn prepare_compaction(
+    data: &std::path::Path,
+) -> Result<matou_native_core::provider_launch::ClaudeLaunch> {
+    let db = rusqlite::Connection::open(data.join("matou.sqlite"))?;
+    prepare_new_claude_launch_with_budget(
+        data,
+        data,
+        &Value::Null,
+        (&read_claude_role_launch_preferences(&db), &Vec::new),
+        BTreeMap::from([(
+            "MATOU_CLAUDE_COMMAND".into(),
+            std::env::current_exe()?.into_os_string(),
+        )]),
+        80,
+        24,
+    )
+}
+
+fn assert_no_request(listener: &StdListener) -> Result<()> {
+    listener.set_nonblocking(true)?;
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        io::ErrorKind::WouldBlock
+    );
+    Ok(())
+}
+
+fn assert_gateway_502(response: (u16, HeaderMap, Vec<u8>), message: &str) -> Result<()> {
+    assert_eq!(response.0, 502);
+    let error: Value = serde_json::from_slice(&response.2)?;
+    assert_eq!(error["error"]["message"], message);
+    Ok(())
+}
+
+#[test]
+fn compaction_marker_matrix_keeps_search_count_history_and_authentication() -> Result<()> {
+    let root = within_workspace()?;
+    let work = listener()?;
+    let search = listener()?;
+    let compact = listener()?;
+    let config = compaction_config(
+        work.local_addr()?,
+        search.local_addr()?,
+        &format!("http://{}/compact", compact.local_addr()?),
+    );
+    persist_compaction(
+        root.path(),
+        &config,
+        &compaction_preferences(true, "custom", "medium"),
+    )?;
+    let plan = prepare_compaction(root.path())?;
+    assert_eq!(
+        plan.launch
+            .env
+            .get(std::ffi::OsStr::new(CONTEXT_ENV))
+            .unwrap(),
+        "190000"
+    );
+    assert!(!plan.gateway.as_ref().unwrap().unknown_compaction_context);
+    println!("PASS exact alias startup context 190000; search context 50000 excluded");
+    let gateway = Gateway::start(Arc::new(plan.gateway.unwrap()))?;
+    let input = search_payload(json!("matou-role/sonnet"));
+    let bytes = serde_json::to_vec_pretty(&input)?;
+    let cases = [
+        ("POST", MESSAGES, "", "search"),
+        ("POST", MESSAGES, MANUAL, "compact"),
+        ("POST", MESSAGES, AUTO, "compact"),
+        (
+            "POST",
+            MESSAGES,
+            "X-Claude-Code-Compaction: manual\r\n",
+            "compact",
+        ),
+        (
+            "POST",
+            MESSAGES,
+            "x-claude-code-compaction: Manual\r\n",
+            "search",
+        ),
+        (
+            "POST",
+            MESSAGES,
+            "x-claude-code-compaction: AUTO\r\n",
+            "search",
+        ),
+        (
+            "POST",
+            MESSAGES,
+            "x-claude-code-compaction: other\r\n",
+            "search",
+        ),
+        (
+            "POST",
+            MESSAGES,
+            "x-claude-code-compaction: manual, auto\r\n",
+            "search",
+        ),
+        (
+            "POST",
+            MESSAGES,
+            "x-claude-code-compaction: manual\r\nX-CLAUDE-CODE-COMPACTION: manual\r\n",
+            "search",
+        ),
+        ("POST", COUNT, "", "search"),
+        ("POST", COUNT, MANUAL, "work"),
+        ("POST", COUNT, AUTO, "work"),
+        (
+            "POST",
+            COUNT,
+            "x-claude-code-compaction: Manual\r\n",
+            "search",
+        ),
+        (
+            "POST",
+            COUNT,
+            "x-claude-code-compaction: auto\r\nx-claude-code-compaction: auto\r\n",
+            "search",
+        ),
+        ("GET", MESSAGES, MANUAL, "work"),
+    ];
+    for (method, path, marker, target) in cases {
+        let listener = match target {
+            "work" => &work,
+            "search" => &search,
+            _ => &compact,
+        };
+        let (received, tasks) = record(listener.try_clone()?, 1, "200 OK", "", b"ok");
+        let auth = format!(
+            "{marker}Authorization: bearer source\r\nCookie: source=1\r\nX-Api-Key: source\r\nX-Access-Token: source\r\nContent-MD5: stale\r\nContent-Digest: stale\r\nDigest: stale\r\n"
+        );
+        assert_eq!(
+            exchange_method(&gateway, method, path, &bytes, &auth)?.0,
+            200
+        );
+        let (line, headers, body) = received.recv_timeout(TIMEOUT)?;
+        assert_eq!(line.trim(), format!("{method} /{target}{path} HTTP/1.1"));
+        assert_eq!(length(&headers)?, body.len());
+        assert_eq!(headers["x-api-key"], format!("synthetic-{target}"));
+        for name in ["authorization", "cookie", "x-access-token"] {
+            assert!(!headers.contains_key(name), "{target} retained {name}");
+        }
+        let mut expected = input.clone();
+        if method == "POST" {
+            expected["model"] = json!(match target {
+                "work" => "work-sonnet",
+                "search" => "search-model",
+                _ => "claude-compact",
+            });
+            for name in ["content-md5", "content-digest", "digest"] {
+                assert!(!headers.contains_key(name), "{target} retained {name}");
+            }
+        }
+        if method == "POST" && path == MESSAGES {
+            match target {
+                "compact" => {
+                    expected["output_config"]["effort"] = json!("medium");
+                    expected["thinking"] = json!({"type":"adaptive"});
+                    expected["max_tokens"] = json!(512);
+                }
+                "search" => {
+                    expected["output_config"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("effort");
+                    expected.as_object_mut().unwrap().remove("thinking");
+                }
+                _ => unreachable!(),
+            }
+        }
+        assert_eq!(serde_json::from_slice::<Value>(&body)?, expected);
+        for task in tasks {
+            task.join().unwrap()?;
+        }
+        println!("PASS {method} {path} {marker:?} => {target}");
+    }
+    for socket in [&work, &search, &compact] {
+        assert_no_request(socket)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn compaction_snapshot_inherits_role_or_target_effort_and_never_falls_back() -> Result<()> {
+    let root = within_workspace()?;
+    let work = listener()?;
+    let search = listener()?;
+    let compact = listener()?;
+    let mut config = compaction_config(
+        work.local_addr()?,
+        search.local_addr()?,
+        &format!("http://{}/compact", compact.local_addr()?),
+    );
+    let mut preferences = compaction_preferences(false, "custom", "follow");
+    preferences["claudeRoleAssignments"] =
+        json!({"sonnet": {"providerId": "work", "model":"work-sonnet"}});
+    persist_compaction(root.path(), &config, &preferences)?;
+    let gateway = Gateway::start(Arc::new(prepare_compaction(root.path())?.gateway.unwrap()))?;
+    let (received, tasks) = record(
+        compact.try_clone()?,
+        3,
+        "429 Too Many Requests",
+        "",
+        b"upstream-limit",
+    );
+    for (model, effort) in [
+        ("matou-role/sonnet", Some("high")),
+        ("matou-role/haiku", None),
+        ("literal-work", Some("medium")),
+    ] {
+        let input = search_payload(json!(model));
+        let response = exchange(&gateway, MESSAGES, &serde_json::to_vec(&input)?, MANUAL)?;
+        assert_eq!(response.0, 429);
+        assert_eq!(response.2, b"upstream-limit");
+        let (_, _, body) = received.recv_timeout(TIMEOUT)?;
+        let mut expected = input;
+        expected["model"] = json!("claude-compact");
+        expected["max_tokens"] = json!(512);
+        if let Some(effort) = effort {
+            expected["output_config"]["effort"] = json!(effort);
+            expected["thinking"] = json!({"type": "adaptive"});
+        } else {
+            expected["output_config"]
+                .as_object_mut()
+                .unwrap()
+                .remove("effort");
+            expected.as_object_mut().unwrap().remove("thinking");
+        }
+        assert_eq!(serde_json::from_slice::<Value>(&body)?, expected);
+        println!("PASS snapshot {model} => {effort:?}; upstream 429 passed through");
+    }
+    for task in tasks {
+        task.join().unwrap()?;
+    }
+    let opus = serde_json::to_vec(&search_payload(json!("matou-role/opus")))?;
+    assert_gateway_502(
+        exchange(&gateway, MESSAGES, &opus, AUTO)?,
+        "opus · Compact fixture: model target or reasoning effort is unavailable",
+    )?;
+    for socket in [&work, &search, &compact] {
+        assert_no_request(socket)?;
+    }
+    println!("PASS unsupported inherited effort => frozen 502, zero outbound");
+
+    preferences["compaction"]["model"] = json!("other");
+    persist_compaction(root.path(), &config, &preferences)?;
+    let plan = prepare_compaction(root.path())?;
+    assert!(
+        !plan
+            .launch
+            .env
+            .contains_key(std::ffi::OsStr::new(CONTEXT_ENV))
+    );
+    assert!(plan.gateway.as_ref().unwrap().unknown_compaction_context);
+    let gateway_other = Gateway::start(Arc::new(plan.gateway.unwrap()))?;
+    let (received, tasks) = record(compact.try_clone()?, 1, "200 OK", "", b"ok");
+    assert_eq!(exchange(&gateway_other, MESSAGES, &opus, AUTO)?.0, 200);
+    let (_, _, body) = received.recv_timeout(TIMEOUT)?;
+    let actual: Value = serde_json::from_slice(&body)?;
+    assert_eq!(actual["model"], "other-exact");
+    assert_eq!(actual["output_config"]["effort"], "low");
+    assert_eq!(actual["max_tokens"], 256);
+    assert!(actual.get("thinking").is_none());
+    for task in tasks {
+        task.join().unwrap()?;
+    }
+    println!("PASS unknown context allowed and recorded; non-Claude target strips thinking");
+
+    let compact_provider = &mut config["providers"]["claude-code"][2];
+    compact_provider["modelMetadata"][1]["contextWindow"] = json!(99_999);
+    persist_compaction(root.path(), &config, &preferences)?;
+    let error = prepare_compaction(root.path())
+        .err()
+        .context("expected low-window error")?;
+    assert_eq!(
+        error.to_string(),
+        "compaction · Compact fixture: context window is under 100K"
+    );
+    println!("PASS context 99999 rejected at preparation");
+    config["providers"]["claude-code"][2]
+        .as_object_mut()
+        .unwrap()
+        .remove("apiKey");
+    persist_compaction(root.path(), &config, &preferences)?;
+    let error = prepare_compaction(root.path())
+        .err()
+        .context("expected target unavailable")?;
+    assert_eq!(
+        error.to_string(),
+        "compaction · Compact fixture: model target is unavailable"
+    );
+    println!("PASS invalidated target rejected at preparation");
+
+    drop(compact);
+    let sonnet = serde_json::to_vec(&search_payload(json!("matou-role/sonnet")))?;
+    assert_gateway_502(
+        exchange(&gateway, MESSAGES, &sonnet, MANUAL)?,
+        CONNECTION_ERROR,
+    )?;
+    for socket in [&work, &search] {
+        assert_no_request(socket)?;
+    }
+    println!("PASS captured target connection failure => frozen 502, zero work traffic");
+
+    preferences["compaction"] = json!({"mode": "follow", "effort": "follow"});
+    preferences["claudeWebSearch"] = json!({"providerId":"search", "model":"search-model"});
+    persist_compaction(root.path(), &config, &preferences)?;
+    let follow = Gateway::start(Arc::new(prepare_compaction(root.path())?.gateway.unwrap()))?;
+    let (received, tasks) = record(work.try_clone()?, 2, "200 OK", "", b"ok");
+    for (model, expected_model, effort) in [
+        ("matou-role/sonnet", "work-sonnet", "high"),
+        ("literal-work", "literal-work", "medium"),
+    ] {
+        let input = search_payload(json!(model));
+        assert_eq!(
+            exchange(&follow, MESSAGES, &serde_json::to_vec(&input)?, MANUAL)?.0,
+            200
+        );
+        let (_, _, body) = received.recv_timeout(TIMEOUT)?;
+        let actual: Value = serde_json::from_slice(&body)?;
+        assert_eq!(actual["model"], expected_model);
+        assert_eq!(actual["output_config"]["effort"], effort);
+        assert_eq!(actual["messages"], input["messages"]);
+        println!("PASS follow marker with search configured: {model} => working {expected_model}");
+    }
+    for task in tasks {
+        task.join().unwrap()?;
+    }
+    assert_no_request(&search)?;
+    Ok(())
+}
+
+#[test]
+fn compaction_legacy_resolves_lazily_retries_then_caches_and_preserves_legacy_generation()
+-> Result<()> {
+    let root = within_workspace()?;
+    let work = listener()?;
+    let compact = listener()?;
+    let later = listener()?;
+    let mut config = compaction_config(
+        work.local_addr()?,
+        work.local_addr()?,
+        &format!("http://{}/first", compact.local_addr()?),
+    );
+    let preferences = compaction_preferences(false, "custom", "follow");
+    let original = config["providers"]["claude-code"][2].clone();
+    config["providers"]["claude-code"][2]
+        .as_object_mut()
+        .unwrap()
+        .remove("apiKey");
+    persist_compaction(root.path(), &config, &preferences)?;
+    let plan = prepare_compaction(root.path())?;
+    assert!(
+        !plan
+            .launch
+            .env
+            .contains_key(std::ffi::OsStr::new(CONTEXT_ENV))
+    );
+    let gateway = Gateway::start(Arc::new(plan.gateway.unwrap()))?;
+    let input = search_payload(json!("matou-api/sonnet"));
+    let bytes = serde_json::to_vec(&input)?;
+    let (work_requests, work_tasks) = record(work.try_clone()?, 2, "200 OK", "", b"ok");
+    for (path, marker) in [(MESSAGES, ""), (COUNT, MANUAL)] {
+        assert_eq!(exchange(&gateway, path, &bytes, marker)?.0, 200);
+        let (_, _, body) = work_requests.recv_timeout(TIMEOUT)?;
+        let actual: Value = serde_json::from_slice(&body)?;
+        assert_eq!(actual["model"], "work-sonnet");
+        assert_eq!(actual["max_tokens"], input["max_tokens"]);
+        assert_eq!(actual["thinking"], input["thinking"]);
+        assert_eq!(
+            actual["output_config"]["effort"],
+            if path == COUNT { "low" } else { "high" }
+        );
+        println!("PASS legacy {path} {marker:?} uses source while target is invalid");
+    }
+    for task in work_tasks {
+        task.join().unwrap()?;
+    }
+    assert_gateway_502(
+        exchange(&gateway, MESSAGES, &bytes, MANUAL)?,
+        CONNECTION_ERROR,
+    )?;
+    assert_no_request(&work)?;
+    assert_no_request(&compact)?;
+    println!("PASS legacy first parse fails at request time; no source fallback or cached error");
+
+    config["providers"]["claude-code"][2] = original;
+    config["providers"]["claude-code"][2]["modelMetadata"][0]["contextWindow"] = json!(50_000);
+    persist_compaction(root.path(), &config, &preferences)?;
+    let (received, tasks) = record(compact.try_clone()?, 2, "200 OK", "", b"ok");
+    for attempt in [
+        "retry after repair",
+        "subsequent request after settings changed",
+    ] {
+        assert_eq!(exchange(&gateway, MESSAGES, &bytes, AUTO)?.0, 200);
+        let (line, headers, body) = received.recv_timeout(TIMEOUT)?;
+        assert!(line.starts_with("POST /first/"));
+        assert_eq!(headers["x-api-key"], "synthetic-compact");
+        let mut expected = input.clone();
+        expected["model"] = json!("compact-alias");
+        expected["output_config"]["effort"] = json!("high");
+        expected["thinking"] = json!({"type":"adaptive"});
+        assert_eq!(serde_json::from_slice::<Value>(&body)?, expected);
+        println!("PASS legacy {attempt}: first target, inherited effort, adaptive, original cap");
+        config["providers"]["claude-code"][2]["endpoint"] =
+            json!(format!("http://{}/later", later.local_addr()?));
+        config["providers"]["claude-code"][2]["apiKey"] = json!("synthetic-new");
+        persist_compaction(
+            root.path(),
+            &config,
+            &compaction_preferences(false, "custom", "medium"),
+        )?;
+    }
+    for task in tasks {
+        task.join().unwrap()?;
+    }
+    assert_no_request(&later)?;
+    config["activeProviderIds"]["claude-code"] = json!("compact");
+    persist_compaction(
+        root.path(),
+        &config,
+        &compaction_preferences(false, "custom", "medium"),
+    )?;
+    let db = rusqlite::Connection::open(root.path().join("matou.sqlite"))?;
+    let mut resumed = prepare_claude_launch(
+        root.path(),
+        root.path(),
+        &json!({"providerConfigId": "work", "model": "work-sonnet"}),
+        Some("synthetic-resume"),
+        BTreeMap::from([(
+            "MATOU_CLAUDE_COMMAND".into(),
+            std::env::current_exe()?.into_os_string(),
+        )]),
+        80,
+        24,
+    )?;
+    resumed.capture_restart_gateway(&read_claude_role_launch_preferences(&db), &Vec::new)?;
+    let next = Gateway::start(Arc::new(resumed.gateway.unwrap()))?;
+    let (working, work_tasks) = record(work.try_clone()?, 1, "200 OK", "", b"ok");
+    assert_eq!(exchange(&next, COUNT, &bytes, AUTO)?.0, 200);
+    let (_, headers, _) = working.recv_timeout(TIMEOUT)?;
+    assert_eq!(headers["x-api-key"], "synthetic-work");
+    for task in work_tasks {
+        task.join().unwrap()?;
+    }
+    println!(
+        "PASS resumed legacy run keeps the bound working source after active provider changes"
+    );
+    let (received, tasks) = record(
+        later.try_clone()?,
+        1,
+        "401 Unauthorized",
+        "",
+        b"upstream-key",
+    );
+    let response = exchange(&next, MESSAGES, &bytes, MANUAL)?;
+    assert_eq!(
+        (response.0, response.2.as_slice()),
+        (401, b"upstream-key".as_slice())
+    );
+    let (line, headers, body) = received.recv_timeout(TIMEOUT)?;
+    assert!(line.starts_with("POST /later/"));
+    assert_eq!(headers["x-api-key"], "synthetic-new");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body)?["output_config"]["effort"],
+        "medium"
+    );
+    for task in tasks {
+        task.join().unwrap()?;
+    }
+    println!("PASS new legacy generation reads updated target and forwards upstream 401");
+    Ok(())
+}
+
+#[test]
+fn compaction_deepseek_conversion_uses_final_destination_in_both_paths() -> Result<()> {
+    let root = within_workspace()?;
+    let work = listener()?;
+    let deepseek = listener()?;
+    let config = compaction_config(
+        work.local_addr()?,
+        work.local_addr()?,
+        "https://api.deepseek.com/anthropic",
+    );
+    let request = json!({"model": "literal-work", "max_tokens": 9000,
+        "tools": [{"name": "search", "type": "web_search_20250305"}],
+        "messages": [{"role": "system", "content": [{"type":"tool_addition", "tool":{
+          "type":"tool_definition", "definition":{"name":"lookup", "input_schema":{"pattern": r"\0"}, "type":"custom"}
+        }}]}]
+    });
+    let bytes = serde_json::to_vec(&request)?;
+    for snapshot in [false, true] {
+        let mut preferences = compaction_preferences(snapshot, "custom", "high");
+        preferences["compaction"]["model"] = json!("other");
+        persist_compaction(root.path(), &config, &preferences)?;
+        let plan = prepare_compaction(root.path())?;
+        let gateway = Gateway::start_inner(
+            Arc::new(plan.gateway.unwrap()),
+            Some(deepseek.local_addr()?),
+        )?;
+        let (received, tasks) = record(deepseek.try_clone()?, 1, "200 OK", "", b"ok");
+        let (status, _, response) = exchange(&gateway, MESSAGES, &bytes, MANUAL)?;
+        assert_eq!(status, 200, "{}", String::from_utf8_lossy(&response));
+        let (line, headers, body) = received.recv_timeout(TIMEOUT)?;
+        assert!(line.starts_with("POST /anthropic/v1/messages"));
+        assert_eq!(headers["host"], "api.deepseek.com");
+        assert_eq!(headers["x-api-key"], "synthetic-compact");
+        let actual: Value = serde_json::from_slice(&body)?;
+        assert_eq!(actual["tools"][0], request["tools"][0]);
+        assert_eq!(actual["tools"][1]["name"], "lookup");
+        assert_eq!(actual["tools"][1]["input_schema"]["pattern"], r"\x00");
+        assert_eq!(
+            actual["messages"][0]["content"][0],
+            tool_reference("tool_addition", "lookup")
+        );
+        assert_eq!(actual["max_tokens"], if snapshot { 256 } else { 9000 });
+        if snapshot {
+            assert!(actual.get("thinking").is_none());
+        } else {
+            assert_eq!(actual["thinking"], json!({"type": "adaptive"}));
+        }
+        for task in tasks {
+            task.join().unwrap()?;
+        }
+        println!(
+            "PASS compaction snapshot={snapshot} selected DeepSeek and converted inline definition"
+        );
+    }
+    assert_no_request(&work)?;
     Ok(())
 }

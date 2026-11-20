@@ -7,9 +7,10 @@ use serde_json::{Map, Value, json};
 use crate::{
     hierarchy::Session,
     provider_launch::{
-        ClaudeRoleAssignment, ClaudeRoleAssignments, EFFORTS, parse_claude_role_assignments,
-        parse_claude_web_search,
+        ClaudeRoleAssignment, ClaudeRoleAssignments, parse_claude_compaction,
+        parse_claude_role_assignments, parse_claude_web_search,
     },
+    pty::LaunchProfile,
     storage::{CommandMetadata, DomainCommit, DomainEventInput, execute},
 };
 
@@ -30,42 +31,12 @@ fn validate_model_preferences(
         "Invalid context window preferences"
     );
 
-    let compaction = value
-        .get("compaction")
-        .filter(|compaction| compaction.is_object())
-        .context("Invalid compaction preferences")?;
-    let mode = compaction["mode"]
-        .as_str()
-        .filter(|mode| matches!(*mode, "follow" | "custom"))
-        .context("Invalid compaction mode")?;
-    let effort = compaction["effort"]
-        .as_str()
-        .filter(|effort| EFFORTS.contains(effort))
-        .context("Invalid compaction effort")?;
-    let provider_id = compaction["providerId"].as_str();
-    let model = compaction["model"].as_str();
-    if mode == "custom" {
-        ensure!(
-            provider_id.is_some_and(|id| !trim(id).is_empty())
-                && model.is_some_and(|model| {
-                    !trim(model).is_empty()
-                        && model.encode_utf16().count() <= 240
-                        && !model.chars().any(|c| c <= '\u{1f}')
-                }),
-            "Choose a compaction provider and model"
-        );
-    }
-    let mut compact = json!({"mode": mode, "effort": effort});
-    if let Some(id) = provider_id {
-        compact["providerId"] = json!(id);
-    }
-    if let Some(model) = model {
-        compact["model"] = json!(trim(model));
-    }
-
     let mut fields = Map::from_iter([
         ("contextWindows".into(), Value::Object(windows.clone())),
-        ("compaction".into(), compact),
+        (
+            "compaction".into(),
+            parse_claude_compaction(&value["compaction"])?,
+        ),
     ]);
     if let Some(search) = value.get("claudeWebSearch") {
         fields.insert(
@@ -95,14 +66,15 @@ fn model_preferences(db: &Connection) -> (Map<String, Value>, ClaudeRoleAssignme
             (
                 Map::from_iter([
                     ("contextWindows".into(), json!({})),
-                    (
-                        "compaction".into(),
-                        json!({"mode": "follow", "effort": "follow"}),
-                    ),
+                    ("compaction".into(), default_claude_compaction()),
                 ]),
                 ClaudeRoleAssignments::default(),
             )
         })
+}
+
+fn default_claude_compaction() -> Value {
+    json!({"mode": "follow", "effort": "follow"})
 }
 
 pub fn read_claude_role_assignments(db: &Connection) -> ClaudeRoleAssignments {
@@ -110,12 +82,22 @@ pub fn read_claude_role_assignments(db: &Connection) -> ClaudeRoleAssignments {
     assignments
 }
 
-#[derive(Default)]
 pub struct ClaudeRoleLaunchPreferences {
     pub assignments: ClaudeRoleAssignments,
     pub web_search: Option<ClaudeRoleAssignment>,
     pub(crate) context_windows: Map<String, Value>,
-    pub(crate) compaction: Value,
+    pub compaction: Value,
+}
+
+impl Default for ClaudeRoleLaunchPreferences {
+    fn default() -> Self {
+        Self {
+            assignments: ClaudeRoleAssignments::default(),
+            web_search: None,
+            context_windows: Map::new(),
+            compaction: default_claude_compaction(),
+        }
+    }
 }
 
 pub fn read_claude_role_launch_preferences(db: &Connection) -> ClaudeRoleLaunchPreferences {
@@ -129,7 +111,9 @@ pub fn read_claude_role_launch_preferences(db: &Connection) -> ClaudeRoleLaunchP
             .as_object()
             .cloned()
             .unwrap_or_default(),
-        compaction: fields.remove("compaction").unwrap_or_default(),
+        compaction: fields
+            .remove("compaction")
+            .unwrap_or_else(default_claude_compaction),
     }
 }
 
@@ -149,6 +133,17 @@ pub fn save_claude_model_assignments(
     web_search: Option<Option<&ClaudeRoleAssignment>>,
     updated_at: i64,
 ) -> Result<Option<ClaudeRoleAssignment>> {
+    save_claude_model_preferences(db, assignments, web_search, None, updated_at)
+        .map(|saved| saved.0)
+}
+
+pub fn save_claude_model_preferences(
+    db: &mut Connection,
+    assignments: &ClaudeRoleAssignments,
+    web_search: Option<Option<&ClaudeRoleAssignment>>,
+    compaction: Option<Option<&Value>>,
+    updated_at: i64,
+) -> Result<(Option<ClaudeRoleAssignment>, Value)> {
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let (mut preferences, _) = model_preferences(&tx);
     preferences.insert(
@@ -169,6 +164,14 @@ pub fn save_claude_model_assignments(
         .cloned()
         .map(serde_json::from_value)
         .transpose()?;
+    if let Some(compaction) = compaction {
+        let value = compaction
+            .map(parse_claude_compaction)
+            .transpose()?
+            .unwrap_or_else(default_claude_compaction);
+        preferences.insert("compaction".into(), value);
+    }
+    let saved_compaction = preferences["compaction"].clone();
     tx.execute(
         "INSERT INTO preferences (key, value_json, updated_at) VALUES (?, ?, ?)
          ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json,
@@ -180,7 +183,7 @@ pub fn save_claude_model_assignments(
         ],
     )?;
     tx.commit()?;
-    Ok(saved_search)
+    Ok((saved_search, saved_compaction))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -319,6 +322,21 @@ pub fn promote_shell_to_claude(
     session_id: &str,
     now: i64,
 ) -> Result<DomainCommit> {
+    promote_shell_to_agent(db, command, session_id, LaunchProfile::ClaudeCode, now)
+}
+
+pub fn promote_shell_to_agent(
+    db: &mut Connection,
+    command: &CommandMetadata,
+    session_id: &str,
+    profile: LaunchProfile,
+    now: i64,
+) -> Result<DomainCommit> {
+    let title = match profile {
+        LaunchProfile::ClaudeCode => "Claude",
+        LaunchProfile::Codex => "Codex",
+        LaunchProfile::Shell => anyhow::bail!("Shell is not an agent profile"),
+    };
     execute(db, command, now, |tx, events| {
         let before = require_session(tx, session_id)?;
         ensure!(
@@ -327,23 +345,25 @@ pub fn promote_shell_to_claude(
         );
         require_no_active_run(tx, session_id)?;
         tx.execute(
-            "UPDATE sessions SET kind = 'claude-code', work_status = 'starting',
+            "UPDATE sessions SET kind = ?, work_status = 'starting',
                  title = CASE WHEN title = 'Shell' OR title = id
-                              THEN 'Claude' ELSE title END,
+                              THEN ? ELSE title END,
                  updated_at = ?, last_activity_at = ?, version = version + 1
              WHERE id = ?",
-            params![now, now, session_id],
+            params![profile.kind(), title, now, now, session_id],
         )?;
-        tx.execute(
-            "UPDATE provider_bindings SET resume_state = 'expired', restore_state = 'none',
-                restore_error = NULL, invalidated_at = ?, updated_at = ?,
-                metadata_json = json_patch(
-                    CASE WHEN json_valid(metadata_json) THEN metadata_json ELSE '{}' END,
-                    '{\"canFork\":false,\"observedUserPrompt\":false,\"observedNormalStop\":false}'
-                )
-             WHERE session_id = ?",
-            params![now, now, session_id],
-        )?;
+        if profile == LaunchProfile::ClaudeCode {
+            tx.execute(
+                "UPDATE provider_bindings SET resume_state = 'expired', restore_state = 'none',
+                    restore_error = NULL, invalidated_at = ?, updated_at = ?,
+                    metadata_json = json_patch(
+                        CASE WHEN json_valid(metadata_json) THEN metadata_json ELSE '{}' END,
+                        '{\"canFork\":false,\"observedUserPrompt\":false,\"observedNormalStop\":false}'
+                    )
+                 WHERE session_id = ?",
+                params![now, now, session_id],
+            )?;
+        }
         let session = require_session(tx, session_id)?;
         events.push(session_event(
             command,
@@ -362,11 +382,24 @@ pub fn return_promoted_claude_to_shell(
     session_id: &str,
     now: i64,
 ) -> Result<DomainCommit> {
+    return_promoted_agent_to_shell(db, command, session_id, LaunchProfile::ClaudeCode, now)
+}
+
+pub fn return_promoted_agent_to_shell(
+    db: &mut Connection,
+    command: &CommandMetadata,
+    session_id: &str,
+    profile: LaunchProfile,
+    now: i64,
+) -> Result<DomainCommit> {
     execute(db, command, now, |tx, events| {
         let before = require_session(tx, session_id)?;
         ensure!(
-            before.kind == "claude-code" && before.archived_at.is_none(),
-            "only an active Claude card can return to Shell"
+            profile != LaunchProfile::Shell
+                && before.kind == profile.kind()
+                && before.archived_at.is_none(),
+            "only an active {} card can return to Shell",
+            profile.kind()
         );
         require_no_active_run(tx, session_id)?;
         tx.execute(
@@ -434,7 +467,7 @@ pub fn start_run(
         tx.execute(
             "UPDATE sessions
              SET status = 'running',
-                 work_status = CASE WHEN kind = 'claude-code' THEN work_status ELSE 'idle' END,
+                 work_status = CASE WHEN kind IN ('claude-code', 'codex') THEN work_status ELSE 'idle' END,
                  updated_at = ?, last_activity_at = ?,
                  version = version + 1
              WHERE id = ?",

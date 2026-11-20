@@ -31,11 +31,19 @@ use hyper_util::{
     client::legacy::connect::HttpConnector,
     rt::{TokioIo, TokioTimer},
 };
-use matou_native_core::provider_launch::{
-    ClaudeGatewayConnection, ClaudeGatewayProjection, ClaudeGatewayRole, EFFORTS,
+use matou_native_core::{
+    claude_role_budget::CLAUDE_ROLES,
+    provider_launch::{
+        ClaudeGatewayCompaction, ClaudeGatewayConnection, ClaudeGatewayProjection,
+        ClaudeGatewayRole, EFFORTS,
+    },
 };
 use serde_json::{Map, Value, json};
-use tokio::{net::TcpListener, sync::oneshot, task::AbortHandle};
+use tokio::{
+    net::TcpListener,
+    sync::{OnceCell, oneshot},
+    task::AbortHandle,
+};
 use tower_service::Service;
 
 const MAX_REQUEST_BYTES: usize = 64 * 1024 * 1024;
@@ -78,6 +86,7 @@ impl Gateway {
         let state = Arc::new(State {
             prefix,
             projection,
+            lazy_compaction: OnceCell::new(),
             stopped: Arc::clone(&stopped),
             #[cfg(test)]
             loopback,
@@ -145,6 +154,7 @@ impl Drop for Gateway {
 struct State {
     prefix: String,
     projection: Arc<ClaudeGatewayProjection>,
+    lazy_compaction: OnceCell<ClaudeGatewayRole>,
     stopped: Arc<AtomicBool>,
     #[cfg(test)]
     loopback: Option<std::net::SocketAddr>,
@@ -202,8 +212,9 @@ impl State {
                 .await
                 .map_err(|error| Fault::request_body(error.as_ref()))?
                 .to_bytes();
-            let (bytes, connection, destination, rewritten) =
-                self.rewrite_json(bytes, path, query, &parts.headers)?;
+            let (bytes, connection, destination, rewritten) = self
+                .rewrite_json(bytes, path, query, &parts.headers)
+                .await?;
             let length = bytes.len() as u64;
             let body = Full::new(bytes)
                 .map_err(|never| match never {})
@@ -292,7 +303,7 @@ impl State {
         send_once(destination, Request::from_parts(parts, body)).await
     }
 
-    fn rewrite_json(
+    async fn rewrite_json(
         &self,
         mut body: Bytes,
         path: &str,
@@ -309,13 +320,35 @@ impl State {
         if role.is_none() && model.is_some_and(|model| model.starts_with("matou-role/")) {
             return Err(Fault::bad_gateway("Unknown Claude model role."));
         }
+        let marked = compaction_marked(headers);
+        let role_target = role.and_then(|index| self.projection.roles[index].as_ref());
+        let compaction = self
+            .projection
+            .compaction
+            .as_ref()
+            .filter(|_| is_message && marked && model.is_some());
         let search = self.projection.web_search.as_ref().filter(|_| {
-            model.is_some()
-                && message.as_ref().is_some_and(pure_web_search)
-                && !compaction_marked(headers)
+            model.is_some() && message.as_ref().is_some_and(pure_web_search) && !marked
         });
-        let target =
-            search.or_else(|| role.and_then(|index| self.projection.roles[index].as_ref()));
+        let custom = match compaction {
+            Some(ClaudeGatewayCompaction::Snapshot { target, .. }) => Some(target),
+            Some(ClaudeGatewayCompaction::OnFirstRequest(preparation)) => Some(
+                self.lazy_compaction
+                    .get_or_try_init(|| async move {
+                        let preparation = preparation.clone();
+                        tokio::task::spawn_blocking(move || {
+                            preparation
+                                .resolve(&crate::host::native_role_catalog)
+                                .map_err(|_| Fault::bad_gateway(CONNECTION_ERROR))
+                        })
+                        .await
+                        .map_err(|_| Fault::bad_gateway(CONNECTION_ERROR))?
+                    })
+                    .await?,
+            ),
+            None => None,
+        };
+        let target = custom.or(search).or(role_target);
         if target.is_none() && role.is_some() {
             return Err(Fault::bad_gateway(
                 "Claude model role target is unavailable.",
@@ -331,10 +364,43 @@ impl State {
         if let (Some(target), Some(message)) = (target, message.as_mut()) {
             message.insert("model".into(), json!(target.model));
             if is_message {
-                apply_role_generation(message, target).map_err(|error| {
+                let effort = target.effort.as_deref();
+                let result = match compaction {
+                    Some(ClaudeGatewayCompaction::OnFirstRequest(_)) => {
+                        let effort = effort
+                            .or(literal_effort)
+                            .filter(|effort| EFFORTS.contains(effort) && *effort != "follow");
+                        if let Some(effort) = effort {
+                            if !supports_effort(target, effort) {
+                                return Err(Fault::bad_gateway(CONNECTION_ERROR));
+                            }
+                            set_effort(message, Some(effort));
+                            message.insert("thinking".into(), json!({"type": "adaptive"}));
+                        }
+                        Ok(())
+                    }
+                    Some(ClaudeGatewayCompaction::Snapshot {
+                        inherit_role_effort: true,
+                        ..
+                    }) => {
+                        let effort = match role_target {
+                            Some(role) => role.effort.as_deref(),
+                            None => effort,
+                        };
+                        apply_role_generation(message, target, effort)
+                    }
+                    _ => apply_role_generation(message, target, effort),
+                };
+                result.map_err(|error| {
                     if search.is_some() {
                         Fault::bad_gateway(format!(
                             "网页搜索 · {}: model target or reasoning effort is unavailable",
+                            target.provider_name
+                        ))
+                    } else if custom.is_some() {
+                        let label = role.map_or("compaction", |index| CLAUDE_ROLES[index]);
+                        Fault::bad_gateway(format!(
+                            "{label} · {}: model target or reasoning effort is unavailable",
                             target.provider_name
                         ))
                     } else {
@@ -453,14 +519,9 @@ fn destination(
 fn apply_role_generation(
     message: &mut Map<String, Value>,
     target: &ClaudeGatewayRole,
+    effort: Option<&str>,
 ) -> Result<(), Fault> {
-    let effort = target.effort.as_deref();
-    if let Some(effort) = effort
-        && target
-            .supported_efforts
-            .as_ref()
-            .is_some_and(|levels| !levels.iter().any(|level| level == effort))
-    {
+    if effort.is_some_and(|effort| !supports_effort(target, effort)) {
         return Err(Fault::bad_gateway(
             "Claude model target reasoning effort is unavailable.",
         ));
@@ -480,6 +541,13 @@ fn apply_role_generation(
         message.insert("max_tokens".into(), json!(cap));
     }
     Ok(())
+}
+
+fn supports_effort(target: &ClaudeGatewayRole, effort: &str) -> bool {
+    target
+        .supported_efforts
+        .as_ref()
+        .is_none_or(|levels| levels.iter().any(|level| level == effort))
 }
 
 fn set_effort(message: &mut Map<String, Value>, effort: Option<&str>) {
