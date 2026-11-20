@@ -61,10 +61,110 @@ mod settings_shell;
 mod workspace {
     include!("../src/workspace.rs");
 
-    use super::probe::{PARENT, SCENE};
+    use super::probe::{PARENT, PEER, SCENE};
+    use crate::ui_text::TextGeometryHandle;
     use matou_native_terminal::{Terminal, TerminalOptions};
+    use std::cell::RefCell;
+
+    #[derive(Default)]
+    pub(super) struct HeaderReadings {
+        pub title: TextGeometryHandle,
+        pub actions: RefCell<Vec<Bounds<Pixels>>>,
+        pub loader_hovered: Cell<bool>,
+        pub remove_hovered: Cell<bool>,
+    }
+
+    pub(super) struct HeaderProbe {
+        pub workspace: Entity<Workspace>,
+        pub width: Pixels,
+        pub title: &'static str,
+        pub readings: Rc<HeaderReadings>,
+    }
+
+    impl Render for HeaderProbe {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let actions = self.workspace.update(cx, |view, cx| {
+                let node = view.graph_node(PEER).unwrap();
+                let loader = self.readings.clone();
+                let remove = self.readings.clone();
+                let readings = self.readings.clone();
+                Workspace::session_card_actions()
+                    .on_children_prepainted(move |bounds, _, _| {
+                        *readings.actions.borrow_mut() = bounds;
+                    })
+                    .child(
+                        view.session_loader_button(PEER, node, cx)
+                            .on_hover(move |hovered, _, _| loader.loader_hovered.set(*hovered)),
+                    )
+                    .children(view.render_fork_header(PEER, ForkPlacement::Child, cx))
+                    .children(view.render_fork_header(PEER, ForkPlacement::Sibling, cx))
+                    .child(
+                        view.remove_card_button(PEER, node, cx)
+                            .on_hover(move |hovered, _, _| remove.remove_hovered.set(*hovered)),
+                    )
+            });
+            Workspace::session_card_header(
+                ui_text(self.title).track_geometry(self.readings.title.clone()),
+                actions,
+            )
+            .font_family(".AppleSystemUIFont")
+            .w(self.width)
+        }
+    }
 
     impl Workspace {
+        pub(super) fn card_header_probe_width(&self, id: &str) -> Pixels {
+            let index = self.order.iter().position(|card| card == id).unwrap();
+            self.carousel_scroll
+                .bounds_for_item(index)
+                .unwrap()
+                .size
+                .width
+        }
+
+        pub(super) fn assert_compact_status_color() {
+            let summary_color = Self::compact_session_summary(None, "Shell")
+                .style()
+                .text
+                .as_ref()
+                .unwrap()
+                .color;
+            assert_eq!(summary_color, Some(rgb(0x6b7482).into()));
+            for status in [
+                "needs-input",
+                "starting",
+                "running",
+                "error",
+                "interrupted",
+                "exited",
+                "idle",
+            ] {
+                let color = Self::compact_session_status(status)
+                    .style()
+                    .text
+                    .as_ref()
+                    .unwrap()
+                    .color;
+                assert_eq!(
+                    color,
+                    (status == "needs-input").then(|| rgb(0xe8ae48).into())
+                );
+            }
+            println!("Compact summary | needs-input #e8ae48 | other states inherit #6b7482");
+        }
+
+        pub(super) fn assert_card_header_dialog(&self, remove: bool) {
+            if remove {
+                assert!(
+                    matches!(&self.dialog, Some(TabDialog::RemoveSession { session_id, .. }) if session_id == PEER)
+                );
+            } else {
+                assert!(
+                    matches!(&self.dialog, Some(TabDialog::SessionLoader(state)) if state.session_id == PEER)
+                );
+            }
+        }
+
         pub(super) fn assert_permission_chip(&self, expected: Option<(&str, &str, bool)>) {
             let chip = self.permission_chip();
             assert_eq!(
@@ -1307,13 +1407,14 @@ mod workspace {
 #[cfg(target_os = "macos")]
 mod probe {
     use std::path::PathBuf;
+    use std::rc::Rc;
     use std::time::{Duration, Instant};
 
     use cocoa::appkit::NSEventType;
 
     use gpui::{
         AnyWindowHandle, AppContext, Application, AsyncApp, Bounds, Keystroke, MouseButton, Pixels,
-        Point, WindowBounds, WindowHandle, WindowOptions, point, px, size,
+        Point, Render, WindowBounds, WindowHandle, WindowOptions, point, px, size,
     };
     use matou_native_core::{
         geometry,
@@ -1336,7 +1437,7 @@ mod probe {
     use crate::{
         assets::NativeAssets,
         runtime_bridge::{self, ProbeReceiver},
-        workspace::Workspace,
+        workspace::{HeaderProbe, HeaderReadings, Workspace},
     };
 
     pub(super) const SCENE: &str = "levels-scene";
@@ -1921,8 +2022,8 @@ mod probe {
         );
     }
 
-    fn mouse(
-        window: WindowHandle<Workspace>,
+    fn mouse<V: Render>(
+        window: WindowHandle<V>,
         cx: &mut AsyncApp,
         position: Point<Pixels>,
         kind: NSEventType,
@@ -3779,6 +3880,152 @@ mod probe {
         host.shutdown().unwrap();
     }
 
+    fn verify_card_header_layout(cx: &mut AsyncApp) {
+        const LONG: &str = "Claude 占位会话，这是一段有意加长用于检查卡头截断行为的验收标题";
+        Workspace::assert_compact_status_color();
+        let fixture = Fixture::new();
+        let Some(BootstrapResult::Writable { connection, .. }) = &fixture.db else {
+            unreachable!()
+        };
+        connection
+            .execute(
+                "UPDATE sessions SET title = ?, kind = 'claude-code' WHERE id = ?",
+                (LONG, PEER),
+            )
+            .unwrap();
+
+        for width in [720., 900., 1200.] {
+            let (window, _sink) = open_hidden(cx, width);
+            deliver(window, cx, fixture.event(true));
+            draw(window, cx);
+            window
+                .update(cx, |view, window, cx| {
+                    assert_eq!(window.viewport_size().width, px(width));
+                    view.qualify(PEER, window, cx);
+                })
+                .unwrap();
+            draw(window, cx);
+            let card_width = window
+                .update(cx, |view, _, _| view.card_header_probe_width(PEER))
+                .unwrap();
+            let workspace = window.update(cx, |_, _, cx| cx.entity()).unwrap();
+            let readings = Rc::new(HeaderReadings::default());
+            let probe = cx
+                .open_window(
+                    WindowOptions {
+                        show: false,
+                        focus: false,
+                        window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                            point(px(0.), px(0.)),
+                            size(px(width), px(780.)),
+                        ))),
+                        ..Default::default()
+                    },
+                    |_, cx| {
+                        cx.new(|_| HeaderProbe {
+                            workspace,
+                            width: card_width,
+                            title: "…",
+                            readings: readings.clone(),
+                        })
+                    },
+                )
+                .unwrap();
+            let mut ellipsis_glyph = None;
+            let mut baseline_actions = Vec::new();
+            for title in ["…", "Shell", LONG] {
+                probe.update(cx, |view, _, _| view.title = title).unwrap();
+                let buttons = AnyWindowHandle::from(probe).update(cx, |_, window, cx| {
+                    assert!(!crate::macos::is_window_visible(window).unwrap());
+                    window.refresh();
+                    window.draw(cx).clear();
+                    let geometry = readings.title.borrow();
+                    let geometry = geometry.as_ref().unwrap();
+                    let run = geometry.layout.runs.last().unwrap();
+                    let last_glyph = (run.font_id, run.glyphs.last().unwrap().id);
+                    let actions = readings.actions.borrow();
+                    let loader = actions[0];
+                    let remove = *actions.last().unwrap();
+                    let title_budget = (loader.left() - px(12.)) * 0.46;
+                    assert_eq!(remove.right(), card_width - px(12.));
+                    assert_eq!(loader.size, size(px(24.), px(24.)));
+                    assert_eq!(remove.size, size(px(27.), px(27.)));
+                    assert_eq!(loader.center().y, px(21.));
+                    assert!((remove.center().y - px(21.)).abs() <= px(0.5));
+                    assert!(geometry.layout.width <= geometry.bounds.size.width);
+                    assert!(geometry.bounds.right() <= loader.left());
+                    if title == "…" {
+                        ellipsis_glyph = Some(last_glyph);
+                        baseline_actions.clone_from(&actions);
+                        return None;
+                    }
+                    assert_eq!(*actions, baseline_actions);
+                    let painted = if title == LONG {
+                        let prefix = LONG.get(..geometry.layout.len - "…".len()).unwrap();
+                        assert!(!prefix.is_empty() && prefix.len() < LONG.len());
+                        assert_eq!(Some(last_glyph), ellipsis_glyph);
+                        assert!((geometry.bounds.size.width - title_budget).abs() <= px(1.));
+                        format!("{prefix}…")
+                    } else {
+                        assert_eq!(geometry.layout.len, title.len());
+                        assert_ne!(Some(last_glyph), ellipsis_glyph);
+                        assert!(geometry.bounds.size.width < title_budget);
+                        title.to_owned()
+                    };
+                    println!(
+                        "{width} pt | card={card_width:?} | title={painted:?} | budget={title_budget:?} | title bounds={:?} | actions={actions:?}",
+                        geometry.bounds,
+                    );
+                    Some((loader, remove))
+                }).unwrap();
+                let Some((loader, remove)) = buttons else {
+                    continue;
+                };
+                for (position, expected) in [
+                    (loader.center(), (true, false)),
+                    (remove.center(), (false, true)),
+                    (point(px(1.), px(50.)), (false, false)),
+                ] {
+                    mouse(probe, cx, position, NSEventType::NSMouseMoved);
+                    assert_eq!(
+                        (readings.loader_hovered.get(), readings.remove_hovered.get()),
+                        expected
+                    );
+                }
+                println!("{width} pt | loader/remove hover passed");
+            }
+            probe
+                .update(cx, |_, window, _| window.remove_window())
+                .unwrap();
+
+            for remove in [false, true] {
+                let position = window
+                    .update(cx, |view, _, _| {
+                        if remove {
+                            view.remove_button_position(PEER)
+                        } else {
+                            view.loader_button_position(PEER)
+                        }
+                    })
+                    .unwrap();
+                click(window, cx, position);
+                window
+                    .update(cx, |view, _, _| view.assert_card_header_dialog(remove))
+                    .unwrap();
+                draw(window, cx);
+                press(window, cx, "escape");
+                draw(window, cx);
+                println!(
+                    "{width} pt | {} opened and dismissed | {position:?}",
+                    if remove { "remove" } else { "loader" }
+                );
+            }
+            window
+                .update(cx, |_, window, _| window.remove_window())
+                .unwrap();
+        }
+    }
+
     fn verify_compact_card(cx: &mut AsyncApp) {
         let mut fixture = Fixture::new();
         let (commands, sink) = runtime_bridge::probe_channel();
@@ -5373,6 +5620,7 @@ mod probe {
     }
 
     pub(super) fn run() {
+        let header_only = std::env::args().any(|arg| arg == "--card-header");
         let water_pointer_only = std::env::args().any(|arg| arg == "--recovery-water-pointer");
         let deferred_only = std::env::args().any(|arg| arg == "--deferred-recovery");
         let show_deferred = std::env::args().any(|arg| arg == "--show-deferred-recovery");
@@ -5383,6 +5631,18 @@ mod probe {
         let codex_loader_only = std::env::args().any(|arg| arg == "--codex-loader");
         let codex_history_only = std::env::args().any(|arg| arg == "--codex-history");
         Application::new().with_assets(NativeAssets).run(move |cx| {
+            if header_only {
+                cx.spawn(async |cx| {
+                    verify_card_header_layout(cx);
+                    verify_compact_card(cx);
+                    verify_session_loader(cx);
+                    verify_card_actions(cx);
+                    verify_stopped_cards(cx);
+                    verify_narrow_stopped_cards(cx);
+                    cx.update(|cx| cx.quit()).unwrap();
+                }).detach();
+                return;
+            }
             if water_pointer_only {
                 cx.spawn(async |cx| {
                     verify_recovery_water_pointer(cx);
@@ -5463,6 +5723,7 @@ mod probe {
                 )
                 .unwrap();
             cx.spawn(async move |cx| {
+                verify_card_header_layout(cx);
                 verify_recovery_water_pointer(cx);
                 verify_compact_card(cx);
                 verify_start_failure_card(cx);

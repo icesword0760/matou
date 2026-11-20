@@ -57,7 +57,7 @@ use crate::{
     sidebar_scrollbar::{self, SidebarScrollbarState},
     tab_dialog_style as tabs_ui,
     terminal_surface::{SurfaceEvent, SurfaceEventKind, TerminalSurface},
-    ui_text::ui_text,
+    ui_text::{UiText, ui_text},
     workspace_drag::{self, WorkspaceDragSnapshot, WorkspaceDragTask},
 };
 
@@ -9376,26 +9376,7 @@ impl Workspace {
                     .text_ellipsis()
                     .child(title.to_owned()),
             )
-            .child(
-                div()
-                    .text_size(px(9.))
-                    .px(px(6.))
-                    .py(px(2.))
-                    .rounded(px(8.))
-                    .bg(rgba(0xffffff0f))
-                    .map(|mut badge| {
-                        badge.style().align_self = Some(AlignSelf::FlexStart);
-                        badge
-                    })
-                    .child(match status {
-                        "starting" | "running" => "运行中",
-                        "needs-input" => "等待输入",
-                        "error" => "异常",
-                        "interrupted" => "中断",
-                        "exited" => "已停止",
-                        _ => "空闲",
-                    }),
-            )
+            .child(Self::compact_session_status(status))
             .children((active_child_count > 0).then(|| {
                 div()
                     .text_size(px(9.))
@@ -9411,6 +9392,65 @@ impl Workspace {
                     .overflow_hidden()
                     .child(summary.to_owned()),
             )
+    }
+
+    fn compact_session_status(status: &str) -> Div {
+        div()
+            .text_size(px(9.))
+            .px(px(6.))
+            .py(px(2.))
+            .rounded(px(8.))
+            .bg(rgba(0xffffff0f))
+            .when(status == "needs-input", |badge| {
+                badge.text_color(rgb(0xe8ae48))
+            })
+            .map(|mut badge| {
+                badge.style().align_self = Some(AlignSelf::FlexStart);
+                badge
+            })
+            .child(match status {
+                "starting" | "running" => "运行中",
+                "needs-input" => "等待输入",
+                "error" => "异常",
+                "interrupted" => "中断",
+                "exited" => "已停止",
+                _ => "空闲",
+            })
+    }
+
+    fn session_card_header(title: UiText, actions: Div) -> Div {
+        div()
+            .h(px(42.))
+            .flex_none()
+            .rounded_t(px(12.))
+            .px(px(12.))
+            .flex()
+            .items_center()
+            .bg(rgb(0xffffff))
+            .child(
+                // The percentage resolves against the space left after the actions.
+                div().flex_1().min_w_0().flex().items_center().child(
+                    div()
+                        .min_w_0()
+                        .max_w(relative(0.46))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .text_size(px(12.))
+                        .font_weight(FontWeight::BOLD)
+                        .child(title),
+                ),
+            )
+            .child(actions)
+    }
+
+    fn session_card_actions() -> Div {
+        div()
+            .flex_none()
+            .ml_auto()
+            .flex()
+            .items_center()
+            .gap(px(6.))
     }
 
     fn stopped_session_status(id: &str) -> Stateful<Div> {
@@ -9553,12 +9593,7 @@ impl Workspace {
             }))
     }
 
-    fn remove_card_button(
-        &self,
-        id: &str,
-        node: &Value,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn remove_card_button(&self, id: &str, node: &Value, cx: &mut Context<Self>) -> Stateful<Div> {
         let tooltip = self.remove_node_tooltip(id, node);
         let button = div()
             .id(SharedString::from(format!("remove-session-{id}")))
@@ -9568,13 +9603,7 @@ impl Workspace {
             .items_center()
             .justify_center()
             .rounded(px(5.))
-            .text_color(rgb(0x5f7898))
-            .child(
-                svg()
-                    .path("icons/circle-minus.svg")
-                    .size(px(14.))
-                    .flex_none(),
-            )
+            .child(icon("circle-minus", 14., 0x5f7898))
             .tooltip(move |_, cx| cx.new(|_| tooltip).into());
         if tooltip.blocked_reason.is_none() {
             let session_id = id.to_owned();
@@ -9598,7 +9627,7 @@ impl Workspace {
         id: &str,
         node: &Value,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> Stateful<Div> {
         let blocked = self.session_loader_blocked_reason(id, node);
         let tooltip: SharedString = blocked
             .unwrap_or(if node["currentMode"] == "codex" {
@@ -9608,28 +9637,34 @@ impl Workspace {
             })
             .to_owned()
             .into();
+        let button_id = SharedString::from(format!("session-loader-open-{id}"));
+        let glyph = svg()
+            .path("icons/folder-input.svg")
+            .size(px(16.))
+            .flex_none()
+            .text_color(rgba(0x00000085))
+            .when(blocked.is_none(), |glyph| {
+                glyph.group_hover(button_id.clone(), |style| {
+                    style.text_color(rgba(0x000000d1))
+                })
+            });
         let button = div()
-            .id(SharedString::from(format!("session-loader-open-{id}")))
+            .id(button_id.clone())
+            .group(button_id)
             .size(px(24.))
             .flex_none()
             .flex()
             .items_center()
             .justify_center()
             .rounded(px(5.))
-            .text_color(rgba(0x00000085))
-            .child(
-                svg()
-                    .path("icons/folder-input.svg")
-                    .size(px(16.))
-                    .flex_none(),
-            )
+            .child(glyph)
             .tooltip(move |_, cx| cx.new(|_| CardTooltip(tooltip.clone())).into());
         if blocked.is_none() {
             let session_id = id.to_owned();
             self.button(
                 button
                     .cursor_pointer()
-                    .hover(|style| style.text_color(rgba(0x000000d1)).bg(rgba(0x0000000f))),
+                    .hover(|style| style.bg(rgba(0x0000000f))),
                 &self.card_controls[id],
                 move |this, window, cx| {
                     this.open_session_loader(&session_id, window, cx);
@@ -12594,46 +12629,29 @@ impl Render for Workspace {
                 card.child(Self::compact_session_summary(node, title))
             } else {
                 card.child(
-                    div()
-                        .id(SharedString::from(format!("session-header-{id}")))
-                        .h(px(42.))
-                        .flex_none()
-                        .rounded_t(px(12.))
-                        .px(px(12.))
-                        .flex()
-                        .items_center()
-                        .bg(rgb(0xffffff))
-                        .on_mouse_down(
-                            MouseButton::Right,
-                            cx.listener({
-                                let id = id.clone();
-                                move |this, event: &MouseDownEvent, _, cx| {
-                                    this.open_fork_menu(&id, event.position, cx);
-                                    cx.stop_propagation();
-                                }
-                            }),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(12.))
-                                .font_weight(FontWeight::BOLD)
-                                .child(title.to_owned()),
-                        )
-                        .child(div().flex_1())
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(6.))
-                                .children(badge)
-                                .children(node.map(|node| self.session_loader_button(id, node, cx)))
-                                .children(self.render_fork_header(id, ForkPlacement::Child, cx))
-                                .children(self.render_fork_header(id, ForkPlacement::Sibling, cx))
-                                .children(
-                                    node.filter(|node| node["archivedAt"].is_null())
-                                        .map(|node| self.remove_card_button(id, node, cx)),
-                                ),
-                        ),
+                    Self::session_card_header(
+                        ui_text(title.replace(['\r', '\n'], " ")),
+                        Self::session_card_actions()
+                            .children(badge)
+                            .children(node.map(|node| self.session_loader_button(id, node, cx)))
+                            .children(self.render_fork_header(id, ForkPlacement::Child, cx))
+                            .children(self.render_fork_header(id, ForkPlacement::Sibling, cx))
+                            .children(
+                                node.filter(|node| node["archivedAt"].is_null())
+                                    .map(|node| self.remove_card_button(id, node, cx)),
+                            ),
+                    )
+                    .id(SharedString::from(format!("session-header-{id}")))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener({
+                            let id = id.clone();
+                            move |this, event: &MouseDownEvent, _, cx| {
+                                this.open_fork_menu(&id, event.position, cx);
+                                cx.stop_propagation();
+                            }
+                        }),
+                    ),
                 )
                 .when(!path_valid, |card| {
                     card.child(
