@@ -7,6 +7,7 @@ use std::io::{BufReader, Read, Write};
 use anyhow::{Result, ensure};
 use matou_native_core::provider_launch::{ClaudeRoleAssignment, ClaudeRoleAssignments};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde_json::Value;
 
 use crate::host::{Command, Event};
 
@@ -39,6 +40,14 @@ pub struct ClaudeRoleAssignmentsReply {
     pub web_search: Option<Option<ClaudeRoleAssignment>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct ClaudeModelPreferencesReply {
+    #[serde(flatten)]
+    pub roles: ClaudeRoleAssignmentsReply,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compaction: Option<Value>,
 }
 
 // A missing field uses Serde's default. A present null belongs to the payload.

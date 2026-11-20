@@ -4,6 +4,8 @@
 mod claude_gateway_restart;
 #[path = "process_contract/claude_model_catalog.rs"]
 mod claude_model_catalog;
+#[path = "process_contract/codex_launch.rs"]
+mod codex_launch;
 #[path = "process_contract/database_recovery.rs"]
 mod database_recovery;
 
@@ -2522,11 +2524,11 @@ fn claude_role_budget_projects_the_actual_fresh_process_environment() -> Result<
         ),
         ("unknown", Some("opus"), "512k", None, Ok(absent)),
         (
-            "assignment misses startup tier",
+            "under 100K with an assignment on another tier",
             Some("sonnet"),
             "512k",
             Some(99_999),
-            Ok(absent),
+            Err("compaction · Compaction API: context window is under 100K"),
         ),
         ("no assignments", None, "512k", Some(99_999), Ok(["old"; 5])),
     ] {
