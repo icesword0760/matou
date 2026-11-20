@@ -17,7 +17,7 @@ fn payload(event: &str, turn: Option<&str>, rollout: &Path) -> Value {
     value
 }
 
-fn emit(child: &mut RuntimeChild, home: &Path, name: &str, hook: Value) -> Result<()> {
+pub(super) fn emit(child: &mut RuntimeChild, home: &Path, name: &str, hook: Value) -> Result<()> {
     fs::write(
         home.join(format!("{name}.json")),
         serde_json::to_vec(&hook)?,
@@ -25,7 +25,7 @@ fn emit(child: &mut RuntimeChild, home: &Path, name: &str, hook: Value) -> Resul
     child.input(&format!("hook {name}"))
 }
 
-fn node<'a>(graph: &'a Value, session: &str) -> Option<&'a Value> {
+pub(super) fn node<'a>(graph: &'a Value, session: &str) -> Option<&'a Value> {
     graph["nodes"]
         .as_array()?
         .iter()
@@ -160,7 +160,7 @@ fn hook_url(data: &Path) -> Result<String> {
         .context("run-scoped loopback URL")
 }
 
-fn shutdown(mut child: RuntimeChild) -> Result<()> {
+pub(super) fn shutdown(mut child: RuntimeChild) -> Result<()> {
     child.send(Command::Shutdown)?;
     assert!(child.closed()?.is_empty());
     let (status, stderr) = child.wait()?;
@@ -187,7 +187,7 @@ fn start(child: &mut RuntimeChild) -> Result<()> {
     Ok(())
 }
 
-fn transcript(home: &Path, id: &str) -> Result<PathBuf> {
+pub(super) fn transcript(home: &Path, id: &str) -> Result<PathBuf> {
     let rollout = home
         .join("sessions")
         .join(format!("rollout-fixture-{id}.jsonl"));

@@ -18,6 +18,7 @@ use std::{
 use crate::{
     SessionEvent, SessionOptions, claude_model_catalog,
     codex_launch::{self, CodexLaunch},
+    codex_resume::{self, Resume as CodexResume},
     history_worker::{HistoryReply, HistoryRequest, HistoryWorker},
     host_control::ControlServer,
     owner::{OwnerEvent, ShellOwner},
@@ -847,6 +848,7 @@ struct LaunchRetry {
     workspace_id: String,
     validated: bool,
     recovering: bool,
+    fresh_codex: bool,
 }
 
 enum RoleAssignmentsRequest {
@@ -1728,6 +1730,7 @@ fn run_writable(
     }
     for (session_id, workspace_id) in startup_restores {
         if !pending_launch.contains(&session_id) {
+            let fresh_codex = owner.pending_codex_fresh(&session_id)?;
             checks.request(&owner, &workspace_id)?;
             launch_retries.insert(
                 session_id,
@@ -1735,6 +1738,7 @@ fn run_writable(
                     workspace_id,
                     recovering: true,
                     validated: false,
+                    fresh_codex,
                 },
             );
         }
@@ -1985,6 +1989,7 @@ fn run_writable(
                         send,
                         &session_id,
                         retry.recovering,
+                        retry.fresh_codex,
                         workspace_path_error(&state),
                     )?,
                 );
@@ -2011,8 +2016,9 @@ fn run_writable(
                         }
                         _ => workspace_path_error(&state),
                     };
-                    let failure =
-                        report_session_launch_failure(&mut owner, send, &id, rebuilding, message)?;
+                    let failure = report_session_launch_failure(
+                        &mut owner, send, &id, rebuilding, false, message,
+                    )?;
                     failed_launches.insert(id, failure);
                 }
             } else {
@@ -2105,9 +2111,16 @@ fn run_writable(
         let mut eligible = HashSet::new();
         let mut completed_launches = Vec::new();
         for session_id in launch_candidates {
+            let fresh_codex = launch_retries
+                .get(&session_id)
+                .is_some_and(|retry| retry.fresh_codex);
             if owner
                 .claude_binding(&session_id)?
                 .is_some_and(|binding| binding.resumable)
+                || (!fresh_codex
+                    && owner
+                        .codex_binding(&session_id)?
+                        .is_some_and(|binding| binding.resumable))
             {
                 if available_slots == 0 {
                     continue;
@@ -2120,7 +2133,11 @@ fn run_writable(
                     &owner,
                     &options,
                     &session_id,
-                    LaunchIntent::Start,
+                    if fresh_codex {
+                        LaunchIntent::FreshCodex
+                    } else {
+                        LaunchIntent::Start
+                    },
                     &role_requests,
                 ) {
                     Ok(result) => {
@@ -2151,13 +2168,16 @@ fn run_writable(
             startup_deferred.remove(&session_id);
             startup_order.remove(&session_id);
             let rebuilding = recovering.remove(&session_id).is_some();
-            let rebuilding = match launch_retries.remove(&session_id) {
+            let retry = launch_retries.remove(&session_id);
+            let fresh_codex = retry.as_ref().is_some_and(|retry| retry.fresh_codex);
+            let rebuilding = match retry {
                 Some(retry) => retry.recovering,
                 None => rebuilding || owner.has_shell_run(&session_id)?,
             };
             let binding = owner.claude_binding(&session_id)?;
             let resume = binding.as_ref().filter(|binding| binding.resumable);
             let mut waits_for_identity = resume.is_some();
+            let mut uses_recovery_slot = resume.is_some();
             let result = launch.and_then(|launch| match launch {
                 PreparedLaunch::Shell(directory) => {
                     owner.set_shell_launch_directory(&session_id, &directory)?;
@@ -2196,13 +2216,29 @@ fn run_writable(
                     }
                     owner.launch_claude(session_id.clone(), terminal, launch, binding.as_ref())
                 }
-                PreparedLaunch::Codex(_) => bail!("Codex requires a fresh Shell promotion"),
+                PreparedLaunch::Codex(launch, resume) => {
+                    waits_for_identity = resume.is_some();
+                    uses_recovery_slot = waits_for_identity;
+                    if let Some(resume) = &resume {
+                        owner.change_codex_restore(
+                            &session_id,
+                            ClaudeRestore::Begin(&resume.binding_id),
+                        )?;
+                    }
+                    let terminal = terminal_layouts
+                        .get(&session_id)
+                        .copied()
+                        .unwrap_or_else(default_terminal_options);
+                    owner
+                        .launch_codex(&session_id, terminal, launch, resume, false)
+                        .map(|_| ())
+                }
             });
             match result {
                 Ok(()) => {
                     failed_launches.remove(&session_id);
                     if waits_for_identity {
-                        provider_starting.insert(session_id.clone(), resume.is_some());
+                        provider_starting.insert(session_id.clone(), uses_recovery_slot);
                     } else {
                         send.send_blocking(Event::Recovery {
                             session_id: session_id.clone(),
@@ -2223,7 +2259,12 @@ fn run_writable(
                         send,
                         &session_id,
                         recovering,
-                        format!("{error:#}"),
+                        fresh_codex,
+                        if fresh_codex {
+                            codex_launch::failure_message(&error)
+                        } else {
+                            format!("{error:#}")
+                        },
                     )?;
                     failed_launches.insert(session_id, failure);
                 }
@@ -2561,6 +2602,7 @@ fn run_writable(
                                     workspace_id,
                                     recovering: false,
                                     validated: false,
+                                    fresh_codex: false,
                                 },
                             );
                             graph["forkSessionResult"] = result;
@@ -3208,30 +3250,48 @@ fn run_writable(
                 }
                 Command::RetryProviderRestore { ref session_id }
                 | Command::StartFreshProviderSession { ref session_id } => {
-                    if !foreground_sessions.contains(session_id)
+                    let Some(stored) = owner
+                        .session(session_id)?
+                        .filter(|session| session.archived_at.is_none())
+                    else {
+                        continue;
+                    };
+                    let codex = stored.kind == "codex";
+                    let fresh = matches!(command, Command::StartFreshProviderSession { .. });
+                    let change = if fresh {
+                        ClaudeRestore::Fresh
+                    } else {
+                        ClaudeRestore::Retry
+                    };
+                    let blocked = !foreground_sessions.contains(session_id)
                         || permission_changes.contains_key(session_id)
                         || shell_promotions.contains_key(session_id)
                         || catalog_loads.contains_key(session_id)
                         || pending_launch.contains(session_id)
+                        || (codex && recovering.contains_key(session_id))
                         || launch_retries.contains_key(session_id)
-                        || !owner.can_launch_provider(session_id)
-                    {
+                        || (!owner.can_launch_provider(session_id)
+                            && !(codex && owner.shell_worker_is_retiring(session_id)));
+                    let accepted = if blocked {
+                        false
+                    } else if codex {
+                        owner.change_codex_restore(session_id, change)?
+                    } else {
+                        stored.kind == "claude-code"
+                            && owner.change_claude_restore(session_id, change)?
+                    };
+                    if !accepted {
+                        if codex {
+                            provider_identity_events.push(json!({
+                                "result": "rejected", "provider": "codex", "sessionId": session_id,
+                                "reason": "restore-action-not-available", "error": codex_resume::action_error(fresh),
+                            }));
+                        }
                         continue;
                     }
                     let Some(workspace_id) = owner.session_workspace(session_id)? else {
                         continue;
                     };
-                    let change = if matches!(command, Command::RetryProviderRestore { .. }) {
-                        ClaudeRestore::Retry
-                    } else {
-                        ClaudeRestore::Fresh
-                    };
-                    if owner.session(session_id)?.is_none_or(|session| {
-                        session.archived_at.is_some() || session.kind != "claude-code"
-                    }) || !owner.change_claude_restore(session_id, change)?
-                    {
-                        continue;
-                    }
                     failed_launches.remove(session_id);
                     sessions.remove(session_id);
                     dirty.remove(session_id);
@@ -3243,6 +3303,15 @@ fn run_writable(
                     operations.retain(|(id, _, _)| id != session_id);
                     searches.retain(|(id, _, _)| id != session_id);
                     copies.retain(|(_, id, _, _)| id != session_id);
+                    if codex {
+                        // Retire immediately, then let the shared queue wait for
+                        // the old worker's exit before it launches a new run.
+                        owner.retire_sessions(std::slice::from_ref(session_id));
+                        send.send_blocking(Event::Recovery {
+                            session_id: session_id.clone(),
+                            state: RecoveryState::Restoring,
+                        })?;
+                    }
                     checks.request(&owner, &workspace_id)?;
                     launch_retries.insert(
                         session_id.clone(),
@@ -3250,6 +3319,7 @@ fn run_writable(
                             workspace_id,
                             recovering: matches!(change, ClaudeRestore::Retry),
                             validated: false,
+                            fresh_codex: codex && fresh,
                         },
                     );
                     continue;
@@ -3257,6 +3327,9 @@ fn run_writable(
                 Command::RetryRecovery { ref session_id }
                 | Command::RestartSession { ref session_id } => {
                     let rebuilding = matches!(command, Command::RetryRecovery { .. });
+                    let codex = owner
+                        .session(session_id)?
+                        .is_some_and(|session| session.kind == "codex");
                     if catalog_loads.contains_key(session_id)
                         || permission_changes.contains_key(session_id)
                         || shell_promotions.contains_key(session_id)
@@ -3272,6 +3345,15 @@ fn run_writable(
                         continue;
                     }
                     let failed = failed_launches.get(session_id);
+                    if codex
+                        && (owner
+                            .codex_binding(session_id)?
+                            .is_some_and(|binding| binding.restore_state == "failed")
+                            || (!parked && matches!(failed, Some(RecoveryState::Failed(_)))))
+                    {
+                        continue;
+                    }
+                    let fresh_codex = codex && owner.pending_codex_fresh(session_id)?;
                     let state = if rebuilding {
                         if !parked && !matches!(failed, Some(RecoveryState::Failed(_))) {
                             continue;
@@ -3322,6 +3404,7 @@ fn run_writable(
                                     workspace_id,
                                     validated: false,
                                     recovering: rebuilding,
+                                    fresh_codex,
                                 },
                             );
                         }
@@ -3614,6 +3697,7 @@ fn run_writable(
                                 workspace_id,
                                 recovering: true,
                                 validated: false,
+                                fresh_codex: false,
                             },
                         );
                     }
@@ -3807,7 +3891,7 @@ fn run_writable(
                         let failure = if clearing {
                             let rebuilding = owner.has_shell_run(id)?;
                             report_session_launch_failure(
-                                &mut owner, send, id, rebuilding, message,
+                                &mut owner, send, id, rebuilding, false, message,
                             )?
                         } else {
                             report_launch_failure(send, id, true, message)?
@@ -4282,8 +4366,8 @@ impl ShellPromotion {
                             .insert(session_id.to_owned(), claude_target_metadata(&launch));
                         owner.launch_promoted_claude(session_id, terminal, launch)?
                     }
-                    PreparedLaunch::Codex(launch) => {
-                        owner.launch_codex(session_id, terminal, launch)?
+                    PreparedLaunch::Codex(launch, None) => {
+                        owner.launch_codex(session_id, terminal, launch, None, true)?
                     }
                     _ => bail!("promotion requires a fresh provider launch"),
                 };
@@ -4703,8 +4787,32 @@ fn report_session_launch_failure(
     send: &async_channel::Sender<Event>,
     session_id: &str,
     recovering: bool,
+    fresh_codex: bool,
     message: String,
 ) -> Result<RecoveryState> {
+    if owner
+        .session(session_id)?
+        .is_some_and(|session| session.kind == "codex")
+    {
+        if fresh_codex {
+            return report_launch_failure(send, session_id, false, message);
+        }
+        let binding = owner.codex_binding(session_id)?;
+        let binding_id = binding.as_ref().map_or("", |binding| binding.id.as_str());
+        let reason = if message == codex_resume::MISSING {
+            message
+        } else {
+            format!("provider process could not start: {message}")
+        };
+        owner.change_codex_restore(
+            session_id,
+            ClaudeRestore::Fail {
+                binding_id,
+                error: &reason,
+            },
+        )?;
+        return report_launch_failure(send, session_id, true, reason);
+    }
     if owner.pending_claude_fork(session_id)?.is_some() {
         let reason = format!("Fork CLI could not start: {message}");
         owner.fail_claude_fork(session_id, &reason)?;
@@ -4852,8 +4960,10 @@ fn launchable_nodes(graph: &Value) -> impl Iterator<Item = &Value> {
         .into_iter()
         .flatten()
         .filter(|node| {
-            matches!(node["currentMode"].as_str(), Some("shell" | "claude-code"))
-                && node.get("archivedAt").is_none()
+            matches!(
+                node["currentMode"].as_str(),
+                Some("shell" | "claude-code" | "codex")
+            ) && node.get("archivedAt").is_none()
         })
 }
 
@@ -4876,6 +4986,16 @@ fn unstarted_sessions(
         };
         if node["currentMode"] == "shell" {
             pending.insert(id.to_owned());
+            continue;
+        }
+        if node["currentMode"] == "codex" {
+            if node["providerRestoreState"] != "failed"
+                && owner
+                    .codex_binding(id)?
+                    .is_some_and(|binding| binding.resumable)
+            {
+                pending.insert(id.to_owned());
+            }
             continue;
         }
         if owner.pending_claude_fork(id)?.is_some() {
@@ -4915,7 +5035,7 @@ enum PreparedLaunch {
         launch: ClaudeLaunch,
         fork_source: Option<String>,
     },
-    Codex(CodexLaunch),
+    Codex(CodexLaunch, Option<CodexResume>),
 }
 
 // A binding may be missing or stale before SessionStart confirms this launch.
@@ -4931,6 +5051,7 @@ fn claude_target_metadata(plan: &ClaudeLaunch) -> Value {
 
 enum LaunchIntent<'a> {
     Start,
+    FreshCodex,
     ShellPromotion(InteractiveLaunch),
     PermissionRestart {
         fresh_mode: Option<&'a str>,
@@ -5167,27 +5288,49 @@ fn prepare_launch(
                 })?;
         }
         "codex" => {
-            let LaunchIntent::ShellPromotion(InteractiveLaunch {
-                profile: LaunchProfile::Codex,
-                mode,
-            }) = intent
-            else {
-                bail!("Codex requires a fresh Shell promotion");
-            };
             let data_root = options.data_root.clone();
+            let promotion = match intent {
+                LaunchIntent::ShellPromotion(InteractiveLaunch {
+                    profile: LaunchProfile::Codex,
+                    mode,
+                }) => Some(mode),
+                LaunchIntent::Start | LaunchIntent::FreshCodex => None,
+                _ => bail!("unsupported Codex launch intent"),
+            };
+            let fresh = matches!(intent, LaunchIntent::FreshCodex);
+            let binding = if promotion.is_none() {
+                owner.codex_binding(session_id)?
+            } else {
+                None
+            };
             thread::Builder::new()
                 .name("codex-launch".into())
                 .spawn(move || {
                     let terminal = default_terminal_options();
-                    let result = codex_launch::prepare(
-                        &data_root,
-                        Path::new(&session.cwd),
-                        mode,
-                        std::env::vars_os().collect(),
-                        terminal.cols,
-                        terminal.rows,
-                    )
-                    .map(PreparedLaunch::Codex);
+                    let cwd = Path::new(&session.cwd);
+                    let env = std::env::vars_os().collect();
+                    let result = if let Some(mode) = promotion {
+                        codex_launch::prepare(
+                            &data_root,
+                            cwd,
+                            mode,
+                            env,
+                            terminal.cols,
+                            terminal.rows,
+                        )
+                        .map(|launch| (launch, None))
+                    } else {
+                        codex_resume::prepare(
+                            &data_root,
+                            cwd,
+                            binding.as_ref(),
+                            fresh,
+                            env,
+                            terminal.cols,
+                            terminal.rows,
+                        )
+                    }
+                    .map(|(launch, resume)| PreparedLaunch::Codex(launch, resume));
                     let _ = send.send(result);
                 })?;
         }

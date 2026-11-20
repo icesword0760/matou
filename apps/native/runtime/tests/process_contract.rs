@@ -8,6 +8,8 @@ mod claude_model_catalog;
 mod codex_events;
 #[path = "process_contract/codex_launch.rs"]
 mod codex_launch;
+#[path = "process_contract/codex_resume.rs"]
+mod codex_resume;
 #[path = "process_contract/database_recovery.rs"]
 mod database_recovery;
 

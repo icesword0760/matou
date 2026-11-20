@@ -3,6 +3,9 @@ set -eu
 printf '%s\0' "$@" > "$CODEX_HOME/argv"
 printf '%s\n' "$PWD" > "$CODEX_HOME/cwd"
 printf '%s\n' "$CODEX_HOME" "${TERM:-}" "${OPENAI_BASE_URL:-}" > "$CODEX_HOME/environment"
+if [ "${CODEX_FIXTURE_RESUME:-}" = 1 ]; then
+    printf '%s\n' "${OPENAI_API_KEY:-}" >> "$CODEX_HOME/environment"
+fi
 test -z "${MATOU_PROVIDER_HOOK_TOKEN:-}${MATOU_AGENT_STATUS_DIR:-}${CLAUDECODE:-}"
 if [ "${CODEX_FIXTURE_EVENTS:-}" = 1 ]; then
     hook_command=$(/usr/bin/perl -MJSON::PP -0777 -ne '
@@ -15,6 +18,31 @@ if [ "${CODEX_FIXTURE_EVENTS:-}" = 1 ]; then
         : > "$CODEX_HOME/startup-hook.sent"
         if [ -n "${CODEX_FIXTURE_EXIT_CODE:-}" ]; then
             exit "$CODEX_FIXTURE_EXIT_CODE"
+        fi
+    fi
+fi
+if [ "${CODEX_FIXTURE_RESUME:-}" = 1 ]; then
+    target=
+    while [ "$#" -gt 1 ]; do
+        if [ "$1" = resume ] && [ "$#" = 2 ]; then
+            target=$2
+            break
+        fi
+        shift
+    done
+    if [ -n "$target" ]; then
+        material="$CODEX_HOME/sessions/rollout-fixture-$target.jsonl"
+        if [ -f "$CODEX_HOME/early-exit" ]; then exit 23; fi
+        if [ -f "$CODEX_HOME/background" ]; then
+            printf 'That session is running in the background (%s).\n' "$(printf '%.8s' "$target")"
+        elif [ ! -f "$material" ]; then
+            printf '\033[31mNo session '
+            /bin/sleep 0.08
+            printf '%s found\033[0m\n' "$target"
+        elif ! /usr/bin/perl -MJSON::PP -ne 'decode_json($_)' "$material" 2>/dev/null; then
+            printf 'Invalid session %s\n' "$target"
+        else
+            printf 'FIXTURE CODEX RESUME\n'
         fi
     fi
 fi
