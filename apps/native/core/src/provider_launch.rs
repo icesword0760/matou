@@ -139,6 +139,125 @@ pub struct ClaudeLaunch {
     pub assigned_role: Option<&'static str>,
     pub effort: Option<String>,
     pub clear_assignment_environment: bool,
+    pub gateway: Option<ClaudeGatewayProjection>,
+}
+
+/// Private launch material. The runtime owns it for at most one CLI run.
+/// Never serialize or format it as part of a launch diagnostic.
+pub struct ClaudeGatewayProjection {
+    pub source: Option<ClaudeGatewayConnection>,
+    pub roles: [Option<ClaudeGatewayRole>; 3],
+    source_models: [Option<String>; 3],
+    source_efforts: [Option<String>; 3],
+    source_effort: Option<String>,
+    startup_role: &'static str,
+}
+
+pub struct ClaudeGatewayConnection {
+    pub endpoint: url::Url,
+    pub api_key: String,
+}
+
+pub struct ClaudeGatewayRole {
+    pub connection: ClaudeGatewayConnection,
+    pub model: String,
+    catalog_model: String,
+    pub effort: Option<String>,
+    pub supported_efforts: Option<Vec<String>>,
+    pub max_output_tokens: Option<u64>,
+}
+
+impl ClaudeGatewayProjection {
+    pub fn supports_environment(&self, env: &BTreeMap<OsString, OsString>) -> bool {
+        let unproxied = get_var(env, "no_proxy").or_else(|| get_var(env, "NO_PROXY"));
+        let bypass_all = unproxied.is_some_and(|value| {
+            value
+                .to_string_lossy()
+                .split(',')
+                .any(|part| part.trim() == "*")
+        });
+        let has_proxy = [
+            "HTTP_PROXY",
+            "http_proxy",
+            "HTTPS_PROXY",
+            "https_proxy",
+            "ALL_PROXY",
+            "all_proxy",
+        ]
+        .into_iter()
+        .any(|name| get_var(env, name).is_some_and(|value| !value.is_empty()));
+        // Preserve the CLI's existing outbound route when an external target
+        // might require a proxy. The gateway currently handles direct HTTP(S).
+        bypass_all
+            || !has_proxy
+            || self.connections().all(|connection| {
+                matches!(
+                    connection.endpoint.host_str(),
+                    Some("127.0.0.1" | "localhost" | "[::1]")
+                )
+            })
+    }
+
+    pub fn connections(&self) -> impl Iterator<Item = &ClaudeGatewayConnection> {
+        self.source
+            .iter()
+            .chain(self.roles.iter().flatten().map(|role| &role.connection))
+    }
+
+    pub fn request_role(&self, model: &str) -> Option<usize> {
+        let model = without_context_suffix(model);
+        if let Some(alias) = startup_role_alias(model) {
+            return ROLES.iter().position(|role| *role == alias);
+        }
+        self.source_models.iter().position(|candidate| {
+            candidate
+                .as_deref()
+                .is_some_and(|id| without_context_suffix(id) == model)
+        })
+    }
+
+    pub fn literal_effort(&self, model: &str) -> Option<&str> {
+        role_with_effort(model, |role| {
+            let index = ROLES.iter().position(|candidate| *candidate == role)?;
+            self.source_models[index].as_deref()
+        })
+        .and_then(|index| self.source_efforts[index].as_deref())
+        .or(self.source_effort.as_deref())
+    }
+
+    pub fn project_environment(&self, launch: &mut ShellLaunch, base_url: &str) -> Value {
+        // The URL prefix is the local capability. The CLI only needs a
+        // placeholder API key to select its API transport.
+        let mut projected = BTreeMap::from([
+            ("ANTHROPIC_BASE_URL".to_owned(), base_url.to_owned()),
+            (
+                "ANTHROPIC_API_KEY".into(),
+                "matou-local-role-gateway".into(),
+            ),
+            ("ANTHROPIC_AUTH_TOKEN".into(), String::new()),
+            ("CLAUDE_CODE_OAUTH_TOKEN".into(), String::new()),
+            ("CLAUDE_CODE_GATEWAY_HINT_HEADERS".into(), "1".into()),
+        ]);
+        for (alias, index) in [("OPUS", 0), ("SONNET", 1), ("HAIKU", 2), ("FABLE", 0)] {
+            let key = format!("ANTHROPIC_DEFAULT_{alias}_MODEL");
+            let name = self.roles[index]
+                .as_ref()
+                .map_or(ROLES[index], |role| &role.catalog_model);
+            projected.insert(format!("{key}_NAME"), name.into());
+            projected.insert(key, format!("matou-role/{}", ROLES[index]));
+        }
+        for (name, value) in &projected {
+            set_var(&mut launch.env, name.into(), value.into());
+        }
+        // A real model ID in --model can be ambiguous when two providers use it.
+        // Metadata continues to record the actual selected model for restoration.
+        if let [flag, model, ..] = launch.argv.as_mut_slice()
+            && flag == "--model"
+        {
+            *model = format!("matou-role/{}", self.startup_role);
+        }
+        serde_json::json!(projected)
+    }
 }
 
 /// Put the private run settings before all provider selection flags.
@@ -363,6 +482,9 @@ fn prepare_claude(
         Some(assignments) => resolve_startup_assignment(&config, &provider, assignments)?,
         None => None,
     };
+    let gateway = assigned
+        .as_ref()
+        .and_then(|(role, _, _)| gateway_projection(&config, &provider, assignments?, role));
     let context_window = match target {
         Some(ClaudeTarget::New {
             budget_preferences: Some(preferences),
@@ -419,8 +541,7 @@ fn prepare_claude(
     let executable = resolve_claude_executable(cwd, &mut environment)?;
     project_environment(provider, &mut environment);
     if let Some(role) = assigned_role {
-        // Cross-role switching and per-role subagent routing need the request
-        // gateway. Native only aligns the role selected for this launch.
+        // Keep a complete direct launch for targets outside the gateway scope.
         project_assigned_role(provider, role, model, &mut environment);
     }
     if let Some(window) = context_window {
@@ -460,6 +581,112 @@ fn prepare_claude(
         assigned_role,
         effort: effort.map(str::to_owned),
         clear_assignment_environment,
+        gateway,
+    })
+}
+
+fn gateway_projection(
+    config: &Value,
+    source: &Provider,
+    assignments: &ClaudeRoleAssignments,
+    startup_role: &'static str,
+) -> Option<ClaudeGatewayProjection> {
+    let source_connection = gateway_connection(source);
+    // A keyless source can only be replaced when all three selectors have API
+    // targets. Otherwise preserve the existing launch for this mixed setup.
+    if source_connection.is_none() && ROLES.iter().any(|role| !assignments.contains_key(*role)) {
+        return None;
+    }
+    let providers = provider_entries(config).unwrap_or_default();
+    let target = |provider: &Provider, role: &str, model: &str, effort: Option<&str>| {
+        let connection = gateway_connection(provider)?;
+        let catalog_model = model.trim();
+        if catalog_model.is_empty() {
+            return None;
+        }
+        let metadata = providers
+            .iter()
+            .find(|entry| entry["id"].as_str() == Some(&provider.id))
+            .and_then(|entry| entry["modelMetadata"].as_array())
+            .and_then(|models| {
+                models
+                    .iter()
+                    .find(|item| item["id"].as_str() == Some(catalog_model))
+            });
+        let model = metadata
+            .and_then(|item| item["resolvedModel"].as_str())
+            .filter(|model| !model.is_empty())
+            .unwrap_or(catalog_model)
+            .to_owned();
+        let effort = effort
+            .or_else(|| provider.effort_mapping.get(role).map(String::as_str))
+            .or(provider.reasoning_effort.as_deref())
+            .filter(|level| EFFORTS.contains(level) && *level != "follow")
+            .map(str::to_owned);
+        Some(ClaudeGatewayRole {
+            connection,
+            model,
+            catalog_model: catalog_model.into(),
+            effort,
+            supported_efforts: metadata
+                .and_then(|item| item["supportedEfforts"].as_array())
+                .map(|levels| {
+                    levels
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect()
+                }),
+            max_output_tokens: metadata
+                .and_then(|item| item["maxOutputTokens"].as_u64())
+                .filter(|tokens| *tokens > 0),
+        })
+    };
+    let mut roles = [None, None, None];
+    for (index, role) in ROLES.into_iter().enumerate() {
+        roles[index] = if let Some(assignment) = assignments.get(role) {
+            let provider = assignment_provider(config, assignment).ok()?;
+            Some(target(
+                &provider,
+                role,
+                &assignment.model,
+                assignment.effort.as_deref(),
+            )?)
+        } else {
+            source
+                .model_mapping
+                .get(role)
+                .and_then(|model| target(source, role, model, None))
+        };
+    }
+    Some(ClaudeGatewayProjection {
+        source: source_connection,
+        roles,
+        source_models: ROLES.map(|role| source.model_mapping.get(role).cloned()),
+        source_efforts: ROLES.map(|role| source.effort_mapping.get(role).cloned()),
+        source_effort: source.reasoning_effort.clone(),
+        startup_role,
+    })
+}
+
+fn gateway_connection(provider: &Provider) -> Option<ClaudeGatewayConnection> {
+    let api_key = provider
+        .api_key
+        .as_deref()
+        .filter(|key| !key.trim().is_empty() && key.bytes().all(|byte| byte.is_ascii_graphic()))?;
+    let endpoint = url::Url::parse(&provider.endpoint).ok()?;
+    if provider.kind.as_deref() == Some("subscription")
+        || !matches!(endpoint.scheme(), "http" | "https")
+        || endpoint.host().is_none()
+        || !endpoint.username().is_empty()
+        || endpoint.password().is_some()
+        || endpoint.fragment().is_some()
+    {
+        return None;
+    }
+    Some(ClaudeGatewayConnection {
+        endpoint,
+        api_key: api_key.into(),
     })
 }
 
@@ -804,16 +1031,23 @@ fn without_context_suffix(model: &str) -> &str {
 }
 
 fn reasoning_effort<'a>(provider: &'a Provider, model: &str) -> Option<&'a str> {
+    role_with_effort(model, |role| {
+        provider.model_mapping.get(role).map(String::as_str)
+    })
+    .and_then(|index| provider.effort_mapping.get(ROLES[index]))
+    .map(String::as_str)
+    .or(provider.reasoning_effort.as_deref())
+}
+
+fn role_with_effort<'a>(model: &str, mapping: impl Fn(&str) -> Option<&'a str>) -> Option<usize> {
     let model = if model.is_empty() { "default" } else { model };
-    let mapped = ROLES.into_iter().find(|role| {
-        provider
-            .model_mapping
-            .get(*role)
+    let mapped = ROLES.iter().position(|role| {
+        mapping(role)
             .is_some_and(|mapped| without_context_suffix(mapped) == without_context_suffix(model))
     });
     let lower_model = model.to_ascii_lowercase();
     let inferred = || {
-        ROLES.into_iter().find(|role| {
+        ROLES.iter().position(|role| {
             ["matou-", "claude-"].into_iter().any(|prefix| {
                 let pattern = format!("{prefix}{role}");
                 lower_model.match_indices(&pattern).any(|(index, _)| {
@@ -823,11 +1057,7 @@ fn reasoning_effort<'a>(provider: &'a Provider, model: &str) -> Option<&'a str> 
             })
         })
     };
-    mapped
-        .or_else(inferred)
-        .and_then(|role| provider.effort_mapping.get(role))
-        .map(String::as_str)
-        .or(provider.reasoning_effort.as_deref())
+    mapped.or_else(inferred)
 }
 
 fn clear_assigned_environment(provider: &Provider, environment: &mut BTreeMap<OsString, OsString>) {

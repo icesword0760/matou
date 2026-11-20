@@ -1,0 +1,31 @@
+{
+  "cli_version": "2.1.329 (Claude Code)",
+  "same_pid": 8785,
+  "same_run": "146c0498-d891-44b7-9421-b0e1300b815f",
+  "same_generation": "f4e7b4cc-af85-4a64-a013-ffac32923fab",
+  "model_change": "/model sonnet",
+  "cli_api_key_confirmation": true,
+  "cli_model_switch_confirmation": true,
+  "assistant_replies": [
+    "loopback-reply-a",
+    "loopback-reply-b"
+  ],
+  "upstream_requests": [
+    {
+      "lane": "a",
+      "path": "/a/v1/messages",
+      "model": "probe-shared-model",
+      "route_valid": true,
+      "key_fingerprint": "14761e1cf25f",
+      "stream": true
+    },
+    {
+      "lane": "b",
+      "path": "/b/v1/messages",
+      "model": "probe-shared-model",
+      "route_valid": true,
+      "key_fingerprint": "1cb2e73babe4",
+      "stream": true
+    }
+  ]
+}

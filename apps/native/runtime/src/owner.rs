@@ -13,7 +13,7 @@ use matou_native_core::{
         canvas, cards, tabs, tasks, workspaces,
     },
     ownership::DatabaseOwner,
-    provider_launch::{ClaudeLaunch, EFFORTS, attach_claude_settings},
+    provider_launch::{ClaudeGatewayProjection, ClaudeLaunch, EFFORTS, attach_claude_settings},
     pty::LaunchProfile,
     session_graph,
     sessions::{self, ClaudeBinding, ClaudeFork, ClaudeRestore, SessionRun, StartRunInput},
@@ -25,6 +25,7 @@ use serde_json::{Value, json};
 
 use crate::{
     SessionEvent, SessionOptions,
+    claude_request_gateway::Gateway,
     derived::{CwdTracker, WorkStatusTracker, terminal_summary_lines, utf16_tail},
     provider_hook::{
         HOOK_QUEUE_CAPACITY, HookMessage, HookSetup, IDENTITY_TIMEOUT, Observation,
@@ -52,6 +53,7 @@ struct RunningShell {
     promotion_process_check: Option<Arc<OnceLock<Result<()>>>>,
     cwd_capture: Option<(Instant, bool)>,
     hook: Option<RunHook>,
+    gateway: Option<Gateway>,
 }
 
 impl RunningShell {
@@ -68,6 +70,7 @@ struct RunHook {
     _registration: Registration,
     launch_metadata: Value,
     secrets: Vec<String>,
+    uses_gateway: bool,
     deadline: Option<Instant>,
     last_observation: Option<Observation>,
     last_submission: Option<Instant>,
@@ -645,6 +648,7 @@ impl ShellOwner {
                 && !shell.retiring
             {
                 shell.retiring = true;
+                shell.gateway.take();
                 shell.hook = None;
                 shell.cwd_capture = None;
                 // Keep the run registered until its final exit record is handled.
@@ -1364,7 +1368,10 @@ impl ShellOwner {
         let mut launch = plan.launch;
         launch.cols = terminal.cols;
         launch.rows = terminal.rows;
-        let secrets = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"]
+        let gateway = plan
+            .gateway
+            .filter(|plan| plan.supports_environment(&launch.env));
+        let mut secrets = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"]
             .into_iter()
             .filter_map(|name| {
                 launch
@@ -1379,6 +1386,13 @@ impl ShellOwner {
                     .map(str::to_owned)
             })
             .collect::<Vec<_>>();
+        if let Some(gateway) = &gateway {
+            secrets.extend(
+                gateway
+                    .connections()
+                    .map(|connection| connection.api_key.clone()),
+            );
+        }
         let safe = |value: &str| safe_hook_text(value, &secrets).unwrap_or("").to_owned();
         let mut metadata = json!({
             "providerConfigId": safe(&plan.provider_config_id), "model": safe(&plan.model),
@@ -1411,7 +1425,7 @@ impl ShellOwner {
             },
             false,
             "",
-            Some((metadata, secrets, resume)),
+            Some((metadata, secrets, resume, gateway)),
         )
     }
 
@@ -1420,7 +1434,12 @@ impl ShellOwner {
         mut options: SessionOptions,
         restore_history: bool,
         divider: &str,
-        provider: Option<(Value, Vec<String>, Option<ResumeMonitor>)>,
+        provider: Option<(
+            Value,
+            Vec<String>,
+            Option<ResumeMonitor>,
+            Option<ClaudeGatewayProjection>,
+        )>,
     ) -> Result<()> {
         ensure!(!self.closing, "Runtime is shutting down");
         if let Some(previous) = self.shells.get(&options.session_id) {
@@ -1430,6 +1449,7 @@ impl ShellOwner {
             );
         }
         if let Some(mut previous) = self.shells.remove(&options.session_id) {
+            previous.gateway.take();
             previous.worker.shutdown()?;
         }
         let stored = self
@@ -1467,7 +1487,8 @@ impl ShellOwner {
         let rows = options.launch.rows.into();
         let run_id = (self.next_id)();
         let mut permission_starting = false;
-        let hook = if let Some((launch_metadata, secrets, resume)) = provider {
+        let mut gateway = None;
+        let hook = if let Some((launch_metadata, mut secrets, resume, gateway_plan)) = provider {
             permission_starting = resume
                 .as_ref()
                 .is_some_and(|resume| resume.permission_respawn);
@@ -1481,6 +1502,18 @@ impl ShellOwner {
             } else {
                 IDENTITY_TIMEOUT
             };
+            // The listener belongs to this owner generation, this session_id
+            // and this run_id. Publish the environment only after bind succeeds.
+            let gateway_env = if let Some(plan) = gateway_plan {
+                let plan = Arc::new(plan);
+                let listener = Gateway::start(Arc::clone(&plan))?;
+                let env = plan.project_environment(&mut options.launch, listener.base_url());
+                secrets.push(listener.base_url().to_owned());
+                gateway = Some(listener);
+                Some(env)
+            } else {
+                None
+            };
             let registration = self
                 .register_hook(
                     &mut options,
@@ -1490,10 +1523,24 @@ impl ShellOwner {
                     permission_starting,
                 )
                 .context(HookSetup)?;
+            if let Some(env) = gateway_env {
+                let path = &registration.settings_path;
+                let mut settings: Value = serde_json::from_slice(&std::fs::read(path)?)
+                    .map_err(|_| anyhow::anyhow!("Read Claude gateway launch settings"))?;
+                settings["env"] = env;
+                settings["modelOverrides"] = json!({
+                    "claude-fable-5": "matou-role/opus-fallback",
+                    "claude-fable-5-2": "matou-role/opus-fallback",
+                    "claude-fable-5-5": "matou-role/opus-fallback",
+                });
+                std::fs::write(path, serde_json::to_vec(&settings)?)
+                    .context("Write Claude gateway launch settings")?;
+            }
             Some(RunHook {
                 _registration: registration,
                 launch_metadata,
                 secrets,
+                uses_gateway: gateway.is_some(),
                 deadline: Some(Instant::now() + identity_wait),
                 last_observation: None,
                 last_submission: None,
@@ -1528,6 +1575,7 @@ impl ShellOwner {
         let commit = match commit {
             Ok(commit) => commit,
             Err(error) => {
+                drop(gateway);
                 let _ = worker.shutdown();
                 return Err(error);
             }
@@ -1554,6 +1602,7 @@ impl ShellOwner {
                 promotion_process_check: None,
                 cwd_capture: None,
                 hook,
+                gateway,
             },
         );
         self.pending.push(OwnerEvent::Domain(commit));
@@ -1599,9 +1648,18 @@ impl ShellOwner {
         let mut events = std::mem::take(&mut self.pending);
         let finished_before_poll: Vec<_> = self
             .shells
-            .iter()
-            .filter(|(_, shell)| shell.retiring && !shell.ended && shell.worker.is_finished())
-            .map(|(id, _)| id.clone())
+            .iter_mut()
+            .filter_map(|(id, shell)| {
+                if shell.ended
+                    || !(shell.retiring || shell.gateway.is_some())
+                    || !shell.worker.is_finished()
+                {
+                    return None;
+                }
+                // A failed worker may finish without recording SavedExit.
+                shell.gateway.take();
+                shell.retiring.then(|| id.clone())
+            })
             .collect();
         self.start_due_cwd_captures();
         let wait = if events.is_empty() && finished_before_poll.is_empty() {
@@ -1883,7 +1941,10 @@ impl ShellOwner {
                 return;
             }
         }
-        observation.model = safe(observation.model);
+        // Resume, permission restart and Fork still launch via the stored
+        // provider. A gateway selector is only valid inside this run's CLI.
+        observation.model = safe(observation.model)
+            .filter(|model| !hook.uses_gateway || !model.starts_with("matou-role/"));
         observation.permission_mode = if first_fresh_identity {
             hook.launch_metadata["permissionMode"]
                 .as_str()
@@ -2366,6 +2427,7 @@ impl ShellOwner {
             return Ok(());
         }
         shell.ended = true;
+        shell.gateway.take();
         let hook = shell.hook.take();
         let had_identity = hook
             .as_ref()
@@ -2525,6 +2587,7 @@ impl ShellOwner {
         }
         self.closing = true;
         for shell in self.shells.values_mut() {
+            shell.gateway.take();
             if !shell.promotion_verified() {
                 shell.hook = None;
             }
@@ -3272,6 +3335,7 @@ mod provider_tests {
                 assigned_role: None,
                 effort: None,
                 clear_assignment_environment: false,
+                gateway: None,
             },
         )?;
         let registration = &owner.shells[session].hook.as_ref().unwrap()._registration;
@@ -3416,6 +3480,7 @@ mod provider_tests {
             assigned_role: None,
             effort: None,
             clear_assignment_environment: false,
+            gateway: None,
         };
         let terminal = TerminalOptions::new(80, 24, 7, 14);
         let blocked_directory = root.path().join("provider-hooks");
