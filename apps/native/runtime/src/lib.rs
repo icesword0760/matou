@@ -1,3 +1,4 @@
+mod claude_request_gateway;
 pub mod derived;
 pub mod flow;
 pub mod history;

@@ -3311,7 +3311,20 @@ exec /bin/sleep 60
 "#,
         )?;
         fs::set_permissions(&stub, fs::Permissions::from_mode(0o700))?;
-        let mut child = RuntimeChild::spawn_configured(root.path(), "", &no_shell, Some(&stub))?;
+        // Keep this direct-launch contract deterministic on machines with or
+        // without an inherited proxy. The gateway has a separate loopback test.
+        let mut child = RuntimeChild::spawn_configured_with(
+            root.path(),
+            "",
+            &no_shell,
+            Some(&stub),
+            |command| {
+                command
+                    .env("HTTPS_PROXY", "http://127.0.0.1:1")
+                    .env("NO_PROXY", "127.0.0.1")
+                    .env("no_proxy", "127.0.0.1");
+            },
+        )?;
         child.connect()?;
         assert_eq!(child.session, seed.session);
 
@@ -4514,5 +4527,323 @@ fn catalog_rejects_absent_ids_and_closing_a_pending_load_stops_its_only_run() ->
     child.send(Command::Shutdown)?;
     child.closed()?;
     assert!(child.wait()?.0.success());
+    Ok(())
+}
+
+#[test]
+fn assigned_claude_gateway_changes_target_without_restarting_the_cli() -> Result<()> {
+    use std::{
+        io::{BufRead, BufReader},
+        net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream},
+    };
+
+    use matou_native_core::sessions::{claude_binding, list_runs};
+    use serde_json::{Value, json};
+
+    const A_KEY: &str = "synthetic-gateway-provider-a";
+    const B_KEY: &str = "synthetic-gateway-provider-b";
+
+    let (observed, requests) = mpsc::channel();
+    let fake = |lane: &'static str,
+                expected_key: &'static str,
+                markers: &'static [(&str, &str)]|
+     -> Result<_> {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+        let address = listener.local_addr()?;
+        listener.set_nonblocking(true)?;
+        let observed = observed.clone();
+        let handle = thread::spawn(move || -> Result<()> {
+            for &(path, marker) in markers {
+                let deadline = Instant::now() + TIMEOUT;
+                let stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            ensure!(Instant::now() < deadline, "gateway fake upstream deadline");
+                            thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
+                };
+                stream.set_nonblocking(false)?;
+                stream.set_read_timeout(Some(TIMEOUT))?;
+                stream.set_write_timeout(Some(TIMEOUT))?;
+                let mut stream = BufReader::new(stream);
+                let mut line = String::new();
+                stream.read_line(&mut line)?;
+                assert_eq!(line, format!("POST /{lane}{path} HTTP/1.1\r\n"));
+                let mut length = None;
+                let mut correct_key = false;
+                loop {
+                    line.clear();
+                    ensure!(stream.read_line(&mut line)? > 0, "incomplete request heads");
+                    if line == "\r\n" {
+                        break;
+                    }
+                    let (name, value) = line.split_once(':').context("HTTP header")?;
+                    match name.to_ascii_lowercase().as_str() {
+                        "content-length" => length = Some(value.trim().parse::<usize>()?),
+                        "x-api-key" => correct_key = value.trim() == expected_key,
+                        "authorization" | "cookie" => bail!("caller credential leaked"),
+                        _ => {}
+                    }
+                }
+                assert!(
+                    correct_key,
+                    "incorrect synthetic credential at upstream {lane}"
+                );
+                let mut body = vec![0; length.context("missing content length")?];
+                stream.read_exact(&mut body)?;
+                let body: Value = serde_json::from_slice(&body)?;
+                assert_eq!(body["model"], "shared-model");
+                observed.send((lane, path, "shared-model"))?;
+                if marker == "paused-stream" {
+                    stream.get_mut().write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n15\r\ndata: paused-stream\n\n\r\n"
+                    )?;
+                    match stream.read(&mut [0]) {
+                        Ok(0) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {}
+                        other => bail!("old gateway left upstream open: {other:?}"),
+                    }
+                    observed.send((lane, "cancelled", "shared-model"))?;
+                } else {
+                    write!(
+                        stream.get_mut(),
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{marker}",
+                        marker.len()
+                    )?;
+                }
+            }
+            Ok(())
+        });
+        Ok((address, handle))
+    };
+    let (a, a_task) = fake("a", A_KEY, &[("/v1/messages", "from-opus")])?;
+    let (b, b_task) = fake(
+        "b",
+        B_KEY,
+        &[
+            ("/v1/messages/count_tokens", "from-sonnet-count"),
+            ("/v1/messages", "paused-stream"),
+        ],
+    )?;
+
+    let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR"))?;
+    let no_shell = root.path().join("missing-shell");
+    let mut seed = RuntimeChild::spawn_configured(root.path(), "", &no_shell, None)?;
+    seed.ready()?;
+    seed.send(Command::Shutdown)?;
+    seed.closed()?;
+    assert!(seed.wait()?.0.success());
+
+    let provider = |id, endpoint, key| {
+        json!({
+            "id": id, "endpoint": endpoint, "apiKey": key, "model": "source-opus",
+            "modelMapping": {"opus": "source-opus", "haiku": "source-haiku"}
+        })
+    };
+    fs::write(seed.data.join("provider-config.json"), json!({
+        "version": 1, "activeProviderIds": {"claude-code": "a"},
+        "providers": {"claude-code": [
+            provider("a", format!("http://{a}/a"), A_KEY), provider("b", format!("http://{b}/b"), B_KEY)
+        ]}
+    }).to_string())?;
+    let db = Connection::open(seed.data.join("matou.sqlite"))?;
+    db.execute(
+        "UPDATE sessions SET kind='claude-code' WHERE id=?1",
+        [&seed.session],
+    )?;
+    db.execute(
+        "INSERT INTO preferences VALUES ('agent.modelPreferences', ?1, 1)",
+        [json!({"contextWindows": {}, "compaction": {"mode":"follow","effort":"follow"}, "claudeRoleAssignments": {
+            "opus": {"providerId": "a", "model": "shared-model"},
+            "sonnet": {"providerId": "b", "model": "shared-model"}
+        }})
+        .to_string()],
+    )?;
+    let stub = root.path().join("gateway-cli");
+    fs::write(
+        &stub,
+        r#"#!/bin/sh
+set -eu
+test "$ANTHROPIC_API_KEY" = matou-local-role-gateway || { echo 'gateway API placeholder missing'; exit 10; }
+test -z "${ANTHROPIC_AUTH_TOKEN-}" && test -z "${CLAUDE_CODE_OAUTH_TOKEN-}" || { echo 'gateway CLI received an auth token'; exit 11; }
+test "$ANTHROPIC_DEFAULT_FABLE_MODEL" = "$ANTHROPIC_DEFAULT_OPUS_MODEL"
+test "$3" = --model
+test "$4" = matou-role/opus
+printf '%s\n' "$ANTHROPIC_BASE_URL" > "$0.url"
+printf '%s\n' "$2" > "$0.settings"
+printf 'gateway-cli ready\n'
+while IFS= read -r switch; do
+    case "$switch" in
+        opus) model=$ANTHROPIC_DEFAULT_OPUS_MODEL; path=/v1/messages ;;
+        sonnet) model=$ANTHROPIC_DEFAULT_SONNET_MODEL; path=/v1/messages/count_tokens ;;
+        stream) model=$ANTHROPIC_DEFAULT_SONNET_MODEL; path=/v1/messages ;;
+        *) exit 12 ;;
+    esac
+    /usr/bin/curl --silent --fail --no-buffer --noproxy '*' --max-time 15 \
+        -H 'content-type: application/json' -H "x-api-key: $ANTHROPIC_API_KEY" \
+        --data "{\"model\":\"$model\",\"stream\":true}" "$ANTHROPIC_BASE_URL$path"
+    printf '\n'
+done
+"#,
+    )?;
+    fs::set_permissions(&stub, fs::Permissions::from_mode(0o700))?;
+    let mut child = RuntimeChild::spawn_configured(root.path(), "", &no_shell, Some(&stub))?;
+    child.connect()?;
+    child.frame(|_, screen, _| screen_has_line(screen, "gateway-cli ready"))?;
+    let initial = list_runs(&db, &child.session)?;
+    assert_eq!(initial.len(), 1);
+    let run = &initial[0];
+    let pid = run.pid.context("substitute CLI PID")?;
+    assert_eq!(run.status, "running");
+    let settings = fs::read_to_string(stub.with_extension("settings"))?;
+    post_claude_identity(
+        Path::new(settings.trim()),
+        "gateway-test-conversation",
+        "default",
+        "matou-role/opus",
+    )?;
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        if let Some(binding) = claude_binding(&db, &child.session)? {
+            assert_eq!(binding.provider_session_id, "gateway-test-conversation");
+            assert_eq!(binding.metadata["providerConfigId"], "a");
+            assert_eq!(binding.metadata["model"], "shared-model");
+            break;
+        }
+        child.event(deadline, true)?;
+    }
+
+    child.input("opus")?;
+    child.frame(|_, screen, _| screen_has_line(screen, "from-opus"))?;
+    assert_eq!(
+        requests
+            .recv_timeout(TIMEOUT)
+            .context("upstream A message observation")?,
+        ("a", "/v1/messages", "shared-model")
+    );
+    child.input("sonnet")?;
+    child.frame(|_, screen, _| screen_has_line(screen, "from-sonnet-count"))?;
+    assert_eq!(
+        requests
+            .recv_timeout(TIMEOUT)
+            .context("upstream B count observation")?,
+        ("b", "/v1/messages/count_tokens", "shared-model")
+    );
+    let after = list_runs(&db, &child.session)?;
+    assert_eq!(after.len(), 1);
+    assert_eq!((&after[0].id, after[0].pid), (&run.id, Some(pid)));
+
+    child.send(Command::SetClaudeRoleAssignments {
+        request_id: 42,
+        assignments: json!({
+            "opus": {"providerId": "a", "model": "shared-model"},
+            "sonnet": {"providerId": "a", "model": "shared-model"}
+        }),
+    })?;
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        if let Event::Graph(graph) = child.event(deadline, true)?
+            && let Some(value) = graph.get("claudeRoleAssignmentsResult")
+        {
+            let reply: ClaudeRoleAssignmentsReply = serde_json::from_value(value.clone())?;
+            assert_eq!(reply.request_id, 42);
+            assert!(reply.error.is_none());
+            break;
+        }
+    }
+    // Saving an assignment for the next launch does not reroute a live card.
+    child.input("stream")?;
+    assert_eq!(
+        requests
+            .recv_timeout(TIMEOUT)
+            .context("upstream B open stream observation")?,
+        ("b", "/v1/messages", "shared-model")
+    );
+    child.frame(|_, screen, _| screen_has_line(screen, "data: paused-stream"))?;
+    child.send(Command::RenameTask {
+        task_id: child.task.clone(),
+        title: "Gateway host responds mid-stream".into(),
+    })?;
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        let event = child.event(deadline, true)?;
+        let raw = serde_json::to_string(&event)?;
+        assert!(
+            !raw.contains(A_KEY) && !raw.contains(B_KEY),
+            "key in runtime event"
+        );
+        if matches!(event, Event::TaskRenameResult { error: None, .. }) {
+            break;
+        }
+    }
+
+    let url = url::Url::parse(fs::read_to_string(stub.with_extension("url"))?.trim())?;
+    let old_addr: SocketAddr = (
+        Ipv4Addr::LOCALHOST,
+        url.port().context("private gateway port")?,
+    )
+        .into();
+    child.send(Command::CreateShellSibling {
+        scene_id: child.scene.clone(),
+        source_session_id: child.session.clone(),
+        parent_session_id: None,
+    })?;
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        match child.event(deadline, true)? {
+            Event::Navigation { .. } => break,
+            Event::NavigationFailed { message, .. } => bail!("create sibling: {message}"),
+            _ => {}
+        }
+    }
+    child.send(Command::CloseSessionCard {
+        scene_id: child.scene.clone(),
+        session_id: child.session.clone(),
+        confirmed_intent: Some(format!("delete-session:{}", child.session)),
+        preserve_scene_on_last_session: true,
+    })?;
+    assert_eq!(
+        requests
+            .recv_timeout(TIMEOUT)
+            .context("upstream B cancellation observation")?,
+        ("b", "cancelled", "shared-model")
+    );
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        match child.event(deadline, true)? {
+            Event::ScenesDisposed(ids) if ids.contains(&child.session) => break,
+            Event::NavigationFailed { message, .. } => bail!("retire gateway card: {message}"),
+            _ => {}
+        }
+    }
+    assert_eq!(
+        TcpStream::connect_timeout(&old_addr, Duration::from_secs(1))
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::ConnectionRefused
+    );
+
+    a_task.join().expect("upstream A panicked")?;
+    b_task.join().expect("upstream B panicked")?;
+    assert_eq!(db.query_row(
+        "SELECT COUNT(*) FROM domain_events WHERE instr(payload_json, ?1)>0 OR instr(payload_json, ?2)>0 OR instr(payload_json, ?3)>0",
+        (A_KEY, B_KEY, url.path()),
+        |row| row.get::<_, i64>(0)
+    )?, 0, "gateway credential in persisted domain events");
+    child.send(Command::Shutdown)?;
+    child.closed()?;
+    let (status, stderr) = child.wait()?;
+    assert!(
+        !stderr.contains(A_KEY) && !stderr.contains(B_KEY) && !stderr.contains(url.path()),
+        "secret in runtime stderr"
+    );
+    ensure!(status.success(), "runtime clean shutdown failed");
+    println!(
+        "substitute CLI pid={pid} run={} reached A(messages) and B(count_tokens/messages) with the same upstream model and distinct key checks; host replied during SSE; card close cancelled upstream and refused old URL",
+        run.id
+    );
     Ok(())
 }
