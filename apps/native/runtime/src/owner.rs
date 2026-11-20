@@ -128,6 +128,7 @@ pub struct ShellOwner {
     next_id: Box<dyn FnMut() -> String>,
     hook_server: Option<ProviderHookServer>,
     codex_titles: codex_title::Reader,
+    codex_hud: codex_events::HudReader,
     run_control: Option<RunControl>,
     control_bin: Option<PathBuf>,
     closing: bool,
@@ -159,6 +160,7 @@ impl ShellOwner {
             next_id: Box::new(next_id),
             hook_server: None,
             codex_titles: codex_title::Reader::default(),
+            codex_hud: codex_events::HudReader::default(),
             run_control: None,
             control_bin: None,
             closing: false,
@@ -2518,6 +2520,69 @@ impl ShellOwner {
         confirmed["result"] = json!("confirmed");
         events.push(OwnerEvent::ProviderIdentity(confirmed));
         events.push(OwnerEvent::Domain(commit));
+    }
+
+    pub(crate) fn codex_hud(&self, session_id: &str) -> Option<Value> {
+        let shell = self.shells.get(session_id)?;
+        if shell.ended || shell.retiring || shell.worker.is_finished() {
+            return None;
+        }
+        let hook = shell.hook.as_ref()?;
+        let safe = |value: &str| safe_hook_text(value, &hook.secrets).is_some();
+        let mut hud = hook.codex.as_ref()?.hud_projection(safe);
+        if hud["model"].is_null()
+            && let Some(model) = hook
+                .last_observation
+                .as_ref()
+                .and_then(|observation| observation.model.as_deref())
+                .filter(|model| safe(model))
+        {
+            hud["model"] = json!(model);
+        }
+        Some(hud)
+    }
+
+    pub(crate) fn poll_codex_hud(&mut self) -> bool {
+        if self.closing {
+            return false;
+        }
+        if let Some(reply) = self.codex_hud.poll()
+            && let Some(shell) = self.shells.get_mut(&reply.session).filter(|shell| {
+                !shell.ended
+                    && !shell.retiring
+                    && shell.run_id == reply.run
+                    && !shell.worker.is_finished()
+            })
+            && let Some(codex) = shell.hook.as_mut().and_then(|hook| hook.codex.as_mut())
+        {
+            codex.accept_hud(reply);
+        }
+        let now = Instant::now();
+        let mut changed = false;
+        let mut next = None;
+        for (session, shell) in &mut self.shells {
+            if shell.ended || shell.retiring || shell.worker.is_finished() {
+                continue;
+            }
+            if let Some(codex) = shell.hook.as_mut().and_then(|hook| hook.codex.as_mut()) {
+                changed |= codex.take_hud_change();
+                if self.codex_hud.idle()
+                    && let Some(due) = codex.hud_due().filter(|due| *due <= now)
+                    && next
+                        .as_ref()
+                        .is_none_or(|(earliest, _, _, _)| due < *earliest)
+                {
+                    next = Some((due, session, &shell.run_id, codex));
+                }
+            }
+        }
+        if let Some((_, session, run, codex)) = next
+            && let Some(request) = codex.read_hud(session.clone(), run.clone())
+            && let Some(reply) = self.codex_hud.submit(request)
+        {
+            codex.accept_hud(reply);
+        }
+        changed
     }
 
     fn poll_codex_titles(&mut self, events: &mut Vec<OwnerEvent>) {

@@ -231,6 +231,308 @@ fn retire_and_check(child: RuntimeChild, db: &Connection, session: &str) -> Resu
 }
 
 #[test]
+fn codex_hud_projects_current_rollout_and_admitted_tools_through_resume() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let (mut child, home, rollout, db) = establish(root.path())?;
+    let previous = list_runs(&db, &child.session)?
+        .pop()
+        .context("initial run")?;
+    let url = current_hook_url(&home)?;
+    let session = child.session.clone();
+    let hud = |child: &mut RuntimeChild, name: &str, accept: &dyn Fn(&Value) -> bool| {
+        let graph = graph(child, name, |_, card| accept(&card["codexHud"]))?;
+        let hud = node(&graph, &session).context("current card")?["codexHud"].clone();
+        println!("codex HUD | {name} | {hud}");
+        Ok::<_, anyhow::Error>(hud)
+    };
+    let append = |rows: &[Value]| -> Result<()> {
+        let mut file = fs::OpenOptions::new().append(true).open(&rollout)?;
+        for row in rows {
+            writeln!(file, "{row}")?;
+        }
+        Ok(())
+    };
+    let turn = |payload: Value| json!({"type": "turn_context", "payload": payload});
+    let tokens = |used: Value, window: Value| {
+        json!({"type": "event_msg", "payload": {
+            "type": "token_count", "info": {
+                "last_token_usage": {"total_tokens": used},
+                "total_token_usage": {"total_tokens": 999999},
+                "model_context_window": window
+            }
+        }})
+    };
+    let command = |id: &str, status: &str, code: i64| {
+        json!({"type": "event_msg", "payload": {
+            "type": "item_completed", "item": {
+                "id": id, "type": "CommandExecution", "status": status, "exit_code": code,
+                "command": ["printf", "hud"]
+            }
+        }})
+    };
+    let hook = |event: &str, tool_id: Option<&str>| -> Result<()> {
+        let mut body = json!({
+            "hook_event_name": event, "session_id": UUID,
+            "turn_id": "hud-turn", "transcript_path": rollout,
+        });
+        body["tool_name"] = json!("Bash");
+        body["tool_input"] = json!({"command":"echo fixture tool"});
+        if let Some(id) = tool_id {
+            body["tool_use_id"] = json!(id);
+        }
+        assert_eq!(post_hook(&url, body)?, 200);
+        Ok(())
+    };
+
+    child.send(Command::Refresh)?;
+    hud(&mut child, "initial empty model, context and tools", &|v| {
+        v.is_object()
+            && v["model"].is_null()
+            && v["contextPercent"].is_null()
+            && v["toolCounts"] == json!([])
+            && v["runningTools"] == json!([])
+    })?;
+    append(&[
+        turn(
+            json!({"model": "fixture-a", "effort": "high", "collaboration_mode": {
+                "settings": {"reasoning_effort": "low"}
+            }}),
+        ),
+        tokens(json!(51001), json!(200000)),
+        json!({"type":"response_item","payload":{"model":"ignored", "type":"mcp_call"}}),
+    ])?;
+    let result = hud(
+        &mut child,
+        "direct effort and rounded last token usage",
+        &|v| {
+            v["model"] == "fixture-a"
+                && v["effort"] == "high"
+                && v["contextPercent"].as_f64() == Some(26.)
+                && v["contextWindowSize"].as_f64() == Some(200000.)
+        },
+    )?;
+    for key in [
+        "account",
+        "usageWindows",
+        "agents",
+        "todos",
+        "mcpErrors",
+        "teamRole",
+        "configCounts",
+    ] {
+        assert!(result.get(key).is_none(), "{key} should not project");
+    }
+    println!("codex HUD | Claude-only fields absent from current-run graph");
+
+    writeln!(
+        fs::OpenOptions::new().append(true).open(&rollout)?,
+        "{{unreadable"
+    )?;
+    let second = turn(json!({"model": "模型-B", "collaboration_mode": {
+        "settings": {"reasoning_effort": "medium"}
+    }}))
+    .to_string();
+    let split = second.find('模').unwrap() + 1;
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&rollout)?
+        .write_all(&second.as_bytes()[..split])?;
+    thread::sleep(Duration::from_millis(350));
+    child.send(Command::Refresh)?;
+    hud(
+        &mut child,
+        "bad line and split UTF-8 retain valid snapshot",
+        &|v| v["model"] == "fixture-a" && v["effort"] == "high",
+    )?;
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&rollout)?
+        .write_all(&second.as_bytes()[split..])?;
+    hud(
+        &mut child,
+        "collaboration effort and completed suffix without newline",
+        &|v| v["model"] == "模型-B" && v["effort"] == "medium",
+    )?;
+    writeln!(fs::OpenOptions::new().append(true).open(&rollout)?)?;
+    append(&[
+        turn(json!({"model": "fixture-c"})),
+        tokens(json!(-1), json!(200000)),
+    ])?;
+    hud(
+        &mut child,
+        "absent effort and invalid usage clear both indicators",
+        &|v| {
+            v["model"] == "fixture-c"
+                && v["effort"].is_null()
+                && v["contextPercent"].is_null()
+                && v["contextWindowSize"].is_null()
+        },
+    )?;
+    for compact in [
+        json!({"type":"compacted","payload":{}}),
+        json!({"type":"event_msg","payload":{"type":"context_compacted"}}),
+    ] {
+        append(&[tokens(json!(0), json!(1_200_000))])?;
+        hud(&mut child, "valid zero percent", &|v| {
+            v["contextPercent"].as_f64() == Some(0.)
+        })?;
+        append(&[compact.clone()])?;
+        hud(&mut child, compact["type"].as_str().unwrap(), &|v| {
+            v["contextPercent"].is_null() && v["contextWindowSize"].is_null()
+        })?;
+    }
+
+    hook("UserPromptSubmit", None)?;
+    hook("PermissionRequest", None)?;
+    graph(&mut child, "permission without call id", |_, card| {
+        card["workStatus"] == "needs-input" && card["codexHud"]["runningTools"] == json!([])
+    })?;
+    println!("codex HUD | missing call ID creates no phantom running tool");
+    hook("PreToolUse", Some("mirrored-call"))?;
+    hud(&mut child, "admitted active tool", &|v| {
+        v["runningTools"][0]["name"] == "Bash"
+            && v["runningTools"][0]["target"] == "echo fixture tool"
+            && v["lastTool"]["status"] == "running"
+    })?;
+    hook("PostToolUse", Some("mirrored-call"))?;
+    hook("PostToolUse", Some("mirrored-call"))?;
+    hud(&mut child, "duplicate PostToolUse counts once", &|v| {
+        v["runningTools"] == json!([]) && v["toolCounts"] == json!([{"name":"Bash","count":1}])
+    })?;
+    append(&[
+        command("mirrored-call", "completed", 0),
+        command("ignored-command", "in_progress", 0),
+        command("rollout-failure", "failed", 1),
+        command("rollout-failure", "completed", 0),
+    ])?;
+    hud(
+        &mut child,
+        "merged hook and rollout, failed command keeps error status",
+        &|v| {
+            v["toolCounts"] == json!([{"name":"Bash","count":2}])
+                && v["lastTool"]["status"] == "error"
+                && v["lastTool"]["target"] == "printf hud"
+        },
+    )?;
+    hook("PreToolUse", Some("still-running"))?;
+    hud(
+        &mut child,
+        "active tool before rollout-only completion",
+        &|v| {
+            v["runningTools"]
+                .as_array()
+                .is_some_and(|items| items.len() == 1)
+        },
+    )?;
+    append(&[command("still-running", "completed", 0)])?;
+    hud(
+        &mut child,
+        "rollout completion removes live tool without PostToolUse",
+        &|v| {
+            v["runningTools"] == json!([])
+                && v["toolCounts"][0]["count"] == 3
+                && v["lastTool"]["status"] == "completed"
+        },
+    )?;
+
+    let detached = rollout.with_extension("detached");
+    fs::rename(&rollout, &detached)?;
+    hud(
+        &mut child,
+        "missing admitted file clears rollout-only data",
+        &|v| {
+            v["model"].is_null()
+                && v["effort"].is_null()
+                && v["contextPercent"].is_null()
+                && v["toolCounts"] == json!([{"name":"Bash","count":1}])
+        },
+    )?;
+    child.input("noise")?;
+    child.frame(|_, screen, _| screen_has_line(screen, "model error: Server timed out"))?;
+    println!("codex HUD | PTY still renders output with missing rollout");
+    fs::rename(&detached, &rollout)?;
+    hud(
+        &mut child,
+        "same admitted file returns and reads from start",
+        &|v| v["model"] == "fixture-c" && v["toolCounts"][0]["count"] == 3,
+    )?;
+
+    hook("PreToolUse", Some("ending-tool"))?;
+    hud(&mut child, "active tool before SessionEnd", &|v| {
+        v["lastTool"]["status"] == "running"
+    })?;
+    hook("SessionEnd", None)?;
+    graph(&mut child, "SessionEnd retires HUD reading", |_, card| {
+        card["workStatus"] == "exited" && card["codexHud"]["runningTools"] == json!([])
+    })?;
+    let next = turn(json!({"model": "fixture-reopened", "effort": "low"}));
+    fs::write(
+        &rollout,
+        format!(
+            "{}\n{next}\n",
+            json!({"type":"session_meta", "payload":{"id":UUID}})
+        ),
+    )?;
+    thread::sleep(Duration::from_millis(400));
+    child.send(Command::Refresh)?;
+    hud(&mut child, "after SessionEnd late data is ignored", &|v| {
+        v["model"] == "fixture-c"
+    })?;
+    fs::write(
+        &rollout,
+        format!(
+            "{}\n",
+            json!({"type":"session_meta", "payload":{"id":UUID}})
+        ),
+    )?;
+
+    child.input("quit")?;
+    graph(
+        &mut child,
+        "process exit removes HUD from the stopped run",
+        |_, card| card["codexHud"].is_null(),
+    )?;
+    assert_eq!(list_runs(&db, &session)?.last().unwrap().status, "exited");
+    assert_shell_gone(previous.pid.context("previous pid")? as u32)?;
+    child.send(Command::RestartSession {
+        session_id: session.clone(),
+    })?;
+    first_screen(&mut child, &home, Some(UUID), true)?;
+    child.send(Command::Refresh)?;
+    hud(
+        &mut child,
+        "replacement run before new SessionStart has no old HUD",
+        &|v| v.is_object() && v["model"].is_null() && v["toolCounts"] == json!([]),
+    )?;
+    let new_url = current_hook_url(&home)?;
+    assert_ne!(new_url, url);
+    let mut start = started(UUID, &rollout);
+    start["model"] = json!("fixture-hook-model");
+    assert_eq!(post_hook(&new_url, start)?, 200);
+    confirmed(&mut child, UUID)?;
+    child.send(Command::Refresh)?;
+    hud(&mut child, "current SessionStart model only", &|v| {
+        v["model"] == "fixture-hook-model" && v["effort"].is_null()
+    })?;
+    let mut file = fs::OpenOptions::new().append(true).open(&rollout)?;
+    file.write_all(&vec![b'x'; 1024 * 1024 + 1])?;
+    writeln!(file)?;
+    append(&[next])?;
+    hud(
+        &mut child,
+        "same UUID resumed with new rollout snapshot and fresh tools",
+        &|v| {
+            v["model"] == "fixture-reopened"
+                && v["effort"] == "low"
+                && v["toolCounts"] == json!([])
+                && v["contextPercent"].is_null()
+        },
+    )?;
+    replacement(&db, &session, &previous)?;
+    shutdown(child)
+}
+
+#[test]
 fn codex_title_follows_the_active_index_and_preserves_manual_priority() -> Result<()> {
     let root = tempfile::tempdir()?;
     let (mut child, home, rollout, db) = establish(root.path())?;
