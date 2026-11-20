@@ -52,6 +52,26 @@ fn clipboard_stream_matches_frozen_parser() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn clipboard_stream_skips_invalid_raw_utf8_but_keeps_real_replacement_characters() -> Result<()> {
+    use matou_native_terminal::{Terminal, TerminalOptions};
+
+    let mut terminal = Terminal::new(TerminalOptions::new(80, 24, 7, 14))?;
+    for data in [
+        b"\x1b]52;\xff;YQ==\x07".as_slice(),
+        b"\x1b]52;\xf0",
+        b"\x9f",
+        b";Yg==\x07",
+        b"\x1b]52;c;Yw==\xff\x07",
+        "\x1b]52;c;ZA==�\x07".as_bytes(),
+    ] {
+        terminal.feed(data);
+    }
+    assert_eq!(terminal.drain_clipboard(), ["a", "b", "c"]);
+    assert!(terminal.drain_responses().is_empty());
+    Ok(())
+}
+
 // Compare after capture so a discrepancy cannot hide the remaining cases.
 #[test]
 #[ignore = "run with the K-terminal-clipboard gate driver"]
