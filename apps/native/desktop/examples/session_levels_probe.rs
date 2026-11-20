@@ -4,8 +4,24 @@
 
 #[cfg(target_os = "macos")]
 pub use matou_native_desktop::{
-    assets, macos, recovery_water_view, rename_input, tab_dialog_style, workspace_drag,
+    assets, recovery_water_view, rename_input, tab_dialog_style, workspace_drag,
 };
+
+#[cfg(target_os = "macos")]
+mod macos {
+    pub use matou_native_desktop::macos::*;
+
+    std::thread_local! {
+        pub(super) static MOUNT_HIDDEN_WATER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    pub fn is_window_visible(window: &gpui::Window) -> anyhow::Result<bool> {
+        if MOUNT_HIDDEN_WATER.get() {
+            return Ok(true);
+        }
+        matou_native_desktop::macos::is_window_visible(window)
+    }
+}
 
 #[cfg(target_os = "macos")]
 #[path = "../src/carousel_motion.rs"]
@@ -717,6 +733,46 @@ mod workspace {
                     RecoveryWater::new(self.runtime_generation, Theme::default(), true, cx)
                 }),
             );
+        }
+
+        pub(super) fn recovery_pointer_bounds(&self, id: &str) -> Bounds<Pixels> {
+            let index = self.order.iter().position(|session| session == id).unwrap();
+            let mut bounds = self.carousel_scroll.bounds_for_item(index).unwrap();
+            bounds.origin += self.carousel_scroll.offset();
+            bounds
+        }
+
+        pub(super) fn recovery_pointer_geometry(&self) -> Option<Value> {
+            self.geometry
+                .get(self.carousel_owner.as_ref().unwrap())
+                .map(|update| update.geometry.clone())
+        }
+
+        pub(super) fn assert_recovery_pointer_state(
+            &self,
+            active: &str,
+            authoritative: &str,
+            covered: bool,
+        ) {
+            assert_eq!(self.level_focus(), Some(active));
+            assert_eq!(self.focused.as_deref(), Some(authoritative));
+            assert_eq!(self.recovery_water_covers_terminal(PARENT), covered);
+        }
+
+        pub(super) fn begin_pointer_reconnect(
+            &mut self,
+            window: &mut Window,
+            cx: &mut Context<Self>,
+        ) {
+            self.apply(
+                BridgeEvent::Connection {
+                    generation: self.runtime_generation,
+                    phase: ConnectionPhase::Reconnecting,
+                },
+                window,
+                cx,
+            );
+            assert!(!self.domain_ready);
         }
 
         pub(super) fn assert_stopped_remove_dialog(
@@ -2300,6 +2356,162 @@ mod probe {
                 .unwrap();
         }
         (window, sink)
+    }
+
+    fn verify_recovery_water_pointer(cx: &mut AsyncApp) {
+        for (covered, y, reconnect) in [
+            (false, 96., false),
+            (true, 36., false),
+            (true, 96., false),
+            (true, 96., true),
+        ] {
+            crate::macos::MOUNT_HIDDEN_WATER.set(covered);
+            let mut fixture = Fixture::new();
+            let (window, sink) = open_hidden(cx, 1200.);
+            let drain = || std::iter::from_fn(|| sink.try_recv().ok()).collect::<Vec<_>>();
+            let focus_commands = |commands: Vec<Command>| {
+                commands
+                    .into_iter()
+                    .filter(|command| matches!(command, Command::FocusSession { .. }))
+                    .collect::<Vec<_>>()
+            };
+
+            deliver(window, cx, fixture.event(true));
+            draw(window, cx);
+            window
+                .update(cx, |view, window, cx| {
+                    view.qualify(PARENT, window, cx);
+                    view.settle_stopped_probe_geometry(cx);
+                    view.assert_recovery_pointer_state(PEER, PEER, covered);
+                    if reconnect {
+                        view.begin_pointer_reconnect(window, cx);
+                    }
+                })
+                .unwrap();
+            if reconnect {
+                sink.generation(2);
+            }
+            drain();
+            let (bounds, geometry_before) = window
+                .update(cx, |view, _, _| {
+                    (
+                        view.recovery_pointer_bounds(PARENT),
+                        view.recovery_pointer_geometry(),
+                    )
+                })
+                .unwrap();
+            assert_ne!(
+                geometry_before
+                    .as_ref()
+                    .and_then(|value| value["anchorSessionId"].as_str()),
+                Some(PARENT)
+            );
+            let center_x = bounds.center().x;
+            for (label, position) in [
+                ("right-exact", point(bounds.right(), bounds.top() + px(96.))),
+                ("bottom-exact", point(center_x, bounds.bottom())),
+                (
+                    "top-left-corner",
+                    point(bounds.left() + px(1.), bounds.top() + px(1.)),
+                ),
+                (
+                    "top-right-corner",
+                    point(bounds.right() - px(1.), bounds.top() + px(1.)),
+                ),
+                (
+                    "bottom-corner",
+                    point(bounds.left() + px(1.), bounds.bottom() - px(1.)),
+                ),
+            ] {
+                click(window, cx, position);
+                window
+                    .update(cx, |view, _, _| {
+                        view.assert_recovery_pointer_state(PEER, PEER, covered);
+                        assert_eq!(view.recovery_pointer_geometry(), geometry_before, "{label}");
+                    })
+                    .unwrap();
+                assert!(
+                    drain().iter().all(|command| !matches!(
+                        command,
+                        Command::FocusSession { .. } | Command::PutGeometry { .. }
+                    )),
+                    "{label}"
+                );
+            }
+
+            click(window, cx, point(center_x, bounds.top() + px(y)));
+            let check_optimistic = |cx: &mut AsyncApp| {
+                window
+                    .update(cx, |view, _, _| {
+                        view.assert_recovery_pointer_state(PARENT, PEER, covered);
+                        let geometry = view.recovery_pointer_geometry().unwrap();
+                        assert_eq!(geometry["focusedSessionId"], PARENT);
+                        assert_eq!(geometry["anchorSessionId"], PARENT);
+                        assert!(geometry["anchorViewportOffset"].is_number());
+                    })
+                    .unwrap();
+            };
+            check_optimistic(cx);
+            let commands = focus_commands(drain());
+            if reconnect {
+                assert!(commands.is_empty());
+                deliver(window, cx, fixture.event(true));
+                check_optimistic(cx);
+                let ready_commands = drain();
+                assert!(ready_commands.iter().any(|command| matches!(command,
+                    Command::PutGeometry { update, .. } if update.geometry["anchorSessionId"] == PARENT
+                )));
+                assert_focus(focus_commands(ready_commands), PARENT);
+                deliver(window, cx, fixture.event(true));
+                assert!(
+                    focus_commands(drain()).is_empty(),
+                    "the replacement ready graph must not replay focus twice"
+                );
+            } else {
+                assert_focus(commands, PARENT);
+                draw(window, cx);
+                window
+                    .update(cx, |view, window, cx| {
+                        view.assert_visual_focus(PARENT);
+                        view.assert_terminal_focus(PARENT, true, window, cx);
+                    })
+                    .unwrap();
+                AnyWindowHandle::from(window)
+                    .update(cx, |_, window, cx| {
+                        window.dispatch_keystroke(Keystroke::parse("a").unwrap(), cx);
+                    })
+                    .unwrap();
+                let commands = drain();
+                let input = commands
+                    .iter()
+                    .filter(|command| matches!(command, Command::Input { .. }))
+                    .collect::<Vec<_>>();
+                if covered {
+                    assert!(input.is_empty(), "input reached the runtime under water");
+                } else {
+                    assert!(
+                        matches!(input.as_slice(), [Command::Input { session_id, bytes, .. }]
+                        if session_id == PARENT && bytes == b"a"),
+                        "the uncovered terminal should emit one input command"
+                    );
+                }
+            }
+            fixture.focus(SCENE, PARENT);
+            deliver(window, cx, fixture.event(false));
+            window
+                .update(cx, |view, _, _| {
+                    view.assert_recovery_pointer_state(PARENT, PARENT, covered);
+                })
+                .unwrap();
+            assert!(focus_commands(drain()).is_empty());
+            window
+                .update(cx, |_, window, _| window.remove_window())
+                .unwrap();
+            println!(
+                "Card pointer | covered={covered} y={y} reconnect={reconnect} | activation, geometry, boundaries and transport passed"
+            );
+        }
+        crate::macos::MOUNT_HIDDEN_WATER.set(false);
     }
 
     fn assert_remove_command(commands: Vec<Command>, id: &str, expected: RemoveScope) {
@@ -4439,12 +4651,20 @@ mod probe {
     }
 
     pub(super) fn run() {
+        let water_pointer_only = std::env::args().any(|arg| arg == "--recovery-water-pointer");
         let deferred_only = std::env::args().any(|arg| arg == "--deferred-recovery");
         let show_deferred = std::env::args().any(|arg| arg == "--show-deferred-recovery");
         let loader_only = std::env::args().any(|arg| arg == "--session-loader");
         let fork_only = std::env::args().any(|arg| arg == "--fork");
         let permission_only = std::env::args().any(|arg| arg == "--permission");
         Application::new().with_assets(NativeAssets).run(move |cx| {
+            if water_pointer_only {
+                cx.spawn(async |cx| {
+                    verify_recovery_water_pointer(cx);
+                    cx.update(|cx| cx.quit()).unwrap();
+                }).detach();
+                return;
+            }
             if deferred_only || show_deferred {
                 cx.spawn(async move |cx| {
                     verify_deferred_recovery(cx, show_deferred);
@@ -4496,6 +4716,7 @@ mod probe {
                 )
                 .unwrap();
             cx.spawn(async move |cx| {
+                verify_recovery_water_pointer(cx);
                 verify_compact_card(cx);
                 verify_start_failure_card(cx);
                 verify_provider_restore_banner(cx).await;

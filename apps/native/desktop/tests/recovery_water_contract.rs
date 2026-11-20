@@ -72,6 +72,7 @@ fn capture_recovery_water_gate() {
         recovery_water::{background_svg, bounded_fluid_svg, edge_svg, fluid_svg},
         recovery_water_macos::{draw_background, draw_edges, draw_fluid, water_base_color},
         recovery_water_view::RecoveryWater,
+        workspace::session_card_hit,
     };
     use matou_native_terminal::Theme;
     use serde_json::json;
@@ -166,7 +167,7 @@ fn capture_recovery_water_gate() {
         .map(|item| {
             let pos = point(px(num(&item["x"]) as f32), px(num(&item["y"]) as f32));
             let inside = water.contains(&pos);
-            json!({"name": item["name"], "insideWaterBounds": inside, "insideCardHitBounds": card.contains(&pos)})
+            json!({"name": item["name"], "insideWaterBounds": inside, "insideCardHitBounds": session_card_hit(&card, pos)})
         })
         .collect::<Vec<_>>();
 
