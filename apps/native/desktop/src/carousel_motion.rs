@@ -92,10 +92,10 @@ impl Transition {
         // CSS Transitions §3 adjusts the duration when reversing a running
         // transition, including another reversal before the first completes.
         let (reversing_start, shortening_factor) = if running && target == self.reversing_start {
-            let factor = (progress * self.shortening_factor + (1.0 - self.shortening_factor))
-                .abs()
-                .clamp(0.0, 1.0);
-            (self.target, factor)
+            (
+                self.target,
+                reversal_factor(progress, self.shortening_factor),
+            )
         } else {
             (current, 1.0)
         };
@@ -135,6 +135,142 @@ impl Transition {
             return self.target;
         }
         self.start_value + (self.target - self.start_value) * progress
+    }
+}
+
+fn reversal_factor(progress: f64, shortening_factor: f64) -> f64 {
+    (progress * shortening_factor + (1.0 - shortening_factor))
+        .abs()
+        .clamp(0.0, 1.0)
+}
+
+#[derive(Clone, Copy)]
+pub struct CarouselLayout {
+    pub columns: u32,
+    pub narrow: bool,
+}
+
+impl CarouselLayout {
+    pub fn for_viewport(viewport: f64) -> Self {
+        Self {
+            columns: (((viewport + 12.) / 292.).floor()).clamp(1., 4.) as u32,
+            narrow: viewport < 720.,
+        }
+    }
+
+    pub fn width_rule(self, selected: bool, hovered: bool) -> WidthRule {
+        match (self.narrow, selected, hovered) {
+            (true, true, _) => WidthRule::NarrowExpanded,
+            (true, false, _) => WidthRule::NarrowBase,
+            (false, true, _) | (false, false, true) => WidthRule::WideExpanded,
+            (false, false, false) => WidthRule::Columns(self.columns),
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum WidthRule {
+    Columns(u32),
+    WideExpanded,
+    NarrowBase,
+    NarrowExpanded,
+}
+
+const WIDTH_RULES: [WidthRule; 7] = [
+    WidthRule::Columns(1),
+    WidthRule::Columns(2),
+    WidthRule::Columns(3),
+    WidthRule::Columns(4),
+    WidthRule::WideExpanded,
+    WidthRule::NarrowBase,
+    WidthRule::NarrowExpanded,
+];
+
+impl WidthRule {
+    pub fn width(self, viewport: f64) -> f64 {
+        let content = viewport - 20.;
+        match self {
+            Self::Columns(columns) => {
+                let columns = f64::from(columns);
+                (content - (columns - 1.) * 12.) / columns
+            }
+            Self::WideExpanded => (content * 0.48).min(620.),
+            Self::NarrowBase => (content * 0.28).clamp(112., 176.),
+            Self::NarrowExpanded => (content * 0.68).clamp(260., 560.),
+        }
+    }
+
+    fn weights(self) -> [f64; WIDTH_RULES.len()] {
+        WIDTH_RULES.map(|rule| if rule == self { 1. } else { 0. })
+    }
+}
+
+pub struct CardWidth {
+    // A running transition can be interrupted by another rule change. Keep
+    // its current blend responsive to the viewport when it becomes the start.
+    start: [f64; WIDTH_RULES.len()],
+    target: WidthRule,
+    reversing_start: Option<WidthRule>,
+    shortening_factor: f64,
+    progress: Transition,
+}
+
+impl CardWidth {
+    pub fn new(rule: WidthRule) -> Self {
+        Self {
+            start: rule.weights(),
+            target: rule,
+            reversing_start: Some(rule),
+            shortening_factor: 1.,
+            progress: Transition::new(1.),
+        }
+    }
+
+    pub fn retarget(&mut self, rule: WidthRule, now: f64, duration: f64) {
+        if self.target == rule {
+            return;
+        }
+        let progress = self.progress.value(now);
+        let previous_target = self.target;
+        let end = previous_target.weights();
+        for (start, end) in self.start.iter_mut().zip(end) {
+            *start += (end - *start) * progress;
+        }
+        if progress < 1. && self.reversing_start == Some(rule) {
+            self.shortening_factor = reversal_factor(progress, self.shortening_factor);
+            self.reversing_start = Some(previous_target);
+        } else {
+            self.shortening_factor = 1.;
+            self.reversing_start = WIDTH_RULES
+                .into_iter()
+                .find(|rule| rule.weights() == self.start);
+        }
+        self.target = rule;
+        self.progress.snap(0.);
+        self.progress
+            .retarget(1., now, duration * self.shortening_factor, Curve::Width);
+    }
+
+    pub fn value(&self, viewport: f64, now: f64) -> f64 {
+        let end = self.target.width(viewport);
+        let progress = self.progress.value(now);
+        if progress == 1. {
+            return end;
+        }
+        let start: f64 = WIDTH_RULES
+            .iter()
+            .zip(self.start)
+            .map(|(rule, weight)| rule.width(viewport) * weight)
+            .sum();
+        start + (end - start) * progress
+    }
+
+    pub fn is_running(&self, now: f64) -> bool {
+        self.progress.is_running(now)
+    }
+
+    pub fn target_rule(&self) -> WidthRule {
+        self.target
     }
 }
 

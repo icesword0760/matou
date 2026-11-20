@@ -34,7 +34,8 @@ mod session_levels {
 
 use crate::{
     carousel_motion::{
-        Curve, Transition, centered_scroll, focus_scroll_step, fully_visible_scroll,
+        CardWidth, CarouselLayout, Curve, Transition, centered_scroll, focus_scroll_step,
+        fully_visible_scroll,
     },
     rename_input::{RenameInput, RenameInputEvent, trim_name},
     runtime_bridge::{
@@ -95,7 +96,7 @@ impl Render for WorkspaceDrag {
 }
 
 struct CardMotion {
-    width: Transition,
+    width: Option<CardWidth>,
     lift: Transition,
 }
 
@@ -3656,6 +3657,35 @@ impl Workspace {
         cx.notify();
     }
 
+    fn advance_edge_browse(&mut self, now: f64, viewport_width: f64, cx: &mut Context<Self>) {
+        if !self.edge_next_at.is_some_and(|deadline| now >= deadline) {
+            return;
+        }
+        let target = self
+            .edge_target
+            .take()
+            .filter(|id| self.order.contains(id))
+            .or_else(|| self.nearest_hidden_card(self.edge_direction, viewport_width))
+            .filter(|id| self.order.contains(id));
+        if let Some(id) = target {
+            // Dwelling at an edge is navigation intent: unlike ordinary
+            // preview, this new position remains after pointer exit.
+            self.hover_baseline = None;
+            self.hover_restore_at = None;
+            self.focus_follow_until = None;
+            self.hovered = Some(id);
+            self.hover_follow_until = Some(now + 440.);
+            if !self.edge_cruising {
+                self.edge_phase_start = now;
+            }
+            self.edge_cruising = true;
+            self.edge_next_at = Some(now + 900.);
+            cx.notify();
+        } else {
+            self.stop_edge_browse(false);
+        }
+    }
+
     fn hover_card(&mut self, id: Option<String>, cx: &mut Context<Self>) {
         let now = self.motion_clock.elapsed().as_secs_f64() * 1000.;
         self.hovered = id;
@@ -6981,7 +7011,7 @@ impl Workspace {
                 .card_motion
                 .entry(id.clone())
                 .or_insert_with(|| CardMotion {
-                    width: Transition::new(selected),
+                    width: None,
                     lift: Transition::new(selected),
                 });
             motion.lift.retarget(selected, now, 180., Curve::Lift);
@@ -10190,19 +10220,8 @@ impl Render for Workspace {
         let level_focus = self.level_focus().map(str::to_owned);
         let active_level_focus = self.active_level_focus().map(str::to_owned);
         let viewport_width = f64::from(f32::from(window.viewport_size().width)) - 260.;
-        let content_width = viewport_width - 20.;
-        let columns = (((viewport_width + 12.) / 292.).floor()).clamp(1., 4.);
-        let narrow = viewport_width < 720.;
-        let inactive_width = if narrow {
-            (content_width * 0.28).clamp(112., 176.)
-        } else {
-            (content_width - (columns - 1.) * 12.) / columns
-        };
-        let active_width = if narrow {
-            (content_width * 0.68).clamp(260., 560.)
-        } else {
-            (content_width * 0.48).min(620.)
-        };
+        let layout = CarouselLayout::for_viewport(viewport_width);
+        let narrow = layout.narrow;
         let now = self.motion_clock.elapsed().as_secs_f64() * 1000.;
         let dragging = cx.has_active_drag();
         if !dragging {
@@ -10256,10 +10275,14 @@ impl Render for Workspace {
             }
         }
 
-        let capacity = columns as u32;
+        let capacity = layout.columns;
         if self.column_capacity != Some(capacity) {
             self.column_capacity = Some(capacity);
             self.restore_geometry = true;
+        }
+        let was_cruising = self.edge_cruising;
+        if !was_cruising {
+            self.advance_edge_browse(now, viewport_width, cx);
         }
         let mut widths = HashMap::new();
         let mut positions = HashMap::new();
@@ -10270,16 +10293,14 @@ impl Render for Workspace {
         let mut moving = false;
         let width_duration = if reduced_motion() { 1. } else { 380. };
         for id in &self.order {
-            let expanded =
-                level_focus.as_ref() == Some(id) || (!narrow && self.hovered.as_ref() == Some(id));
-            let motion = self.card_motion.get_mut(id).expect("mounted card motion");
-            motion.width.retarget(
-                if expanded { 1. } else { 0. },
-                now,
-                width_duration,
-                Curve::Width,
+            let rule = layout.width_rule(
+                level_focus.as_ref() == Some(id),
+                self.hovered.as_ref() == Some(id),
             );
-            let width = inactive_width + (active_width - inactive_width) * motion.width.value(now);
+            let motion = self.card_motion.get_mut(id).expect("mounted card motion");
+            let motion_width = motion.width.get_or_insert_with(|| CardWidth::new(rule));
+            motion_width.retarget(rule, now, width_duration);
+            let width = motion_width.value(viewport_width, now);
             widths.insert(id.clone(), width);
             positions.insert(id.clone(), left);
             self.card_geometry.push((id.clone(), left, width));
@@ -10290,38 +10311,16 @@ impl Render for Workspace {
                 preview_geometry = Some((left, width));
             }
             left += width + 12.;
-            moving |= motion.width.is_running(now) || motion.lift.is_running(now);
+            moving |= motion_width.is_running(now) || motion.lift.is_running(now);
         }
         let total =
             20. + widths.values().sum::<f64>() + self.order.len().saturating_sub(1) as f64 * 12.;
         let max_scroll = (total - viewport_width).max(0.);
-        if let Some(deadline) = self.edge_next_at {
-            if now >= deadline {
-                let target = self
-                    .edge_target
-                    .take()
-                    .filter(|id| self.order.contains(id))
-                    .or_else(|| self.nearest_hidden_card(self.edge_direction, viewport_width));
-                if let Some(id) = target {
-                    // Dwelling at an edge is navigation intent: unlike ordinary
-                    // preview, this new position remains after pointer exit.
-                    self.hover_baseline = None;
-                    self.hover_restore_at = None;
-                    self.focus_follow_until = None;
-                    self.hovered = Some(id);
-                    self.hover_follow_until = Some(now + 440.);
-                    if !self.edge_cruising {
-                        self.edge_phase_start = now;
-                    }
-                    self.edge_cruising = true;
-                    self.edge_next_at = Some(now + 900.);
-                    cx.notify();
-                } else {
-                    self.stop_edge_browse(false);
-                }
-            }
-            moving = true;
+        if was_cruising {
+            // The next cruise target depends on this frame's hidden cards.
+            self.advance_edge_browse(now, viewport_width, cx);
         }
+        moving |= self.edge_next_at.is_some();
         if self.restore_geometry {
             self.restore_geometry = moving;
             if let Some(saved) = self
