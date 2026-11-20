@@ -1,5 +1,6 @@
 mod claude_model_catalog;
 mod claude_request_gateway;
+mod codex_catalog;
 mod codex_events;
 mod codex_launch;
 mod codex_permissions;

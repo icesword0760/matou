@@ -777,15 +777,19 @@ impl ShellOwner {
         Ok(failed)
     }
 
-    pub(crate) fn load_claude_catalog_binding(
+    pub(crate) fn load_provider_catalog_binding(
         &mut self,
         input: &sessions::ClaudeCatalogLoad<'_>,
+        provider: &str,
+        completed_turn: bool,
     ) -> Result<i64> {
         let id = (self.next_id)();
-        let commit = sessions::load_claude_catalog_binding(
+        let commit = sessions::load_provider_catalog_binding(
             &mut self.connection,
             &command(id.clone(), "session.load-provider-catalog", id),
             input,
+            provider,
+            completed_turn,
             now(),
         )?;
         let revision = commit.result["spawnRevision"]
@@ -797,36 +801,26 @@ impl ShellOwner {
 
     pub(crate) fn catalog_binding_owners(
         &self,
+        provider: &str,
         provider_ids: &[&str],
     ) -> Result<HashMap<String, Value>> {
-        let mut query = self.connection.prepare(
-            "SELECT binding.provider_session_id, session.id, session.title
-             FROM provider_bindings AS binding
-             JOIN sessions AS session ON session.id = binding.session_id
-             JOIN tasks ON tasks.id = session.task_id
-             JOIN workspaces ON workspaces.id = tasks.workspace_id
-             WHERE binding.provider = 'claude-code' AND binding.resume_state = 'available'
-               AND binding.invalidated_at IS NULL AND binding.user_exited_at IS NULL
-               AND session.kind = 'claude-code' AND session.archived_at IS NULL
-               AND tasks.archived_at IS NULL AND workspaces.archived_at IS NULL
-               AND binding.provider_session_id IN (SELECT value FROM json_each(?))
-             ORDER BY binding.updated_at DESC, session.id",
-        )?;
-        let rows = query.query_map([serde_json::to_string(provider_ids)?], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })?;
         let mut owners = HashMap::new();
-        for row in rows {
-            let (provider_id, session_id, title) = row?;
+        for (provider_id, session_id, title) in
+            sessions::catalog_binding_owners(&self.connection, provider, provider_ids)?
+        {
             owners
                 .entry(provider_id)
                 .or_insert_with(|| json!({"sessionId": session_id, "title": title}));
         }
         Ok(owners)
+    }
+
+    pub(crate) fn ensure_codex_catalog_available(
+        &self,
+        session_id: &str,
+        provider_session_id: &str,
+    ) -> Result<()> {
+        sessions::ensure_codex_catalog_available(&self.connection, session_id, provider_session_id)
     }
 
     pub(crate) fn startup_recovery_candidates(
@@ -3152,6 +3146,11 @@ impl ShellOwner {
             .chain(retiring)
         {
             if let Err(error) = result {
+                #[cfg(unix)]
+                if error.is::<crate::session::PtyShutdownIncomplete>() {
+                    first_error = Some(error);
+                    continue;
+                }
                 first_error.get_or_insert(error);
             }
         }

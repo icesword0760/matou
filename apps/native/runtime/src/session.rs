@@ -8,6 +8,8 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
+#[cfg(unix)]
+use matou_native_core::pty::ForegroundProcessGroup;
 use matou_native_core::{
     durability::{
         DEFAULT_MAX_RETAINED_BYTES, Event as GateEvent, ExecutionPauser, Gate, PendingFrame, State,
@@ -30,6 +32,20 @@ use crate::{
 const READ_BYTES: usize = 8 * 1024;
 const READ_QUEUE: usize = 128;
 const EXIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+#[cfg(unix)]
+#[derive(Debug)]
+pub(crate) struct PtyShutdownIncomplete;
+
+#[cfg(unix)]
+impl std::fmt::Display for PtyShutdownIncomplete {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("could not confirm that the Shell and its PTY foreground group exited")
+    }
+}
+
+#[cfg(unix)]
+impl std::error::Error for PtyShutdownIncomplete {}
 
 enum ReaderEvent {
     Data(Vec<u8>),
@@ -510,17 +526,56 @@ impl Session {
         if self.closed {
             return Ok(());
         }
+        #[cfg(unix)]
+        let foreground = self
+            .process
+            .as_ref()
+            .and_then(PtyProcess::foreground_process_group);
         let disposal = self.dispose();
         if !self.disposed {
             return disposal;
         }
+        #[cfg(unix)]
+        if let Some(group) = &foreground
+            && let Err(error) = group.hang_up()
+        {
+            self.events.push(diagnostic(format!(
+                "hang up Shell foreground group: {error}"
+            )));
+        }
         // A termination request can partly succeed (the PTY child received
         // SIGHUP, but the process-group signal failed). Drain its real exit
         // even in that case so the owner can finish and retire the run.
-        self.await_shutdown(Duration::from_millis(1_500))?;
-        if !self.closed {
+        let complete = self.await_shutdown(
+            Duration::from_millis(1_500),
+            #[cfg(unix)]
+            foreground.as_ref(),
+        )?;
+        if !complete {
             self.force_kill();
-            self.await_shutdown(Duration::from_millis(1_000))?;
+            #[cfg(unix)]
+            if let Some(group) = foreground.as_ref()
+                && let Err(error) = group.force_kill()
+            {
+                self.events.push(diagnostic(format!(
+                    "force termination of Shell foreground group: {error}"
+                )));
+            }
+            #[cfg_attr(windows, allow(unused_variables))]
+            let complete = self.await_shutdown(
+                Duration::from_millis(1_000),
+                #[cfg(unix)]
+                foreground.as_ref(),
+            )?;
+            #[cfg(unix)]
+            if !complete
+                && foreground
+                    .as_ref()
+                    .is_some_and(|group| group.is_running().unwrap_or(true))
+            {
+                self.end_storage();
+                return Err(PtyShutdownIncomplete.into());
+            }
         }
         if !self.closed {
             // Drain the already queued chunks before giving up on the backend closing.
@@ -533,6 +588,8 @@ impl Session {
                 self.end_storage();
             }
         }
+        #[cfg(unix)]
+        ensure!(self.child_exit.is_some(), PtyShutdownIncomplete);
         disposal
     }
 
@@ -632,19 +689,38 @@ impl Session {
         self.delivery.credit.unacked_bytes()
     }
 
-    fn await_shutdown(&mut self, max_wait: Duration) -> Result<()> {
+    fn await_shutdown(
+        &mut self,
+        max_wait: Duration,
+        #[cfg(unix)] foreground: Option<&ForegroundProcessGroup>,
+    ) -> Result<bool> {
         let deadline = Instant::now() + max_wait;
-        while !self.closed {
+        loop {
+            #[cfg(unix)]
+            let group_running = foreground
+                .map(ForegroundProcessGroup::is_running)
+                .transpose()
+                .context(PtyShutdownIncomplete)?
+                .unwrap_or(false);
+            #[cfg(windows)]
+            let group_running = false;
+            if self.closed && !group_running {
+                return Ok(true);
+            }
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                break;
+                return Ok(false);
             }
-            self.advance(remaining.min(EXIT_POLL_INTERVAL), false)?;
+            let poll = remaining.min(EXIT_POLL_INTERVAL);
+            let next = Instant::now() + poll;
+            self.advance(poll, false)?;
             if !self.closed && self.gate.state() != State::Healthy {
                 self.end_storage();
             }
+            if group_running && (self.closed || self.reader_finished) {
+                thread::sleep(next.saturating_duration_since(Instant::now()));
+            }
         }
-        Ok(())
     }
 
     fn advance(&mut self, max_wait: Duration, wake_on_events: bool) -> Result<()> {

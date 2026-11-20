@@ -563,6 +563,60 @@ mod workspace {
             )
         }
 
+        pub(super) fn open_codex_loader_direct(
+            &mut self,
+            id: &str,
+            window: &mut Window,
+            cx: &mut Context<Self>,
+        ) {
+            self.open_session_loader(id, window, cx);
+        }
+
+        pub(super) fn verify_codex_loader_direct(
+            &mut self,
+            selected: &str,
+            expect_focus: bool,
+            enabled: bool,
+            window: &Window,
+        ) {
+            let state = self.loader();
+            assert_eq!(state.provider, "codex");
+            assert_eq!(state.selected.as_deref(), Some(selected));
+            assert_eq!(state.list_focus.is_focused(window), expect_focus);
+            assert_eq!(self.session_loader_can_submit(state), enabled);
+        }
+
+        pub(super) fn codex_loader_select_direct(
+            &mut self,
+            id: &str,
+            window: &mut Window,
+            cx: &mut Context<Self>,
+        ) {
+            self.select_loader_session(id, cx);
+            window.focus(&self.loader().list_focus);
+        }
+
+        pub(super) fn codex_loader_close_direct(
+            &mut self,
+            window: &mut Window,
+            cx: &mut Context<Self>,
+        ) {
+            self.close_dialog(window, cx);
+        }
+
+        pub(super) fn codex_loader_source_direct(
+            &mut self,
+            provider: &'static str,
+            cx: &mut Context<Self>,
+        ) {
+            self.switch_loader_provider(provider, cx);
+        }
+
+        pub(super) fn codex_loader_submit_direct(&mut self, cx: &mut Context<Self>) {
+            self.submit_session_loader(cx);
+            assert!(self.loader().confirm_running);
+        }
+
         pub(super) fn loader_cwd(&self) -> String {
             self.graph_node(super::probe::PEER).unwrap()["cwd"]
                 .as_str()
@@ -4712,6 +4766,206 @@ mod probe {
         );
     }
 
+    fn verify_codex_loader(cx: &mut AsyncApp) {
+        use serde_json::{Value, json};
+        let mut fixture = Fixture::new();
+        fixture.fork_source(false, "idle");
+        fixture.codex_permission_state("idle", "none");
+        fixture.focus(SCENE, PARENT);
+        let (window, sink) = open_hidden(cx, 1250.);
+        deliver(window, cx, fixture.event(true));
+        draw(window, cx);
+        window
+            .update(cx, |view, window, cx| {
+                view.qualify(PARENT, window, cx);
+                view.open_codex_loader_direct(PARENT, window, cx);
+            })
+            .unwrap();
+        draw(window, cx);
+        let list_request = || {
+            std::iter::from_fn(|| sink.try_recv().ok())
+                .find_map(|command| {
+                    if let Command::ListCodexSessions {
+                        request_id,
+                        cwd,
+                        offset,
+                        limit,
+                        ..
+                    } = command
+                    {
+                        assert_eq!(offset, Some(0));
+                        assert_eq!(limit, Some(50));
+                        Some((request_id, cwd))
+                    } else {
+                        None
+                    }
+                })
+                .expect("Codex list request")
+        };
+        let send_list = |cx: &mut AsyncApp, request_id, cwd: &str, second_owner: Value| {
+            let Event::Graph(mut graph) = fixture.graph_event() else {
+                unreachable!()
+            };
+            graph["providerSessionCatalogResults"] = json!([{
+                "provider": "codex", "cwd": cwd, "requestId": request_id,
+                "total": 2, "offset": 0, "limit": 50, "nextOffset": 2, "hasMore": false,
+                "sessions": [
+                    {"providerSessionId":"codex-first","title":"第一个会话","updatedAt":2,"permissionMode":"default","messageCount":0,"loadedBy":{"sessionId":PARENT,"title":"主卡"}},
+                    {"providerSessionId":"codex-second","title":"第二个会话","updatedAt":1,"permissionMode":"default","messageCount":0,"loadedBy":second_owner}
+                ]
+            }]);
+            deliver(window, cx, Event::Graph(graph));
+            draw(window, cx);
+        };
+        let assert_state = |cx: &mut AsyncApp, selected: &str, focus, enabled| {
+            window
+                .update(cx, |view, window, _| {
+                    view.verify_codex_loader_direct(selected, focus, enabled, window);
+                })
+                .unwrap();
+        };
+        let (request, cwd) = list_request();
+        send_list(cx, request, &cwd, Value::Null);
+        assert_state(cx, "codex-first", false, false);
+        window
+            .update(cx, |view, window, cx| {
+                view.codex_loader_select_direct("codex-second", window, cx);
+            })
+            .unwrap();
+        assert_state(cx, "codex-second", true, true);
+        let preview = std::iter::from_fn(|| sink.try_recv().ok())
+            .filter_map(|command| {
+                if let Command::GetCodexSession {
+                    request_id,
+                    provider_session_id,
+                    ..
+                } = command
+                    && provider_session_id == "codex-second"
+                {
+                    Some(request_id)
+                } else {
+                    None
+                }
+            })
+            .last()
+            .expect("selected Codex preview request");
+        let Event::Graph(mut graph) = fixture.graph_event() else {
+            unreachable!()
+        };
+        graph["providerSessionDetailResults"] = json!([{
+            "provider": "codex", "cwd": cwd, "requestId": preview, "providerSessionId":"codex-second",
+            "events": [{"index":1,"kind":"user","text":"合成首条提示"}],
+            "page":{"startEventIndex":1,"endEventIndex":1,"total":1,"hasEarlier":false,"hasLater":false}
+        }]);
+        deliver(window, cx, Event::Graph(graph));
+        draw(window, cx);
+        window
+            .update(cx, |view, _, _| view.assert_loader_preview(&[1], 1, false))
+            .unwrap();
+        println!(
+            "Codex shared panel rendered preview; current-card occupation disabled the first selection"
+        );
+
+        // A title change refreshes the list without moving focus or clearing the preview.
+        let Event::Graph(mut graph) = fixture.graph_event() else {
+            unreachable!()
+        };
+        graph["nodes"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|node| node["sessionId"] == PARENT)
+            .unwrap()["title"] = json!("新卡名");
+        deliver(window, cx, Event::Graph(graph));
+        let (refresh, _) = list_request();
+        let Event::Graph(mut graph) = fixture.graph_event() else {
+            unreachable!()
+        };
+        graph["nodes"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|node| node["sessionId"] == PARENT)
+            .unwrap()["title"] = json!("新卡名");
+        graph["providerSessionCatalogResults"] = json!([{
+            "provider":"codex","cwd":cwd,"requestId":refresh,"total":2,"nextOffset":2,"hasMore":false,
+            "sessions":[
+                {"providerSessionId":"codex-first","title":"第一个会话","updatedAt":2,"permissionMode":"default","messageCount":0},
+                {"providerSessionId":"codex-second","title":"已刷新会话","updatedAt":1,"permissionMode":"default","messageCount":0,"loadedBy":{"sessionId":PEER,"title":"其他卡"}}
+            ]
+        }]);
+        deliver(window, cx, Event::Graph(graph));
+        draw(window, cx);
+        assert_state(cx, "codex-second", true, false);
+        window
+            .update(cx, |view, _, _| view.assert_loader_preview(&[1], 1, false))
+            .unwrap();
+        println!(
+            "silent refresh kept selected row, preview and list focus; elsewhere occupation disabled Load"
+        );
+
+        window
+            .update(cx, |view, window, cx| {
+                view.codex_loader_close_direct(window, cx);
+                view.open_codex_loader_direct(PARENT, window, cx);
+            })
+            .unwrap();
+        draw(window, cx);
+        let (reopen, _) = list_request();
+        send_list(cx, reopen, &cwd, Value::Null);
+        assert_state(cx, "codex-second", true, true);
+        println!("reopen kept Codex source, selected UUID and list focus");
+        // Isolated direct handlers drive the warning/confirm path without keyboard or mouse delivery.
+        let Event::Graph(mut graph) = fixture.graph_event() else {
+            unreachable!()
+        };
+        graph["nodes"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|node| node["sessionId"] == PARENT)
+            .unwrap()["workStatus"] = json!("running");
+        deliver(window, cx, Event::Graph(graph));
+        window
+            .update(cx, |view, _, cx| view.codex_loader_submit_direct(cx))
+            .unwrap();
+        assert!(
+            !std::iter::from_fn(|| sink.try_recv().ok())
+                .any(|command| matches!(command, Command::LoadCodexSession { .. }))
+        );
+        window
+            .update(cx, |view, _, cx| view.codex_loader_submit_direct(cx))
+            .unwrap();
+        assert!(std::iter::from_fn(|| sink.try_recv().ok()).any(|command| matches!(command,
+            Command::LoadCodexSession { session_id, provider_session_id } if session_id == PARENT && provider_session_id == "codex-second"
+        )));
+        println!(
+            "running card required confirmation, then submitted exact target and selected UUID"
+        );
+        let Event::Graph(mut graph) = fixture.graph_event() else {
+            unreachable!()
+        };
+        graph["providerSessionLoadErrors"] = json!([{"sessionId": PARENT,"providerSessionId":"codex-second","error":"fixture error"}]);
+        deliver(window, cx, Event::Graph(graph));
+        window
+            .update(cx, |view, _, cx| {
+                view.assert_loader_submit(false, true, Some("fixture error"));
+                view.codex_loader_source_direct("claude-code", cx);
+            })
+            .unwrap();
+        assert!(
+            std::iter::from_fn(|| sink.try_recv().ok())
+                .any(|command| matches!(command, Command::ListProviderSessions { .. }))
+        );
+        draw(window, cx);
+        window
+            .update(cx, |_, window, _| window.remove_window())
+            .unwrap();
+        println!(
+            "provider switch reused the same panel and Claude list command; no key or mouse event delivered"
+        );
+    }
+
     fn verify_codex_permission_mode(cx: &mut AsyncApp) {
         const RECOVERING: &str = "当前终端需要先完成恢复";
         const LABELS: [(&str, &str); 4] = [
@@ -4865,6 +5119,7 @@ mod probe {
         let fork_only = std::env::args().any(|arg| arg == "--fork");
         let permission_only = std::env::args().any(|arg| arg == "--permission");
         let codex_permission_only = std::env::args().any(|arg| arg == "--codex-permission");
+        let codex_loader_only = std::env::args().any(|arg| arg == "--codex-loader");
         Application::new().with_assets(NativeAssets).run(move |cx| {
             if water_pointer_only {
                 cx.spawn(async |cx| {
@@ -4879,6 +5134,13 @@ mod probe {
                     if !show_deferred {
                         cx.update(|cx| cx.quit()).unwrap();
                     }
+                }).detach();
+                return;
+            }
+            if codex_loader_only {
+                cx.spawn(async |cx| {
+                    verify_codex_loader(cx);
+                    cx.update(|cx| cx.quit()).unwrap();
                 }).detach();
                 return;
             }

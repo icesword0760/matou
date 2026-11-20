@@ -1009,3 +1009,353 @@ fn codex_permission_requires_session_start_and_times_out_to_retryable_failure() 
     );
     shutdown(child)
 }
+
+fn catalog_fixture(home: &Path, cwd: &Path, id: &str, title: &str) -> Result<PathBuf> {
+    use std::io::Write;
+    let path = transcript(home, id)?;
+    fs::write(
+        &path,
+        format!(
+            "{}\n{}\n",
+            json!({"type": "session_meta", "payload": {"id": id, "cwd": cwd}}),
+            json!({"type": "response_item", "payload": {
+                "type": "message", "role": "user", "content": [{"text": "Find the synthetic needle"}]
+            }}),
+        ),
+    )?;
+    let mut titles = fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(home.join("session_index.jsonl"))?;
+    writeln!(
+        titles,
+        "{}",
+        json!({"id": id, "thread_name": title, "updated_at": "2026-11-20T00:00:00Z"})
+    )?;
+    Ok(path)
+}
+
+fn spawn_catalog_fixture(root: &Path) -> Result<(RuntimeChild, PathBuf)> {
+    let home = root.join("isolated Codex home");
+    fs::create_dir(&home)?;
+    fs::write(
+        home.join("config.toml"),
+        "approval_policy = \"untrusted\"\nsandbox_mode = \"read-only\"\n",
+    )?;
+    let fixture = root.join("fixture Codex");
+    fs::write(&fixture, include_bytes!("../fixtures/codex-launch.sh"))?;
+    fs::set_permissions(&fixture, fs::Permissions::from_mode(0o700))?;
+    let mut child = spawn(root)?;
+    child.hello()?;
+    Ok((child, home))
+}
+
+fn catalog_receipt(
+    child: &mut RuntimeChild,
+    key: &str,
+    accepts: impl Fn(&Value) -> bool,
+) -> Result<Value> {
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        match child
+            .event(deadline, true)
+            .with_context(|| format!("catalog receipt {key}"))?
+        {
+            Event::Graph(graph) => {
+                if let Some(row) = graph[key]
+                    .as_array()
+                    .and_then(|rows| rows.iter().find(|row| accepts(row)))
+                {
+                    return Ok(row.clone());
+                }
+            }
+            Event::Diagnostic(message) => println!("catalog diagnostic: {message}"),
+            Event::Closed => bail!("runtime closed waiting for {key}"),
+            _ => {}
+        }
+    }
+}
+
+fn list_catalog(child: &mut RuntimeChild, request_id: u64, query: &str) -> Result<Value> {
+    let cwd = child.workspace.display().to_string();
+    child.send(Command::ListCodexSessions {
+        request_id,
+        cwd,
+        query: query.into(),
+        full_text: false,
+        offset: None,
+        limit: Some(1),
+    })?;
+    catalog_receipt(child, "providerSessionCatalogResults", |row| {
+        row["provider"] == "codex" && row["requestId"] == request_id
+    })
+}
+
+fn load_catalog(
+    child: &mut RuntimeChild,
+    session_id: &str,
+    provider_session_id: &str,
+) -> Result<()> {
+    child.send(Command::LoadCodexSession {
+        session_id: session_id.into(),
+        provider_session_id: provider_session_id.into(),
+    })
+}
+
+fn catalog_sibling(
+    child: &mut RuntimeChild,
+    db: &Connection,
+    session: &str,
+) -> Result<(String, SessionRun)> {
+    child.send(Command::CreateShellSibling {
+        scene_id: child.scene.clone(),
+        source_session_id: session.to_owned(),
+        parent_session_id: None,
+    })?;
+    let deadline = Instant::now() + TIMEOUT;
+    let sibling = loop {
+        if let Event::Navigation { graph, .. } = child.event(deadline, true)?
+            && let Some(id) = graph["nodes"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find_map(|node| {
+                    node["sessionId"]
+                        .as_str()
+                        .filter(|id| *id != session)
+                        .map(str::to_owned)
+                })
+        {
+            break id;
+        }
+    };
+    let other = loop {
+        let runs = list_runs(db, &sibling)?;
+        if let Some(run) = runs.last().filter(|run| run.status == "running") {
+            break run.clone();
+        }
+        ensure!(Instant::now() < deadline, "sibling Shell did not start");
+        thread::sleep(Duration::from_millis(20));
+    };
+    Ok((sibling, other))
+}
+
+#[test]
+fn codex_catalog_load_replaces_same_card_and_rejects_duplicate_and_occupied() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let (mut child, home) = spawn_catalog_fixture(root.path())?;
+    let path = catalog_fixture(&home, &child.workspace, UUID, "续聊历史")?;
+    let session = child.session.clone();
+    let initial = list_catalog(&mut child, 10, "续聊")?;
+    assert_eq!(initial["total"], 1);
+    assert_eq!(initial["sessions"][0]["providerSessionId"], UUID);
+    assert!(initial["sessions"][0]["loadedBy"].is_null());
+    let cwd = child.workspace.display().to_string();
+    child.send(Command::SearchCodexSession {
+        request_id: 11,
+        cwd: cwd.clone(),
+        provider_session_id: UUID.into(),
+        query: "NEEDLE".into(),
+        offset: None,
+        limit: None,
+    })?;
+    let search = catalog_receipt(&mut child, "providerSessionDetailResults", |row| {
+        row["requestId"] == 11
+    })?;
+    assert_eq!(search["hits"][0]["eventIndex"], 1);
+    child.send(Command::GetCodexSession {
+        request_id: 12,
+        cwd,
+        provider_session_id: UUID.into(),
+        around_event_index: Some(1),
+        start_event_index: None,
+        limit: None,
+    })?;
+    let detail = catalog_receipt(&mut child, "providerSessionDetailResults", |row| {
+        row["requestId"] == 12
+    })?;
+    assert_eq!(detail["events"][0]["text"], "Find the synthetic needle");
+    println!("shared worker routed Codex list, search and preview via correlated graph receipts");
+
+    let db = open_data(&child)?;
+    let old = list_runs(&db, &session)?.pop().context("initial shell")?;
+    load_catalog(&mut child, &session, UUID)?;
+    load_catalog(&mut child, &session, UUID)?;
+    let duplicate = catalog_receipt(&mut child, "providerSessionLoadErrors", |row| {
+        row["sessionId"] == session
+    })?;
+    assert!(matches!(
+        duplicate["error"].as_str(),
+        Some("正在载入当前卡片" | "已载入当前卡片")
+    ));
+    child.frame(|_, screen, _| screen_has_line(screen, "FIXTURE CODEX RESUME"))?;
+    let args = fs::read_to_string(home.join("argv"))?;
+    let args: Vec<_> = args.split_terminator('\0').collect();
+    assert!(args.ends_with(&["resume", UUID]));
+    assert!(
+        args.windows(2)
+            .any(|args| args == ["--ask-for-approval", "untrusted"])
+    );
+    assert!(
+        args.windows(2)
+            .any(|args| args == ["--sandbox", "read-only"])
+    );
+    let cwd = fs::read_to_string(home.join("cwd"))?;
+    assert_eq!(
+        Path::new(cwd.trim()).canonicalize()?,
+        child.workspace.canonicalize()?
+    );
+    assert_eq!(
+        post_hook(&current_hook_url(&home)?, started(UUID, &path))?,
+        200
+    );
+    confirmed(&mut child, UUID)?;
+    replacement(&db, &session, &old)?;
+    assert_eq!(
+        codex_binding(&db, &session)?.unwrap().provider_session_id,
+        UUID
+    );
+    println!(
+        "same card kept original scene and loaded the same UUID; default permissions, cwd and first screen verified; old PID retired"
+    );
+
+    load_catalog(&mut child, &session, UUID)?;
+    let duplicate = catalog_receipt(&mut child, "providerSessionLoadErrors", |row| {
+        row["sessionId"] == session
+    })?;
+    assert_eq!(duplicate["error"], "已载入当前卡片");
+    let occupied = list_catalog(&mut child, 13, "续聊")?;
+    assert_eq!(occupied["sessions"][0]["loadedBy"]["sessionId"], session);
+    assert_eq!(occupied["sessions"][0]["loadedBy"]["title"], "续聊历史");
+
+    let (sibling, other) = catalog_sibling(&mut child, &db, &session)?;
+    load_catalog(&mut child, &sibling, UUID)?;
+    let elsewhere = catalog_receipt(&mut child, "providerSessionLoadErrors", |row| {
+        row["sessionId"] == sibling
+    })?;
+    assert_eq!(elsewhere["error"], "已载入“续聊历史”");
+    assert_eq!(list_runs(&db, &session)?.len(), 2);
+    assert_eq!(list_runs(&db, &sibling)?.last().unwrap().id, other.id);
+    assert!(codex_binding(&db, &sibling)?.is_none());
+    println!(
+        "pending and confirmed repeat rejected; refreshed list marks owner; occupied sibling's Shell untouched"
+    );
+
+    let new_path = catalog_fixture(&home, &child.workspace, FOREIGN, "另一段历史")?;
+    load_catalog(&mut child, &sibling, FOREIGN)?;
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        if let Event::Frame {
+            session_id, screen, ..
+        } = child.event(deadline, true)?
+            && session_id == sibling
+            && screen_has_line(&screen, "FIXTURE CODEX RESUME")
+        {
+            break;
+        }
+    }
+    assert_eq!(
+        post_hook(&current_hook_url(&home)?, started(FOREIGN, &new_path))?,
+        200
+    );
+    let identity = catalog_receipt(&mut child, "providerIdentityEvents", |row| {
+        row["sessionId"] == sibling && row["result"] == "confirmed"
+    })?;
+    assert_eq!(identity["providerSessionId"], FOREIGN);
+    replacement(&db, &sibling, &other)?;
+    assert_eq!(
+        codex_binding(&db, &sibling)?.unwrap().provider_session_id,
+        FOREIGN
+    );
+    println!("fresh sibling card uses the same loader; retained both distinct UUIDs");
+    shutdown(child)?;
+    Ok(())
+}
+
+#[test]
+fn codex_catalog_missing_selection_and_failed_respawn_recover_without_new_uuid() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let (mut child, home) = spawn_catalog_fixture(root.path())?;
+    let session = child.session.clone();
+    let db = open_data(&child)?;
+    let old = list_runs(&db, &session)?.pop().context("initial shell")?;
+    load_catalog(&mut child, &session, UUID)?;
+    let missing = catalog_receipt(&mut child, "providerSessionLoadErrors", |row| {
+        row["sessionId"] == session
+    })?;
+    assert_eq!(
+        missing["error"],
+        "Provider session was not found in this working directory"
+    );
+    assert_eq!(list_runs(&db, &session)?.last().unwrap().id, old.id);
+    assert!(codex_binding(&db, &session)?.is_none());
+    println!(
+        "missing selection rejected before changing the current process or creating a binding"
+    );
+    let path = catalog_fixture(&home, &child.workspace, UUID, "可重试历史")?;
+    fs::write(home.join("early-exit"), "")?;
+    load_catalog(&mut child, &session, UUID)?;
+    let receipt = catalog_receipt(&mut child, "providerIdentityEvents", |row| {
+        row["sessionId"] == session && row["result"] == "restore-failed"
+    })?;
+    assert_eq!(receipt["providerSessionId"], UUID);
+    assert!(
+        receipt["restoreError"]
+            .as_str()
+            .is_some_and(|error| error.contains("23")),
+        "{receipt}"
+    );
+    let failed_binding = codex_binding(&db, &session)?.unwrap();
+    assert_eq!(failed_binding.restore_state, "failed");
+    assert_eq!(failed_binding.provider_session_id, UUID);
+    assert_shell_gone(old.pid.context("old PID")? as u32)?;
+    fs::remove_file(home.join("early-exit"))?;
+    fs::write(home.join("config.toml"), "")?;
+    // A competing loader can claim the released identity after a failure.
+    let (sibling, _) = catalog_sibling(&mut child, &db, &session)?;
+    load_catalog(&mut child, &sibling, UUID)?;
+    child.send(Command::RetryProviderRestore {
+        session_id: session.clone(),
+    })?;
+    let rejected = catalog_receipt(&mut child, "providerIdentityEvents", |row| {
+        row["sessionId"] == session && row["reason"] == "catalog-identity-occupied"
+    })?;
+    assert_eq!(rejected["result"], "rejected");
+    assert_eq!(
+        codex_binding(&db, &session)?.unwrap().restore_state,
+        "failed"
+    );
+    child.send(Command::CloseSessionCard {
+        scene_id: child.scene.clone(),
+        session_id: sibling.clone(),
+        confirmed_intent: Some(format!("delete-session:{sibling}")),
+        preserve_scene_on_last_session: true,
+    })?;
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        if let Event::ScenesDisposed(cards) = child.event(deadline, true)?
+            && cards.contains(&sibling)
+        {
+            break;
+        }
+    }
+    println!("failed card could not retry while a different card claimed the same UUID");
+    child.send(Command::RetryProviderRestore {
+        session_id: session.clone(),
+    })?;
+    first_screen(&mut child, &home, Some(UUID), false)?;
+    assert_eq!(
+        post_hook(&current_hook_url(&home)?, started(UUID, &path))?,
+        200
+    );
+    confirmed(&mut child, UUID)?;
+    let recovered = codex_binding(&db, &session)?.unwrap();
+    assert_eq!(recovered.id, failed_binding.id);
+    assert_eq!(recovered.provider_session_id, UUID);
+    assert_eq!(recovered.restore_state, "none");
+    println!(
+        "early exit 23 used the shared failure state; explicit Retry confirmed the same binding and UUID"
+    );
+    shutdown(child)?;
+    Ok(())
+}
