@@ -8,6 +8,26 @@ use serde_json::{Value, json};
 
 const GROUPS: [&str; 5] = ["work", "cwd", "summary", "tail", "bufferedSummary"];
 
+#[test]
+fn cwd_normalizes_only_a_literal_drive_in_the_first_file_url_segment() {
+    let mut tracker = CwdTracker::default();
+    for (url, expected) in [
+        ("file:///C|/a%20b", Some("/C:/a b")),
+        ("file://localhost/c|", Some("/c:")),
+        ("file:///C%7C/a", Some("/C|/a")),
+        ("file:///C|suffix/a", Some("/C|suffix/a")),
+        ("file:///1|/a", Some("/1|/a")),
+        ("file:///dir/C|/a", Some("/dir/C|/a")),
+        ("https://localhost/C|/a", None),
+    ] {
+        assert_eq!(
+            tracker.ingest(&format!("\x1b]7;{url}\x07")).as_deref(),
+            expected,
+            "{url}"
+        );
+    }
+}
+
 fn string(field: &Value) -> Result<&str> {
     field.as_str().context("fixture field must be a string")
 }

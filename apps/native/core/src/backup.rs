@@ -156,13 +156,32 @@ impl BackupService {
         let partial = add_suffix(&path, ".partial");
         let partial_manifest = add_suffix(&manifest, ".partial");
 
-        let result = (|| {
+        // Runtime ownership serializes creation for this data root. A timestamp
+        // may still collide with a backup from an earlier service instance.
+        for (target, stage) in [
+            (&path, "publish backup database"),
+            (&manifest, "publish backup manifest"),
+        ] {
+            match fs::symlink_metadata(target) {
+                Ok(metadata) if !metadata.is_dir() => {
+                    return Err(io::Error::from(io::ErrorKind::AlreadyExists))
+                        .with_context(|| backup_target(stage, target));
+                }
+                // Leave directory conflicts to rename so the OS error survives.
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error).with_context(|| backup_target(stage, target)),
+            }
+        }
+
+        let mut unpaired = false;
+        let result: Result<_> = (|| {
             online_backup(connection, &partial, budget)?;
             assert_integrity_with_budget(&partial, budget)?;
             let (size, sha256) = hash_file_with_budget(&partial, budget)?;
             let descriptor = BackupDescriptor {
                 id,
-                path,
+                path: path.clone(),
                 created_at,
                 reason,
                 schema_version,
@@ -174,7 +193,9 @@ impl BackupService {
                 test_stage(TestStage::BeforeSqlitePublish, budget);
             }
             check_budget(budget)?;
-            fs::rename(&partial, &descriptor.path)?;
+            fs::rename(&partial, &path)
+                .with_context(|| backup_target("publish backup database", &path))?;
+            unpaired = true;
             check_budget(budget)?;
             write_manifest(&partial_manifest, &descriptor)?;
             #[cfg(test)]
@@ -182,13 +203,26 @@ impl BackupService {
                 test_stage(TestStage::BeforeManifestPublish, budget);
             }
             check_budget(budget)?;
-            fs::rename(&partial_manifest, manifest)?;
+            fs::rename(&partial_manifest, &manifest)
+                .with_context(|| backup_target("publish backup manifest", &manifest))?;
+            unpaired = false;
             check_budget(budget)?;
             Ok(descriptor)
         })();
-        if result.is_err() {
+        if let Err(error) = result {
             let _ = remove_partial_backup(&partial);
             let _ = remove_file_if_present(&partial_manifest);
+            if unpaired {
+                // All destination SQLite handles are closed and the manifest
+                // was never published, so this path is not a restore candidate.
+                if let Err(cleanup_error) = remove_unpaired_backup(&path) {
+                    return Err(error.context(format!(
+                        "failed to clean up unpaired backup {}: {cleanup_error}",
+                        path.display()
+                    )));
+                }
+            }
+            return Err(error);
         }
         result
     }
@@ -327,7 +361,8 @@ impl BackupService {
                 drop(old);
                 assert_integrity(&replaced_partial)?;
                 hash_file(&replaced_partial)?;
-                rename(&replaced_partial, &replaced)?;
+                rename(&replaced_partial, &replaced)
+                    .with_context(|| backup_target("publish restore rollback", &replaced))?;
             }
 
             if let Err(error) = rename(&temporary, &target) {
@@ -359,6 +394,16 @@ impl BackupService {
         self.last_timestamp = now.max(after_previous);
         Ok(self.last_timestamp)
     }
+}
+
+fn backup_target(stage: &str, target: &Path) -> String {
+    format!(
+        "failed to {stage} at {}",
+        target
+            .file_name()
+            .unwrap_or(target.as_os_str())
+            .to_string_lossy()
+    )
 }
 
 fn parse_backup_id(id: &str) -> Option<(i64, BackupReason, i64)> {
@@ -585,6 +630,23 @@ fn remove_partial_backup(path: &Path) -> io::Result<()> {
         Err(error) => return Err(error),
     }
     remove_file_if_present(&add_suffix(path, "-shm"))?;
+    remove_file_if_present(path)
+}
+
+fn remove_unpaired_backup(path: &Path) -> io::Result<()> {
+    let sidecars = [add_suffix(path, "-wal"), add_suffix(path, "-shm")];
+    for sidecar in &sidecars {
+        match fs::symlink_metadata(sidecar) {
+            Ok(metadata) if metadata.is_file() && metadata.len() == 0 => {}
+            // A nonempty or unexpected sidecar can indicate external use.
+            Ok(_) => return Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    for sidecar in sidecars {
+        remove_file_if_present(&sidecar)?;
+    }
     remove_file_if_present(path)
 }
 
@@ -848,11 +910,17 @@ mod tests {
             let partial = service
                 .directory
                 .join("matou-2-clean-exit-v0.sqlite.partial");
+            let published = service.directory.join("matou-2-clean-exit-v0.sqlite");
+            let unpaired = published.clone();
             let guard = hook(move |stage, budget| {
                 if stage == target {
                     if stage == TestStage::HashBlock {
                         fs::write(add_suffix(&partial, "-wal"), []).unwrap();
                         fs::write(add_suffix(&partial, "-shm"), [0; 32 * 1024]).unwrap();
+                    }
+                    if stage == TestStage::BeforeManifestPublish {
+                        fs::write(add_suffix(&unpaired, "-wal"), []).unwrap();
+                        fs::write(add_suffix(&unpaired, "-shm"), []).unwrap();
                     }
                     observed.set(true);
                     expire_at_stage(budget);
@@ -866,18 +934,8 @@ mod tests {
             timeout(&error);
             assert_eq!(service.list_valid()?, vec![previous.clone()]);
             assert_eq!(fs::read(previous.path)?, bytes);
-            let sqlite_published = target == TestStage::BeforeManifestPublish;
-            assert_eq!(
-                service
-                    .directory
-                    .join("matou-2-clean-exit-v0.sqlite")
-                    .exists(),
-                sqlite_published
-            );
-            assert_eq!(
-                fs::read_dir(&service.directory)?.count(),
-                if sqlite_published { 3 } else { 2 }
-            );
+            assert!(!published.exists());
+            assert_eq!(fs::read_dir(&service.directory)?.count(), 2);
             println!("{target:?} timeout removed partial files and sidecars");
         }
         Ok(())
@@ -1055,7 +1113,10 @@ mod tests {
                 })
                 .unwrap_err();
             assert!(injected);
-            assert_eq!(error.to_string(), case["error"].as_str().unwrap());
+            assert_eq!(
+                error.root_cause().to_string(),
+                case["error"].as_str().unwrap()
+            );
             assert_eq!(load_value(&target)?, expected);
             assert_eq!(load_value(&descriptor.path)?, "from-backup");
             assert_eq!(fs::read(&descriptor.path)?, original_backup);

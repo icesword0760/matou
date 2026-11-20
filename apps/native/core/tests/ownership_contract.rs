@@ -19,6 +19,37 @@ const WAIT: Duration = Duration::from_secs(15);
 const CHILD_ROOT: &str = "MATOU_OWNERSHIP_TEST_ROOT";
 const CHILD_ID: &str = "MATOU_OWNERSHIP_TEST_ID";
 
+#[cfg(unix)]
+#[test]
+fn release_retries_the_same_lease_after_directory_permissions_are_restored() -> Result<()> {
+    use matou_native_core::ownership::assert_no_live_owner;
+    use std::{io, os::unix::fs::PermissionsExt};
+
+    if unsafe { libc::geteuid() } == 0 {
+        return Ok(());
+    }
+    let root = tempfile::tempdir()?;
+    let db = root.path().join("matou.sqlite");
+    let lock = root.path().join("matou.sqlite.owner");
+    let mut lease = DatabaseOwner::acquire(&db, GENERATION)?;
+    fs::set_permissions(root.path(), fs::Permissions::from_mode(0o555))?;
+    let denied = lease.release();
+    fs::set_permissions(root.path(), fs::Permissions::from_mode(0o755))?;
+
+    let error = denied.unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<io::Error>().unwrap().raw_os_error(),
+        Some(libc::EACCES)
+    );
+    assert!(lock.is_file());
+    assert!(assert_no_live_owner(&db).is_err());
+    lease.release()?;
+    assert_no_live_owner(&db)?;
+    assert_eq!(fs::read_dir(root.path())?.count(), 0);
+    assert!(error.to_string().contains(lock.to_str().unwrap()));
+    Ok(())
+}
+
 #[test]
 fn agrees_with_nine_captured_reference_cases() -> Result<()> {
     let fixture: Value = serde_json::from_str(include_str!("fixtures/owner-reference.json"))?;
@@ -430,7 +461,12 @@ mod gate {
                     let display = |text: &str| text.replace(directory.to_str().unwrap(), "<root>");
                     let recovery = error.downcast_ref::<OwnerRecoveryError>();
                     observation["status"] = json!("error");
-                    observation["message"] = json!(display(&error.to_string()));
+                    let message = if op == "release" {
+                        format!("{error:#}")
+                    } else {
+                        error.to_string()
+                    };
+                    observation["message"] = json!(display(&message));
                     observation["code"] = json!(recovery.map(|error| error.code));
                     observation["issue"] = json!(recovery.map(|error| error.issue));
                     observation["statePath"] =

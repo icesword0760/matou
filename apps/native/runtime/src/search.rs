@@ -97,7 +97,8 @@ impl SessionSearch {
         // The source stores the new options before checking whether to rebuild
         // decorations. Toggling options for the same query keeps cached highlights.
         self.last_options = options;
-        let active = if query.is_empty() {
+        let empty_query = query.is_empty();
+        let active = if empty_query {
             self.clear();
             None
         } else {
@@ -140,7 +141,7 @@ impl SessionSearch {
                     (entry.row, entry.col, entry.size) == (found.row, found.col, found.size)
                 })
             })
-            .map_or(-1, |index| index as isize);
+            .map_or(if empty_query { 0 } else { -1 }, |index| index as isize);
         Ok(SearchResult {
             sequence,
             matches: self.matches.clone(),

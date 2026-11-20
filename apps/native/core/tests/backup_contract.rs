@@ -250,7 +250,7 @@ fn restore_keeps_committed_old_wal_in_rollback_and_removes_obsolete_sidecars() -
 }
 
 #[test]
-fn failed_manifest_publication_leaves_the_database_but_not_a_recovery_choice() -> Result<()> {
+fn failed_manifest_publication_removes_the_unpaired_database_and_allows_retry() -> Result<()> {
     let root = tempfile::tempdir()?;
     let source = seed_wal(
         &root.path().join("source.sqlite"),
@@ -268,10 +268,10 @@ fn failed_manifest_publication_leaves_the_database_but_not_a_recovery_choice() -
             .is_err()
     );
     assert!(service.list_valid()?.is_empty());
-    let published = backup_dir.join("matou-1000-pre-migration-v5.sqlite");
-    assert_eq!(
-        read_snapshot(&published, "restored_rows")?["rows"],
-        json!([{"value": "from-backup"}])
+    assert!(
+        !backup_dir
+            .join("matou-1000-pre-migration-v5.sqlite")
+            .exists()
     );
     assert!(
         !backup_dir
@@ -285,6 +285,10 @@ fn failed_manifest_publication_leaves_the_database_but_not_a_recovery_choice() -
     );
     let next = service.create(&source, BackupReason::PreMigration, 1_000)?;
     assert_eq!(next.id, "matou-1001-pre-migration-v5");
+    assert_eq!(
+        read_snapshot(&next.path, "restored_rows")?["rows"],
+        json!([{"value": "from-backup"}])
+    );
     assert_eq!(service.list_valid()?, vec![next]);
     Ok(())
 }

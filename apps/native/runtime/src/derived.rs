@@ -173,7 +173,13 @@ fn file_url_path(raw: &str) -> Option<String> {
             return None;
         }
     }
-    Some(percent_decode_str(path).decode_utf8().ok()?.into_owned())
+    let mut decoded = percent_decode_str(path).decode_utf8().ok()?.into_owned();
+    if matches!(path.as_bytes(), [b'/', drive, b'|', rest @ ..]
+        if drive.is_ascii_alphabetic() && (rest.is_empty() || rest[0] == b'/'))
+    {
+        decoded.replace_range(2..3, ":");
+    }
+    Some(decoded)
 }
 
 pub fn terminal_summary_lines(raw: &str) -> Vec<String> {
