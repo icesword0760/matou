@@ -45,6 +45,10 @@ const VIEW_SAVED: &str = "模型分配已保存，新会话将使用此配置";
 const VIEW_SAVE_ERROR: &str = "保存未确认，请重试。原选择已保留。";
 const VIEW_PRIVACY: &str = "使用指定供应商时，请求所需的对话内容会发送给该供应商。";
 const VIEW_SCOPE: &str = "新会话使用此分配，正在运行的会话不受影响";
+const VIEW_SEARCH_TIER: &str = "网页搜索";
+const VIEW_SEARCH_UNASSIGNED: &str = "未指定";
+const VIEW_SEARCH_FOLLOW_TIER: &str = "未指定：搜索请求使用当前档位供应商";
+const VIEW_SEARCH_NOTE: &str = "搜索请求会连同当前对话内容发送给该供应商";
 
 // Frozen status colors from `claude-role-assignments.css`; the shell currently
 // has no success token, so these stay local to the assignment block.
@@ -69,7 +73,7 @@ const VIEW_NARROW_BREAKPOINT: f32 = 640.;
 /// One frame of the frozen assignment block, supplied by the settings logic.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct AssignmentPanel {
-    pub(crate) rows: [AssignmentRow; 3],
+    pub(crate) rows: [AssignmentRow; 4],
     pub(crate) status: AssignmentStatus,
     pub(crate) can_save: bool,
     pub(crate) can_restore: bool,
@@ -96,6 +100,8 @@ pub(crate) struct AssignmentRow {
     pub(crate) effort: AssignmentSelect,
     pub(crate) manual_model: Option<String>,
     pub(crate) target: String,
+    /// Row-local explanatory copy, rendered in the row's meta area.
+    pub(crate) note: Option<String>,
     pub(crate) problem: Option<String>,
     pub(crate) retry_catalog: bool,
 }
@@ -175,30 +181,30 @@ impl EventEmitter<AssignmentAction> for AssignmentView {}
 /// The assignment block view. The parent keeps one entity for the settings
 /// lifetime and calls [`AssignmentView::render_panel`] with the current panel.
 pub(crate) struct AssignmentView {
-    /// [row][provider / model / effort] trigger focus handles.
-    controls: [[FocusHandle; 3]; 3],
-    /// Slot 0 is the disconnect retry; slots 1..=3 are the per-row catalog retry.
-    retry_focus: [FocusHandle; 4],
+    /// [row][provider / model / effort] trigger focus handles. Row 3 is web search.
+    controls: [[FocusHandle; 3]; 4],
+    /// Slot 0 is the disconnect retry; slots 1..=4 are the per-row catalog retry.
+    retry_focus: [FocusHandle; 5],
     restore_focus: FocusHandle,
     save_focus: FocusHandle,
-    manual_inputs: [Entity<RenameInput>; 3],
+    manual_inputs: [Entity<RenameInput>; 4],
     _manual_subscriptions: Vec<Subscription>,
-    manual_edit: [bool; 3],
-    manual_sync_suppress: [bool; 3],
+    manual_edit: [bool; 4],
+    manual_sync_suppress: [bool; 4],
     open_menu: Option<OpenAssignmentMenu>,
-    trigger_bounds: Rc<RefCell<[[Option<Bounds<Pixels>>; 3]; 3]>>,
+    trigger_bounds: Rc<RefCell<[[Option<Bounds<Pixels>>; 3]; 4]>>,
     menu_scroll: ScrollHandle,
     pending_focus: Option<FocusHandle>,
 }
 
 impl AssignmentView {
     pub(crate) fn new(cx: &mut Context<Self>) -> Self {
-        let controls: [[FocusHandle; 3]; 3] =
+        let controls: [[FocusHandle; 3]; 4] =
             std::array::from_fn(|_| std::array::from_fn(|_| cx.focus_handle().tab_stop(true)));
         let retry_focus = std::array::from_fn(|_| cx.focus_handle().tab_stop(true));
         let restore_focus = cx.focus_handle().tab_stop(true);
         let save_focus = cx.focus_handle().tab_stop(true);
-        let manual_inputs: [Entity<RenameInput>; 3] = std::array::from_fn(|_| {
+        let manual_inputs: [Entity<RenameInput>; 4] = std::array::from_fn(|_| {
             cx.new(|cx| {
                 let mut input = RenameInput::new(String::new(), cx);
                 // Model ids are routinely longer than the editor's 20-unit
@@ -209,7 +215,7 @@ impl AssignmentView {
             })
         });
 
-        let mut subscriptions = Vec::with_capacity(3);
+        let mut subscriptions = Vec::with_capacity(4);
         for (index, input) in manual_inputs.iter().enumerate() {
             let model_focus = controls[index][AssignmentColumn::Model.index()].clone();
             subscriptions.push(cx.subscribe(input, move |this, _, event, cx| match event {
@@ -238,10 +244,10 @@ impl AssignmentView {
             save_focus,
             manual_inputs,
             _manual_subscriptions: subscriptions,
-            manual_edit: [false; 3],
-            manual_sync_suppress: [false; 3],
+            manual_edit: [false; 4],
+            manual_sync_suppress: [false; 4],
             open_menu: None,
-            trigger_bounds: Rc::new(RefCell::new([[None; 3]; 3])),
+            trigger_bounds: Rc::new(RefCell::new([[None; 3]; 4])),
             menu_scroll: ScrollHandle::new(),
             pending_focus: None,
         }
@@ -410,8 +416,8 @@ impl AssignmentView {
                 keyboard_focus,
                 cx,
                 |this, _, cx| {
-                    this.manual_edit = [false; 3];
-                    this.manual_sync_suppress = [false; 3];
+                    this.manual_edit = [false; 4];
+                    this.manual_sync_suppress = [false; 4];
                     cx.emit(AssignmentAction::Restore);
                     cx.notify();
                 },
@@ -677,6 +683,17 @@ impl AssignmentView {
             );
             has_meta = true;
         }
+        if let Some(note) = row.note.as_deref() {
+            meta = meta.child(
+                div()
+                    .text_size(px(10.))
+                    .line_height(relative(1.55))
+                    .text_color(rgb(MUTED))
+                    .whitespace_normal()
+                    .child(note.to_owned()),
+            );
+            has_meta = true;
+        }
         if let Some(problem) = row.problem.as_deref() {
             meta = meta.child(self.problem_line(
                 index,
@@ -693,7 +710,7 @@ impl AssignmentView {
             .flex_col()
             .gap(px(4.))
             .py(px(VIEW_ROW_PADDING_Y));
-        if index < 2 {
+        if index < SEARCH_INDEX {
             container = container.border_b_1().border_color(rgba(LINE));
         }
         if problem {
@@ -1502,7 +1519,9 @@ use crate::{
 };
 
 const ROLES: [&str; 3] = ["opus", "sonnet", "haiku"];
-const TIERS: [&str; 3] = ["Opus", "Sonnet", "Haiku"];
+const TIERS: [&str; 4] = ["Opus", "Sonnet", "Haiku", VIEW_SEARCH_TIER];
+/// Index of the fourth (web search) row in [`AssignmentPanel::rows`].
+const SEARCH_INDEX: usize = 3;
 const FOLLOW_PROVIDER: &str = "沿用默认供应商";
 const CHOOSE_MODEL: &str = "请选择模型";
 static NEXT_ASSIGNMENT_REQUEST: AtomicU64 = AtomicU64::new(1);
@@ -1573,6 +1592,23 @@ fn inherited_effort<'a>(provider: &'a Value, role: &str) -> &'a str {
         .or_else(|| provider["reasoningEffort"].as_str())
         .filter(|effort| EFFORTS.contains(effort))
         .unwrap_or("follow")
+}
+
+/// Web search has no role mapping: an omitted effort inherits the provider's
+/// global effort, while an explicit `follow` stays on the row and blocks that
+/// inheritance.
+fn global_effort(provider: &Value) -> &str {
+    provider["reasoningEffort"]
+        .as_str()
+        .filter(|effort| EFFORTS.contains(effort))
+        .unwrap_or("follow")
+}
+
+fn search_models(provider: &Value, native: &[Value]) -> Vec<AssignmentOption> {
+    // Reuse the tier directory behavior: with no authoritative directory the
+    // startup/tier models stay as suggestions and manual ids remain allowed.
+    // An existing but empty directory yields no fallback suggestions.
+    available_models(provider, native)
 }
 
 fn effort_choices(provider: &Value, model: &str, native: &[Value]) -> Vec<&'static str> {
@@ -1654,6 +1690,73 @@ fn row_problem(
     (!effort_choices(provider, id, native).contains(&effort)).then_some(Problem::Effort)
 }
 
+/// A web-search row is stricter than a tier row: the target must be a
+/// Claude Code API Key target, and a manual model id is checked after trimming.
+fn search_problem(
+    provider: Option<&Value>,
+    model: &str,
+    effort: &str,
+    native: &[Value],
+) -> Option<Problem> {
+    let Some(provider) = provider else {
+        // A stored target whose provider was deleted keeps its old value.
+        return Some(Problem::Provider);
+    };
+    // The frozen runtime rejects subscription targets as unavailable search
+    // providers; the row keeps the stored value so the user can clear it.
+    if subscription(provider) {
+        return Some(Problem::Provider);
+    }
+    if provider["hasApiKey"] != true {
+        return Some(Problem::Key);
+    }
+    // An existing but empty authoritative/native directory is reported before
+    // the empty-model prompt, so the user is not asked to pick a model that
+    // cannot exist yet.
+    let directory = catalog(provider, native);
+    if directory.is_some_and(|models| models.is_empty()) {
+        return Some(Problem::Catalog);
+    }
+    let id = trim_name(model);
+    if id.is_empty() {
+        return Some(Problem::Empty);
+    }
+    if model.encode_utf16().count() > 240 || model.chars().any(|ch| ch.is_ascii_control()) {
+        return Some(Problem::Invalid);
+    }
+    // After trimming both ends the frozen search validator rejects any
+    // whitespace, Unicode control (including U+0085 and DEL) and an interior
+    // BOM in the remaining value.
+    if id
+        .chars()
+        .any(|ch| ch.is_control() || ch.is_whitespace() || ch == '\u{feff}')
+    {
+        return Some(Problem::Invalid);
+    }
+    if let Some(models) = directory
+        && model_metadata(models, id).is_none()
+    {
+        return Some(Problem::Model);
+    }
+    (!effort_choices(provider, id, native).contains(&effort)).then_some(Problem::Effort)
+}
+
+fn search_patch(search: Option<&ClaudeRoleAssignment>) -> Option<Value> {
+    match search {
+        Some(target) => serde_json::to_value(target).ok(),
+        None => Some(Value::Null),
+    }
+}
+
+/// A search-row effort selection is always explicit, including `follow`.
+/// Storing it prevents a later provider-global change from re-enabling
+/// inheritance on a row the user deliberately set to follow.
+fn store_search_effort(search: &mut Option<ClaudeRoleAssignment>, effort: &str) {
+    if let Some(target) = search {
+        target.effort = Some(effort.to_owned());
+    }
+}
+
 fn account_caption(provider: Option<&Value>, assigned: bool) -> String {
     if !assigned {
         let name = provider
@@ -1713,6 +1816,13 @@ fn available_models(provider: &Value, native: &[Value]) -> Vec<AssignmentOption>
 
 fn allows_manual(provider: &Value) -> bool {
     !subscription(provider) && provider["builtIn"] != true && catalog(provider, &[]).is_none()
+}
+
+/// The search row only trusts an explicit directory. A built-in provider whose
+/// endpoint was changed to a custom API is no longer `official`, so it can use
+/// a manually typed model when it has no `modelMetadata` field.
+fn allows_manual_search(provider: &Value) -> bool {
+    !subscription(provider) && !official(provider) && provider.get("modelMetadata").is_none()
 }
 
 fn default_model<'a>(provider: &'a Value, role: &str, native: &'a [Value]) -> Option<&'a str> {
@@ -1786,7 +1896,9 @@ pub(crate) struct ClaudeAssignments {
     pending: Option<PendingAssignment>,
     baseline: Option<ClaudeRoleAssignments>,
     draft: ClaudeRoleAssignments,
-    manual: [bool; 3],
+    search_baseline: Option<ClaudeRoleAssignment>,
+    search_draft: Option<ClaudeRoleAssignment>,
+    manual: [bool; 4],
     load_error: bool,
     save_error: bool,
     saved: bool,
@@ -1800,7 +1912,9 @@ impl ClaudeAssignments {
             pending: None,
             baseline: None,
             draft: ClaudeRoleAssignments::new(),
-            manual: [false; 3],
+            search_baseline: None,
+            search_draft: None,
+            manual: [false; 4],
             load_error: false,
             save_error: false,
             saved: false,
@@ -1871,6 +1985,10 @@ impl ClaudeAssignments {
                 && provider["id"].as_str().is_some_and(|id| {
                     providers.active_id() == Some(id)
                         || self.draft.values().any(|row| row.provider_id == id)
+                        || self
+                            .search_draft
+                            .as_ref()
+                            .is_some_and(|row| row.provider_id == id)
                 })
         });
         let (generation, phase) = self.commands.connection();
@@ -1915,9 +2033,9 @@ impl ClaudeAssignments {
     }
 
     fn dirty(&self) -> bool {
-        self.baseline
-            .as_ref()
-            .is_some_and(|baseline| baseline != &self.draft)
+        self.baseline.as_ref().is_some_and(|baseline| {
+            baseline != &self.draft || self.search_baseline != self.search_draft
+        })
     }
 
     pub(crate) fn receive(&mut self, reply: ClaudeRoleAssignmentsReply) {
@@ -1930,14 +2048,30 @@ impl ClaudeAssignments {
             return;
         }
         let pending = self.pending.take().expect("matching assignment request");
+        let saved = pending.operation == AssignmentRequest::Save;
+        if saved && reply.web_search.is_none() && self.search_baseline != self.search_draft {
+            self.fail(pending.operation);
+            return;
+        }
+        // An older runtime can acknowledge a tiers-only save without this field.
+        let search = match reply.web_search {
+            Some(search) => Some(search),
+            None if saved => None,
+            None => Some(None),
+        };
         let Some(assignments) = reply.assignments.filter(|_| reply.error.is_none()) else {
             self.fail(pending.operation);
             return;
         };
-        let saved = pending.operation == AssignmentRequest::Save;
         if saved || !self.dirty() {
             self.draft = assignments.clone();
-            self.manual = [false; 3];
+            self.manual = [false; 4];
+            if let Some(search) = &search {
+                self.search_draft = search.clone();
+            }
+        }
+        if let Some(search) = search {
+            self.search_baseline = search;
         }
         self.baseline = Some(assignments);
         self.load_error = false;
@@ -2018,11 +2152,21 @@ impl ClaudeAssignments {
     }
 
     fn row_provider<'a>(&self, index: usize, providers: &'a ProviderSettings) -> Option<&'a Value> {
-        let provider_id = self
-            .draft
-            .get(ROLES[index])
-            .map(|row| row.provider_id.as_str());
-        let effective_id = provider_id.or(providers.active_id());
+        let (provider_id, fallback) = if index == SEARCH_INDEX {
+            (
+                self.search_draft
+                    .as_ref()
+                    .map(|row| row.provider_id.as_str()),
+                None,
+            )
+        } else {
+            let role = ROLES.get(index)?;
+            (
+                self.draft.get(*role).map(|row| row.provider_id.as_str()),
+                providers.active_id(),
+            )
+        };
+        let effective_id = provider_id.or(fallback);
         providers.providers().iter().find(|provider| {
             provider["id"]
                 .as_str()
@@ -2031,10 +2175,13 @@ impl ClaudeAssignments {
     }
 
     pub(crate) fn uses_native_catalog(&self, index: usize, providers: &ProviderSettings) -> bool {
-        self.row_provider(index, providers).is_some_and(official)
+        index <= SEARCH_INDEX && self.row_provider(index, providers).is_some_and(official)
     }
 
     fn row(&self, index: usize, providers: &ProviderSettings, enabled: bool) -> AssignmentRow {
+        if index == SEARCH_INDEX {
+            return self.search_row(providers, enabled);
+        }
         let role = ROLES[index];
         let tier = TIERS[index];
         let assigned = self.draft.get(role);
@@ -2151,7 +2298,122 @@ impl ClaudeAssignments {
             effort: select(efforts, effort, selectable),
             manual_model: manual.then(|| selected.to_owned()),
             target,
+            note: None,
             problem: problem_text,
+            retry_catalog: problem == Some(Problem::Catalog),
+        }
+    }
+
+    /// The fourth row is an independent web-search target. It is unassigned by
+    /// default and does not fall back to the active provider in the editor.
+    fn search_row(&self, providers: &ProviderSettings, enabled: bool) -> AssignmentRow {
+        let assigned = self.search_draft.as_ref();
+        let provider_id = assigned.map(|row| row.provider_id.as_str());
+        let provider = self.row_provider(SEARCH_INDEX, providers);
+        let provider_value = provider.unwrap_or(&Value::Null);
+        let provider_name = provider_value["name"]
+            .as_str()
+            .or(provider_id)
+            .unwrap_or("—");
+        let native = self.native_catalog.models();
+        let choices = search_models(provider_value, native);
+        let selected = assigned.map(|row| row.model.as_str()).unwrap_or_default();
+        let effort = assigned
+            .and_then(|row| row.effort.as_deref())
+            .unwrap_or_else(|| global_effort(provider_value));
+        // With no authoritative directory the startup/tier models stay as
+        // suggestions and a manual id is allowed; validation only trusts an
+        // existing authoritative or native directory.
+        let manual_allowed = provider.is_some_and(allows_manual_search);
+        let unavailable_model =
+            !selected.is_empty() && !choices.iter().any(|model| model.value == selected);
+        let manual = manual_allowed && (self.manual[SEARCH_INDEX] || unavailable_model);
+        let problem = assigned.and_then(|_| search_problem(provider, selected, effort, native));
+        let selectable = enabled
+            && assigned.is_some()
+            && provider.is_some_and(|provider| !subscription(provider));
+
+        let mut provider_items = vec![option("", VIEW_SEARCH_UNASSIGNED)];
+        if let Some(id) = provider_id.filter(|_| provider.is_none_or(subscription)) {
+            provider_items.push(option(id, format!("{id} · 不可用")));
+        }
+        provider_items.extend(providers.providers().iter().filter_map(|provider| {
+            // Only Claude Code provider targets are selectable; subscription
+            // providers stay out of the menu. A keyless target stays
+            // selectable so its frozen "API Key 未配置" reason is visible, and
+            // a stored subscription remains visible until the user clears it.
+            if subscription(provider) {
+                return None;
+            }
+            let id = provider["id"].as_str()?;
+            Some(option(id, provider["name"].as_str().unwrap_or(id)))
+        }));
+
+        let mut model_items = vec![option("", CHOOSE_MODEL)];
+        let model_selection = if assigned.is_none() {
+            model_items[0].label = VIEW_SEARCH_UNASSIGNED.into();
+            ""
+        } else {
+            if unavailable_model && !manual {
+                model_items.push(option(selected, format!("{selected} · 不可用")));
+            }
+            model_items.extend(choices);
+            if manual_allowed {
+                model_items.push(option(MANUAL_MODEL_SENTINEL, "手动填写模型 ID…"));
+            }
+            if manual {
+                MANUAL_MODEL_SENTINEL
+            } else {
+                selected
+            }
+        };
+
+        let mut efforts: Vec<_> = effort_choices(provider_value, selected, native)
+            .into_iter()
+            .map(|level| option(level, effort_name(level)))
+            .collect();
+        if !efforts.iter().any(|item| item.value == effort) {
+            efforts.push(option(
+                effort,
+                format!("{} （不支持）", effort_name(effort)),
+            ));
+        }
+        let effort_selection = if assigned.is_none() {
+            efforts = vec![option("", VIEW_SEARCH_UNASSIGNED)];
+            ""
+        } else {
+            effort
+        };
+
+        let target = if assigned.is_none() {
+            VIEW_SEARCH_FOLLOW_TIER.into()
+        } else {
+            let target_model = model_name(
+                catalog(provider_value, native).unwrap_or_default(),
+                selected,
+            );
+            let mut target = format!("当前目标：{provider_name} · {target_model}");
+            if effort != "follow" {
+                target.push_str(" · ");
+                target.push_str(effort_name(effort));
+            }
+            target
+        };
+
+        AssignmentRow {
+            tier: VIEW_SEARCH_TIER,
+            provider: select(provider_items, provider_id.unwrap_or_default(), enabled),
+            account: if assigned.is_some() {
+                account_caption(provider, true)
+            } else {
+                String::new()
+            },
+            model: select(model_items, model_selection, selectable),
+            effort: select(efforts, effort_selection, selectable),
+            manual_model: manual.then(|| selected.to_owned()),
+            target,
+            note: Some(VIEW_SEARCH_NOTE.into()),
+            problem: problem.map(|problem| problem.text().to_owned()),
             retry_catalog: problem == Some(Problem::Catalog),
         }
     }
@@ -2162,71 +2424,147 @@ impl ClaudeAssignments {
         }
         if matches!(action, AssignmentAction::Restore) && self.baseline.is_some() {
             self.draft.clear();
-            self.manual = [false; 3];
+            self.search_draft = None;
+            self.manual = [false; 4];
         } else if !matches!(self.status(providers), AssignmentStatus::Ready) {
             return;
         } else {
             match action {
                 AssignmentAction::Provider(index, id) => {
-                    let role = ROLES[*index];
-                    if self
-                        .draft
-                        .get(role)
-                        .map_or("", |row| row.provider_id.as_str())
-                        == id
-                    {
-                        return;
-                    }
-                    self.manual[*index] = false;
-                    if id.is_empty() {
-                        self.draft.remove(role);
-                    } else {
-                        self.draft.insert(
-                            role.into(),
-                            ClaudeRoleAssignment {
+                    let index = *index;
+                    if index == SEARCH_INDEX {
+                        if self
+                            .search_draft
+                            .as_ref()
+                            .map_or("", |row| row.provider_id.as_str())
+                            == id
+                        {
+                            return;
+                        }
+                        self.manual[SEARCH_INDEX] = false;
+                        self.search_draft = if id.is_empty() {
+                            None
+                        } else {
+                            Some(ClaudeRoleAssignment {
                                 provider_id: id.clone(),
                                 model: String::new(),
                                 effort: None,
-                            },
-                        );
+                            })
+                        };
+                    } else {
+                        let Some(role) = ROLES.get(index).copied() else {
+                            return;
+                        };
+                        if self
+                            .draft
+                            .get(role)
+                            .map_or("", |row| row.provider_id.as_str())
+                            == id
+                        {
+                            return;
+                        }
+                        self.manual[index] = false;
+                        if id.is_empty() {
+                            self.draft.remove(role);
+                        } else {
+                            self.draft.insert(
+                                role.into(),
+                                ClaudeRoleAssignment {
+                                    provider_id: id.clone(),
+                                    model: String::new(),
+                                    effort: None,
+                                },
+                            );
+                        }
                     }
                 }
                 AssignmentAction::Model(index, model) => {
-                    if let Some(row) = self.draft.get_mut(ROLES[*index]) {
-                        self.manual[*index] = model == MANUAL_MODEL_SENTINEL
-                            && providers
-                                .providers()
-                                .iter()
-                                .find(|provider| provider["id"] == row.provider_id)
-                                .is_some_and(allows_manual);
-                        if self.manual[*index] || row.model == *model {
+                    let index = *index;
+                    if index == SEARCH_INDEX {
+                        let manual = model == MANUAL_MODEL_SENTINEL
+                            && self.search_draft.as_ref().is_some_and(|row| {
+                                providers
+                                    .providers()
+                                    .iter()
+                                    .find(|provider| provider["id"] == row.provider_id)
+                                    .is_some_and(allows_manual_search)
+                            });
+                        let Some(row) = self.search_draft.as_mut() else {
+                            return;
+                        };
+                        self.manual[SEARCH_INDEX] = manual;
+                        if manual || row.model == *model {
                             return;
                         }
                         row.model.clone_from(model);
+                    } else {
+                        let Some(role) = ROLES.get(index).copied() else {
+                            return;
+                        };
+                        if let Some(row) = self.draft.get_mut(role) {
+                            self.manual[index] = model == MANUAL_MODEL_SENTINEL
+                                && providers
+                                    .providers()
+                                    .iter()
+                                    .find(|provider| provider["id"] == row.provider_id)
+                                    .is_some_and(allows_manual);
+                            if self.manual[index] || row.model == *model {
+                                return;
+                            }
+                            row.model.clone_from(model);
+                        }
                     }
                 }
                 AssignmentAction::Manual(index, model) => {
-                    if let Some(row) = self.draft.get_mut(ROLES[*index]) {
+                    let index = *index;
+                    if index == SEARCH_INDEX {
+                        let Some(row) = self.search_draft.as_mut() else {
+                            return;
+                        };
                         if row.model == *model {
                             return;
                         }
-                        self.manual[*index] = true;
+                        self.manual[SEARCH_INDEX] = true;
                         row.model.clone_from(model);
+                    } else {
+                        let Some(role) = ROLES.get(index).copied() else {
+                            return;
+                        };
+                        if let Some(row) = self.draft.get_mut(role) {
+                            if row.model == *model {
+                                return;
+                            }
+                            self.manual[index] = true;
+                            row.model.clone_from(model);
+                        }
                     }
                 }
                 AssignmentAction::Effort(index, effort) => {
-                    let role = ROLES[*index];
-                    if let Some(row) = self.draft.get_mut(role) {
-                        let inherited = providers
-                            .providers()
-                            .iter()
-                            .find(|provider| provider["id"] == row.provider_id)
-                            .map_or("follow", |provider| inherited_effort(provider, role));
-                        row.effort = if effort == "follow" && inherited == "follow" {
-                            None
-                        } else {
-                            Some(effort.clone())
+                    let index = *index;
+                    if index == SEARCH_INDEX {
+                        if self.search_draft.is_none() {
+                            return;
+                        }
+                        // Keep an explicit follow even when the provider's
+                        // current global effort is also follow, so a later
+                        // global change cannot make this row inherit again.
+                        store_search_effort(&mut self.search_draft, effort);
+                    } else {
+                        let Some(role) = ROLES.get(index).copied() else {
+                            return;
                         };
+                        if let Some(row) = self.draft.get_mut(role) {
+                            let inherited = providers
+                                .providers()
+                                .iter()
+                                .find(|provider| provider["id"] == row.provider_id)
+                                .map_or("follow", |provider| inherited_effort(provider, role));
+                            row.effort = if effort == "follow" && inherited == "follow" {
+                                None
+                            } else {
+                                Some(effort.clone())
+                            };
+                        }
                     }
                 }
                 _ => return,
@@ -2243,11 +2581,13 @@ impl ClaudeAssignments {
         self.saved = false;
         let request = serde_json::to_value(&self.draft)
             .ok()
-            .and_then(|assignments| {
+            .zip(search_patch(self.search_draft.as_ref()))
+            .and_then(|(assignments, web_search)| {
                 self.send(AssignmentRequest::Save, |request_id| {
                     Command::SetClaudeRoleAssignments {
                         request_id,
                         assignments,
+                        web_search: Some(web_search),
                     }
                 })
             });
@@ -2263,8 +2603,14 @@ impl ClaudeAssignments {
 
 #[cfg(test)]
 mod assignment_validation_tests {
-    use super::{Problem, allows_manual, available_models, effort_choices, row_problem};
-    use serde_json::json;
+    use super::{
+        Problem, VIEW_PRIVACY, VIEW_SAVE_ERROR, VIEW_SEARCH_FOLLOW_TIER, VIEW_SEARCH_NOTE,
+        VIEW_SEARCH_TIER, VIEW_SEARCH_UNASSIGNED, allows_manual, allows_manual_search,
+        available_models, effort_choices, global_effort, row_problem, search_models, search_patch,
+        search_problem, store_search_effort,
+    };
+    use matou_native_core::provider_launch::ClaudeRoleAssignment;
+    use serde_json::{Value, json};
 
     #[test]
     fn manual_model_requires_a_concrete_id_and_keeps_frozen_validation_order() {
@@ -2345,5 +2691,272 @@ mod assignment_validation_tests {
             row_problem(Some(&provider), "", "follow", true, &[]),
             Some(Problem::Catalog)
         );
+    }
+
+    #[test]
+    fn web_search_requires_an_api_key_target_and_rejects_blank_or_control_ids() {
+        let api = json!({"id": "api", "hasApiKey": true});
+        assert_eq!(
+            search_problem(None, "a", "follow", &[]),
+            Some(Problem::Provider)
+        );
+        assert_eq!(
+            search_problem(
+                Some(&json!({"id": "sub", "subscription": {"provider": "codex"}})),
+                "a",
+                "follow",
+                &[],
+            ),
+            Some(Problem::Provider)
+        );
+        assert_eq!(
+            search_problem(
+                Some(&json!({"id": "api", "hasApiKey": false})),
+                "a",
+                "follow",
+                &[]
+            ),
+            Some(Problem::Key)
+        );
+        assert_eq!(
+            search_problem(Some(&api), "", "follow", &[]),
+            Some(Problem::Empty)
+        );
+        assert_eq!(
+            search_problem(Some(&api), "  \t ", "follow", &[]),
+            Some(Problem::Empty)
+        );
+        assert_eq!(
+            search_problem(Some(&api), "a\tb", "follow", &[]),
+            Some(Problem::Invalid)
+        );
+        assert_eq!(
+            search_problem(Some(&api), "a\u{7f}b", "follow", &[]),
+            Some(Problem::Invalid)
+        );
+        assert_eq!(
+            search_problem(Some(&api), "a b", "follow", &[]),
+            Some(Problem::Invalid)
+        );
+        assert_eq!(
+            search_problem(Some(&api), "a\u{85}b", "follow", &[]),
+            Some(Problem::Invalid)
+        );
+        assert_eq!(
+            search_problem(Some(&api), "a\u{9f}b", "follow", &[]),
+            Some(Problem::Invalid)
+        );
+        assert_eq!(
+            search_problem(Some(&api), "a\u{feff}b", "follow", &[]),
+            Some(Problem::Invalid)
+        );
+        assert_eq!(
+            search_problem(Some(&api), "\ta", "follow", &[]),
+            Some(Problem::Invalid)
+        );
+        assert_eq!(search_problem(Some(&api), " a ", "follow", &[]), None);
+        assert_eq!(
+            search_problem(Some(&api), "\u{feff}vendor/model\u{feff}", "follow", &[]),
+            None
+        );
+        assert_eq!(
+            search_problem(Some(&api), &"🙂".repeat(121), "follow", &[]),
+            Some(Problem::Invalid)
+        );
+        assert_eq!(
+            search_problem(Some(&api), "vendor/model", "follow", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn web_search_inherits_only_the_provider_global_effort() {
+        let provider = json!({
+            "id": "api", "hasApiKey": true,
+            "reasoningEffort": "low",
+            "effortMapping": {"opus": "max", "sonnet": "high"},
+        });
+        assert_eq!(global_effort(&provider), "low");
+        assert_eq!(
+            global_effort(&json!({"reasoningEffort": "bogus"})),
+            "follow"
+        );
+        assert_eq!(
+            search_problem(Some(&provider), "vendor/model", "low", &[]),
+            None
+        );
+        assert_eq!(
+            search_problem(Some(&provider), "vendor/model", "follow", &[]),
+            None
+        );
+        let no_catalog_model = json!([{"id": "vendor/model"}]);
+        assert_eq!(
+            search_problem(
+                Some(&provider),
+                "vendor/model",
+                "low",
+                no_catalog_model.as_array().unwrap()
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn web_search_uses_the_authoritative_or_native_directory_when_present() {
+        let official = json!({
+            "id": "official", "builtIn": true, "hasApiKey": true,
+            "endpoint": "https://api.anthropic.com/",
+        });
+        assert_eq!(
+            search_problem(Some(&official), "opus", "follow", &[]),
+            Some(Problem::Catalog)
+        );
+        let native = json!([{"id": "opus", "supportedEfforts": ["low"]}]);
+        let native = native.as_array().unwrap();
+        assert_eq!(
+            search_problem(Some(&official), "sonnet", "follow", native),
+            Some(Problem::Model)
+        );
+        assert_eq!(
+            search_problem(Some(&official), "opus", "high", native),
+            Some(Problem::Effort)
+        );
+        assert_eq!(search_problem(Some(&official), "opus", "low", native), None);
+        let empty = json!({"id": "api", "hasApiKey": true, "modelMetadata": []});
+        assert!(search_models(&empty, &[]).is_empty());
+        assert_eq!(
+            search_problem(Some(&empty), "", "follow", &[]),
+            Some(Problem::Catalog)
+        );
+        assert_eq!(
+            search_problem(Some(&empty), "startup", "follow", &[]),
+            Some(Problem::Catalog)
+        );
+        let legacy = json!({
+            "id": "api", "hasApiKey": true,
+            "model": "startup",
+            "modelMapping": {"opus": "tier-opus", "sonnet": "tier-sonnet"},
+        });
+        assert!(allows_manual(&legacy));
+        assert!(allows_manual_search(&legacy));
+        assert_eq!(
+            search_models(&legacy, &[])
+                .into_iter()
+                .map(|model| model.value)
+                .collect::<Vec<_>>(),
+            ["startup", "tier-opus", "tier-sonnet"]
+        );
+        assert_eq!(
+            search_problem(Some(&legacy), "startup", "follow", &[]),
+            None
+        );
+        // A built-in provider pointed at a custom endpoint is no longer
+        // official. The search row may use a manual id without a directory,
+        // while the tier rows keep their original manual rule.
+        let built_in_custom = json!({
+            "id": "builtin", "builtIn": true,
+            "endpoint": "https://api.example.com", "hasApiKey": true,
+        });
+        assert!(!allows_manual(&built_in_custom));
+        assert!(allows_manual_search(&built_in_custom));
+        assert_eq!(
+            search_problem(Some(&built_in_custom), "vendor/model", "follow", &[]),
+            None
+        );
+        assert!(!allows_manual_search(&official));
+        let known = json!({
+            "id": "api", "hasApiKey": true,
+            "modelMetadata": [{"id": "a", "supportedEfforts": ["low"]}],
+        });
+        assert_eq!(
+            search_problem(Some(&known), "b", "follow", &[]),
+            Some(Problem::Model)
+        );
+        assert_eq!(search_problem(Some(&known), " a ", "follow", &[]), None);
+        assert_eq!(
+            search_problem(Some(&known), "a", "high", &[]),
+            Some(Problem::Effort)
+        );
+        assert_eq!(
+            search_models(&known, &[])
+                .into_iter()
+                .map(|model| model.value)
+                .collect::<Vec<_>>(),
+            ["a"]
+        );
+    }
+
+    #[test]
+    fn web_search_patch_distinguishes_preserve_clear_and_set() {
+        assert_eq!(search_patch(None), Some(Value::Null));
+        assert_eq!(
+            search_patch(Some(&ClaudeRoleAssignment {
+                provider_id: "api".into(),
+                model: "vendor/model".into(),
+                effort: Some("low".into()),
+            })),
+            Some(json!({
+                "providerId": "api",
+                "model": "vendor/model",
+                "effort": "low",
+            }))
+        );
+        // An explicit follow is a stored value, not an omitted effort.
+        assert_eq!(
+            search_patch(Some(&ClaudeRoleAssignment {
+                provider_id: "api".into(),
+                model: "vendor/model".into(),
+                effort: Some("follow".into()),
+            })),
+            Some(json!({
+                "providerId": "api",
+                "model": "vendor/model",
+                "effort": "follow",
+            }))
+        );
+    }
+
+    #[test]
+    fn web_search_keeps_an_explicit_follow_even_when_it_is_currently_inherited() {
+        let mut target = Some(ClaudeRoleAssignment {
+            provider_id: "api".into(),
+            model: "vendor/model".into(),
+            effort: None,
+        });
+        store_search_effort(&mut target, "follow");
+        assert_eq!(target.unwrap().effort.as_deref(), Some("follow"));
+        store_search_effort(&mut None, "follow");
+    }
+
+    #[test]
+    fn web_search_copy_matches_the_frozen_strings() {
+        assert_eq!(VIEW_SEARCH_TIER, "网页搜索");
+        assert_eq!(VIEW_SEARCH_UNASSIGNED, "未指定");
+        assert_eq!(
+            VIEW_SEARCH_FOLLOW_TIER,
+            "未指定：搜索请求使用当前档位供应商"
+        );
+        assert_eq!(
+            VIEW_PRIVACY,
+            "使用指定供应商时，请求所需的对话内容会发送给该供应商。"
+        );
+        assert_eq!(VIEW_SEARCH_NOTE, "搜索请求会连同当前对话内容发送给该供应商");
+        assert_eq!(VIEW_SAVE_ERROR, "保存未确认，请重试。原选择已保留。");
+        assert_eq!(
+            Problem::Provider.text(),
+            "供应商已不存在；原选择已保留，请重新选择。"
+        );
+        assert_eq!(Problem::Key.text(), "API Key 未配置，请先编辑供应商。");
+        assert_eq!(
+            Problem::Model.text(),
+            "模型已不可用；原选择已保留，请重新选择。"
+        );
+        assert_eq!(Problem::Catalog.text(), "模型目录暂不可用，请重试。");
+        assert_eq!(
+            Problem::Effort.text(),
+            "当前模型不支持所选推理强度；原选择已保留，请重新选择。"
+        );
+        assert_eq!(Problem::Empty.text(), "请选择或输入模型。");
+        assert_eq!(Problem::Invalid.text(), "模型 ID 无效，请检查输入。");
     }
 }

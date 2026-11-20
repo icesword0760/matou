@@ -7,8 +7,9 @@ use std::{
 
 use anyhow::ensure;
 use matou_native_core::provider_launch::{
-    parse_claude_role_assignments, prepare_new_claude_launch,
+    parse_claude_role_assignments, prepare_new_claude_launch, prepare_new_claude_launch_with_budget,
 };
+use matou_native_core::sessions::read_claude_role_launch_preferences;
 
 use super::*;
 
@@ -58,6 +59,57 @@ fn projection(source: SocketAddr, other: SocketAddr) -> Result<ClaudeGatewayProj
     .context("missing API gateway projection")
 }
 
+fn search_projection(
+    source: SocketAddr,
+    search: SocketAddr,
+    effort: Option<&str>,
+) -> Result<ClaudeGatewayProjection> {
+    let temp = within_workspace()?;
+    let config = json!({
+        "version": 1,
+        "activeProviderIds": {"claude-code": "work"},
+        "providers": {"claude-code": [
+            {"id": "work", "endpoint": format!("http://{source}/work?tenant=work"),
+             "model": "work-opus", "apiKey": "synthetic-work",
+             "modelMapping": {"opus": "work-opus", "sonnet": "work-sonnet", "haiku": "work-haiku"}},
+            {"id": "search", "name": "搜索供应商", "endpoint": format!("http://{search}/search///?tenant=search"),
+             "model": "unused-default", "apiKey": "synthetic-search",
+             "reasoningEffort": "high", "effortMapping": {"haiku": "low"},
+             "modelMetadata": [{"id": "search-alias", "resolvedModel": "claude-search-exact",
+                                "supportedEfforts": ["high"], "maxOutputTokens": 512}]}
+        ]}
+    });
+    std::fs::write(temp.path().join("provider-config.json"), config.to_string())?;
+    let db = rusqlite::Connection::open_in_memory()?;
+    let mut target = json!({"providerId": "search", "model": "search-alias"});
+    if let Some(effort) = effort {
+        target["effort"] = json!(effort);
+    }
+    db.execute_batch("CREATE TABLE preferences (key TEXT PRIMARY KEY, value_json TEXT)")?;
+    db.execute(
+        "INSERT INTO preferences VALUES ('agent.modelPreferences', ?)",
+        [
+            json!({"contextWindows": {}, "compaction": {"mode": "follow", "effort": "follow"},
+                "claudeWebSearch": target})
+            .to_string(),
+        ],
+    )?;
+    prepare_new_claude_launch_with_budget(
+        temp.path(),
+        temp.path(),
+        &Value::Null,
+        (&read_claude_role_launch_preferences(&db), &Vec::new),
+        BTreeMap::from([(
+            "MATOU_CLAUDE_COMMAND".into(),
+            std::env::current_exe()?.into_os_string(),
+        )]),
+        80,
+        24,
+    )?
+    .gateway
+    .context("missing search gateway projection")
+}
+
 fn listener() -> io::Result<StdListener> {
     StdListener::bind((Ipv4Addr::LOCALHOST, 0))
 }
@@ -105,11 +157,21 @@ fn length(headers: &HeaderMap) -> Result<usize> {
 }
 
 fn open_request(gateway: &Gateway, path: &str, body: &[u8], headers: &str) -> Result<TcpStream> {
+    open_request_method(gateway, "POST", path, body, headers)
+}
+
+fn open_request_method(
+    gateway: &Gateway,
+    method: &str,
+    path: &str,
+    body: &[u8],
+    headers: &str,
+) -> Result<TcpStream> {
     let (addr, prefix) = gateway_address(gateway)?;
     let mut stream = socket(addr)?;
     write!(
         stream,
-        "POST {prefix}{path} HTTP/1.1\r\nHost: local-gateway\r\nContent-Length: {}\r\n{headers}\r\n",
+        "{method} {prefix}{path} HTTP/1.1\r\nHost: local-gateway\r\nContent-Length: {}\r\n{headers}\r\n",
         body.len()
     )?;
     stream.write_all(body)?;
@@ -122,7 +184,17 @@ fn exchange(
     body: &[u8],
     headers: &str,
 ) -> Result<(u16, HeaderMap, Vec<u8>)> {
-    let mut stream = BufReader::new(open_request(gateway, path, body, headers)?);
+    exchange_method(gateway, "POST", path, body, headers)
+}
+
+fn exchange_method(
+    gateway: &Gateway,
+    method: &str,
+    path: &str,
+    body: &[u8],
+    headers: &str,
+) -> Result<(u16, HeaderMap, Vec<u8>)> {
+    let mut stream = BufReader::new(open_request_method(gateway, method, path, body, headers)?);
     let (start, headers) = head(&mut stream)?;
     let status = start
         .split_whitespace()
@@ -200,6 +272,320 @@ fn record(
         })
         .collect();
     (rx, tasks)
+}
+
+fn search_payload(model: Value) -> Value {
+    json!({
+        "model": model,
+        "tools": [
+            {"type": "web_search_20250305", "name": "web_search"},
+            {"type": "web_search_20260209", "name": "web_search"}
+        ],
+        "system": [{"type": "text", "text": "system sentinel"}],
+        "messages": [
+            {"role": "user", "content": "whole conversation 哨兵"},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "old-call",
+                                          "content": "historical tool result sentinel"}]}
+        ],
+        "max_tokens": 9999,
+        "thinking": {"type": "enabled", "budget_tokens": 1024},
+        "output_config": {"effort": "low", "format": {"type": "json_schema"}},
+        "metadata": {"user_id": "fixture"},
+        "stream": true
+    })
+}
+
+#[test]
+fn web_search_gateway_routes_each_request_by_tools_method_path_and_marker() -> Result<()> {
+    let work = listener()?;
+    let search = listener()?;
+    let gateway = Gateway::start(Arc::new(search_projection(
+        work.local_addr()?,
+        search.local_addr()?,
+        None,
+    )?))?;
+    let pure = search_payload(json!("matou-role/haiku"));
+    let literal = search_payload(json!("work-literal"));
+    let mut cases = vec![
+        (
+            "messages",
+            "POST",
+            MESSAGES,
+            "",
+            pure.clone(),
+            Some("search"),
+        ),
+        ("count", "POST", COUNT, "", pure.clone(), Some("search")),
+        (
+            "different marker",
+            "POST",
+            MESSAGES,
+            "MANUAL",
+            pure.clone(),
+            Some("search"),
+        ),
+        (
+            "literal search",
+            "POST",
+            COUNT,
+            "",
+            literal.clone(),
+            Some("search"),
+        ),
+        (
+            "manual messages",
+            "POST",
+            MESSAGES,
+            "manual",
+            pure.clone(),
+            Some("role"),
+        ),
+        (
+            "auto messages",
+            "POST",
+            MESSAGES,
+            "auto",
+            pure.clone(),
+            Some("role"),
+        ),
+        (
+            "manual count",
+            "POST",
+            COUNT,
+            "manual",
+            pure.clone(),
+            Some("role"),
+        ),
+        (
+            "auto count",
+            "POST",
+            COUNT,
+            "auto",
+            pure.clone(),
+            Some("role"),
+        ),
+        ("other method", "PUT", MESSAGES, "", literal.clone(), None),
+        (
+            "other path",
+            "POST",
+            "/v1/messages/",
+            "",
+            literal.clone(),
+            None,
+        ),
+        (
+            "invalid model",
+            "POST",
+            MESSAGES,
+            "",
+            search_payload(json!(3)),
+            None,
+        ),
+    ];
+    for (label, tools) in [
+        ("no tools", None),
+        ("empty tools", Some(json!([]))),
+        ("null tools", Some(Value::Null)),
+        ("only client", Some(json!([{"name": "client"}]))),
+        ("only fetch", Some(json!([{"type": "web_fetch_20250910"}]))),
+        (
+            "mixed client",
+            Some(json!([{"type": "web_search_20250305"}, {"name": "client"}])),
+        ),
+        (
+            "mixed fetch",
+            Some(json!([{"type": "web_search_20250305"}, {"type": "web_fetch_20250910"}])),
+        ),
+        (
+            "mixed null",
+            Some(json!([{"type": "web_search_20250305"}, null])),
+        ),
+        (
+            "mixed scalar",
+            Some(json!([{"type": "web_search_20250305"}, 4])),
+        ),
+        (
+            "mixed invalid type",
+            Some(json!([{"type": "web_search_20250305"}, {"type": 4}])),
+        ),
+    ] {
+        let mut body = literal.clone();
+        if let Some(tools) = tools {
+            body["tools"] = tools;
+        } else {
+            body.as_object_mut().unwrap().remove("tools");
+        }
+        cases.push((label, "POST", MESSAGES, "", body, None));
+    }
+    let search_hits = 4;
+    let (work_requests, work_tasks) = record(
+        work.try_clone()?,
+        cases.len() - search_hits,
+        "200 OK",
+        "",
+        b"work",
+    );
+    let (search_requests, search_tasks) =
+        record(search.try_clone()?, search_hits, "200 OK", "", b"search");
+    let mut total_search = 0;
+    for (label, method, path, marker, payload, target) in cases {
+        let mut headers = "x-api-key: old\r\nauthorization: Bearer old\r\ncookie: old\r\ncontent-md5: old\r\ncontent-digest: old\r\ndigest: old\r\nanthropic-beta: existing, shared\r\nanthropic-beta: shared\r\n".to_string();
+        if !marker.is_empty() {
+            write!(headers, "x-claude-code-compaction: {marker}\r\n")?;
+        }
+        let original = serde_json::to_vec_pretty(&payload)?;
+        let (status, _, response) = exchange_method(
+            &gateway,
+            method,
+            &format!("{path}?beta=1"),
+            &original,
+            &headers,
+        )?;
+        let is_search = target == Some("search");
+        assert_eq!(status, 200, "{label}");
+        let (requests, other, provider) = if is_search {
+            total_search += 1;
+            (&search_requests, &work_requests, "search")
+        } else {
+            (&work_requests, &search_requests, "work")
+        };
+        assert_eq!(response, provider.as_bytes(), "{label}");
+        let (start, headers, bytes) = requests.recv_timeout(TIMEOUT)?;
+        assert!(
+            other.try_recv().is_err(),
+            "{label} leaked to the other upstream"
+        );
+        assert_eq!(
+            start,
+            format!("{method} /{provider}{path}?tenant={provider}&beta=1 HTTP/1.1\r\n"),
+            "{label}"
+        );
+        assert_eq!(
+            headers["x-api-key"],
+            format!("synthetic-{provider}"),
+            "{label}"
+        );
+        assert_eq!(headers.get_all("x-api-key").iter().count(), 1, "{label}");
+        assert!(
+            !headers.contains_key("authorization") && !headers.contains_key("cookie"),
+            "{label}"
+        );
+        assert_eq!(headers["anthropic-beta"], "existing,shared", "{label}");
+        assert_eq!(length(&headers)?, bytes.len(), "{label}");
+        let mut expected = payload;
+        match target {
+            Some("search") => {
+                expected["model"] = json!("claude-search-exact");
+                if path == MESSAGES {
+                    expected["max_tokens"] = json!(512);
+                    expected["thinking"] = json!({"type": "adaptive"});
+                    expected["output_config"]["effort"] = json!("high");
+                }
+            }
+            Some("role") => {
+                expected["model"] = json!("work-haiku");
+                if path == MESSAGES {
+                    expected.as_object_mut().unwrap().remove("thinking");
+                    expected["output_config"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("effort");
+                }
+            }
+            _ => assert_eq!(bytes, original, "{label} changed original bytes"),
+        }
+        for name in ["content-md5", "content-digest", "digest"] {
+            assert_eq!(
+                headers.contains_key(name),
+                target.is_none(),
+                "{label} {name}"
+            );
+        }
+        assert_eq!(
+            serde_json::from_slice::<Value>(&bytes)?,
+            expected,
+            "{label}"
+        );
+    }
+    assert_eq!(total_search, search_hits);
+    for task in work_tasks.into_iter().chain(search_tasks) {
+        task.join().expect("fake upstream thread")?;
+    }
+    for upstream in [work, search] {
+        upstream.set_nonblocking(true)?;
+        assert_eq!(
+            upstream.accept().unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn web_search_gateway_preserves_http_failures_and_never_falls_back() -> Result<()> {
+    let work = listener()?;
+    work.set_nonblocking(true)?;
+    let original = serde_json::to_vec(&search_payload(json!("matou-role/haiku")))?;
+    for (status, line) in [
+        (401, "401 Unauthorized"),
+        (429, "429 Too Many Requests"),
+        (503, "503 Service Unavailable"),
+    ] {
+        let search = listener()?;
+        let gateway = Gateway::start(Arc::new(search_projection(
+            work.local_addr()?,
+            search.local_addr()?,
+            Some("follow"),
+        )?))?;
+        let (requests, tasks) = record(search, 1, line, "Retry-After: 4\r\n", b"upstream response");
+        let (actual, headers, response) = exchange(&gateway, MESSAGES, &original, "")?;
+        assert_eq!(actual, status);
+        assert_eq!(headers["retry-after"], "4");
+        assert_eq!(response, b"upstream response");
+        let (_, headers, body) = requests.recv_timeout(TIMEOUT)?;
+        assert_eq!(headers["x-api-key"], "synthetic-search");
+        let mut expected = search_payload(json!("claude-search-exact"));
+        expected["max_tokens"] = json!(512);
+        expected.as_object_mut().unwrap().remove("thinking");
+        expected["output_config"]
+            .as_object_mut()
+            .unwrap()
+            .remove("effort");
+        assert_eq!(serde_json::from_slice::<Value>(&body)?, expected);
+        for task in tasks {
+            task.join().expect("fake upstream thread")?;
+        }
+        assert_eq!(work.accept().unwrap_err().kind(), io::ErrorKind::WouldBlock);
+    }
+    let search = listener()?;
+    let addr = search.local_addr()?;
+    let gateway = Gateway::start(Arc::new(search_projection(
+        work.local_addr()?,
+        addr,
+        Some("low"),
+    )?))?;
+    let (status, _, body) = exchange(&gateway, MESSAGES, &original, "")?;
+    assert_eq!(status, 502);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body)?["error"]["message"],
+        "网页搜索 · 搜索供应商: model target or reasoning effort is unavailable"
+    );
+    search.set_nonblocking(true)?;
+    assert_eq!(
+        search.accept().unwrap_err().kind(),
+        io::ErrorKind::WouldBlock
+    );
+    assert_eq!(work.accept().unwrap_err().kind(), io::ErrorKind::WouldBlock);
+    let gateway = Gateway::start(Arc::new(search_projection(work.local_addr()?, addr, None)?))?;
+    drop(search);
+    let (status, _, body) = exchange(&gateway, MESSAGES, &original, "")?;
+    assert_eq!(status, 502);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body)?["error"]["message"],
+        CONNECTION_ERROR
+    );
+    assert_eq!(work.accept().unwrap_err().kind(), io::ErrorKind::WouldBlock);
+    Ok(())
 }
 
 #[test]

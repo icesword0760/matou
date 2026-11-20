@@ -10,10 +10,14 @@ use matou_native_core::{
     provider_launch::{
         attach_claude_settings, parse_claude_role_assignments, prepare_claude_fork,
         prepare_claude_launch, prepare_claude_permission_restart, prepare_new_claude_launch,
-        validate_claude_role_assignments,
+        prepare_new_claude_launch_with_budget, validate_claude_role_assignments,
+        validate_claude_web_search,
     },
     pty::ShellLaunch,
+    sessions::{read_claude_role_launch_preferences, save_claude_model_assignments},
+    storage::migrate,
 };
+use rusqlite::Connection;
 use serde_json::{Value, json};
 
 const MARKERS: [&str; 13] = [
@@ -39,6 +43,120 @@ fn config(providers: Value, active: &str) -> Value {
         "providers": {"claude-code": providers},
         "activeProviderIds": {"claude-code": active}
     })
+}
+
+#[test]
+fn web_search_preferences_resolve_exactly_for_new_launches_in_two_workspaces() -> Result<()> {
+    let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR"))?;
+    let data = root.path().join("data");
+    let workspace_a = root.path().join("a");
+    let workspace_b = root.path().join("b");
+    for directory in [&data, &workspace_a, &workspace_b] {
+        fs::create_dir(directory)?;
+    }
+    let config_path = data.join("provider-config.json");
+    let mut config = config(
+        json!([
+            {"id": "work", "name": "工作供应商", "endpoint": "http://127.0.0.1:1/work",
+             "apiKey": "work-fixture", "model": "opus",
+             "modelMapping": {"opus": "work-opus", "sonnet": "work-sonnet", "haiku": "work-haiku"}},
+            {"id": "anthropic-official", "name": "搜索供应商", "endpoint": "https://api.anthropic.com/",
+             "builtIn": true, "apiKey": "search-fixture", "model": "default",
+             "reasoningEffort": "high", "effortMapping": {"opus": "low"}}
+        ]),
+        "work",
+    );
+    fs::write(&config_path, config.to_string())?;
+    let db_path = data.join("matou.sqlite");
+    let mut db = Connection::open(&db_path)?;
+    migrate(&mut db, 1)?;
+    let catalog = || {
+        vec![json!({
+            "id": "opus", "resolvedModel": "claude-search-fixture", "supportedEfforts": ["high"],
+            "maxOutputTokens": 1024, "contextWindow": 50_000
+        })]
+    };
+    let assignments = Default::default();
+    let payload = json!({"providerId": " anthropic-official ", "model": " opus "});
+    let target = validate_claude_web_search(&data, &payload, &assignments, &catalog)?;
+    assert_eq!(target.provider_id, "anthropic-official");
+    assert_eq!(target.model, "opus");
+    assert_eq!(target.effort, None);
+    save_claude_model_assignments(&mut db, &assignments, Some(Some(&target)), 2)?;
+    let launch = |cwd: &Path| {
+        let preferences = read_claude_role_launch_preferences(&Connection::open(&db_path)?);
+        prepare_new_claude_launch_with_budget(
+            &data,
+            cwd,
+            &Value::Null,
+            (&preferences, &catalog),
+            BTreeMap::from([(
+                "MATOU_CLAUDE_COMMAND".into(),
+                std::env::current_exe()?.into_os_string(),
+            )]),
+            80,
+            24,
+        )
+    };
+    for cwd in [&workspace_a, &workspace_b] {
+        let plan = launch(cwd)?;
+        assert_eq!(&plan.launch.cwd, cwd);
+        let snapshot = plan.gateway.context("search-only snapshot")?;
+        assert_eq!(
+            snapshot.roles.map(|role| role.unwrap().model),
+            ["work-opus", "work-sonnet", "work-haiku"]
+        );
+        let search = snapshot.web_search.context("search target")?;
+        assert_eq!(search.model, "claude-search-fixture");
+        assert_eq!(search.connection.api_key, "search-fixture");
+        assert_eq!(search.effort.as_deref(), Some("high"));
+        assert_eq!(search.max_output_tokens, Some(1024));
+    }
+    let follow = json!({"providerId": "anthropic-official", "model": "opus", "effort": "follow"});
+    let target = validate_claude_web_search(&data, &follow, &assignments, &catalog)?;
+    save_claude_model_assignments(&mut db, &assignments, Some(Some(&target)), 3)?;
+    assert_eq!(
+        launch(&workspace_b)?
+            .gateway
+            .unwrap()
+            .web_search
+            .unwrap()
+            .effort,
+        None
+    );
+
+    config["providers"]["claude-code"][0]["modelMapping"]
+        .as_object_mut()
+        .unwrap()
+        .remove("haiku");
+    fs::write(&config_path, config.to_string())?;
+    // Search-only saves do not depend on whether all three working defaults can start.
+    validate_claude_web_search(&data, &follow, &assignments, &catalog)?;
+    let error = launch(&workspace_a)
+        .err()
+        .context("missing role should block startup")?;
+    assert_eq!(
+        error.to_string(),
+        "haiku · 工作供应商: native role model is unavailable; configure this role's model"
+    );
+
+    config["providers"]["claude-code"][1]["apiKey"] = Value::Null;
+    fs::write(&config_path, config.to_string())?;
+    let error = launch(&workspace_b)
+        .err()
+        .context("unavailable search target should block startup")?;
+    assert_eq!(
+        error.to_string(),
+        "网页搜索 · 搜索供应商: model target is unavailable"
+    );
+    assert_eq!(
+        read_claude_role_launch_preferences(&db).web_search.as_ref(),
+        Some(&target)
+    );
+    let error = validate_claude_web_search(&data, &follow, &assignments, &catalog)
+        .expect_err("official without a key");
+    assert_eq!(error.to_string(), "API Key 未配置");
+    Ok(())
 }
 
 fn prepare(root: &Path, binding: Value, overrides: &[(&str, &str)]) -> Result<ShellLaunch> {

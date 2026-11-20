@@ -100,6 +100,18 @@ pub(crate) fn parse_assignment(value: &Value) -> Result<ClaudeRoleAssignment> {
     })
 }
 
+pub(crate) fn parse_claude_web_search(value: &Value) -> Result<ClaudeRoleAssignment> {
+    let target = parse_assignment(value)?;
+    ensure!(
+        [&target.provider_id, &target.model].into_iter().all(|id| {
+            !id.chars()
+                .any(|c| c.is_whitespace() || c.is_control() || c == '\u{feff}')
+        }),
+        "网页搜索供应商和模型不能包含空白或控制字符"
+    );
+    Ok(target)
+}
+
 pub fn parse_claude_role_assignments(value: &Value) -> Result<ClaudeRoleAssignments> {
     let mut assignments = ClaudeRoleAssignments::new();
     for (role, value) in value
@@ -131,6 +143,25 @@ pub fn validate_claude_role_assignments(
     Ok(assignments)
 }
 
+pub fn validate_claude_web_search(
+    data_root: &Path,
+    value: &Value,
+    assignments: &ClaudeRoleAssignments,
+    load_native_catalog: &dyn Fn() -> Vec<Value>,
+) -> Result<ClaudeRoleAssignment> {
+    let assignment = parse_claude_web_search(value).context("模型已不可用")?;
+    let config = read_provider_config(data_root)?;
+    let native_catalog = std::cell::OnceCell::new();
+    let catalog = || native_catalog.get_or_init(load_native_catalog).as_slice();
+    let (_, metadata) = search_provider(&config, &assignment, &catalog)?;
+    validate_assignment_effort(metadata, &assignment).context("当前模型不支持所选推理强度")?;
+    if !assignments.is_empty() {
+        let source = read_provider(data_root, &config, &Value::Null)?;
+        snapshot_api_roles(&config, &source, assignments, &catalog)?;
+    }
+    Ok(assignment)
+}
+
 pub struct ClaudeLaunch {
     pub launch: ShellLaunch,
     pub provider_config_id: String,
@@ -147,6 +178,7 @@ pub struct ClaudeLaunch {
 pub struct ClaudeGatewayProjection {
     pub source: Option<ClaudeGatewayConnection>,
     pub roles: [Option<ClaudeGatewayRole>; 3],
+    pub web_search: Option<ClaudeGatewayRole>,
     source_provider_id: String,
     source_models: [Option<String>; 3],
     source_efforts: [Option<String>; 3],
@@ -165,6 +197,7 @@ pub struct ClaudeGatewayRole {
     pub model: String,
     catalog_model: String,
     provider_id: String,
+    pub provider_name: String,
     pub effort: Option<String>,
     pub supported_efforts: Option<Vec<String>>,
     pub max_output_tokens: Option<u64>,
@@ -205,6 +238,7 @@ impl ClaudeGatewayProjection {
         self.source
             .iter()
             .chain(self.roles.iter().flatten().map(|role| &role.connection))
+            .chain(self.web_search.iter().map(|target| &target.connection))
     }
 
     pub fn request_role(&self, model: &str) -> Option<usize> {
@@ -343,6 +377,7 @@ impl ClaudeLaunch {
     pub fn capture_restart_gateway(
         &mut self,
         preferences: &ClaudeRoleLaunchPreferences,
+        load_native_catalog: &dyn Fn() -> Vec<Value>,
     ) -> Result<()> {
         let data_root = &self.launch.data_root;
         let config = read_provider_config(data_root)?;
@@ -352,7 +387,18 @@ impl ClaudeLaunch {
         let role = self
             .assigned_role
             .or_else(|| model_role(&source, &self.model));
-        self.gateway = gateway_projection(&config, &source, Some(&preferences.assignments), role);
+        self.gateway = if preferences.web_search.is_some() {
+            Some(search_gateway_projection(
+                &config,
+                &source,
+                preferences,
+                role,
+                &self.launch.env,
+                load_native_catalog,
+            )?)
+        } else {
+            gateway_projection(&config, &source, Some(&preferences.assignments), role)
+        };
         Ok(())
     }
 }
@@ -447,7 +493,7 @@ pub fn prepare_new_claude_launch_with_budget(
     data_root: &Path,
     cwd: &Path,
     binding: &Value,
-    preferences: &ClaudeRoleLaunchPreferences,
+    preferences: (&ClaudeRoleLaunchPreferences, &dyn Fn() -> Vec<Value>),
     environment: BTreeMap<OsString, OsString>,
     cols: u16,
     rows: u16,
@@ -457,7 +503,7 @@ pub fn prepare_new_claude_launch_with_budget(
         cwd,
         binding,
         Some(ClaudeTarget::New {
-            assignments: Some(&preferences.assignments),
+            assignments: Some(&preferences.0.assignments),
             budget_preferences: Some(preferences),
         }),
         environment,
@@ -514,7 +560,7 @@ pub fn prepare_claude_fork(
 enum ClaudeTarget<'a> {
     New {
         assignments: Option<&'a ClaudeRoleAssignments>,
-        budget_preferences: Option<&'a ClaudeRoleLaunchPreferences>,
+        budget_preferences: Option<(&'a ClaudeRoleLaunchPreferences, &'a dyn Fn() -> Vec<Value>)>,
     },
     PermissionRestart {
         remembered: bool,
@@ -579,16 +625,34 @@ fn prepare_claude(
         Some(assignments) => resolve_startup_assignment(&config, &provider, assignments)?,
         None => None,
     };
-    let gateway = if matches!(target, None | Some(ClaudeTarget::New { .. })) {
-        gateway_projection(&config, &provider, assignments, startup_role(&provider))
-    } else {
-        None
+    let (gateway, has_search) = match target {
+        Some(ClaudeTarget::New {
+            budget_preferences: Some((preferences, catalog)),
+            ..
+        }) if preferences.web_search.is_some() => (
+            Some(search_gateway_projection(
+                &config,
+                &provider,
+                preferences,
+                startup_role(&provider),
+                &environment,
+                catalog,
+            )?),
+            true,
+        ),
+        None | Some(ClaudeTarget::New { .. }) => (
+            gateway_projection(&config, &provider, assignments, startup_role(&provider)),
+            false,
+        ),
+        _ => (None, false),
     };
     let context_window = match target {
         Some(ClaudeTarget::New {
-            budget_preferences: Some(preferences),
+            budget_preferences: Some((preferences, _)),
             ..
-        }) if assigned.is_some() => new_assigned_context_window(&config, &provider, preferences)?,
+        }) if assigned.is_some() || has_search => {
+            new_assigned_context_window(&config, &provider, preferences)?
+        }
         _ => None,
     };
     let model = match provider_binding["model"].as_str() {
@@ -626,7 +690,8 @@ fn prepare_claude(
             (&provider, model, effort, bound_role)
         }
     };
-    let clear_assignment_environment = assigned_role.is_some()
+    let clear_assignment_environment = has_search
+        || assigned_role.is_some()
         || assignments.is_some_and(|assignments| !assignments.is_empty())
         || (remembered && provider_binding["clearAssignmentEnvironment"] == true);
     if clear_assignment_environment {
@@ -690,16 +755,7 @@ fn gateway_projection(
     assignments: Option<&ClaudeRoleAssignments>,
     startup_role: Option<&'static str>,
 ) -> Option<ClaudeGatewayProjection> {
-    let mut projection = ClaudeGatewayProjection {
-        source: gateway_connection(source),
-        roles: [None, None, None],
-        source_provider_id: source.id.clone(),
-        source_models: ROLES.map(|role| source.model_mapping.get(role).cloned()),
-        source_efforts: ROLES.map(|role| source.effort_mapping.get(role).cloned()),
-        source_effort: source.reasoning_effort.clone(),
-        has_role_assignments: false,
-        startup_role: None,
-    };
+    let mut projection = api_projection(source);
     let Some(assignments) = assignments.filter(|assignments| !assignments.is_empty()) else {
         return (projection.source.is_some()
             && projection
@@ -722,49 +778,24 @@ fn gateway_projection(
     }
     let providers = provider_entries(config).unwrap_or_default();
     let target = |provider: &Provider, role: &str, model: &str, effort: Option<&str>| {
-        let connection = gateway_connection(provider)?;
-        let catalog_model = model.trim();
-        if catalog_model.is_empty() {
-            return None;
-        }
-        let metadata = providers
+        let entry = providers
             .iter()
-            .find(|entry| entry["id"].as_str() == Some(&provider.id))
+            .find(|entry| entry["id"].as_str() == Some(&provider.id));
+        let metadata = entry
             .and_then(|entry| entry["modelMetadata"].as_array())
             .and_then(|models| {
                 models
                     .iter()
-                    .find(|item| item["id"].as_str() == Some(catalog_model))
+                    .find(|item| item["id"].as_str() == Some(model.trim()))
             });
-        let model = metadata
-            .and_then(|item| item["resolvedModel"].as_str())
-            .filter(|model| !model.is_empty())
-            .unwrap_or(catalog_model)
-            .to_owned();
-        let effort = effort
-            .or_else(|| provider.effort_mapping.get(role).map(String::as_str))
-            .or(provider.reasoning_effort.as_deref())
-            .filter(|level| EFFORTS.contains(level) && *level != "follow")
-            .map(str::to_owned);
-        Some(ClaudeGatewayRole {
-            connection,
+        gateway_target(
+            provider,
+            provider_name(entry, &provider.id),
             model,
-            catalog_model: catalog_model.into(),
-            provider_id: provider.id.clone(),
+            metadata,
+            Some(role),
             effort,
-            supported_efforts: metadata
-                .and_then(|item| item["supportedEfforts"].as_array())
-                .map(|levels| {
-                    levels
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .map(str::to_owned)
-                        .collect()
-                }),
-            max_output_tokens: metadata
-                .and_then(|item| item["maxOutputTokens"].as_u64())
-                .filter(|tokens| *tokens > 0),
-        })
+        )
     };
     for (index, role) in ROLES.into_iter().enumerate() {
         projection.roles[index] = if let Some(assignment) = assignments.get(role) {
@@ -790,6 +821,233 @@ fn gateway_projection(
     projection.has_role_assignments = true;
     projection.startup_role = startup_role;
     Some(projection)
+}
+
+fn api_projection(source: &Provider) -> ClaudeGatewayProjection {
+    ClaudeGatewayProjection {
+        source: gateway_connection(source),
+        roles: [None, None, None],
+        web_search: None,
+        source_provider_id: source.id.clone(),
+        source_models: ROLES.map(|role| source.model_mapping.get(role).cloned()),
+        source_efforts: ROLES.map(|role| source.effort_mapping.get(role).cloned()),
+        source_effort: source.reasoning_effort.clone(),
+        has_role_assignments: false,
+        startup_role: None,
+    }
+}
+
+fn gateway_target(
+    provider: &Provider,
+    provider_name: &str,
+    model: &str,
+    metadata: Option<&Value>,
+    role: Option<&str>,
+    effort: Option<&str>,
+) -> Option<ClaudeGatewayRole> {
+    let connection = gateway_connection(provider)?;
+    let catalog_model = model.trim();
+    if catalog_model.is_empty() {
+        return None;
+    }
+    let model = metadata
+        .and_then(|item| item["resolvedModel"].as_str())
+        .filter(|model| !model.is_empty())
+        .unwrap_or(catalog_model)
+        .to_owned();
+    let effort = effort
+        .or_else(|| role.and_then(|role| provider.effort_mapping.get(role).map(String::as_str)))
+        .or(provider.reasoning_effort.as_deref())
+        .filter(|level| EFFORTS.contains(level) && *level != "follow")
+        .map(str::to_owned);
+    Some(ClaudeGatewayRole {
+        connection,
+        model,
+        catalog_model: catalog_model.into(),
+        provider_id: provider.id.clone(),
+        provider_name: provider_name.into(),
+        effort,
+        supported_efforts: metadata
+            .and_then(|item| item["supportedEfforts"].as_array())
+            .map(|levels| {
+                levels
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            }),
+        max_output_tokens: metadata
+            .and_then(|item| item["maxOutputTokens"].as_u64())
+            .filter(|tokens| *tokens > 0),
+    })
+}
+
+fn provider_name<'a>(entry: Option<&'a Value>, id: &'a str) -> &'a str {
+    entry
+        .and_then(|entry| entry["name"].as_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or(id)
+}
+
+fn search_gateway_projection(
+    config: &Value,
+    source: &Provider,
+    preferences: &ClaudeRoleLaunchPreferences,
+    startup_role: Option<&'static str>,
+    environment: &BTreeMap<OsString, OsString>,
+    load_native_catalog: &dyn Fn() -> Vec<Value>,
+) -> Result<ClaudeGatewayProjection> {
+    let assignment = preferences
+        .web_search
+        .as_ref()
+        .context("missing web search preference")?;
+    let entry = provider_entry(config, &assignment.provider_id);
+    let name = provider_name(entry, &assignment.provider_id);
+    let native_catalog = std::cell::OnceCell::new();
+    let catalog = || native_catalog.get_or_init(load_native_catalog).as_slice();
+    let (provider, metadata) = search_provider(config, assignment, &catalog)
+        .map_err(|_| anyhow::anyhow!("网页搜索 · {name}: model target is unavailable"))?;
+    let target = gateway_target(
+        &provider,
+        name,
+        &assignment.model,
+        metadata,
+        None,
+        assignment.effort.as_deref(),
+    )
+    .with_context(|| format!("网页搜索 · {name}: model target is unavailable"))?;
+
+    let mut projection = api_projection(source);
+    projection.roles = snapshot_api_roles(config, source, &preferences.assignments, &catalog)?;
+    projection.web_search = Some(target);
+    projection.has_role_assignments = true;
+    projection.startup_role = startup_role;
+    // The existing owner can launch directly for legacy proxy setups. A run
+    // with an explicit search target needs its gateway to enforce that choice.
+    ensure!(
+        projection.supports_environment(environment),
+        "网页搜索 · {name}: model target is unavailable"
+    );
+    Ok(projection)
+}
+
+fn provider_entry<'a>(config: &'a Value, id: &str) -> Option<&'a Value> {
+    provider_entries(config)?
+        .iter()
+        .find(|entry| entry["id"].as_str() == Some(id))
+}
+
+fn uses_native_catalog(entry: &Value) -> bool {
+    entry["builtIn"] == true
+        && entry.get("modelMetadata").is_none()
+        && entry["endpoint"].as_str().is_some_and(|endpoint| {
+            endpoint.strip_suffix('/').unwrap_or(endpoint) == OFFICIAL_ENDPOINT
+        })
+}
+
+fn search_provider<'a>(
+    config: &'a Value,
+    assignment: &ClaudeRoleAssignment,
+    native_catalog: &impl Fn() -> &'a [Value],
+) -> Result<(Provider, Option<&'a Value>)> {
+    if assignment.provider_id == OFFICIAL_ID && provider_entries(config).is_none() {
+        // The built-in default exists without a provider file, with no Key.
+        bail!("API Key 未配置");
+    }
+    let entry = provider_entry(config, &assignment.provider_id)
+        .filter(|entry| entry["cli"].as_str().is_none_or(|cli| cli == "claude-code"))
+        .context("供应商已不存在")?;
+    ensure!(
+        entry["kind"] != "subscription" && entry["subscription"].is_null(),
+        "供应商已不存在"
+    );
+    ensure!(
+        entry["apiKey"]
+            .as_str()
+            .is_some_and(|key| !key.is_empty() && key.bytes().all(|byte| byte.is_ascii_graphic())),
+        "API Key 未配置"
+    );
+    let provider: Provider =
+        serde_json::from_value(entry.clone()).map_err(|_| anyhow::anyhow!("供应商已不存在"))?;
+    let metadata = exact_model_metadata(entry, &assignment.model, native_catalog)?;
+    Ok((provider, metadata))
+}
+
+fn exact_model_metadata<'a>(
+    entry: &'a Value,
+    model: &str,
+    native_catalog: &impl Fn() -> &'a [Value],
+) -> Result<Option<&'a Value>> {
+    let models = if uses_native_catalog(entry) {
+        native_catalog()
+    } else if let Some(catalog) = entry.get("modelMetadata") {
+        catalog.as_array().context("模型目录暂不可用")?
+    } else {
+        return Ok(None);
+    };
+    ensure!(!models.is_empty(), "模型目录暂不可用");
+    let metadata = models
+        .iter()
+        .find(|item| item["id"].as_str() == Some(model))
+        .context("模型已不可用")?;
+    Ok(Some(metadata))
+}
+
+fn snapshot_api_roles<'a>(
+    config: &'a Value,
+    source: &Provider,
+    assignments: &ClaudeRoleAssignments,
+    native_catalog: &impl Fn() -> &'a [Value],
+) -> Result<[Option<ClaudeGatewayRole>; 3]> {
+    let mut targets = [None, None, None];
+    for (index, role) in ROLES.into_iter().enumerate() {
+        let assignment = assignments.get(role);
+        let id = assignment.map_or(source.id.as_str(), |target| target.provider_id.as_str());
+        let entry = provider_entry(config, id)
+            .with_context(|| format!("{role} · {id}: model target is unavailable"))?;
+        let name = provider_name(Some(entry), id);
+        let provider;
+        let (provider, model) = if let Some(assignment) = assignment {
+            provider = serde_json::from_value::<Provider>(entry.clone())
+                .map_err(|_| anyhow::anyhow!("{role} · {name}: model target is unavailable"))?;
+            (&provider, assignment.model.as_str())
+        } else {
+            let model = source.model_mapping.get(role).map(String::as_str)
+                .filter(|model| !model.is_empty())
+                .or_else(|| {
+                    let prefix = format!("claude-{role}-");
+                    let models = native_catalog();
+                    let native = models.iter().find(|item| item["id"] == role).or_else(|| {
+                        models.iter().find(|item| item["id"].as_str().is_some_and(|id| id.starts_with(&prefix)))
+                    })?;
+                    if uses_native_catalog(entry) {
+                        native["id"].as_str()
+                    } else {
+                        native["resolvedModel"].as_str().or_else(|| native["id"].as_str())
+                    }
+                })
+                .with_context(|| format!("{role} · {name}: native role model is unavailable; configure this role's model"))?;
+            (source, model)
+        };
+        let metadata = exact_model_metadata(entry, model, native_catalog)
+            .with_context(|| format!("{role} · {name}"))?;
+        if let Some(assignment) = assignment {
+            validate_assignment_effort(metadata, assignment)
+                .with_context(|| format!("{role} · {name}: 当前模型不支持所选推理强度"))?;
+        }
+        targets[index] = Some(
+            gateway_target(
+                provider,
+                name,
+                model,
+                metadata,
+                Some(role),
+                assignment.and_then(|target| target.effort.as_deref()),
+            )
+            .with_context(|| format!("{role} · {name}: model target is unavailable"))?,
+        );
+    }
+    Ok(targets)
 }
 
 fn gateway_connection(provider: &Provider) -> Option<ClaudeGatewayConnection> {
@@ -960,12 +1218,19 @@ fn validate_assignment_model(
         .iter()
         .find(|model| model["id"].as_str() == Some(&assignment.model))
         .context("Assignment model is unavailable")?;
+    validate_assignment_effort(Some(model), assignment)
+}
+
+fn validate_assignment_effort(
+    metadata: Option<&Value>,
+    assignment: &ClaudeRoleAssignment,
+) -> Result<()> {
     if let Some(effort) = assignment
         .effort
         .as_deref()
         .filter(|effort| *effort != "follow")
-        && let Some(levels) = model
-            .get("supportedEfforts")
+        && let Some(levels) = metadata
+            .and_then(|model| model.get("supportedEfforts"))
             .filter(|levels| !levels.is_null())
     {
         ensure!(

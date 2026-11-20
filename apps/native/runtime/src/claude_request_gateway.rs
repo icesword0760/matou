@@ -1,5 +1,6 @@
 //! Per-run API Key transport. The URL's unguessable path is the local credential.
 use std::{
+    borrow::Cow,
     convert::Infallible,
     error::Error as _,
     fmt::Write as _,
@@ -186,7 +187,8 @@ impl State {
                 .await
                 .map_err(|error| Fault::request_body(error.as_ref()))?
                 .to_bytes();
-            let (bytes, connection, rewritten) = self.rewrite_json(bytes, is_message)?;
+            let (bytes, connection, rewritten) =
+                self.rewrite_json(bytes, is_message, &parts.headers)?;
             let length = bytes.len() as u64;
             let body = Full::new(bytes)
                 .map_err(|never| match never {})
@@ -265,6 +267,7 @@ impl State {
         &self,
         mut body: Bytes,
         is_message: bool,
+        headers: &HeaderMap,
     ) -> Result<(Bytes, &ClaudeGatewayConnection, bool), Fault> {
         let mut message = serde_json::from_slice::<Map<String, Value>>(&body).ok();
         let model = message
@@ -272,16 +275,20 @@ impl State {
             .and_then(|object| object.get("model"))
             .and_then(Value::as_str);
         let role = model.and_then(|model| self.projection.request_role(model));
-        let target = role.and_then(|index| self.projection.roles[index].as_ref());
-        if target.is_none()
-            && (role.is_some() || model.is_some_and(|model| model.starts_with("matou-role/")))
-        {
-            let reason = if role.is_some() {
-                "Claude model role target is unavailable."
-            } else {
-                "Unknown Claude model role."
-            };
-            return Err(Fault::bad_gateway(reason));
+        if role.is_none() && model.is_some_and(|model| model.starts_with("matou-role/")) {
+            return Err(Fault::bad_gateway("Unknown Claude model role."));
+        }
+        let search = self.projection.web_search.as_ref().filter(|_| {
+            model.is_some()
+                && message.as_ref().is_some_and(pure_web_search)
+                && !compaction_marked(headers)
+        });
+        let target =
+            search.or_else(|| role.and_then(|index| self.projection.roles[index].as_ref()));
+        if target.is_none() && role.is_some() {
+            return Err(Fault::bad_gateway(
+                "Claude model role target is unavailable.",
+            ));
         }
         let connection = target
             .map(|role| &role.connection)
@@ -293,7 +300,16 @@ impl State {
         if let (Some(target), Some(message)) = (target, message.as_mut()) {
             message.insert("model".into(), json!(target.model));
             if is_message {
-                apply_role_generation(message, target)?;
+                apply_role_generation(message, target).map_err(|error| {
+                    if search.is_some() {
+                        Fault::bad_gateway(format!(
+                            "网页搜索 · {}: model target or reasoning effort is unavailable",
+                            target.provider_name
+                        ))
+                    } else {
+                        error
+                    }
+                })?;
             }
             rewritten = true;
         } else if let Some(message) = message.as_mut() {
@@ -345,6 +361,30 @@ impl State {
         }
         Some((path, uri.query()))
     }
+}
+
+fn pure_web_search(message: &Map<String, Value>) -> bool {
+    message
+        .get("tools")
+        .and_then(Value::as_array)
+        .is_some_and(|tools| {
+            !tools.is_empty()
+                && tools.iter().all(|tool| {
+                    tool.as_object()
+                        .and_then(|tool| tool.get("type"))
+                        .and_then(Value::as_str)
+                        .is_some_and(|kind| kind.starts_with("web_search_"))
+                })
+        })
+}
+
+fn compaction_marked(headers: &HeaderMap) -> bool {
+    let all = headers.get_all("x-claude-code-compaction");
+    let mut values = all.iter();
+    values
+        .next()
+        .is_some_and(|value| matches!(value.as_bytes(), b"manual" | b"auto"))
+        && values.next().is_none()
 }
 
 fn destination(
@@ -504,7 +544,7 @@ async fn send_once(
 ) -> Result<Response<GatewayBody>, Fault> {
     // The low-level HTTP/1 connection has no redirect, decompression, retry,
     // or pooling layer. Keep the driver owned by this downstream exchange.
-    let failure = Fault::bad_gateway(CONNECTION_ERROR);
+    let failure = || Fault::bad_gateway(CONNECTION_ERROR);
     let (mut sender, task) = if destination.scheme_str() == Some("https") {
         static CONNECTOR: OnceLock<Option<HttpsConnector<HttpConnector>>> = OnceLock::new();
         let mut connector = CONNECTOR
@@ -521,15 +561,15 @@ async fn send_once(
                 )
             })
             .as_ref()
-            .ok_or(failure)?
+            .ok_or_else(failure)?
             .clone();
-        connect(connector.call(destination).await.map_err(|_| failure)?).await?
+        connect(connector.call(destination).await.map_err(|_| failure())?).await?
     } else {
         connect(
             http_connector()
                 .call(destination)
                 .await
-                .map_err(|_| failure)?,
+                .map_err(|_| failure())?,
         )
         .await?
     };
@@ -539,7 +579,7 @@ async fn send_once(
         {
             Fault::request_body(cause)
         } else {
-            failure
+            failure()
         }
     })?;
     let (mut parts, incoming) = response.into_parts();
@@ -603,20 +643,19 @@ async fn connect<T: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static>
     Ok((sender, AbortOnDrop(task.abort_handle())))
 }
 
-#[derive(Clone, Copy)]
-struct Fault(StatusCode, &'static str);
+struct Fault(StatusCode, Cow<'static, str>);
 
 impl Fault {
     fn new(status: StatusCode, message: &'static str) -> Self {
-        Self(status, message)
+        Self(status, Cow::Borrowed(message))
     }
 
-    fn bad_gateway(message: &'static str) -> Self {
-        Self(StatusCode::BAD_GATEWAY, message)
+    fn bad_gateway(message: impl Into<Cow<'static, str>>) -> Self {
+        Self(StatusCode::BAD_GATEWAY, message.into())
     }
 
     fn too_large() -> Self {
-        Self(StatusCode::PAYLOAD_TOO_LARGE, LIMIT_ERROR)
+        Self::new(StatusCode::PAYLOAD_TOO_LARGE, LIMIT_ERROR)
     }
 
     fn request_body(error: &(dyn std::error::Error + 'static)) -> Self {

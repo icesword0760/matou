@@ -5,7 +5,7 @@
 use std::io::{BufReader, Read, Write};
 
 use anyhow::{Result, ensure};
-use matou_native_core::provider_launch::ClaudeRoleAssignments;
+use matou_native_core::provider_launch::{ClaudeRoleAssignment, ClaudeRoleAssignments};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::host::{Command, Event};
@@ -31,8 +31,23 @@ pub struct ClaudeRoleAssignmentsReply {
     pub request_id: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub assignments: Option<ClaudeRoleAssignments>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present"
+    )]
+    pub web_search: Option<Option<ClaudeRoleAssignment>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+// A missing field uses Serde's default. A present null belongs to the payload.
+pub(crate) fn deserialize_present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
