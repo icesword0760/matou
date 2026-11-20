@@ -12,8 +12,7 @@
 //!   `models-refresh`) is left for the next level;
 //! - delete, subscription sign-in/refresh and subscription interaction;
 //! - context-window writing (the runtime has no write path yet);
-//! - the model-assignment, compaction and dispatch blocks below the provider
-//!   list on the Claude page.
+//! - the compaction and dispatch blocks below the Claude model assignments.
 //!
 //! GPUI has no ARIA surface; keyboard-operable buttons and the selected/pressed
 //! visual state stand in for `aria-pressed` / `aria-current` and this limitation
@@ -21,6 +20,7 @@
 use std::{cell::RefCell, collections::HashMap, ops::Range, rc::Rc, time::Duration};
 
 use gpui::{prelude::*, *};
+use matou_native_runtime::protocol::ClaudeRoleAssignmentsReply;
 use serde_json::Value;
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -29,21 +29,28 @@ use crate::rename_input::{RenameInput, RenameInputEvent};
 use crate::runtime_bridge::RuntimeCommands;
 use crate::terminal_input::read_clipboard_text;
 
+// The desktop probes compile the settings shell directly alongside a test transport.
+#[path = "claude_role_assignments.rs"]
+pub mod claude_role_assignments;
+#[cfg(any(test, debug_assertions))]
+use self::claude_role_assignments::AssignmentPanel;
+use self::claude_role_assignments::{AssignmentAction, AssignmentView, ClaudeAssignments};
+
 // Frozen light palette (`hierarchy.css` / `provider-setup.css`).
 const CANVAS: u32 = 0xf7f8fa;
-const PANEL: u32 = 0xffffff;
-const PANEL_MUTED: u32 = 0xfbfcfd;
-const TEXT: u32 = 0x303744;
-const MUTED: u32 = 0x7e8794;
+pub(super) const PANEL: u32 = 0xffffff;
+pub(super) const PANEL_MUTED: u32 = 0xfbfcfd;
+pub(super) const TEXT: u32 = 0x303744;
+pub(super) const MUTED: u32 = 0x7e8794;
 const FAINT: u32 = 0xa3aab4;
-const ACCENT: u32 = 0x347fd6;
+pub(super) const ACCENT: u32 = 0x347fd6;
 const ACCENT_SOFT: u32 = 0x347fd61c; // rgba(52,127,214,.11)
 const ACCENT_LINE: u32 = 0x347fd647; // rgba(52,127,214,.28)
-const LINE: u32 = 0x424b581a; // rgba(66,75,88,.1)
-const LINE_STRONG: u32 = 0x424b5829; // rgba(66,75,88,.16)
+pub(super) const LINE: u32 = 0x424b581a; // rgba(66,75,88,.1)
+pub(super) const LINE_STRONG: u32 = 0x424b5829; // rgba(66,75,88,.16)
 const NAV_TEXT: u32 = 0x5f6976;
-const DANGER_TEXT: u32 = 0xa13d39;
-const DANGER_BG: u32 = 0xfff2f1;
+pub(super) const DANGER_TEXT: u32 = 0xa13d39;
+pub(super) const DANGER_BG: u32 = 0xfff2f1;
 const DANGER_LINE: u32 = 0xf4d4d1;
 const NOTICE_BG: u32 = 0xeaf4ff;
 const NOTICE_LINE: u32 = 0xd1e6fc;
@@ -74,13 +81,13 @@ const ROLE_LABELS: [&str; 3] = ["Opus", "Sonnet", "Haiku"];
 // border, so the active card needs a named 80 + 2pt outer frame.
 const ACTIVE_API_CARD_MIN_OUTER_HEIGHT: f32 = 82.;
 
-fn color_alpha(hex: u32, alpha: f32) -> Rgba {
+pub(super) fn color_alpha(hex: u32, alpha: f32) -> Rgba {
     let mut color = rgb(hex);
     color.a = alpha;
     color
 }
 
-fn icon(name: &str, size: f32, color: u32) -> Svg {
+pub(super) fn icon(name: &str, size: f32, color: u32) -> Svg {
     svg()
         .path(SharedString::from(format!("icons/{name}.svg")))
         .size(px(size))
@@ -88,7 +95,7 @@ fn icon(name: &str, size: f32, color: u32) -> Svg {
         .text_color(rgb(color))
 }
 
-fn shadow(color: u32, alpha: f32, y: f32, blur: f32) -> BoxShadow {
+pub(super) fn shadow(color: u32, alpha: f32, y: f32, blur: f32) -> BoxShadow {
     BoxShadow {
         color: color_alpha(color, alpha).into(),
         offset: point(px(0.), px(y)),
@@ -154,7 +161,7 @@ fn reduced_motion() -> bool {
 }
 
 #[derive(Clone, Copy)]
-enum FocusRingStyle {
+pub(super) enum FocusRingStyle {
     /// `.model-settings__heading > button:focus-visible` etc.: 2px accent-line,
     /// 1px outside the control.
     Shell,
@@ -162,7 +169,7 @@ enum FocusRingStyle {
     Dialog,
 }
 
-fn focus_ring_with(
+pub(super) fn focus_ring_with(
     focus: FocusHandle,
     radius: f32,
     keyboard_focus: bool,
@@ -1198,7 +1205,7 @@ fn gpt_family(model: &str) -> bool {
         })
 }
 
-fn effort_name(effort: &str) -> &'static str {
+pub(super) fn effort_name(effort: &str) -> &'static str {
     match effort {
         "low" => "低",
         "medium" => "中",
@@ -1281,6 +1288,9 @@ impl EventEmitter<SettingsShellEvent> for SettingsShell {}
 
 pub struct SettingsShell {
     providers: ProviderSettings,
+    assignments: ClaudeAssignments,
+    assignment_view: Entity<AssignmentView>,
+    _assignment_subscriptions: [Subscription; 2],
     page: SettingsPage,
     editor: Option<Editor>,
     keyboard_focus: bool,
@@ -1295,12 +1305,21 @@ pub struct SettingsShell {
 }
 
 impl SettingsShell {
-    pub fn new(commands: RuntimeCommands, _window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let mut providers = ProviderSettings::new(commands);
+    pub fn new(commands: RuntimeCommands, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let mut providers = ProviderSettings::new(commands.clone());
         // First read on mount; the shared selection is kept by ProviderSettings.
         providers.load();
-        Self {
+        let assignment_view = cx.new(AssignmentView::new);
+        let assignment_actions =
+            cx.subscribe_in(&assignment_view, window, |shell, _, action, _, cx| {
+                shell.assignment_action(action, cx)
+            });
+        let assignment_updates = cx.observe(&assignment_view, |_, _, cx| cx.notify());
+        let mut shell = Self {
             providers,
+            assignments: ClaudeAssignments::new(commands),
+            assignment_view,
+            _assignment_subscriptions: [assignment_actions, assignment_updates],
             page: SettingsPage::ClaudeCode,
             editor: None,
             keyboard_focus: false,
@@ -1312,7 +1331,9 @@ impl SettingsShell {
             load_retry_focus: cx.focus_handle().tab_stop(true),
             new_provider_focus: cx.focus_handle().tab_stop(true),
             card_controls: HashMap::new(),
-        }
+        };
+        shell.load_assignments(cx);
+        shell
     }
 
     pub fn can_close(&self) -> bool {
@@ -1361,7 +1382,59 @@ impl SettingsShell {
         if self.providers.switching().is_some() {
             return;
         }
+        if self
+            .assignment_view
+            .update(cx, |view, cx| view.close_menu(window, cx))
+        {
+            cx.notify();
+            return;
+        }
         cx.emit(SettingsShellEvent::Close);
+    }
+
+    fn load_assignments(&mut self, cx: &mut Context<Self>) {
+        let request = self.assignments.load();
+        self.watch_assignment_reply(request, cx);
+    }
+
+    fn watch_assignment_reply(&self, request: Option<u64>, cx: &mut Context<Self>) {
+        if let Some(request_id) = request {
+            // The frozen settings client times out unanswered requests at 10 seconds.
+            let timer = cx.background_executor().timer(Duration::from_secs(10));
+            cx.spawn(async move |shell, cx| {
+                timer.await;
+                let _ = shell.update(cx, |shell, cx| {
+                    if shell.assignments.expire(request_id) {
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+        }
+    }
+
+    fn assignment_action(&mut self, action: &AssignmentAction, cx: &mut Context<Self>) {
+        match action {
+            AssignmentAction::Retry => {
+                self.providers.load();
+                self.load_assignments(cx);
+            }
+            AssignmentAction::Save => {
+                let request = self.assignments.save(&self.providers);
+                self.watch_assignment_reply(request, cx);
+            }
+            _ => self.assignments.change(action, &self.providers),
+        }
+        cx.notify();
+    }
+
+    pub fn receive_assignments(
+        &mut self,
+        reply: ClaudeRoleAssignmentsReply,
+        cx: &mut Context<Self>,
+    ) {
+        self.assignments.receive(reply);
+        cx.notify();
     }
 
     pub fn receive(
@@ -1378,6 +1451,10 @@ impl SettingsShell {
     pub fn connection_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let update = self.providers.connection_changed();
         self.apply_update(update, window, cx);
+        let request = self
+            .assignments
+            .connection_changed(self.page == SettingsPage::ClaudeCode);
+        self.watch_assignment_reply(request, cx);
         cx.notify();
     }
 
@@ -1627,11 +1704,15 @@ impl SettingsShell {
             self.card_controls.clear();
             self.keyboard_focus = false;
             self.providers.reset_for_page();
+            self.assignments.reset();
+            self.assignment_view
+                .update(cx, |view, cx| view.close_menu(window, cx));
         }
         self.page = page;
         self.scroll.set_offset(point(px(0.), px(0.)));
         if page == SettingsPage::ClaudeCode {
             self.providers.load();
+            self.load_assignments(cx);
         }
         let focus = self.nav_focus[page.index()].clone();
         window.focus(&focus);
@@ -1640,6 +1721,31 @@ impl SettingsShell {
 
     fn busy(&self) -> bool {
         self.providers.saving() || self.providers.switching().is_some()
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    #[allow(dead_code)]
+    pub(crate) fn diagnostics_assignments(&self) -> (AssignmentPanel, (bool, bool, bool, bool)) {
+        (
+            self.assignments.panel(&self.providers),
+            self.assignments.diagnostics(),
+        )
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    #[allow(dead_code)]
+    pub(crate) fn diagnostics_assignment_action(
+        &mut self,
+        action: &AssignmentAction,
+        cx: &mut Context<Self>,
+    ) {
+        self.assignment_action(action, cx);
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    #[allow(dead_code)]
+    pub(crate) fn diagnostics_focus_assignment_provider(&self, window: &mut Window, cx: &App) {
+        self.assignment_view.read(cx).focus_first_provider(window);
     }
 
     // Probe surface for hidden GPUI integration tests. These helpers expose
@@ -2083,19 +2189,25 @@ impl SettingsShell {
 
     fn claude_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let mut content = div().flex().flex_col().w_full();
+        let panel = self.assignments.panel(&self.providers);
+        let assignments = self.assignment_view.update(cx, |view, cx| {
+            view.render_panel(panel, self.keyboard_focus, window, cx)
+        });
         if self.providers.loading() {
-            return content.child(
-                div()
-                    .mt(px(23.))
-                    .p(px(14.))
-                    .rounded(px(9.))
-                    .border_1()
-                    .border_color(rgba(LINE))
-                    .bg(rgb(PANEL))
-                    .text_size(px(10.))
-                    .text_color(rgb(MUTED))
-                    .child("正在载入供应商配置…"),
-            );
+            return content
+                .child(
+                    div()
+                        .mt(px(23.))
+                        .p(px(14.))
+                        .rounded(px(9.))
+                        .border_1()
+                        .border_color(rgba(LINE))
+                        .bg(rgb(PANEL))
+                        .text_size(px(10.))
+                        .text_color(rgb(MUTED))
+                        .child("正在载入供应商配置…"),
+                )
+                .child(assignments);
         }
 
         if let Some((title, body, error)) = self.providers.notice() {
@@ -2131,7 +2243,7 @@ impl SettingsShell {
                     ),
                 ),
         );
-        content
+        content.child(assignments)
     }
 
     fn notice_block(&self, title: &str, body: &str, error: bool, cx: &mut Context<Self>) -> Div {

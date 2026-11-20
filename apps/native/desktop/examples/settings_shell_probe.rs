@@ -45,6 +45,24 @@ mod workspace {
     include!("../src/workspace.rs");
 
     impl Workspace {
+        pub(super) fn assignment_reply(
+            &mut self,
+            reply: ClaudeRoleAssignmentsReply,
+            window: &mut Window,
+            cx: &mut Context<Self>,
+        ) {
+            self.apply(
+                BridgeEvent::Runtime {
+                    generation: 1,
+                    event: Event::Graph(
+                        serde_json::json!({ "claudeRoleAssignmentsResult": reply }),
+                    ),
+                },
+                window,
+                cx,
+            );
+        }
+
         pub(super) fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
             self.toggle_settings(window, cx);
         }
@@ -92,13 +110,16 @@ mod workspace {
 #[cfg(all(target_os = "macos", debug_assertions))]
 mod probe {
     use gpui::*;
-    use matou_native_runtime::protocol::{ProviderSettingsReply, ProviderSettingsResult};
+    use matou_native_runtime::protocol::{
+        ClaudeRoleAssignmentsReply, ProviderSettingsReply, ProviderSettingsResult,
+    };
     use serde_json::{Value, json};
 
     use crate::{
         assets::NativeAssets,
         provider_settings::{ProviderDraft, ProviderSettings, ProviderUpdate},
         runtime_bridge::{self, Command, ProbeReceiver},
+        settings_shell::claude_role_assignments::{AssignmentAction, AssignmentStatus},
         settings_shell::{EditorStep, SettingsPage, SettingsShell},
         workspace::Workspace,
     };
@@ -107,6 +128,13 @@ mod probe {
         match sink.try_recv().expect("settings should send a read") {
             Command::GetProviderSettings { request_id } => request_id,
             _ => panic!("unexpected command while waiting for provider settings"),
+        }
+    }
+
+    fn assignment_request_id(sink: &ProbeReceiver) -> u64 {
+        match sink.try_recv().expect("settings should read assignments") {
+            Command::GetClaudeRoleAssignments { request_id } => request_id,
+            _ => panic!("unexpected command while waiting for role assignments"),
         }
     }
 
@@ -348,6 +376,7 @@ mod probe {
             .unwrap();
         press(window, "enter", cx);
         let first = request_id(&sink);
+        assignment_request_id(&sink);
         draw(window, cx);
         let first_entity = window
             .update(cx, |view, _, _| view.settings_entity().unwrap().entity_id())
@@ -378,6 +407,7 @@ mod probe {
         draw(window, cx);
         press(window, "enter", cx);
         let second = request_id(&sink);
+        assignment_request_id(&sink);
         assert_ne!(first, second);
         assert_ne!(
             first_entity,
@@ -422,6 +452,7 @@ mod probe {
         press(window, "shift-tab", cx);
         press(window, "enter", cx);
         let reentry = request_id(&sink);
+        assignment_request_id(&sink);
         assert_ne!(second, reentry);
         window
             .update(cx, |view, window, cx| {
@@ -499,6 +530,185 @@ mod probe {
         );
     }
 
+    fn verify_assignments_window(cx: &mut AsyncApp) {
+        let (window, sink) = cx.update(|cx| open_window(None, cx)).unwrap();
+        window
+            .update(cx, |view, window, cx| view.open_settings(window, cx))
+            .unwrap();
+        let provider_request = request_id(&sink);
+        let request = assignment_request_id(&sink);
+        let mut base = row("base", "隔离默认");
+        base["modelMapping"] =
+            json!({"opus": "base-opus", "sonnet": "base-sonnet", "haiku": "base-haiku"});
+        let mut target = row("target", "隔离备用");
+        target["modelMetadata"] = json!([
+            {"id": "target-opus", "displayName": "备用 Opus", "supportedEfforts": ["high"]},
+            {"id": "target-sonnet", "displayName": "备用 Sonnet"},
+        ]);
+        let mut no_key = row("no-key", "未配置 Key");
+        no_key["hasApiKey"] = json!(false);
+        let mut subscription = row("subscription", "隔离订阅");
+        subscription["kind"] = json!("subscription");
+        subscription["subscription"] = json!({
+            "account": {"status": "ready"}, "modelMetadata": [{"id": "subscriber-model"}],
+        });
+        window
+            .update(cx, |view, window, cx| {
+                view.provider_reply(
+                    result(
+                        provider_request,
+                        snapshot(vec![base, target, no_key, subscription], "base"),
+                    ),
+                    window,
+                    cx,
+                );
+            })
+            .unwrap();
+        let reply = |cx: &mut AsyncApp, request_id, assignments: Option<Value>| {
+            window
+                .update(cx, |view, window, cx| {
+                    view.assignment_reply(
+                        ClaudeRoleAssignmentsReply {
+                            request_id,
+                            error: assignments.is_none().then(|| "isolated failure".into()),
+                            assignments: assignments
+                                .map(|value| serde_json::from_value(value).unwrap()),
+                        },
+                        window,
+                        cx,
+                    );
+                })
+                .unwrap();
+        };
+        let action = |cx: &mut AsyncApp, action| {
+            window
+                .update(cx, |view, _, cx| {
+                    view.settings_entity().unwrap().update(cx, |shell, cx| {
+                        shell.diagnostics_assignment_action(&action, cx)
+                    });
+                })
+                .unwrap();
+        };
+        let data = |cx: &mut AsyncApp| {
+            window
+                .update(cx, |view, _, cx| {
+                    view.settings_entity()
+                        .unwrap()
+                        .read(cx)
+                        .diagnostics_assignments()
+                })
+                .unwrap()
+        };
+
+        let saved = json!({
+            "sonnet": {"providerId": "target", "model": "target-sonnet"},
+            "haiku": {"providerId": "subscription", "model": "subscriber-model"},
+        });
+        reply(cx, request + 1000, Some(saved.clone()));
+        assert!(matches!(data(cx).0.status, AssignmentStatus::Loading));
+        reply(cx, request, Some(saved));
+        draw(window, cx);
+        let (panel, flags) = data(cx);
+        assert!(!flags.0);
+        assert_eq!(panel.rows[0].target, "最终：隔离默认 · base-opus");
+        assert!(
+            panel.rows[0]
+                .provider
+                .items
+                .iter()
+                .all(|item| item.value != "subscription")
+        );
+        assert_eq!(panel.rows[2].provider.label, "subscription · 不可用");
+        assert_eq!(
+            panel.rows[2].problem.as_deref(),
+            Some("账号已失效，请重新登录或选择其他供应商。")
+        );
+        assert!(!panel.can_save);
+
+        action(cx, AssignmentAction::Provider(2, "".into()));
+        action(cx, AssignmentAction::Provider(1, "".into()));
+        draw(window, cx);
+        window
+            .update(cx, |view, window, cx| {
+                view.settings_entity()
+                    .unwrap()
+                    .read(cx)
+                    .diagnostics_focus_assignment_provider(window, cx);
+            })
+            .unwrap();
+        press(window, "enter", cx);
+        draw(window, cx);
+        press(window, "down", cx);
+        press(window, "down", cx);
+        press(window, "enter", cx);
+        assert_eq!(data(cx).0.rows[0].provider.label, "隔离备用");
+        assert!(!data(cx).0.can_save);
+        action(cx, AssignmentAction::Model(0, "target-opus".into()));
+        action(cx, AssignmentAction::Effort(0, "high".into()));
+        let (panel, flags) = data(cx);
+        assert_eq!(flags, (true, false, false, false));
+        assert_eq!(panel.rows[0].target, "当前目标：隔离备用 · 备用 Opus · 高");
+        assert!(panel.can_save);
+        let expected = json!({
+            "opus": {"providerId": "target", "model": "target-opus", "effort": "high"}
+        });
+        let save = |cx: &mut AsyncApp, expected| {
+            action(cx, AssignmentAction::Save);
+            let Command::SetClaudeRoleAssignments {
+                request_id,
+                assignments,
+            } = sink.try_recv().unwrap()
+            else {
+                panic!("allocation did not issue a save");
+            };
+            assert_eq!(assignments, expected);
+            assert_eq!(data(cx).1, (true, true, false, false));
+            request_id
+        };
+        let failed = save(cx, expected.clone());
+        reply(cx, failed, None);
+        let (panel, flags) = data(cx);
+        assert_eq!(flags, (true, false, false, true));
+        assert_eq!(panel.rows[0].target, "当前目标：隔离备用 · 备用 Opus · 高");
+        assert!(panel.can_save);
+        let succeeded = save(cx, expected.clone());
+        // A normalized reply owns the new baseline, even when it differs from the request.
+        let mut canonical = expected;
+        canonical["opus"]["effort"] = json!("follow");
+        reply(cx, succeeded, Some(canonical));
+        let (panel, flags) = data(cx);
+        assert_eq!(flags, (false, false, true, false));
+        assert_eq!(panel.rows[0].target, "当前目标：隔离备用 · 备用 Opus");
+        assert!(!panel.can_save);
+
+        action(cx, AssignmentAction::Provider(0, "no-key".into()));
+        let (panel, _) = data(cx);
+        assert_eq!(
+            panel.rows[0].problem.as_deref(),
+            Some("API Key 未配置，请先编辑供应商。")
+        );
+        assert!(!panel.can_save);
+        action(cx, AssignmentAction::Save);
+        assert!(sink.try_recv().is_err());
+        action(cx, AssignmentAction::Restore);
+        let (panel, _) = data(cx);
+        assert!(
+            panel
+                .rows
+                .iter()
+                .all(|row| row.target.starts_with("最终："))
+        );
+        let restored = save(cx, json!({}));
+        reply(cx, restored, Some(json!({})));
+        assert_eq!(data(cx).1, (false, false, true, false));
+        window
+            .update(cx, |_, window, _| window.remove_window())
+            .unwrap();
+        println!(
+            "Hidden GPUI: assignment Graph routing, stale reply, subscription retention, exact save payload, failure retention, canonical baseline, no-Key guard and restore deletion"
+        );
+    }
+
     pub(super) fn run() {
         let args = std::env::args().skip(1).collect::<Vec<_>>();
         let state = match args.as_slice() {
@@ -517,10 +727,20 @@ mod probe {
                     .update(cx, |view, window, cx| view.open_settings(window, cx))
                     .unwrap();
                 let request = request_id(&sink);
+                let allocation = assignment_request_id(&sink);
                 if state == "empty" {
                     window
                         .update(cx, |view, window, cx| {
                             view.provider_reply(result(request, snapshot(vec![], "")), window, cx);
+                            view.assignment_reply(
+                                ClaudeRoleAssignmentsReply {
+                                    request_id: allocation,
+                                    assignments: Some(Default::default()),
+                                    error: None,
+                                },
+                                window,
+                                cx,
+                            );
                         })
                         .unwrap();
                 }
@@ -529,6 +749,7 @@ mod probe {
                 verify_commands();
                 cx.spawn(async |cx| {
                     verify_window(cx);
+                    verify_assignments_window(cx);
                     cx.update(|cx| cx.quit()).unwrap();
                 })
                 .detach();
