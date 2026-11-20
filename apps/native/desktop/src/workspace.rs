@@ -18,7 +18,9 @@ use matou_native_core::workspace_paths::WorkspacePathState;
 use matou_native_runtime::history::{HistoryCursor, HistoryLine, HistorySearchOptions};
 use matou_native_runtime::history_worker::{HistoryReply, HistoryRequest};
 use matou_native_runtime::host::{RecentReplies, deferred_summary_text};
-use matou_native_runtime::protocol::{ClaudeRoleAssignmentsReply, ProviderSettingsReply};
+use matou_native_runtime::protocol::{
+    ClaudeModelCatalogReply, ClaudeRoleAssignmentsReply, ProviderSettingsReply,
+};
 use matou_native_terminal::Theme;
 use serde_json::Value;
 
@@ -2860,6 +2862,14 @@ impl Workspace {
                 self.fault = Some(message);
             }
             Event::Graph(mut graph) => {
+                if let Some(reply) = graph
+                    .as_object_mut()
+                    .and_then(|graph| graph.remove("claudeModelCatalogResult"))
+                    && let Some((settings, _)) = &self.settings
+                    && let Ok(reply) = serde_json::from_value::<ClaudeModelCatalogReply>(reply)
+                {
+                    settings.update(cx, |settings, cx| settings.receive_model_catalog(reply, cx));
+                }
                 if let Some(reply) = graph
                     .as_object_mut()
                     .and_then(|graph| graph.remove("claudeRoleAssignmentsResult"))

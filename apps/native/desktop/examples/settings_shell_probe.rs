@@ -45,6 +45,22 @@ mod workspace {
     include!("../src/workspace.rs");
 
     impl Workspace {
+        pub(super) fn model_catalog_reply(
+            &mut self,
+            reply: Value,
+            window: &mut Window,
+            cx: &mut Context<Self>,
+        ) {
+            self.apply(
+                BridgeEvent::Runtime {
+                    generation: 1,
+                    event: Event::Graph(serde_json::json!({ "claudeModelCatalogResult": reply })),
+                },
+                window,
+                cx,
+            );
+        }
+
         pub(super) fn assignment_reply(
             &mut self,
             reply: ClaudeRoleAssignmentsReply,
@@ -709,6 +725,230 @@ mod probe {
         );
     }
 
+    fn verify_model_catalog_window(cx: &mut AsyncApp) {
+        let (window, sink) = cx.update(|cx| open_window(None, cx)).unwrap();
+        let official = json!({
+            "id": "anthropic-official", "name": "隔离官方", "cli": "claude-code",
+            "builtIn": true, "endpoint": "https://api.anthropic.com/", "hasApiKey": false,
+        });
+        let mut custom = row("custom", "隔离自定义");
+        custom["modelMetadata"] = json!([{"id": "custom-only", "displayName": "自定义模型"}]);
+        let providers = |cx: &mut AsyncApp, request, active| {
+            window
+                .update(cx, |view, window, cx| {
+                    view.provider_reply(
+                        result(
+                            request,
+                            snapshot(vec![official.clone(), custom.clone()], active),
+                        ),
+                        window,
+                        cx,
+                    );
+                })
+                .unwrap();
+        };
+        let assignments = |cx: &mut AsyncApp, request_id, data| {
+            window
+                .update(cx, |view, window, cx| {
+                    view.assignment_reply(
+                        ClaudeRoleAssignmentsReply {
+                            request_id,
+                            assignments: Some(serde_json::from_value(data).unwrap()),
+                            error: None,
+                        },
+                        window,
+                        cx,
+                    );
+                })
+                .unwrap();
+        };
+        let reply = |cx: &mut AsyncApp, request_id, mut payload: Value| {
+            payload["requestId"] = json!(request_id);
+            window
+                .update(cx, |view, window, cx| {
+                    view.model_catalog_reply(payload, window, cx)
+                })
+                .unwrap();
+        };
+        let action = |cx: &mut AsyncApp, action| {
+            window
+                .update(cx, |view, _, cx| {
+                    view.settings_entity().unwrap().update(cx, |shell, cx| {
+                        shell.diagnostics_assignment_action(&action, cx);
+                    });
+                })
+                .unwrap();
+        };
+        let panel = |cx: &mut AsyncApp| {
+            window
+                .update(cx, |view, _, cx| {
+                    view.settings_entity()
+                        .unwrap()
+                        .read(cx)
+                        .diagnostics_assignments()
+                        .0
+                })
+                .unwrap()
+        };
+        let toggle = |cx: &mut AsyncApp| {
+            window
+                .update(cx, |view, window, cx| view.open_settings(window, cx))
+                .unwrap();
+        };
+        let catalog_request = || {
+            let Command::GetClaudeModelCatalog { request_id } = sink.try_recv().unwrap() else {
+                panic!("settings did not request the native model catalog");
+            };
+            request_id
+        };
+
+        toggle(cx);
+        let provider_read = request_id(&sink);
+        let assignment_read = assignment_request_id(&sink);
+        providers(cx, provider_read, "anthropic-official");
+        let first = catalog_request();
+        assignments(cx, assignment_read, json!({}));
+        action(
+            cx,
+            AssignmentAction::Provider(0, "anthropic-official".into()),
+        );
+        action(cx, AssignmentAction::Model(0, "opus".into()));
+        assert!(
+            sink.try_recv().is_err(),
+            "same settings mount repeated the request"
+        );
+
+        let rows = json!({"models": [
+            {"id": "claude-opus-fixture", "displayName": "Opus concrete", "contextWindow": 200000},
+            {"id": "default", "resolvedModel": "claude-opus-fixture", "displayName": "Default (recommended)"},
+            {"id": "opus", "resolvedModel": "claude-opus-fixture", "displayName": "Opus alias",
+                "contextWindow": 200000, "maxContextWindow": 1000000, "supportedEfforts": ["high"]},
+            {"id": "sonnet", "resolvedModel": "claude-sonnet-fixture", "displayName": "Sonnet alias"},
+            {"id": "claude-haiku-fixture", "displayName": "Haiku concrete"},
+            {"id": "fable", "resolvedModel": "claude-fable-fixture"},
+        ]});
+        reply(cx, first + 1000, rows.clone());
+        for result in [
+            json!({"models": []}),
+            json!({"error": "isolated catalog failure"}),
+        ] {
+            let active = if result.get("error").is_some() {
+                action(cx, AssignmentAction::RetryCatalog(0));
+                catalog_request()
+            } else {
+                first
+            };
+            reply(cx, active, result);
+            let current = panel(cx);
+            assert_eq!(
+                current.rows[0].problem.as_deref(),
+                Some("模型目录暂不可用，请重试。")
+            );
+            assert!(current.rows[0].retry_catalog);
+            assert!(!current.can_save);
+            action(cx, AssignmentAction::Save);
+            assert!(sink.try_recv().is_err());
+        }
+        action(cx, AssignmentAction::RetryCatalog(0));
+        let successful = catalog_request();
+        reply(cx, successful, rows.clone());
+        let current = panel(cx);
+        assert!(current.can_save);
+        assert_eq!(current.rows[1].target, "最终：隔离官方 · Sonnet alias");
+        assert_eq!(current.rows[2].target, "最终：隔离官方 · Haiku concrete");
+
+        for (index, name) in ["Opus alias", "Sonnet alias", "Haiku concrete"]
+            .into_iter()
+            .enumerate()
+        {
+            action(cx, AssignmentAction::Provider(index, "".into()));
+            assert_eq!(panel(cx).rows[index].model.label, name);
+            action(
+                cx,
+                AssignmentAction::Provider(index, "anthropic-official".into()),
+            );
+            let current = panel(cx);
+            let options = &current.rows[index].model.items;
+            assert_eq!(
+                options
+                    .iter()
+                    .map(|option| option.value.as_str())
+                    .collect::<Vec<_>>(),
+                [
+                    "",
+                    "claude-opus-fixture",
+                    "default",
+                    "opus",
+                    "sonnet",
+                    "claude-haiku-fixture",
+                    "fable"
+                ]
+            );
+            assert_eq!(options[2].label, "Default (recommended)");
+            assert_eq!(options[6].label, "fable");
+            action(cx, AssignmentAction::Provider(index, "".into()));
+        }
+        action(cx, AssignmentAction::Provider(1, "custom".into()));
+        let current = panel(cx);
+        assert_eq!(
+            current.rows[1]
+                .model
+                .items
+                .iter()
+                .map(|option| option.value.as_str())
+                .collect::<Vec<_>>(),
+            ["", "custom-only"]
+        );
+        action(cx, AssignmentAction::Provider(1, "".into()));
+        action(
+            cx,
+            AssignmentAction::Provider(0, "anthropic-official".into()),
+        );
+        action(cx, AssignmentAction::Model(0, "opus".into()));
+        assert_eq!(
+            panel(cx).rows[0]
+                .effort
+                .items
+                .iter()
+                .map(|option| option.value.as_str())
+                .collect::<Vec<_>>(),
+            ["follow", "high"]
+        );
+        action(cx, AssignmentAction::Save);
+        let Command::SetClaudeRoleAssignments {
+            assignments: saved, ..
+        } = sink.try_recv().unwrap()
+        else {
+            panic!("catalog alias should be savable");
+        };
+        assert_eq!(
+            saved,
+            json!({"opus": {"providerId": "anthropic-official", "model": "opus"}})
+        );
+        assert!(sink.try_recv().is_err());
+
+        toggle(cx);
+        reply(cx, successful, rows.clone());
+        toggle(cx);
+        let provider_read = request_id(&sink);
+        let assignment_read = assignment_request_id(&sink);
+        providers(cx, provider_read, "custom");
+        assert!(
+            sink.try_recv().is_err(),
+            "unused official provider should not request its catalog"
+        );
+        assignments(cx, assignment_read, saved);
+        let explicit = catalog_request();
+        reply(cx, explicit, rows);
+        assert_eq!(panel(cx).rows[0].model.label, "Opus alias");
+        window
+            .update(cx, |_, window, _| window.remove_window())
+            .unwrap();
+        println!(
+            "Hidden GPUI: official catalog defaults, alias and concrete choices, explicit/non-default lookup, empty and error retries, custom isolation and alias save"
+        );
+    }
+
     pub(super) fn run() {
         let args = std::env::args().skip(1).collect::<Vec<_>>();
         let state = match args.as_slice() {
@@ -750,6 +990,7 @@ mod probe {
                 cx.spawn(async |cx| {
                     verify_window(cx);
                     verify_assignments_window(cx);
+                    verify_model_catalog_window(cx);
                     cx.update(|cx| cx.quit()).unwrap();
                 })
                 .detach();

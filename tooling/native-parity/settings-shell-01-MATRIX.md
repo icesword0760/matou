@@ -25,7 +25,7 @@
 
 - **内容待后续关卡**。语言与时区的正文。Claude Code 下方的对话压缩模型和派活也未接入。
 - 网页搜索行随网关第 3 阶段一起补。冻结默认文案为「未指定（按档位供应商处理）」。原生搜索路由就绪后，控件才能实际改变请求去向。
-- 模型目录探测待专门关卡。冻结的 [nativeClaudeModels()](../../apps/runtime/src/session/native-model-catalog.ts) 离线启动 CLI，读取 `initialize.models`，再逐档读取上下文窗口和推理强度。原生当前只接收已保存的目录和映射，目录错误的「重试」重新读取设置快照。
+- 官方模型目录探测已接入。分配区读取原生宿主从 CLI 离线取得的目录，保留别名、具体模型 ID、名称、强度和上下文上限。错误行的「重试」重新向宿主发请求，沿用其 60 秒缓存。自定义供应商继续使用其自身配置。 [冻结目录规则](../../apps/runtime/src/session/agent-model-settings.ts)
 - 订阅供应商分配随网关第 4 阶段与订阅服务一起补。历史订阅分配保留原 ID，并显示冻结账号错误。
 - 模型发现与刷新、删除、订阅账号相关交互、上下文窗口编辑。
 - 切换说明正文待能力落地后补。原生在供应商列表下方保留加粗的「切换会影响所有 码头 窗口。」。冻结正文为「所有 Claude Code 会话跟随全局供应商；暂缓会话就绪后自动切换，旧会话再次打开时也会应用，历史保留。上下文窗口可在「编辑」中设置。」待暂缓会话自动切换、旧会话重开生效和上下文窗口编辑落地后补齐。[hierarchyShell.ts:188–190，正文续行 191](../../apps/desktop/src/renderer/src/i18n/messages/hierarchyShell.ts#L188-L191)
@@ -111,3 +111,11 @@
 首轮截图发现下拉边线误读了灰色令牌的透明度。修正后，Opus 供应商控件顶边原始 RGB 由 `78,88,47` 回到与冻结实窗相同的 `225,226,228`，两者描边均为 2 个设备像素，高度均为 68 个设备像素（34 逻辑点）。这一读数取自中间直边，包含各自 PNG 的阴影边距。 [逐点读数](output/assignment-ui-01/window-readings.json) · [修正前](output/assignment-ui-01/native-default-before-border.png)
 
 桌面验证基线为 `f282956b`，使用独立源码副本加本关桌面文件构建。35 项桌面测试、隐藏 GPUI 探针和两项既有原生进程用例通过。Rust 格式、项目标识符和 Git 空白检查通过。
+
+### 官方模型目录接入 · 88c258f4
+
+- 默认供应商或某一分配使用无独立目录的内置官方供应商时，当前设置面板发一次目录请求。切换设置子页保留同一面板的结果，关闭设置后重新读取。官方目录错误的「重试」发送新命令，宿主仍决定缓存是否有效。
+- 继承档位沿用冻结的顺序，先看已存映射，再匹配该档别名，最后匹配该档的具体模型 ID。显示目录名称，保存选中条目的自身 ID。
+- 隐藏 GPUI 探针覆盖 Graph 路由、同面板去重、过期回包、空表与错误拦截保存、各档别名和具体 ID、强度列表、重试、非默认官方指派以及自定义模型隔离。保存断言为 `model: "opus"`。 [探针日志](output/assignment-ui-01/official-hidden-probe.log)
+- 隔离 macOS 实窗只配置 Anthropic 官方，离线读取本机 Claude Code 2.1.329 的 9 个目录条目。Opus、Sonnet、Haiku 默认行均显示名称。Opus 选用「Anthropic 官方 / Opus / 跟随会话」后出现绿色保存回执，重开保留。SQLite 回读为 `{"opus":{"providerId":"anthropic-official","model":"opus"}}`。显示名称相同的目录项仍分别保留，以条目 ID 区分。 [默认](output/assignment-ui-01/screenshots/official-default.png) · [下拉](output/assignment-ui-01/screenshots/official-menu.png) · [保存](output/assignment-ui-01/screenshots/official-saved.png) · [重开](output/assignment-ui-01/screenshots/official-reopened.png) · [宿主目录读数](output/assignment-ui-01/official-runtime-readback.json) · [SQLite 读数](output/assignment-ui-01/official-saved-readback.json)
+- 35 项桌面测试和 Rust 格式、标识符、Git 空白检查均通过。尚未验证 Windows 实窗、其他 Claude Code 版本、真实宿主缓存窗口内的手动重试、真实模型调用或逐像素对比。
