@@ -18,6 +18,7 @@ use matou_native_core::workspace_paths::WorkspacePathState;
 use matou_native_runtime::history::{HistoryCursor, HistoryLine, HistorySearchOptions};
 use matou_native_runtime::history_worker::{HistoryReply, HistoryRequest};
 use matou_native_runtime::host::{RecentReplies, deferred_summary_text};
+use matou_native_runtime::protocol::ProviderSettingsReply;
 use matou_native_terminal::Theme;
 use serde_json::Value;
 
@@ -38,6 +39,7 @@ use crate::{
         BridgeEvent, Command, ConnectionPhase, Event, RecoveryState, RuntimeCommands,
         StartupBlockKind,
     },
+    settings_shell::{SettingsShell, SettingsShellEvent, settings_button},
     sidebar_scrollbar::{self, SidebarScrollbarState},
     tab_dialog_style as tabs_ui,
     terminal_surface::{SurfaceEvent, SurfaceEventKind, TerminalSurface},
@@ -909,6 +911,7 @@ pub struct Workspace {
     history_view: Option<Entity<HistoryView>>,
     history_request: Option<HistoryContextRequest>,
     search: Option<TerminalSearchState>,
+    settings: Option<(Entity<SettingsShell>, Subscription)>,
     commands: RuntimeCommands,
     runtime_generation: u64,
     transport_connected: bool,
@@ -1705,6 +1708,7 @@ impl Workspace {
             history_view: None,
             history_request: None,
             search: None,
+            settings: None,
             runtime_generation: 0,
             transport_connected: false,
             domain_ready: false,
@@ -1860,6 +1864,52 @@ impl Workspace {
             self.notification_open = true;
             cx.notify();
         }
+    }
+
+    fn toggle_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((settings, _)) = &self.settings {
+            if settings.read(cx).can_close() {
+                self.close_settings(window, cx);
+            }
+            return;
+        }
+        if self.dialog.is_some() {
+            return;
+        }
+        self.close_notifications(cx);
+        self.workspace_menu = None;
+        self.task_menu = None;
+        self.tab_menu = None;
+        self.hidden_tabs = None;
+        self.fork_menu = None;
+        self.permission_menu = None;
+        let commands = self.commands.clone();
+        let settings = cx.new(|cx| SettingsShell::new(commands, window, cx));
+        let subscription =
+            cx.subscribe_in(
+                &settings,
+                window,
+                |this, _, event, window, cx| match event {
+                    SettingsShellEvent::Close => this.close_settings(window, cx),
+                },
+            );
+        self.settings = Some((settings, subscription));
+        self.sync_terminal_input(window, cx);
+        cx.notify();
+    }
+
+    fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings.take().is_none() {
+            return;
+        }
+        self.sync_terminal_input(window, cx);
+        let focus = self
+            .active_level_focus()
+            .and_then(|id| self.terminals.get(id))
+            .map(|terminal| &terminal.read(cx).focus)
+            .unwrap_or(&self.control_focus["settings"]);
+        window.focus(focus);
+        cx.notify();
     }
 
     fn close_notifications(&mut self, cx: &mut Context<Self>) {
@@ -2268,6 +2318,9 @@ impl Workspace {
                 return;
             }
             BridgeEvent::Connection { phase, .. } => {
+                if let Some((settings, _)) = &self.settings {
+                    settings.update(cx, |settings, cx| settings.connection_changed(window, cx));
+                }
                 self.transport_connected = matches!(phase, ConnectionPhase::Ready);
                 if !self.transport_connected {
                     let message = match &phase {
@@ -2637,6 +2690,7 @@ impl Workspace {
                         || return_to_terminal
                         || notification_focus.is_some())
                     && self.dialog.is_none()
+                    && self.settings.is_none()
                     && self.active_path_valid()
                     && (return_to_terminal
                         || self
@@ -2806,6 +2860,14 @@ impl Workspace {
                 self.fault = Some(message);
             }
             Event::Graph(mut graph) => {
+                if let Some(reply) = graph
+                    .as_object_mut()
+                    .and_then(|graph| graph.remove("providerSettingsResult"))
+                    && let Some((settings, _)) = &self.settings
+                    && let Ok(reply) = serde_json::from_value::<ProviderSettingsReply>(reply)
+                {
+                    settings.update(cx, |settings, cx| settings.receive(reply, window, cx));
+                }
                 let action = &graph["sessionCardAction"];
                 if action["outcome"] == "hide-window" {
                     if self.finish_card_action(action)
@@ -2930,6 +2992,7 @@ impl Workspace {
                     if self.focused.as_ref() == Some(&session_id)
                         && self.order.contains(&session_id)
                         && self.dialog.is_none()
+                        && self.settings.is_none()
                         && self.active_path_valid()
                         && !self.recovery_blocked(&session_id)
                         && window.focused(cx).is_none()
@@ -3027,6 +3090,7 @@ impl Workspace {
                     .is_some_and(|change| change.outcome == PermissionOutcome::Pending)
                     && self.active_level_focus() == Some(session_id.as_str())
                     && self.dialog.is_none()
+                    && self.settings.is_none()
                     && self.active_path_valid()
                     && !self.recovery_blocked(&session_id)
                     && window.focused(cx).is_none()
@@ -3643,6 +3707,7 @@ impl Workspace {
             let blocked = blocked || self.recovery_water_covers_terminal(id);
             let disabled = disabled
                 || blocked
+                || self.settings.is_some()
                 || self
                     .history_request
                     .as_ref()
@@ -4634,17 +4699,32 @@ impl Workspace {
                 div()
                     .h(px(38.))
                     .flex_none()
-                    .px(px(18.))
+                    .px(px(8.))
                     .flex()
                     .items_center()
+                    .justify_between()
                     .text_size(px(12.))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgb(0x989da7))
-                    .child(self.control(div().child(icon("columns-3", 16., 0x989da7)), "board"))
-                    .child(div().ml(px(7.)).child("看板"))
-                    .child(div().flex_1())
-                    .child(self.control(div().child(icon("settings-2", 16., 0x989da7)), "settings"))
-                    .child(div().ml(px(7.)).child("设置")),
+                    .child(
+                        self.control(
+                            div()
+                                .h(px(30.))
+                                .px(px(10.))
+                                .flex()
+                                .items_center()
+                                .gap(px(7.))
+                                .child(icon("columns-3", 16., 0x989da7))
+                                .child("看板"),
+                            "board",
+                        ),
+                    )
+                    .child(self.button(
+                        settings_button(self.settings.is_some()),
+                        &self.control_focus["settings"],
+                        Self::toggle_settings,
+                        cx,
+                    )),
             )
     }
 
@@ -7058,6 +7138,37 @@ impl Workspace {
             self.close_notifications(cx);
             cx.stop_propagation();
             return;
+        }
+        if let Some((settings, _)) = &self.settings
+            && self.dialog.is_none()
+        {
+            if stroke.key == "escape" && self.workspace_menu.is_none() && self.task_menu.is_none() {
+                settings
+                    .clone()
+                    .update(cx, |settings, cx| settings.escape(window, cx));
+                cx.stop_propagation();
+                return;
+            }
+            if settings.read(cx).modal_open()
+                || self.workspace_menu.is_none() && self.task_menu.is_none()
+            {
+                if stroke.key == "tab"
+                    && !mods.alt
+                    && !mods.control
+                    && !mods.platform
+                    && !settings.read(cx).modal_open()
+                {
+                    self.keyboard_focus = true;
+                    if mods.shift {
+                        window.focus_prev();
+                    } else {
+                        window.focus_next();
+                    }
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+                return;
+            }
         }
         if let Some(TabDialog::Branch(state)) = &self.dialog {
             let input = state.input.read(cx);
@@ -10950,12 +11061,27 @@ impl Render for Workspace {
                     .flex_1()
                     .min_w_0()
                     .h_full()
+                    .relative()
                     .flex()
                     .flex_col()
-                    .child(self.topbar(window, cx))
-                    .child(carousel)
-                    .children(self.search_bar(cx))
-                    .child(self.footer(window, cx)),
+                    .child(
+                        div()
+                            .size_full()
+                            .flex()
+                            .flex_col()
+                            .when(self.settings.is_some(), |mut stage| {
+                                // Keep the terminal laid out while excluding it from focus and paint.
+                                stage.style().visibility = Some(Visibility::Hidden);
+                                stage
+                            })
+                            .child(self.topbar(window, cx))
+                            .child(carousel)
+                            .children(self.search_bar(cx))
+                            .child(self.footer(window, cx)),
+                    )
+                    .children(self.settings.as_ref().map(|(settings, _)| {
+                        div().absolute().inset_0().occlude().child(settings.clone())
+                    })),
             )
             .child(
                 canvas(

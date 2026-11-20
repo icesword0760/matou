@@ -2,7 +2,9 @@ pub mod assets;
 pub mod carousel_motion;
 #[cfg(target_os = "macos")]
 pub mod macos;
+mod provider_settings;
 pub mod runtime_bridge;
+mod settings_shell;
 pub mod terminal_input;
 mod terminal_scrollbar;
 pub mod terminal_surface;
