@@ -50,6 +50,30 @@ pub(crate) struct ClaudeModelPreferencesReply {
     pub compaction: Option<Value>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimeZoneSettingsSnapshot {
+    pub time_zone: String,
+    pub system_time_zone: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_time_zone: Option<String>,
+    pub zones: Vec<String>,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum TimeZoneSettingsError {
+    InvalidRequest,
+    Storage,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimeZoneSettingsReply {
+    pub request_id: u64,
+    pub result: Result<TimeZoneSettingsSnapshot, TimeZoneSettingsError>,
+}
+
 // A missing field uses Serde's default. A present null belongs to the payload.
 pub(crate) fn deserialize_present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where

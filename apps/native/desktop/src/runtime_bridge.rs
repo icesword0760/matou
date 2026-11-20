@@ -1,6 +1,7 @@
 // Desktop facade over a supervised private runtime child. No in-process fallback.
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use matou_native_core::database_recovery::RECOVERY_ID_CHANGED;
+use matou_native_core::sessions::{current_interface_locale, read_locale_preference};
 pub use matou_native_runtime::host::{
     Command, DatabaseRecoveryAction, DatabaseRecoveryDetails, DatabaseRecoveryResult, Event,
     LaunchOptions, ReadOnlyNavigation, ReadOnlyQuery, RecoveryState, StartupBlock,
@@ -497,6 +498,10 @@ fn run_child(
         .arg(&options.shell_home)
         .arg("--shell")
         .arg(&options.shell)
+        .env(
+            "MATOU_LOCALE",
+            current_interface_locale(read_locale_preference(&options.data_root)).value(),
+        )
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());

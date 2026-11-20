@@ -26,6 +26,7 @@ use crate::{
     protocol::{
         ClaudeModelCatalogReply, ClaudeModelCatalogResult, ClaudeModelPreferencesReply,
         ClaudeRoleAssignmentsReply, ProviderSettingsReply, ProviderSettingsResult,
+        TimeZoneSettingsError, TimeZoneSettingsReply, TimeZoneSettingsSnapshot,
         deserialize_present,
     },
     provider_catalog,
@@ -53,15 +54,19 @@ use matou_native_core::{
     journal::JournalOptions,
     provider_config::{ProviderConfigLocale, ProviderConfigStore},
     provider_launch::{
-        CLAUDE_PERMISSION_MODES, ClaudeLaunch, prepare_claude_fork, prepare_claude_launch,
+        CLAUDE_PERMISSION_MODES, ClaudeLaunch, automatic_time_zone, available_time_zones,
+        official_time_zone_endpoint, prepare_claude_fork, prepare_claude_launch,
         prepare_claude_permission_restart, prepare_new_claude_launch_with_budget,
+        project_cli_time_zone, system_time_zone, valid_claude_time_zone,
         validate_claude_compaction, validate_claude_role_assignments, validate_claude_web_search,
         validate_cwd,
     },
     pty::{LaunchProfile, ShellLaunch},
     sessions::{
-        ClaudeCatalogLoad, ClaudeRestore, ClaudeRoleLaunchPreferences, ProviderBinding,
-        read_claude_role_launch_preferences, save_claude_model_preferences,
+        ClaudeCatalogLoad, ClaudeRestore, ClaudeRoleLaunchPreferences, InterfaceLocale,
+        LOCALE_FILE, LocalePreference, ProviderBinding, current_interface_locale,
+        read_claude_role_launch_preferences, read_claude_time_zone, read_locale_preference,
+        save_claude_model_preferences, save_claude_time_zone,
     },
     startup::{self, BootstrapResult, ReadOnlyReason, RecoveryError, RecoveryRequired},
     storage::{CommandMetadata, configure_connection},
@@ -160,6 +165,14 @@ pub enum Command {
     },
     GetClaudeModelPreferences {
         request_id: u64,
+    },
+    GetTimeZoneSettings {
+        request_id: u64,
+    },
+    SetTimeZoneSettings {
+        request_id: u64,
+        #[serde(default)]
+        time_zone: Value,
     },
     SetClaudeRoleAssignments {
         request_id: u64,
@@ -715,6 +728,7 @@ pub enum Event {
         result: Result<ReadOnlyNavigation, String>,
     },
     History(HistoryReply),
+    TimeZoneSettings(TimeZoneSettingsReply),
     SearchResults {
         session_id: String,
         sequence: u64,
@@ -902,6 +916,10 @@ enum RoleAssignmentsRequest {
         include_compaction: bool,
     },
     ForLaunch(Sender<ClaudeRoleLaunchPreferences>),
+    TimeZone {
+        request_id: u64,
+        setting: Option<Value>,
+    },
 }
 
 enum ProviderSettingsRequest {
@@ -920,9 +938,9 @@ struct ProviderSettingsWorker {
 
 impl ProviderSettingsWorker {
     fn new(data_root: PathBuf) -> Result<Self> {
-        let locale = match std::env::var("MATOU_LOCALE").as_deref() {
-            Ok("en") => ProviderConfigLocale::En,
-            _ => ProviderConfigLocale::ZhCn,
+        let locale = match current_interface_locale(read_locale_preference(&data_root)) {
+            InterfaceLocale::English => ProviderConfigLocale::En,
+            InterfaceLocale::Chinese => ProviderConfigLocale::ZhCn,
         };
         let (requests, incoming) = mpsc::channel();
         let (outgoing, replies) = mpsc::channel();
@@ -1046,6 +1064,8 @@ pub fn storage_command_rejected(command: Command, code: &str, message: &str) -> 
         Command::GetClaudeModelCatalog { request_id }
         | Command::GetClaudeRoleAssignments { request_id }
         | Command::GetClaudeModelPreferences { request_id }
+        | Command::GetTimeZoneSettings { request_id }
+        | Command::SetTimeZoneSettings { request_id, .. }
         | Command::SetClaudeRoleAssignments { request_id, .. }
         | Command::SetClaudeModelPreferences { request_id, .. }
         | Command::GetProviderSettings { request_id }
@@ -1846,6 +1866,7 @@ fn run_writable(
     let (role_requests, role_commands) = mpsc::channel();
     let (role_results, role_replies) = mpsc::channel();
     let role_data_root = data_root.clone();
+    let time_zone_events = send.clone();
     let role_worker = thread::Builder::new()
         .name("claude-role-assignments".into())
         .spawn(move || {
@@ -1896,6 +1917,22 @@ fn run_writable(
                     }),
                     RoleAssignmentsRequest::ForLaunch(reply) => {
                         let _ = reply.send(load_role_preferences(&role_data_root));
+                        continue;
+                    }
+                    RoleAssignmentsRequest::TimeZone {
+                        request_id,
+                        setting,
+                    } => {
+                        let result = time_zone_settings(&role_data_root, setting.as_ref());
+                        if time_zone_events
+                            .send_blocking(Event::TimeZoneSettings(TimeZoneSettingsReply {
+                                request_id,
+                                result,
+                            }))
+                            .is_err()
+                        {
+                            break;
+                        }
                         continue;
                     }
                 };
@@ -2790,6 +2827,23 @@ fn run_writable(
                             command,
                             Command::GetClaudeModelPreferences { .. }
                         ),
+                    })?;
+                    continue;
+                }
+                Command::GetTimeZoneSettings { request_id } => {
+                    role_requests.send(RoleAssignmentsRequest::TimeZone {
+                        request_id,
+                        setting: None,
+                    })?;
+                    continue;
+                }
+                Command::SetTimeZoneSettings {
+                    request_id,
+                    time_zone,
+                } => {
+                    role_requests.send(RoleAssignmentsRequest::TimeZone {
+                        request_id,
+                        setting: Some(time_zone),
                     })?;
                     continue;
                 }
@@ -5522,6 +5576,61 @@ fn load_role_preferences(data_root: &Path) -> ClaudeRoleLaunchPreferences {
         .unwrap_or_default()
 }
 
+/// Locale is available even before the database can be opened for recovery.
+pub fn save_locale_preference(
+    data_root: &Path,
+    preference: LocalePreference,
+) -> Result<InterfaceLocale> {
+    use std::io::Write;
+
+    std::fs::create_dir_all(data_root)?;
+    let mut file = tempfile::NamedTempFile::new_in(data_root)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    serde_json::to_writer(&mut file, &json!({ "preference": preference }))?;
+    file.flush()?;
+    file.as_file().sync_all()?;
+    file.persist(data_root.join(LOCALE_FILE))?;
+    Ok(current_interface_locale(preference))
+}
+
+fn time_zone_settings(
+    data_root: &Path,
+    setting: Option<&Value>,
+) -> Result<TimeZoneSettingsSnapshot, TimeZoneSettingsError> {
+    let time_zone = if let Some(setting) = setting {
+        let setting = setting
+            .as_str()
+            .filter(|zone| valid_claude_time_zone(zone))
+            .ok_or(TimeZoneSettingsError::InvalidRequest)?;
+        open_role_assignments_writer(data_root)
+            .and_then(|db| save_claude_time_zone(&db, setting, now()))
+            .map_err(|_| TimeZoneSettingsError::Storage)?;
+        setting.to_owned()
+    } else {
+        startup::open_read_only(&data_root.join("matou.sqlite"))
+            .and_then(|db| read_claude_time_zone(&db))
+            .map_err(|_| TimeZoneSettingsError::Storage)?
+    };
+    let system_time_zone = system_time_zone();
+    let auto_time_zone = automatic_time_zone(&system_time_zone, None).map(str::to_owned);
+    static ZONES: LazyLock<Vec<String>> = LazyLock::new(available_time_zones);
+    let mut zones = ZONES.clone();
+    if !matches!(time_zone.as_str(), "auto" | "system") && !zones.contains(&time_zone) {
+        zones.push(time_zone.clone());
+    }
+    Ok(TimeZoneSettingsSnapshot {
+        time_zone,
+        system_time_zone,
+        auto_time_zone,
+        zones,
+    })
+}
+
 pub(crate) fn native_role_catalog() -> Vec<Value> {
     claude_model_catalog::models()
         .into_iter()
@@ -5736,6 +5845,10 @@ fn prepare_launch(
                         if !fresh_launch {
                             launch.capture_restart_gateway(&preferences, &native_role_catalog)?;
                         }
+                        let zone = startup::open_read_only(&data_root.join("matou.sqlite"))
+                            .and_then(|db| read_claude_time_zone(&db))
+                            .unwrap_or_else(|_| "auto".into());
+                        launch.project_time_zone(&zone, &system_time_zone());
                         Ok(PreparedLaunch::ClaudeCode {
                             launch,
                             fork_source: fork.map(|fork| fork.source_id),
@@ -5791,7 +5904,23 @@ fn prepare_launch(
                             terminal.rows,
                         )
                     }
-                    .map(|(launch, resume)| PreparedLaunch::Codex(launch, resume));
+                    .map(|(mut launch, resume)| {
+                        let official = official_time_zone_endpoint(
+                            launch
+                                .launch
+                                .env
+                                .get(std::ffi::OsStr::new("OPENAI_BASE_URL"))
+                                .map(OsString::as_os_str),
+                            "api.openai.com",
+                        );
+                        project_cli_time_zone(
+                            &mut launch.launch,
+                            "auto",
+                            &system_time_zone(),
+                            official,
+                        );
+                        PreparedLaunch::Codex(launch, resume)
+                    });
                     let _ = send.send(result);
                 })?;
         }
@@ -6673,6 +6802,55 @@ mod tests {
             1
         );
         Ok(())
+    }
+
+    #[test]
+    fn saving_language_and_time_zone_does_not_unlock_a_frozen_process() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let (mut runtime, session_id) = open_raw_test_shell(root.path())?;
+        let freeze = |frozen| -> Result<()> {
+            let (reply, result) = mpsc::channel();
+            send_test_command(
+                &runtime,
+                Command::TestFreezeShellWrites {
+                    session_id: session_id.clone(),
+                    frozen,
+                    reply,
+                },
+            )?;
+            result.recv_timeout(Duration::from_secs(3))??;
+            Ok(())
+        };
+        freeze(true)?;
+        let data = root.path().join("data");
+        save_locale_preference(&data, LocalePreference::English)?;
+        assert_eq!(read_locale_preference(&data), LocalePreference::English);
+        send_test_command(
+            &runtime,
+            Command::SetTimeZoneSettings {
+                request_id: 51,
+                time_zone: json!("UTC"),
+            },
+        )?;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Event::TimeZoneSettings(reply) = next_test_event(&runtime, deadline)? {
+                assert_eq!(reply.request_id, 51);
+                assert_eq!(reply.result.unwrap().time_zone, "UTC");
+                break;
+            }
+        }
+        send_test_command(&runtime, test_input(&session_id, b"must remain frozen\r"))?;
+        loop {
+            if let Event::Diagnostic(error) = next_test_event(&runtime, deadline)? {
+                assert_eq!(error, "session output is frozen");
+                break;
+            }
+        }
+        freeze(false)?;
+        send_test_command(&runtime, test_input(&session_id, b"allowed\r"))?;
+        assert_raw_shell_input(root.path(), b"allowed\r")?;
+        runtime.shutdown()
     }
 
     #[test]

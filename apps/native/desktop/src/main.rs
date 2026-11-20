@@ -4,6 +4,9 @@ use std::{cell::RefCell, rc::Rc};
 
 use anyhow::Result;
 use gpui::*;
+use matou_native_core::sessions::{
+    InterfaceLocale, current_interface_locale, read_locale_preference,
+};
 #[cfg(target_os = "macos")]
 use matou_native_desktop::macos;
 use matou_native_desktop::{
@@ -16,6 +19,7 @@ actions!(matou_native, [Quit]);
 
 fn main() -> Result<()> {
     let options = options()?;
+    let locale = current_interface_locale(read_locale_preference(&options.data_root));
     let runtime = Rc::new(RefCell::new(RuntimeBridge::start(options)?));
     let commands = runtime.borrow().commands.clone();
     let events = runtime.borrow().events.clone();
@@ -75,10 +79,7 @@ fn main() -> Result<()> {
         }
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
-        cx.set_menus(vec![Menu {
-            name: "Matou Native".into(),
-            items: vec![MenuItem::action("退出 Matou Native", Quit)],
-        }]);
+        set_app_menu(locale, cx);
         let bounds = Bounds::centered(None, size(px(1200.), px(780.)), cx);
         #[cfg(all(target_os = "macos", debug_assertions))]
         let window_diag = match std::env::var("MATOU_WINDOW_DIAG").as_deref() {
@@ -109,6 +110,10 @@ fn main() -> Result<()> {
                     eprintln!("Apply native sidebar material: {error:#}");
                 }
                 let workspace = cx.new(|cx| Workspace::new(commands, events, window, cx));
+                cx.subscribe(&workspace, |_, locale: &InterfaceLocale, cx| {
+                    set_app_menu(*locale, cx)
+                })
+                .detach();
                 #[cfg(target_os = "macos")]
                 {
                     let workspace = workspace.downgrade();
@@ -172,6 +177,16 @@ fn main() -> Result<()> {
         .detach();
     });
     runtime.borrow_mut().shutdown()
+}
+
+fn set_app_menu(locale: InterfaceLocale, cx: &mut App) {
+    cx.set_menus(vec![Menu {
+        name: "Matou Native".into(),
+        items: vec![MenuItem::action(
+            locale.text("退出 Matou Native", "Quit Matou Native"),
+            Quit,
+        )],
+    }]);
 }
 
 fn options() -> Result<LaunchOptions> {

@@ -16,6 +16,7 @@
 use std::{cell::RefCell, rc::Rc};
 
 use gpui::{prelude::*, *};
+use matou_native_core::sessions::InterfaceLocale;
 
 use super::{
     ACCENT, DANGER_BG, DANGER_TEXT, FocusRingStyle, LINE, LINE_STRONG, MUTED, PANEL, PANEL_MUTED,
@@ -73,6 +74,7 @@ const VIEW_NARROW_BREAKPOINT: f32 = 640.;
 /// One frame of the frozen assignment block, supplied by the settings logic.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct AssignmentPanel {
+    locale: InterfaceLocale,
     pub(crate) rows: [AssignmentRow; 4],
     pub(crate) status: AssignmentStatus,
     pub(crate) can_save: bool,
@@ -181,6 +183,7 @@ impl EventEmitter<AssignmentAction> for AssignmentView {}
 /// The assignment block view. The parent keeps one entity for the settings
 /// lifetime and calls [`AssignmentView::render_panel`] with the current panel.
 pub(crate) struct AssignmentView {
+    locale: InterfaceLocale,
     /// [row][provider / model / effort] trigger focus handles. Row 3 is web search.
     controls: [[FocusHandle; 3]; 4],
     /// Slot 0 is the disconnect retry; slots 1..=4 are the per-row catalog retry.
@@ -238,6 +241,7 @@ impl AssignmentView {
         }
 
         Self {
+            locale: InterfaceLocale::default(),
             controls,
             retry_focus,
             restore_focus,
@@ -288,6 +292,7 @@ impl AssignmentView {
         }
 
         let AssignmentPanel {
+            locale,
             rows,
             status,
             can_save,
@@ -296,6 +301,7 @@ impl AssignmentView {
             saved,
             save_error,
         } = panel;
+        self.locale = locale;
 
         // A menu cannot survive a state transition that disables its controls.
         if self.open_menu.is_some() && (saving || status != AssignmentStatus::Ready) {
@@ -317,7 +323,7 @@ impl AssignmentView {
                     .text_size(px(13.))
                     .font_weight(FontWeight(680.))
                     .text_color(rgb(TEXT))
-                    .child(VIEW_TITLE),
+                    .child(self.locale.text(VIEW_TITLE, "Model assignments")),
             )
             .child(
                 div()
@@ -325,7 +331,7 @@ impl AssignmentView {
                     .line_height(relative(1.65))
                     .text_color(rgb(MUTED))
                     .whitespace_normal()
-                    .child(VIEW_SUBTITLE),
+                    .child(self.locale.text(VIEW_SUBTITLE, "Assign a provider and model to each tier. Unassigned tiers follow the default provider.")),
             );
 
         let mut section = div().flex().flex_col().gap(px(10.)).child(header);
@@ -361,15 +367,25 @@ impl AssignmentView {
                         div()
                             .w(px(VIEW_ROLE_WIDTH))
                             .flex_none()
-                            .child(VIEW_HEAD_TIER),
+                            .child(self.locale.text(VIEW_HEAD_TIER, "Tier")),
                     )
-                    .child(div().flex_1().min_w_0().child(VIEW_HEAD_PROVIDER))
-                    .child(div().flex_1().min_w_0().child(VIEW_HEAD_MODEL))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(self.locale.text(VIEW_HEAD_PROVIDER, "Provider / account")),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(self.locale.text(VIEW_HEAD_MODEL, "Model")),
+                    )
                     .child(
                         div()
                             .w(px(VIEW_EFFORT_WIDTH))
                             .flex_none()
-                            .child(VIEW_HEAD_EFFORT),
+                            .child(self.locale.text(VIEW_HEAD_EFFORT, "Reasoning effort")),
                     ),
             );
         }
@@ -397,7 +413,10 @@ impl AssignmentView {
                 .line_height(relative(1.65))
                 .text_color(rgb(MUTED))
                 .whitespace_normal()
-                .child(VIEW_PRIVACY),
+                .child(self.locale.text(
+                    VIEW_PRIVACY,
+                    "Conversation content needed for a request is sent to the assigned provider.",
+                )),
         );
 
         let mut actions = div()
@@ -409,7 +428,7 @@ impl AssignmentView {
             .pb(px(14.))
             .child(assignment_action_button(
                 "claude-assignment-restore",
-                VIEW_RESTORE,
+                self.locale.text(VIEW_RESTORE, "Restore defaults"),
                 false,
                 can_restore && !saving,
                 self.restore_focus.clone(),
@@ -424,7 +443,11 @@ impl AssignmentView {
             ))
             .child(assignment_action_button(
                 "claude-assignment-save",
-                if saving { VIEW_SAVING } else { VIEW_SAVE },
+                if saving {
+                    self.locale.text(VIEW_SAVING, "Saving…")
+                } else {
+                    self.locale.text(VIEW_SAVE, "Save assignments")
+                },
                 true,
                 can_save && !saving,
                 self.save_focus.clone(),
@@ -448,7 +471,10 @@ impl AssignmentView {
                     .font_weight(FontWeight(600.))
                     .line_height(relative(1.5))
                     .text_color(rgb(VIEW_SUCCESS_TEXT))
-                    .child(VIEW_SAVED),
+                    .child(self.locale.text(
+                        VIEW_SAVED,
+                        "Model assignments saved. New sessions will use this configuration.",
+                    )),
             );
         }
 
@@ -460,7 +486,10 @@ impl AssignmentView {
                     .text_size(px(11.))
                     .line_height(relative(1.65))
                     .text_color(rgb(MUTED))
-                    .child(VIEW_SCOPE),
+                    .child(self.locale.text(
+                        VIEW_SCOPE,
+                        "New sessions use these assignments. Running sessions are unaffected.",
+                    )),
             )
             .child(actions);
         if save_error {
@@ -469,7 +498,10 @@ impl AssignmentView {
                     .text_size(px(11.))
                     .line_height(relative(1.55))
                     .text_color(rgb(VIEW_ERROR))
-                    .child(VIEW_SAVE_ERROR),
+                    .child(self.locale.text(
+                        VIEW_SAVE_ERROR,
+                        "Save was not confirmed. Your selections were kept; please retry.",
+                    )),
             );
         }
         section = section.child(footer);
@@ -510,7 +542,7 @@ impl AssignmentView {
                     .text_size(px(11.))
                     .line_height(relative(1.65))
                     .text_color(rgb(MUTED))
-                    .child(VIEW_LOADING)
+                    .child(self.locale.text(VIEW_LOADING, "Loading model assignments…"))
                     .into_any_element(),
             ),
             AssignmentStatus::Disconnected => Some(
@@ -522,7 +554,10 @@ impl AssignmentView {
                     .text_size(px(11.))
                     .line_height(relative(1.65))
                     .text_color(rgb(VIEW_ERROR))
-                    .child(VIEW_DISCONNECTED)
+                    .child(
+                        self.locale
+                            .text(VIEW_DISCONNECTED, "Settings service is disconnected."),
+                    )
                     .child(self.retry_link(0, keyboard_focus, cx))
                     .into_any_element(),
             ),
@@ -531,7 +566,10 @@ impl AssignmentView {
                     .text_size(px(11.))
                     .line_height(relative(1.65))
                     .text_color(rgb(MUTED))
-                    .child(VIEW_EMPTY)
+                    .child(self.locale.text(
+                        VIEW_EMPTY,
+                        "No providers are available. Add a provider first.",
+                    ))
                     .into_any_element(),
             ),
         }
@@ -633,15 +671,15 @@ impl AssignmentView {
                         .child(row.tier),
                 )
                 .child(assignment_labeled_field(
-                    VIEW_HEAD_PROVIDER,
+                    self.locale.text(VIEW_HEAD_PROVIDER, "Provider / account"),
                     provider_field.into_any_element(),
                 ))
                 .child(assignment_labeled_field(
-                    VIEW_HEAD_MODEL,
+                    self.locale.text(VIEW_HEAD_MODEL, "Model"),
                     model_field.into_any_element(),
                 ))
                 .child(assignment_labeled_field(
-                    VIEW_HEAD_EFFORT,
+                    self.locale.text(VIEW_HEAD_EFFORT, "Reasoning effort"),
                     effort_field.into_any_element(),
                 ))
         } else {
@@ -1177,7 +1215,7 @@ impl AssignmentView {
         let focus = self.retry_focus[slot].clone();
         assignment_link_button(
             SharedString::from(format!("claude-assignment-retry-{slot}")),
-            VIEW_RETRY,
+            self.locale.text(VIEW_RETRY, "Retry"),
             focus,
             keyboard_focus,
             cx,
@@ -1539,6 +1577,19 @@ enum Problem {
 }
 
 impl Problem {
+    fn localized(self, locale: InterfaceLocale) -> &'static str {
+        locale.text(self.text(), match self {
+            Self::Provider => "Provider no longer exists. Your selection was kept; choose another provider.",
+            Self::Key => "API key is missing. Edit the provider first.",
+            Self::Account => "Account is unavailable. Sign in again or choose another provider.",
+            Self::Empty => "Choose or enter a model.",
+            Self::Model => "Model is unavailable. Your selection was kept; choose another model.",
+            Self::Catalog => "Model directory is unavailable. Please retry.",
+            Self::Invalid => "Invalid model ID. Please check your input.",
+            Self::Effort => "The selected reasoning effort is not supported by this model. Its value was kept; choose another effort.",
+        })
+    }
+
     fn text(self) -> &'static str {
         match self {
             Self::Provider => "供应商已不存在；原选择已保留，请重新选择。",
@@ -1757,12 +1808,26 @@ fn store_search_effort(search: &mut Option<ClaudeRoleAssignment>, effort: &str) 
     }
 }
 
-fn account_caption(provider: Option<&Value>, assigned: bool) -> String {
+fn assignment_effort_name(effort: &str, locale: InterfaceLocale) -> &'static str {
+    locale.text(
+        effort_name(effort),
+        match effort {
+            "low" => "Low",
+            "medium" => "Medium",
+            "high" => "High",
+            "xhigh" => "XHigh",
+            "max" => "Max",
+            _ => "Follow session",
+        },
+    )
+}
+
+fn account_caption(provider: Option<&Value>, assigned: bool, locale: InterfaceLocale) -> String {
     if !assigned {
         let name = provider
             .and_then(|provider| provider["name"].as_str())
-            .unwrap_or("默认供应商不可用");
-        return format!("{name} · 默认供应商");
+            .unwrap_or(locale.text("默认供应商不可用", "Default provider unavailable"));
+        return format!("{name} · {}", locale.text("默认供应商", "Default provider"));
     }
     let Some(provider) = provider else {
         return String::new();
@@ -2135,12 +2200,21 @@ impl ClaudeAssignments {
     }
 
     pub(crate) fn panel(&self, providers: &ProviderSettings) -> AssignmentPanel {
+        self.panel_localized(providers, InterfaceLocale::default())
+    }
+
+    pub(crate) fn panel_localized(
+        &self,
+        providers: &ProviderSettings,
+        locale: InterfaceLocale,
+    ) -> AssignmentPanel {
         let status = self.status(providers);
         let saving = self.saving();
         let enabled = matches!(status, AssignmentStatus::Ready) && !saving;
-        let rows = std::array::from_fn(|index| self.row(index, providers, enabled));
+        let rows = std::array::from_fn(|index| self.row(index, providers, enabled, locale));
         let can_save = enabled && self.dirty() && rows.iter().all(|row| row.problem.is_none());
         AssignmentPanel {
+            locale,
             rows,
             status,
             can_save,
@@ -2178,9 +2252,15 @@ impl ClaudeAssignments {
         index <= SEARCH_INDEX && self.row_provider(index, providers).is_some_and(official)
     }
 
-    fn row(&self, index: usize, providers: &ProviderSettings, enabled: bool) -> AssignmentRow {
+    fn row(
+        &self,
+        index: usize,
+        providers: &ProviderSettings,
+        enabled: bool,
+        locale: InterfaceLocale,
+    ) -> AssignmentRow {
         if index == SEARCH_INDEX {
-            return self.search_row(providers, enabled);
+            return self.search_row(providers, enabled, locale);
         }
         let role = ROLES[index];
         let tier = TIERS[index];
@@ -2220,9 +2300,15 @@ impl ClaudeAssignments {
             && assigned.is_some()
             && provider.is_some_and(|provider| !subscription(provider));
 
-        let mut provider_items = vec![option("", FOLLOW_PROVIDER)];
+        let mut provider_items = vec![option(
+            "",
+            locale.text(FOLLOW_PROVIDER, "Follow default provider"),
+        )];
         if let Some(id) = provider_id.filter(|_| provider.is_none_or(subscription)) {
-            provider_items.push(option(id, format!("{id} · 不可用")));
+            provider_items.push(option(
+                id,
+                format!("{id} · {}", locale.text("不可用", "Unavailable")),
+            ));
         }
         provider_items.extend(providers.providers().iter().filter_map(|provider| {
             if subscription(provider) {
@@ -2231,19 +2317,33 @@ impl ClaudeAssignments {
             let id = provider["id"].as_str()?;
             Some(option(id, provider["name"].as_str().unwrap_or(id)))
         }));
-        let mut model_items = vec![option("", CHOOSE_MODEL)];
+        let mut model_items = vec![option("", locale.text(CHOOSE_MODEL, "Choose a model"))];
         let model_selection = if assigned.is_none() {
             model_items[0].label = default
                 .map(|id| model_name(models, id).to_owned())
-                .unwrap_or_else(|| format!("{tier} 原生默认档位（目录暂不可用）"));
+                .unwrap_or_else(|| {
+                    format!(
+                        "{tier} {}",
+                        locale.text(
+                            "原生默认档位（目录暂不可用）",
+                            "native default (directory unavailable)"
+                        )
+                    )
+                });
             ""
         } else {
             if unavailable_model && !manual {
-                model_items.push(option(selected, format!("{selected} · 不可用")));
+                model_items.push(option(
+                    selected,
+                    format!("{selected} · {}", locale.text("不可用", "Unavailable")),
+                ));
             }
             model_items.extend(choices);
             if manual_allowed {
-                model_items.push(option(MANUAL_MODEL_SENTINEL, "手动填写模型 ID…"));
+                model_items.push(option(
+                    MANUAL_MODEL_SENTINEL,
+                    locale.text("手动填写模型 ID…", "Enter a model ID…"),
+                ));
             }
             if manual {
                 MANUAL_MODEL_SENTINEL
@@ -2253,47 +2353,51 @@ impl ClaudeAssignments {
         };
         let mut efforts: Vec<_> = effort_choices(provider_value, effective_model, native)
             .into_iter()
-            .map(|level| option(level, effort_name(level)))
+            .map(|level| option(level, assignment_effort_name(level, locale)))
             .collect();
         if !efforts.iter().any(|item| item.value == effort) {
             efforts.push(option(
                 effort,
-                format!("{} （不支持）", effort_name(effort)),
+                format!(
+                    "{} {}",
+                    assignment_effort_name(effort, locale),
+                    locale.text("（不支持）", "(unsupported)")
+                ),
             ));
         }
         if assigned.is_none() {
-            efforts = vec![option(effort, effort_name(effort))];
+            efforts = vec![option(effort, assignment_effort_name(effort, locale))];
         }
         let target_model = if assigned.is_some() || default.is_some() {
             model_name(models, effective_model)
         } else {
-            "原生默认档位待确认"
+            locale.text("原生默认档位待确认", "Native default tier pending")
         };
         let prefix = if assigned.is_some() {
-            "当前目标："
+            locale.text("当前目标：", "Current target: ")
         } else {
-            "最终："
+            locale.text("最终：", "Effective target: ")
         };
         let mut target = format!("{prefix}{provider_name} · {target_model}");
         if effort != "follow" {
             target.push_str(" · ");
-            target.push_str(effort_name(effort));
+            target.push_str(assignment_effort_name(effort, locale));
         }
         let problem_text = problem.map(|problem| {
             if assigned.is_some() {
-                problem.text().to_owned()
+                problem.localized(locale).to_owned()
             } else {
                 let id = default.unwrap_or(tier);
-                format!(
-                    "沿用默认：{provider_name} · {id}。{}请为此档位重新选择供应商和模型。",
-                    problem.text()
-                )
+                match locale {
+                    InterfaceLocale::Chinese => format!("沿用默认：{provider_name} · {id}。{}请为此档位重新选择供应商和模型。", problem.text()),
+                    InterfaceLocale::English => format!("Default target: {provider_name} · {id}. {} Choose another provider and model for this tier.", problem.localized(locale)),
+                }
             }
         });
         AssignmentRow {
             tier,
             provider: select(provider_items, provider_id.unwrap_or_default(), enabled),
-            account: account_caption(provider, assigned.is_some()),
+            account: account_caption(provider, assigned.is_some(), locale),
             model: select(model_items, model_selection, selectable),
             effort: select(efforts, effort, selectable),
             manual_model: manual.then(|| selected.to_owned()),
@@ -2306,7 +2410,12 @@ impl ClaudeAssignments {
 
     /// The fourth row is an independent web-search target. It is unassigned by
     /// default and does not fall back to the active provider in the editor.
-    fn search_row(&self, providers: &ProviderSettings, enabled: bool) -> AssignmentRow {
+    fn search_row(
+        &self,
+        providers: &ProviderSettings,
+        enabled: bool,
+        locale: InterfaceLocale,
+    ) -> AssignmentRow {
         let assigned = self.search_draft.as_ref();
         let provider_id = assigned.map(|row| row.provider_id.as_str());
         let provider = self.row_provider(SEARCH_INDEX, providers);
@@ -2333,9 +2442,15 @@ impl ClaudeAssignments {
             && assigned.is_some()
             && provider.is_some_and(|provider| !subscription(provider));
 
-        let mut provider_items = vec![option("", VIEW_SEARCH_UNASSIGNED)];
+        let mut provider_items = vec![option(
+            "",
+            locale.text(VIEW_SEARCH_UNASSIGNED, "Unassigned"),
+        )];
         if let Some(id) = provider_id.filter(|_| provider.is_none_or(subscription)) {
-            provider_items.push(option(id, format!("{id} · 不可用")));
+            provider_items.push(option(
+                id,
+                format!("{id} · {}", locale.text("不可用", "Unavailable")),
+            ));
         }
         provider_items.extend(providers.providers().iter().filter_map(|provider| {
             // Only Claude Code provider targets are selectable; subscription
@@ -2349,17 +2464,23 @@ impl ClaudeAssignments {
             Some(option(id, provider["name"].as_str().unwrap_or(id)))
         }));
 
-        let mut model_items = vec![option("", CHOOSE_MODEL)];
+        let mut model_items = vec![option("", locale.text(CHOOSE_MODEL, "Choose a model"))];
         let model_selection = if assigned.is_none() {
-            model_items[0].label = VIEW_SEARCH_UNASSIGNED.into();
+            model_items[0].label = locale.text(VIEW_SEARCH_UNASSIGNED, "Unassigned").into();
             ""
         } else {
             if unavailable_model && !manual {
-                model_items.push(option(selected, format!("{selected} · 不可用")));
+                model_items.push(option(
+                    selected,
+                    format!("{selected} · {}", locale.text("不可用", "Unavailable")),
+                ));
             }
             model_items.extend(choices);
             if manual_allowed {
-                model_items.push(option(MANUAL_MODEL_SENTINEL, "手动填写模型 ID…"));
+                model_items.push(option(
+                    MANUAL_MODEL_SENTINEL,
+                    locale.text("手动填写模型 ID…", "Enter a model ID…"),
+                ));
             }
             if manual {
                 MANUAL_MODEL_SENTINEL
@@ -2370,41 +2491,56 @@ impl ClaudeAssignments {
 
         let mut efforts: Vec<_> = effort_choices(provider_value, selected, native)
             .into_iter()
-            .map(|level| option(level, effort_name(level)))
+            .map(|level| option(level, assignment_effort_name(level, locale)))
             .collect();
         if !efforts.iter().any(|item| item.value == effort) {
             efforts.push(option(
                 effort,
-                format!("{} （不支持）", effort_name(effort)),
+                format!(
+                    "{} {}",
+                    assignment_effort_name(effort, locale),
+                    locale.text("（不支持）", "(unsupported)")
+                ),
             ));
         }
         let effort_selection = if assigned.is_none() {
-            efforts = vec![option("", VIEW_SEARCH_UNASSIGNED)];
+            efforts = vec![option(
+                "",
+                locale.text(VIEW_SEARCH_UNASSIGNED, "Unassigned"),
+            )];
             ""
         } else {
             effort
         };
 
         let target = if assigned.is_none() {
-            VIEW_SEARCH_FOLLOW_TIER.into()
+            locale
+                .text(
+                    VIEW_SEARCH_FOLLOW_TIER,
+                    "Unassigned: search requests use the current tier provider",
+                )
+                .into()
         } else {
             let target_model = model_name(
                 catalog(provider_value, native).unwrap_or_default(),
                 selected,
             );
-            let mut target = format!("当前目标：{provider_name} · {target_model}");
+            let mut target = format!(
+                "{}{provider_name} · {target_model}",
+                locale.text("当前目标：", "Current target: ")
+            );
             if effort != "follow" {
                 target.push_str(" · ");
-                target.push_str(effort_name(effort));
+                target.push_str(assignment_effort_name(effort, locale));
             }
             target
         };
 
         AssignmentRow {
-            tier: VIEW_SEARCH_TIER,
+            tier: locale.text(VIEW_SEARCH_TIER, "Web search"),
             provider: select(provider_items, provider_id.unwrap_or_default(), enabled),
             account: if assigned.is_some() {
-                account_caption(provider, true)
+                account_caption(provider, true, locale)
             } else {
                 String::new()
             },
@@ -2412,8 +2548,8 @@ impl ClaudeAssignments {
             effort: select(efforts, effort_selection, selectable),
             manual_model: manual.then(|| selected.to_owned()),
             target,
-            note: Some(VIEW_SEARCH_NOTE.into()),
-            problem: problem.map(|problem| problem.text().to_owned()),
+            note: Some(locale.text(VIEW_SEARCH_NOTE, "Search requests include the current conversation content and are sent to that provider.").into()),
+            problem: problem.map(|problem| problem.localized(locale).to_owned()),
             retry_catalog: problem == Some(Problem::Catalog),
         }
     }

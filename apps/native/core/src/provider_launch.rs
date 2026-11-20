@@ -23,6 +23,148 @@ use crate::{
 const OFFICIAL_ID: &str = "anthropic-official";
 const OFFICIAL_ENDPOINT: &str = "https://api.anthropic.com";
 const CLI_DEFAULT_MODEL: &str = "CLI 默认";
+const ZONEINFO: &str = "/usr/share/zoneinfo";
+const COMMON_TIME_ZONES: [&str; 8] = [
+    "UTC",
+    "Asia/Shanghai",
+    "Asia/Tokyo",
+    "Asia/Singapore",
+    "America/Los_Angeles",
+    "America/New_York",
+    "Europe/London",
+    "Europe/Paris",
+];
+
+pub fn valid_claude_time_zone(value: &str) -> bool {
+    if matches!(value, "auto" | "system") {
+        return true;
+    }
+    let mut parts = value.split('/');
+    if value.len() > 100
+        || !parts.next().is_some_and(|part| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphabetic() || byte == b'_')
+        })
+        || !parts.all(|part| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'+' | b'-'))
+        })
+        || value.starts_with("posix/")
+        || value.starts_with("right/")
+        || matches!(value, "localtime" | "posixrules")
+    {
+        return false;
+    }
+    if COMMON_TIME_ZONES.contains(&value) {
+        return true;
+    }
+    use io::Read;
+    let mut magic = [0; 4];
+    fs::File::open(Path::new(ZONEINFO).join(value))
+        .and_then(|mut file| file.read_exact(&mut magic))
+        .is_ok()
+        && magic == *b"TZif"
+}
+
+pub fn available_time_zones() -> Vec<String> {
+    let installed = fs::read_to_string(Path::new(ZONEINFO).join("zone.tab")).unwrap_or_default();
+    let mut canonical: Vec<_> = installed
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .filter_map(|line| line.split('\t').nth(2))
+        .filter(|name| !COMMON_TIME_ZONES.contains(name))
+        .collect();
+    canonical.sort_unstable();
+    canonical.dedup();
+    COMMON_TIME_ZONES
+        .into_iter()
+        .chain(canonical)
+        .map(str::to_owned)
+        .collect()
+}
+
+pub fn system_time_zone() -> String {
+    std::env::var("TZ")
+        .ok()
+        .filter(|zone| !matches!(zone.as_str(), "auto" | "system") && valid_claude_time_zone(zone))
+        .or_else(|| {
+            let zone = fs::canonicalize("/etc/localtime").ok()?;
+            let name = zone.to_str()?.rsplit_once("/zoneinfo/")?.1;
+            valid_claude_time_zone(name).then(|| name.to_owned())
+        })
+        .or_else(|| {
+            let zone = fs::read_to_string("/etc/timezone").ok()?;
+            let name = zone.trim();
+            valid_claude_time_zone(name).then(|| name.to_owned())
+        })
+        .unwrap_or_else(|| "UTC".into())
+}
+
+pub fn automatic_time_zone(system: &str, exit_country: Option<&str>) -> Option<&'static str> {
+    matches!(
+        system,
+        "Asia/Shanghai"
+            | "Asia/Chongqing"
+            | "Asia/Chungking"
+            | "Asia/Harbin"
+            | "Asia/Urumqi"
+            | "Asia/Kashgar"
+            | "PRC"
+            | "Asia/Hong_Kong"
+            | "Hongkong"
+            | "Asia/Macau"
+            | "Asia/Macao"
+    )
+    .then(
+        || match exit_country.map(str::to_ascii_uppercase).as_deref() {
+            Some("TW") => "Asia/Taipei",
+            Some("MY") => "Asia/Kuala_Lumpur",
+            Some("PH") => "Asia/Manila",
+            _ => "Asia/Singapore",
+        },
+    )
+}
+
+pub fn cli_time_zone<'a>(
+    profile: &str,
+    setting: &'a str,
+    system: &str,
+    exit_country: Option<&str>,
+    official: bool,
+) -> Option<&'a str> {
+    match (profile, setting) {
+        ("claude-code", "system") => None,
+        ("claude-code", "auto") | ("codex" | "antigravity", _) if official => {
+            automatic_time_zone(system, exit_country)
+        }
+        ("claude-code", value) if value != "auto" => Some(value),
+        _ => None,
+    }
+}
+
+pub fn project_cli_time_zone(
+    launch: &mut ShellLaunch,
+    setting: &str,
+    system: &str,
+    official: bool,
+) {
+    if let Some(zone) = cli_time_zone(launch.profile.kind(), setting, system, None, official) {
+        set_var(&mut launch.env, "TZ".into(), zone.into());
+    }
+}
+
+pub fn official_time_zone_endpoint(endpoint: Option<&OsStr>, official_host: &str) -> bool {
+    endpoint.and_then(OsStr::to_str).is_none_or(|endpoint| {
+        let endpoint = endpoint.trim();
+        endpoint.is_empty()
+            || url::Url::parse(endpoint).is_ok_and(|url| url.host_str() == Some(official_host))
+    })
+}
+
 pub const EFFORTS: [&str; 6] = ["follow", "low", "medium", "high", "xhigh", "max"];
 pub const CLAUDE_PERMISSION_MODES: [&str; 5] = [
     "default",
@@ -226,6 +368,32 @@ pub struct ClaudeLaunch {
     pub effort: Option<String>,
     pub clear_assignment_environment: bool,
     pub gateway: Option<ClaudeGatewayProjection>,
+}
+
+impl ClaudeLaunch {
+    pub fn project_time_zone(&mut self, setting: &str, system: &str) {
+        let official = official_time_zone_endpoint(
+            get_var(&self.launch.env, "ANTHROPIC_BASE_URL"),
+            "api.anthropic.com",
+        ) || self.gateway.as_ref().is_some_and(|gateway| {
+            gateway
+                .roles
+                .iter()
+                .flatten()
+                .chain(gateway.web_search.iter())
+                .chain(
+                    gateway
+                        .compaction
+                        .iter()
+                        .filter_map(|compaction| match compaction {
+                            ClaudeGatewayCompaction::Snapshot { target, .. } => Some(target),
+                            ClaudeGatewayCompaction::OnFirstRequest(_) => None,
+                        }),
+                )
+                .any(|target| target.connection.endpoint.host_str() == Some("api.anthropic.com"))
+        });
+        project_cli_time_zone(&mut self.launch, setting, system, official);
+    }
 }
 
 /// Private launch material. The runtime owns it for at most one CLI run.
