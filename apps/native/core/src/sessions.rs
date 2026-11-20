@@ -1703,6 +1703,107 @@ pub fn rename_session(
     })
 }
 
+pub fn observe_codex_title(
+    db: &mut Connection,
+    command: &CommandMetadata,
+    session_id: &str,
+    run_id: &str,
+    generation: &str,
+    provider_session_id: &str,
+    title: &str,
+    now: i64,
+) -> Result<Option<DomainCommit>> {
+    let title = trim(title);
+    let before = require_session(db, session_id)?;
+    let manual = before.title_source.as_deref() == Some("manual");
+    // The serialized owner is the sole writer. Skip unchanged observations
+    // before opening the command transaction, including its replay receipt.
+    if title.is_empty()
+        || (before.provider_title.as_deref() == Some(title)
+            && (manual
+                || (before.title_source.as_deref() == Some("auto") && before.title == title)))
+    {
+        return Ok(None);
+    }
+    execute(db, command, now, |tx, events| {
+        let owns_run: bool = tx.query_row(
+            "SELECT EXISTS (
+               SELECT 1 FROM session_runs
+               WHERE session_id = ?1 AND id = ?2 AND runtime_generation = ?3
+                 AND profile = 'codex' AND status = 'running'
+                 AND ordinal = (SELECT max(ordinal) FROM session_runs WHERE session_id = ?1)
+             )",
+            params![session_id, run_id, generation],
+            |row| row.get(0),
+        )?;
+        ensure!(
+            before.archived_at.is_none()
+                && owns_run
+                && codex_binding(tx, session_id)?.is_some_and(|binding| {
+                    binding.resumable && binding.provider_session_id == provider_session_id
+                }),
+            "Codex title no longer belongs to the active SessionRun"
+        );
+        write_provider_title(tx, command, events, &before, title, manual, now)
+    })
+    .map(Some)
+}
+
+pub fn restore_codex_title(
+    db: &mut Connection,
+    command: &CommandMetadata,
+    session_id: &str,
+    now: i64,
+) -> Result<Option<DomainCommit>> {
+    let before = require_session(db, session_id)?;
+    ensure!(
+        before.kind == "codex" && before.archived_at.is_none(),
+        "automatic title can only be restored for a current Codex card"
+    );
+    let Some(title) = before
+        .provider_title
+        .as_deref()
+        .map(trim)
+        .filter(|title| !title.is_empty() && before.title_source.as_deref() == Some("manual"))
+    else {
+        return Ok(None);
+    };
+    execute(db, command, now, |tx, events| {
+        write_provider_title(tx, command, events, &before, title, false, now)
+    })
+    .map(Some)
+}
+
+fn write_provider_title(
+    tx: &Connection,
+    command: &CommandMetadata,
+    events: &mut Vec<DomainEventInput>,
+    before: &Session,
+    provider_title: &str,
+    manual: bool,
+    now: i64,
+) -> Result<Value> {
+    let (title, source) = if manual {
+        (before.title.as_str(), "manual")
+    } else {
+        (provider_title, "auto")
+    };
+    tx.execute(
+        "UPDATE sessions SET title = ?, title_source = ?, provider_title = ?,
+             updated_at = ?, version = version + 1 WHERE id = ?",
+        params![title, source, provider_title, now, before.id],
+    )?;
+    let session = serde_json::to_value(require_session(tx, &before.id)?)?;
+    events.push(session_event(
+        command,
+        "session.updated",
+        before,
+        now,
+        json!({"session": session}),
+    ));
+    Ok(session)
+}
+
 pub fn update_cwd(
     db: &mut Connection,
     command: &CommandMetadata,

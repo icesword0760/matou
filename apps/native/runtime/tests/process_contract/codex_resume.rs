@@ -231,6 +231,213 @@ fn retire_and_check(child: RuntimeChild, db: &Connection, session: &str) -> Resu
 }
 
 #[test]
+fn codex_title_follows_the_active_index_and_preserves_manual_priority() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let (mut child, home, rollout, db) = establish(root.path())?;
+    let session = child.session.clone();
+    fs::write(
+        &rollout,
+        format!(
+            "{}\n",
+            json!({"type":"session_meta","payload": {
+                "id":UUID, "cwd":child.workspace, "timestamp":"2026-11-15T06:12:00Z",
+            }})
+        ),
+    )?;
+    let index = home.join("session_index.jsonl");
+    let old_url = current_hook_url(&home)?;
+    let row = |id: &str, title: &str, updated: &str| {
+        json!({"id":id, "thread_name":title, "updated_at":updated}).to_string()
+    };
+    let send_title = |child: &mut RuntimeChild, title: Option<&str>| {
+        child.send(Command::SetSessionTitle {
+            session_id: session.clone(),
+            title: title.map(str::to_owned),
+        })
+    };
+    let visible = |child: &mut RuntimeChild, title: &str, source: &str, provider: &str| {
+        graph(child, title, |_, card| {
+            card["title"] == title
+                && card["titleSource"] == source
+                && card["providerTitle"] == provider
+        })
+    };
+    let updates = || {
+        db.query_row(
+            "SELECT COUNT(*) FROM domain_events WHERE session_id = ?
+             AND event_type = 'session.updated' AND json_type(payload_json, '$.session') = 'object'",
+            [&session],
+            |row| row.get::<_, i64>(0),
+        )
+    };
+    let receipts = || {
+        db.query_row(
+            "SELECT COUNT(*) FROM command_deduplication WHERE command_id LIKE 'codex-title-%'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+    };
+
+    let prompt = "合成首问：整理项目";
+    writeln!(
+        fs::OpenOptions::new().append(true).open(&rollout)?,
+        "{}",
+        json!({"type":"event_msg","payload":{"type":"user_message","message":prompt}})
+    )?;
+    assert_eq!(
+        post_hook(
+            &old_url,
+            json!({
+                "hook_event_name": "UserPromptSubmit", "session_id": UUID,
+                "transcript_path": rollout, "turn_id": "title-turn", "prompt": prompt,
+            })
+        )?,
+        200
+    );
+    graph(&mut child, "first prompt keeps the default", |_, card| {
+        card["workStatus"] == "running"
+            && card["title"] == "Codex"
+            && card["providerTitle"].is_null()
+    })?;
+    println!(
+        "codex-title first prompt: rollout and authenticated hook kept default while index missing"
+    );
+
+    send_title(&mut child, Some("手动一"))?;
+    graph(&mut child, "named before auto", |_, card| {
+        card["title"] == "手动一"
+            && card["titleSource"] == "manual"
+            && card["providerTitle"].is_null()
+    })?;
+    send_title(&mut child, None)?;
+    child.send(Command::Refresh)?;
+    graph(
+        &mut child,
+        "restore before any provider title",
+        |_, card| {
+            card["title"] == "手动一"
+                && card["titleSource"] == "manual"
+                && card["providerTitle"].is_null()
+        },
+    )?;
+    println!("codex-title clear without candidate: manual name survives");
+
+    let first = row(UUID, "  自动摘要一  ", "2026-11-15T06:14:00Z");
+    let store = root.path().join("index staging");
+    fs::write(
+        &store,
+        [
+            first.clone(),
+            row(UUID, "旧标题", "2026-11-15T06:13:00Z"),
+            row(FOREIGN, "旁路会话", "2026-11-15T06:50:00Z"),
+            row(UUID, " ", "2026-11-15T06:50:00Z"),
+            row(UUID, "坏时间", "now"),
+            "{bad json".into(),
+            "null".into(),
+            "{\"id\":".into(),
+        ]
+        .join("\n"),
+    )?;
+    fs::rename(&store, &index)?;
+    visible(&mut child, "手动一", "manual", "自动摘要一")?;
+    println!(
+        "codex-title delayed index: atomic creation, exact UUID and latest valid time selected under manual lock"
+    );
+    let count = updates()?;
+    let receipt_count = receipts()?;
+    writeln!(
+        fs::OpenOptions::new().append(true).open(&index)?,
+        "\n{first}"
+    )?;
+    // Give the asynchronous observer several polls before asserting both writes are deduplicated.
+    thread::sleep(Duration::from_millis(850));
+    assert_eq!(updates()?, count);
+    assert_eq!(receipts()?, receipt_count);
+    println!("codex-title duplicate/bad/empty rows: no event or command receipt added");
+    send_title(&mut child, None)?;
+    visible(&mut child, "自动摘要一", "auto", "自动摘要一")?;
+
+    let later = row(UUID, "自动摘要二", "2026-11-15T06:15:00.125Z");
+    fs::write(&store, format!("{first}\n{later}\n"))?;
+    fs::rename(&store, &index)?;
+    visible(&mut child, "自动摘要二", "auto", "自动摘要二")?;
+    send_title(&mut child, Some("手动二"))?;
+    visible(&mut child, "手动二", "manual", "自动摘要二")?;
+    let latest = row(UUID, "自动摘要三", "2026-11-15T06:16:00Z");
+    writeln!(
+        fs::OpenOptions::new().append(true).open(&index)?,
+        "{latest}"
+    )?;
+    visible(&mut child, "手动二", "manual", "自动摘要三")?;
+    let listing = list_catalog(&mut child, 91, "自动摘要三")?;
+    let listed = &listing["sessions"][0];
+    assert_eq!(listed["providerSessionId"], UUID, "{listing}");
+    assert_eq!(listed["title"], "自动摘要三");
+    assert_eq!(listed["loadedBy"]["title"], "手动二");
+    println!(
+        "codex-title clear and update: unlocked card followed a replacement index, then manual lock; catalog shows current provider title and manual card name"
+    );
+
+    // The replacement process has rendered its first frame but has not bound its UUID.
+    restart(&mut child)?;
+    first_screen(&mut child, &home, Some(UUID), true)?;
+    let new_url = current_hook_url(&home)?;
+    assert_ne!(old_url, new_url);
+    let next = row(UUID, "仅新 run 可观察", "2026-11-15T06:17:00Z");
+    writeln!(fs::OpenOptions::new().append(true).open(&index)?, "{next}")?;
+    assert!(matches!(
+        post_hook(&old_url, started(UUID, &rollout))?,
+        200 | 404
+    ));
+    child.send(Command::Refresh)?;
+    graph(&mut child, "old run could not write", |_, card| {
+        card["providerRestoreState"] == "restoring" && card["providerTitle"] == "自动摘要三"
+    })?;
+    assert_eq!(
+        matou_native_core::sessions::get_session(&db, &session)?
+            .unwrap()
+            .provider_title
+            .as_deref(),
+        Some("自动摘要三")
+    );
+    assert_eq!(post_hook(&new_url, started(UUID, &rollout))?, 200);
+    visible(&mut child, "手动二", "manual", "仅新 run 可观察")?;
+    send_title(&mut child, None)?;
+    visible(&mut child, "仅新 run 可观察", "auto", "仅新 run 可观察")?;
+    println!(
+        "codex-title late run: retired hook stayed fenced until replacement UUID confirmation"
+    );
+
+    let old = retire_and_check(child, &db, &session)?;
+    fs::remove_file(&index)?;
+    let mut child = spawn(root.path())?;
+    child.connect()?;
+    assert_eq!(child.session, session);
+    first_screen(&mut child, &home, Some(UUID), true)?;
+    let new = replacement(&db, &session, &old)?;
+    assert_ne!(new.runtime_generation, old.runtime_generation);
+    assert_eq!(
+        post_hook(&current_hook_url(&home)?, started(UUID, &rollout))?,
+        200
+    );
+    child.send(Command::Refresh)?;
+    visible(&mut child, "仅新 run 可观察", "auto", "仅新 run 可观察")?;
+    child.input("hook missing-local-fixture")?;
+    child.send(Command::Resize {
+        session_id: session.clone(),
+        cols: 91,
+        rows: 27,
+        cell_width_px: 8,
+        cell_height_px: 15,
+    })?;
+    child.frame(|_, screen, _| screen.cols == 91 && screen.rows == 27)?;
+    println!(
+        "codex-title cold reopen: same card and saved title with missing index, terminal resized successfully"
+    );
+    shutdown(child)
+}
+
+#[test]
 fn codex_resume_cold_start_preserves_card_binding_and_legacy_material() -> Result<()> {
     let root = tempfile::tempdir()?;
     let (child, home, rollout, db) = establish(root.path())?;

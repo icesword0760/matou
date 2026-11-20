@@ -29,7 +29,7 @@ use uuid::Uuid;
 use crate::{
     SessionEvent, SessionOptions,
     claude_request_gateway::Gateway,
-    codex_events,
+    codex_events::{self, title as codex_title},
     codex_launch::CodexLaunch,
     codex_resume::{self, Resume as CodexResume},
     derived::{CwdTracker, WorkStatusTracker, terminal_summary_lines, utf16_tail},
@@ -127,6 +127,7 @@ pub struct ShellOwner {
     generation: String,
     next_id: Box<dyn FnMut() -> String>,
     hook_server: Option<ProviderHookServer>,
+    codex_titles: codex_title::Reader,
     run_control: Option<RunControl>,
     control_bin: Option<PathBuf>,
     closing: bool,
@@ -157,6 +158,7 @@ impl ShellOwner {
             generation,
             next_id: Box::new(next_id),
             hook_server: None,
+            codex_titles: codex_title::Reader::default(),
             run_control: None,
             control_bin: None,
             closing: false,
@@ -2070,6 +2072,7 @@ impl ShellOwner {
         for (id, run_id, effect) in codex_effects {
             self.apply_codex_effect(&id, &run_id, effect, None, events);
         }
+        self.poll_codex_titles(events);
         let mut expired_forks = Vec::new();
         let mut expired_permission_restores = Vec::new();
         for (session_id, shell) in &mut self.shells {
@@ -2430,10 +2433,12 @@ impl ShellOwner {
         let codex = hook.codex.as_mut().expect("Codex run");
         let payload = observation.codex.take().expect("Codex payload");
         if let Some(confirmed) = &hook.last_observation {
-            if confirmed.identity.as_deref() != Some(identity_text.as_str()) {
+            if confirmed.identity.as_deref() != Some(identity_text.as_str())
+                || !codex.admits_hook(&payload)
+            {
                 return;
             }
-            let Some(effect) = codex.apply(observation.event, payload, &shell.cwd) else {
+            let Some(effect) = codex.apply_admitted(observation.event, payload, &shell.cwd) else {
                 return;
             };
             let notification = observation.notification.map(|(notice, _)| notice.payload());
@@ -2504,7 +2509,7 @@ impl ShellOwner {
             })));
             return;
         };
-        codex.confirm(rollout);
+        codex.confirm(rollout, expected.unwrap_or(&identity_text).to_owned());
         hook.deadline = None;
         hook.codex_resume = None;
         observation.identity = Some(identity_text);
@@ -2513,6 +2518,103 @@ impl ShellOwner {
         confirmed["result"] = json!("confirmed");
         events.push(OwnerEvent::ProviderIdentity(confirmed));
         events.push(OwnerEvent::Domain(commit));
+    }
+
+    fn poll_codex_titles(&mut self, events: &mut Vec<OwnerEvent>) {
+        if self.closing {
+            return;
+        }
+        if let Some(observation) = self.codex_titles.poll()
+            && let Some(shell) = self.shells.get_mut(&observation.session).filter(|shell| {
+                !shell.ended
+                    && !shell.retiring
+                    && shell.run_id == observation.run
+                    && !shell.worker.is_finished()
+            })
+            && let Some(hook) = shell.hook.as_mut()
+            && let Some(watch) = hook
+                .codex
+                .as_mut()
+                .and_then(|codex| codex.title.as_mut())
+                .filter(|watch| watch.identity == observation.identity)
+            && let Some(title) = watch.accept(observation.read)
+            && let Some(title) = safe_hook_text(&title, &hook.secrets)
+        {
+            let id = (self.next_id)();
+            match sessions::observe_codex_title(
+                &mut self.connection,
+                &command(
+                    format!("codex-title-{id}"),
+                    "session.observe-provider-title",
+                    id,
+                ),
+                &observation.session,
+                &observation.run,
+                &self.generation,
+                &observation.identity,
+                title,
+                now(),
+            ) {
+                Ok(Some(commit)) => events.push(OwnerEvent::Domain(commit)),
+                Ok(None) => {}
+                Err(error) => {
+                    watch.retry();
+                    diagnostic(
+                        events,
+                        &observation.session,
+                        format!("persist Codex title: {error:#}"),
+                    );
+                }
+            }
+        }
+        if !self.codex_titles.idle() {
+            return;
+        }
+        let now = Instant::now();
+        let next = self
+            .shells
+            .iter_mut()
+            .filter(|(_, shell)| !shell.ended && !shell.retiring && !shell.worker.is_finished())
+            .filter_map(|(id, shell)| {
+                let watch = shell.hook.as_mut()?.codex.as_mut()?.title.as_mut()?;
+                watch.ready(now).then_some((id, &shell.run_id, watch))
+            })
+            .min_by_key(|(_, _, watch)| watch.due);
+        if let Some((id, run, watch)) = next {
+            self.codex_titles
+                .submit(watch.request(id.clone(), run.clone(), now));
+        }
+    }
+
+    pub(crate) fn set_session_title(
+        &mut self,
+        session_id: &str,
+        title: Option<&str>,
+    ) -> Result<Option<DomainCommit>> {
+        let id = (self.next_id)();
+        let time = now();
+        if let Some(title) = title {
+            sessions::rename_session(
+                &mut self.connection,
+                &command(format!("rename-card-{id}"), "hierarchy.rename-session", id),
+                session_id,
+                title,
+                time,
+                time,
+            )
+            .map(Some)
+        } else {
+            sessions::restore_codex_title(
+                &mut self.connection,
+                &command(
+                    format!("restore-card-title-{id}"),
+                    "hierarchy.restore-session-auto-title",
+                    id,
+                ),
+                session_id,
+                time,
+            )
+        }
     }
 
     fn apply_codex_effect(

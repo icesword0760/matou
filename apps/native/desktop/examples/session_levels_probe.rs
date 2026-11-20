@@ -77,18 +77,22 @@ mod workspace {
     pub(super) struct HeaderProbe {
         pub workspace: Entity<Workspace>,
         pub width: Pixels,
-        pub title: &'static str,
+        pub title: Option<&'static str>,
         pub readings: Rc<HeaderReadings>,
     }
 
     impl Render for HeaderProbe {
         fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            let actions = self.workspace.update(cx, |view, cx| {
+            let (title, actions) = self.workspace.update(cx, |view, cx| {
                 let node = view.graph_node(PEER).unwrap();
+                let title = self
+                    .title
+                    .or_else(|| node["title"].as_str())
+                    .unwrap_or("Shell");
                 let loader = self.readings.clone();
                 let remove = self.readings.clone();
                 let readings = self.readings.clone();
-                Workspace::session_card_actions()
+                let actions = Workspace::session_card_actions()
                     .on_children_prepainted(move |bounds, _, _| {
                         *readings.actions.borrow_mut() = bounds;
                     })
@@ -101,10 +105,11 @@ mod workspace {
                     .child(
                         view.remove_card_button(PEER, node, cx)
                             .on_hover(move |hovered, _, _| remove.remove_hovered.set(*hovered)),
-                    )
+                    );
+                (title.to_owned(), actions)
             });
             Workspace::session_card_header(
-                ui_text(self.title).track_geometry(self.readings.title.clone()),
+                ui_text(title).track_geometry(self.readings.title.clone()),
                 actions,
             )
             .font_family(".AppleSystemUIFont")
@@ -113,6 +118,55 @@ mod workspace {
     }
 
     impl Workspace {
+        pub(super) fn title_probe_projection(&self) -> (String, Bounds<Pixels>, String) {
+            let scene = self.hierarchy.as_ref().unwrap().scene.as_ref().unwrap();
+            let tab_index = self
+                .scenes
+                .iter()
+                .position(|item| item.id == scene.id)
+                .unwrap();
+            let label = self.scene_title(&self.scenes[tab_index]);
+            let mut element = tabs_ui::tab_title(label.clone());
+            let text = element.style().text.as_ref().unwrap();
+            assert_eq!(text.line_clamp, Some(1));
+            assert!(
+                matches!(&text.text_overflow, Some(TextOverflow::Truncate(mark)) if mark == "…")
+            );
+            (
+                label,
+                self.tab_scroll.bounds_for_item(tab_index).unwrap(),
+                self.graph_node(PEER).unwrap()["title"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned(),
+            )
+        }
+
+        pub(super) fn focus_title_menu_item(&self, restore: bool, window: &mut Window) {
+            let (_, _, rename, restore_auto) = self.fork_menu.as_ref().expect("session title menu");
+            window.focus(if restore { restore_auto } else { rename });
+        }
+
+        pub(super) fn replace_title_input(&self, window: &mut Window, cx: &mut Context<Self>) {
+            let Some(TabDialog::RenameSession { input, .. }) = &self.dialog else {
+                panic!("expected the session rename dialog");
+            };
+            input.update(cx, |input, cx| {
+                let len = input.text.encode_utf16().count();
+                input.replace_text_in_range(Some(0..len), "手工标题", window, cx);
+            });
+        }
+
+        pub(super) fn assert_title_dialog_state(&self, failed: bool) {
+            if failed {
+                assert!(
+                    matches!(&self.dialog, Some(TabDialog::RenameSession { failure: Some(title), .. }) if title == "手工标题")
+                );
+            } else {
+                assert!(self.dialog.is_none());
+            }
+        }
+
         pub(super) fn card_header_probe_width(&self, id: &str) -> Pixels {
             let index = self.order.iter().position(|card| card == id).unwrap();
             self.carousel_scroll
@@ -3880,6 +3934,226 @@ mod probe {
         host.shutdown().unwrap();
     }
 
+    fn verify_codex_title_layout(cx: &mut AsyncApp) {
+        const LONG: &str =
+            "这是一次较晚到达的 Codex 自动标题，用于检查标题更新后卡头是否在原有宽度内省略";
+        let fixture = Fixture::new();
+        let Event::Ready { mut graph, .. } = fixture.event(true) else {
+            unreachable!()
+        };
+        let update =
+            |graph: &mut serde_json::Value, title: &str, source: &str, provider: Option<&str>| {
+                let node = graph["nodes"]
+                    .as_array_mut()
+                    .unwrap()
+                    .iter_mut()
+                    .find(|node| node["sessionId"] == PEER)
+                    .unwrap();
+                node["currentMode"] = "codex".into();
+                node["title"] = title.into();
+                node["titleSource"] = source.into();
+                node["providerTitle"] = serde_json::json!(provider);
+            };
+        update(&mut graph, "Codex", "default", None);
+        for width in [720., 900., 1200.] {
+            let (window, sink) = open_hidden(cx, width);
+            let Event::Ready {
+                hierarchy,
+                mut scenes,
+                geometry,
+                ..
+            } = fixture.event(true)
+            else {
+                unreachable!()
+            };
+            // Keep a long pinned tab on screen while the card's title changes.
+            let scene = scenes.iter_mut().find(|scene| scene.id == SCENE).unwrap();
+            scene.title_pinned = true;
+            scene.name = LONG.into();
+            let mut graph = graph.clone();
+            deliver(
+                window,
+                cx,
+                Event::Ready {
+                    hierarchy,
+                    scenes,
+                    graph: graph.clone(),
+                    geometry,
+                },
+            );
+            draw(window, cx);
+            window
+                .update(cx, |view, window, cx| {
+                    assert_eq!(window.viewport_size().width, px(width));
+                    assert!(!crate::macos::is_window_visible(window).unwrap());
+                    view.qualify(PEER, window, cx);
+                })
+                .unwrap();
+            draw(window, cx);
+            let (card_width, workspace, initial) = window
+                .update(cx, |view, _, cx| {
+                    (
+                        view.card_header_probe_width(PEER),
+                        cx.entity(),
+                        view.title_probe_projection(),
+                    )
+                })
+                .unwrap();
+            assert_eq!(initial.2, "Codex");
+            assert_eq!(initial.0, LONG);
+            assert!((px(198.)..=px(200.)).contains(&initial.1.size.width));
+            let readings = Rc::new(HeaderReadings::default());
+            let probe = cx
+                .open_window(
+                    WindowOptions {
+                        show: false,
+                        focus: false,
+                        ..Default::default()
+                    },
+                    |_, cx| {
+                        cx.new(|_| HeaderProbe {
+                            workspace,
+                            width: card_width,
+                            title: Some("…"),
+                            readings: readings.clone(),
+                        })
+                    },
+                )
+                .unwrap();
+            let painted = |cx: &mut AsyncApp| {
+                AnyWindowHandle::from(probe)
+                    .update(cx, |_, window, cx| {
+                        assert!(!crate::macos::is_window_visible(window).unwrap());
+                        window.refresh();
+                        window.draw(cx).clear();
+                        let geometry = readings.title.borrow();
+                        let geometry = geometry.as_ref().unwrap();
+                        let run = geometry.layout.runs.last().unwrap();
+                        assert!(geometry.layout.width <= geometry.bounds.size.width);
+                        (
+                            (run.font_id, run.glyphs.last().unwrap().id),
+                            geometry.layout.len,
+                            geometry.bounds,
+                            readings.actions.borrow().clone(),
+                        )
+                    })
+                    .unwrap()
+            };
+            let (ellipsis, _, _, actions) = painted(cx);
+            probe.update(cx, |view, _, _| view.title = None).unwrap();
+            for (case, (title, source, provider)) in [
+                (LONG, "auto", LONG),
+                ("手工标题", "manual", LONG),
+                (LONG, "auto", LONG),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                update(&mut graph, title, source, Some(provider));
+                deliver(window, cx, Event::Graph(graph.clone()));
+                draw(window, cx);
+                let (tab_title, tab, card) = window
+                    .update(cx, |view, _, _| view.title_probe_projection())
+                    .unwrap();
+                assert_eq!(
+                    (tab_title, tab, card.as_str()),
+                    (initial.0.clone(), initial.1, title)
+                );
+                let (last_glyph, len, bounds, buttons) = painted(cx);
+                assert_eq!(buttons, actions);
+                assert!(bounds.right() <= buttons[0].left());
+                if title == LONG {
+                    assert_eq!(last_glyph, ellipsis);
+                    assert!(len < LONG.len());
+                    assert!(
+                        (bounds.size.width - (buttons[0].left() - px(12.)) * 0.46).abs() <= px(1.)
+                    );
+                } else {
+                    assert_ne!(last_glyph, ellipsis);
+                    assert_eq!(len, title.len());
+                }
+                println!(
+                    "Codex title {width} pt | source={source} | card={bounds:?} | clipped={} | tab={tab:?} | actions unchanged",
+                    len < title.len()
+                );
+                if width == 1200. && case < 2 {
+                    let restore = case == 1;
+                    let position = window
+                        .update(cx, |view, _, _| view.fork_card_header(PEER))
+                        .unwrap();
+                    fork_click(window, cx, MouseButton::Right, position);
+                    draw(window, cx);
+                    window
+                        .update(cx, |view, window, _| {
+                            view.focus_title_menu_item(restore, window)
+                        })
+                        .unwrap();
+                    press(window, cx, "enter");
+                    if !restore {
+                        window
+                            .update(cx, |view, window, cx| view.replace_title_input(window, cx))
+                            .unwrap();
+                        draw(window, cx);
+                        press(window, cx, "enter");
+                    }
+                    let submitted: Vec<_> = std::iter::from_fn(|| sink.try_recv().ok())
+                        .filter_map(|command| match command {
+                            Command::SetSessionTitle { session_id, title } => {
+                                Some((session_id, title))
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    let requested = (!restore).then(|| "手工标题".to_owned());
+                    assert_eq!(submitted, [(PEER.to_owned(), requested.clone())]);
+                    if !restore {
+                        deliver(
+                            window,
+                            cx,
+                            Event::SessionTitleResult {
+                                session_id: PEER.into(),
+                                title: requested.clone(),
+                                error: Some("synthetic failure".into()),
+                            },
+                        );
+                        window
+                            .update(cx, |view, _, _| view.assert_title_dialog_state(true))
+                            .unwrap();
+                        draw(window, cx);
+                        press(window, cx, "enter");
+                        assert!(std::iter::from_fn(|| sink.try_recv().ok()).any(|command| matches!(command, Command::SetSessionTitle { session_id, title } if session_id == PEER && title == requested)));
+                    }
+                    deliver(
+                        window,
+                        cx,
+                        Event::SessionTitleResult {
+                            session_id: PEER.into(),
+                            title: requested,
+                            error: None,
+                        },
+                    );
+                    window
+                        .update(cx, |view, _, _| view.assert_title_dialog_state(false))
+                        .unwrap();
+                    println!(
+                        "Codex title menu | {}",
+                        if restore {
+                            "restore sent from manual card"
+                        } else {
+                            "rename sent, failure kept input, retry succeeded"
+                        }
+                    );
+                }
+            }
+            probe
+                .update(cx, |_, window, _| window.remove_window())
+                .unwrap();
+            window
+                .update(cx, |_, window, _| window.remove_window())
+                .unwrap();
+        }
+    }
+
     fn verify_card_header_layout(cx: &mut AsyncApp) {
         const LONG: &str = "Claude 占位会话，这是一段有意加长用于检查卡头截断行为的验收标题";
         Workspace::assert_compact_status_color();
@@ -3925,7 +4199,7 @@ mod probe {
                         cx.new(|_| HeaderProbe {
                             workspace,
                             width: card_width,
-                            title: "…",
+                            title: Some("…"),
                             readings: readings.clone(),
                         })
                     },
@@ -3934,7 +4208,9 @@ mod probe {
             let mut ellipsis_glyph = None;
             let mut baseline_actions = Vec::new();
             for title in ["…", "Shell", LONG] {
-                probe.update(cx, |view, _, _| view.title = title).unwrap();
+                probe
+                    .update(cx, |view, _, _| view.title = Some(title))
+                    .unwrap();
                 let buttons = AnyWindowHandle::from(probe).update(cx, |_, window, cx| {
                     assert!(!crate::macos::is_window_visible(window).unwrap());
                     window.refresh();
@@ -5621,6 +5897,7 @@ mod probe {
 
     pub(super) fn run() {
         let header_only = std::env::args().any(|arg| arg == "--card-header");
+        let codex_title_only = std::env::args().any(|arg| arg == "--codex-title");
         let water_pointer_only = std::env::args().any(|arg| arg == "--recovery-water-pointer");
         let deferred_only = std::env::args().any(|arg| arg == "--deferred-recovery");
         let show_deferred = std::env::args().any(|arg| arg == "--show-deferred-recovery");
@@ -5631,6 +5908,13 @@ mod probe {
         let codex_loader_only = std::env::args().any(|arg| arg == "--codex-loader");
         let codex_history_only = std::env::args().any(|arg| arg == "--codex-history");
         Application::new().with_assets(NativeAssets).run(move |cx| {
+            if codex_title_only {
+                cx.spawn(async |cx| {
+                    verify_codex_title_layout(cx);
+                    cx.update(|cx| cx.quit()).unwrap();
+                }).detach();
+                return;
+            }
             if header_only {
                 cx.spawn(async |cx| {
                     verify_card_header_layout(cx);
