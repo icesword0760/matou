@@ -588,3 +588,217 @@ fn gateway_bounds_declared_and_chunked_requests_at_64_mib() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn gateway_streams_general_post_before_the_client_finishes_uploading() -> Result<()> {
+    const SIZE: usize = 1024 * 1024;
+    const FIRST: usize = 16 * 1024;
+    let a = listener()?;
+    let b = listener()?;
+    let gateway = Gateway::start(Arc::new(projection(a.local_addr()?, b.local_addr()?)?))?;
+    let (addr, prefix) = gateway_address(&gateway)?;
+    let (arrived, first_segment) = mpsc::channel();
+    let upstream = upstream(a, move |mut io, start, headers| {
+        assert_eq!(
+            start.trim(),
+            "POST /a/v1/models?tenant=a&beta=true HTTP/1.1"
+        );
+        assert_eq!(headers["x-api-key"], "synthetic-a");
+        assert_eq!(length(&headers)?, SIZE);
+        let mut first = vec![0; FIRST];
+        io.read_exact(&mut first)?;
+        assert_eq!(first, vec![b'a'; FIRST]);
+        arrived.send(())?;
+        let mut tail = vec![0; SIZE - FIRST];
+        io.read_exact(&mut tail)?;
+        assert_eq!(tail, vec![b'b'; SIZE - FIRST]);
+        reply(io.get_mut(), "200 OK", "", b"ok")
+    });
+
+    let mut client = socket(addr)?;
+    write!(
+        client,
+        "POST {prefix}/v1/models?beta=true HTTP/1.1\r\nHost: gateway\r\nContent-Length: {SIZE}\r\n\r\n"
+    )?;
+    client.write_all(&vec![b'a'; FIRST])?;
+    first_segment.recv_timeout(TIMEOUT)?;
+    println!("Upstream read {FIRST} of {SIZE} bytes before the client sent the remaining bytes");
+    client.write_all(&vec![b'b'; SIZE - FIRST])?;
+    assert!(head(&mut BufReader::new(client))?.0.contains("200"));
+    upstream.join().unwrap()?;
+    Ok(())
+}
+
+#[test]
+fn gateway_streams_general_chunked_requests_and_aborts_at_64_mib() -> Result<()> {
+    let a = listener()?;
+    let b = listener()?;
+    let gateway = Gateway::start(Arc::new(projection(a.local_addr()?, b.local_addr()?)?))?;
+    let (addr, prefix) = gateway_address(&gateway)?;
+    let overflow_upstream = a.try_clone()?;
+    let valid_upstream = upstream(a, |mut io, start, headers| {
+        assert_eq!(start.trim(), "GET /a/v1/messages?tenant=a HTTP/1.1");
+        assert_eq!(headers["transfer-encoding"], "chunked");
+        assert!(!headers.contains_key(header::TRAILER));
+        let mut bytes = Vec::new();
+        while read_chunk(&mut io, &mut bytes)? != 0 {}
+        assert_eq!(bytes, br#"{"model":"matou-role/sonnet"}"#);
+        reply(io.get_mut(), "200 OK", "", b"")
+    });
+    let mut valid = socket(addr)?;
+    write!(
+        valid,
+        "GET {prefix}{MESSAGES} HTTP/1.1\r\nHost: gateway\r\nTransfer-Encoding: chunked\r\nTrailer: x-api-key\r\n\r\n"
+    )?;
+    write_chunk(&mut valid, br#"{"model":"matou-role/sonnet"}"#)?;
+    valid.write_all(b"0\r\nx-api-key: client-trailer\r\n\r\n")?;
+    assert!(head(&mut BufReader::new(valid))?.0.contains("200"));
+    valid_upstream.join().unwrap()?;
+
+    let (arrived, full_prefix) = mpsc::channel();
+    let oversized_upstream = upstream(overflow_upstream, move |mut io, start, headers| {
+        assert_eq!(start.trim(), "POST /a/v1/models?tenant=a HTTP/1.1");
+        assert_eq!(headers["transfer-encoding"], "chunked");
+        let mut received = 0;
+        let mut bytes = Vec::new();
+        while received < MAX_REQUEST_BYTES {
+            bytes.clear();
+            let size = read_chunk(&mut io, &mut bytes)?;
+            ensure!(size > 0, "upstream received an early end of body");
+            assert!(bytes.iter().all(|byte| *byte == b'a'));
+            received += size;
+        }
+        assert_eq!(received, MAX_REQUEST_BYTES);
+        arrived.send(())?;
+        let outcome = io.read(&mut [0]);
+        assert!(
+            matches!(outcome, Ok(0))
+                || matches!(&outcome, Err(error) if error.kind() == io::ErrorKind::ConnectionReset),
+            "expected upstream abort after the allowed prefix, got {outcome:?}"
+        );
+        Ok(())
+    });
+    let mut client = socket(addr)?;
+    write!(
+        client,
+        "POST {prefix}/v1/models HTTP/1.1\r\nHost: gateway\r\nTransfer-Encoding: chunked\r\n\r\n"
+    )?;
+    let block = vec![b'a'; 1024 * 1024];
+    for _ in 0..64 {
+        write_chunk(&mut client, &block)?;
+    }
+    full_prefix.recv_timeout(TIMEOUT)?;
+    let _ = client.write_all(b"1\r\nx\r\n0\r\n\r\n");
+    assert!(head(&mut BufReader::new(client))?.0.contains("413"));
+    oversized_upstream.join().unwrap()?;
+    println!("Upstream received {MAX_REQUEST_BYTES} bytes, then EOF/reset; client received 413");
+    Ok(())
+}
+
+#[test]
+fn gateway_effort_only_uses_the_source_and_rewrites_messages_not_counts() -> Result<()> {
+    let temp = within_workspace()?;
+    let a = listener()?;
+    let addr = a.local_addr()?;
+    let prepare = |mapping: Value, global: Value, key: Value| {
+        let config = json!({
+            "version": 1,
+            "activeProviderIds": {"claude-code": "a"},
+            "providers": {"claude-code": [{
+                "id": "a", "endpoint": format!("http://{addr}/a"),
+                "model": "literal", "apiKey": key,
+                "modelMapping": {"sonnet": "shared"},
+                "effortMapping": mapping, "reasoningEffort": global
+            }]}
+        });
+        std::fs::write(temp.path().join("provider-config.json"), config.to_string())?;
+        prepare_new_claude_launch(
+            temp.path(),
+            temp.path(),
+            &Value::Null,
+            None,
+            BTreeMap::from([(
+                "MATOU_CLAUDE_COMMAND".into(),
+                std::env::current_exe()?.into_os_string(),
+            )]),
+            80,
+            24,
+        )
+    };
+    let key = json!("synthetic-effort-source");
+    let mut plan = prepare(json!({"sonnet": "high"}), Value::Null, key.clone())?;
+    let projection = Arc::new(
+        plan.gateway
+            .take()
+            .context("effort mapping enables gateway")?,
+    );
+    let gateway = Gateway::start(Arc::clone(&projection))?;
+    let environment = projection.project_environment(&mut plan.launch, gateway.base_url());
+    assert_eq!(
+        environment["ANTHROPIC_DEFAULT_SONNET_MODEL"],
+        "matou-api/sonnet"
+    );
+    assert!(environment.get("ANTHROPIC_DEFAULT_OPUS_MODEL").is_none());
+    assert_eq!(environment["NO_PROXY"], "127.0.0.1,localhost");
+    assert!(projection.model_picker().is_none());
+    assert_eq!(plan.launch.argv, ["--model", "literal"]);
+
+    let literal = br#"{"model":"unmatched","output_config":{"effort":"low"}}"#;
+    let (requests, workers) = record(a.try_clone()?, 4, "200 OK", "", b"ok");
+    for (path, payload, expected) in [
+        (
+            MESSAGES,
+            br#"{"model":"matou-api/sonnet","output_config":{"kept":true}}"#.as_slice(),
+            json!({"model":"shared","output_config":{"effort":"high","kept":true}}),
+        ),
+        (
+            MESSAGES,
+            br#"{"model":"shared"}"#.as_slice(),
+            json!({"model":"shared","output_config":{"effort":"high"}}),
+        ),
+        (
+            COUNT,
+            br#"{"model":"matou-api/sonnet","output_config":{"effort":"low"}}"#.as_slice(),
+            json!({"model":"shared","output_config":{"effort":"low"}}),
+        ),
+    ] {
+        assert_eq!(exchange(&gateway, path, payload, "")?.0, 200);
+        let (start, headers, bytes) = requests.recv_timeout(TIMEOUT)?;
+        assert!(start.starts_with(&format!("POST /a{path} ")));
+        assert_eq!(headers["x-api-key"], "synthetic-effort-source");
+        assert_eq!(serde_json::from_slice::<Value>(&bytes)?, expected);
+    }
+    assert_eq!(exchange(&gateway, MESSAGES, literal, "")?.0, 200);
+    assert_eq!(requests.recv_timeout(TIMEOUT)?.2, literal);
+    for worker in workers {
+        worker.join().unwrap()?;
+    }
+
+    let global = prepare(json!({}), json!("medium"), key.clone())?;
+    let gateway = Gateway::start(Arc::new(
+        global.gateway.context("global effort enables gateway")?,
+    ))?;
+    let (requests, workers) = record(a, 1, "200 OK", "", b"ok");
+    assert_eq!(exchange(&gateway, MESSAGES, literal, "")?.0, 200);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&requests.recv_timeout(TIMEOUT)?.2)?,
+        json!({"model":"unmatched","output_config":{"effort":"medium"}})
+    );
+    for worker in workers {
+        worker.join().unwrap()?;
+    }
+
+    let direct = prepare(json!({"sonnet": "follow"}), json!("follow"), key)?;
+    assert!(direct.gateway.is_none());
+    let direct_environment = direct.launch.env;
+    assert_eq!(
+        direct_environment.get(std::ffi::OsStr::new("ANTHROPIC_BASE_URL")),
+        Some(&std::ffi::OsString::from(format!("http://{addr}/a")))
+    );
+    assert!(
+        prepare(json!({"sonnet": "high"}), Value::Null, Value::Null)?
+            .gateway
+            .is_none()
+    );
+    Ok(())
+}

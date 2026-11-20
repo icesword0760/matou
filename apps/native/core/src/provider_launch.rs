@@ -151,7 +151,8 @@ pub struct ClaudeGatewayProjection {
     source_models: [Option<String>; 3],
     source_efforts: [Option<String>; 3],
     source_effort: Option<String>,
-    startup_role: &'static str,
+    has_role_assignments: bool,
+    startup_role: Option<&'static str>,
 }
 
 pub struct ClaudeGatewayConnection {
@@ -207,6 +208,9 @@ impl ClaudeGatewayProjection {
     }
 
     pub fn request_role(&self, model: &str) -> Option<usize> {
+        if !self.has_role_assignments {
+            return None;
+        }
         let model = without_context_suffix(model);
         if let Some(alias) = startup_role_alias(model) {
             return ROLES.iter().position(|role| *role == alias);
@@ -219,12 +223,22 @@ impl ClaudeGatewayProjection {
     }
 
     pub fn literal_effort(&self, model: &str) -> Option<&str> {
-        role_with_effort(model, |role| {
-            let index = ROLES.iter().position(|candidate| *candidate == role)?;
-            self.source_models[index].as_deref()
-        })
-        .and_then(|index| self.source_efforts[index].as_deref())
-        .or(self.source_effort.as_deref())
+        api_role_index(model)
+            .or_else(|| {
+                role_with_effort(model, |role| {
+                    let index = ROLES.iter().position(|candidate| *candidate == role)?;
+                    self.source_models[index].as_deref()
+                })
+            })
+            .and_then(|index| self.source_efforts[index].as_deref())
+            .or(self.source_effort.as_deref())
+    }
+
+    pub fn literal_model_override(&self, model: &str) -> Option<&str> {
+        if self.has_role_assignments {
+            return None;
+        }
+        self.source_models[api_role_index(model)?].as_deref()
     }
 
     pub fn project_environment(&self, launch: &mut ShellLaunch, base_url: &str) -> Value {
@@ -240,25 +254,63 @@ impl ClaudeGatewayProjection {
             ("CLAUDE_CODE_OAUTH_TOKEN".into(), String::new()),
             ("CLAUDE_CODE_GATEWAY_HINT_HEADERS".into(), "1".into()),
         ]);
+        let no_proxy = get_var(&launch.env, "no_proxy")
+            .or_else(|| get_var(&launch.env, "NO_PROXY"))
+            .map(|value| value.to_string_lossy())
+            .unwrap_or_default();
+        let mut exclusions: Vec<_> = no_proxy
+            .split(',')
+            .filter(|part| !part.is_empty())
+            .collect();
+        for local in ["127.0.0.1", "localhost"] {
+            if !exclusions.iter().any(|part| part.trim() == local) {
+                exclusions.push(local);
+            }
+        }
+        let exclusions = exclusions.join(",");
+        projected.insert("NO_PROXY".into(), exclusions.clone());
+        projected.insert("no_proxy".into(), exclusions);
+        if self.has_role_assignments {
+            clear_role_model_environment(&mut launch.env);
+        }
         for (alias, index) in [("OPUS", 0), ("SONNET", 1), ("HAIKU", 2), ("FABLE", 0)] {
+            let (prefix, name) = if self.has_role_assignments {
+                ("matou-role", self.catalog_model(index))
+            } else if alias != "FABLE"
+                && let Some(model) = self.source_models[index]
+                    .as_deref()
+                    .filter(|model| !model.is_empty())
+            {
+                ("matou-api", model)
+            } else {
+                continue;
+            };
             let key = format!("ANTHROPIC_DEFAULT_{alias}_MODEL");
-            projected.insert(format!("{key}_NAME"), self.catalog_model(index).into());
-            projected.insert(key, format!("matou-role/{}", ROLES[index]));
+            projected.insert(format!("{key}_NAME"), name.into());
+            projected.insert(key, format!("{prefix}/{}", ROLES[index]));
         }
         for (name, value) in &projected {
             set_var(&mut launch.env, name.into(), value.into());
         }
         // A real model ID in --model can be ambiguous when two providers use it.
         // Metadata continues to record the actual selected model for restoration.
-        if let [flag, model, ..] = launch.argv.as_mut_slice()
-            && flag == "--model"
-        {
-            *model = format!("matou-role/{}", self.startup_role);
+        if let Some(role) = self.startup_role {
+            let alias = format!("matou-role/{role}");
+            if let [flag, model, ..] = launch.argv.as_mut_slice()
+                && flag == "--model"
+            {
+                *model = alias;
+            } else {
+                launch.argv.splice(..0, ["--model".into(), alias]);
+            }
         }
         serde_json::json!(projected)
     }
 
-    pub fn model_picker(&self) -> Value {
+    pub fn model_picker(&self) -> Option<Value> {
+        if !self.has_role_assignments {
+            return None;
+        }
         let options: [Value; ROLES.len()] = std::array::from_fn(|index| {
             let role = ROLES[index];
             let (first, rest) = role.split_at(1);
@@ -274,16 +326,34 @@ impl ClaudeGatewayProjection {
                 "description": provider_id,
             })
         });
-        serde_json::json!({
+        Some(serde_json::json!({
             "replaceBuiltInOptions": true,
             "options": options,
-        })
+        }))
     }
 
     fn catalog_model(&self, index: usize) -> &str {
         self.roles[index]
             .as_ref()
             .map_or(ROLES[index], |target| &target.catalog_model)
+    }
+}
+
+impl ClaudeLaunch {
+    pub fn capture_restart_gateway(
+        &mut self,
+        preferences: &ClaudeRoleLaunchPreferences,
+    ) -> Result<()> {
+        let data_root = &self.launch.data_root;
+        let config = read_provider_config(data_root)?;
+        // The bound launch determines the conversation and restored model.
+        // Capture routing from the preferences for this new run.
+        let source = read_provider(data_root, &config, &Value::Null)?;
+        let role = self
+            .assigned_role
+            .or_else(|| model_role(&source, &self.model));
+        self.gateway = gateway_projection(&config, &source, Some(&preferences.assignments), role);
+        Ok(())
     }
 }
 
@@ -509,9 +579,11 @@ fn prepare_claude(
         Some(assignments) => resolve_startup_assignment(&config, &provider, assignments)?,
         None => None,
     };
-    let gateway = assigned
-        .as_ref()
-        .and_then(|(role, _, _)| gateway_projection(&config, &provider, assignments?, role));
+    let gateway = if matches!(target, None | Some(ClaudeTarget::New { .. })) {
+        gateway_projection(&config, &provider, assignments, startup_role(&provider))
+    } else {
+        None
+    };
     let context_window = match target {
         Some(ClaudeTarget::New {
             budget_preferences: Some(preferences),
@@ -615,13 +687,37 @@ fn prepare_claude(
 fn gateway_projection(
     config: &Value,
     source: &Provider,
-    assignments: &ClaudeRoleAssignments,
-    startup_role: &'static str,
+    assignments: Option<&ClaudeRoleAssignments>,
+    startup_role: Option<&'static str>,
 ) -> Option<ClaudeGatewayProjection> {
-    let source_connection = gateway_connection(source);
+    let mut projection = ClaudeGatewayProjection {
+        source: gateway_connection(source),
+        roles: [None, None, None],
+        source_provider_id: source.id.clone(),
+        source_models: ROLES.map(|role| source.model_mapping.get(role).cloned()),
+        source_efforts: ROLES.map(|role| source.effort_mapping.get(role).cloned()),
+        source_effort: source.reasoning_effort.clone(),
+        has_role_assignments: false,
+        startup_role: None,
+    };
+    let Some(assignments) = assignments.filter(|assignments| !assignments.is_empty()) else {
+        return (projection.source.is_some()
+            && projection
+                .source_efforts
+                .iter()
+                .chain([&projection.source_effort])
+                .any(|effort| {
+                    effort
+                        .as_deref()
+                        .is_some_and(|level| EFFORTS.contains(&level) && level != "follow")
+                }))
+        .then_some(projection);
+    };
     // A keyless source can only be replaced when all three selectors have API
     // targets. Otherwise preserve the existing launch for this mixed setup.
-    if source_connection.is_none() && ROLES.iter().any(|role| !assignments.contains_key(*role)) {
+    if projection.source.is_none()
+        && (startup_role.is_none() || ROLES.iter().any(|role| !assignments.contains_key(*role)))
+    {
         return None;
     }
     let providers = provider_entries(config).unwrap_or_default();
@@ -670,9 +766,8 @@ fn gateway_projection(
                 .filter(|tokens| *tokens > 0),
         })
     };
-    let mut roles = [None, None, None];
     for (index, role) in ROLES.into_iter().enumerate() {
-        roles[index] = if let Some(assignment) = assignments.get(role) {
+        projection.roles[index] = if let Some(assignment) = assignments.get(role) {
             let provider = assignment_provider(config, assignment).ok()?;
             Some(target(
                 &provider,
@@ -687,15 +782,14 @@ fn gateway_projection(
                 .and_then(|model| target(source, role, model, None))
         };
     }
-    Some(ClaudeGatewayProjection {
-        source: source_connection,
-        roles,
-        source_provider_id: source.id.clone(),
-        source_models: ROLES.map(|role| source.model_mapping.get(role).cloned()),
-        source_efforts: ROLES.map(|role| source.effort_mapping.get(role).cloned()),
-        source_effort: source.reasoning_effort.clone(),
-        startup_role,
-    })
+    if let Some(index) = ROLES.iter().position(|role| Some(*role) == startup_role)
+        && projection.roles[index].is_none()
+    {
+        return None;
+    }
+    projection.has_role_assignments = true;
+    projection.startup_role = startup_role;
+    Some(projection)
 }
 
 fn gateway_connection(provider: &Provider) -> Option<ClaudeGatewayConnection> {
@@ -705,6 +799,7 @@ fn gateway_connection(provider: &Provider) -> Option<ClaudeGatewayConnection> {
         .filter(|key| !key.trim().is_empty() && key.bytes().all(|byte| byte.is_ascii_graphic()))?;
     let endpoint = url::Url::parse(&provider.endpoint).ok()?;
     if provider.kind.as_deref() == Some("subscription")
+        || provider.subscription.is_some()
         || !matches!(endpoint.scheme(), "http" | "https")
         || endpoint.host().is_none()
         || !endpoint.username().is_empty()
@@ -884,7 +979,11 @@ fn validate_assignment_model(
 }
 
 fn startup_role(source: &Provider) -> Option<&'static str> {
-    let model = without_context_suffix(&source.model);
+    model_role(source, &source.model)
+}
+
+fn model_role(source: &Provider, model: &str) -> Option<&'static str> {
+    let model = without_context_suffix(model);
     if matches!(model, "" | "default" | CLI_DEFAULT_MODEL) {
         // With the local defaults and no user-level model override, Claude Code
         // 2.1.328 reported claude-opus-5-5 in SessionStart without --model (2026-11).
@@ -1068,6 +1167,11 @@ fn reasoning_effort<'a>(provider: &'a Provider, model: &str) -> Option<&'a str> 
     .or(provider.reasoning_effort.as_deref())
 }
 
+fn api_role_index(model: &str) -> Option<usize> {
+    let role = model.strip_prefix("matou-api/")?;
+    ROLES.iter().position(|candidate| *candidate == role)
+}
+
 fn role_with_effort<'a>(model: &str, mapping: impl Fn(&str) -> Option<&'a str>) -> Option<usize> {
     let model = if model.is_empty() { "default" } else { model };
     let mapped = ROLES.iter().position(|role| {
@@ -1089,7 +1193,7 @@ fn role_with_effort<'a>(model: &str, mapping: impl Fn(&str) -> Option<&'a str>) 
     mapped.or_else(inferred)
 }
 
-fn clear_assigned_environment(provider: &Provider, environment: &mut BTreeMap<OsString, OsString>) {
+fn clear_role_model_environment(environment: &mut BTreeMap<OsString, OsString>) {
     environment.retain(|key, _| {
         #[cfg(windows)]
         let key = key.to_ascii_uppercase();
@@ -1102,6 +1206,10 @@ fn clear_assigned_environment(provider: &Provider, environment: &mut BTreeMap<Os
                     .windows(b"SUBAGENT".len())
                     .any(|part| part == b"SUBAGENT")))
     });
+}
+
+fn clear_assigned_environment(provider: &Provider, environment: &mut BTreeMap<OsString, OsString>) {
+    clear_role_model_environment(environment);
     for key in [
         "ANTHROPIC_API_KEY",
         "ANTHROPIC_AUTH_TOKEN",

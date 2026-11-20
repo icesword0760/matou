@@ -1,5 +1,7 @@
 #![cfg(target_os = "macos")]
 
+#[path = "process_contract/claude_gateway_restart.rs"]
+mod claude_gateway_restart;
 #[path = "process_contract/claude_model_catalog.rs"]
 mod claude_model_catalog;
 
