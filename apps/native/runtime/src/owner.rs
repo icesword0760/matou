@@ -1528,12 +1528,14 @@ impl ShellOwner {
                 let mut settings: Value = serde_json::from_slice(&std::fs::read(path)?)
                     .map_err(|_| anyhow::anyhow!("Read Claude gateway launch settings"))?;
                 settings["env"] = env;
-                settings["modelPicker"] = model_picker;
-                settings["modelOverrides"] = json!({
-                    "claude-fable-5": "matou-role/opus-fallback",
-                    "claude-fable-5-2": "matou-role/opus-fallback",
-                    "claude-fable-5-5": "matou-role/opus-fallback",
-                });
+                if let Some(model_picker) = model_picker {
+                    settings["modelPicker"] = model_picker;
+                    settings["modelOverrides"] = json!({
+                        "claude-fable-5": "matou-role/opus-fallback",
+                        "claude-fable-5-2": "matou-role/opus-fallback",
+                        "claude-fable-5-5": "matou-role/opus-fallback",
+                    });
+                }
                 std::fs::write(path, serde_json::to_vec(&settings)?)
                     .context("Write Claude gateway launch settings")?;
             }
@@ -1942,10 +1944,11 @@ impl ShellOwner {
                 return;
             }
         }
-        // Resume, permission restart and Fork still launch via the stored
-        // provider. A gateway selector is only valid inside this run's CLI.
-        observation.model = safe(observation.model)
-            .filter(|model| !hook.uses_gateway || !model.starts_with("matou-role/"));
+        // Keep transient gateway selectors out of the restored model metadata.
+        observation.model = safe(observation.model).filter(|model| {
+            !hook.uses_gateway
+                || !(model.starts_with("matou-role/") || model.starts_with("matou-api/"))
+        });
         observation.permission_mode = if first_fresh_identity {
             hook.launch_metadata["permissionMode"]
                 .as_str()

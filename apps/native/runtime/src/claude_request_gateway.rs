@@ -1,6 +1,7 @@
 //! Per-run API Key transport. The URL's unguessable path is the local credential.
 use std::{
     convert::Infallible,
+    error::Error as _,
     fmt::Write as _,
     net::Ipv4Addr,
     pin::Pin,
@@ -17,7 +18,7 @@ use std::{
 use anyhow::{Context, Result, anyhow};
 use http_body_util::{BodyExt, Full, LengthLimitError, Limited, combinators::UnsyncBoxBody};
 use hyper::{
-    HeaderMap, Method, Request, Response, StatusCode, Uri,
+    HeaderMap, Method, Request, Response, StatusCode, Uri, Version,
     body::{Body, Bytes, Frame, Incoming, SizeHint},
     client::conn::http1 as client,
     header::{self, HeaderValue},
@@ -49,7 +50,7 @@ type GatewayBody = UnsyncBoxBody<Bytes, BodyError>;
 pub(crate) struct Gateway {
     base_url: String,
     stopped: Arc<AtomicBool>,
-    stop: Option<oneshot::Sender<()>>,
+    stop: Option<(oneshot::Sender<()>, thread::JoinHandle<()>)>,
 }
 
 impl Gateway {
@@ -69,7 +70,7 @@ impl Gateway {
         });
         let (stop, closed) = oneshot::channel();
         let (ready, bound) = mpsc::sync_channel(1);
-        thread::Builder::new()
+        let serving_thread = thread::Builder::new()
             .name("claude-request-gateway".into())
             .spawn(move || {
                 let runtime = tokio::runtime::Builder::new_current_thread()
@@ -107,7 +108,7 @@ impl Gateway {
         Ok(Self {
             base_url,
             stopped,
-            stop: Some(stop),
+            stop: Some((stop, serving_thread)),
         })
     }
 
@@ -119,8 +120,10 @@ impl Gateway {
 impl Drop for Gateway {
     fn drop(&mut self) {
         self.stopped.store(true, Ordering::Release);
-        if let Some(stop) = self.stop.take() {
+        if let Some((stop, serving_thread)) = self.stop.take() {
             let _ = stop.send(());
+            // The listener must be closed before a replacement gets its URL.
+            let _ = serving_thread.join();
         }
     }
 }
@@ -170,29 +173,100 @@ impl State {
         let (path, query) = self
             .route(&parts.uri)
             .ok_or(Fault::new(StatusCode::NOT_FOUND, PATH_ERROR))?;
-        let size = incoming.size_hint().upper();
+        let size = incoming.size_hint().exact();
         if size.is_some_and(|size| size > MAX_REQUEST_BYTES as u64) {
             return Err(Fault::too_large());
         }
         let is_message = parts.method == Method::POST && path == "/v1/messages";
         let is_count = parts.method == Method::POST && path == "/v1/messages/count_tokens";
-        let mut body = Limited::new(incoming, MAX_REQUEST_BYTES)
-            .collect()
-            .await
-            .map_err(|error| {
-                if error.is::<LengthLimitError>() {
-                    Fault::too_large()
-                } else {
-                    Fault::new(
-                        StatusCode::BAD_REQUEST,
-                        "Claude request gateway could not read the request.",
-                    )
-                }
-            })?
-            .to_bytes();
-        let mut message = (is_message || is_count)
-            .then(|| serde_json::from_slice::<Map<String, Value>>(&body).ok())
-            .flatten();
+        let limited = Limited::new(incoming, MAX_REQUEST_BYTES);
+        let (body, length, connection, rewritten) = if is_message || is_count {
+            let bytes = limited
+                .collect()
+                .await
+                .map_err(|error| Fault::request_body(error.as_ref()))?
+                .to_bytes();
+            let (bytes, connection, rewritten) = self.rewrite_json(bytes, is_message)?;
+            let length = bytes.len() as u64;
+            let body = Full::new(bytes)
+                .map_err(|never| match never {})
+                .boxed_unsync();
+            (body, Some(length), connection, rewritten)
+        } else {
+            let connection = self
+                .projection
+                .source
+                .as_ref()
+                .ok_or(Fault::bad_gateway(SOURCE_ERROR))?;
+            let body = limited
+                .map_frame(|frame| {
+                    if frame.is_trailers() {
+                        Frame::data(Bytes::new())
+                    } else {
+                        frame
+                    }
+                })
+                .boxed_unsync();
+            (body, size, connection, false)
+        };
+        let destination =
+            destination(connection, path, query).ok_or(Fault::bad_gateway(CONNECTION_ERROR))?;
+        let mut key = HeaderValue::from_str(&connection.api_key)
+            .map_err(|_| Fault::bad_gateway("Claude model target credential is unavailable."))?;
+        key.set_sensitive(true);
+        request_headers(
+            &mut parts.headers,
+            [(header::HeaderName::from_static("x-api-key"), key)],
+        );
+        if rewritten {
+            for name in ["content-md5", "content-digest", "digest"] {
+                parts.headers.remove(name);
+            }
+        }
+        // The outgoing framing describes the forwarded body. Hyper otherwise
+        // assumes an unknown-length GET or HEAD has no body.
+        if let Some(length) = length {
+            if length > 0 || rewritten || parts.headers.contains_key(header::CONTENT_LENGTH) {
+                parts
+                    .headers
+                    .insert(header::CONTENT_LENGTH, HeaderValue::from(length));
+            }
+        } else {
+            parts.version = Version::HTTP_11;
+            parts.headers.remove(header::CONTENT_LENGTH);
+            parts.headers.insert(
+                header::TRANSFER_ENCODING,
+                HeaderValue::from_static("chunked"),
+            );
+        }
+        parts.headers.insert(
+            header::HOST,
+            HeaderValue::from_str(
+                destination
+                    .authority()
+                    .ok_or(Fault::bad_gateway(CONNECTION_ERROR))?
+                    .as_str(),
+            )
+            .map_err(|_| Fault::bad_gateway(CONNECTION_ERROR))?,
+        );
+        parts.uri = Uri::from_parts({
+            let mut origin_form = hyper::http::uri::Parts::default();
+            origin_form.path_and_query = destination.path_and_query().cloned();
+            origin_form
+        })
+        .map_err(|_| Fault::bad_gateway(CONNECTION_ERROR))?;
+        if self.stopped.load(Ordering::Acquire) {
+            return Err(Fault::new(StatusCode::NOT_FOUND, PATH_ERROR));
+        }
+        send_once(destination, Request::from_parts(parts, body)).await
+    }
+
+    fn rewrite_json(
+        &self,
+        mut body: Bytes,
+        is_message: bool,
+    ) -> Result<(Bytes, &ClaudeGatewayConnection, bool), Fault> {
+        let mut message = serde_json::from_slice::<Map<String, Value>>(&body).ok();
         let model = message
             .as_ref()
             .and_then(|object| object.get("model"))
@@ -214,6 +288,7 @@ impl State {
             .or(self.projection.source.as_ref())
             .ok_or(Fault::bad_gateway(SOURCE_ERROR))?;
         let literal_effort = model.and_then(|model| self.projection.literal_effort(model));
+        let literal_model = model.and_then(|model| self.projection.literal_model_override(model));
         let mut rewritten = false;
         if let (Some(target), Some(message)) = (target, message.as_mut()) {
             message.insert("model".into(), json!(target.model));
@@ -221,14 +296,19 @@ impl State {
                 apply_role_generation(message, target)?;
             }
             rewritten = true;
-        } else if is_message
-            && let Some(effort) = literal_effort
-            && EFFORTS.contains(&effort)
-            && effort != "follow"
-            && let Some(message) = message.as_mut()
-        {
-            set_effort(message, Some(effort));
-            rewritten = true;
+        } else if let Some(message) = message.as_mut() {
+            if let Some(model) = literal_model {
+                message.insert("model".into(), json!(model));
+                rewritten = true;
+            }
+            if is_message
+                && let Some(effort) = literal_effort
+                && EFFORTS.contains(&effort)
+                && effort != "follow"
+            {
+                set_effort(message, Some(effort));
+                rewritten = true;
+            }
         }
         if rewritten {
             body = serde_json::to_vec(&message)
@@ -238,47 +318,7 @@ impl State {
                 return Err(Fault::too_large());
             }
         }
-        let destination =
-            destination(connection, path, query).ok_or(Fault::bad_gateway(CONNECTION_ERROR))?;
-        let mut key = HeaderValue::from_str(&connection.api_key)
-            .map_err(|_| Fault::bad_gateway("Claude model target credential is unavailable."))?;
-        key.set_sensitive(true);
-        request_headers(
-            &mut parts.headers,
-            [(header::HeaderName::from_static("x-api-key"), key)],
-        );
-        if rewritten {
-            for name in ["content-md5", "content-digest", "digest"] {
-                parts.headers.remove(name);
-            }
-        }
-        // Hyper handles framing with the actual body length. Keep an explicit
-        // zero when the original request included a Content-Length.
-        if rewritten || parts.headers.contains_key(header::CONTENT_LENGTH) {
-            parts
-                .headers
-                .insert(header::CONTENT_LENGTH, HeaderValue::from(body.len()));
-        }
-        parts.headers.insert(
-            header::HOST,
-            HeaderValue::from_str(
-                destination
-                    .authority()
-                    .ok_or(Fault::bad_gateway(CONNECTION_ERROR))?
-                    .as_str(),
-            )
-            .map_err(|_| Fault::bad_gateway(CONNECTION_ERROR))?,
-        );
-        parts.uri = Uri::from_parts({
-            let mut origin_form = hyper::http::uri::Parts::default();
-            origin_form.path_and_query = destination.path_and_query().cloned();
-            origin_form
-        })
-        .map_err(|_| Fault::bad_gateway(CONNECTION_ERROR))?;
-        if self.stopped.load(Ordering::Acquire) {
-            return Err(Fault::new(StatusCode::NOT_FOUND, PATH_ERROR));
-        }
-        send_once(destination, Request::from_parts(parts, Full::new(body))).await
+        Ok((body, connection, rewritten))
     }
 
     fn route<'a>(&self, uri: &'a Uri) -> Option<(&'a str, Option<&'a str>)> {
@@ -460,7 +500,7 @@ fn http_connector() -> HttpConnector {
 
 async fn send_once(
     destination: Uri,
-    request: Request<Full<Bytes>>,
+    request: Request<GatewayBody>,
 ) -> Result<Response<GatewayBody>, Fault> {
     // The low-level HTTP/1 connection has no redirect, decompression, retry,
     // or pooling layer. Keep the driver owned by this downstream exchange.
@@ -493,7 +533,15 @@ async fn send_once(
         )
         .await?
     };
-    let response = sender.send_request(request).await.map_err(|_| failure)?;
+    let response = sender.send_request(request).await.map_err(|error| {
+        if error.is_user()
+            && let Some(cause) = error.source()
+        {
+            Fault::request_body(cause)
+        } else {
+            failure
+        }
+    })?;
     let (mut parts, incoming) = response.into_parts();
     if parts.status.is_redirection() && parts.headers.contains_key(header::LOCATION) {
         return Err(Fault::bad_gateway(
@@ -545,7 +593,7 @@ impl Drop for AbortOnDrop {
 
 async fn connect<T: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static>(
     socket: T,
-) -> Result<(client::SendRequest<Full<Bytes>>, AbortOnDrop), Fault> {
+) -> Result<(client::SendRequest<GatewayBody>, AbortOnDrop), Fault> {
     let (sender, connection) = client::handshake(socket)
         .await
         .map_err(|_| Fault::bad_gateway(CONNECTION_ERROR))?;
@@ -569,6 +617,17 @@ impl Fault {
 
     fn too_large() -> Self {
         Self(StatusCode::PAYLOAD_TOO_LARGE, LIMIT_ERROR)
+    }
+
+    fn request_body(error: &(dyn std::error::Error + 'static)) -> Self {
+        if error.is::<LengthLimitError>() {
+            Self::too_large()
+        } else {
+            Self::new(
+                StatusCode::BAD_REQUEST,
+                "Claude request gateway could not read the request.",
+            )
+        }
     }
 
     fn response(self) -> Response<GatewayBody> {

@@ -4004,20 +4004,16 @@ fn prepare_launch(
                     .filter(|binding| binding.resumable)
                     .map(|binding| binding.provider_session_id)
             };
-            let role_preferences = if fork.is_none()
+            let fresh_launch = fork.is_none()
                 && resume_id.is_none()
                 && matches!(
                     intent,
                     LaunchIntent::Start | LaunchIntent::ShellPromotion(_)
-                ) {
-                let (reply, result) = mpsc::channel();
-                // Read in the same queue as saves so a prior save takes effect
-                // even if the client hasn't received its reply yet.
-                role_requests.send(RoleAssignmentsRequest::ForLaunch(reply))?;
-                Some(result)
-            } else {
-                None
-            };
+                );
+            let (reply, role_preferences) = mpsc::channel();
+            // Every new PTY captures its own preferences. Use the save queue
+            // so a prior save is visible before its reply reaches the client.
+            role_requests.send(RoleAssignmentsRequest::ForLaunch(reply))?;
             let permission_fresh = matches!(
                 intent,
                 LaunchIntent::PermissionRestart {
@@ -4030,27 +4026,21 @@ fn prepare_launch(
                 .name("claude-launch".into())
                 .spawn(move || {
                     let terminal = default_terminal_options();
-                    if let Some(fork) = fork {
-                        let result = prepare_claude_fork(
-                            &data_root,
-                            Path::new(&session.cwd),
-                            &fork.metadata,
-                            &fork.source_id,
-                            std::env::vars_os().collect(),
-                            terminal.cols,
-                            terminal.rows,
-                        );
-                        let _ = send.send(result.map(|launch| PreparedLaunch::ClaudeCode {
-                            launch,
-                            fork_source: Some(fork.source_id),
-                        }));
-                        return;
-                    }
                     let cwd = Path::new(&session.cwd);
                     let environment = std::env::vars_os().collect();
-                    let result = if let Some(role_preferences) = role_preferences {
-                        (|| {
-                            let preferences = role_preferences.recv()?;
+                    let result = (|| {
+                        let preferences = role_preferences.recv()?;
+                        let mut launch = if let Some(fork) = &fork {
+                            prepare_claude_fork(
+                                &data_root,
+                                cwd,
+                                &fork.metadata,
+                                &fork.source_id,
+                                environment,
+                                terminal.cols,
+                                terminal.rows,
+                            )
+                        } else if fresh_launch {
                             prepare_new_claude_launch_with_budget(
                                 &data_root,
                                 cwd,
@@ -4060,32 +4050,36 @@ fn prepare_launch(
                                 terminal.cols,
                                 terminal.rows,
                             )
-                        })()
-                    } else if permission_fresh {
-                        prepare_claude_permission_restart(
-                            &data_root,
-                            cwd,
-                            &metadata,
-                            remembered,
-                            environment,
-                            terminal.cols,
-                            terminal.rows,
-                        )
-                    } else {
-                        prepare_claude_launch(
-                            &data_root,
-                            cwd,
-                            &metadata,
-                            resume_id.as_deref(),
-                            environment,
-                            terminal.cols,
-                            terminal.rows,
-                        )
-                    };
-                    let _ = send.send(result.map(|launch| PreparedLaunch::ClaudeCode {
-                        launch,
-                        fork_source: None,
-                    }));
+                        } else if permission_fresh {
+                            prepare_claude_permission_restart(
+                                &data_root,
+                                cwd,
+                                &metadata,
+                                remembered,
+                                environment,
+                                terminal.cols,
+                                terminal.rows,
+                            )
+                        } else {
+                            prepare_claude_launch(
+                                &data_root,
+                                cwd,
+                                &metadata,
+                                resume_id.as_deref(),
+                                environment,
+                                terminal.cols,
+                                terminal.rows,
+                            )
+                        }?;
+                        if !fresh_launch {
+                            launch.capture_restart_gateway(&preferences)?;
+                        }
+                        Ok(PreparedLaunch::ClaudeCode {
+                            launch,
+                            fork_source: fork.map(|fork| fork.source_id),
+                        })
+                    })();
+                    let _ = send.send(result);
                 })?;
         }
         _ => bail!("unsupported session launch kind"),
@@ -4694,7 +4688,7 @@ mod tests {
     }
 
     #[test]
-    fn permission_restart_with_expired_binding_does_not_read_role_assignments() -> Result<()> {
+    fn permission_restart_with_expired_binding_reads_preferences_for_the_new_run() -> Result<()> {
         let root = tempfile::tempdir()?;
         let options = LaunchOptions {
             data_root: root.path().join("data"),
@@ -4767,10 +4761,10 @@ mod tests {
             )?,
             PermissionProgress::Pending
         ));
-        assert!(matches!(
-            requests.try_recv(),
-            Err(mpsc::TryRecvError::Empty)
-        ));
+        let RoleAssignmentsRequest::ForLaunch(reply) = requests.try_recv()? else {
+            bail!("permission restart did not request current preferences");
+        };
+        reply.send(Default::default())?;
         assert!(matches!(change.phase, PermissionPhase::Preparing(Some(_))));
         Ok(())
     }
