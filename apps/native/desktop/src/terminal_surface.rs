@@ -548,6 +548,12 @@ impl TerminalSurface {
             cx.stop_propagation();
             return;
         }
+        if mac && key == "a" && mods.platform && !mods.control && !mods.alt && !mods.shift {
+            self.emit(SurfaceEventKind::Select(SelectionAction::SelectAll), cx);
+            cx.notify();
+            cx.stop_propagation();
+            return;
+        }
         if self.input_disabled {
             return;
         }
