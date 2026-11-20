@@ -471,3 +471,134 @@ fn missing_truncated_or_corrupt_shm_preserves_committed_wal_for_recovery() -> Re
     }
     Ok(())
 }
+
+// Called by the shared startup gate driver with a disposable database copy.
+#[test]
+#[ignore = "fixture-driven probe; run through K-storage-recovery/run.sh"]
+fn startup_recovery_gate_probe() -> Result<()> {
+    use matou_native_core::recovery_marker;
+    use rusqlite::OpenFlags;
+    use serde_json::{Value, json};
+
+    fn capture(root: &Path, action: &str, output: &Path, id: &str) -> Result<Value> {
+        let path = root.join(DATABASE);
+        let marker = root.join(MARKER);
+        if action == "quick-check" {
+            let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            startup::assert_startup_integrity(&db)?;
+            return Ok(json!({"kind": "integrity-ok"}));
+        }
+        if action == "retry-open" {
+            // The core exposes the marker primitive. The native runtime does
+            // not expose the frozen recovery-page retry action.
+            return Ok(json!({"kind": "unsupported"}));
+        }
+        if action == "resolve" {
+            let was_resolved = recovery_marker::is_resolved(&marker, id)?;
+            recovery_marker::resolve(
+                &marker,
+                id,
+                456,
+                "数据库恢复状态已更新，请使用最新恢复页面重试",
+            )?;
+            return Ok(json!({
+                "kind": "resolved", "wasResolved": was_resolved,
+                "resolved": recovery_marker::is_resolved(&marker, id)?,
+            }));
+        }
+
+        fn rows(connection: &Connection) -> Result<Vec<Value>> {
+            let mut statement =
+                connection.prepare("SELECT value FROM gate_payload ORDER BY rowid")?;
+            Ok(statement
+                .query_map([], |row| Ok(json!({"value": row.get::<_, String>(0)?})))?
+                .collect::<rusqlite::Result<_>>()?)
+        }
+
+        Ok(
+            match startup::open(root, &uuid::Uuid::new_v4().to_string())? {
+                BootstrapResult::RecoveryRequired(recovery) => {
+                    let mut value = serde_json::to_value(recovery)?;
+                    value["kind"] = json!("recovery-required");
+                    value
+                }
+                BootstrapResult::ReadOnly {
+                    connection,
+                    data_root,
+                    reason,
+                } => {
+                    let write_error = connection
+                        .execute("UPDATE gate_payload SET value = value", [])
+                        .expect_err("read-only fixture unexpectedly accepted a write");
+                    json!({
+                        "kind": "read-only", "dataRoot": data_root, "reason": reason, "rows": rows(&connection)?,
+                        "writeError": write_error.to_string(), "writeSqliteCode": write_error.sqlite_error().map(|error| error.extended_code),
+                    })
+                }
+                BootstrapResult::Writable {
+                    connection,
+                    ownership,
+                    data_root,
+                } => {
+                    let read = rows(&connection)?;
+                    if action == "hold" {
+                        connection.execute_batch(
+                            "PRAGMA wal_autocheckpoint=0; PRAGMA wal_checkpoint(TRUNCATE);",
+                        )?;
+                        connection.execute(
+                            "INSERT INTO gate_payload VALUES (?1)",
+                            ["committed-in-wal"],
+                        )?;
+                        write_gate_output(output, &json!({"kind": "holding", "rows": read}))?;
+                        loop {
+                            thread::park();
+                        }
+                    }
+                    if action == "clean-close" {
+                        let backup_time = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)?
+                            .as_millis()
+                            .try_into()?;
+                        BackupService::new(root)?.backup_for_clean_exit(
+                            &connection,
+                            backup_time,
+                            matou_native_core::backup::CLEAN_EXIT_BACKUP_TIMEOUT,
+                        )?;
+                    }
+                    drop(connection);
+                    drop(ownership);
+                    json!({"kind": "writable", "dataRoot": data_root, "rows": read})
+                }
+            },
+        )
+    }
+
+    fn write_gate_output(output: &Path, value: &Value) -> Result<()> {
+        let staging = output.with_extension("partial");
+        fs::write(&staging, serde_json::to_vec(value)?)?;
+        fs::rename(staging, output)?;
+        Ok(())
+    }
+
+    let root =
+        PathBuf::from(std::env::var_os("MATOU_RECOVERY_GATE_ROOT").context("missing gate root")?);
+    let output = PathBuf::from(
+        std::env::var_os("MATOU_RECOVERY_GATE_OUTPUT").context("missing gate output")?,
+    );
+    let action = std::env::var("MATOU_RECOVERY_GATE_ACTION")?;
+    let id = std::env::var("MATOU_RECOVERY_GATE_ID")?;
+    let value = capture(&root, &action, &output, &id).unwrap_or_else(|error| {
+        let sqlite_code = error
+            .downcast_ref::<rusqlite::Error>()
+            .and_then(|error| error.sqlite_error())
+            .map(|error| error.extended_code);
+        let io_code = error
+            .downcast_ref::<std::io::Error>()
+            .and_then(|error| error.raw_os_error());
+        json!({"kind": "error", "error": {
+            "message": error.to_string(), "chain": format!("{error:#}"),
+            "sqliteCode": sqlite_code, "osCode": io_code,
+        }})
+    });
+    write_gate_output(&output, &value)
+}

@@ -166,6 +166,20 @@ fn recovery_marker_matches_frozen_bootstrap() -> Result<()> {
             }
             action => panic!("unexpected reference action {action}"),
         }
+        let marker_names = fs::read_dir(root)?
+            .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+            .collect::<std::io::Result<Vec<_>>>()?;
+        let mut marker_names: Vec<_> = marker_names
+            .into_iter()
+            .filter(|name| name.starts_with(MARKER))
+            .collect();
+        marker_names.sort();
+        assert_eq!(
+            marker_names.iter().collect::<Vec<_>>(),
+            after.keys().collect::<Vec<_>>(),
+            "{}: marker inventory",
+            case.name
+        );
         for (name, raw) in after {
             assert_eq!(
                 fs::read_to_string(root.join(&name))?,
