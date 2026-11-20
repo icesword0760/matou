@@ -802,16 +802,40 @@ fn read_chunk(stream: &mut BufReader<TcpStream>, output: &mut Vec<u8>) -> Result
 
 #[test]
 fn gateway_streams_first_sse_bytes_before_tail_and_backpressures_slow_client() -> Result<()> {
+    for deepseek in [false, true] {
+        check_sse_backpressure(deepseek)?;
+    }
+    Ok(())
+}
+
+const STREAM_REQUEST: &[u8] = br#"{"model":"sonnet","stream":true,"tools":[{"type":"custom","name":"fixture","input_schema":{}}]}"#;
+const DEEPSEEK_STREAM_BODY: &[u8] = br#"{"model":"shared","stream":true,"tools":[{"name":"fixture","input_schema":{}}],"output_config":{"effort":"high"}}"#;
+
+fn stream_gateway(a: SocketAddr, b: SocketAddr, deepseek: bool) -> Result<Gateway> {
+    let mut plan = projection(a, b)?;
+    if deepseek {
+        let index = plan.request_role("sonnet").context("test role")?;
+        plan.roles[index].as_mut().unwrap().connection.endpoint =
+            url::Url::parse("https://api.deepseek.com/anthropic")?;
+    }
+    Gateway::start_inner(Arc::new(plan), deepseek.then_some(b))
+}
+
+fn check_sse_backpressure(deepseek: bool) -> Result<()> {
     const FIRST: &[u8] = b"event: message_start\ndata: first\n\n";
     const TAIL: &[u8] = b"event: message_stop\ndata: done\n\n";
     let a = listener()?;
     let b = listener()?;
-    let gateway = Gateway::start(Arc::new(projection(a.local_addr()?, b.local_addr()?)?))?;
+    let gateway = stream_gateway(a.local_addr()?, b.local_addr()?, deepseek)?;
     let (release, wait) = mpsc::channel();
     let (finished, writing) = mpsc::channel();
     let padding = vec![b'x'; 64 * 1024];
     let upstream = upstream(b, move |mut io, _, headers| {
-        io.read_exact(&mut vec![0; length(&headers)?])?;
+        let mut body = vec![0; length(&headers)?];
+        io.read_exact(&mut body)?;
+        if deepseek {
+            assert_eq!(body, DEEPSEEK_STREAM_BODY);
+        }
         let out = io.get_mut();
         out.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n")?;
         write_chunk(out, FIRST)?;
@@ -824,12 +848,7 @@ fn gateway_streams_first_sse_bytes_before_tail_and_backpressures_slow_client() -
         finished.send(())?;
         Ok(())
     });
-    let mut client = BufReader::new(open_request(
-        &gateway,
-        MESSAGES,
-        br#"{"model":"sonnet","stream":true}"#,
-        "",
-    )?);
+    let mut client = BufReader::new(open_request(&gateway, MESSAGES, STREAM_REQUEST, "")?);
     let (start, headers) = head(&mut client)?;
     assert!(start.contains("200"));
     assert_eq!(headers["content-type"], "text/event-stream");
@@ -858,19 +877,31 @@ fn gateway_streams_first_sse_bytes_before_tail_and_backpressures_slow_client() -
     assert_eq!(received.len(), FIRST.len() + 16 * 1024 * 1024 + TAIL.len());
     assert!(received.ends_with(TAIL));
     upstream.join().unwrap()?;
+    eprintln!("PASS SSE first chunk and slow downstream (DeepSeek conversion: {deepseek})");
     Ok(())
 }
 
 #[test]
 fn gateway_cancels_upstream_before_headers_after_first_sse_and_on_drop() -> Result<()> {
+    for deepseek in [false, true] {
+        check_stream_cancellation(deepseek)?;
+    }
+    Ok(())
+}
+
+fn check_stream_cancellation(deepseek: bool) -> Result<()> {
     for (send_headers, retire) in [(false, false), (true, false), (true, true)] {
         let a = listener()?;
         let b = listener()?;
-        let gateway = Gateway::start(Arc::new(projection(a.local_addr()?, b.local_addr()?)?))?;
+        let gateway = stream_gateway(a.local_addr()?, b.local_addr()?, deepseek)?;
         let (addr, _) = gateway_address(&gateway)?;
         let (received, wait) = mpsc::channel();
         let upstream = upstream(b, move |mut io, _, headers| {
-            io.read_exact(&mut vec![0; length(&headers)?])?;
+            let mut body = vec![0; length(&headers)?];
+            io.read_exact(&mut body)?;
+            if deepseek {
+                assert_eq!(body, DEEPSEEK_STREAM_BODY);
+            }
             if send_headers {
                 io.get_mut().write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n")?;
                 write_chunk(io.get_mut(), b"data: first\n\n")?;
@@ -882,12 +913,7 @@ fn gateway_cancels_upstream_before_headers_after_first_sse_and_on_drop() -> Resu
                 outcome => anyhow::bail!("upstream remained open after cancel: {outcome:?}"),
             }
         });
-        let mut client = BufReader::new(open_request(
-            &gateway,
-            MESSAGES,
-            br#"{"model":"sonnet","stream":true}"#,
-            "",
-        )?);
+        let mut client = BufReader::new(open_request(&gateway, MESSAGES, STREAM_REQUEST, "")?);
         wait.recv_timeout(TIMEOUT)?;
         if send_headers {
             assert!(head(&mut client)?.0.contains("200"));
@@ -914,6 +940,9 @@ fn gateway_cancels_upstream_before_headers_after_first_sse_and_on_drop() -> Resu
             upstream.join().unwrap()?;
         }
     }
+    eprintln!(
+        "PASS cancellation before headers, after first SSE, and on gateway retirement (DeepSeek conversion: {deepseek})"
+    );
     Ok(())
 }
 
@@ -1186,5 +1215,418 @@ fn gateway_effort_only_uses_the_source_and_rewrites_messages_not_counts() -> Res
             .gateway
             .is_none()
     );
+    Ok(())
+}
+
+fn tool_reference(kind: &str, name: &str) -> Value {
+    json!({"type": kind, "tool": {"type": "tool_reference", "name": name}})
+}
+
+fn inline_tool(definition: &Value) -> Value {
+    json!({"type":"tool_addition", "tool":{"type":"tool_definition", "definition":definition},
+        "cache_control":{"type":"ephemeral"}})
+}
+
+fn deepseek_fixture(destination: SocketAddr) -> Result<Gateway> {
+    let mut plan = projection(destination, destination)?;
+    plan.source.as_mut().unwrap().endpoint =
+        url::Url::parse("https://api.deepseek.com/anthropic///?tenant=fixture")?;
+    Gateway::start_inner(Arc::new(plan), Some(destination))
+}
+
+#[test]
+fn deepseek_tool_conversion_matrix_matches_upstream_bytes() -> Result<()> {
+    let server = listener()?;
+    let gateway = deepseek_fixture(server.local_addr()?)?;
+    let base = json!({"name":"base","input_schema":{}});
+    let base_custom = json!({"type":"custom","name":"base","input_schema":{}});
+    let search =
+        json!({"name":"search", "type":"web_search_20250305", "input_schema":{"pattern":r"\0"}});
+    let invalid_custom = json!({"name":"  ","type":"custom","input_schema":{}});
+    let lookup = json!({"name":"lookup","input_schema":{"type":"object","maxProperties":1},"eager_input_streaming":true});
+    let lookup_inline = json!({"type":"custom","name":"lookup","eager_input_streaming":true,
+        "input_schema":{"maxProperties":1.0,"type":"object"}});
+    let lookup_deferred = json!({"name":"lookup","input_schema":{"type":"object","maxProperties":1},
+        "eager_input_streaming":true,"defer_loading":true});
+    let promoted_reference = json!({"type":"tool_addition", "tool":{"type":"tool_reference","name":"lookup"},
+        "cache_control":{"type":"ephemeral"}});
+    let removal = tool_reference("tool_removal", "lookup");
+    let restore = tool_reference("tool_addition", "lookup");
+    let removed_text = json!({"type":"text","text":
+        "Historical tool availability change: \"lookup\" was removed. The tools list in this request determines which tools are currently callable."});
+    let restored_text = json!({"type":"text","text":
+        "Historical tool availability change: \"lookup\" was added. The tools list in this request determines which tools are currently callable."});
+    let result = json!({"role":"user","content":[{"type":"tool_result","tool_use_id":"old-call","content":[
+        {"type":"tool_reference","tool_name":"lookup","cache_control":{"type":"ephemeral"}},
+        {"type":"tool_reference","tool_name":"missing"},
+        {"type":"tool_reference","tool_name":"base"}
+    ]},{"type":"tool_reference","tool_name":"missing"}]});
+    let missing_text = json!({"type":"text","text":
+        "Historical tool discovery: \"missing\" was previously discovered, but its definition is not provided in the current tools list and it is not callable."});
+    let mut removed_result = result.clone();
+    removed_result["content"][0]["content"][0] = json!({"type":"text","cache_control":{"type":"ephemeral"},"text":
+        "Historical tool discovery: \"lookup\" was previously discovered, but its definition is not provided in the current tools list and it is not callable."});
+    removed_result["content"][0]["content"][1] = missing_text.clone();
+    let mut restored_result = result.clone();
+    restored_result["content"][0]["content"][1] = missing_text;
+    let old_call = json!({"role":"assistant","content":[{"type":"tool_use","id":"old-call","name":"lookup",
+        "input":{"pattern":r"\0"}}]});
+    let mut lookup_eager = lookup.clone();
+    lookup_eager["defer_loading"] = json!(false);
+    let replacement = json!({"name":"lookup","input_schema":{"type":"string"}, "type":"custom"});
+    let replacement_eager =
+        json!({"name":"lookup","input_schema":{"type":"string"},"defer_loading":false});
+    let mut definition_text = restored_text.clone();
+    definition_text
+        .as_object_mut()
+        .unwrap()
+        .shift_remove("text");
+    definition_text["cache_control"] = json!({"type":"ephemeral"});
+    definition_text["text"] = restored_text["text"].clone();
+    let schema = json!({"type":"object",
+        "pattern":r"λ\0é\\0\\\0\01\099\x00\0",
+        "properties":{"paths":{"items":[{"pattern":r"\0"},false]}},
+        "patternProperties":{r"\0":{"allOf":[{"pattern":r"\0"}]}},
+        "$defs":{"child":{"not":{"pattern":r"\0"}}},
+        "default":{"pattern":r"\0"}, "examples":[{"pattern":r"\0"}]});
+    let mut normalized_schema = schema.clone();
+    normalized_schema["pattern"] = json!(r"λ\x00é\\0\\\x00\01\099\x00\x00");
+    normalized_schema["properties"]["paths"]["items"][0]["pattern"] = json!(r"\x00");
+    normalized_schema["patternProperties"][r"\0"]["allOf"][0]["pattern"] = json!(r"\x00");
+    normalized_schema["$defs"]["child"]["not"]["pattern"] = json!(r"\x00");
+    let with_tools = |tools: Value, messages: Value| json!({"model":"literal","tools":tools,"messages":messages,"max_tokens":9000});
+    let cases = [
+        (
+            "top-level custom and server tool",
+            MESSAGES,
+            with_tools(json!([base_custom, search, invalid_custom]), json!([])),
+            with_tools(json!([base, search, invalid_custom]), json!([])),
+        ),
+        (
+            "promote definition and retain history fields",
+            MESSAGES,
+            with_tools(
+                json!([base]),
+                json!([{"role":"system","content":[inline_tool(&lookup)]}, old_call]),
+            ),
+            with_tools(
+                json!([base, lookup_deferred]),
+                json!([{"role":"system","content":[promoted_reference]}, old_call]),
+            ),
+        ),
+        (
+            "reuse equivalent definitions",
+            MESSAGES,
+            with_tools(
+                json!([base, lookup_deferred]),
+                json!([{"role":"system","content":[inline_tool(&lookup_inline), inline_tool(&lookup), restore]}]),
+            ),
+            with_tools(
+                json!([base, lookup_deferred]),
+                json!([{"role":"system","content":[promoted_reference, promoted_reference, restore]}]),
+            ),
+        ),
+        (
+            "remove and mark historical discoveries",
+            MESSAGES,
+            with_tools(
+                json!([base, lookup]),
+                json!([old_call, result, {"role":"system","content":[removal]}]),
+            ),
+            with_tools(
+                json!([base]),
+                json!([old_call, removed_result, {"role":"system","content":[removed_text]}]),
+            ),
+        ),
+        (
+            "restore by reference",
+            MESSAGES,
+            with_tools(
+                json!([base, lookup_deferred]),
+                json!([result, {"role":"system","content":[removal]},{"role":"system","content":[restore]}]),
+            ),
+            with_tools(
+                json!([base, lookup_eager]),
+                json!([restored_result, {"role":"system","content":[removed_text]},{"role":"system","content":[restored_text]}]),
+            ),
+        ),
+        (
+            "replace definition in registration order",
+            MESSAGES,
+            with_tools(
+                json!([lookup, base]),
+                json!([{"role":"system","content":[removal, inline_tool(&replacement)]},old_call]),
+            ),
+            with_tools(
+                json!([replacement_eager, base]),
+                json!([{"role":"system","content":[removed_text, definition_text]},old_call]),
+            ),
+        ),
+        (
+            "count_tokens schema-only pattern normalization",
+            COUNT,
+            with_tools(
+                json!([{"name":"base","input_schema":schema}]),
+                json!([{"role":"system","content":[inline_tool(&json!({"name":"lookup","input_schema":schema}))]},old_call]),
+            ),
+            with_tools(
+                json!([{"name":"base","input_schema":normalized_schema},
+                {"name":"lookup","input_schema":normalized_schema,"defer_loading":true}]),
+                json!([{"role":"system","content":[promoted_reference]},old_call]),
+            ),
+        ),
+    ];
+    let (upstream, tasks) = record(server, cases.len(), "200 OK", "", b"ok");
+    for (label, path, input, expected) in cases {
+        let response = exchange(
+            &gateway,
+            path,
+            &serde_json::to_vec_pretty(&input)?,
+            "Digest: old\r\n",
+        )?;
+        assert_eq!(response.0, 200, "{label}");
+        let (line, headers, bytes) = upstream.recv_timeout(TIMEOUT)?;
+        assert_eq!(
+            line,
+            format!("POST /anthropic{path}?tenant=fixture HTTP/1.1\r\n")
+        );
+        assert_eq!(headers["host"], "api.deepseek.com");
+        assert_eq!(headers["x-api-key"], "synthetic-a");
+        assert_eq!(length(&headers)?, bytes.len());
+        assert!(!headers.contains_key("digest"));
+        assert_eq!(String::from_utf8(bytes)?, expected.to_string(), "{label}");
+        eprintln!("PASS {label}");
+    }
+    for task in tasks {
+        task.join().unwrap()?;
+    }
+    Ok(())
+}
+
+#[test]
+fn deepseek_tool_errors_stop_before_upstream_and_next_request_recovers() -> Result<()> {
+    let server = listener()?;
+    let gateway = deepseek_fixture(server.local_addr()?)?;
+    let base = json!({"name":"base","input_schema":{}});
+    let deferred = json!({"name":"later","input_schema":{},"defer_loading":true});
+    let server_tool = json!({"name":"search","type":"web_search_20250305"});
+    let removal = tool_reference("tool_removal", "base");
+    let conflicting = inline_tool(&json!({"name":"base","input_schema":{"type":"object"}}));
+    let invalid = inline_tool(&json!({"name":"bad","type":"custom","input_schema":[]}));
+    let request = |tools: Value, events: Value| json!({"model":"literal","tools":tools,"messages":[{"role":"system","content":events}]});
+    let mut forced = request(json!([base]), json!([removal]));
+    forced["tool_choice"] = json!({"type":"tool","name":"base"});
+    let cases = [
+        (
+            "definition conflict",
+            request(json!([base]), json!([conflicting])),
+            "DeepSeek cannot convert inline tools with conflicting definitions for the same name.",
+        ),
+        (
+            "invalid promoted definition",
+            request(json!([base]), json!([invalid])),
+            "DeepSeek cannot convert this inline tool definition: a named custom tool with input_schema is required.",
+        ),
+        (
+            "promotion needs array",
+            request(json!(null), json!([conflicting])),
+            "DeepSeek inline tool conversion requires a tools array.",
+        ),
+        (
+            "promotion needs existing non-deferred tool",
+            request(json!([deferred]), json!([conflicting])),
+            "DeepSeek inline tool conversion requires at least one existing non-deferred tool.",
+        ),
+        (
+            "fold needs array",
+            request(json!({}), json!([removal])),
+            "DeepSeek tool availability conversion requires a tools array.",
+        ),
+        (
+            "fold requires valid top-level client tools",
+            request(json!([base, server_tool]), json!([removal])),
+            "DeepSeek tool availability conversion supports only named client tools with input_schema.",
+        ),
+        (
+            "duplicate fold tool",
+            request(json!([base, base]), json!([removal])),
+            "DeepSeek cannot resolve duplicate top-level tool names during tool availability conversion.",
+        ),
+        (
+            "invalid folded definition",
+            request(json!([base]), json!([removal, invalid])),
+            "DeepSeek tool availability conversion supports only named client tool definitions with input_schema.",
+        ),
+        (
+            "invalid folded reference",
+            request(json!([base]), json!([tool_reference("tool_removal", " ")])),
+            "DeepSeek cannot resolve this tool availability reference.",
+        ),
+        (
+            "unknown removal",
+            request(
+                json!([base]),
+                json!([tool_reference("tool_removal", "missing")]),
+            ),
+            "DeepSeek cannot resolve an unknown tool availability reference.",
+        ),
+        (
+            "unknown restoration",
+            request(
+                json!([base]),
+                json!([removal, tool_reference("tool_addition", "missing")]),
+            ),
+            "DeepSeek cannot resolve an unknown tool availability reference.",
+        ),
+        (
+            "only deferred tools remain",
+            request(json!([base, deferred]), json!([removal])),
+            "DeepSeek tool availability conversion requires at least one non-deferred tool when tools remain.",
+        ),
+        (
+            "force removed tool",
+            forced,
+            "DeepSeek cannot force tool_choice to a tool removed from the current tools list.",
+        ),
+    ];
+    server.set_nonblocking(true)?;
+    for (index, (label, input, message)) in cases.into_iter().enumerate() {
+        let path = if index % 2 == 0 { MESSAGES } else { COUNT };
+        let (status, headers, body) = exchange(&gateway, path, &serde_json::to_vec(&input)?, "")?;
+        assert_eq!(status, 400, "{label}");
+        assert_eq!(headers["content-type"], "application/json", "{label}");
+        assert_eq!(
+            String::from_utf8(body)?,
+            json!({"type":"error","error":{"type":"invalid_request_error","message":message}})
+                .to_string(),
+            "{label}"
+        );
+        assert_eq!(
+            server.accept().unwrap_err().kind(),
+            io::ErrorKind::WouldBlock,
+            "{label}"
+        );
+        eprintln!("PASS {label} (400, zero upstream requests)");
+    }
+    let (upstream, tasks) = record(server, 2, "200 OK", "", b"ok");
+    let input = request(json!([base]), json!([removal]));
+    let expected = request(
+        json!([]),
+        json!([{"type":"text","text":
+        "Historical tool availability change: \"base\" was removed. The tools list in this request determines which tools are currently callable."}]),
+    );
+    assert_eq!(
+        exchange(&gateway, COUNT, &serde_json::to_vec(&input)?, "")?.0,
+        200
+    );
+    assert_eq!(
+        String::from_utf8(upstream.recv_timeout(TIMEOUT)?.2)?,
+        expected.to_string()
+    );
+    eprintln!("PASS same listener recovers and forwards an empty tools list");
+
+    let reference_only = br#"{ "model":"literal", "messages":[{"role":"system","content":[{"type":"tool_addition","tool":{"type":"tool_reference","name":"not-declared"}}]}] }"#;
+    assert_eq!(
+        exchange(&gateway, MESSAGES, reference_only, "Digest: untouched\r\n")?.0,
+        200
+    );
+    let (_, headers, body) = upstream.recv_timeout(TIMEOUT)?;
+    assert_eq!(body, reference_only);
+    assert_eq!(headers["digest"], "untouched");
+    eprintln!("PASS reference-only addition leaves original bytes and digest");
+    for task in tasks {
+        task.join().unwrap()?;
+    }
+    Ok(())
+}
+
+#[test]
+fn deepseek_tool_conversion_follows_final_url_and_preserves_search_marker_precedence() -> Result<()>
+{
+    let work = listener()?;
+    let search = listener()?;
+    let work_address = work.local_addr()?;
+    let search_address = search.local_addr()?;
+    let mut to_deepseek = search_projection(work_address, search_address, None)?;
+    let mut from_deepseek = search_projection(work_address, search_address, None)?;
+    let official = url::Url::parse("https://api.deepseek.com/anthropic")?;
+    to_deepseek.web_search.as_mut().unwrap().connection.endpoint = official.clone();
+    from_deepseek.source.as_mut().unwrap().endpoint = official;
+    let to_deepseek = Gateway::start_inner(Arc::new(to_deepseek), Some(search_address))?;
+    let from_deepseek = Gateway::start_inner(Arc::new(from_deepseek), Some(work_address))?;
+    let (work_requests, work_tasks) = record(work, 5, "200 OK", "", b"ok");
+    let (search_requests, search_tasks) = record(search, 3, "200 OK", "", b"ok");
+    let request = br#"{ "model":"deepseek-literal", "max_tokens":9000, "tools":[{"name":"search","type":"web_search_20250305"}], "messages":[{"role":"system","content":[{"type":"tool_addition","tool":{"type":"tool_definition","definition":{"name":"lookup","input_schema":{"pattern":"\\0"},"type":"custom"}}}]}] }"#;
+    let original: Value = serde_json::from_slice(request)?;
+    for path in [MESSAGES, COUNT] {
+        assert_eq!(exchange(&to_deepseek, path, request, "")?.0, 200);
+        let (line, headers, body) = search_requests.recv_timeout(TIMEOUT)?;
+        assert_eq!(line, format!("POST /anthropic{path} HTTP/1.1\r\n"));
+        assert_eq!(headers["x-api-key"], "synthetic-search");
+        let mut expected = original.clone();
+        expected["model"] = json!("claude-search-exact");
+        if path == MESSAGES {
+            expected["max_tokens"] = json!(512);
+            expected["output_config"] = json!({"effort":"high"});
+            expected["thinking"] = json!({"type":"adaptive"});
+        }
+        expected["tools"] = json!([original["tools"][0], {"name":"lookup","input_schema":{"pattern":r"\x00"},"defer_loading":true}]);
+        expected["messages"][0]["content"][0] = tool_reference("tool_addition", "lookup");
+        assert_eq!(String::from_utf8(body)?, expected.to_string());
+        for marker in ["manual", "auto"] {
+            assert_eq!(
+                exchange(
+                    &to_deepseek,
+                    path,
+                    request,
+                    &format!("x-claude-code-compaction: {marker}\r\n")
+                )?
+                .0,
+                200
+            );
+            let (line, headers, body) = work_requests.recv_timeout(TIMEOUT)?;
+            assert_eq!(line, format!("POST /work{path}?tenant=work HTTP/1.1\r\n"));
+            assert_eq!(headers["x-api-key"], "synthetic-work");
+            assert_eq!(body, request);
+        }
+        eprintln!(
+            "PASS {path} search routes into DeepSeek, both compaction markers preserve work bytes"
+        );
+    }
+    assert_eq!(exchange(&from_deepseek, COUNT, request, "")?.0, 200);
+    let (line, headers, body) = search_requests.recv_timeout(TIMEOUT)?;
+    assert_eq!(
+        line,
+        "POST /search/v1/messages/count_tokens?tenant=search HTTP/1.1\r\n"
+    );
+    assert_eq!(headers["x-api-key"], "synthetic-search");
+    let mut expected = original.clone();
+    expected["model"] = json!("claude-search-exact");
+    assert_eq!(String::from_utf8(body)?, expected.to_string());
+    eprintln!("PASS DeepSeek source rerouted out preserves original tool structure");
+
+    let mut wrong_path = projection(work_address, search_address)?;
+    wrong_path.source.as_mut().unwrap().endpoint =
+        url::Url::parse("https://api.deepseek.com/compatible/anthropic")?;
+    let wrong_path = Gateway::start_inner(Arc::new(wrong_path), Some(work_address))?;
+    assert_eq!(exchange(&wrong_path, MESSAGES, request, "")?.0, 200);
+    let (line, _, body) = work_requests.recv_timeout(TIMEOUT)?;
+    assert_eq!(line, "POST /compatible/anthropic/v1/messages HTTP/1.1\r\n");
+    assert_eq!(body, request);
+    for url in [
+        "https://api.deepseek.com.example.invalid/anthropic/v1/messages",
+        "https://deepseek.com/anthropic/v1/messages",
+        "https://api.deepseek.com./anthropic/v1/messages",
+        "https://api.deepseek.com/v1/messages",
+        "https://api.deepseek.com/anthropic/v1/messages/",
+    ] {
+        assert!(!deepseek_tools::matches(&url.parse()?), "{url}");
+    }
+    eprintln!(
+        "PASS exact host/path predicate; wrong-path and model alias do not trigger conversion"
+    );
+    for task in work_tasks.into_iter().chain(search_tasks) {
+        task.join().unwrap()?;
+    }
     Ok(())
 }

@@ -56,6 +56,17 @@ pub(crate) struct Gateway {
 
 impl Gateway {
     pub(crate) fn start(projection: Arc<ClaudeGatewayProjection>) -> Result<Self> {
+        Self::start_inner(
+            projection,
+            #[cfg(test)]
+            None,
+        )
+    }
+
+    fn start_inner(
+        projection: Arc<ClaudeGatewayProjection>,
+        #[cfg(test)] loopback: Option<std::net::SocketAddr>,
+    ) -> Result<Self> {
         let mut random = [0u8; 32];
         getrandom::fill(&mut random).map_err(|_| anyhow!("Generate Claude gateway credential"))?;
         let mut prefix = String::with_capacity(65);
@@ -68,6 +79,8 @@ impl Gateway {
             prefix,
             projection,
             stopped: Arc::clone(&stopped),
+            #[cfg(test)]
+            loopback,
         });
         let (stop, closed) = oneshot::channel();
         let (ready, bound) = mpsc::sync_channel(1);
@@ -133,6 +146,8 @@ struct State {
     prefix: String,
     projection: Arc<ClaudeGatewayProjection>,
     stopped: Arc<AtomicBool>,
+    #[cfg(test)]
+    loopback: Option<std::net::SocketAddr>,
 }
 
 async fn serve(listener: TcpListener, state: Arc<State>) {
@@ -181,19 +196,19 @@ impl State {
         let is_message = parts.method == Method::POST && path == "/v1/messages";
         let is_count = parts.method == Method::POST && path == "/v1/messages/count_tokens";
         let limited = Limited::new(incoming, MAX_REQUEST_BYTES);
-        let (body, length, connection, rewritten) = if is_message || is_count {
+        let (body, length, connection, destination, rewritten) = if is_message || is_count {
             let bytes = limited
                 .collect()
                 .await
                 .map_err(|error| Fault::request_body(error.as_ref()))?
                 .to_bytes();
-            let (bytes, connection, rewritten) =
-                self.rewrite_json(bytes, is_message, &parts.headers)?;
+            let (bytes, connection, destination, rewritten) =
+                self.rewrite_json(bytes, path, query, &parts.headers)?;
             let length = bytes.len() as u64;
             let body = Full::new(bytes)
                 .map_err(|never| match never {})
                 .boxed_unsync();
-            (body, Some(length), connection, rewritten)
+            (body, Some(length), connection, destination, rewritten)
         } else {
             let connection = self
                 .projection
@@ -209,10 +224,10 @@ impl State {
                     }
                 })
                 .boxed_unsync();
-            (body, size, connection, false)
+            let destination =
+                destination(connection, path, query).ok_or(Fault::bad_gateway(CONNECTION_ERROR))?;
+            (body, size, connection, destination, false)
         };
-        let destination =
-            destination(connection, path, query).ok_or(Fault::bad_gateway(CONNECTION_ERROR))?;
         let mut key = HeaderValue::from_str(&connection.api_key)
             .map_err(|_| Fault::bad_gateway("Claude model target credential is unavailable."))?;
         key.set_sensitive(true);
@@ -260,15 +275,31 @@ impl State {
         if self.stopped.load(Ordering::Acquire) {
             return Err(Fault::new(StatusCode::NOT_FOUND, PATH_ERROR));
         }
+        // Tests remap only the socket destination, after routing, rewriting and Host selection.
+        #[cfg(test)]
+        let destination = match self
+            .loopback
+            .filter(|_| destination.host() == Some(deepseek_tools::HOST))
+        {
+            Some(address) => Uri::builder()
+                .scheme("http")
+                .authority(address.to_string())
+                .path_and_query(destination.path_and_query().unwrap().clone())
+                .build()
+                .expect("local fixture destination"),
+            None => destination,
+        };
         send_once(destination, Request::from_parts(parts, body)).await
     }
 
     fn rewrite_json(
         &self,
         mut body: Bytes,
-        is_message: bool,
+        path: &str,
+        query: Option<&str>,
         headers: &HeaderMap,
-    ) -> Result<(Bytes, &ClaudeGatewayConnection, bool), Fault> {
+    ) -> Result<(Bytes, &ClaudeGatewayConnection, Uri, bool), Fault> {
+        let is_message = path == "/v1/messages";
         let mut message = serde_json::from_slice::<Map<String, Value>>(&body).ok();
         let model = message
             .as_ref()
@@ -326,6 +357,14 @@ impl State {
                 rewritten = true;
             }
         }
+        let destination =
+            destination(connection, path, query).ok_or(Fault::bad_gateway(CONNECTION_ERROR))?;
+        if deepseek_tools::matches(&destination)
+            && let Some(message) = message.as_mut()
+        {
+            rewritten |= deepseek_tools::convert(message)
+                .map_err(|message| Fault::new(StatusCode::BAD_REQUEST, message))?;
+        }
         if rewritten {
             body = serde_json::to_vec(&message)
                 .map_err(|_| Fault::bad_gateway(CONNECTION_ERROR))?
@@ -334,7 +373,7 @@ impl State {
                 return Err(Fault::too_large());
             }
         }
-        Ok((body, connection, rewritten))
+        Ok((body, connection, destination, rewritten))
     }
 
     fn route<'a>(&self, uri: &'a Uri) -> Option<(&'a str, Option<&'a str>)> {
@@ -686,6 +725,437 @@ impl Fault {
                     .boxed_unsync(),
             )
             .expect("static gateway response")
+    }
+}
+
+mod deepseek_tools {
+    use std::collections::{HashMap, HashSet};
+
+    use super::{Map, Uri, Value, json};
+
+    pub(super) const HOST: &str = "api.deepseek.com";
+
+    pub(super) fn matches(destination: &Uri) -> bool {
+        destination.host() == Some(HOST)
+            && matches!(
+                destination.path(),
+                "/anthropic/v1/messages" | "/anthropic/v1/messages/count_tokens"
+            )
+    }
+
+    pub(super) fn convert(message: &mut Map<String, Value>) -> Result<bool, &'static str> {
+        let mut changed = false;
+        if let Some(tools) = message.get_mut("tools").and_then(Value::as_array_mut) {
+            for tool in tools.iter_mut().filter_map(Value::as_object_mut) {
+                if client_name(tool).is_some() && kind(tool) == Some("custom") {
+                    tool.shift_remove("type");
+                    changed = true;
+                }
+            }
+        }
+        changed |= convert_availability(message)?;
+        let mut available = HashSet::new();
+        if let Some(tools) = message.get_mut("tools").and_then(Value::as_array_mut) {
+            for tool in tools.iter_mut().filter_map(Value::as_object_mut) {
+                if client_name(tool).is_some()
+                    && let Some(schema) = tool.get_mut("input_schema")
+                {
+                    changed |= normalize_schema(schema);
+                }
+                if let Some(name) = tool.get("name").and_then(Value::as_str) {
+                    available.insert(name.to_owned());
+                }
+            }
+        }
+        if let Some(messages) = message.get_mut("messages").and_then(Value::as_array_mut) {
+            for block in role_blocks(messages, "user") {
+                if kind(block) == Some("tool_result")
+                    && let Some(content) = block.get_mut("content").and_then(Value::as_array_mut)
+                {
+                    for reference in content.iter_mut().filter_map(Value::as_object_mut) {
+                        if kind(reference) == Some("tool_reference")
+                            && let Some(name) = reference.get("tool_name").and_then(Value::as_str)
+                            && !available.contains(name)
+                        {
+                            let name = json!(name);
+                            reference.shift_remove("tool_name");
+                            reference.insert("type".into(), json!("text"));
+                            reference.insert("text".into(), json!(format!(
+                                "Historical tool discovery: {name} was previously discovered, but its definition is not provided in the current tools list and it is not callable."
+                            )));
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(changed)
+    }
+
+    fn kind(object: &Map<String, Value>) -> Option<&str> {
+        object.get("type").and_then(Value::as_str)
+    }
+
+    fn named(value: &Value) -> Option<&str> {
+        value.as_str().filter(|name| {
+            // ECMAScript trim includes BOM and excludes NEL.
+            !name
+                .trim_matches(|ch: char| ch == '\u{feff}' || (ch.is_whitespace() && ch != '\u{85}'))
+                .is_empty()
+        })
+    }
+
+    fn client_name(definition: &Map<String, Value>) -> Option<&str> {
+        if definition.get("input_schema").is_some_and(Value::is_object)
+            && (definition.get("type").is_none() || kind(definition) == Some("custom"))
+        {
+            definition.get("name").and_then(named)
+        } else {
+            None
+        }
+    }
+
+    fn role_blocks<'a>(
+        messages: &'a mut [Value],
+        role: &'static str,
+    ) -> impl Iterator<Item = &'a mut Map<String, Value>> {
+        messages
+            .iter_mut()
+            .filter(move |entry| entry["role"].as_str() == Some(role))
+            .filter_map(|entry| entry.get_mut("content").and_then(Value::as_array_mut))
+            .flatten()
+            .filter_map(Value::as_object_mut)
+    }
+
+    fn inline_definition(block: &Map<String, Value>) -> Option<&Value> {
+        let tool = block.get("tool")?.as_object()?;
+        (kind(block) == Some("tool_addition") && kind(tool) == Some("tool_definition"))
+            .then(|| tool.get("definition").unwrap_or(&Value::Null))
+    }
+
+    fn convert_availability(message: &mut Map<String, Value>) -> Result<bool, &'static str> {
+        let Some(messages) = message.get_mut("messages").and_then(Value::as_array_mut) else {
+            return Ok(false);
+        };
+        let fold = role_blocks(messages, "system").any(|block| kind(block) == Some("tool_removal"));
+        if !fold {
+            let mut has_definition = false;
+            for definition in
+                role_blocks(messages, "system").filter_map(|block| inline_definition(block))
+            {
+                if definition.as_object().and_then(client_name).is_none() {
+                    return Err(
+                        "DeepSeek cannot convert this inline tool definition: a named custom tool with input_schema is required.",
+                    );
+                }
+                has_definition = true;
+            }
+            if !has_definition {
+                return Ok(false);
+            }
+        }
+
+        let tools = match message.get_mut("tools") {
+            Some(Value::Array(tools)) => std::mem::take(tools),
+            None => Vec::new(),
+            Some(_) if fold => {
+                return Err("DeepSeek tool availability conversion requires a tools array.");
+            }
+            Some(_) => return Err("DeepSeek inline tool conversion requires a tools array."),
+        };
+        let forced_tool = message
+            .get("tool_choice")
+            .and_then(Value::as_object)
+            .filter(|choice| kind(choice) == Some("tool"))
+            .and_then(|choice| choice.get("name").and_then(Value::as_str))
+            .map(str::to_owned);
+        let messages = message
+            .get_mut("messages")
+            .and_then(Value::as_array_mut)
+            .expect("messages array");
+        let tools = if fold {
+            fold_availability(messages, tools, forced_tool.as_deref())?
+        } else {
+            promote_definitions(messages, tools)?
+        };
+        message.insert("tools".into(), Value::Array(tools));
+        Ok(true)
+    }
+
+    fn definition_fields(
+        definition: &Map<String, Value>,
+    ) -> impl Iterator<Item = (&String, &Value)> {
+        definition.iter().filter(|(key, value)| match key.as_str() {
+            "defer_loading" => false,
+            "type" => value.as_str() != Some("custom"),
+            _ => true,
+        })
+    }
+
+    // Frozen JSON numbers are JavaScript numbers, and object field order is immaterial.
+    fn equivalent_value(left: &Value, right: &Value) -> bool {
+        match (left, right) {
+            (Value::Object(left), Value::Object(right)) => {
+                left.len() == right.len()
+                    && left.iter().all(|(key, value)| {
+                        right
+                            .get(key)
+                            .is_some_and(|other| equivalent_value(value, other))
+                    })
+            }
+            (Value::Array(left), Value::Array(right)) => {
+                left.len() == right.len()
+                    && left
+                        .iter()
+                        .zip(right)
+                        .all(|(value, other)| equivalent_value(value, other))
+            }
+            (Value::Number(left), Value::Number(right)) => {
+                left.as_f64().map(f64::to_bits) == right.as_f64().map(f64::to_bits)
+            }
+            _ => left == right,
+        }
+    }
+
+    fn same_definition(left: &Map<String, Value>, right: &Map<String, Value>) -> bool {
+        definition_fields(left).count() == definition_fields(right).count()
+            && definition_fields(left).all(|(key, value)| {
+                right.get(key).is_some_and(|other| {
+                    (key != "type" || other.as_str() != Some("custom"))
+                        && equivalent_value(value, other)
+                })
+            })
+    }
+
+    fn deferred(definition: &Map<String, Value>) -> bool {
+        definition.get("defer_loading").and_then(Value::as_bool) == Some(true)
+    }
+
+    fn set_deferred(definition: &mut Map<String, Value>, value: bool) {
+        if kind(definition) == Some("custom") {
+            definition.shift_remove("type");
+        }
+        definition.shift_remove("defer_loading");
+        definition.insert("defer_loading".into(), Value::Bool(value));
+    }
+
+    fn promote_definitions(
+        messages: &mut [Value],
+        mut tools: Vec<Value>,
+    ) -> Result<Vec<Value>, &'static str> {
+        for block in role_blocks(messages, "system") {
+            let Some(definition) = inline_definition(block).and_then(Value::as_object) else {
+                continue;
+            };
+            let name = client_name(definition).expect("validated client definition");
+            let mut found = false;
+            for existing in tools
+                .iter()
+                .filter_map(Value::as_object)
+                .filter(|tool| tool.get("name").and_then(Value::as_str) == Some(name))
+            {
+                if !same_definition(existing, definition) {
+                    return Err(
+                        "DeepSeek cannot convert inline tools with conflicting definitions for the same name.",
+                    );
+                }
+                found = true;
+            }
+            if !found {
+                let mut definition = definition.clone();
+                set_deferred(&mut definition, true);
+                tools.push(Value::Object(definition));
+            }
+            block.insert("tool".into(), json!({"type":"tool_reference","name":name}));
+        }
+        if !tools
+            .iter()
+            .filter_map(Value::as_object)
+            .any(|tool| !deferred(tool))
+        {
+            return Err(
+                "DeepSeek inline tool conversion requires at least one existing non-deferred tool.",
+            );
+        }
+        Ok(tools)
+    }
+
+    struct Registration {
+        definition: Map<String, Value>,
+        active: bool,
+        touched: bool,
+    }
+
+    fn fold_availability(
+        messages: &mut [Value],
+        tools: Vec<Value>,
+        forced_tool: Option<&str>,
+    ) -> Result<Vec<Value>, &'static str> {
+        // Keep the order of first registration even when a definition gets replaced.
+        let mut indices = HashMap::new();
+        let mut registry = Vec::new();
+        for tool in tools {
+            let Value::Object(definition) = tool else {
+                return Err(
+                    "DeepSeek tool availability conversion supports only named client tools with input_schema.",
+                );
+            };
+            let name = client_name(&definition)
+                .ok_or("DeepSeek tool availability conversion supports only named client tools with input_schema.")?;
+            if indices.insert(name.to_owned(), registry.len()).is_some() {
+                return Err(
+                    "DeepSeek cannot resolve duplicate top-level tool names during tool availability conversion.",
+                );
+            }
+            registry.push(Registration {
+                definition,
+                active: true,
+                touched: false,
+            });
+        }
+        for block in role_blocks(messages, "system") {
+            let addition = match kind(block) {
+                Some("tool_addition") => true,
+                Some("tool_removal") => false,
+                _ => continue,
+            };
+            let tool = block.get("tool").and_then(Value::as_object);
+            let name = if let Some(definition) = inline_definition(block) {
+                let definition = definition.as_object().ok_or(
+                    "DeepSeek tool availability conversion supports only named client tool definitions with input_schema."
+                )?;
+                let name = client_name(definition).ok_or(
+                    "DeepSeek tool availability conversion supports only named client tool definitions with input_schema."
+                )?;
+                let entry = Registration {
+                    definition: definition.clone(),
+                    active: true,
+                    touched: true,
+                };
+                if let Some(&index) = indices.get(name) {
+                    registry[index] = entry;
+                } else {
+                    indices.insert(name.to_owned(), registry.len());
+                    registry.push(entry);
+                }
+                name
+            } else {
+                let name = tool
+                    .filter(|tool| kind(tool) == Some("tool_reference"))
+                    .and_then(|tool| tool.get("name"))
+                    .and_then(named)
+                    .ok_or("DeepSeek cannot resolve this tool availability reference.")?;
+                let index = *indices
+                    .get(name)
+                    .ok_or("DeepSeek cannot resolve an unknown tool availability reference.")?;
+                registry[index].active = addition;
+                registry[index].touched = true;
+                name
+            };
+            let name = json!(name);
+            let action = if addition { "added" } else { "removed" };
+            block.shift_remove("tool");
+            block.insert("type".into(), json!("text"));
+            block.insert("text".into(), json!(format!(
+                "Historical tool availability change: {name} was {action}. The tools list in this request determines which tools are currently callable."
+            )));
+        }
+        if forced_tool
+            .and_then(|name| indices.get(name))
+            .is_some_and(|&index| !registry[index].active)
+        {
+            return Err(
+                "DeepSeek cannot force tool_choice to a tool removed from the current tools list.",
+            );
+        }
+        let mut tools = Vec::new();
+        let mut has_eager_tool = false;
+        for mut tool in registry.into_iter().filter(|tool| tool.active) {
+            if tool.touched {
+                set_deferred(&mut tool.definition, false);
+            }
+            has_eager_tool |= !deferred(&tool.definition);
+            tools.push(Value::Object(tool.definition));
+        }
+        if !tools.is_empty() && !has_eager_tool {
+            return Err(
+                "DeepSeek tool availability conversion requires at least one non-deferred tool when tools remain.",
+            );
+        }
+        Ok(tools)
+    }
+
+    fn normalize_schema(schema: &mut Value) -> bool {
+        let Some(schema) = schema.as_object_mut() else {
+            return false;
+        };
+        let mut changed = false;
+        for (key, value) in schema {
+            match key.as_str() {
+                "pattern" => {
+                    if let Some(normalized) = value.as_str().and_then(normalize_null_escape) {
+                        *value = Value::String(normalized);
+                        changed = true;
+                    }
+                }
+                "properties" | "patternProperties" | "$defs" | "definitions"
+                | "dependentSchemas" => {
+                    if let Some(children) = value.as_object_mut() {
+                        for child in children.values_mut() {
+                            changed |= normalize_schema(child);
+                        }
+                    }
+                }
+                "items" | "allOf" | "anyOf" | "oneOf" | "prefixItems" if value.is_array() => {
+                    for child in value.as_array_mut().unwrap() {
+                        changed |= normalize_schema(child);
+                    }
+                }
+                "items"
+                | "additionalItems"
+                | "additionalProperties"
+                | "unevaluatedItems"
+                | "unevaluatedProperties"
+                | "propertyNames"
+                | "contains"
+                | "not"
+                | "if"
+                | "then"
+                | "else"
+                | "contentSchema" => changed |= normalize_schema(value),
+                _ => {}
+            }
+        }
+        changed
+    }
+
+    fn normalize_null_escape(pattern: &str) -> Option<String> {
+        let mut normalized = String::new();
+        let mut copied = 0;
+        let mut backslashes = 0;
+        for (index, byte) in pattern.bytes().enumerate() {
+            if byte == b'\\' {
+                backslashes += 1;
+                continue;
+            }
+            if byte == b'0'
+                && backslashes % 2 == 1
+                && !pattern
+                    .as_bytes()
+                    .get(index + 1)
+                    .is_some_and(u8::is_ascii_digit)
+            {
+                normalized.push_str(&pattern[copied..index - 1]);
+                normalized.push_str(r"\x00");
+                copied = index + 1;
+            }
+            backslashes = 0;
+        }
+        if copied == 0 {
+            return None;
+        }
+        normalized.push_str(&pattern[copied..]);
+        Some(normalized)
     }
 }
 
