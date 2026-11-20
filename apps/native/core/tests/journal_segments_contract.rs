@@ -289,3 +289,198 @@ fn keeps_output_available_when_opportunistic_sidecar_publication_fails() -> Resu
     assert!(range.is_dir());
     Ok(())
 }
+
+#[derive(Deserialize)]
+struct GateSegmentInput {
+    records: Vec<Record>,
+    layouts: std::collections::BTreeMap<String, Vec<GateFile>>,
+    ranges: Vec<GateRange>,
+    tails: Vec<GateTail>,
+}
+
+#[derive(Deserialize)]
+struct GateFile {
+    name: String,
+    base64: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GateRange {
+    id: String,
+    layout: String,
+    from_sequence: u64,
+    through_sequence: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct GateTail {
+    id: String,
+    layout: String,
+    limit: usize,
+}
+
+fn gate_install(root: &Path, case: &str, files: &[GateFile]) -> Result<std::path::PathBuf> {
+    let path = root.join("journal").join(case);
+    fs::create_dir_all(&path)?;
+    for file in files {
+        fs::write(path.join(&file.name), STANDARD.decode(&file.base64)?)?;
+    }
+    Ok(path)
+}
+
+fn gate_index(directory: &Path, name: &str) -> Result<Value> {
+    use serde_json::json;
+
+    match fs::read(directory.join(name)) {
+        Ok(bytes) => Ok(serde_json::from_slice(&bytes)
+            .unwrap_or_else(|_| json!({ "invalidBase64": STANDARD.encode(bytes) }))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Value::Null),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn gate_segment_error(error: &anyhow::Error) -> Value {
+    use matou_native_core::journal::JournalCorruptionError;
+    use serde_json::json;
+
+    if let Some(fault) = error.downcast_ref::<JournalCorruptionError>() {
+        return json!({
+            "type": "JournalCorruptionError",
+            "message": fault.message,
+            "offset": fault.offset,
+            "quarantined": fault.quarantine_path.is_some(),
+        });
+    }
+    json!({ "type": "anyhow::Error", "message": error.to_string() })
+}
+
+fn gate_range_read(root: &Path, case: &str, from: u64, through: Option<u64>) -> Value {
+    use serde_json::json;
+
+    let mut frames = Vec::new();
+    let result = for_each_frame(root, case, from, through, |record| {
+        frames.push(record.frame);
+        Ok(())
+    });
+    json!({ "frames": frames, "error": result.err().as_ref().map(gate_segment_error) })
+}
+
+fn gate_write(
+    root: &Path,
+    id: &str,
+    records: &[Record],
+    compress_sealed: bool,
+) -> Result<(std::path::PathBuf, Vec<Value>)> {
+    use serde_json::json;
+
+    let mut journal = SegmentJournal::open(
+        root,
+        id,
+        JournalOptions {
+            raw_hot_bytes: 1,
+            compress_sealed,
+            ..options()
+        },
+    )?;
+    for record in records {
+        journal.append(record)?;
+    }
+    journal.close()?;
+    wait_for_compression();
+
+    let directory = journal.directory().to_owned();
+    let mut paths = fs::read_dir(&directory)?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    paths.sort();
+    let mut segments = Vec::new();
+    for path in paths {
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .context("segment filename")?;
+        if name.ends_with(".mtj") {
+            let mut entry = json!({ "name": name, "base64": STANDARD.encode(fs::read(&path)?) });
+            if compress_sealed {
+                entry["gzipBase64"] = Value::Null;
+            }
+            segments.push(entry);
+        } else if name.ends_with(".mtj.gz") {
+            let bytes = fs::read(&path)?;
+            let mut raw = Vec::new();
+            MultiGzDecoder::new(bytes.as_slice()).read_to_end(&mut raw)?;
+            segments.push(json!({
+                "name": name,
+                "base64": STANDARD.encode(raw),
+                "gzipBase64": STANDARD.encode(bytes),
+            }));
+        }
+    }
+    Ok((directory, segments))
+}
+
+#[test]
+#[ignore = "requires K-storage-journal run.sh to supply the fixed inputs"]
+fn export_fixed_journal_segments() -> Result<()> {
+    use std::path::PathBuf;
+
+    use serde_json::json;
+
+    let stage = PathBuf::from(
+        std::env::var_os("MATOU_JOURNAL_GATE_RUN").context("MATOU_JOURNAL_GATE_RUN is required")?,
+    );
+    let input: GateSegmentInput = serde_json::from_slice(&fs::read(stage.join("inputs.json"))?)?;
+    let directory = tempfile::tempdir_in(&stage)?;
+    let root = directory.path();
+    let (raw_directory, raw) = gate_write(root, "raw", &input.records, false)?;
+    let (_, compressed) = gate_write(root, "compressed", &input.records, true)?;
+    let mut observations = vec![
+        json!({
+            "id": "raw-encoding-and-rollover",
+            "segments": raw,
+            "tailIndex": gate_index(&raw_directory, "tail-index.json")?,
+            "rangeIndex": gate_index(&raw_directory, "range-index.json")?,
+        }),
+        json!({
+            "id": "gzip-publication",
+            "segments": compressed,
+            "strict": gate_range_read(root, "compressed", 0, None),
+        }),
+    ];
+    for case in input.ranges {
+        let directory = gate_install(root, &case.id, &input.layouts[&case.layout])?;
+        let strict = gate_range_read(root, &case.id, case.from_sequence, case.through_sequence);
+        observations.push(json!({
+            "id": case.id, "strict": strict,
+            "rangeIndex": gate_index(&directory, "range-index.json")?,
+        }));
+    }
+    for case in input.tails {
+        let directory = gate_install(root, &case.id, &input.layouts[&case.layout])?;
+        let mut journal = SegmentJournal::open(root, &case.id, options())?;
+        let snapshot = journal.tail_snapshot();
+        let (replay, error) = match journal.tail_start(case.limit) {
+            Ok(tail_from) => (
+                json!({
+                    "firstSequence": snapshot.first_sequence,
+                    "lastSequence": snapshot.last_sequence,
+                    "tailFromSequence": tail_from,
+                    "domainEventSequence": journal.domain_event_sequence_at_or_before(snapshot.last_sequence),
+                }),
+                Value::Null,
+            ),
+            Err(error) => (Value::Null, gate_segment_error(&error)),
+        };
+        journal.close()?;
+        observations.push(json!({
+            "id": case.id, "replay": replay, "error": error,
+            "tailIndex": gate_index(&directory, "tail-index.json")?,
+        }));
+    }
+    fs::write(
+        stage.join("segments.native.json"),
+        serde_json::to_vec(&observations)?,
+    )?;
+    Ok(())
+}
