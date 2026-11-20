@@ -99,6 +99,7 @@ struct Turn {
 pub(crate) struct Run {
     home: Option<PathBuf>,
     rollout: Option<(PathBuf, File)>,
+    pub title: Option<title::Watch>,
     turns_seen: HashSet<String>,
     turn: Option<Turn>,
     ended: bool,
@@ -121,6 +122,7 @@ impl Run {
         Self {
             home: home.map(|home| launch.cwd.join(home)),
             rollout: None,
+            title: None,
             turns_seen: HashSet::new(),
             turn: None,
             ended: false,
@@ -148,22 +150,30 @@ impl Run {
         file.metadata().ok()?.is_file().then_some((path, file))
     }
 
-    pub fn confirm(&mut self, rollout: (PathBuf, File)) {
+    pub fn confirm(&mut self, rollout: (PathBuf, File), identity: String) {
+        self.title = self
+            .home
+            .as_ref()
+            .map(|home| title::Watch::new(home.clone(), identity));
         self.rollout = Some(rollout);
     }
 
-    pub fn apply(&mut self, event: &'static str, hook: Hook, cwd: &str) -> Option<Effect> {
-        let (rollout_path, _) = self.rollout.as_ref()?;
-        if self.ended
-            || (hook.has_transcript_field
-                && hook
-                    .transcript
-                    .as_ref()
-                    .and_then(|path| path.canonicalize().ok())
-                    .as_ref()
-                    != Some(rollout_path))
-        {
-            return None;
+    pub fn admits_hook(&self, hook: &Hook) -> bool {
+        !self.ended
+            && self.rollout.as_ref().is_some_and(|(rollout, _)| {
+                !hook.has_transcript_field
+                    || hook
+                        .transcript
+                        .as_ref()
+                        .and_then(|path| path.canonicalize().ok())
+                        .as_ref()
+                        == Some(rollout)
+            })
+    }
+
+    pub fn apply_admitted(&mut self, event: &'static str, hook: Hook, cwd: &str) -> Option<Effect> {
+        if let Some(title) = &mut self.title {
+            title.refresh(event == "SessionEnd");
         }
         if event == "UserPromptSubmit" {
             if let Some(id) = &hook.turn {
@@ -292,4 +302,285 @@ fn read_error(file: &mut File, size: u64, turn: &str) -> Option<String> {
         line.clear();
     }
     None
+}
+
+pub(crate) mod title {
+    //! Observe the index of an admitted Codex run without blocking the owner on disk reads.
+    use std::{
+        fs::{self, Metadata, OpenOptions},
+        io::{self, BufRead, BufReader, Read},
+        path::PathBuf,
+        sync::mpsc::{self, Receiver, SyncSender, TryRecvError},
+        thread,
+        time::{Duration, Instant, SystemTime},
+    };
+
+    use rusqlite::Connection;
+    use serde_json::Value;
+
+    const POLL_INTERVAL: Duration = Duration::from_millis(250);
+    const WATCH_WINDOW: Duration = Duration::from_secs(30);
+    const MAX_LINE: u64 = 8 * 1024 * 1024;
+
+    pub(crate) struct Watch {
+        home: PathBuf,
+        pub identity: String,
+        pub due: Instant,
+        deadline: Instant,
+        final_read: bool,
+        stamp: Option<Stamp>,
+    }
+
+    impl Watch {
+        pub fn new(home: PathBuf, identity: String) -> Self {
+            let now = Instant::now();
+            Self {
+                home,
+                identity,
+                due: now,
+                deadline: now + WATCH_WINDOW,
+                final_read: false,
+                stamp: None,
+            }
+        }
+
+        pub fn refresh(&mut self, ended: bool) {
+            let now = Instant::now();
+            if ended || now >= self.deadline {
+                self.due = now;
+            }
+            self.deadline = now + WATCH_WINDOW;
+            self.final_read = ended;
+        }
+
+        pub fn ready(&self, now: Instant) -> bool {
+            now >= self.due && (now < self.deadline || self.final_read)
+        }
+
+        pub fn request(&mut self, session: String, run: String, now: Instant) -> Request {
+            self.due = now + POLL_INTERVAL;
+            if self.final_read {
+                self.deadline = now;
+                self.final_read = false;
+            }
+            Request {
+                session,
+                run,
+                identity: self.identity.clone(),
+                home: self.home.clone(),
+                previous: self.stamp,
+            }
+        }
+
+        pub fn accept(&mut self, read: ReadIndex) -> Option<String> {
+            match read {
+                ReadIndex::Unchanged => None,
+                ReadIndex::Missing => {
+                    self.stamp = None;
+                    None
+                }
+                ReadIndex::Read(stamp, title) => {
+                    self.stamp = Some(stamp);
+                    title
+                }
+            }
+        }
+
+        pub fn retry(&mut self) {
+            self.stamp = None;
+        }
+    }
+
+    pub(crate) struct Request {
+        session: String,
+        run: String,
+        identity: String,
+        home: PathBuf,
+        previous: Option<Stamp>,
+    }
+
+    pub(crate) struct Observation {
+        pub session: String,
+        pub run: String,
+        pub identity: String,
+        pub read: ReadIndex,
+    }
+
+    #[derive(Default)]
+    pub(crate) struct Reader {
+        worker: Option<(SyncSender<Request>, Receiver<Observation>)>,
+        busy: bool,
+    }
+
+    impl Reader {
+        pub fn idle(&self) -> bool {
+            !self.busy
+        }
+
+        pub fn submit(&mut self, request: Request) {
+            if self.worker.is_none() {
+                self.worker = start_reader().ok();
+            }
+            let Some((requests, _)) = &self.worker else {
+                return;
+            };
+            if requests.try_send(request).is_ok() {
+                self.busy = true;
+            } else {
+                self.worker = None;
+            }
+        }
+
+        pub fn poll(&mut self) -> Option<Observation> {
+            if !self.busy {
+                return None;
+            }
+            match self.worker.as_ref()?.1.try_recv() {
+                Ok(result) => {
+                    self.busy = false;
+                    Some(result)
+                }
+                Err(TryRecvError::Empty) => None,
+                Err(TryRecvError::Disconnected) => {
+                    self.worker = None;
+                    self.busy = false;
+                    None
+                }
+            }
+        }
+    }
+
+    fn start_reader() -> io::Result<(SyncSender<Request>, Receiver<Observation>)> {
+        let (requests, incoming) = mpsc::sync_channel::<Request>(1);
+        let (outgoing, replies) = mpsc::channel();
+        thread::Builder::new()
+            .name("codex-title".into())
+            .spawn(move || {
+                let Ok(dates) = Connection::open_in_memory() else {
+                    return;
+                };
+                for request in incoming {
+                    let read = read_index(&request, &dates).unwrap_or(ReadIndex::Unchanged);
+                    if outgoing
+                        .send(Observation {
+                            session: request.session,
+                            run: request.run,
+                            identity: request.identity,
+                            read,
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            })?;
+        Ok((requests, replies))
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub(crate) struct Stamp {
+        size: u64,
+        modified: SystemTime,
+        #[cfg(unix)]
+        identity: (u64, u64, i64, i64),
+    }
+
+    impl Stamp {
+        fn new(meta: &Metadata) -> io::Result<Self> {
+            #[cfg(unix)]
+            use std::os::unix::fs::MetadataExt;
+            Ok(Self {
+                size: meta.len(),
+                modified: meta.modified()?,
+                #[cfg(unix)]
+                identity: (meta.dev(), meta.ino(), meta.ctime(), meta.ctime_nsec()),
+            })
+        }
+    }
+
+    pub(crate) enum ReadIndex {
+        Unchanged,
+        Missing,
+        Read(Stamp, Option<String>),
+    }
+
+    fn read_index(request: &Request, dates: &Connection) -> io::Result<ReadIndex> {
+        let path = request.home.canonicalize()?.join("session_index.jsonl");
+        let meta = match fs::symlink_metadata(&path) {
+            Ok(meta) if meta.is_file() => meta,
+            Ok(_) => return Ok(ReadIndex::Missing),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(ReadIndex::Missing),
+            Err(error) => return Err(error),
+        };
+        let stamp = Stamp::new(&meta)?;
+        if request.previous == Some(stamp) {
+            return Ok(ReadIndex::Unchanged);
+        }
+        let mut options = OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        }
+        let file = options.open(path)?;
+        let opened = file.metadata()?;
+        if !opened.is_file() || Stamp::new(&opened)? != stamp {
+            // An append or replacement raced the open. Leave the stamp unconsumed.
+            return Ok(ReadIndex::Unchanged);
+        }
+        let mut reader = BufReader::new(file.take(stamp.size));
+        let title = latest_title(&mut reader, &request.identity, dates)?;
+        Ok(ReadIndex::Read(stamp, title))
+    }
+
+    fn latest_title(
+        reader: &mut impl BufRead,
+        identity: &str,
+        dates: &Connection,
+    ) -> io::Result<Option<String>> {
+        let mut newest: Option<(i64, String)> = None;
+        let mut line = Vec::new();
+        let mut timestamp = dates
+            .prepare_cached("SELECT CAST(ROUND(unixepoch(?1, 'subsec') * 1000) AS INTEGER)")
+            .map_err(io::Error::other)?;
+        loop {
+            line.clear();
+            let size = reader.take(MAX_LINE + 1).read_until(b'\n', &mut line)?;
+            if size == 0 {
+                break;
+            }
+            if size as u64 > MAX_LINE {
+                if !line.ends_with(b"\n") {
+                    reader.skip_until(b'\n')?;
+                }
+                continue;
+            }
+            let Ok(row) = serde_json::from_slice::<Value>(&line) else {
+                continue;
+            };
+            if row["id"].as_str() != Some(identity) {
+                continue;
+            }
+            let Some(title) = row["thread_name"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            else {
+                continue;
+            };
+            let Some(date) = row["updated_at"]
+                .as_str()
+                .filter(|date| date.as_bytes().get(4) == Some(&b'-'))
+            else {
+                continue;
+            };
+            if let Ok(Some(at)) = timestamp.query_row([date], |row| row.get(0))
+                && newest.as_ref().is_none_or(|(previous, _)| at >= *previous)
+            {
+                newest = Some((at, title.to_owned()));
+            }
+        }
+        Ok(newest.map(|(_, title)| title))
+    }
 }

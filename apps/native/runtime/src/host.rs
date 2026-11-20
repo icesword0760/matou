@@ -366,6 +366,10 @@ pub enum Command {
         task_id: String,
         title: String,
     },
+    SetSessionTitle {
+        session_id: String,
+        title: Option<String>,
+    },
     SetTaskPinned {
         task_id: String,
         pinned: bool,
@@ -736,6 +740,11 @@ pub enum Event {
     TaskRenameResult {
         task_id: String,
         title: String,
+        error: Option<String>,
+    },
+    SessionTitleResult {
+        session_id: String,
+        title: Option<String>,
         error: Option<String>,
     },
     Ready {
@@ -2744,6 +2753,21 @@ fn run_writable(
             let (session_id, request, refresh) = match command {
                 Command::DatabaseRecovery { .. } | Command::ReadOnlyQuery { .. } => {
                     unreachable!("storage-only commands cannot pass the writable gate");
+                }
+                Command::SetSessionTitle { session_id, title } => {
+                    let error = match owner.set_session_title(&session_id, title.as_deref()) {
+                        Ok(commit) => {
+                            graph_dirty |= commit.is_some();
+                            None
+                        }
+                        Err(error) => Some(format!("{error:#}")),
+                    };
+                    send.send_blocking(Event::SessionTitleResult {
+                        session_id,
+                        title,
+                        error,
+                    })?;
+                    continue;
                 }
                 Command::GetClaudeModelCatalog { request_id } => {
                     if model_catalog_worker.is_err()
@@ -5827,31 +5851,30 @@ fn active_graph(
         Some(scene_id) => {
             let mut graph = owner.graph(scene_id, Some(window_id))?;
             graph["workspaceSessionCount"] = json!(owner.scene_workspace_session_count(scene_id)?);
-            if !startup_deferred.is_empty()
-                && let Some(nodes) = graph["nodes"].as_array_mut()
-            {
+            if let Some(nodes) = graph["nodes"].as_array_mut() {
                 for node in nodes {
-                    let Some(id) = node["sessionId"]
-                        .as_str()
-                        .filter(|id| startup_deferred.contains(*id))
-                    else {
+                    let Some(id) = node["sessionId"].as_str() else {
                         continue;
                     };
+                    let deferred = startup_deferred.contains(id);
+                    let codex = node["currentMode"] == "codex";
+                    if !codex && !deferred {
+                        continue;
+                    }
                     let Some(session) = owner.session(id)? else {
                         continue;
                     };
-                    let provider_session_id = if node["currentMode"] == "codex" {
-                        owner
-                            .codex_binding(id)?
-                            .map(|binding| binding.provider_session_id)
-                    } else {
-                        owner
-                            .claude_binding(id)?
-                            .map(|binding| binding.provider_session_id)
-                    };
+                    if deferred {
+                        let provider_session_id = if codex {
+                            owner.codex_binding(id)?
+                        } else {
+                            owner.claude_binding(id)?
+                        };
+                        node["historyProviderSessionId"] =
+                            json!(provider_session_id.map(|binding| binding.provider_session_id));
+                    }
                     node["titleSource"] = json!(session.title_source);
                     node["providerTitle"] = json!(session.provider_title);
-                    node["historyProviderSessionId"] = json!(provider_session_id);
                 }
             }
             Ok(graph)

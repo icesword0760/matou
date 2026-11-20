@@ -277,6 +277,11 @@ enum TabDialog {
         scene_id: String,
         input: Entity<RenameInput>,
     },
+    RenameSession {
+        session_id: String,
+        input: Entity<RenameInput>,
+        failure: Option<String>,
+    },
     Close {
         scene_id: String,
         graph: Value,
@@ -309,6 +314,7 @@ impl TabDialog {
             Self::CloseSession { .. }
                 | Self::LastSession { .. }
                 | Self::RemoveSession { .. }
+                | Self::RenameSession { .. }
                 | Self::SessionLoader(_)
                 | Self::Branch(_)
         )
@@ -582,7 +588,7 @@ struct SessionLoader {
     has_more_sessions: bool,
     pending_list: Option<LoaderListRequest>,
     list_query: String,
-    catalog_revision: Vec<(String, String, String, u64, bool)>,
+    catalog_revision: Vec<(String, String, String, String, u64, bool)>,
     refresh_catalog: bool,
     content_input: Entity<RenameInput>,
     _content_subscription: Subscription,
@@ -1212,7 +1218,7 @@ pub struct Workspace {
     card_controls: HashMap<String, FocusHandle>,
     remove_card_controls: HashMap<String, FocusHandle>,
     fork_controls: HashMap<String, [FocusHandle; 4]>,
-    fork_menu: Option<(String, Point<Pixels>, FocusHandle)>,
+    fork_menu: Option<(String, Point<Pixels>, FocusHandle, FocusHandle)>,
     fork_readiness: Option<&'static str>,
     fork_readiness_generation: u64,
     fork_retries: HashMap<String, ForkRetry>,
@@ -2875,6 +2881,9 @@ impl Workspace {
             TabDialog::Rename { scene_id, .. } | TabDialog::Close { scene_id, .. } => {
                 !self.scenes.iter().any(|s| &s.id == scene_id)
             }
+            TabDialog::RenameSession { session_id, .. } => {
+                self.codex_title_card(session_id).is_none()
+            }
             TabDialog::CloseSession {
                 scene_id,
                 session_id,
@@ -3293,6 +3302,27 @@ impl Workspace {
                     } else {
                         self.close_dialog(window, cx);
                         self.show_toast("工作台已重命名", cx);
+                    }
+                }
+            }
+            Event::SessionTitleResult {
+                session_id,
+                title,
+                error,
+            } => {
+                if let Some(title) = title
+                    && let Some(TabDialog::RenameSession {
+                        session_id: current,
+                        input,
+                        failure,
+                    }) = &mut self.dialog
+                    && *current == session_id
+                    && trim_name(&input.read(cx).text) == title
+                {
+                    if error.is_some() {
+                        *failure = Some(title);
+                    } else {
+                        self.close_dialog(window, cx);
                     }
                 }
             }
@@ -6030,6 +6060,9 @@ impl Workspace {
                 self.card_controls.get(&state.session_id).cloned()
             }
             Some(TabDialog::Branch(state)) => self.card_controls.get(&state.session_id).cloned(),
+            Some(TabDialog::RenameSession { session_id, .. }) => {
+                self.card_controls.get(&session_id).cloned()
+            }
             Some(TabDialog::PermissionMode(_)) => self
                 .permission_chip()
                 .filter(|chip| !chip.disabled)
@@ -6051,6 +6084,44 @@ impl Workspace {
             return;
         };
         let text = self.scene_title(scene);
+        let input = self.open_title_input(text, window, cx);
+        self.dialog = Some(TabDialog::Rename { scene_id, input });
+        self.workspace_menu = None;
+        self.tab_menu = None;
+        self.hidden_tabs = None;
+        cx.notify();
+    }
+
+    fn open_session_rename(
+        &mut self,
+        session_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(title) = self
+            .codex_title_card(&session_id)
+            .and_then(|node| node["title"].as_str())
+            .map(str::to_owned)
+        else {
+            return;
+        };
+        self.fork_menu = None;
+        let input = self.open_title_input(title, window, cx);
+        input.update(cx, |input, _| input.placeholder = "会话名称".into());
+        self.dialog = Some(TabDialog::RenameSession {
+            session_id,
+            input,
+            failure: None,
+        });
+        cx.notify();
+    }
+
+    fn open_title_input(
+        &mut self,
+        text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<RenameInput> {
         let input = cx.new(|cx| RenameInput::new(text, cx));
         self.dialog_controls = (0..3).map(|_| cx.focus_handle().tab_stop(true)).collect();
         self.dialog_subscription =
@@ -6062,11 +6133,7 @@ impl Workspace {
                 }),
             );
         window.focus(&input.read(cx).focus);
-        self.dialog = Some(TabDialog::Rename { scene_id, input });
-        self.workspace_menu = None;
-        self.tab_menu = None;
-        self.hidden_tabs = None;
-        cx.notify();
+        input
     }
     fn rename_error(&self, scene_id: &str, value: &str) -> Option<String> {
         self.scenes
@@ -6111,8 +6178,28 @@ impl Workspace {
             }
             return;
         }
+        if let Some(TabDialog::RenameSession {
+            session_id, input, ..
+        }) = &self.dialog
+        {
+            let text = input.read(cx);
+            let title = trim_name(&text.text);
+            if !text.composing() && !title.is_empty() && self.codex_title_card(session_id).is_some()
+            {
+                self.send(
+                    Command::SetSessionTitle {
+                        session_id: session_id.clone(),
+                        title: Some(title.to_owned()),
+                    },
+                    cx,
+                );
+            }
+            return;
+        }
         let command = match &self.dialog {
-            Some(TabDialog::RenameTask { .. }) => unreachable!("task rename handled above"),
+            Some(TabDialog::RenameTask { .. } | TabDialog::RenameSession { .. }) => {
+                unreachable!("rename handled above")
+            }
             Some(TabDialog::RemoveWorkspace { workspace_id, .. }) => {
                 Some(Command::RemoveWorkspace {
                     workspace_id: workspace_id.clone(),
@@ -6547,6 +6634,14 @@ impl Workspace {
         })
     }
 
+    fn codex_title_card(&self, id: &str) -> Option<&Value> {
+        self.graph_node(id).filter(|node| {
+            node["currentMode"] == "codex"
+                && node["archivedAt"].is_null()
+                && self.card_mutation_blocked_reason(id, node).is_none()
+        })
+    }
+
     fn stopped_remove_blocked_reason(&self) -> Option<&'static str> {
         if !self.active_path_valid() {
             return Some(WORKSPACE_PATH_UNAVAILABLE);
@@ -6711,9 +6806,10 @@ impl Workspace {
 
     fn open_fork_menu(&mut self, id: &str, position: Point<Pixels>, cx: &mut Context<Self>) {
         if self.dialog.is_some()
-            || self
-                .fork_access(id, ForkPlacement::Peer)
-                .is_none_or(|access| access.blocked.is_some())
+            || (self.codex_title_card(id).is_none()
+                && self
+                    .fork_access(id, ForkPlacement::Peer)
+                    .is_none_or(|access| access.blocked.is_some()))
         {
             return;
         }
@@ -6721,7 +6817,12 @@ impl Workspace {
         self.task_menu = None;
         self.tab_menu = None;
         self.hidden_tabs = None;
-        self.fork_menu = Some((id.to_owned(), position, cx.focus_handle().tab_stop(true)));
+        self.fork_menu = Some((
+            id.to_owned(),
+            position,
+            cx.focus_handle().tab_stop(true),
+            cx.focus_handle().tab_stop(true),
+        ));
         cx.notify();
     }
 
@@ -6912,11 +7013,10 @@ impl Workspace {
                 .map_or(&[], Vec::as_slice),
             cx,
         );
-        if self
-            .fork_menu
-            .as_ref()
-            .is_some_and(|(id, _, _)| self.fork_access(id, ForkPlacement::Peer).is_none())
-        {
+        if self.fork_menu.as_ref().is_some_and(|(id, _, _, _)| {
+            self.codex_title_card(id).is_none()
+                && self.fork_access(id, ForkPlacement::Peer).is_none()
+        }) {
             self.fork_menu = None;
         }
         if let Some(result) = result {
@@ -8802,7 +8902,7 @@ impl Workspace {
                 .terminals
                 .values()
                 .any(|terminal| terminal.read(cx).focus.is_focused(window))
-                || matches!(&self.dialog, Some(TabDialog::Rename { input, .. } | TabDialog::RenameTask { input, .. }) if input.read(cx).focus.is_focused(window) && input.read(cx).composing()))
+                || matches!(&self.dialog, Some(TabDialog::Rename { input, .. } | TabDialog::RenameTask { input, .. } | TabDialog::RenameSession { input, .. }) if input.read(cx).focus.is_focused(window) && input.read(cx).composing()))
         {
             return;
         }
@@ -11083,33 +11183,63 @@ impl Workspace {
     }
 
     fn render_fork_menu(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (id, position, focus) = self.fork_menu.as_ref()?;
-        let access = self.fork_access(id, ForkPlacement::Peer)?;
-        if access.blocked.is_some() {
-            return None;
+        let (id, position, focus, restore_focus) = self.fork_menu.as_ref()?;
+        let mut menu = tabs_ui::context_menu("fork-card-menu")
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
+        let mut width = px(132.);
+        let mut height = px(36.);
+        if let Some(node) = self.codex_title_card(id) {
+            let rename_id = id.clone();
+            menu = menu.child(self.mutation_button(
+                tabs_ui::menu_item("session-rename-menu", "重命名…"),
+                focus,
+                move |this, window, cx| this.open_session_rename(rename_id.clone(), window, cx),
+                cx,
+            ));
+            if node["titleSource"] == "manual" {
+                width = px(156.);
+                height += px(28.);
+                let session_id = id.clone();
+                menu = menu.child(self.mutation_button(
+                    tabs_ui::menu_item("session-restore-title-menu", "恢复 Codex 自动标题"),
+                    restore_focus,
+                    move |this, _, cx| {
+                        this.fork_menu = None;
+                        this.send(
+                            Command::SetSessionTitle {
+                                session_id: session_id.clone(),
+                                title: None,
+                            },
+                            cx,
+                        );
+                        cx.notify();
+                    },
+                    cx,
+                ));
+            }
+        } else {
+            let access = self.fork_access(id, ForkPlacement::Peer)?;
+            if access.blocked.is_some() {
+                return None;
+            }
+            let tooltip = access.readiness.unwrap_or("创建 Fork 会话");
+            let item = tabs_ui::menu_item("fork-menu-peer", "⑂ Fork 会话")
+                .when(access.readiness.is_some(), |item| item.opacity(0.38))
+                .tooltip(move |_, cx| cx.new(|_| CardTooltip(tooltip.into())).into());
+            let id = id.clone();
+            menu = menu.child(self.button(
+                item,
+                focus,
+                move |this, window, cx| this.open_fork(&id, ForkPlacement::Peer, window, cx),
+                cx,
+            ));
         }
-        let tooltip = access.readiness.unwrap_or("创建 Fork 会话");
-        let item = tabs_ui::menu_item("fork-menu-peer", "⑂ Fork 会话")
-            .when(access.readiness.is_some(), |item| item.opacity(0.38))
-            .tooltip(move |_, cx| cx.new(|_| CardTooltip(tooltip.into())).into());
-        let id = id.clone();
-        let item = self.button(
-            item,
-            focus,
-            move |this, window, cx| this.open_fork(&id, ForkPlacement::Peer, window, cx),
-            cx,
-        );
         let viewport = window.viewport_size();
         let position = point(
-            position.x.min((viewport.width - px(132.)).max(px(0.))),
-            position.y.min((viewport.height - px(36.)).max(px(0.))),
+            position.x.min((viewport.width - width).max(px(0.))),
+            position.y.min((viewport.height - height).max(px(0.))),
         );
-        let menu = tabs_ui::context_menu("fork-card-menu")
-            .w(px(132.))
-            .left(position.x)
-            .top(position.y)
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(item);
+        let menu = menu.w(width).left(position.x).top(position.y);
         let dismiss =
             |this: &mut Self, _: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>| {
                 this.fork_menu = None;
@@ -11186,6 +11316,14 @@ impl Workspace {
                         true,
                         error.is_some() && !value.is_empty(),
                     )
+                }
+                TabDialog::RenameSession { input, failure, .. } => {
+                    let value = trim_name(&input.read(cx).text);
+                    let mut body = tabs_ui::dialog_body().child(input.clone());
+                    if failure.as_deref() == Some(value) {
+                        body = body.child(tabs_ui::dialog_error("重命名失败，请稍后重试"));
+                    }
+                    ("重命名会话".into(), body, "确定".into(), true, value.is_empty())
                 }
                 TabDialog::Close {
                     scene_id,
@@ -13818,7 +13956,7 @@ fn generic_agent_title(title: &str, short: &str) -> bool {
         )
 }
 
-fn loader_catalog_revision(graph: &Value) -> Vec<(String, String, String, u64, bool)> {
+fn loader_catalog_revision(graph: &Value) -> Vec<(String, String, String, String, u64, bool)> {
     session_levels::nodes(graph)
         .iter()
         .filter_map(|node| {
@@ -13826,6 +13964,9 @@ fn loader_catalog_revision(graph: &Value) -> Vec<(String, String, String, u64, b
                 (
                     node["sessionId"].as_str().unwrap_or_default().to_owned(),
                     node["title"].as_str().unwrap_or_default().to_owned(),
+                    trimmed_graph_text(&node["providerTitle"])
+                        .unwrap_or_default()
+                        .to_owned(),
                     node["providerRestoreState"]
                         .as_str()
                         .unwrap_or_default()
