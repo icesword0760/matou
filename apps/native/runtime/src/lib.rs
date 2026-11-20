@@ -1,3 +1,4 @@
+mod claude_model_catalog;
 mod claude_request_gateway;
 pub mod derived;
 pub mod flow;

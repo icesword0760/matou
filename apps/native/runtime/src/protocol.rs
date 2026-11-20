@@ -35,6 +35,38 @@ pub struct ClaudeRoleAssignmentsReply {
     pub error: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeCatalogModel {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_context_window: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supported_efforts: Option<Vec<String>>,
+}
+
+/// Returned in the Graph event's `claudeModelCatalogResult` field.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeModelCatalogReply {
+    pub request_id: u64,
+    #[serde(flatten)]
+    pub result: ClaudeModelCatalogResult,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ClaudeModelCatalogResult {
+    Models(Vec<ClaudeCatalogModel>),
+    Error(String),
+}
+
 /// Returned in the Graph event's `providerSettingsResult` field.
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
