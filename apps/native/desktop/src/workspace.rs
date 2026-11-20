@@ -10,6 +10,7 @@ use std::{
 use crate::history_view::{HistoryView, HistoryViewEvent, HistoryViewState};
 #[cfg(target_os = "macos")]
 use crate::recovery_water_view::RecoveryWater;
+use database_recovery_page::{ConfirmationFocus, PageAction, PageOperation, PagePresentation};
 use gpui::{prelude::*, *};
 use matou_native_core::geometry::GeometryUpdate;
 use matou_native_core::hierarchy::canvas::{ForkPlacement, ForkWorktreeMode};
@@ -922,13 +923,36 @@ impl Notifications {
 struct DatabaseRecoveryPageState {
     details: Arc<DatabaseRecoveryDetails>,
     available: bool,
-    pending: Option<String>,
+    pending: Option<(String, PageOperation)>,
+    selected_backup: Option<String>,
     error: Option<String>,
+    exported_path: Option<PathBuf>,
+    empty_trigger: FocusHandle,
+    confirmation: Option<EmptyDatabaseConfirmation>,
+}
+
+struct EmptyDatabaseConfirmation {
+    recovery_id: String,
+    back: FocusHandle,
+    confirm: FocusHandle,
 }
 
 impl DatabaseRecoveryPageState {
+    fn update_details(&mut self, details: Arc<DatabaseRecoveryDetails>) {
+        let backups = database_recovery_page::visible_backups(&details.backups);
+        if !backups
+            .iter()
+            .any(|backup| Some(&backup.id) == self.selected_backup.as_ref())
+        {
+            self.selected_backup = backups.first().map(|backup| backup.id.clone());
+        }
+        self.details = details;
+        self.available = true;
+    }
+
     fn disconnect(&mut self) {
         self.available = false;
+        self.confirmation = None;
         if self.pending.take().is_some() {
             self.error = Some(DATABASE_RECOVERY_INTERRUPTED.into());
         }
@@ -2432,31 +2456,109 @@ impl Workspace {
         }
     }
 
-    fn retry_database_recovery(&mut self, expected_recovery_id: &str, cx: &mut Context<Self>) {
+    fn database_recovery_action(
+        &mut self,
+        recovery_id: &str,
+        action: &PageAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(state) = &mut self.database_recovery else {
             return;
         };
         if !state.available
             || state.pending.is_some()
-            || state.details.recovery_id != expected_recovery_id
+            || state.details.recovery_id != recovery_id
+            || (state.confirmation.is_some()
+                && !matches!(
+                    action,
+                    PageAction::CancelConfirmation | PageAction::ConfirmEmpty
+                ))
         {
             return;
         }
+        let (operation, action) = match action {
+            PageAction::SelectBackup(id) => {
+                if database_recovery_page::visible_backups(&state.details.backups)
+                    .iter()
+                    .any(|backup| &backup.id == id)
+                {
+                    state.selected_backup = Some(id.clone());
+                    cx.notify();
+                }
+                return;
+            }
+            PageAction::OpenConfirmation => {
+                if recovery_id.is_empty() {
+                    return;
+                }
+                let back = cx.focus_handle().tab_stop(true);
+                window.focus(&back);
+                state.confirmation = Some(EmptyDatabaseConfirmation {
+                    recovery_id: recovery_id.into(),
+                    back,
+                    confirm: cx.focus_handle().tab_stop(true),
+                });
+                cx.notify();
+                return;
+            }
+            PageAction::CancelConfirmation => {
+                if state.confirmation.take().is_some() {
+                    window.focus(&state.empty_trigger);
+                    cx.notify();
+                }
+                return;
+            }
+            PageAction::ConfirmEmpty => {
+                let Some(confirmation) = state.confirmation.take() else {
+                    return;
+                };
+                if confirmation.recovery_id != recovery_id {
+                    cx.notify();
+                    return;
+                }
+                (
+                    PageOperation::StartEmpty,
+                    DatabaseRecoveryAction::StartEmptyDatabase {
+                        expected_recovery_id: confirmation.recovery_id,
+                    },
+                )
+            }
+            PageAction::Restore if !recovery_id.is_empty() => {
+                let Some(backup_id) = state.selected_backup.clone() else {
+                    return;
+                };
+                (
+                    PageOperation::Restore,
+                    DatabaseRecoveryAction::RestoreBackup {
+                        backup_id,
+                        expected_recovery_id: recovery_id.into(),
+                    },
+                )
+            }
+            PageAction::Retry if !recovery_id.is_empty() => (
+                PageOperation::Retry,
+                DatabaseRecoveryAction::RetryOpen {
+                    expected_recovery_id: recovery_id.into(),
+                },
+            ),
+            PageAction::Export => (
+                PageOperation::Export,
+                DatabaseRecoveryAction::ExportRecoveryBundle,
+            ),
+            PageAction::Retry | PageAction::Restore => return,
+        };
         let request_id = database_recovery_request_id();
-        let result = self.commands.send_at(
+        state.error = None;
+        state.exported_path = None;
+        match self.commands.send_at(
             self.runtime_generation,
             Command::DatabaseRecovery {
                 request_id: request_id.clone(),
-                action: DatabaseRecoveryAction::RetryOpen {
-                    expected_recovery_id: expected_recovery_id.into(),
-                },
+                action,
             },
-        );
-        match result {
-            Ok(()) => {
-                state.error = None;
-                state.pending = Some(request_id);
-            }
+        ) {
+            Ok(()) => state.pending = Some((request_id, operation)),
             Err(error) => state.error = Some(error.to_string()),
         }
         cx.notify();
@@ -2780,16 +2882,21 @@ impl Workspace {
                         if let Some(state) = &mut self.database_recovery
                             && state.details.recovery_id == details.recovery_id
                         {
-                            state.details = details.clone();
-                            state.available = true;
+                            state.update_details(details.clone());
                         } else {
                             window.blur();
-                            self.database_recovery = Some(DatabaseRecoveryPageState {
+                            let mut state = DatabaseRecoveryPageState {
                                 details: details.clone(),
                                 available: true,
                                 pending: None,
+                                selected_backup: None,
                                 error: None,
-                            });
+                                exported_path: None,
+                                empty_trigger: cx.focus_handle().tab_stop(true),
+                                confirmation: None,
+                            };
+                            state.update_details(details.clone());
+                            self.database_recovery = Some(state);
                         }
                     }
                     ConnectionPhase::Starting | ConnectionPhase::Reconnecting => {
@@ -2956,11 +3063,16 @@ impl Workspace {
                         None => Ok(result.exported_path),
                     });
                 } else if let Some(state) = &mut self.database_recovery
-                    && state.pending.as_ref() == Some(&result.request_id)
-                    && let Some(error) = result.error
+                    && let Some((pending_id, operation)) = &state.pending
+                    && *pending_id == result.request_id
                 {
-                    state.pending = None;
-                    state.error = Some(error.message);
+                    if let Some(error) = result.error {
+                        state.pending = None;
+                        state.error = Some(error.message);
+                    } else if *operation == PageOperation::Export {
+                        state.pending = None;
+                        state.exported_path = result.exported_path;
+                    }
                 }
             }
             Event::StorageCommandRejected { message, .. } => {
@@ -10925,11 +11037,22 @@ impl Render for Workspace {
             let recovery_id = state.details.recovery_id.clone();
             return database_recovery_page::render(
                 &state.details,
-                state.pending.is_some(),
-                state.error.as_deref(),
-                state.available,
-                cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    this.retry_database_recovery(&recovery_id, cx);
+                PagePresentation {
+                    available: state.available,
+                    pending: state.pending.as_ref().map(|(_, operation)| *operation),
+                    selected_backup: state.selected_backup.as_deref(),
+                    error: state.error.as_deref(),
+                    exported_path: state.exported_path.as_deref(),
+                    empty_trigger: &state.empty_trigger,
+                    confirmation: state.confirmation.as_ref().map(|confirmation| {
+                        ConfirmationFocus {
+                            back: &confirmation.back,
+                            confirm: &confirmation.confirm,
+                        }
+                    }),
+                },
+                cx.listener(move |this, action: &PageAction, window, cx| {
+                    this.database_recovery_action(&recovery_id, action, window, cx);
                 }),
             )
             .into_any_element();

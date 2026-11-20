@@ -32,8 +32,8 @@ use crate::{
 };
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use matou_native_core::{
-    backup::BackupReason,
-    database_recovery::{RECOVERY_ID_CHANGED, RecoveryActions},
+    backup::{BackupReason, BackupService, DEFAULT_MAX_BACKUPS},
+    database_recovery::{OpeningAction, RECOVERY_ID_CHANGED, RecoveryActionError, RecoveryActions},
     hierarchy::{
         self, BootstrapWindowInput, HierarchyIds, HierarchyResult, Scene, Task, WindowNavigation,
         Workspace,
@@ -985,21 +985,25 @@ type WritableDatabase = (
     PathBuf,
 );
 
+enum RecoveryOutcome {
+    Opened(WritableDatabase),
+    Exported(PathBuf),
+}
+
 fn await_database_recovery(
-    recovery: RecoveryRequired,
+    mut recovery: RecoveryRequired,
     generation: &str,
     incoming: &Receiver<Command>,
     send: &async_channel::Sender<Event>,
 ) -> Result<Option<(WritableDatabase, String)>> {
-    let details = DatabaseRecoveryDetails::from(&recovery);
-    send.send_blocking(Event::DatabaseRecoveryRequired(details.clone()))?;
+    send.send_blocking(Event::DatabaseRecoveryRequired(
+        DatabaseRecoveryDetails::from(&recovery),
+    ))?;
     thread::scope(|scope| {
         type Attempt = (
             RecoveryActions,
-            std::result::Result<
-                WritableDatabase,
-                matou_native_core::database_recovery::RecoveryActionError,
-            >,
+            RecoveryRequired,
+            std::result::Result<RecoveryOutcome, RecoveryActionError>,
         );
         let mut active: Option<(String, thread::ScopedJoinHandle<'_, Attempt>)> = None;
         let mut actions = Some(RecoveryActions::default());
@@ -1013,17 +1017,32 @@ fn await_database_recovery(
                 let Some((request_id, worker)) = active.take() else {
                     return Ok(None);
                 };
-                let (state, result) = worker
+                let (state, updated_recovery, result) = worker
                     .join()
                     .map_err(|_| anyhow!("database recovery worker panicked"))?;
                 if closing {
                     return Ok(None);
                 }
                 actions = Some(state);
+                recovery = updated_recovery;
                 match result {
-                    Ok(database) => return Ok(Some((database, request_id))),
+                    Ok(RecoveryOutcome::Opened(database)) => {
+                        return Ok(Some((database, request_id)));
+                    }
+                    Ok(RecoveryOutcome::Exported(path)) => {
+                        recovery_result(
+                            send,
+                            DatabaseRecoveryResult {
+                                request_id,
+                                exported_path: Some(path),
+                                error: None,
+                            },
+                        )?;
+                    }
                     Err(error) => {
-                        send.send_blocking(Event::DatabaseRecoveryRequired(details.clone()))?;
+                        send.send_blocking(Event::DatabaseRecoveryRequired(
+                            DatabaseRecoveryDetails::from(&recovery),
+                        ))?;
                         recovery_result(
                             send,
                             DatabaseRecoveryResult::failed(
@@ -1062,8 +1081,6 @@ fn await_database_recovery(
                         .is_some_and(|id| id != recovery.recovery_id)
                     {
                         Some(("RECOVERY_ID_CHANGED", RECOVERY_ID_CHANGED))
-                    } else if !matches!(action, DatabaseRecoveryAction::RetryOpen { .. }) {
-                        Some(("RECOVERY_NOT_IMPLEMENTED", "此数据库恢复操作尚未实现"))
                     } else {
                         None
                     };
@@ -1085,24 +1102,45 @@ fn await_database_recovery(
                         )?;
                         continue;
                     };
-                    let DatabaseRecoveryAction::RetryOpen {
-                        expected_recovery_id,
-                    } = action
-                    else {
-                        unreachable!()
-                    };
                     let mut state = actions.take().expect("idle recovery state");
-                    let recovery = &recovery;
+                    let mut snapshot = recovery.clone();
                     let worker = thread::Builder::new()
                         .name("matou-database-recovery".into())
                         .spawn_scoped(scope, move || {
-                            let result = state.retry_open(
-                                recovery,
+                            let opening = match &action {
+                                DatabaseRecoveryAction::RetryOpen { .. } => OpeningAction::Retry,
+                                DatabaseRecoveryAction::RestoreBackup { backup_id, .. } => {
+                                    OpeningAction::Restore(backup_id)
+                                }
+                                DatabaseRecoveryAction::StartEmptyDatabase { .. } => {
+                                    OpeningAction::StartEmpty
+                                }
+                                DatabaseRecoveryAction::ExportRecoveryBundle => {
+                                    let result = state.retry_pending_cleanup().and_then(|()| {
+                                        crate::readonly_export::export_pending(&snapshot, now)
+                                            .map(RecoveryOutcome::Exported)
+                                            .map_err(|cause| RecoveryActionError {
+                                                stage: "DATABASE_EXPORT_FAILED",
+                                                cause,
+                                            })
+                                    });
+                                    return (state, snapshot, result);
+                                }
+                            };
+                            let result = state.open(
+                                &snapshot,
                                 generation,
                                 archive_id,
-                                &expected_recovery_id,
+                                action.expected_recovery_id().expect("opening action"),
+                                opening,
                             );
-                            (state, result)
+                            if let Err(error) = &result
+                                && !matches!(action, DatabaseRecoveryAction::RetryOpen { .. })
+                                && !matches!(error.stage, "marker" | "fence" | "cleanup" | "lease")
+                            {
+                                refresh_recovery_backups(&mut snapshot);
+                            }
+                            (state, snapshot, result.map(RecoveryOutcome::Opened))
                         })
                         .context("start database recovery worker")?;
                     active = Some((request_id, worker));
@@ -1111,6 +1149,27 @@ fn await_database_recovery(
             }
         }
     })
+}
+
+fn refresh_recovery_backups(recovery: &mut RecoveryRequired) {
+    let root = recovery
+        .durable_database_path
+        .parent()
+        .expect("validated recovery data root");
+    match BackupService::new(root).and_then(|backups| backups.list_valid()) {
+        Ok(mut backups) => {
+            backups.truncate(DEFAULT_MAX_BACKUPS);
+            recovery.backups = backups;
+            recovery.backup_list_error = None;
+        }
+        Err(error) => {
+            recovery.backup_list_error = Some(RecoveryError {
+                code: "BACKUP_LIST_FAILED".into(),
+                message: format!("{error:#}"),
+                retryable: true,
+            });
+        }
+    }
 }
 
 fn run(

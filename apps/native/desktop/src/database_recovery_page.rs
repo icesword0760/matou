@@ -1,14 +1,19 @@
 //! Native database-recovery page.
 //!
 //! Frozen source: the light `database-recovery-page` / `database-recovery-card`
-//! view from the reference desktop app. Only the copy that this stage can act
-//! on is rendered: the page header, the reason, the verified backups and the
-//! single "重新检查数据库" action. The other frozen actions (restore, export,
-//! start empty) stay out of this view until their runtime paths exist.
+//! view from the reference desktop app. The page renders the reason, the
+//! verified backups, the three ordinary actions and the separate danger entry
+//! at the bottom. The empty-database confirmation is a focused, trapped modal
+//! inside this page.
 //!
 //! The page owns no state and no runtime handle. It is a pure projection of
 //! `DatabaseRecoveryDetails` plus the desktop operation state, so the caller can
-//! swap recovery generations without leaving stale local state behind.
+//! swap recovery generations without leaving stale local state behind. Focus
+//! handles and the confirmation visibility stay in the workspace; the page only
+//! renders them and reports the requested action.
+
+use std::path::Path;
+use std::rc::Rc;
 
 use gpui::{prelude::*, *};
 use matou_native_core::startup::RecoveryError;
@@ -32,9 +37,21 @@ pub const INTEGRITY_DESCRIPTION: &str =
 pub const WORKING: &str = "正在处理数据库恢复，请保持 Matou 开启…";
 pub const BACKUPS: &str = "可用备份";
 pub const NO_BACKUPS: &str = "暂未找到通过完整性校验的备份。";
+pub const RESTORING: &str = "正在恢复…";
+pub const RESTORE_SELECTED: &str = "恢复所选备份";
 pub const RECHECK_DATABASE: &str = "重新检查数据库";
 pub const CHECKING: &str = "正在检查…";
+pub const EXPORT_BUNDLE: &str = "导出恢复资料";
+pub const START_EMPTY: &str = "创建全新空数据库";
+pub const START_EMPTY_HINT: &str = "此入口只在你明确确认后执行；现有隔离文件和备份继续保留。";
+pub const CONFIRM_EMPTY_LABEL: &str = "确认创建全新空数据库";
+pub const CONFIRM_EMPTY_TITLE: &str = "确认创建全新空数据库？";
+pub const CONFIRM_EMPTY_BODY: &str =
+    "Matou 将显示一个全新的空工作区。当前损坏或异常文件和备份仍会保留，便于后续导出与排查。";
+pub const BACK: &str = "返回";
+pub const CONFIRM_EMPTY: &str = "确认创建空数据库";
 pub const GENERIC_ERROR: &str = "数据库恢复操作失败";
+const EXPORTED_TO: &str = "恢复资料已导出到 ";
 
 /// Frozen headline of the read-only workspace banner. The workspace also uses
 /// it verbatim as the disabled reason of blocked mutations.
@@ -62,7 +79,18 @@ const ERROR_TEXT: u32 = 0xa12525;
 const ERROR_BACKGROUND: u32 = 0xfff0ef;
 const PROGRESS_TEXT: u32 = 0x275da8;
 const PROGRESS_BACKGROUND: u32 = 0xedf4ff;
+const SUCCESS_TEXT: u32 = 0x17653a;
+const SUCCESS_BACKGROUND: u32 = 0xedf9f1;
 const ROW_BORDER: u32 = 0xe2e6ec;
+const SELECTED_BORDER: u32 = 0x78a5ff;
+const SELECTED_BACKGROUND: u32 = 0xf2f6ff;
+const BUTTON_BORDER: u32 = 0xd4d9e1;
+const DANGER_TEXT: u32 = 0xad3434;
+const DANGER_FOCUS: u32 = 0x8f2626;
+const DANGER_BUTTON: u32 = 0xb63838;
+const FOOTER_BORDER: u32 = 0xeceff3;
+const RADIO_BORDER: u32 = 0xc6ccd6;
+const DIALOG_BACKDROP: u32 = 0x161b2361;
 
 // Frozen roles from `read-only-recovery.css`. The background is an sRGB mix of
 // the workspace terminal background with amber; the bottom rule is the darker
@@ -82,20 +110,73 @@ const CARD_RADIUS: f32 = 20.;
 const CARD_PADDING: f32 = 30.;
 const MAX_BACKUPS: usize = 7;
 
+/// One of the four database-recovery actions exposed by the page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PageOperation {
+    Restore,
+    Retry,
+    Export,
+    StartEmpty,
+}
+
+/// The action requested by a click or a keyboard activation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PageAction {
+    SelectBackup(String),
+    Restore,
+    Retry,
+    Export,
+    OpenConfirmation,
+    CancelConfirmation,
+    ConfirmEmpty,
+}
+
+/// Focus handles owned by the workspace for the empty-database confirmation.
+pub struct ConfirmationFocus<'a> {
+    pub back: &'a FocusHandle,
+    pub confirm: &'a FocusHandle,
+}
+
+/// Everything the workspace projects into the recovery page.
+pub struct PagePresentation<'a> {
+    pub available: bool,
+    pub pending: Option<PageOperation>,
+    pub selected_backup: Option<&'a str>,
+    pub error: Option<&'a str>,
+    pub exported_path: Option<&'a Path>,
+    pub empty_trigger: &'a FocusHandle,
+    pub confirmation: Option<ConfirmationFocus<'a>>,
+}
+
+type PageActionHandler = Rc<dyn Fn(&PageAction, &mut Window, &mut App)>;
+
 /// Render the independent recovery page.
 ///
-/// `pending` is the shared database-recovery operation state: while it is set,
-/// the only action becomes "正在检查…" and the global progress line appears.
-/// `error` is the latest action error. `details.error` is the startup error and
-/// intentionally renders independently, because both errors can be present at
-/// the same time. The page only shows the action this stage implements.
+/// `pending` identifies the active action: only that button changes its label,
+/// every other control becomes non-interactive and the global blue progress
+/// notice appears. `error` is the latest action error; `details.error` is the
+/// startup error and renders independently, because both can be present at the
+/// same time. `exported_path` drives the frozen green success copy.
+///
+/// The workspace owns the recovery ID, the operation state, the focus handles
+/// and whether `confirmation` is open. The page only reports the requested
+/// action; it never confirms the empty-database choice by itself.
 pub fn render(
     details: &DatabaseRecoveryDetails,
-    pending: bool,
-    error: Option<&str>,
-    enabled: bool,
-    on_retry: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
+    presentation: PagePresentation<'_>,
+    on_action: impl Fn(&PageAction, &mut Window, &mut App) + 'static,
 ) -> Stateful<Div> {
+    let PagePresentation {
+        available,
+        pending,
+        selected_backup,
+        error,
+        exported_path,
+        empty_trigger,
+        confirmation,
+    } = presentation;
+    let on_action: PageActionHandler = Rc::new(on_action);
+
     let (title, description) = match details.reason {
         DatabaseRecoveryReason::Ownership => (OWNERSHIP_TITLE, OWNERSHIP_DESCRIPTION),
         DatabaseRecoveryReason::Wal => (TITLE, WAL_DESCRIPTION),
@@ -115,7 +196,15 @@ pub fn render(
             text.to_owned()
         }
     });
-    let has_notice = startup_error.is_some() || action_error.is_some() || pending;
+    let success = exported_path.map(|path| format!("{EXPORTED_TO}{}", path.display()));
+    let has_notice =
+        startup_error.is_some() || action_error.is_some() || success.is_some() || pending.is_some();
+    let confirmation_open = confirmation.is_some();
+    let can_act = available && pending.is_none() && !confirmation_open;
+    let can_open = can_act && !details.recovery_id.is_empty();
+    let selected_visible = selected_backup
+        .is_some_and(|selected| backups.iter().any(|backup| backup.id.as_str() == selected));
+    let can_restore = can_open && selected_visible;
 
     let header = div()
         .id("database-recovery-header")
@@ -176,11 +265,15 @@ pub fn render(
         .text_color(rgb(PRIMARY_TEXT))
         .child(header);
 
+    let mut status = div()
+        .id("database-recovery-status")
+        .debug_selector(|| "database-recovery-status".to_owned())
+        .w_full()
+        .min_w_0();
     if has_notice {
         let mut notices = div()
             .id("database-recovery-notices")
             .debug_selector(|| "database-recovery-notices".to_owned())
-            .mt(px(16.))
             .w_full()
             .min_w_0()
             .flex()
@@ -202,7 +295,15 @@ pub fn render(
                 ERROR_BACKGROUND,
             ));
         }
-        if pending {
+        if let Some(success) = success {
+            notices = notices.child(notice(
+                "database-recovery-success",
+                success,
+                SUCCESS_TEXT,
+                SUCCESS_BACKGROUND,
+            ));
+        }
+        if pending.is_some() {
             notices = notices.child(notice(
                 "database-recovery-progress",
                 WORKING.to_owned(),
@@ -210,8 +311,9 @@ pub fn render(
                 PROGRESS_BACKGROUND,
             ));
         }
-        card = card.child(notices);
+        status = status.mt(px(16.)).child(notices);
     }
+    card = card.child(status);
 
     let mut backups_section = div()
         .id("database-recovery-backups")
@@ -278,46 +380,64 @@ pub fn render(
             .flex_col()
             .gap(px(8.));
         for (index, backup) in backups.iter().enumerate() {
-            list = list.child(backup_row(index, backup));
+            list = list.child(backup_row(
+                index,
+                backup,
+                selected_backup == Some(backup.id.as_str()),
+                can_act,
+                on_action.clone(),
+            ));
         }
         backups_section = backups_section.child(list);
     }
     card = card.child(backups_section);
 
-    let action_enabled = enabled && !pending;
-    let retry_label = if pending { CHECKING } else { RECHECK_DATABASE };
-    let retry = div()
-        .id("database-recovery-retry")
-        .debug_selector(|| "database-recovery-retry".to_owned())
-        .flex_none()
-        .h(px(38.))
-        .px(px(14.))
-        .flex()
-        .items_center()
-        .justify_center()
-        .border_1()
-        .border_color(rgb(ACCENT))
-        .rounded(px(9.))
-        .bg(rgb(ACCENT))
-        .text_color(rgb(0xffffff))
-        .text_size(px(16.))
-        .font_weight(FontWeight::SEMIBOLD)
-        .whitespace_nowrap()
-        .child(
-            div()
-                .id("database-recovery-retry-label")
-                .debug_selector(|| "database-recovery-retry-label".to_owned())
-                .child(ui_text(retry_label).normal_line_height()),
-        );
-    let retry = if action_enabled {
-        retry
-            .tab_index(0)
-            .cursor_pointer()
-            .focus(|style| style.border_color(rgb(ACCENT_FOCUS)))
-            .on_click(move |event, window, cx| on_retry(event, window, cx))
+    let restore_label = if pending == Some(PageOperation::Restore) {
+        RESTORING
     } else {
-        retry.opacity(0.48).cursor(CursorStyle::Arrow)
+        RESTORE_SELECTED
     };
+    let retry_label = if pending == Some(PageOperation::Retry) {
+        CHECKING
+    } else {
+        RECHECK_DATABASE
+    };
+    let export_label = if pending == Some(PageOperation::Export) {
+        EXPORTING
+    } else {
+        EXPORT_BUNDLE
+    };
+
+    let restore = action_button(
+        "database-recovery-restore",
+        "database-recovery-restore",
+        restore_label,
+        can_restore,
+        ButtonStyle::Primary,
+        PageAction::Restore,
+        None,
+        on_action.clone(),
+    );
+    let retry = action_button(
+        "database-recovery-retry",
+        "database-recovery-retry",
+        retry_label,
+        can_open,
+        ButtonStyle::Secondary,
+        PageAction::Retry,
+        None,
+        on_action.clone(),
+    );
+    let export = action_button(
+        "database-recovery-export",
+        "database-recovery-export",
+        export_label,
+        can_act,
+        ButtonStyle::Secondary,
+        PageAction::Export,
+        None,
+        on_action.clone(),
+    );
     card = card.child(
         div()
             .id("database-recovery-primary-actions")
@@ -328,29 +448,348 @@ pub fn render(
             .flex()
             .flex_wrap()
             .gap(px(10.))
-            .child(retry),
+            .child(restore)
+            .child(retry)
+            .child(export),
     );
 
-    div()
+    let start_empty = action_button(
+        "database-recovery-start-empty",
+        "database-recovery-start-empty",
+        START_EMPTY,
+        can_open,
+        ButtonStyle::DangerLink,
+        PageAction::OpenConfirmation,
+        Some(empty_trigger),
+        on_action.clone(),
+    );
+    card = card.child(
+        div()
+            .id("database-recovery-footer")
+            .debug_selector(|| "database-recovery-footer".to_owned())
+            .mt(px(24.))
+            .pt(px(18.))
+            .w_full()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .items_start()
+            .border_t_1()
+            .border_color(rgb(FOOTER_BORDER))
+            .child(start_empty)
+            .child(
+                div()
+                    .id("database-recovery-start-empty-hint")
+                    .debug_selector(|| "database-recovery-start-empty-hint".to_owned())
+                    .mt(px(7.))
+                    .w_full()
+                    .min_w_0()
+                    .text_color(rgb(SECONDARY_TEXT))
+                    .text_size(px(12.))
+                    .line_height(relative(1.5))
+                    .whitespace_normal()
+                    .child(ui_text(START_EMPTY_HINT)),
+            ),
+    );
+
+    let mut page = div()
         .id("database-recovery-page")
+        .debug_selector(|| "database-recovery-page".to_owned())
+        .relative()
         .size_full()
-        .overflow_y_scroll()
         .bg(rgb(PAGE_BACKGROUND))
         .text_color(rgb(PRIMARY_TEXT))
         .child(
             div()
-                .id("database-recovery-centering")
-                .debug_selector(|| "database-recovery-centering".to_owned())
-                .w_full()
-                .min_h(relative(1.))
-                .px(px(PAGE_PADDING_X))
-                .py(px(PAGE_PADDING_Y))
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .child(card),
+                .id("database-recovery-scroll")
+                .debug_selector(|| "database-recovery-scroll".to_owned())
+                .size_full()
+                .overflow_y_scroll()
+                .child(
+                    div()
+                        .id("database-recovery-centering")
+                        .debug_selector(|| "database-recovery-centering".to_owned())
+                        .w_full()
+                        .min_h(relative(1.))
+                        .px(px(PAGE_PADDING_X))
+                        .py(px(PAGE_PADDING_Y))
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .justify_center()
+                        .child(card),
+                ),
+        );
+    if let Some(confirmation) = confirmation {
+        page = page.child(empty_confirmation_dialog(
+            confirmation.back,
+            confirmation.confirm,
+            available && pending.is_none(),
+            on_action,
+        ));
+    }
+    page
+}
+
+#[derive(Clone, Copy)]
+enum ButtonStyle {
+    Primary,
+    Secondary,
+    Danger,
+    DangerLink,
+}
+
+fn action_button(
+    id: &'static str,
+    selector: &'static str,
+    label: &'static str,
+    enabled: bool,
+    style: ButtonStyle,
+    action: PageAction,
+    focus: Option<&FocusHandle>,
+    on_action: PageActionHandler,
+) -> Stateful<Div> {
+    let label_selector = format!("{selector}-label");
+    let base = div()
+        .id(id)
+        .debug_selector(move || selector.to_owned())
+        .relative()
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .border_1()
+        .rounded(px(9.))
+        .text_size(px(16.))
+        .whitespace_nowrap()
+        .child(
+            div()
+                .id(SharedString::from(label_selector.clone()))
+                .debug_selector(move || label_selector)
+                .child(ui_text(label).normal_line_height()),
         )
+        .child(action_state_marker(selector, enabled));
+    let button = match style {
+        ButtonStyle::Primary => base
+            .h(px(38.))
+            .px(px(14.))
+            .border_color(rgb(ACCENT))
+            .bg(rgb(ACCENT))
+            .text_color(rgb(0xffffff)),
+        ButtonStyle::Secondary => base
+            .h(px(38.))
+            .px(px(14.))
+            .border_color(rgb(BUTTON_BORDER))
+            .bg(rgb(CARD_BACKGROUND))
+            .text_color(rgb(PRIMARY_TEXT)),
+        ButtonStyle::Danger => base
+            .h(px(38.))
+            .px(px(14.))
+            .border_color(rgb(DANGER_BUTTON))
+            .bg(rgb(DANGER_BUTTON))
+            .text_color(rgb(0xffffff)),
+        ButtonStyle::DangerLink => base
+            .border_color(rgba(0x00000000))
+            .bg(rgba(0x00000000))
+            .text_color(rgb(DANGER_TEXT)),
+    };
+    if !enabled {
+        return button.opacity(0.48).cursor(CursorStyle::Arrow);
+    }
+    let style_kind = style;
+    let button = match focus {
+        Some(focus) => {
+            let focus = focus.clone().tab_stop(true);
+            button.track_focus(&focus)
+        }
+        None => button,
+    };
+
+    let key_action = action.clone();
+    let click_action = action;
+    let key_handler = on_action.clone();
+    let click_handler = on_action;
+    button
+        .tab_index(0)
+        .cursor_pointer()
+        .focus(move |style| match style_kind {
+            ButtonStyle::Primary => style.border_color(rgb(ACCENT_FOCUS)),
+            ButtonStyle::Secondary => style.border_color(rgb(ACCENT)),
+            ButtonStyle::Danger => style.border_color(rgb(DANGER_FOCUS)),
+            ButtonStyle::DangerLink => style.text_color(rgb(DANGER_FOCUS)).underline(),
+        })
+        .on_key_down(move |event, window, cx| {
+            if is_activation_key(&event.keystroke) {
+                cx.stop_propagation();
+                key_handler(&key_action, window, cx);
+            }
+        })
+        .on_click(move |event, window, cx| {
+            // GPUI also synthesizes a keyboard click on key-up. The key-down
+            // handler already dispatched the action, so ignore that copy.
+            if matches!(event, ClickEvent::Keyboard(_)) {
+                return;
+            }
+            cx.stop_propagation();
+            click_handler(&click_action, window, cx);
+        })
+}
+
+/// A zero-size selector kept inside each button so a hidden-window probe can
+/// tell enabled and disabled controls apart without reading the presentation.
+fn action_state_marker(selector: &'static str, enabled: bool) -> AnyElement {
+    let marker = format!(
+        "{selector}-{}",
+        if enabled { "enabled" } else { "disabled" }
+    );
+    div()
+        .flex_none()
+        .w(px(0.))
+        .h(px(0.))
+        .debug_selector(move || marker)
+        .into_any_element()
+}
+
+fn is_activation_key(keystroke: &Keystroke) -> bool {
+    matches!(keystroke.key.as_str(), "enter" | "space") && !keystroke.modifiers.modified()
+}
+
+impl ConfirmationFocus<'_> {
+    pub(super) fn handle_key(
+        &self,
+        keystroke: &Keystroke,
+        confirm_enabled: bool,
+        window: &mut Window,
+        cancel: impl FnOnce(&mut Window),
+    ) -> bool {
+        let key = keystroke.key.as_str();
+        let modifiers = keystroke.modifiers;
+        if key == "escape" {
+            cancel(window);
+            return true;
+        }
+        if key == "tab" && !modifiers.alt && !modifiers.control && !modifiers.platform {
+            let next = if !confirm_enabled || self.confirm.is_focused(window) {
+                self.back
+            } else if self.back.is_focused(window) || modifiers.shift {
+                self.confirm
+            } else {
+                self.back
+            };
+            window.focus(next);
+            return true;
+        }
+        // Enter and Space reach the focused dialog button.
+        key != "enter" && key != "space" && !modifiers.platform
+    }
+}
+
+fn empty_confirmation_dialog(
+    back: &FocusHandle,
+    confirm: &FocusHandle,
+    confirm_enabled: bool,
+    on_action: PageActionHandler,
+) -> Stateful<Div> {
+    let back_focus = back.clone().tab_stop(true);
+    let confirm_focus = confirm.clone().tab_stop(true);
+    let key_back = back_focus.clone();
+    let key_confirm = confirm_focus.clone();
+    let key_handler = on_action.clone();
+    let back_button = action_button(
+        "database-recovery-dialog-back",
+        "database-recovery-dialog-back",
+        BACK,
+        true,
+        ButtonStyle::Secondary,
+        PageAction::CancelConfirmation,
+        Some(&back_focus),
+        on_action.clone(),
+    );
+    let confirm_button = action_button(
+        "database-recovery-dialog-confirm",
+        "database-recovery-dialog-confirm",
+        CONFIRM_EMPTY,
+        confirm_enabled,
+        ButtonStyle::Danger,
+        PageAction::ConfirmEmpty,
+        Some(&confirm_focus),
+        on_action,
+    );
+
+    let title = div()
+        .id("database-recovery-dialog-title")
+        .debug_selector(|| "database-recovery-dialog-title".to_owned())
+        .text_size(px(19.))
+        .font_weight(FontWeight::BOLD)
+        .line_height(relative(1.2))
+        .text_color(rgb(PRIMARY_TEXT))
+        .whitespace_normal()
+        .child(ui_text(CONFIRM_EMPTY_TITLE));
+    let body = div()
+        .id("database-recovery-dialog-body")
+        .debug_selector(|| "database-recovery-dialog-body".to_owned())
+        .mt(px(16.))
+        .w_full()
+        .min_w_0()
+        .text_color(rgb(MUTED_TEXT))
+        .text_size(px(16.))
+        .line_height(relative(1.55))
+        .whitespace_normal()
+        .child(ui_text(CONFIRM_EMPTY_BODY));
+    let footer = div()
+        .id("database-recovery-dialog-actions")
+        .debug_selector(|| "database-recovery-dialog-actions".to_owned())
+        .mt(px(20.))
+        .flex()
+        .justify_end()
+        .gap(px(10.))
+        .child(back_button)
+        .child(confirm_button);
+
+    let panel = div()
+        .id("database-recovery-dialog")
+        .debug_selector(|| "database-recovery-dialog".to_owned())
+        .w_full()
+        .max_w(px(430.))
+        .flex()
+        .flex_col()
+        .p(px(22.))
+        .rounded(px(16.))
+        .bg(rgb(CARD_BACKGROUND))
+        .text_color(rgb(PRIMARY_TEXT))
+        .shadow(vec![shadow(0x000000, 0.24, 20., 80.)])
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+        .capture_key_down(move |event, window, cx| {
+            let focus = ConfirmationFocus {
+                back: &key_back,
+                confirm: &key_confirm,
+            };
+            if focus.handle_key(&event.keystroke, confirm_enabled, window, |window| {
+                key_handler(&PageAction::CancelConfirmation, window, cx)
+            }) {
+                cx.stop_propagation();
+            }
+        })
+        .child(title)
+        .child(body)
+        .child(footer);
+
+    div()
+        .id("database-recovery-dialog-backdrop")
+        .debug_selector(|| "database-recovery-dialog-backdrop".to_owned())
+        .absolute()
+        .inset_0()
+        .occlude()
+        .flex()
+        .items_center()
+        .justify_center()
+        .p(px(20.))
+        .bg(rgba(DIALOG_BACKDROP))
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+        .child(panel)
 }
 
 /// Render the cross-workspace read-only banner.
@@ -554,7 +993,7 @@ fn mix_color(base: u32, tint: u32, percent: u32) -> u32 {
 /// The frozen page sorts by time descending, then ID descending, and keeps the
 /// newest seven verified backups. Sorting lives here as well as in the backup
 /// service so a reordered or reconnected projection cannot change the list.
-pub fn visible_backups(backups: &[DatabaseRecoveryBackup]) -> Vec<&DatabaseRecoveryBackup> {
+pub(super) fn visible_backups(backups: &[DatabaseRecoveryBackup]) -> Vec<&DatabaseRecoveryBackup> {
     let mut visible: Vec<_> = backups.iter().collect();
     visible.sort_by(|left, right| {
         right
@@ -609,14 +1048,77 @@ fn notice(id: &'static str, text: String, text_color: u32, background: u32) -> S
         .child(ui_text(text))
 }
 
-fn backup_row(index: usize, backup: &DatabaseRecoveryBackup) -> Stateful<Div> {
+fn backup_row(
+    index: usize,
+    backup: &DatabaseRecoveryBackup,
+    selected: bool,
+    enabled: bool,
+    on_action: PageActionHandler,
+) -> Stateful<Div> {
     let metadata = format!(
         "{} · 数据版本 {} · {}",
         format_backup_time(backup.created_at),
         backup.schema_version,
         format_backup_size(backup.size)
     );
-    div()
+    let marker = format!(
+        "database-recovery-backup-{index}-{}",
+        if selected { "selected" } else { "unselected" }
+    );
+    let radio = div()
+        .flex_none()
+        .size(px(14.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .border_1()
+        .border_color(rgb(if selected { ACCENT } else { RADIO_BORDER }))
+        .bg(rgb(if selected { ACCENT } else { CARD_BACKGROUND }))
+        .when(selected, |radio| {
+            radio.child(div().size(px(5.)).rounded_full().bg(rgb(0xffffff)))
+        })
+        .when(!enabled, |radio| radio.opacity(0.6));
+    let text = div()
+        .min_w_0()
+        .flex_1()
+        .flex()
+        .flex_col()
+        .gap(px(3.))
+        .child(
+            div()
+                .id(SharedString::from(format!(
+                    "database-recovery-backup-id-{index}"
+                )))
+                .debug_selector(move || format!("database-recovery-backup-id-{index}"))
+                .w_full()
+                .min_w_0()
+                .overflow_hidden()
+                .text_color(rgb(PRIMARY_TEXT))
+                .text_size(px(16.))
+                .font_weight(FontWeight::BOLD)
+                .line_height(relative(1.4))
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .child(ui_text(backup.id.clone())),
+        )
+        .child(
+            div()
+                .id(SharedString::from(format!(
+                    "database-recovery-backup-meta-{index}"
+                )))
+                .debug_selector(move || format!("database-recovery-backup-meta-{index}"))
+                .w_full()
+                .min_w_0()
+                .overflow_hidden()
+                .text_color(rgb(SECONDARY_TEXT))
+                .text_size(px(13.))
+                .line_height(relative(1.4))
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .child(ui_text(metadata)),
+        );
+    let row = div()
         .id(SharedString::from(format!(
             "database-recovery-backup-{index}"
         )))
@@ -629,46 +1131,51 @@ fn backup_row(index: usize, backup: &DatabaseRecoveryBackup) -> Stateful<Div> {
         .px(px(12.))
         .py(px(12.))
         .border_1()
-        .border_color(rgb(ROW_BORDER))
+        .border_color(rgb(if selected {
+            SELECTED_BORDER
+        } else {
+            ROW_BORDER
+        }))
         .rounded(px(11.))
-        .bg(rgb(CARD_BACKGROUND))
+        .bg(rgb(if selected {
+            SELECTED_BACKGROUND
+        } else {
+            CARD_BACKGROUND
+        }))
+        .child(radio)
+        .child(text)
         .child(
             div()
-                .min_w_0()
-                .flex_1()
-                .flex()
-                .flex_col()
-                .gap(px(3.))
-                .child(
-                    div()
-                        .id(SharedString::from(format!(
-                            "database-recovery-backup-id-{index}"
-                        )))
-                        .debug_selector(move || format!("database-recovery-backup-id-{index}"))
-                        .w_full()
-                        .min_w_0()
-                        .text_color(rgb(PRIMARY_TEXT))
-                        .text_size(px(16.))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .line_height(relative(1.4))
-                        .whitespace_normal()
-                        .child(ui_text(backup.id.clone())),
-                )
-                .child(
-                    div()
-                        .id(SharedString::from(format!(
-                            "database-recovery-backup-meta-{index}"
-                        )))
-                        .debug_selector(move || format!("database-recovery-backup-meta-{index}"))
-                        .w_full()
-                        .min_w_0()
-                        .text_color(rgb(SECONDARY_TEXT))
-                        .text_size(px(13.))
-                        .line_height(relative(1.4))
-                        .whitespace_normal()
-                        .child(ui_text(metadata)),
-                ),
-        )
+                .flex_none()
+                .w(px(0.))
+                .h(px(0.))
+                .debug_selector(move || marker)
+                .into_any_element(),
+        );
+    if !enabled {
+        return row.cursor(CursorStyle::Arrow);
+    }
+
+    let key_action = PageAction::SelectBackup(backup.id.clone());
+    let click_action = key_action.clone();
+    let key_handler = on_action.clone();
+    let click_handler = on_action;
+    row.tab_index(0)
+        .cursor_pointer()
+        .focus(|style| style.border_color(rgb(ACCENT_FOCUS)))
+        .on_key_down(move |event, window, cx| {
+            if is_activation_key(&event.keystroke) {
+                cx.stop_propagation();
+                key_handler(&key_action, window, cx);
+            }
+        })
+        .on_click(move |event, window, cx| {
+            if matches!(event, ClickEvent::Keyboard(_)) {
+                return;
+            }
+            cx.stop_propagation();
+            click_handler(&click_action, window, cx);
+        })
 }
 
 fn recovery_error_text(error: &RecoveryError) -> String {
