@@ -16,12 +16,15 @@ use matou_native_core::{
     provider_launch::{ClaudeGatewayProjection, ClaudeLaunch, EFFORTS, attach_claude_settings},
     pty::LaunchProfile,
     session_graph,
-    sessions::{self, ClaudeBinding, ClaudeFork, ClaudeRestore, SessionRun, StartRunInput},
+    sessions::{
+        self, ClaudeBinding, ClaudeFork, ClaudeRestore, ProviderBinding, SessionRun, StartRunInput,
+    },
     shell_history,
     storage::{CommandMetadata, DomainCommit},
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
+use uuid::Uuid;
 
 use crate::{
     SessionEvent, SessionOptions,
@@ -1172,7 +1175,7 @@ impl ShellOwner {
             .transpose()
     }
 
-    pub(crate) fn permission_binding(&self, session_id: &str) -> Result<Option<ClaudeBinding>> {
+    pub(crate) fn permission_binding(&self, session_id: &str) -> Result<Option<ProviderBinding>> {
         let session = self
             .session(session_id)?
             .context(ACTIVE_PERMISSION_SESSION)?;
@@ -1180,17 +1183,24 @@ impl ShellOwner {
             session.archived_at.is_none(),
             "archived Session permission mode cannot be modified"
         );
-        ensure!(session.kind == "claude-code", "{ACTIVE_PERMISSION_SESSION}");
+        let codex = session.kind == "codex";
+        ensure!(
+            codex || session.kind == "claude-code",
+            "{ACTIVE_PERMISSION_SESSION}"
+        );
         let shell = self.shells.get(session_id);
         ensure!(
             !shell.is_some_and(|shell| shell.retiring)
                 && !self.waiting_for_provider_restore(session_id),
             "AI Session is already stopping or recovering"
         );
-        let Some(binding) = self
-            .claude_binding(session_id)?
-            .filter(|binding| binding.resumable)
-        else {
+        let binding = if codex {
+            self.codex_binding(session_id)?
+        } else {
+            self.claude_binding(session_id)?
+        };
+        let Some(binding) = binding.filter(|binding| binding.resumable) else {
+            ensure!(!codex, "{ACTIVE_PERMISSION_SESSION}");
             ensure!(
                 !shell.is_some_and(|shell| shell.is_shell),
                 "{ACTIVE_PERMISSION_SESSION}"
@@ -1212,23 +1222,27 @@ impl ShellOwner {
             .and_then(|hook| hook.last_observation.as_ref())
             .and_then(|observation| observation.identity.as_deref())
             .context(ACTIVE_PERMISSION_SESSION)?;
+        let same_identity = if codex {
+            CodexResume::from_binding(&binding)
+                .is_ok_and(|resume| Uuid::parse_str(identity) == Ok(resume.identity))
+        } else {
+            binding.provider_session_id == identity
+        };
         ensure!(
-            binding.restore_state == "none"
-                && binding.provider_session_id == identity
-                && binding.metadata.is_object(),
+            binding.restore_state == "none" && same_identity && binding.metadata.is_object(),
             "{ACTIVE_PERMISSION_SESSION}"
         );
         Ok(Some(binding))
     }
 
-    pub(crate) fn write_claude_permission(
+    pub(crate) fn write_provider_permission(
         &mut self,
         session_id: &str,
         binding_id: &str,
         permission: Option<&Value>,
     ) -> Result<()> {
         let id = (self.next_id)();
-        let commit = sessions::write_claude_permission(
+        let commit = sessions::write_provider_permission(
             &mut self.connection,
             &command(id.clone(), "session.set-permission-mode", id),
             session_id,
@@ -1541,6 +1555,9 @@ impl ShellOwner {
             Some((metadata, secrets, None, None)),
             resume,
         )?;
+        if let Some(warning) = plan.permission_warning {
+            diagnostic(&mut self.pending, session_id, warning.into());
+        }
         let shell = self.shells.get_mut(session_id).unwrap();
         shell.provider_startup_pending = promotion;
         Ok(shell.run_id.clone())
@@ -2072,6 +2089,17 @@ impl ShellOwner {
                     .is_some_and(|deadline| deadline <= Instant::now())
             {
                 hook.deadline = None;
+                if let Some(resume) = &hook.codex_resume
+                    && resume.permission_respawn
+                {
+                    expired_permission_restores.push((
+                        session_id.clone(),
+                        shell.run_id.clone(),
+                        resume.binding_id.clone(),
+                        true,
+                    ));
+                    continue;
+                }
                 if let Some(resume) = &mut hook.resume {
                     if resume.fresh_permission() {
                         hook.permission_identity_error =
@@ -2085,6 +2113,7 @@ impl ShellOwner {
                             session_id.clone(),
                             shell.run_id.clone(),
                             binding_id.clone(),
+                            false,
                         ));
                         continue;
                     }
@@ -2106,14 +2135,13 @@ impl ShellOwner {
         for (session_id, run_id) in expired_forks {
             self.park_fork_run(&session_id, &run_id, FORK_IDENTITY_TIMEOUT, events);
         }
-        for (session_id, run_id, binding_id) in expired_permission_restores {
-            self.park_provider_run(
-                &session_id,
-                &run_id,
-                &binding_id,
-                "provider resume identity confirmation timed out",
-                events,
-            );
+        for (session_id, run_id, binding_id, codex) in expired_permission_restores {
+            let error = "provider resume identity confirmation timed out";
+            if codex {
+                self.park_codex_run(&session_id, &run_id, &binding_id, error, events);
+            } else {
+                self.park_provider_run(&session_id, &run_id, &binding_id, error, events);
+            }
         }
         for (session_id, shell) in &mut self.shells {
             if let Some(bytes) = shell

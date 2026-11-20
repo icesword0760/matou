@@ -82,7 +82,53 @@ mod workspace {
             let Some(TabDialog::PermissionMode(state)) = &self.dialog else {
                 panic!("expected permission confirmation");
             };
-            assert_eq!(state.copy(), expected);
+            let (title, body, confirm) = state.copy();
+            assert_eq!((title, body.as_str(), confirm), expected);
+        }
+
+        pub(super) fn toggle_codex_permission_menu(
+            &mut self,
+            window: &mut Window,
+            cx: &mut Context<Self>,
+        ) {
+            assert!(!matou_native_desktop::macos::is_window_visible(window).unwrap());
+            self.toggle_permission_menu(window, cx);
+        }
+
+        pub(super) fn assert_codex_permission_rows(&self) {
+            let chip = self.permission_chip().unwrap();
+            let rows: Vec<_> = chip.modes.iter().map(|mode| mode.label()).collect();
+            assert_eq!(
+                rows,
+                ["Default", "Accept Edits", "Plan Mode", "Bypass Permissions"]
+            );
+            assert_eq!(PERMISSION_MENU_TITLE, "权限模式");
+        }
+
+        pub(super) fn choose_codex_permission_mode(
+            &mut self,
+            mode: &str,
+            window: &mut Window,
+            cx: &mut Context<Self>,
+        ) {
+            let mode = PermissionMode::ALL
+                .into_iter()
+                .find(|entry| entry.value() == mode)
+                .unwrap();
+            self.choose_permission_mode(mode, window, cx);
+        }
+
+        pub(super) fn complete_codex_permission_confirmation(
+            &mut self,
+            confirm: bool,
+            window: &mut Window,
+            cx: &mut Context<Self>,
+        ) {
+            if confirm {
+                self.confirm_dialog(window, cx);
+            } else {
+                self.close_dialog(window, cx);
+            }
         }
 
         pub(super) fn assert_permission_toast(&self, expected: Option<&str>) {
@@ -1568,6 +1614,22 @@ mod probe {
                 unreachable!()
             };
             Event::Graph(graph)
+        }
+
+        fn codex_permission_state(&self, work: &str, restore: &str) {
+            let Some(BootstrapResult::Writable { connection, .. }) = &self.db else {
+                unreachable!()
+            };
+            connection
+                .execute(
+                    "UPDATE sessions SET kind = 'codex', work_status = ? WHERE id = ?",
+                    (work, PARENT),
+                )
+                .unwrap();
+            connection.execute(
+                "UPDATE provider_bindings SET provider = 'codex', restore_state = ? WHERE session_id = ?",
+                (restore, PARENT),
+            ).unwrap();
         }
 
         fn permission_mode(&self, mode: Option<&str>) {
@@ -4650,6 +4712,151 @@ mod probe {
         );
     }
 
+    fn verify_codex_permission_mode(cx: &mut AsyncApp) {
+        const RECOVERING: &str = "当前终端需要先完成恢复";
+        const LABELS: [(&str, &str); 4] = [
+            ("default", "Default"),
+            ("acceptEdits", "Accept Edits"),
+            ("plan", "Plan Mode"),
+            ("bypassPermissions", "Bypass Permissions"),
+        ];
+        const ENTER: (&str, &str, &str) = (
+            "切换到高权限模式",
+            "切换到 Bypass Permissions 会打断当前 Codex 会话进程（正在执行的任务会被中断），重启后会自动 resume 恢复会话历史。\n\n是否确认？",
+            "确认切换",
+        );
+        const EXIT: (&str, &str, &str) = (
+            "退出高权限模式",
+            "退出 Bypass Permissions 会打断当前 Codex 会话进程（正在执行的任务会被中断），重启后会自动 resume 恢复会话历史。\n\n是否确认？",
+            "确认退出",
+        );
+        let mut fixture = Fixture::new();
+        fixture.fork_source(false, "starting");
+        fixture.codex_permission_state("starting", "none");
+        fixture.focus(SCENE, PARENT);
+        let (window, sink) = open_hidden(cx, 1250.);
+        deliver(window, cx, fixture.event(true));
+        draw(window, cx);
+        window
+            .update(cx, |view, window, cx| {
+                view.qualify(PARENT, window, cx);
+                view.assert_permission_chip(Some(("Default", RECOVERING, true)));
+                view.toggle_codex_permission_menu(window, cx);
+                view.assert_permission_menu(false);
+            })
+            .unwrap();
+        println!("Codex starting | permission disabled even with a ready terminal frame");
+
+        fixture.codex_permission_state("idle", "none");
+        for (mode, label) in LABELS {
+            fixture.permission_mode(Some(mode));
+            deliver(window, cx, fixture.graph_event());
+            let title = format!("当前权限模式：{label}，点击切换");
+            window
+                .update(cx, |view, window, cx| {
+                    view.assert_permission_chip(Some((label, &title, false)));
+                    view.toggle_codex_permission_menu(window, cx);
+                    view.assert_permission_menu(true);
+                    view.assert_codex_permission_rows();
+                })
+                .unwrap();
+            draw(window, cx);
+            window
+                .update(cx, |view, window, cx| {
+                    view.choose_codex_permission_mode(mode, window, cx);
+                    view.assert_permission_menu(false);
+                    view.assert_no_dialog();
+                })
+                .unwrap();
+            assert!(fixture.process(window, cx, &sink).is_empty());
+            println!(
+                "Codex {label} | exact chip, tooltip and four drawn menu rows; selecting current mode sent no command"
+            );
+        }
+        let choose = |cx: &mut AsyncApp, mode| {
+            window
+                .update(cx, |view, window, cx| {
+                    view.toggle_codex_permission_menu(window, cx);
+                    view.choose_codex_permission_mode(mode, window, cx);
+                })
+                .unwrap();
+        };
+        choose(cx, "auto");
+        assert!(fixture.process(window, cx, &sink).is_empty());
+        choose(cx, "plan");
+        window
+            .update(cx, |view, window, cx| {
+                view.assert_permission_confirmation(EXIT);
+                view.complete_codex_permission_confirmation(false, window, cx);
+            })
+            .unwrap();
+        assert!(fixture.process(window, cx, &sink).is_empty());
+        println!("Codex exit Bypass | frozen confirmation copy; cancel sent no command");
+
+        fixture.permission_mode(Some("default"));
+        deliver(window, cx, fixture.graph_event());
+        choose(cx, "bypassPermissions");
+        window
+            .update(cx, |view, window, cx| {
+                view.assert_permission_confirmation(ENTER);
+                view.complete_codex_permission_confirmation(true, window, cx);
+                view.assert_permission_chip(Some((
+                    "Default",
+                    "当前权限模式：Default，点击切换",
+                    true,
+                )));
+                view.toggle_codex_permission_menu(window, cx);
+                view.assert_permission_menu(false);
+            })
+            .unwrap();
+        assert!(matches!(
+            fixture.process(window, cx, &sink).as_slice(),
+            [Command::SetProviderPermissionMode { session_id, mode }]
+                if session_id == PARENT && mode == "bypassPermissions"
+        ));
+        println!(
+            "Codex enter Bypass | frozen confirmation copy; confirm sent one command, pending kept previous mode disabled"
+        );
+
+        fixture.codex_permission_state("error", "failed");
+        deliver(
+            window,
+            cx,
+            fixture.permission_result("bypassPermissions", Some("复起夹具错误")),
+        );
+        window
+            .update(cx, |view, window, cx| {
+                view.assert_permission_chip(Some(("Default", RECOVERING, true)));
+                view.assert_permission_toast(Some("切换失败：复起夹具错误"));
+                view.toggle_codex_permission_menu(window, cx);
+                view.assert_permission_menu(false);
+            })
+            .unwrap();
+        fixture.codex_permission_state("starting", "restoring");
+        deliver(window, cx, fixture.graph_event());
+        window
+            .update(cx, |view, _, _| {
+                view.assert_permission_chip(Some(("Default", RECOVERING, true)));
+            })
+            .unwrap();
+        fixture.codex_permission_state("idle", "none");
+        fixture.permission_mode(Some("bypassPermissions"));
+        deliver(window, cx, fixture.graph_event());
+        window
+            .update(cx, |view, window, _| {
+                view.assert_permission_chip(Some((
+                    "Bypass Permissions",
+                    "当前权限模式：Bypass Permissions，点击切换",
+                    false,
+                )));
+                window.remove_window();
+            })
+            .unwrap();
+        println!(
+            "Codex failure and recovery | toast copy, disabled failed/restoring states, reopened with confirmed mode"
+        );
+    }
+
     pub(super) fn run() {
         let water_pointer_only = std::env::args().any(|arg| arg == "--recovery-water-pointer");
         let deferred_only = std::env::args().any(|arg| arg == "--deferred-recovery");
@@ -4657,6 +4864,7 @@ mod probe {
         let loader_only = std::env::args().any(|arg| arg == "--session-loader");
         let fork_only = std::env::args().any(|arg| arg == "--fork");
         let permission_only = std::env::args().any(|arg| arg == "--permission");
+        let codex_permission_only = std::env::args().any(|arg| arg == "--codex-permission");
         Application::new().with_assets(NativeAssets).run(move |cx| {
             if water_pointer_only {
                 cx.spawn(async |cx| {
@@ -4672,6 +4880,14 @@ mod probe {
                         cx.update(|cx| cx.quit()).unwrap();
                     }
                 }).detach();
+                return;
+            }
+            if codex_permission_only {
+                cx.spawn(async |cx| {
+                    verify_codex_permission_mode(cx);
+                    cx.update(|cx| cx.quit()).unwrap();
+                })
+                .detach();
                 return;
             }
             if permission_only {

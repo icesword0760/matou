@@ -7,14 +7,14 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use matou_native_core::{
     provider_launch::{EFFORTS, validate_cwd},
     pty::{LaunchProfile, ShellLaunch},
 };
 use serde_json::{Value, json};
 
-use crate::shell_input::CODEX_BYPASS;
+use crate::codex_permissions;
 
 pub(crate) const STARTUP_GRACE: Duration = Duration::from_millis(150);
 
@@ -23,6 +23,7 @@ pub(crate) struct CodexLaunch {
     pub provider_config_id: String,
     pub model: String,
     pub permission_mode: &'static str,
+    pub permission_warning: Option<&'static str>,
 }
 
 pub(crate) fn first_screen_ready(elapsed: Duration, emitted_output: bool) -> bool {
@@ -55,7 +56,7 @@ pub(crate) fn failure_message(error: &anyhow::Error) -> String {
 pub(crate) fn prepare(
     data_root: &Path,
     cwd: &Path,
-    permission_mode: &'static str,
+    permission_mode: Option<&Value>,
     mut environment: BTreeMap<OsString, OsString>,
     cols: u16,
     rows: u16,
@@ -105,19 +106,8 @@ pub(crate) fn prepare(
     if !model.is_empty() {
         argv.extend(["--model".into(), model.into()]);
     }
-    match permission_mode {
-        "default" => {
-            let (approval, sandbox) = default_permissions(&environment);
-            argv.extend([
-                "--ask-for-approval".into(),
-                approval.into(),
-                "--sandbox".into(),
-                sandbox.into(),
-            ]);
-        }
-        "bypassPermissions" => argv.push(CODEX_BYPASS.into()),
-        _ => bail!("Unsupported Codex launch permission mode"),
-    }
+    let (permission_mode, permission_warning) =
+        codex_permissions::append_args(&mut argv, permission_mode, &cwd, &environment);
     environment.insert("TERM".into(), "xterm-256color".into());
     for (name, value) in [
         ("OPENAI_API_KEY", field("apiKey")),
@@ -142,6 +132,7 @@ pub(crate) fn prepare(
         provider_config_id: field("id").to_owned(),
         model: model.to_owned(),
         permission_mode,
+        permission_warning,
     })
 }
 
@@ -187,118 +178,4 @@ fn executable_at(path: PathBuf) -> Option<PathBuf> {
         }
     }
     Some(path)
-}
-
-const DEFAULT_PERMISSIONS: (&str, &str) = ("on-request", "workspace-write");
-
-fn default_permissions(environment: &BTreeMap<OsString, OsString>) -> (&'static str, &'static str) {
-    let root = environment
-        .get(OsStr::new("CODEX_HOME"))
-        .filter(|path| !path.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| {
-            let home_key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
-            environment
-                .get(OsStr::new(home_key))
-                .map(|home| Path::new(home).join(".codex"))
-        });
-    root.and_then(|root| fs::read_to_string(root.join("config.toml")).ok())
-        .as_deref()
-        .and_then(parse_default_permissions)
-        .unwrap_or(DEFAULT_PERMISSIONS)
-}
-
-fn parse_default_permissions(text: &str) -> Option<(&'static str, &'static str)> {
-    let mut selected = DEFAULT_PERMISSIONS;
-    let mut seen = [false; 2];
-    let mut remaining = text.trim();
-    // TOML root keys appear before the first table. Scan strings and containers
-    // so directives inside documentation or arrays cannot become permissions.
-    while !remaining.is_empty() && !remaining.starts_with('[') {
-        let (line, rest) = next_root_statement(remaining)?;
-        remaining = rest.trim_start();
-        let Some((key, value)) = line.split_once('=') else {
-            continue;
-        };
-        let (index, target, supported): (_, &mut &'static str, &'static [&'static str]) =
-            match key.trim().trim_matches(['"', '\'']) {
-                "approval_policy" => (
-                    0,
-                    &mut selected.0,
-                    &["on-request", "never", "untrusted", "on-failure"],
-                ),
-                "sandbox_mode" => (
-                    1,
-                    &mut selected.1,
-                    &["read-only", "workspace-write", "danger-full-access"],
-                ),
-                _ => continue,
-            };
-        if std::mem::replace(&mut seen[index], true) {
-            return None;
-        }
-        let value = value.trim();
-        let parsed = if value.starts_with('"') {
-            serde_json::from_str::<String>(value).ok()
-        } else {
-            value
-                .strip_prefix('\'')
-                .and_then(|text| text.strip_suffix('\''))
-                .map(str::to_owned)
-        };
-        if let Some(value) = supported
-            .iter()
-            .find(|value| parsed.as_deref() == Some(**value))
-        {
-            *target = value;
-        }
-    }
-    Some(selected)
-}
-
-fn next_root_statement(text: &str) -> Option<(&str, &str)> {
-    let mut cursor = 0;
-    let mut depth = 0usize;
-    while let Some(&byte) = text.as_bytes().get(cursor) {
-        match byte {
-            b'"' | b'\'' => {
-                let bytes = text.as_bytes();
-                let width = if bytes.get(cursor..cursor + 3) == Some(&[byte; 3]) {
-                    3
-                } else {
-                    1
-                };
-                let delimiter = &bytes[cursor..cursor + width];
-                cursor += width;
-                loop {
-                    if bytes.get(cursor..cursor + width) == Some(delimiter) {
-                        cursor += width;
-                        break;
-                    }
-                    match *bytes.get(cursor)? {
-                        b'\\' if byte == b'"' => cursor += 2,
-                        b'\n' | b'\r' if width == 1 => return None,
-                        _ => cursor += 1,
-                    }
-                }
-                continue;
-            }
-            b'#' => {
-                let newline = text[cursor..]
-                    .find('\n')
-                    .map_or(text.len(), |offset| cursor + offset);
-                if depth == 0 {
-                    return Some((&text[..cursor], &text[newline..]));
-                }
-                cursor = newline;
-                continue;
-            }
-            b'[' | b'{' => depth += 1,
-            b']' | b'}' => depth = depth.checked_sub(1)?,
-            b'\n' if depth == 0 => return Some((&text[..cursor], &text[cursor + 1..])),
-            _ => {}
-        }
-        cursor += 1;
-    }
-    (depth == 0).then_some((text, ""))
 }

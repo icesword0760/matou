@@ -45,6 +45,7 @@ pub(crate) struct Resume {
     pub binding_id: String,
     pub provider_session_id: String,
     pub identity: Uuid,
+    pub permission_respawn: bool,
     recent: String,
 }
 
@@ -58,6 +59,7 @@ impl Resume {
             binding_id: binding.id.clone(),
             provider_session_id: binding.provider_session_id.clone(),
             identity,
+            permission_respawn: false,
             recent: String::new(),
         })
     }
@@ -114,44 +116,19 @@ pub(crate) fn prepare(
     } else {
         Some(Resume::from_binding(binding.context(MISSING)?)?)
     };
-    let mode = match binding.and_then(|binding| binding.metadata["permissionMode"].as_str()) {
-        Some("bypassPermissions") => "bypassPermissions",
-        Some("acceptEdits") => "acceptEdits",
-        Some("plan") => "plan",
-        _ => "default",
-    };
     let inherited_api = ["OPENAI_API_KEY", "OPENAI_BASE_URL"].map(|key| {
         let key = OsString::from(key);
         let value = environment.get(&key).cloned();
         (key, value)
     });
-    let base_mode = if mode == "bypassPermissions" {
-        mode
-    } else {
-        "default"
-    };
-    let mut plan = codex_launch::prepare(data_root, cwd, base_mode, environment, cols, rows)?;
-    if matches!(mode, "plan" | "acceptEdits") {
-        let argv = &mut plan.launch.argv;
-        for (flag, value) in [
-            ("--ask-for-approval", "on-request"),
-            (
-                "--sandbox",
-                if mode == "plan" {
-                    "read-only"
-                } else {
-                    "workspace-write"
-                },
-            ),
-        ] {
-            let index = argv
-                .iter()
-                .position(|arg| arg == flag)
-                .context("missing Codex permission flag")?;
-            argv[index + 1] = value.into();
-        }
-        plan.permission_mode = mode;
-    }
+    let mut plan = codex_launch::prepare(
+        data_root,
+        cwd,
+        binding.and_then(|binding| binding.metadata.get("permissionMode")),
+        environment,
+        cols,
+        rows,
+    )?;
     if let Some(binding) = binding {
         if let Some(id) = binding.metadata["providerConfigId"]
             .as_str()

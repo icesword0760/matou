@@ -166,10 +166,22 @@ impl PermissionMode {
         Self::Bypass,
     ];
 
+    const CODEX: [Self; 4] = [Self::Default, Self::AcceptEdits, Self::Plan, Self::Bypass];
+
+    fn supported(node: &Value) -> Option<&'static [Self]> {
+        match node["currentMode"].as_str() {
+            Some("claude-code") => Some(&Self::ALL),
+            Some("codex") => Some(&Self::CODEX),
+            _ => None,
+        }
+    }
+
     fn from_node(node: &Value) -> Self {
         let value = node["permissionMode"].as_str();
-        Self::ALL
-            .into_iter()
+        Self::supported(node)
+            .unwrap_or_default()
+            .iter()
+            .copied()
             .find(|mode| Some(mode.value()) == value)
             .unwrap_or(Self::Default)
     }
@@ -197,6 +209,7 @@ impl PermissionMode {
 }
 
 struct PermissionChip {
+    modes: &'static [PermissionMode],
     mode: PermissionMode,
     title: String,
     disabled: bool,
@@ -207,28 +220,26 @@ struct PermissionConfirmation {
     from: PermissionMode,
     target: PermissionMode,
     resumable: bool,
+    codex: bool,
 }
 
 impl PermissionConfirmation {
     // Frozen i18n/messages/hud.ts: bypassEnter*, bypassExit*, bypassNotResumable.
-    fn copy(&self) -> (&'static str, &'static str, &'static str) {
-        let (title, body, confirm) = if self.target == PermissionMode::Bypass {
-            (
-                "切换到高权限模式",
-                "切换到 Bypass Permissions 会打断当前 Claude 会话进程（正在执行的任务会被中断），重启后会自动 resume 恢复会话历史。\n\n是否确认？",
-                "确认切换",
-            )
+    fn copy(&self) -> (&'static str, String, &'static str) {
+        let agent = if self.codex { "Codex" } else { "Claude" };
+        let (title, action, confirm) = if self.target == PermissionMode::Bypass {
+            ("切换到高权限模式", "切换到", "确认切换")
         } else {
-            (
-                "退出高权限模式",
-                "退出 Bypass Permissions 会打断当前 Claude 会话进程（正在执行的任务会被中断），重启后会自动 resume 恢复会话历史。\n\n是否确认？",
-                "确认退出",
-            )
+            ("退出高权限模式", "退出", "确认退出")
         };
         let body = if self.resumable {
-            body
+            format!(
+                "{action} Bypass Permissions 会打断当前 {agent} 会话进程（正在执行的任务会被中断），重启后会自动 resume 恢复会话历史。\n\n是否确认？"
+            )
         } else {
-            "当前 Claude 会话还没有生成可恢复的 sessionId。继续切换会启动一个全新的 Claude 会话，当前内容将不会保留。\n\n是否确认？"
+            format!(
+                "当前 {agent} 会话还没有生成可恢复的 sessionId。继续切换会启动一个全新的 {agent} 会话，当前内容将不会保留。\n\n是否确认？"
+            )
         };
         (title, body, confirm)
     }
@@ -6136,6 +6147,8 @@ impl Workspace {
         } else if self.storage_fault_sessions.contains(id) {
             Some("终端存储异常，请先恢复或结束当前会话")
         } else if self.recovery_blocked(id)
+            || (node["currentMode"] == "codex"
+                && matches!(node["workStatus"].as_str(), Some("starting" | "exited")))
             || generation != self.runtime_generation
             || phase != ConnectionPhase::Ready
             || matches!(
@@ -6152,7 +6165,7 @@ impl Workspace {
     fn permission_node(&self) -> Option<(&str, &Value)> {
         let id = self.level_focus()?;
         let node = self.graph_node(id)?;
-        (node["currentMode"] == "claude-code").then_some((id, node))
+        PermissionMode::supported(node).map(|_| (id, node))
     }
 
     fn permission_chip(&self) -> Option<PermissionChip> {
@@ -6161,6 +6174,7 @@ impl Workspace {
         let mode = change.map_or_else(|| PermissionMode::from_node(node), |change| change.from);
         let blocked = self.permission_blocked_reason(id, node);
         Some(PermissionChip {
+            modes: PermissionMode::supported(node)?,
             mode,
             title: blocked.map_or_else(
                 || format!("当前权限模式：{}，点击切换", mode.label()),
@@ -6201,6 +6215,7 @@ impl Workspace {
     fn permission_confirmation_valid(&self, state: &PermissionConfirmation) -> bool {
         self.permission_node().is_some_and(|(id, node)| {
             id == state.session_id
+                && (node["currentMode"] == "codex") == state.codex
                 && PermissionMode::from_node(node) == state.from
                 && self.permission_chip().is_some_and(|chip| !chip.disabled)
         })
@@ -6219,7 +6234,10 @@ impl Workspace {
         let Some((id, node)) = self.permission_node().filter(|(id, _)| *id == session_id) else {
             return;
         };
-        let Some(chip) = self.permission_chip().filter(|chip| !chip.disabled) else {
+        let Some(chip) = self
+            .permission_chip()
+            .filter(|chip| !chip.disabled && chip.modes.contains(&target))
+        else {
             return;
         };
         let from = chip.mode;
@@ -6230,7 +6248,9 @@ impl Workspace {
         if from == PermissionMode::Bypass || target == PermissionMode::Bypass {
             // Older graph nodes omit the provider session ID. A confirmed identity
             // event or binding-backed fields can still establish resumability.
-            let resumable = node["canFork"] == true
+            let codex = node["currentMode"] == "codex";
+            let resumable = codex
+                || node["canFork"] == true
                 || self.permission_identities.contains(id)
                 || ["providerSessionId", "model"].into_iter().any(|key| {
                     node[key]
@@ -6244,6 +6264,7 @@ impl Workspace {
                     from,
                     target,
                     resumable,
+                    codex,
                 }),
                 3,
                 window,
@@ -11000,7 +11021,7 @@ impl Workspace {
             .items_center()
             .child(self.permission_chip_view(chip, cx))
             .when(menu_open, |status| {
-                status.child(self.permission_menu_view(chip.mode, window, cx))
+                status.child(self.permission_menu_view(chip, window, cx))
             })
     }
 
@@ -11082,7 +11103,7 @@ impl Workspace {
     /// menu upward and left-aligns it with the chip.
     fn permission_menu_view(
         &self,
-        active: PermissionMode,
+        chip: &PermissionChip,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -11098,18 +11119,15 @@ impl Workspace {
             )
             .read(cx)
             .clone();
-        let items = PermissionMode::ALL
-            .into_iter()
-            .enumerate()
-            .map(|(index, mode)| {
-                let item = permission_menu_item(mode, active);
-                self.button(
-                    item,
-                    &focuses[index],
-                    move |this, window, cx| this.choose_permission_mode(mode, window, cx),
-                    cx,
-                )
-            });
+        let items = chip.modes.iter().copied().enumerate().map(|(index, mode)| {
+            let item = permission_menu_item(mode, chip.mode);
+            self.button(
+                item,
+                &focuses[index],
+                move |this, window, cx| this.choose_permission_mode(mode, window, cx),
+                cx,
+            )
+        });
         let panel = div()
             .id("permission-menu")
             .flex()

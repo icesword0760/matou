@@ -727,7 +727,7 @@ pub fn unbound_codex_restore(db: &Connection, session_id: &str) -> Result<Option
 }
 
 /// A missing permission is distinct from an explicit default on rollback.
-pub fn write_claude_permission(
+pub fn write_provider_permission(
     db: &mut Connection,
     command: &CommandMetadata,
     session_id: &str,
@@ -737,10 +737,15 @@ pub fn write_claude_permission(
 ) -> Result<DomainCommit> {
     execute(db, command, now, |tx, events| {
         let session = require_session(tx, session_id)?;
+        let provider = session.kind.as_str();
+        ensure!(
+            matches!(provider, "claude-code" | "codex"),
+            "Unsupported permission provider"
+        );
         let raw: String = tx.query_row(
             "SELECT metadata_json FROM provider_bindings
-             WHERE id = ? AND session_id = ? AND provider = 'claude-code'",
-            params![binding_id, session_id],
+             WHERE id = ? AND session_id = ? AND provider = ?",
+            params![binding_id, session_id, provider],
             |row| row.get(0),
         )?;
         let mut metadata: serde_json::Map<String, Value> = serde_json::from_str(&raw)?;
@@ -754,7 +759,7 @@ pub fn write_claude_permission(
             params![serde_json::to_string(&metadata)?, binding_id],
         )?;
         let payload = json!({
-            "sessionId": session_id, "bindingId": binding_id, "provider": "claude-code",
+            "sessionId": session_id, "bindingId": binding_id, "provider": provider,
             "permissionMode": permission,
         });
         events.push(session_event(
@@ -1304,7 +1309,7 @@ fn record_provider_identity(
             .and_then(|(_, metadata)| serde_json::from_str(metadata).ok())
             .unwrap_or_default();
         for (key, value) in input.launch_metadata.as_object().into_iter().flatten() {
-            if key == "providerConfigId" {
+            if key == "providerConfigId" || (provider == "codex" && key == "permissionMode") {
                 metadata.insert(key.clone(), value.clone());
             } else {
                 metadata.entry(key.clone()).or_insert_with(|| value.clone());
