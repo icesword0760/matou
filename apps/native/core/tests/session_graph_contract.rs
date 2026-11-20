@@ -1,13 +1,16 @@
 use std::{
     collections::{BTreeMap, HashSet},
-    fs,
+    env, fs,
+    path::PathBuf,
 };
 
 use anyhow::{Context, Result, bail};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use matou_native_core::{
+    hierarchy::canvas::{CanvasError, CanvasIds, CanvasMessages, create_fork_child},
     session_graph::{project_scene_graph, set_work_status},
-    storage::{CommandMetadata, configure_connection},
+    sessions::{ClaudeCatalogLoad, load_claude_catalog_binding},
+    storage::{CommandMetadata, CommandReplayConflictError, configure_connection},
 };
 use rusqlite::{Connection, types::ValueRef};
 use serde::Deserialize;
@@ -136,6 +139,149 @@ fn projection_and_status_transactions_match_the_frozen_database() -> Result<()> 
         }
     }
     Ok(())
+}
+
+#[test]
+#[ignore = "requires a fresh K-storage-session frozen export"]
+fn export_native_session_graph() -> Result<()> {
+    let gate = PathBuf::from(env::var("MATOU_SESSION_GATE")?);
+    let reference: Value = serde_json::from_slice(&fs::read(gate.join("graph.frozen.json"))?)?;
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("matou.sqlite");
+    fs::write(&path, STANDARD.decode(text(&reference, "seedBase64")?)?)?;
+    let mut db = Connection::open(&path)?;
+    configure_connection(&db)?;
+    let sqlite: String = db.query_row("SELECT sqlite_version()", [], |row| row.get(0))?;
+    eprintln!("Native SQLite {sqlite}");
+    let steps = reference["steps"].as_array().context("graph steps")?;
+    let scene_id = text(&steps[0], "sceneId")?;
+    let ids: CanvasIds = serde_json::from_value(
+        steps
+            .iter()
+            .find(|step| step["label"] == "fork-accepted")
+            .context("fork acceptance input")?["ids"]
+            .clone(),
+    )?;
+    let messages = CanvasMessages {
+        new_canvas: "新画布",
+        duplicate_scene_name: "当前事项下已存在同名页签",
+        workspace_path_invalid: "工作区路径不可用",
+        detached_session_must_return: "请先把会话返回当前画布",
+    };
+    let mut observations = Vec::new();
+    for step in steps {
+        let op = text(step, "op")?;
+        if let Some(sql) = step["sql"].as_array() {
+            for statement in sql {
+                db.execute_batch(statement.as_str().context("graph setup statement")?)
+                    .with_context(|| format!("setup for {}", step["label"]))?;
+            }
+        }
+        let observed = match op {
+            "project" => {
+                project_scene_graph(&db, text(step, "sceneId")?, step["windowId"].as_str())
+            }
+            "reopen" => {
+                db.close().map_err(|(_, error)| error)?;
+                db = Connection::open(&path)?;
+                configure_connection(&db)?;
+                project_scene_graph(&db, scene_id, Some("window"))
+            }
+            _ => {
+                let command: CommandMetadata = serde_json::from_value(step["command"].clone())?;
+                let input = &step["input"];
+                let committed_at = step["committedAt"].as_i64().context("commit time")?;
+                match op {
+                    "status" | "work-status" => {
+                        let input: WorkStatusInput = serde_json::from_value(input.clone())?;
+                        set_work_status(
+                            &mut db,
+                            &command,
+                            &input.session_id,
+                            &input.work_status,
+                            input.now,
+                            committed_at,
+                        )
+                        .map(|commit| commit.result)
+                    }
+                    "fork" => create_fork_child(
+                        &mut db,
+                        &command,
+                        &serde_json::from_value(input.clone())?,
+                        &ids,
+                        &messages,
+                        committed_at,
+                    ),
+                    "catalog" => load_claude_catalog_binding(
+                        &mut db,
+                        &command,
+                        &ClaudeCatalogLoad {
+                            binding_id: text(input, "bindingId")?,
+                            session_id: text(input, "sessionId")?,
+                            scene_id: text(input, "sceneId")?,
+                            cwd: text(input, "cwd")?,
+                            provider_session_id: text(input, "providerSessionId")?,
+                            title: text(input, "title")?,
+                            model: input["model"].as_str(),
+                            permission_mode: text(input, "permissionMode")?,
+                        },
+                        input["now"].as_i64().context("catalog input time")?,
+                    )
+                    .map(|commit| commit.result),
+                    _ => bail!("unknown graph operation {op}"),
+                }
+            }
+        };
+        let (result, error, error_code, error_detail) = match observed {
+            Ok(result) => (Some(result), None, None, None),
+            Err(error) => {
+                let code = error
+                    .downcast_ref::<CanvasError>()
+                    .map(|error| error.code)
+                    .or_else(|| {
+                        error
+                            .downcast_ref::<CommandReplayConflictError>()
+                            .map(|_| CommandReplayConflictError::CODE)
+                    });
+                let sqlite_code = error
+                    .downcast_ref::<rusqlite::Error>()
+                    .and_then(|error| error.sqlite_error())
+                    .map(|error| error.extended_code);
+                (None, Some(error.to_string()), code, sqlite_code)
+            }
+        };
+        let projection = if step.get("projection").is_some() {
+            Some(project_scene_graph(&db, scene_id, Some("window"))?)
+        } else {
+            None
+        };
+        let snapshot = step["snapshot"]
+            .as_object()
+            .map(|tables| {
+                tables
+                    .keys()
+                    .map(|table| Ok((table, read_rows(&db, table)?)))
+                    .collect::<Result<BTreeMap<_, _>>>()
+            })
+            .transpose()?;
+        let label = step["label"]
+            .as_str()
+            .or(step["command"]["commandId"].as_str());
+        observations.push(json!({ "op": op, "label": label, "result": result,
+            "error": error, "errorCode": error_code, "errorDetail": error_detail,
+            "projection": projection, "snapshot": snapshot }));
+    }
+    fs::write(
+        gate.join("graph.native.json"),
+        serde_json::to_vec_pretty(&observations)?,
+    )?;
+    Ok(())
+}
+
+fn text<'a>(object: &'a Value, key: &str) -> Result<&'a str> {
+    object[key]
+        .as_str()
+        .with_context(|| format!("missing {key}"))
 }
 
 #[test]

@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, path::Path};
+use std::{collections::BTreeMap, env, fs, path::Path, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use matou_native_core::{
@@ -9,7 +9,9 @@ use matou_native_core::{
         read_claude_role_assignments, rename_session, save_claude_role_assignments, start_run,
         update_cwd,
     },
-    storage::{CommandMetadata, DomainCommit, configure_connection, migrate},
+    storage::{
+        CommandMetadata, CommandReplayConflictError, DomainCommit, configure_connection, migrate,
+    },
 };
 use rusqlite::{Connection, types::ValueRef};
 use serde::Deserialize;
@@ -194,6 +196,8 @@ struct Step {
     result: Option<Value>,
     error: Option<String>,
     snapshot: BTreeMap<String, Vec<Value>>,
+    #[serde(default)]
+    hold_writer: bool,
 }
 
 #[test]
@@ -201,6 +205,25 @@ fn shell_lifecycle_matches_frozen_source_across_reopen() -> Result<()> {
     let reference: Reference = serde_json::from_str(REFERENCE)?;
     assert_eq!(reference.tables, TABLES);
     assert_eq!(reference.steps.len(), 22);
+    replay_lifecycle(reference, false)?;
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires a fresh K-storage-session frozen export"]
+fn export_native_session_repository() -> Result<()> {
+    let gate = env::var("MATOU_SESSION_GATE")?;
+    let gate = Path::new(&gate);
+    let reference = serde_json::from_slice(&fs::read(gate.join("repository.frozen.json"))?)?;
+    let observations = replay_lifecycle(reference, true)?;
+    fs::write(
+        gate.join("repository.native.json"),
+        serde_json::to_vec_pretty(&observations)?,
+    )?;
+    Ok(())
+}
+
+fn replay_lifecycle(reference: Reference, capture: bool) -> Result<Vec<Value>> {
     let temporary = tempfile::tempdir()?;
     let path = temporary.path().join("matou.sqlite");
     let mut db = open(&path)?;
@@ -213,29 +236,64 @@ fn shell_lifecycle_matches_frozen_source_across_reopen() -> Result<()> {
         reference.bootstrap.committed_at,
     )?;
 
+    let mut observations = Vec::new();
     for (index, step) in reference.steps.into_iter().enumerate() {
         let label = format!("{} {} ({})", index + 1, step.op, step.command.command_id);
-        if step.op == "reopen" {
+        let observed = if step.op == "reopen" {
             db.close().map_err(|(_, error)| error)?;
             db = open(&path)?;
-            assert!(get_run(&db, "missing")?.is_none());
-            assert_eq!(
-                get_run(&db, "run-2")?,
-                list_runs(&db, "shell-2")?.get(1).cloned()
-            );
-            let reopened = json!({
+            if !capture {
+                assert!(get_run(&db, "missing")?.is_none());
+                assert_eq!(
+                    get_run(&db, "run-2")?,
+                    list_runs(&db, "shell-2")?.get(1).cloned()
+                );
+            }
+            Ok(json!({
                 "sessions": list_sessions(&db)?,
                 "runs": list_all_runs(&db)?,
                 "sessionRuns": list_runs(&db, "shell-2")?,
                 "missing": get_session(&db, "missing")?,
-            });
-            assert_eq!(Some(reopened), step.result, "{label}");
+            }))
+        } else if step.hold_writer {
+            let mut writer = Connection::open(&path)?;
+            let lock =
+                writer.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            db.busy_timeout(Duration::ZERO)?;
+            let result = apply(&mut db, &step);
+            lock.rollback()?;
+            db.busy_timeout(Duration::from_secs(5))?;
+            result.and_then(|commit| Ok(serde_json::to_value(commit)?))
         } else {
-            let observed = apply(&mut db, &step);
-            match (observed, step.result, step.error) {
-                (Ok(commit), Some(expected), None) => {
-                    assert_eq!(serde_json::to_value(commit)?, expected, "{label}");
+            apply(&mut db, &step).and_then(|commit| Ok(serde_json::to_value(commit)?))
+        };
+        if capture {
+            let mut snapshot = BTreeMap::new();
+            for table in TABLES {
+                snapshot.insert(
+                    table,
+                    read_rows(&db, &format!("SELECT * FROM {table} ORDER BY rowid"))?,
+                );
+            }
+            let (result, error, error_code, error_detail) = match observed {
+                Ok(result) => (Some(result), None, None, None),
+                Err(error) => {
+                    let code = error
+                        .downcast_ref::<CommandReplayConflictError>()
+                        .map(|_| CommandReplayConflictError::CODE);
+                    let sqlite_code = error
+                        .downcast_ref::<rusqlite::Error>()
+                        .and_then(|error| error.sqlite_error())
+                        .map(|error| error.extended_code);
+                    (None, Some(error.to_string()), code, sqlite_code)
                 }
+            };
+            observations.push(json!({ "op": step.op, "command": step.command, "input": step.input,
+                "result": result, "error": error, "errorCode": error_code, "errorDetail": error_detail,
+                "snapshot": snapshot }));
+        } else {
+            match (observed, step.result, step.error) {
+                (Ok(actual), Some(expected), None) => assert_eq!(actual, expected, "{label}"),
                 (Err(error), None, Some(expected)) => {
                     assert_eq!(error.to_string(), expected, "{label}");
                 }
@@ -245,19 +303,19 @@ fn shell_lifecycle_matches_frozen_source_across_reopen() -> Result<()> {
                     );
                 }
             }
-        }
-        for table in TABLES {
-            compare_rows(
-                &db,
-                &format!("SELECT * FROM {table} ORDER BY rowid"),
-                step.snapshot
-                    .get(table)
-                    .with_context(|| format!("{label}: fixture {table}"))?,
-                &label,
-            )?;
+            for table in TABLES {
+                compare_rows(
+                    &db,
+                    &format!("SELECT * FROM {table} ORDER BY rowid"),
+                    step.snapshot
+                        .get(table)
+                        .with_context(|| format!("{label}: fixture {table}"))?,
+                    &label,
+                )?;
+            }
         }
     }
-    Ok(())
+    Ok(observations)
 }
 
 fn apply(db: &mut Connection, step: &Step) -> Result<DomainCommit> {

@@ -41,7 +41,8 @@ try {
   const seedBase64 = readFileSync(seedPath).toString('base64')
   const tables = [
     'runtime_sequences', 'session_canvas_memberships', 'window_scene_focus',
-    'sessions', 'tasks', 'workspaces', 'domain_events', 'command_deduplication'
+    'sessions', 'tasks', 'workspaces', 'domain_events', 'command_deduplication',
+    'session_graph_summaries'
   ]
   const snapshot = () => Object.fromEntries(
     tables.map(table => [table, database.all(`SELECT * FROM ${table} ORDER BY rowid`)])
@@ -56,17 +57,19 @@ try {
     for (const statement of sql) database.exec(statement)
     let result
     let error
+    let errorCode: string | undefined
     try {
       result = interactions.record(metadata, input)
     } catch (failure) {
       error = (failure as Error).message
+      errorCode = (failure as { code?: string }).code
     }
     const receipt = database.get<{ committed_at: number }>(
       'SELECT committed_at FROM command_deduplication WHERE command_id = ?',
       metadata.commandId
     )
     steps.push({
-      op: 'record', label, command: metadata, input, sql, result, error,
+      op: 'record', label, command: metadata, input, sql, result, error, errorCode,
       committedAt: receipt?.committed_at ?? input.now, snapshot: snapshot()
     })
   }
@@ -87,6 +90,14 @@ try {
   record('missing-session', { sessionId: 'missing', interactionKind: 'submit', now: 2006 })
   record('archived-session', { sessionId: first, interactionKind: 'control', now: 2007 },
     command('archived-session'), [`UPDATE sessions SET status = 'archived', archived_at = 2007 WHERE id = '${first}'`])
+  record('submit-hash-conflict', { ...submit, now: 2008 }, { ...submitCommand, requestHash: 'changed' })
+  record('control-with-derived-summary', { sessionId: second, interactionKind: 'control', now: 2009 },
+    command('control-with-derived-summary'), [
+      `INSERT INTO session_graph_summaries VALUES ('${second}', '["早期",null,"一","二","三","四"]', 2009)`
+    ])
+  record('replay-after-summary-changed', submit, submitCommand)
+  record('missing-order-sequence', { sessionId: second, interactionKind: 'control', now: 2010 },
+    command('missing-order-sequence'), ["DELETE FROM runtime_sequences WHERE name = 'session-user-interaction'"])
 
   const output = process.argv[2]
   if (!output) throw new Error('Pass the output fixture path')

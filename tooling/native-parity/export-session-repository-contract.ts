@@ -2,6 +2,7 @@
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import type { DatabaseSync } from 'node:sqlite'
 import { RuntimeDatabase } from '../../apps/runtime/src/storage/database'
 import { FOUNDATION_MIGRATIONS } from '../../apps/runtime/src/storage/migrations'
 import { MigrationRunner } from '../../apps/runtime/src/storage/migration-runner'
@@ -27,7 +28,8 @@ const tables = ['sessions', 'session_runs', 'domain_events', 'command_deduplicat
 const snapshot = () => Object.fromEntries(tables.map(table => [table, database.all(`SELECT * FROM ${table} ORDER BY rowid`)]))
 const steps: unknown[] = []
 const create = { id: 'shell-2', taskId: ids.taskId, executionContextId: ids.executionContextId, title: ' Shell ', now: 1100 }
-const actions: Array<{ op: string, input: any, commandId?: string, hash?: string }> = [
+const lockStart = { id: 'overlap-3', sessionId: 'overlap', runtimeGeneration: 'generation-4', cols: 80, rows: 24, now: 3700 }
+const actions: Array<{ op: string, input: any, commandId?: string, hash?: string, holdWriter?: true }> = [
   { op: 'create', input: create, commandId: 'create' },
   { op: 'create', input: create, commandId: 'create' },
   { op: 'create', input: { ...create, id: 'conflict' }, commandId: 'create', hash: 'different' },
@@ -50,12 +52,29 @@ const actions: Array<{ op: string, input: any, commandId?: string, hash?: string
   { op: 'create', input: { ...create, id: 'unknown-task', taskId: 'missing' } },
   { op: 'create', input: { ...create, id: 'unknown-context', executionContextId: 'missing' } },
   { op: 'reopen', input: {} },
+  { op: 'create', input: { ...create, id: 'overlap', title: 'Overlap', now: 3100 } },
+  { op: 'start', input: { id: 'overlap-1', sessionId: 'overlap', runtimeGeneration: 'generation-3', pid: 789, cols: 80, rows: 24, now: 3200 }, commandId: 'overlap-start' },
+  { op: 'start', input: { id: 'overlap-1', sessionId: 'overlap', runtimeGeneration: 'generation-3', pid: 789, cols: 80, rows: 24, now: 3200 }, commandId: 'overlap-start' },
+  { op: 'start', input: { id: 'overlap-1', sessionId: 'overlap', runtimeGeneration: 'generation-3', cols: 90, rows: 25, now: 3300 } },
+  { op: 'start', input: { id: 'overlap-2', sessionId: 'overlap', runtimeGeneration: 'generation-4', cols: 100, rows: 30, now: 3400 } },
+  { op: 'finish', input: { runId: 'overlap-1', exitCode: 0, now: 3500 } },
+  { op: 'finish', input: { runId: 'missing', exitCode: 1, now: 3600 } },
+  { op: 'start', input: lockStart, commandId: 'writer-contention', holdWriter: true },
+  { op: 'start', input: lockStart, commandId: 'writer-contention' },
+  { op: 'reopen', input: {} },
 ]
 for (const [index, action] of actions.entries()) {
   const commandId = action.commandId ?? `command-${index}`
   const command = { commandId, commandType: `session.${action.op}`, requestHash: action.hash ?? commandId }
   const input = action.input
-  let result: unknown, error: string | undefined
+  let result: unknown, error: string | undefined, errorCode: string | undefined, errorDetail: number | undefined
+  let lock: DatabaseSync | undefined
+  if (action.holdWriter) {
+    const { DatabaseSync } = process.getBuiltinModule('node:sqlite') as typeof import('node:sqlite')
+    lock = new DatabaseSync(path)
+    lock.exec('BEGIN IMMEDIATE')
+    database.exec('PRAGMA busy_timeout = 0')
+  }
   try {
     switch (action.op) {
       case 'create': result = repository.createSession(command, { ...input, kind: 'shell' }); break
@@ -71,9 +90,21 @@ for (const [index, action] of actions.entries()) {
         result = { sessions: repository.listSessions(), runs: repository.listAllRuns(), sessionRuns: repository.listRuns('shell-2'), missing: repository.getSession('missing') ?? null }
         break
     }
-  } catch (e) { error = (e as Error).message }
+  } catch (e) {
+    const cause = e as Error & { code?: string, errcode?: number }
+    error = cause.message
+    errorCode = cause.code
+    errorDetail = cause.errcode
+  } finally {
+    if (lock) {
+      lock.exec('ROLLBACK')
+      lock.close()
+      database.exec('PRAGMA busy_timeout = 5000')
+    }
+  }
   const receipt = database.get<{ committed_at: number }>('SELECT committed_at FROM command_deduplication WHERE command_id=?', commandId)
-  steps.push({ op: action.op, input, command, result, error, committedAt: receipt?.committed_at ?? 9999, snapshot: snapshot() })
+  steps.push({ op: action.op, input, command, holdWriter: action.holdWriter, result, error, errorCode, errorDetail,
+    committedAt: receipt?.committed_at ?? 9999, snapshot: snapshot() })
 }
 database.close()
 const output = process.argv[2]!
