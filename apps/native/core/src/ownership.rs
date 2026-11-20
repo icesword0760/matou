@@ -72,7 +72,7 @@ impl DatabaseOwner {
     pub fn acquire(database_path: &Path, generation: &str) -> Result<Self> {
         ensure!(!generation.is_empty(), "owner runtime generation is empty");
         fs::create_dir_all(parent(database_path))?;
-        let owner_path = append_suffix(database_path, ".owner");
+        let owner_path = canonicalize_parent(&append_suffix(database_path, ".owner"))?;
         let record = OwnerRecord {
             pid: std::process::id().into(),
             runtime_generation: generation.to_owned(),
@@ -150,7 +150,7 @@ pub(crate) fn with_recovery_action_fence<T>(
     database_path: &Path,
     operation: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
-    let path = append_suffix(database_path, ".recovery-action.sqlite");
+    let path = canonicalize_parent(&append_suffix(database_path, ".recovery-action.sqlite"))?;
     match fs::symlink_metadata(&path) {
         Ok(metadata) if metadata.is_file() => repair_mode(&path, &metadata),
         Ok(_) => {
@@ -166,12 +166,8 @@ pub(crate) fn with_recovery_action_fence<T>(
             return Err(OwnerRecoveryError::new("takeover-sidecar-unusable", &path, error).into());
         }
     }
-    let sqlite_path = parent(&path).canonicalize()?.join(
-        path.file_name()
-            .context("missing recovery fence filename")?,
-    );
     let mut connection = Connection::open_with_flags(
-        sqlite_path,
+        &path,
         OpenFlags::default() | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )?;
     repair_mode(&path, &fs::symlink_metadata(&path)?);
@@ -327,18 +323,9 @@ fn with_takeover_lock(path: &Path, operation: impl FnOnce() -> Result<()>) -> Re
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(unusable(error.into()).into()),
     }
-    let filename = path
-        .file_name()
-        .ok_or_else(|| unusable(anyhow!("missing sidecar filename")))?;
-    // SQLite NOFOLLOW checks every component. Resolve existing parent aliases
-    // but leave the final component for SQLite to validate.
-    let sqlite_path = parent(path)
-        .canonicalize()
-        .map_err(|e| unusable(e.into()))?
-        .join(filename);
     let flags = OpenFlags::default() | OpenFlags::SQLITE_OPEN_NOFOLLOW;
     let mut connection =
-        Connection::open_with_flags(sqlite_path, flags).map_err(|e| unusable(e.into()))?;
+        Connection::open_with_flags(path, flags).map_err(|e| unusable(e.into()))?;
     let metadata = fs::symlink_metadata(path).map_err(|e| unusable(e.into()))?;
     if !metadata.is_file() {
         return Err(unusable(anyhow!("takeover sidecar is not a regular file")).into());
@@ -415,6 +402,45 @@ fn parent(path: &Path) -> &Path {
     path.parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."))
+}
+
+/// Resolve the directory used for SQLite and owner locks, leaving the final
+/// component intact for NOFOLLOW and symlink_metadata checks.
+pub(crate) fn canonicalize_parent(path: &Path) -> io::Result<PathBuf> {
+    let filename = path.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "missing database or sidecar filename",
+        )
+    })?;
+    let directory = parent(path);
+    let resolved = directory.canonicalize();
+    #[cfg(target_os = "macos")]
+    let resolved = resolved.or_else(|error| {
+        // realpath can report ENOENT for an existing /.vol/<dev>/<ino>
+        // alias. The open directory descriptor can resolve that vnode.
+        if error.kind() != io::ErrorKind::NotFound {
+            return Err(error);
+        }
+        use std::{
+            ffi::CStr,
+            os::fd::AsRawFd,
+            os::unix::{ffi::OsStrExt, fs::OpenOptionsExt},
+        };
+
+        let directory = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY)
+            .open(directory)?;
+        let mut buffer = [0_u8; libc::MAXPATHLEN as usize];
+        if unsafe { libc::fcntl(directory.as_raw_fd(), libc::F_GETPATH, buffer.as_mut_ptr()) } == -1
+        {
+            return Err(io::Error::last_os_error());
+        }
+        let path = CStr::from_bytes_until_nul(&buffer).map_err(io::Error::other)?;
+        Ok(PathBuf::from(std::ffi::OsStr::from_bytes(path.to_bytes())))
+    });
+    Ok(resolved?.join(filename))
 }
 
 #[cfg(unix)]

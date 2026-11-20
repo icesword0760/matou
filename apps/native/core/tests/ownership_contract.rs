@@ -10,6 +10,8 @@ use anyhow::{Context, Result, ensure};
 use matou_native_core::ownership::{
     DatabaseOwner, OwnerRecord, OwnerRecoveryError, read_database_owner,
 };
+#[cfg(unix)]
+use matou_native_core::startup::{self, BootstrapResult};
 use serde_json::{Value, json};
 
 const GENERATION: &str = "native-contract";
@@ -29,8 +31,9 @@ fn release_retries_the_same_lease_after_directory_permissions_are_restored() -> 
         return Ok(());
     }
     let root = tempfile::tempdir()?;
-    let db = root.path().join("matou.sqlite");
-    let lock = root.path().join("matou.sqlite.owner");
+    let real = root.path().canonicalize()?;
+    let db = real.join("matou.sqlite");
+    let lock = real.join("matou.sqlite.owner");
     let mut lease = DatabaseOwner::acquire(&db, GENERATION)?;
     fs::set_permissions(root.path(), fs::Permissions::from_mode(0o555))?;
     let denied = lease.release();
@@ -58,10 +61,11 @@ fn agrees_with_nine_captured_reference_cases() -> Result<()> {
     for expected in cases {
         let name = expected["name"].as_str().context("case name")?;
         let root = tempfile::tempdir()?;
+        let real = root.path().canonicalize()?;
         let directory = if name == "empty" {
-            root.path().join("new").join("data")
+            real.join("new").join("data")
         } else {
-            root.path().to_owned()
+            real.clone()
         };
         let db = directory.join("matou.sqlite");
         let owner_path = directory.join("matou.sqlite.owner");
@@ -92,7 +96,7 @@ fn agrees_with_nine_captured_reference_cases() -> Result<()> {
             "format": if owner_path.is_file() { "file" } else if owner_path.is_dir() { "directory" } else { "absent" }
         });
         if let Err(error) = &acquired {
-            let directory = root.path().to_string_lossy();
+            let directory = real.to_string_lossy();
             let normalized = error.to_string().replace(directory.as_ref(), "<root>");
             actual["error"] = json!(normalized);
             if let Some(recovery) = error.downcast_ref::<OwnerRecoveryError>() {
@@ -155,9 +159,10 @@ fn agrees_with_nine_captured_reference_cases() -> Result<()> {
 #[test]
 fn rejects_corrupted_sqlite_fence_without_replacing_the_owner() -> Result<()> {
     let root = tempfile::tempdir()?;
-    let db = root.path().join("matou.sqlite");
-    let owner_path = root.path().join("matou.sqlite.owner");
-    let sidecar = root.path().join("matou.sqlite.owner.takeover.sqlite");
+    let real = root.path().canonicalize()?;
+    let db = real.join("matou.sqlite");
+    let owner_path = real.join("matou.sqlite.owner");
+    let sidecar = real.join("matou.sqlite.owner.takeover.sqlite");
     write_owner(&owner_path, DEAD_PID, "previous")?;
     fs::write(&sidecar, b"not a SQLite database")?;
 
@@ -173,13 +178,143 @@ fn rejects_corrupted_sqlite_fence_without_replacing_the_owner() -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn rejects_symlink_as_final_takeover_fence_component() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let db = root.path().join("matou.sqlite");
+    let owner_path = root.path().join("matou.sqlite.owner");
+    let sidecar = root.path().join("matou.sqlite.owner.takeover.sqlite");
+    let target = root.path().join("target.sqlite");
+    drop(rusqlite::Connection::open(&target)?);
+    std::os::unix::fs::symlink(&target, &sidecar)?;
+    write_owner(&owner_path, DEAD_PID, "previous")?;
+    let previous = read_database_owner(&owner_path);
+
+    let error = DatabaseOwner::acquire(&db, GENERATION).expect_err("symlinked takeover fence");
+    let recovery = error
+        .downcast_ref::<OwnerRecoveryError>()
+        .context("recovery error")?;
+    assert_eq!(recovery.issue, "takeover-sidecar-unusable");
+    assert_eq!(fs::read_link(&sidecar)?, target);
+    assert_eq!(read_database_owner(&owner_path), previous);
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn volume_alias_and_real_path_both_take_over_and_start() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let real = directory.path().canonicalize()?;
+    let alias = volume_alias(&real)?;
+    assert_startup_takeover(&real, &alias)
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_parent_and_real_path_both_take_over_and_start() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let real = directory.path().join("data");
+    let alias = directory.path().join("alias");
+    fs::create_dir(&real)?;
+    std::os::unix::fs::symlink(&real, &alias)?;
+    assert_startup_takeover(&real, &alias)
+}
+
+#[cfg(unix)]
+fn assert_startup_takeover(real: &Path, alias: &Path) -> Result<()> {
+    drop(startup::open(real, "seed")?);
+    let owner_path = real.join("matou.sqlite.owner");
+    for (root, generation) in [(alias, "alias-takeover"), (real, "real-takeover")] {
+        write_owner(&owner_path, DEAD_PID, "previous")?;
+        let result = startup::open(root, generation)?;
+        let connection = match &result {
+            BootstrapResult::Writable { connection, .. } => connection,
+            BootstrapResult::RecoveryRequired(state) => {
+                anyhow::bail!("{generation}: unexpected recovery: {state:?}")
+            }
+            BootstrapResult::ReadOnly { reason, .. } => {
+                anyhow::bail!("{generation}: unexpected read-only mode: {reason:?}")
+            }
+        };
+        assert_eq!(
+            connection.query_row(
+                "SELECT value FROM _runtime_meta WHERE key = 'runtime_generation'",
+                [],
+                |row| row.get::<_, String>(0),
+            )?,
+            generation
+        );
+        assert_eq!(
+            read_database_owner(&owner_path),
+            Some(OwnerRecord {
+                pid: std::process::id().into(),
+                runtime_generation: generation.into(),
+            })
+        );
+        assert!(!real.join("matou.sqlite.recovery.json").exists());
+        assert!(real.join("matou.sqlite.owner.takeover.sqlite").is_file());
+        drop(result);
+        assert!(!owner_path.exists());
+        println!("{generation}: writable startup, no recovery marker, lease released");
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn startup_rejects_symlink_as_final_database_component() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let target = tempfile::tempdir()?;
+    drop(startup::open(target.path(), "original")?);
+    let db = directory.path().join("matou.sqlite");
+    let owner_path = directory.path().join("matou.sqlite.owner");
+    write_owner(&owner_path, DEAD_PID, "previous")?;
+    let previous = read_database_owner(&owner_path);
+    let existing = target.path().join("matou.sqlite");
+    let missing = target.path().join("missing.sqlite");
+    let original = fs::read(&existing)?;
+    for destination in [&existing, &missing] {
+        std::os::unix::fs::symlink(destination, &db)?;
+        let Err(error) = startup::open(directory.path(), GENERATION) else {
+            anyhow::bail!("startup accepted a final database symlink: {destination:?}");
+        };
+        assert!(error.to_string().contains("symbolic link"), "{error:#}");
+        assert_eq!(fs::read_link(&db)?, *destination);
+        assert_eq!(read_database_owner(&owner_path), previous);
+        assert!(!directory.path().join("matou.sqlite.recovery.json").exists());
+        fs::remove_file(&db)?;
+    }
+    assert_eq!(fs::read(&existing)?, original);
+    assert!(!missing.exists());
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn volume_alias(real: &Path) -> Result<PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = fs::metadata(real)?;
+    let alias = PathBuf::from(format!("/.vol/{}/{}", metadata.dev(), metadata.ino()));
+    let aliased = fs::metadata(&alias)?;
+    assert_eq!(
+        (aliased.dev(), aliased.ino()),
+        (metadata.dev(), metadata.ino())
+    );
+    Ok(alias)
+}
+
 #[test]
 fn contending_processes_allow_one_owner_and_recover_after_crash() -> Result<()> {
-    for scenario in ["empty", "stale-file"] {
+    for scenario in [
+        "empty",
+        "stale-file",
+        #[cfg(target_os = "macos")]
+        "stale-volume-alias",
+    ] {
         let root = tempfile::tempdir()?;
-        let db = root.path().join("matou.sqlite");
         let owner_path = root.path().join("matou.sqlite.owner");
-        if scenario == "stale-file" {
+        if scenario != "empty" {
             write_owner(&owner_path, DEAD_PID, "earlier-generation")?;
             let abandoned = root.path().join("matou.sqlite.owner.takeover");
             fs::create_dir(&abandoned)?;
@@ -187,11 +322,18 @@ fn contending_processes_allow_one_owner_and_recover_after_crash() -> Result<()> 
         }
         let executable = std::env::current_exe()?;
         let mut children = Children(Vec::new());
-        for id in 0..5 {
+        let roots = vec![root.path().to_owned(); 5];
+        #[cfg(target_os = "macos")]
+        let roots = if scenario == "stale-volume-alias" {
+            vec![root.path().to_owned(), volume_alias(root.path())?]
+        } else {
+            roots
+        };
+        for (id, contender_root) in roots.iter().enumerate() {
             children.0.push(
                 Command::new(&executable)
                     .args(["--exact", "ownership_contender_process", "--nocapture"])
-                    .env(CHILD_ROOT, root.path())
+                    .env(CHILD_ROOT, contender_root)
                     .env(CHILD_ID, id.to_string())
                     .stdin(Stdio::null())
                     .spawn()?,
@@ -237,13 +379,20 @@ fn contending_processes_allow_one_owner_and_recover_after_crash() -> Result<()> 
         children.0[winner].wait()?;
         assert_eq!(read_database_owner(&owner_path), Some(winning_record));
         {
-            let _owner = DatabaseOwner::acquire(&db, "after-crash")?;
+            let _owner = DatabaseOwner::acquire(
+                &roots
+                    .last()
+                    .context("no owner contender")?
+                    .join("matou.sqlite"),
+                "after-crash",
+            )?;
             assert_eq!(
                 read_database_owner(&owner_path).unwrap().runtime_generation,
                 "after-crash"
             );
         }
         assert!(!owner_path.exists());
+        println!("{scenario}: {claims:?}; stale owner reclaimed after crash");
     }
     Ok(())
 }
