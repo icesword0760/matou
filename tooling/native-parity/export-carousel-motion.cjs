@@ -12,6 +12,11 @@ const css=fs.readFileSync(path.join(root,'apps/desktop/src/renderer/src/session-
 app.whenReady().then(async()=>{
  const window=new BrowserWindow({show:false,width:1000,height:300,webPreferences:{backgroundThrottling:false}})
  try {
+  if (process.argv[2] === '--canvas-motion-gate') {
+   const [probe, inputs, bundle, output] = process.argv.slice(3)
+   await require(probe).capture(window, css, inputs, bundle, output)
+   return
+  }
   await window.loadURL('data:text/html;charset=utf-8,'+encodeURIComponent(`<style>${css}</style><style>body{margin:0}.session-carousel{height:200px;--session-visible-columns:3}.session-card-slot{height:150px}</style><div class="hierarchy-shell" data-theme="light"><div class="session-carousel"><div class="session-card-slot"><div class="session-card"></div></div></div></div>`))
   const result=await window.webContents.executeJavaScript(`(async()=>{
    const slot=document.querySelector('.session-card-slot'),card=document.querySelector('.session-card');
