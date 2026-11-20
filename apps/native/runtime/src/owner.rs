@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, OnceLock, mpsc},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -120,6 +120,7 @@ pub struct ShellOwner {
     next_id: Box<dyn FnMut() -> String>,
     hook_server: Option<ProviderHookServer>,
     run_control: Option<RunControl>,
+    control_bin: Option<PathBuf>,
     closing: bool,
 }
 
@@ -149,6 +150,7 @@ impl ShellOwner {
             next_id: Box::new(next_id),
             hook_server: None,
             run_control: None,
+            control_bin: None,
             closing: false,
         };
         let runs = {
@@ -181,8 +183,9 @@ impl ShellOwner {
         Ok(owner)
     }
 
-    pub(crate) fn set_run_control(&mut self, control: RunControl) {
+    pub(crate) fn set_run_control(&mut self, control: RunControl, bin: Option<PathBuf>) {
         self.run_control = Some(control);
+        self.control_bin = bin;
     }
 
     pub fn session(&self, id: &str) -> Result<Option<StoredSession>> {
@@ -1569,10 +1572,28 @@ impl ShellOwner {
             None
         };
         clear_control_environment(&mut options.launch);
-        if let Some(control) = &self.run_control
-            && let Err(error) = control.inject(&mut options.launch, &session_id, &run_id)
-        {
-            eprintln!("[host-control] {error:#}");
+        if let Some(control) = &self.run_control {
+            match control.inject(&mut options.launch, &session_id, &run_id) {
+                Ok(()) => {
+                    if let Some(bin) = &self.control_bin {
+                        let launch = &mut options.launch;
+                        let path = launch
+                            .env
+                            .get(std::ffi::OsStr::new("PATH"))
+                            .or_else(|| launch.inherited_env.get(std::ffi::OsStr::new("PATH")));
+                        let entries = path.into_iter().flat_map(std::env::split_paths);
+                        match std::env::join_paths(std::iter::once(bin.clone()).chain(entries)) {
+                            Ok(path) => {
+                                launch.env.insert("PATH".into(), path);
+                            }
+                            Err(error) => {
+                                eprintln!("[host-control] could not prepend mt to PATH: {error}")
+                            }
+                        }
+                    }
+                }
+                Err(error) => eprintln!("[host-control] {error:#}"),
+            }
         }
         let mut worker = match SessionWorker::spawn(options, self.send.clone(), run_id.clone()) {
             Ok(worker) => worker,
