@@ -94,7 +94,14 @@ impl LaunchOptions {
         } else {
             "/bin/zsh"
         });
-        let mut args = args.into_iter();
+        let mut args = args.into_iter().peekable();
+        // The shipped runtime enters here before reading Hello. The private
+        // shim mode must finish before normal options or runtime startup.
+        #[cfg(unix)]
+        if args.peek().is_some_and(|flag| flag == crate::mt_cli::MODE) {
+            args.next();
+            std::process::exit(crate::mt_cli::run(args));
+        }
         while let Some(flag) = args.next() {
             let value = args
                 .next()
@@ -1826,7 +1833,17 @@ fn run_writable(
     let control = if recovery_request.is_none() {
         match ControlServer::start(&data_root, generation) {
             Ok(control) => {
-                owner.set_run_control(control.runs());
+                #[cfg(unix)]
+                let bin = match crate::mt_cli::install_shim(&data_root) {
+                    Ok(bin) => Some(bin),
+                    Err(error) => {
+                        eprintln!("[host-control] could not install mt: {error:#}");
+                        None
+                    }
+                };
+                #[cfg(not(unix))]
+                let bin = None;
+                owner.set_run_control(control.runs(), bin);
                 Some(control)
             }
             Err(error) => {

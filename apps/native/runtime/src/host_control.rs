@@ -5,6 +5,7 @@ use std::{ffi::OsStr, path::Path};
 
 #[cfg(unix)]
 use std::{
+    borrow::Cow,
     collections::HashMap,
     fs::{self, DirBuilder, Metadata, Permissions},
     io::{self, Read, Write},
@@ -116,9 +117,9 @@ impl RunControl {
 }
 
 #[cfg(unix)]
-const VERSION: u8 = 1;
+pub(crate) const VERSION: u8 = 1;
 #[cfg(unix)]
-const MAX_FRAME_BYTES: usize = 2 * 1024 * 1024;
+pub(crate) const MAX_FRAME_BYTES: usize = 2 * 1024 * 1024;
 #[cfg(unix)]
 const MAX_CONNECTIONS: usize = 16;
 #[cfg(unix)]
@@ -237,17 +238,17 @@ impl Tokens {
 #[derive(Serialize)]
 struct Fault {
     code: &'static str,
-    message: &'static str,
+    message: Cow<'static, str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     details: Option<Value>,
 }
 
 #[cfg(unix)]
 impl Fault {
-    fn new(code: &'static str, message: &'static str) -> Self {
+    fn new(code: &'static str, message: impl Into<Cow<'static, str>>) -> Self {
         Self {
             code,
-            message,
+            message: message.into(),
             details: None,
         }
     }
@@ -263,11 +264,13 @@ const TIMEOUT: &str = "TIMEOUT";
 const UNSUPPORTED: &str = "UNSUPPORTED";
 
 #[cfg(unix)]
-fn missing_target() -> Fault {
-    Fault::new(
-        "TARGET_NOT_FOUND",
-        "target is not in the active Matou session graph",
-    )
+fn missing_target(message: impl Into<Cow<'static, str>>) -> Fault {
+    Fault::new("TARGET_NOT_FOUND", message)
+}
+
+#[cfg(unix)]
+fn missing_caller() -> Fault {
+    missing_target("当前调用会话已不在 Matou 会话图中")
 }
 
 #[cfg(unix)]
@@ -429,7 +432,7 @@ struct Pending {
 type Clock = fn() -> i64;
 
 #[cfg(unix)]
-fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -1178,7 +1181,7 @@ fn projection<'a>(
             let current = targets
                 .iter()
                 .find(|target| target.session_id == caller.session_id)
-                .ok_or_else(missing_target)?;
+                .ok_or_else(missing_caller)?;
             Ok(targets
                 .iter()
                 .filter(|target| Arc::ptr_eq(&target.dag.sibling_refs, &current.dag.sibling_refs))
@@ -1362,18 +1365,23 @@ impl Selector {
         let current = targets
             .iter()
             .find(|target| target.session_id == caller.session_id)
-            .ok_or_else(missing_target)?;
+            .ok_or_else(missing_caller)?;
         let find_ref =
             |reference: &str| targets.iter().find(|target| target.reference == reference);
         match self {
-            Self::SelfTarget => Some(current),
-            Self::Session(id) => targets.iter().find(|target| target.session_id == *id),
+            Self::SelfTarget => Ok(current),
+            Self::Session(id) => targets
+                .iter()
+                .find(|target| target.session_id == *id)
+                .ok_or_else(|| missing_target("指定会话已不在 Matou 会话图中")),
             Self::Reference { reference, .. } => {
                 let mut matches = scoped
                     .into_iter()
                     .flatten()
                     .filter(|target| target.reference == *reference);
-                let first = matches.next().ok_or_else(missing_target)?;
+                let first = matches.next().ok_or_else(|| {
+                    missing_target(format!("目标 {reference} 已不在 Matou 会话图中"))
+                })?;
                 if let Some(second) = matches.next() {
                     let candidates: Vec<_> = [first, second]
                         .into_iter()
@@ -1392,17 +1400,18 @@ impl Selector {
                         .collect();
                     return Err(Fault {
                         code: "AMBIGUOUS_TARGET",
-                        message: "target matches multiple entries",
+                        message: format!("目标 {reference} 匹配多个层级位置").into(),
                         details: Some(json!({ "candidates": candidates })),
                     });
                 }
-                Some(first)
+                Ok(first)
             }
             Self::Sibling { ordinal, .. } => current
                 .dag
                 .sibling_refs
                 .get(ordinal - 1)
-                .and_then(|reference| find_ref(reference)),
+                .and_then(|reference| find_ref(reference))
+                .ok_or_else(|| missing_target(format!("当前层级没有第 {ordinal} 个会话"))),
             Self::Left | Self::Right => {
                 let index = ordinal(&current.session) as usize - 1;
                 let neighbor = if matches!(self, Self::Left) {
@@ -1413,15 +1422,29 @@ impl Selector {
                 neighbor
                     .and_then(|index| current.dag.sibling_refs.get(index))
                     .and_then(|reference| find_ref(reference))
+                    .ok_or_else(|| {
+                        missing_target(if matches!(self, Self::Left) {
+                            "当前会话左侧没有同层会话"
+                        } else {
+                            "当前会话右侧没有同层会话"
+                        })
+                    })
             }
-            Self::Parent => current.dag.parent_ref.as_deref().and_then(find_ref),
+            Self::Parent => {
+                let reference = current
+                    .dag
+                    .parent_ref
+                    .as_deref()
+                    .ok_or_else(|| missing_target("当前会话没有父会话"))?;
+                find_ref(reference).ok_or_else(|| missing_target("父会话已不在 Matou 会话图中"))
+            }
             Self::Child(ordinal) => current
                 .dag
                 .child_refs
                 .get(ordinal - 1)
-                .and_then(|reference| find_ref(reference)),
+                .and_then(|reference| find_ref(reference))
+                .ok_or_else(|| missing_target(format!("当前会话没有第 {ordinal} 个子会话"))),
         }
-        .ok_or_else(missing_target)
     }
 }
 
@@ -1443,5 +1466,10 @@ impl ControlServer {
 }
 
 #[cfg(all(unix, test))]
-#[path = "../tests/host_control/socket.rs"]
-mod socket_tests;
+mod socket_tests {
+    include!("../tests/host_control/socket.rs");
+
+    mod mt_discovery {
+        include!("../tests/host_control/mt_discovery.rs");
+    }
+}
