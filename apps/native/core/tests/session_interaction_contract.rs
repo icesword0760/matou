@@ -1,11 +1,11 @@
-use std::{collections::BTreeMap, fs};
+use std::{collections::BTreeMap, env, fs, path::PathBuf};
 
 use anyhow::{Context, Result, bail};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use matou_native_core::{
     hierarchy::focus_session,
     session_graph::{RecordInteractionInput, record_interaction},
-    storage::{CommandMetadata, configure_connection},
+    storage::{CommandMetadata, CommandReplayConflictError, configure_connection},
 };
 use rusqlite::{Connection, types::ValueRef};
 use serde::Deserialize;
@@ -61,14 +61,37 @@ struct Step {
 #[test]
 fn interaction_transactions_and_focus_follow_the_frozen_database() -> Result<()> {
     let reference: Reference = serde_json::from_str(REFERENCE)?;
+    replay_interactions(reference, false)?;
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires a fresh K-storage-session frozen export"]
+fn export_native_session_interaction() -> Result<()> {
+    let gate = PathBuf::from(env::var("MATOU_SESSION_GATE")?);
+    let reference = serde_json::from_slice(&fs::read(gate.join("interaction.frozen.json"))?)?;
+    let observations = replay_interactions(reference, true)?;
+    fs::write(
+        gate.join("interaction.native.json"),
+        serde_json::to_vec_pretty(&observations)?,
+    )?;
+    Ok(())
+}
+
+fn replay_interactions(reference: Reference, capture: bool) -> Result<Vec<Value>> {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("matou.sqlite");
     fs::write(&path, STANDARD.decode(reference.seed_base64)?)?;
     let mut db = Connection::open(path)?;
     configure_connection(&db)?;
 
+    let mut observations = Vec::new();
     for step in reference.steps {
         let label = &step.label;
+        let op = match &step.operation {
+            Operation::Record { .. } => "record",
+            Operation::Focus { .. } => "focus",
+        };
         for sql in step.sql {
             db.execute_batch(&sql).with_context(|| label.clone())?;
         }
@@ -93,6 +116,32 @@ fn interaction_transactions_and_focus_follow_the_frozen_database() -> Result<()>
                 "Session does not belong to the Scene",
             ),
         };
+        if capture {
+            let (result, error, error_code) = match result {
+                Ok(value) => (Some(value), None, None),
+                Err(error) => {
+                    let code = error
+                        .downcast_ref::<CommandReplayConflictError>()
+                        .map(|_| CommandReplayConflictError::CODE);
+                    (None, Some(error.to_string()), code)
+                }
+            };
+            let snapshot = step
+                .snapshot
+                .keys()
+                .map(|table| {
+                    Ok((
+                        table,
+                        read_rows(&db, table).with_context(|| format!("{label}: {table}"))?,
+                    ))
+                })
+                .collect::<Result<BTreeMap<_, _>>>()?;
+            observations.push(
+                json!({ "op": op, "label": label, "result": result, "error": error,
+                "errorCode": error_code, "snapshot": snapshot }),
+            );
+            continue;
+        }
         match (result, step.result, step.error) {
             (Ok(actual), Some(mut expected), None) => {
                 apply_permission_default(&mut expected);
@@ -114,7 +163,7 @@ fn interaction_transactions_and_focus_follow_the_frozen_database() -> Result<()>
             );
         }
     }
-    Ok(())
+    Ok(observations)
 }
 
 fn read_rows(db: &Connection, table: &str) -> Result<Vec<Value>> {
