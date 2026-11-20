@@ -164,3 +164,132 @@ fn local_scroll_does_not_move_the_selection_rows() -> Result<()> {
     assert_eq!(before.text(&mut terminal)?, "C");
     Ok(())
 }
+
+/// Replay the gate inputs and retain actual results even when the two engines differ.
+#[test]
+#[ignore = "writes the terminal selection gate evidence"]
+fn capture_terminal_selection_gate() -> Result<()> {
+    use matou_native_terminal::SelectionAction;
+    use serde_json::json;
+    use std::{env, fs};
+
+    let inputs: Value = serde_json::from_slice(&fs::read(
+        env::var_os("MATOU_SELECTION_GATE_INPUT").expect("set MATOU_SELECTION_GATE_INPUT"),
+    )?)?;
+    let output =
+        env::var_os("MATOU_SELECTION_GATE_OUTPUT").expect("set MATOU_SELECTION_GATE_OUTPUT");
+    let dimensions = |grid: &Value| -> Result<(u16, u16)> {
+        Ok((
+            u16::try_from(grid[0].as_u64().unwrap())?,
+            u16::try_from(grid[1].as_u64().unwrap())?,
+        ))
+    };
+    let mut observations = Vec::new();
+    for case in inputs["cases"].as_array().unwrap() {
+        let (cols, rows) = dimensions(&case["grid"])?;
+        let mut options = TerminalOptions::new(cols, rows, 8, 16);
+        options.history_lines = usize::try_from(case["history"].as_u64().unwrap_or(0))?;
+        let mut terminal = Terminal::new(options)?;
+        terminal.feed(case["text"].as_str().unwrap().as_bytes());
+
+        let mut results = Vec::new();
+        let initial = json!(["initial"]);
+        for (index, step) in std::iter::once(&initial)
+            .chain(case["steps"].as_array().unwrap())
+            .enumerate()
+        {
+            let mut operation_error = None;
+            match step[0].as_str().unwrap() {
+                "initial" => {}
+                "down" => {
+                    let position = point(&step[2]);
+                    let mode = if step[1] == "column" {
+                        SelectionMode::Column
+                    } else {
+                        mode(&step[1])
+                    };
+                    terminal.selection_action(SelectionAction::Begin {
+                        mode,
+                        row: position.row,
+                        x: position.col as f32,
+                    })?;
+                }
+                "drag" => {
+                    let position = point(&step[1]);
+                    let row = position.row;
+                    let x = position.col as f32;
+                    let action = match step[2].as_i64().filter(|amount| *amount != 0) {
+                        Some(amount) => SelectionAction::ExtendOutside {
+                            row,
+                            x,
+                            below: amount > 0,
+                        },
+                        None => SelectionAction::Extend { row, x },
+                    };
+                    terminal.selection_action(action)?;
+                }
+                "shift" => {
+                    let position = point(&step[1]);
+                    terminal.selection_action(SelectionAction::IncrementalClick {
+                        row: position.row,
+                        x: position.col as f32,
+                    })?;
+                }
+                "setSelection" => {
+                    let position = point(&step[1]);
+                    terminal.selection_action(SelectionAction::Select {
+                        row: position.row,
+                        col: position.col,
+                        length: step[2].as_i64().unwrap().try_into()?,
+                    })?;
+                }
+                "clearSelection" => terminal.selection_action(SelectionAction::Clear)?,
+                "selectAll" => operation_error = Some("no native selectAll entry point"),
+                "scroll" => terminal.scroll(i32::try_from(step[1].as_i64().unwrap())?)?,
+                "tick" => terminal.selection_action(SelectionAction::Scroll {
+                    lines: i32::try_from(step[1].as_i64().unwrap())?,
+                })?,
+                "resize" => {
+                    let (cols, rows) = dimensions(&step[1])?;
+                    terminal.resize(cols, rows, 8, 16)?;
+                }
+                "feed" => {
+                    let text = step[1].as_str().unwrap();
+                    let count = usize::try_from(step[2].as_u64().unwrap_or(1))?;
+                    terminal.feed(text.repeat(count).as_bytes());
+                }
+                name => anyhow::bail!("Unknown gate action {name}"),
+            }
+
+            let range = terminal.selection_range()?;
+            let screen = terminal.screen()?;
+            results.push(json!({
+                "step": index,
+                "start": range.map(|range| (range.anchor.col, range.anchor.row)),
+                "end": range.map(|range| (range.end.col, range.end.row)),
+                "shape": range.map(|range| if range.column { "column" } else { "linear" }),
+                "hasSelection": range.is_some_and(|range| range.anchor != range.end),
+                "text": terminal.selected_text()?,
+                "viewportCursor": screen.cursor_has_position.then_some((screen.cursor_col, screen.cursor_row)),
+                "cursorVisible": screen.cursor_visible,
+                "retainedRows": screen.scrollbar.total,
+                "historyTrimmedRows": terminal.history_trimmed_rows()?,
+                "offset": screen.scrollbar.offset,
+                "buffer": if screen.alternate { "alternate" } else { "normal" },
+                "grid": [screen.cols, screen.rows],
+                "operationError": operation_error,
+            }));
+        }
+        observations.push(json!({ "id": case["id"], "results": results }));
+    }
+    println!(
+        "Native Terminal: {} fixtures, {} observations",
+        observations.len(),
+        observations
+            .iter()
+            .map(|case| case["results"].as_array().unwrap().len())
+            .sum::<usize>()
+    );
+    fs::write(output, serde_json::to_string_pretty(&observations)? + "\n")?;
+    Ok(())
+}
