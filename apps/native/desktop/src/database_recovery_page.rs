@@ -50,6 +50,9 @@ pub const CONFIRM_EMPTY_BODY: &str =
     "Matou 将显示一个全新的空工作区。当前损坏或异常文件和备份仍会保留，便于后续导出与排查。";
 pub const BACK: &str = "返回";
 pub const CONFIRM_EMPTY: &str = "确认创建空数据库";
+pub const INVALID_MARKER_DESCRIPTION: &str = "Matou 已保留原数据库和恢复记录，会自动重新检查。";
+pub const INVALID_MARKER_ERROR: &str =
+    "数据库恢复记录无效。当前无法验证恢复状态，暂不能恢复备份、导出恢复资料或创建空数据库。";
 pub const GENERIC_ERROR: &str = "数据库恢复操作失败";
 const EXPORTED_TO: &str = "恢复资料已导出到 ";
 
@@ -110,6 +113,26 @@ const CARD_RADIUS: f32 = 20.;
 const CARD_PADDING: f32 = 30.;
 const MAX_BACKUPS: usize = 7;
 
+/// The frozen page renders in Chromium with `line-height: normal`; the fixed
+/// Mac UI font cascade (SF Pro / PingFang SC) measures 1.4em for it. The
+/// snapshot shows that leading in the title, empty state, dialog and footer.
+/// Keeping it as a factor instead of a fixed card height means the card still
+/// grows with its content and can scroll.
+const NORMAL_LINE_HEIGHT: f32 = 1.4;
+/// `h2 { margin: 0.83em 0 }` at the frozen 15pt section title. Chromium does
+/// not collapse margins between the flex row and its `h2` item, so the row
+/// grows by both margins. Applied as padding so the count label stays centered.
+const SECTION_TITLE_MARGIN_Y: f32 = 15. * 0.83;
+/// `.database-recovery-empty` inherits the UA paragraph `margin-block-start`.
+const EMPTY_STATE_MARGIN_TOP: f32 = 16.;
+/// `.database-recovery-card button:disabled { opacity: .48 }`.
+const DISABLED_OPACITY: f32 = 0.48;
+/// UA dialog button face and border on the frozen macOS build.
+const DIALOG_BUTTON_BACKGROUND: u32 = 0xefefef;
+const DIALOG_BUTTON_BORDER: u32 = 0x767676;
+const DIALOG_BUTTON_TEXT: u32 = 0x000000;
+const BUTTON_FONT_SIZE: f32 = 16.;
+
 /// One of the four database-recovery actions exposed by the page.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PageOperation {
@@ -144,11 +167,64 @@ pub struct PagePresentation<'a> {
     pub selected_backup: Option<&'a str>,
     pub error: Option<&'a str>,
     pub exported_path: Option<&'a Path>,
-    pub empty_trigger: &'a FocusHandle,
+    pub empty_trigger: Option<&'a FocusHandle>,
     pub confirmation: Option<ConfirmationFocus<'a>>,
+    /// The actual window client height in points, from
+    /// `Window::viewport_size().height`.
+    ///
+    /// The frozen page uses `min-height: 100vh`; a percentage minimum cannot
+    /// resolve below GPUI's scroll container, so the caller must project the
+    /// real viewport height here. Long cards still scroll because this is a
+    /// minimum, not a fixed height.
+    pub viewport_height: Pixels,
 }
 
 type PageActionHandler = Rc<dyn Fn(&PageAction, &mut Window, &mut App)>;
+
+#[cfg(debug_assertions)]
+#[derive(Default)]
+pub(crate) struct PageProbe {
+    pub(crate) root: Option<ElementId>,
+    pub(crate) bounds: std::collections::BTreeMap<&'static str, Vec<Bounds<Pixels>>>,
+    pub(crate) buttons: std::collections::BTreeMap<&'static str, (bool, ButtonSpec)>,
+}
+
+#[cfg(debug_assertions)]
+pub(super) fn probe_root(root: &Stateful<Div>) {
+    PAGE_PROBE.with_borrow_mut(|probe| {
+        if let Some(probe) = probe {
+            probe.root = Element::id(root);
+        }
+    });
+}
+
+#[cfg(debug_assertions)]
+thread_local! {
+    static PAGE_PROBE: std::cell::RefCell<Option<PageProbe>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(debug_assertions)]
+#[allow(dead_code)]
+pub(crate) fn probe_draw<T>(draw: impl FnOnce() -> T) -> (T, PageProbe) {
+    PAGE_PROBE.set(Some(PageProbe::default()));
+    let result = draw();
+    (result, PAGE_PROBE.take().unwrap())
+}
+
+fn probe_children(parent: Div, name: &'static str) -> Div {
+    #[cfg(debug_assertions)]
+    if PAGE_PROBE.with_borrow(|probe| probe.is_some()) {
+        return parent.on_children_prepainted(move |children, _, _| {
+            PAGE_PROBE.with_borrow_mut(|probe| {
+                if let Some(probe) = probe {
+                    probe.bounds.insert(name, children);
+                }
+            });
+        });
+    }
+    let _ = name;
+    parent
+}
 
 /// Render the independent recovery page.
 ///
@@ -162,7 +238,7 @@ type PageActionHandler = Rc<dyn Fn(&PageAction, &mut Window, &mut App)>;
 /// and whether `confirmation` is open. The page only reports the requested
 /// action; it never confirms the empty-database choice by itself.
 pub fn render(
-    details: &DatabaseRecoveryDetails,
+    details: Option<&DatabaseRecoveryDetails>,
     presentation: PagePresentation<'_>,
     on_action: impl Fn(&PageAction, &mut Window, &mut App) + 'static,
 ) -> Stateful<Div> {
@@ -174,21 +250,25 @@ pub fn render(
         exported_path,
         empty_trigger,
         confirmation,
+        viewport_height,
     } = presentation;
+
     let on_action: PageActionHandler = Rc::new(on_action);
-
-    let (title, description) = match details.reason {
-        DatabaseRecoveryReason::Ownership => (OWNERSHIP_TITLE, OWNERSHIP_DESCRIPTION),
-        DatabaseRecoveryReason::Wal => (TITLE, WAL_DESCRIPTION),
-        DatabaseRecoveryReason::Integrity => (TITLE, INTEGRITY_DESCRIPTION),
+    let (title, description) = match details.map(|details| details.reason) {
+        Some(DatabaseRecoveryReason::Ownership) => (OWNERSHIP_TITLE, OWNERSHIP_DESCRIPTION),
+        Some(DatabaseRecoveryReason::Wal) => (TITLE, WAL_DESCRIPTION),
+        Some(DatabaseRecoveryReason::Integrity) => (TITLE, INTEGRITY_DESCRIPTION),
+        None => (TITLE, INVALID_MARKER_DESCRIPTION),
     };
-
-    let backups = visible_backups(&details.backups);
-    let startup_error = details
-        .error
-        .as_ref()
-        .map(recovery_error_text)
-        .filter(|text| !text.trim().is_empty());
+    let backups = details.map(|details| visible_backups(&details.backups));
+    let startup_error = match details {
+        Some(details) => details
+            .error
+            .as_ref()
+            .map(recovery_error_text)
+            .filter(|text| !text.trim().is_empty()),
+        None => Some(INVALID_MARKER_ERROR.to_owned()),
+    };
     let action_error = error.map(|text| {
         if text.trim().is_empty() {
             GENERIC_ERROR.to_owned()
@@ -197,14 +277,17 @@ pub fn render(
         }
     });
     let success = exported_path.map(|path| format!("{EXPORTED_TO}{}", path.display()));
+    let confirm_enabled = available && pending.is_none() && details.is_some();
+    let can_act = confirm_enabled && confirmation.is_none();
+    let can_open = can_act && details.is_some_and(|details| !details.recovery_id.is_empty());
+    let selected_visible = selected_backup.is_some_and(|selected| {
+        backups
+            .as_ref()
+            .is_some_and(|backups| backups.iter().any(|backup| backup.id == selected))
+    });
+    let can_restore = can_open && selected_visible;
     let has_notice =
         startup_error.is_some() || action_error.is_some() || success.is_some() || pending.is_some();
-    let confirmation_open = confirmation.is_some();
-    let can_act = available && pending.is_none() && !confirmation_open;
-    let can_open = can_act && !details.recovery_id.is_empty();
-    let selected_visible = selected_backup
-        .is_some_and(|selected| backups.iter().any(|backup| backup.id.as_str() == selected));
-    let can_restore = can_open && selected_visible;
 
     let header = div()
         .id("database-recovery-header")
@@ -231,7 +314,7 @@ pub fn render(
                 .text_color(rgb(PRIMARY_TEXT))
                 .text_size(px(26.))
                 .font_weight(FontWeight::BOLD)
-                .line_height(relative(1.2))
+                .line_height(relative(NORMAL_LINE_HEIGHT))
                 .whitespace_normal()
                 .child(ui_text(title)),
         )
@@ -278,7 +361,7 @@ pub fn render(
             .min_w_0()
             .flex()
             .flex_col()
-            .gap(px(8.));
+            .gap(px(16.));
         if let Some(startup_error) = startup_error {
             notices = notices.child(notice(
                 "database-recovery-startup-error",
@@ -315,82 +398,84 @@ pub fn render(
     }
     card = card.child(status);
 
-    let mut backups_section = div()
-        .id("database-recovery-backups")
-        .debug_selector(|| "database-recovery-backups".to_owned())
-        .mt(px(26.))
-        .w_full()
-        .min_w_0()
-        .flex()
-        .flex_col()
-        .child(
-            div()
-                .id("database-recovery-backups-heading")
-                .debug_selector(|| "database-recovery-backups-heading".to_owned())
-                .w_full()
-                .min_w_0()
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap(px(12.))
-                .child(
-                    div()
-                        .id("database-recovery-backups-title")
-                        .debug_selector(|| "database-recovery-backups-title".to_owned())
-                        .flex_none()
-                        .text_color(rgb(PRIMARY_TEXT))
-                        .text_size(px(15.))
-                        .font_weight(FontWeight::BOLD)
-                        .whitespace_nowrap()
-                        .child(ui_text(BACKUPS).normal_line_height()),
-                )
-                .child(
-                    div()
-                        .id("database-recovery-backup-count")
-                        .debug_selector(|| "database-recovery-backup-count".to_owned())
-                        .flex_none()
-                        .text_color(rgb(COUNT_TEXT))
-                        .text_size(px(13.))
-                        .whitespace_nowrap()
-                        .child(ui_text(format!("{} 份", backups.len())).normal_line_height()),
-                ),
-        );
-
-    if backups.is_empty() {
-        backups_section = backups_section.child(
-            div()
-                .id("database-recovery-empty")
-                .debug_selector(|| "database-recovery-empty".to_owned())
-                .mt(px(10.))
-                .min_w_0()
-                .text_color(rgb(SECONDARY_TEXT))
-                .text_size(px(16.))
-                .line_height(relative(1.5))
-                .whitespace_normal()
-                .child(ui_text(NO_BACKUPS)),
-        );
-    } else {
-        let mut list = div()
-            .id("database-recovery-backup-list")
-            .debug_selector(|| "database-recovery-backup-list".to_owned())
-            .mt(px(10.))
+    if let Some(backups) = backups {
+        let mut backups_section = div()
+            .id("database-recovery-backups")
+            .debug_selector(|| "database-recovery-backups".to_owned())
+            .mt(px(26.))
             .w_full()
             .min_w_0()
             .flex()
             .flex_col()
-            .gap(px(8.));
-        for (index, backup) in backups.iter().enumerate() {
-            list = list.child(backup_row(
-                index,
-                backup,
-                selected_backup == Some(backup.id.as_str()),
-                can_act,
-                on_action.clone(),
-            ));
+            .child(
+                div()
+                    .id("database-recovery-backups-heading")
+                    .debug_selector(|| "database-recovery-backups-heading".to_owned())
+                    .w_full()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(12.))
+                    .py(px(SECTION_TITLE_MARGIN_Y))
+                    .child(
+                        div()
+                            .id("database-recovery-backups-title")
+                            .debug_selector(|| "database-recovery-backups-title".to_owned())
+                            .flex_none()
+                            .text_color(rgb(PRIMARY_TEXT))
+                            .text_size(px(15.))
+                            .font_weight(FontWeight::BOLD)
+                            .whitespace_nowrap()
+                            .child(ui_text(BACKUPS).normal_line_height()),
+                    )
+                    .child(
+                        div()
+                            .id("database-recovery-backup-count")
+                            .debug_selector(|| "database-recovery-backup-count".to_owned())
+                            .flex_none()
+                            .text_color(rgb(COUNT_TEXT))
+                            .text_size(px(13.))
+                            .whitespace_nowrap()
+                            .child(ui_text(format!("{} 份", backups.len())).normal_line_height()),
+                    ),
+            );
+
+        if backups.is_empty() {
+            backups_section = backups_section.child(
+                div()
+                    .id("database-recovery-empty")
+                    .debug_selector(|| "database-recovery-empty".to_owned())
+                    .mt(px(EMPTY_STATE_MARGIN_TOP))
+                    .min_w_0()
+                    .text_color(rgb(SECONDARY_TEXT))
+                    .text_size(px(16.))
+                    .line_height(relative(NORMAL_LINE_HEIGHT))
+                    .whitespace_normal()
+                    .child(ui_text(NO_BACKUPS)),
+            );
+        } else {
+            let mut list = div()
+                .id("database-recovery-backup-list")
+                .debug_selector(|| "database-recovery-backup-list".to_owned())
+                .w_full()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(8.));
+            for (index, backup) in backups.iter().enumerate() {
+                list = list.child(backup_row(
+                    index,
+                    backup,
+                    selected_backup == Some(backup.id.as_str()),
+                    can_act,
+                    on_action.clone(),
+                ));
+            }
+            backups_section = backups_section.child(list);
         }
-        backups_section = backups_section.child(list);
+        card = card.child(backups_section);
     }
-    card = card.child(backups_section);
 
     let restore_label = if pending == Some(PageOperation::Restore) {
         RESTORING
@@ -460,7 +545,7 @@ pub fn render(
         can_open,
         ButtonStyle::DangerLink,
         PageAction::OpenConfirmation,
-        Some(empty_trigger),
+        empty_trigger,
         on_action.clone(),
     );
     card = card.child(
@@ -486,7 +571,7 @@ pub fn render(
                     .min_w_0()
                     .text_color(rgb(SECONDARY_TEXT))
                     .text_size(px(12.))
-                    .line_height(relative(1.5))
+                    .line_height(relative(NORMAL_LINE_HEIGHT))
                     .whitespace_normal()
                     .child(ui_text(START_EMPTY_HINT)),
             ),
@@ -506,11 +591,11 @@ pub fn render(
                 .size_full()
                 .overflow_y_scroll()
                 .child(
-                    div()
+                    probe_children(div(), "recovery-card")
                         .id("database-recovery-centering")
                         .debug_selector(|| "database-recovery-centering".to_owned())
                         .w_full()
-                        .min_h(relative(1.))
+                        .min_h(viewport_height)
                         .px(px(PAGE_PADDING_X))
                         .py(px(PAGE_PADDING_Y))
                         .flex()
@@ -524,19 +609,162 @@ pub fn render(
         page = page.child(empty_confirmation_dialog(
             confirmation.back,
             confirmation.confirm,
-            available && pending.is_none(),
+            confirm_enabled,
             on_action,
         ));
     }
     page
 }
 
-#[derive(Clone, Copy)]
+/// Render the error and disabled actions without a trusted recovery generation.
+pub fn render_invalid_marker(viewport_height: Pixels) -> Stateful<Div> {
+    render(
+        None,
+        PagePresentation {
+            available: false,
+            pending: None,
+            selected_backup: None,
+            error: None,
+            exported_path: None,
+            empty_trigger: None,
+            confirmation: None,
+            viewport_height,
+        },
+        |_, _, _| {},
+    )
+}
+
+/// The two button families in the frozen page. Card buttons are 38pt tall with
+/// 9pt corners; the dialog lives outside the card, so its buttons use the
+/// browser's own 28pt, square, 1pt-border controls. Keeping both here means the
+/// page has one definition of every production button style.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ButtonStyle {
     Primary,
     Secondary,
-    Danger,
     DangerLink,
+    DialogBack,
+    DialogDanger,
+}
+
+/// Resolved, testable production button parameters.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ButtonSpec {
+    height: Option<f32>,
+    padding_x: f32,
+    pub(crate) border_width: f32,
+    pub(crate) radius: f32,
+    pub(crate) background: Option<u32>,
+    pub(crate) border: Option<u32>,
+    pub(crate) text: u32,
+    font_size: f32,
+    pub(crate) font_weight: FontWeight,
+    focus_border: Option<u32>,
+    focus_text: Option<u32>,
+    focus_underline: bool,
+}
+
+impl ButtonStyle {
+    /// Resolve the frozen CSS for this button in its current state.
+    ///
+    /// Every disabled color is composited against the fixed white card/dialog
+    /// surface with the same .48 factor as `button:disabled { opacity: .48 }`.
+    /// Opaque white labels therefore stay white, and a same-colored fill and
+    /// border stay identical instead of the border darkening over the fill.
+    fn spec(self, enabled: bool) -> ButtonSpec {
+        let spec = match self {
+            ButtonStyle::Primary => ButtonSpec {
+                height: Some(38.),
+                padding_x: 14.,
+                border_width: 1.,
+                radius: 9.,
+                background: Some(ACCENT),
+                border: Some(ACCENT),
+                text: 0xffffff,
+                font_size: BUTTON_FONT_SIZE,
+                font_weight: FontWeight::NORMAL,
+                focus_border: Some(ACCENT_FOCUS),
+                focus_text: None,
+                focus_underline: false,
+            },
+            ButtonStyle::Secondary => ButtonSpec {
+                height: Some(38.),
+                padding_x: 14.,
+                border_width: 1.,
+                radius: 9.,
+                background: Some(CARD_BACKGROUND),
+                border: Some(BUTTON_BORDER),
+                text: PRIMARY_TEXT,
+                font_size: BUTTON_FONT_SIZE,
+                font_weight: FontWeight::NORMAL,
+                focus_border: Some(ACCENT),
+                focus_text: None,
+                focus_underline: false,
+            },
+            ButtonStyle::DangerLink => ButtonSpec {
+                height: None,
+                padding_x: 0.,
+                border_width: 0.,
+                radius: 0.,
+                background: None,
+                border: None,
+                text: DANGER_TEXT,
+                font_size: BUTTON_FONT_SIZE,
+                font_weight: FontWeight::NORMAL,
+                focus_border: None,
+                focus_text: Some(DANGER_FOCUS),
+                focus_underline: true,
+            },
+            ButtonStyle::DialogBack => ButtonSpec {
+                height: Some(28.),
+                padding_x: 7.,
+                border_width: 1.,
+                radius: 0.,
+                background: Some(DIALOG_BUTTON_BACKGROUND),
+                border: Some(DIALOG_BUTTON_BORDER),
+                text: DIALOG_BUTTON_TEXT,
+                font_size: BUTTON_FONT_SIZE,
+                font_weight: FontWeight::NORMAL,
+                focus_border: Some(ACCENT),
+                focus_text: None,
+                focus_underline: false,
+            },
+            ButtonStyle::DialogDanger => ButtonSpec {
+                height: Some(28.),
+                padding_x: 7.,
+                border_width: 1.,
+                radius: 0.,
+                background: Some(DANGER_BUTTON),
+                border: Some(DANGER_BUTTON),
+                text: 0xffffff,
+                font_size: BUTTON_FONT_SIZE,
+                font_weight: FontWeight::NORMAL,
+                focus_border: Some(DANGER_FOCUS),
+                focus_text: None,
+                focus_underline: false,
+            },
+        };
+        if enabled {
+            return spec;
+        }
+        // Render all three layers pre-composited against the white card. This
+        // is the frozen `opacity: .48` group result without GPUI's
+        // per-primitive fading, which would otherwise darken the border over
+        // the already-faded fill and turn white labels light blue.
+        let fade = |color: u32| {
+            mix_color(
+                color,
+                CARD_BACKGROUND,
+                ((1. - DISABLED_OPACITY) * 100.).round() as u32,
+            )
+        };
+        ButtonSpec {
+            background: spec.background.map(fade),
+            border: spec.border.map(fade),
+            text: fade(spec.text),
+            ..spec
+        }
+    }
 }
 
 fn action_button(
@@ -550,7 +778,14 @@ fn action_button(
     on_action: PageActionHandler,
 ) -> Stateful<Div> {
     let label_selector = format!("{selector}-label");
-    let base = div()
+    let spec = style.spec(enabled);
+    #[cfg(debug_assertions)]
+    PAGE_PROBE.with_borrow_mut(|probe| {
+        if let Some(probe) = probe {
+            probe.buttons.insert(id, (enabled, spec));
+        }
+    });
+    let mut button = div()
         .id(id)
         .debug_selector(move || selector.to_owned())
         .relative()
@@ -558,10 +793,26 @@ fn action_button(
         .flex()
         .items_center()
         .justify_center()
-        .border_1()
-        .rounded(px(9.))
-        .text_size(px(16.))
+        .text_size(px(spec.font_size))
+        .font_weight(spec.font_weight)
+        .text_color(rgb(spec.text))
         .whitespace_nowrap()
+        .px(px(spec.padding_x));
+    if let Some(height) = spec.height {
+        button = button.h(px(height));
+    }
+    if spec.border_width > 0. {
+        button = button
+            .border(px(spec.border_width))
+            .rounded(px(spec.radius));
+        if let Some(border) = spec.border {
+            button = button.border_color(rgb(border));
+        }
+    }
+    if let Some(background) = spec.background {
+        button = button.bg(rgb(background));
+    }
+    button = button
         .child(
             div()
                 .id(SharedString::from(label_selector.clone()))
@@ -569,34 +820,9 @@ fn action_button(
                 .child(ui_text(label).normal_line_height()),
         )
         .child(action_state_marker(selector, enabled));
-    let button = match style {
-        ButtonStyle::Primary => base
-            .h(px(38.))
-            .px(px(14.))
-            .border_color(rgb(ACCENT))
-            .bg(rgb(ACCENT))
-            .text_color(rgb(0xffffff)),
-        ButtonStyle::Secondary => base
-            .h(px(38.))
-            .px(px(14.))
-            .border_color(rgb(BUTTON_BORDER))
-            .bg(rgb(CARD_BACKGROUND))
-            .text_color(rgb(PRIMARY_TEXT)),
-        ButtonStyle::Danger => base
-            .h(px(38.))
-            .px(px(14.))
-            .border_color(rgb(DANGER_BUTTON))
-            .bg(rgb(DANGER_BUTTON))
-            .text_color(rgb(0xffffff)),
-        ButtonStyle::DangerLink => base
-            .border_color(rgba(0x00000000))
-            .bg(rgba(0x00000000))
-            .text_color(rgb(DANGER_TEXT)),
-    };
     if !enabled {
-        return button.opacity(0.48).cursor(CursorStyle::Arrow);
+        return button.cursor(CursorStyle::Arrow);
     }
-    let style_kind = style;
     let button = match focus {
         Some(focus) => {
             let focus = focus.clone().tab_stop(true);
@@ -612,11 +838,20 @@ fn action_button(
     button
         .tab_index(0)
         .cursor_pointer()
-        .focus(move |style| match style_kind {
-            ButtonStyle::Primary => style.border_color(rgb(ACCENT_FOCUS)),
-            ButtonStyle::Secondary => style.border_color(rgb(ACCENT)),
-            ButtonStyle::Danger => style.border_color(rgb(DANGER_FOCUS)),
-            ButtonStyle::DangerLink => style.text_color(rgb(DANGER_FOCUS)).underline(),
+        .focus(move |style| {
+            let style = match spec.focus_border {
+                Some(color) => style.border_color(rgb(color)),
+                None => style,
+            };
+            let style = match spec.focus_text {
+                Some(color) => style.text_color(rgb(color)),
+                None => style,
+            };
+            if spec.focus_underline {
+                style.underline()
+            } else {
+                style
+            }
         })
         .on_key_down(move |event, window, cx| {
             if is_activation_key(&event.keystroke) {
@@ -700,7 +935,7 @@ fn empty_confirmation_dialog(
         "database-recovery-dialog-back",
         BACK,
         true,
-        ButtonStyle::Secondary,
+        ButtonStyle::DialogBack,
         PageAction::CancelConfirmation,
         Some(&back_focus),
         on_action.clone(),
@@ -710,7 +945,7 @@ fn empty_confirmation_dialog(
         "database-recovery-dialog-confirm",
         CONFIRM_EMPTY,
         confirm_enabled,
-        ButtonStyle::Danger,
+        ButtonStyle::DialogDanger,
         PageAction::ConfirmEmpty,
         Some(&confirm_focus),
         on_action,
@@ -721,7 +956,7 @@ fn empty_confirmation_dialog(
         .debug_selector(|| "database-recovery-dialog-title".to_owned())
         .text_size(px(19.))
         .font_weight(FontWeight::BOLD)
-        .line_height(relative(1.2))
+        .line_height(relative(NORMAL_LINE_HEIGHT))
         .text_color(rgb(PRIMARY_TEXT))
         .whitespace_normal()
         .child(ui_text(CONFIRM_EMPTY_TITLE));
@@ -736,7 +971,7 @@ fn empty_confirmation_dialog(
         .line_height(relative(1.55))
         .whitespace_normal()
         .child(ui_text(CONFIRM_EMPTY_BODY));
-    let footer = div()
+    let footer = probe_children(div(), "confirmation-buttons")
         .id("database-recovery-dialog-actions")
         .debug_selector(|| "database-recovery-dialog-actions".to_owned())
         .mt(px(20.))
@@ -1043,7 +1278,7 @@ fn notice(id: &'static str, text: String, text_color: u32, background: u32) -> S
         .bg(rgb(background))
         .text_color(rgb(text_color))
         .text_size(px(16.))
-        .line_height(relative(1.5))
+        .line_height(relative(NORMAL_LINE_HEIGHT))
         .whitespace_normal()
         .child(ui_text(text))
 }
@@ -1264,4 +1499,75 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     let month = month_prime + if month_prime < 10 { 3 } else { -9 };
     let year = if month <= 2 { year + 1 } else { year };
     (year, month as u32, day as u32)
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::FontWeight;
+
+    use super::{
+        ACCENT, ButtonStyle, CARD_BACKGROUND, DANGER_BUTTON, DIALOG_BUTTON_BACKGROUND,
+        DIALOG_BUTTON_BORDER, DIALOG_BUTTON_TEXT, PRIMARY_TEXT, mix_color,
+    };
+
+    #[test]
+    fn card_buttons_use_regular_38pt_chrome() {
+        let primary = ButtonStyle::Primary.spec(true);
+        assert_eq!(primary.height, Some(38.));
+        assert_eq!(primary.padding_x, 14.);
+        assert_eq!(primary.border_width, 1.);
+        assert_eq!(primary.radius, 9.);
+        assert_eq!(primary.background, Some(ACCENT));
+        assert_eq!(primary.border, Some(ACCENT));
+        assert_eq!(primary.text, 0xffffff);
+        assert_eq!(primary.font_size, 16.);
+        assert_eq!(primary.font_weight, FontWeight::NORMAL);
+
+        let secondary = ButtonStyle::Secondary.spec(true);
+        assert_eq!(secondary.height, Some(38.));
+        assert_eq!(secondary.radius, 9.);
+        assert_eq!(secondary.padding_x, 14.);
+        assert_eq!(secondary.border_width, 1.);
+        assert_eq!(secondary.font_weight, FontWeight::NORMAL);
+    }
+
+    #[test]
+    fn disabled_primary_keeps_its_white_label() {
+        let disabled = ButtonStyle::Primary.spec(false);
+        assert_eq!(disabled.text, 0xffffff);
+        assert_eq!(disabled.background, Some(0x9ebefb));
+        assert_eq!(
+            disabled.border, disabled.background,
+            "fill and border must stay equal, as in the frozen group opacity"
+        );
+
+        let secondary = ButtonStyle::Secondary.spec(false);
+        assert_eq!(
+            secondary.text,
+            mix_color(PRIMARY_TEXT, CARD_BACKGROUND, 52),
+            "dark labels follow the .48 group fade"
+        );
+    }
+
+    #[test]
+    fn dialog_buttons_use_browser_28pt_geometry() {
+        let back = ButtonStyle::DialogBack.spec(true);
+        assert_eq!(back.height, Some(28.));
+        assert_eq!(back.padding_x, 7.);
+        assert_eq!(back.border_width, 1.);
+        assert_eq!(back.radius, 0.);
+        assert_eq!(back.background, Some(DIALOG_BUTTON_BACKGROUND));
+        assert_eq!(back.border, Some(DIALOG_BUTTON_BORDER));
+        assert_eq!(back.text, DIALOG_BUTTON_TEXT);
+        assert_eq!(back.font_size, 16.);
+        assert_eq!(back.font_weight, FontWeight::NORMAL);
+
+        let confirm = ButtonStyle::DialogDanger.spec(true);
+        assert_eq!(confirm.height, Some(28.));
+        assert_eq!(confirm.padding_x, 7.);
+        assert_eq!(confirm.border_width, 1.);
+        assert_eq!(confirm.radius, 0.);
+        assert_eq!(confirm.background, Some(DANGER_BUTTON));
+        assert_eq!(confirm.text, 0xffffff);
+    }
 }

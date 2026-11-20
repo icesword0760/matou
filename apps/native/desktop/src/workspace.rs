@@ -643,6 +643,7 @@ const LAST_TAB_BODY: &str = "当前已是最后一个事项下的最后一个标
 const LAST_TAB_CONFIRM: &str = "我知道了";
 const STOP_SESSION: &str = "停止会话";
 const STOPPED_SESSION_STATUS: &str = "正在恢复会话…";
+const INVALID_RECOVERY_MARKER_DIAGNOSTIC: &str = "database recovery marker is invalid";
 const REMOVE_NODE_ACTION: &str = "移除节点…";
 const WORKSPACE_PATH_UNAVAILABLE: &str = "工作区目录不可用，请先在本地恢复原路径，或移出该工作区";
 const SESSION_LOADER_TITLE: &str = "载入 Claude Code 会话";
@@ -1159,6 +1160,7 @@ pub struct Workspace {
     commands: RuntimeCommands,
     runtime_generation: u64,
     database_recovery: Option<DatabaseRecoveryPageState>,
+    invalid_recovery_marker: bool,
     read_only: Option<ReadOnlyState>,
     transport_connected: bool,
     domain_ready: bool,
@@ -2147,6 +2149,7 @@ impl Workspace {
             settings: None,
             runtime_generation: 0,
             database_recovery: None,
+            invalid_recovery_marker: false,
             read_only: None,
             transport_connected: false,
             domain_ready: false,
@@ -2993,6 +2996,7 @@ impl Workspace {
             BridgeEvent::Connection { phase, .. } => {
                 match &phase {
                     ConnectionPhase::DatabaseRecovery { details, .. } => {
+                        self.invalid_recovery_marker = false;
                         if let Some(state) = &mut self.database_recovery
                             && state.details.recovery_id == details.recovery_id
                         {
@@ -3077,6 +3081,7 @@ impl Workspace {
         };
         let fresh_ready = matches!(&event, Event::Ready { .. });
         if fresh_ready {
+            self.invalid_recovery_marker = false;
             self.database_recovery = None;
             if self.read_only.take().is_some() {
                 self.clear_read_only_history(cx);
@@ -3091,6 +3096,7 @@ impl Workspace {
         let fresh_read_only = matches!(&event, Event::ReadOnlyReady { .. });
         let event = match event {
             Event::ReadOnlyReady { projection, .. } => {
+                self.invalid_recovery_marker = false;
                 self.database_recovery = None;
                 if matches!(
                     self.level_focus_request,
@@ -3951,8 +3957,12 @@ impl Workspace {
                 }
             }
             Event::Diagnostic(message) => {
-                // Launch failures already carry this same diagnostic in their card.
-                if !self.recovery.values().any(|state| {
+                if !self.domain_ready && message == INVALID_RECOVERY_MARKER_DIAGNOSTIC {
+                    // Keep the error visible across automatic startup attempts.
+                    self.invalid_recovery_marker = true;
+                    self.database_recovery = None;
+                } else if !self.recovery.values().any(|state| {
+                    // Launch failures already carry this diagnostic in their card.
                     matches!(state, RecoveryState::StartFailed(error) | RecoveryState::Failed(error) if error == &message)
                 }) {
                     self.fault = Some(message);
@@ -8586,6 +8596,9 @@ impl Workspace {
     }
 
     fn tab_key(&mut self, stroke: &Keystroke, window: &mut Window, cx: &mut Context<Self>) {
+        if self.invalid_recovery_marker {
+            return;
+        }
         if self.database_recovery.is_some() {
             if stroke.key == "tab"
                 && !stroke.modifiers.alt
@@ -11998,50 +12011,52 @@ impl Workspace {
     }
 }
 
+fn workspace_frame(root: Stateful<Div>) -> AnyElement {
+    #[cfg(debug_assertions)]
+    database_recovery_page::probe_root(&root);
+    root.into_any_element()
+}
+
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.invalid_recovery_marker {
+            return workspace_frame(database_recovery_page::render_invalid_marker(
+                window.viewport_size().height,
+            ));
+        }
         if let Some(state) = &self.database_recovery {
             let recovery_id = state.details.recovery_id.clone();
-            return database_recovery_page::render(
-                &state.details,
+            return workspace_frame(database_recovery_page::render(
+                Some(&state.details),
                 PagePresentation {
                     available: state.available,
                     pending: state.pending.as_ref().map(|(_, operation)| *operation),
                     selected_backup: state.selected_backup.as_deref(),
                     error: state.error.as_deref(),
                     exported_path: state.exported_path.as_deref(),
-                    empty_trigger: &state.empty_trigger,
+                    empty_trigger: Some(&state.empty_trigger),
                     confirmation: state.confirmation.as_ref().map(|confirmation| {
                         ConfirmationFocus {
                             back: &confirmation.back,
                             confirm: &confirmation.confirm,
                         }
                     }),
+                    viewport_height: window.viewport_size().height,
                 },
                 cx.listener(move |this, action: &PageAction, window, cx| {
                     this.database_recovery_action(&recovery_id, action, window, cx);
                 }),
-            )
-            .into_any_element();
+            ));
         }
         if self.hierarchy.is_none()
             && self.read_only.is_none()
-            && matches!(
+            && !matches!(
                 self.commands.connection().1,
-                ConnectionPhase::Starting
-                    | ConnectionPhase::Reconnecting
-                    | ConnectionPhase::DatabaseRecovery { .. }
+                ConnectionPhase::Blocked(_) | ConnectionPhase::Stopped
             )
         {
-            return div()
-                .size_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(rgb(0xf7f8fa))
-                .text_color(rgb(0x303744))
-                .child("正在打开工作区…")
-                .into_any_element();
+            // The bridge can publish Ready before the workspace projection arrives.
+            return workspace_frame(div().id("startup-neutral").size_full().bg(rgb(0xf7f8fa)));
         }
         let level_focus = self.level_focus().map(str::to_owned);
         let active_level_focus = self.active_level_focus().map(str::to_owned);
@@ -12853,7 +12868,7 @@ impl Render for Workspace {
                 )
         });
         let geometry_view = cx.entity().downgrade();
-        div()
+        let root = div()
             .id("workspace-root")
             .relative()
             .capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, _, cx| {
@@ -12939,8 +12954,8 @@ impl Render for Workspace {
                     .map(fork_readiness_toast),
             )
             .children(window_overlay)
-            .children(permission_toast)
-            .into_any_element()
+            .children(permission_toast);
+        workspace_frame(root)
     }
 }
 
