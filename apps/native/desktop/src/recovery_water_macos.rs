@@ -256,82 +256,133 @@ pub fn draw_fluid(frame: &Value) -> Result<Bitmap> {
     }
     Ok(finish(ctx))
 }
+pub fn water_base_color(theme: Theme) -> u32 {
+    if theme == Theme::LIGHT {
+        // The frozen renderer presents CSS #fafcff as (251, 252, 255) in sRGB
+        // captures. Keep the one-byte raster quantization in the static layer.
+        0xfbfcff
+    } else {
+        theme.background
+    }
+}
+
 /// CSS background is independent of the animated canvas alpha.
 pub fn draw_background(width: f64, height: f64, dpr: f64, theme: Theme) -> Bitmap {
-    let (ctx, space) = bitmap((width * dpr).round() as u32, (height * dpr).round() as u32);
-    let light = theme.background == Theme::LIGHT.background;
-    let bg = if light { 0xfafcff } else { theme.background };
-    fill(
-        &ctx,
-        [
-            ((bg >> 16) & 255) as f64 / 255.,
-            ((bg >> 8) & 255) as f64 / 255.,
-            (bg & 255) as f64 / 255.,
-            1.,
-        ],
-    );
-    ctx.fill_rect(rect(0., 0., width * dpr, height * dpr));
-    let color = if light {
-        [86. / 255., 153. / 255., 219. / 255., 0.055]
-    } else {
-        [71. / 255., 147. / 255., 222. / 255., 0.05]
-    };
-    let mut end = color;
-    end[3] = 0.;
-    let components = [color, end].concat();
-    let g = CGGradient::create_with_color_components(&space, &components, &[0., 0.48], 2);
-    let center = CGPoint::new(width * 0.5 * dpr, height * 0.35 * dpr);
-    let radius = ((width * 0.5).powi(2) + (height * 0.65).powi(2)).sqrt() * dpr;
-    ctx.draw_radial_gradient(
-        &g,
-        center,
-        0.,
-        center,
-        radius,
-        CGGradientDrawingOptions::CGGradientDrawsAfterEndLocation,
-    );
-    finish(ctx)
+    background_layers(width, height, dpr, theme, true)
 }
-/// CSS ::after is a static inset shadow and1px inside border, above the canvas.
-/// CG's CSS blur48 mapping is deliberately still an unverified candidate.
-pub fn draw_edges(width: f64, height: f64, dpr: f64) -> Bitmap {
-    let (ctx, space) = bitmap((width * dpr).round() as u32, (height * dpr).round() as u32);
-    let (w, h) = (width * dpr, height * dpr);
-    ctx.save();
-    ctx.clip_to_rect(rect(0., 0., w, h));
-    ctx.set_shadow_with_color(
-        CGSize::new(0., 28. * dpr),
-        48. * dpr,
-        &cg_color(&space, [19. / 255., 92. / 255., 159. / 255., 0.055]),
-    );
-    fill(&ctx, [1.; 4]);
-    ctx.begin_path();
-    let margin = width.max(height) * dpr + 192. * dpr;
-    // Fill only outside the original padding box. The source itself is clipped
-    // out; its offset shadow is allowed into the box (standard inner-shadow form).
-    for (x, y, rw, rh) in [
-        (-margin, -margin, w + 2. * margin, h + 2. * margin),
-        (0., 0., w, h),
-    ] {
-        ctx.move_to_point(x, y);
-        ctx.add_line_to_point(x + rw, y);
-        ctx.add_line_to_point(x + rw, y + rh);
-        ctx.add_line_to_point(x, y + rh);
-        ctx.close_path();
+
+fn background_layers(width: f64, height: f64, dpr: f64, theme: Theme, radial: bool) -> Bitmap {
+    let (w, h) = ((width * dpr).round() as u32, (height * dpr).round() as u32);
+    let bg = water_base_color(theme);
+    let base = [
+        f64::from((bg >> 16) & 255),
+        f64::from((bg >> 8) & 255),
+        f64::from(bg & 255),
+    ];
+    let (tint, alpha) = if theme == Theme::LIGHT {
+        ([86., 153., 219.], 0.055)
+    } else {
+        ([71., 147., 222.], 0.05)
+    };
+    let (center_x, center_y) = (width * 0.5 * dpr, height * 0.35 * dpr);
+    let radius = 0.48 * center_x.hypot(height * 0.65 * dpr);
+    let x_distance_squared = (0..w)
+        .map(|x| (f64::from(x) + 0.5 - center_x).powi(2))
+        .collect::<Vec<_>>();
+    let mut premult_rgba = Vec::with_capacity(w as usize * h as usize * 4);
+    for y in 0..h {
+        let dy_squared = (f64::from(y) + 0.5 - center_y).powi(2);
+        for dx_squared in &x_distance_squared {
+            // CSS interpolates the tint in premultiplied sRGB. Composite it
+            // over the opaque base before quantizing to 8-bit channels.
+            let mix = if radial {
+                alpha * (1. - (dx_squared + dy_squared).sqrt() / radius).max(0.)
+            } else {
+                0.
+            };
+            for (base, tint) in base.into_iter().zip(tint) {
+                premult_rgba.push((base + (tint - base) * mix).round() as u8);
+            }
+            premult_rgba.push(255);
+        }
     }
-    ctx.eo_fill_path();
-    ctx.restore();
-    disable_shadow(&ctx, &space);
-    stroke(&ctx, [181. / 255., 216. / 255., 1., 0.055]);
-    ctx.set_line_width(2. * dpr);
-    ctx.begin_path();
-    ctx.move_to_point(0., 0.);
-    ctx.add_line_to_point(w, 0.);
-    ctx.add_line_to_point(w, h);
-    ctx.add_line_to_point(0., h);
-    ctx.close_path();
-    ctx.stroke_path();
-    finish(ctx)
+    Bitmap {
+        width: w,
+        height: h,
+        premult_rgba,
+    }
+}
+// Cumulative Gaussian coverage of an edge at a signed distance in sigmas.
+fn normal_cdf(distance: f64) -> f64 {
+    let x = distance.abs();
+    let t = 1. / (1. + 0.2316419 * x);
+    let tail = (-x * x / 2.).exp()
+        * 0.3989422804
+        * t
+        * (0.319381530
+            + t * (-0.356563782 + t * (1.781477937 + t * (-1.821255978 + t * 1.330274429))));
+    if distance < 0. { tail } else { 1. - tail }
+}
+
+fn inset_coverage(size: u32, shift: f64, sigma: f64) -> Vec<f64> {
+    (0..size)
+        .map(|index| {
+            let center = f64::from(index) + 0.5 - shift;
+            normal_cdf(center / sigma) - normal_cdf((center - f64::from(size)) / sigma)
+        })
+        .collect()
+}
+
+fn inset_layers(width: f64, height: f64, dpr: f64, shadow: bool, stroke: bool) -> Bitmap {
+    let width = (width * dpr).round() as u32;
+    let height = (height * dpr).round() as u32;
+    let sigma = 24. * dpr; // CSS box-shadow blur radius 48px.
+    let x_inside = inset_coverage(width, 0., sigma);
+    let y_inside = inset_coverage(height, -28. * dpr, sigma);
+    let mut premult_rgba = Vec::with_capacity(width as usize * height as usize * 4);
+    for (y, &inside_y) in y_inside.iter().enumerate() {
+        for (x, &inside_x) in x_inside.iter().enumerate() {
+            let edge_distance = x
+                .min(width as usize - x - 1)
+                .min(y.min(height as usize - y - 1));
+            let line_alpha = if stroke {
+                0.055 * (dpr - edge_distance as f64).clamp(0., 1.)
+            } else {
+                0.
+            };
+            // CSS lists the stroke first, so it composites above the soft shadow.
+            let shadow_alpha = if shadow {
+                0.055 * (1. - inside_x * inside_y) * (1. - line_alpha)
+            } else {
+                0.
+            };
+            for (line, shade) in [181., 216., 255.].into_iter().zip([19., 92., 159.]) {
+                premult_rgba.push((line * line_alpha + shade * shadow_alpha).round() as u8);
+            }
+            premult_rgba.push(((line_alpha + shadow_alpha) * 255.).round() as u8);
+        }
+    }
+    Bitmap {
+        width,
+        height,
+        premult_rgba,
+    }
+}
+
+/// The CSS inset stroke and shadow above the canvas, clipped by the card at paint time.
+pub fn draw_edges(width: f64, height: f64, dpr: f64) -> Bitmap {
+    inset_layers(width, height, dpr, true, true)
+}
+
+#[cfg(debug_assertions)]
+pub fn debug_static_layers(width: f64, height: f64, dpr: f64) -> [Bitmap; 5] {
+    [
+        background_layers(width, height, dpr, Theme::LIGHT, false),
+        draw_background(width, height, dpr, Theme::LIGHT),
+        inset_layers(width, height, dpr, false, true),
+        inset_layers(width, height, dpr, true, false),
+        draw_edges(width, height, dpr),
+    ]
 }
 /// Diagnostic primitives use the same context, sRGB state and byte conversion.
 pub fn diagnostic(dpr: f64, shadow_blur: f64, shadow_offset: (f64, f64)) -> Bitmap {

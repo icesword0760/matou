@@ -29,6 +29,38 @@ mod mac {
         )?;
         Ok(())
     }
+    #[cfg(debug_assertions)]
+    pub fn save_static_layers(args: &[String]) -> Result<()> {
+        ensure!(
+            args.len() == 4,
+            "expected: --layers OUTPUT WIDTH HEIGHT DPR"
+        );
+        let root = std::path::Path::new(&args[0]);
+        let width = args[1].parse()?;
+        let height = args[2].parse()?;
+        let dpr = args[3].parse()?;
+        std::fs::create_dir_all(root)?;
+        let layers = cg::debug_static_layers(width, height, dpr);
+        for (name, layer) in ["base", "gradient", "stroke", "shadow", "edges"]
+            .into_iter()
+            .zip(&layers)
+        {
+            save(root, name, layer)?;
+        }
+        let mut combined = layers[1].clone();
+        for (pixel, edge) in combined
+            .premult_rgba
+            .chunks_exact_mut(4)
+            .zip(layers[4].premult_rgba.chunks_exact(4))
+        {
+            for channel in 0..3 {
+                pixel[channel] = edge[channel]
+                    + ((u16::from(pixel[channel]) * u16::from(255 - edge[3]) + 127) / 255) as u8;
+            }
+        }
+        save(root, "combined", &combined)?;
+        Ok(())
+    }
     fn summary(values: &[f64]) -> Value {
         let mut sorted = values.to_vec();
         sorted.sort_by(f64::total_cmp);
@@ -341,6 +373,14 @@ mod mac {
 }
 #[cfg(target_os = "macos")]
 fn main() {
+    #[cfg(debug_assertions)]
+    {
+        let args = std::env::args().skip(1).collect::<Vec<_>>();
+        if args.first().is_some_and(|arg| arg == "--layers") {
+            mac::save_static_layers(&args[1..]).unwrap();
+            return;
+        }
+    }
     mac::run()
 }
 #[cfg(not(target_os = "macos"))]

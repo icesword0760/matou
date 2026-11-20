@@ -1014,6 +1014,10 @@ pub struct Workspace {
     #[cfg(target_os = "macos")]
     recovery_water: HashMap<String, Entity<RecoveryWater>>,
     #[cfg(target_os = "macos")]
+    recovery_water_content: HashSet<String>,
+    #[cfg(target_os = "macos")]
+    recovery_water_focus: Option<(String, String)>,
+    #[cfg(target_os = "macos")]
     recovery_water_visibility: Option<gpui::Task<()>>,
     storage_fault_sessions: HashSet<String>,
     order: Vec<String>,
@@ -1813,6 +1817,10 @@ impl Workspace {
             #[cfg(target_os = "macos")]
             recovery_water: HashMap::new(),
             #[cfg(target_os = "macos")]
+            recovery_water_content: HashSet::new(),
+            #[cfg(target_os = "macos")]
+            recovery_water_focus: None,
+            #[cfg(target_os = "macos")]
             recovery_water_visibility: None,
             storage_fault_sessions: HashSet::new(),
             order: Vec::new(),
@@ -2039,6 +2047,8 @@ impl Workspace {
         self.transport_connected = false;
         self.domain_ready = false;
         self.session_frames.clear();
+        #[cfg(target_os = "macos")]
+        self.recovery_water_content.clear();
         self.recovery.clear();
         self.deferred_previews.clear();
         self.deferred_controls.clear();
@@ -2271,6 +2281,15 @@ impl Workspace {
                     self.pending_card_action = None;
                     self.pending_provider_restores.clear();
                     self.session_frames.clear();
+                    #[cfg(target_os = "macos")]
+                    if matches!(phase, ConnectionPhase::Reconnecting) {
+                        self.recovery_water_content.clear();
+                    } else if matches!(
+                        phase,
+                        ConnectionPhase::Stopped | ConnectionPhase::Blocked(_)
+                    ) {
+                        self.recovery_water_focus = None;
+                    }
                     if matches!(&self.dialog, Some(TabDialog::RemoveSession { session_id, .. })
                         if self.is_stopped_session(session_id))
                     {
@@ -2494,7 +2513,10 @@ impl Workspace {
                 }
                 if scene_changed {
                     #[cfg(target_os = "macos")]
-                    self.retain_recovery_water(window, cx, |_, _| false);
+                    {
+                        self.recovery_water_focus = None;
+                        self.retain_recovery_water(window, cx, |_, _| false);
+                    }
                     // A newly mounted source carousel starts at its current styles.
                     for saved in &geometry {
                         if !self.geometry_dirty.contains(&saved.owner_key) {
@@ -2580,6 +2602,23 @@ impl Workspace {
                     self.close_invalid_dialog(window, cx);
                 }
                 self.reconcile_transport_geometry(&geometry, cx);
+                #[cfg(target_os = "macos")]
+                if fresh_ready
+                    && let Some((scene_id, session_id)) = self.recovery_water_focus.take()
+                    && self.active_scene_id() == Some(scene_id.as_str())
+                    && self.active_path_valid()
+                    && self.order.contains(&session_id)
+                    && !self.is_stopped_session(&session_id)
+                    && self.focused.as_ref() != Some(&session_id)
+                {
+                    self.send(
+                        Command::FocusSession {
+                            scene_id,
+                            session_id,
+                        },
+                        cx,
+                    );
+                }
                 self.sync_terminal_input(window, cx);
                 if scene_changed
                     && let Some(index) = self.scenes.iter().position(|scene| {
@@ -2660,6 +2699,8 @@ impl Workspace {
                     self.card_motion.remove(&id);
                     self.resize_revisions.remove(&id);
                     self.session_frames.remove(&id);
+                    #[cfg(target_os = "macos")]
+                    self.recovery_water_content.remove(&id);
                 }
             }
             Event::SceneClosePreview {
@@ -2852,6 +2893,30 @@ impl Workspace {
                         );
                     if valid {
                         self.session_frames.insert(session_id.clone());
+                        #[cfg(target_os = "macos")]
+                        if !self.recovery_water_content.contains(&session_id)
+                            && screen.cells.iter().any(|cell| {
+                                cell.has_content
+                                    && !cell.invisible
+                                    && cell.text.chars().any(|ch| !ch.is_whitespace())
+                            })
+                        {
+                            // Qualify this card in the same update that gives the
+                            // surface its first visible grid. Ready and empty
+                            // resize frames do not end the visual handoff.
+                            self.recovery_water_content.insert(session_id.clone());
+                            #[cfg(debug_assertions)]
+                            if let Some(trace) = &self.motion_trace {
+                                record_motion(
+                                    trace,
+                                    &serde_json::json!({
+                                        "kind": "recovery-water-handoff", "session": session_id,
+                                        "at": self.motion_clock.elapsed().as_secs_f64() * 1000.,
+                                        "generation": generation, "sequence": sequence,
+                                    }),
+                                );
+                            }
+                        }
                     } else if !was_usable {
                         self.session_frames.remove(&session_id);
                     }
@@ -2883,6 +2948,19 @@ impl Workspace {
             Event::Recovery { session_id, state } => {
                 if self.is_stopped_session(&session_id) {
                     return;
+                }
+                #[cfg(target_os = "macos")]
+                if matches!(state, RecoveryState::Restoring)
+                    && matches!(
+                        self.recovery.get(&session_id),
+                        Some(
+                            RecoveryState::Deferred
+                                | RecoveryState::Failed(_)
+                                | RecoveryState::Ready
+                        )
+                    )
+                {
+                    self.recovery_water_content.remove(&session_id);
                 }
                 if !matches!(&state, RecoveryState::Ready)
                     || (self.recovery_blocked(&session_id)
@@ -3043,6 +3121,8 @@ impl Workspace {
                 self.deferred_previews.remove(id);
                 self.deferred_controls.remove(id);
                 self.session_frames.remove(id);
+                #[cfg(target_os = "macos")]
+                self.recovery_water_content.remove(id);
                 self.resize_revisions.remove(id);
                 continue;
             }
@@ -3234,8 +3314,10 @@ impl Workspace {
     }
 
     fn geometry_focus(&self) -> Option<&str> {
-        self.pending_focus
-            .as_ref()
+        let pending = self.pending_focus.as_ref();
+        #[cfg(target_os = "macos")]
+        let pending = self.recovery_water_focus.as_ref().or(pending);
+        pending
             .filter(|(scene_id, _)| {
                 self.hierarchy
                     .as_ref()
@@ -3556,14 +3638,17 @@ impl Workspace {
             window.blur();
         }
         for (id, terminal) in &self.terminals {
+            let blocked = self.recovery_blocked(id);
+            #[cfg(target_os = "macos")]
+            let blocked = blocked || self.recovery_water_covers_terminal(id);
             let disabled = disabled
-                || self.recovery_blocked(id)
+                || blocked
                 || self
                     .history_request
                     .as_ref()
                     .is_some_and(|request| request.session_id == *id);
             terminal.update(cx, |terminal, cx| {
-                terminal.set_transport_available(!self.recovery_blocked(id), cx);
+                terminal.set_transport_available(!blocked, cx);
                 terminal.set_input_disabled(disabled, cx);
             });
         }
@@ -3741,7 +3826,7 @@ impl Workspace {
             && fork_failure_copy(node).is_none()
             && fork_progress_copy(node).is_none()
             && Self::provider_restore_state(node) != Some("failed")
-            && self.recovery_blocked(id)
+            && !self.recovery_water_content.contains(id)
             && !self.storage_fault_sessions.contains(id)
             && !matches!(
                 self.recovery.get(id),
@@ -3753,6 +3838,11 @@ impl Workspace {
                 )
             )
             && !matches!(node["workStatus"].as_str(), Some("error" | "exited"))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn recovery_water_covers_terminal(&self, id: &str) -> bool {
+        self.recovery_water.contains_key(id) && !self.recovery_water_content.contains(id)
     }
 
     #[cfg(target_os = "macos")]
@@ -6716,8 +6806,14 @@ impl Workspace {
     }
 
     fn level_focus(&self) -> Option<&str> {
-        self.focused
+        let focus = self.focused.as_ref();
+        #[cfg(target_os = "macos")]
+        let focus = self
+            .recovery_water_focus
             .as_ref()
+            .map(|(_, id)| id)
+            .or(focus);
+        focus
             .filter(|id| self.order.contains(id))
             .or_else(|| self.order.first())
             .map(String::as_str)
@@ -10359,12 +10455,29 @@ impl Render for Workspace {
                 && node.is_some_and(|node| self.recovery_water_needed(id, node))
             {
                 mounted_water.insert(id.clone());
-                // Match the native terminal's current default workspace theme.
-                let theme = Theme::default();
+                // Native workspace chrome currently has only the light theme.
+                // Terminal screen colors are per-session and may be set by OSC.
+                let workspace_theme = Theme::LIGHT;
                 let entity = self.recovery_water.entry(id.clone()).or_insert_with(|| {
+                    #[cfg(debug_assertions)]
+                    if let Some(trace) = &self.motion_trace {
+                        record_motion(
+                            trace,
+                            &serde_json::json!({
+                                "kind": "recovery-water-mount", "session": id,
+                                "at": self.motion_clock.elapsed().as_secs_f64() * 1000.,
+                                "generation": self.runtime_generation,
+                            }),
+                        );
+                    }
                     cx.new(|cx| {
-                        RecoveryWater::new(self.runtime_generation, theme, reduced_motion(), cx)
-                            .with_bottom_radius(CARD_RADIUS)
+                        RecoveryWater::new(
+                            self.runtime_generation,
+                            workspace_theme,
+                            reduced_motion(),
+                            cx,
+                        )
+                        .with_bottom_radius(CARD_RADIUS)
                     })
                 });
                 Some(RecoveryWater::overlay(entity.clone()))
@@ -10387,20 +10500,6 @@ impl Render for Workspace {
                         {
                             // The badge handles its own pointer-down and stops
                             // propagation in the bubble phase.
-                            return;
-                        }
-                        #[cfg(target_os = "macos")]
-                        if this.recovery_water.contains_key(&scrollbar_session)
-                            && let Some(index) =
-                                this.order.iter().position(|id| id == &scrollbar_session)
-                            && let Some(bounds) = this.carousel_scroll.bounds_for_item(index)
-                            && event.position.y
-                                >= bounds.top()
-                                    + this.carousel_scroll.offset().y
-                                    + RecoveryWater::TOP
-                        {
-                            // The terminal and the card's normal click handler are both below the water.
-                            cx.stop_propagation();
                             return;
                         }
                         // The original card activates in pointer capture, before
@@ -10442,6 +10541,25 @@ impl Render for Workspace {
                         this.hover_restore_at = None;
                         this.hover_follow_until = None;
                         this.capture_geometry(Some(session_id.clone()), false, window, cx);
+                        #[cfg(target_os = "macos")]
+                        if this.recovery_water.contains_key(&session_id)
+                            && (!this.domain_ready
+                                || !this.transport_connected
+                                || this.commands.connection()
+                                    != (this.runtime_generation, ConnectionPhase::Ready))
+                            && let Some(scene_id) = &scene_id
+                        {
+                            // This click belongs to the visible card, even while
+                            // the replacement runtime cannot receive commands.
+                            if let Some(update) = this.pending_geometry.take() {
+                                this.reconnect_geometry.insert(update.owner_key);
+                            }
+                            this.recovery_water_focus =
+                                Some((scene_id.clone(), session_id.clone()));
+                            this.refresh_level(cx);
+                            cx.notify();
+                            return;
+                        }
                         if this.geometry_focus() != Some(session_id.as_str()) {
                             if let Some(scene_id) = &scene_id {
                                 this.send(
