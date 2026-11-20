@@ -15,7 +15,9 @@ use crate::storage::{CommandMetadata, DomainEventInput, execute};
 pub use model::{
     ExecutionContext, HierarchyResult, Mount, Scene, Session, Task, WindowNavigation, Workspace,
 };
-pub use navigation::{focus_session, list_scenes, read_created_path, read_hierarchy, select_scene};
+pub use navigation::{
+    focus_session, list_scenes, read_created_path, read_hierarchy, read_hierarchy_at, select_scene,
+};
 
 use navigation::{activate_workspace, register_window};
 

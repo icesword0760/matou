@@ -122,11 +122,19 @@ pub fn read_database_owner(owner_path: &Path) -> Option<OwnerRecord> {
 
 /// Read-only startup checks the live owner before inspecting user data.
 pub fn assert_no_live_owner(database_path: &Path) -> Result<()> {
+    check_no_live_owner(database_path, true)
+}
+
+pub(crate) fn assert_no_live_owner_read_only(database_path: &Path) -> Result<()> {
+    check_no_live_owner(database_path, false)
+}
+
+fn check_no_live_owner(database_path: &Path, repair: bool) -> Result<()> {
     let owner_path = append_suffix(database_path, ".owner");
     if !owner_path.exists() {
         return Ok(());
     }
-    match inspect(&owner_path) {
+    match inspect_owner(&owner_path, repair) {
         Inspection::Malformed(error) => {
             Err(OwnerRecoveryError::new("owner-record-malformed", &owner_path, error).into())
         }
@@ -188,6 +196,10 @@ enum Inspection {
 }
 
 fn inspect(path: &Path) -> Inspection {
+    inspect_owner(path, true)
+}
+
+fn inspect_owner(path: &Path, repair: bool) -> Inspection {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Inspection::Absent,
@@ -199,7 +211,9 @@ fn inspect(path: &Path) -> Inspection {
             fs::read(path.join("owner.json")),
         )
     } else if metadata.is_file() {
-        repair_mode(path, &metadata);
+        if repair {
+            repair_mode(path, &metadata);
+        }
         (OwnerFormat::File, fs::read(path))
     } else {
         return Inspection::Malformed(anyhow!("owner path is not a regular file"));

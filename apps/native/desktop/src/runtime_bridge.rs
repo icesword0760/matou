@@ -3,10 +3,12 @@ use anyhow::{Context, Result, anyhow, bail, ensure};
 use matou_native_core::database_recovery::RECOVERY_ID_CHANGED;
 pub use matou_native_runtime::host::{
     Command, DatabaseRecoveryAction, DatabaseRecoveryDetails, DatabaseRecoveryResult, Event,
-    LaunchOptions, RecoveryState, StartupBlock, StartupBlockKind,
+    LaunchOptions, ReadOnlyNavigation, ReadOnlyQuery, RecoveryState, StartupBlock,
+    StartupBlockKind,
 };
 use matou_native_runtime::host::{
-    DATABASE_RECOVERY_BUSY, DATABASE_RECOVERY_INTERRUPTED, STORAGE_RECOVERY_WAITING,
+    DATABASE_RECOVERY_BUSY, DATABASE_RECOVERY_INTERRUPTED, STORAGE_READ_ONLY,
+    STORAGE_READ_ONLY_TITLE, STORAGE_RECOVERY_WAITING, StoragePhase, storage_command_rejected,
 };
 use matou_native_runtime::protocol::{
     ClientMessage, ServerMessage, VERSION, check_version, read_messages, write_message,
@@ -26,6 +28,9 @@ use std::{
 pub enum ConnectionPhase {
     Starting,
     Ready,
+    ReadOnly {
+        pending: Option<String>,
+    },
     DatabaseRecovery {
         details: Arc<DatabaseRecoveryDetails>,
         pending: Option<String>,
@@ -64,13 +69,15 @@ pub enum SendError {
     NotReady,
     LifecycleCommand,
     StorageReadOnly,
+    RecoveryWaiting,
     RecoveryIdChanged,
     RecoveryBusy,
 }
 impl std::fmt::Display for SendError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::StorageReadOnly => return f.write_str(STORAGE_RECOVERY_WAITING),
+            Self::StorageReadOnly => return f.write_str(STORAGE_READ_ONLY_TITLE),
+            Self::RecoveryWaiting => return f.write_str(STORAGE_RECOVERY_WAITING),
             Self::RecoveryIdChanged => return f.write_str(RECOVERY_ID_CHANGED),
             Self::RecoveryBusy => return f.write_str(DATABASE_RECOVERY_BUSY),
             _ => {}
@@ -93,26 +100,31 @@ struct State {
 }
 
 fn qualify_command(phase: &ConnectionPhase, command: &Command) -> Result<(), SendError> {
-    match (phase, command) {
-        (_, Command::Shutdown) => Err(SendError::LifecycleCommand),
-        (ConnectionPhase::Ready, Command::DatabaseRecovery { .. }) => Err(SendError::NotReady),
-        (ConnectionPhase::Ready, _) => Ok(()),
-        (
-            ConnectionPhase::DatabaseRecovery { details, .. },
-            Command::DatabaseRecovery { action, .. },
-        ) => {
-            if action
-                .expected_recovery_id()
-                .is_some_and(|id| id != details.recovery_id)
-            {
-                Err(SendError::RecoveryIdChanged)
-            } else {
-                Ok(())
-            }
-        }
-        (ConnectionPhase::DatabaseRecovery { .. }, _) => Err(SendError::StorageReadOnly),
-        _ => Err(SendError::NotReady),
+    if matches!(command, Command::Shutdown) {
+        return Err(SendError::LifecycleCommand);
     }
+    let (storage, rejection) = match phase {
+        ConnectionPhase::Ready => (StoragePhase::Writable, SendError::NotReady),
+        ConnectionPhase::ReadOnly { .. } => (StoragePhase::ReadOnly, SendError::StorageReadOnly),
+        ConnectionPhase::DatabaseRecovery { .. } => {
+            (StoragePhase::Recovery, SendError::RecoveryWaiting)
+        }
+        _ => return Err(SendError::NotReady),
+    };
+    if !storage.accepts(command) {
+        return Err(rejection);
+    }
+    if let (
+        ConnectionPhase::DatabaseRecovery { details, .. },
+        Command::DatabaseRecovery { action, .. },
+    ) = (phase, command)
+        && action
+            .expected_recovery_id()
+            .is_some_and(|id| id != details.recovery_id)
+    {
+        return Err(SendError::RecoveryIdChanged);
+    }
+    Ok(())
 }
 #[cfg(test)]
 #[derive(Default)]
@@ -160,13 +172,17 @@ impl RuntimeCommands {
         }
         qualify_command(&state.phase, &command)?;
         let mut recovery_request = None;
-        if let ConnectionPhase::DatabaseRecovery { pending, .. } = &state.phase {
-            if pending.is_some() {
+        if let Command::DatabaseRecovery { request_id, .. } = &command {
+            if matches!(
+                &state.phase,
+                ConnectionPhase::DatabaseRecovery {
+                    pending: Some(_),
+                    ..
+                } | ConnectionPhase::ReadOnly { pending: Some(_) }
+            ) {
                 return Err(SendError::RecoveryBusy);
             }
-            if let Command::DatabaseRecovery { request_id, .. } = &command {
-                recovery_request = Some(request_id.clone());
-            }
+            recovery_request = Some(request_id.clone());
         }
         state
             .sender
@@ -174,7 +190,10 @@ impl RuntimeCommands {
             .ok_or(SendError::NotReady)?
             .send(Outgoing::Business(command))
             .map_err(|_| SendError::NotReady)?;
-        if let ConnectionPhase::DatabaseRecovery { pending, .. } = &mut state.phase {
+        if let ConnectionPhase::DatabaseRecovery { pending, .. }
+        | ConnectionPhase::ReadOnly { pending } = &mut state.phase
+            && recovery_request.is_some()
+        {
             *pending = recovery_request;
         }
         Ok(())
@@ -557,27 +576,45 @@ fn run_child(
                                 let state = writer_shared.state.lock().unwrap();
                                 // Normal stop closes admission, then drains accepted FIFO
                                 // before Stop. Failure retirement changes phase instead.
-                                let qualified = state.generation == generation
-                                    && qualify_command(&state.phase, &command).is_ok()
-                                    && match (&state.phase, &command) {
-                                        (
-                                            ConnectionPhase::DatabaseRecovery { pending, .. },
-                                            Command::DatabaseRecovery { request_id, .. },
-                                        ) => pending.as_ref() == Some(request_id),
-                                        _ => true,
-                                    };
+                                let qualification = if state.generation != generation {
+                                    Err(SendError::NotReady)
+                                } else {
+                                    qualify_command(&state.phase, &command).and_then(|()| {
+                                        match (&state.phase, &command) {
+                                            (
+                                                ConnectionPhase::DatabaseRecovery {
+                                                    pending, ..
+                                                }
+                                                | ConnectionPhase::ReadOnly { pending },
+                                                Command::DatabaseRecovery { request_id, .. },
+                                            ) if pending.as_ref() != Some(request_id) => {
+                                                Err(SendError::NotReady)
+                                            }
+                                            _ => Ok(()),
+                                        }
+                                    })
+                                };
+                                let report =
+                                    state.sender.is_some() && state.generation == generation;
                                 drop(state);
-                                if !qualified {
-                                    if let Command::DatabaseRecovery { request_id, .. } = command {
+                                if let Err(error) = qualification {
+                                    // Retirement owns the pending export completion once the pipe is gone.
+                                    if report {
+                                        let (code, message) = match error {
+                                            SendError::StorageReadOnly => {
+                                                (STORAGE_READ_ONLY, STORAGE_READ_ONLY_TITLE)
+                                            }
+                                            SendError::RecoveryWaiting => {
+                                                (STORAGE_READ_ONLY, STORAGE_RECOVERY_WAITING)
+                                            }
+                                            _ => (
+                                                "RECOVERY_INTERRUPTED",
+                                                DATABASE_RECOVERY_INTERRUPTED,
+                                            ),
+                                        };
                                         let _ = writer_events.send_blocking(BridgeEvent::Runtime {
                                             generation,
-                                            event: Event::DatabaseRecoveryResult(
-                                                DatabaseRecoveryResult::failed(
-                                                    request_id,
-                                                    "RECOVERY_INTERRUPTED",
-                                                    DATABASE_RECOVERY_INTERRUPTED,
-                                                ),
-                                            ),
+                                            event: storage_command_rejected(command, code, message),
                                         });
                                     }
                                     continue;
@@ -641,16 +678,22 @@ fn run_child(
             }
             if let Event::DatabaseRecoveryResult(result) = &event {
                 let mut state = shared.state.lock().unwrap();
-                if let ConnectionPhase::DatabaseRecovery { pending, .. } = &mut state.phase
+                if let ConnectionPhase::DatabaseRecovery { pending, .. }
+                | ConnectionPhase::ReadOnly { pending } = &mut state.phase
                     && pending.as_ref() == Some(&result.request_id)
                 {
                     *pending = None;
                 }
             }
-            if matches!(event, Event::Ready { .. }) {
+            if matches!(event, Event::Ready { .. } | Event::ReadOnlyReady { .. }) {
                 ready = true;
                 if !shared.state.lock().unwrap().stopping {
-                    publish(shared, events, generation, ConnectionPhase::Ready);
+                    let phase = if matches!(event, Event::ReadOnlyReady { .. }) {
+                        ConnectionPhase::ReadOnly { pending: None }
+                    } else {
+                        ConnectionPhase::Ready
+                    };
+                    publish(shared, events, generation, phase);
                 }
             }
             if events
@@ -675,7 +718,8 @@ fn run_child(
         let mut state = shared.state.lock().unwrap();
         state.sender = None;
         match std::mem::replace(&mut state.phase, ConnectionPhase::Reconnecting) {
-            ConnectionPhase::DatabaseRecovery { pending, .. } => pending,
+            ConnectionPhase::DatabaseRecovery { pending, .. }
+            | ConnectionPhase::ReadOnly { pending } => pending,
             _ => None,
         }
     };
@@ -906,6 +950,131 @@ mod supervisor_tests {
             thread::sleep(Duration::from_millis(4));
         }
         ensure!(!old.exists(), "old queued input executed on new child");
+        bridge.shutdown()?;
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn queued_read_only_export_ends_once_and_does_not_replay_after_disconnect() -> Result<()> {
+        let root =
+            std::env::temp_dir().join(format!("matou-supervisor-read-only-{}", Uuid::new_v4()));
+        let data_root = root.join("data");
+        drop(matou_native_core::startup::open(
+            &data_root,
+            "read-only-fixture",
+        )?);
+        sql(
+            &root,
+            "INSERT INTO schema_migrations (version, name, checksum, applied_at)
+                    VALUES (999, 'newer', 'newer', 1)",
+        )?;
+        let executable = std::env::current_exe()?;
+        let binary = executable
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("matou-native-runtime");
+        let mut bridge = RuntimeBridge::start_supervised(
+            LaunchOptions {
+                data_root,
+                workspace: root.join("workspace"),
+                shell_home: root.join("shell-home"),
+                shell: "/unused/shell".into(),
+            },
+            &binary,
+            TestHooks::default(),
+        )?;
+        let ready = |bridge: &RuntimeBridge, after| -> Result<u64> {
+            let mut generation = None;
+            next(bridge, |event| {
+                if let BridgeEvent::Runtime {
+                    generation: current,
+                    event:
+                        Event::ReadOnlyReady {
+                            projection: Ok(_), ..
+                        },
+                } = event
+                    && current > after
+                {
+                    generation = Some(current);
+                    return true;
+                }
+                false
+            })?;
+            generation.context("read-only generation")
+        };
+        let generation = ready(&bridge, 0)?;
+        assert_eq!(
+            bridge.commands.send_at(generation, Command::Refresh),
+            Err(SendError::StorageReadOnly)
+        );
+        let (paused, resume) = install(&bridge.commands.shared.hooks.before_business);
+        // An invalid UUID still tests queue admission, and makes writing any
+        // export impossible even if an older writer accidentally sends it.
+        let request_id = "read-only-export-interrupted".to_owned();
+        bridge.commands.send_at(
+            generation,
+            Command::DatabaseRecovery {
+                request_id: request_id.clone(),
+                action: DatabaseRecoveryAction::ExportRecoveryBundle,
+            },
+        )?;
+        paused.recv_timeout(LIMIT)?;
+        assert_eq!(
+            bridge.commands.send_at(
+                generation,
+                Command::DatabaseRecovery {
+                    request_id: "second-export".into(),
+                    action: DatabaseRecoveryAction::ExportRecoveryBundle,
+                }
+            ),
+            Err(SendError::RecoveryBusy),
+        );
+        kill_owned(&bridge, &root)?;
+        next(&bridge, |event| {
+            matches!(event, BridgeEvent::Runtime {
+            generation: retired,
+            event: Event::DatabaseRecoveryResult(result),
+        } if retired == generation && result.request_id == request_id
+            && result.error.as_ref().is_some_and(|error| error.message == DATABASE_RECOVERY_INTERRUPTED))
+        })?;
+        resume.send(())?;
+        let next_generation = ready(&bridge, generation)?;
+        assert_eq!(
+            bridge.commands.connection(),
+            (next_generation, ConnectionPhase::ReadOnly { pending: None })
+        );
+        assert!(matches!(
+            bridge.commands.send_at(
+                generation,
+                Command::History(matou_native_runtime::history_worker::HistoryRequest::Page {
+                    session_id: "unused".into(),
+                    sequence: 1,
+                    before: None,
+                })
+            ),
+            Err(SendError::WrongGeneration { .. })
+        ));
+        bridge.commands.send_at(
+            next_generation,
+            Command::ReadOnlyQuery {
+                request_id: 2,
+                query: ReadOnlyQuery::Workspace {
+                    workspace_id: "missing".into(),
+                },
+            },
+        )?;
+        next(&bridge, |event| {
+            assert!(!matches!(&event, BridgeEvent::Runtime {
+                event: Event::DatabaseRecoveryResult(result), ..
+            } if result.request_id == request_id));
+            matches!(event, BridgeEvent::Runtime {
+                generation,
+                event: Event::ReadOnlyQueryResult { request_id: 2, result: Err(_) },
+            } if generation == next_generation)
+        })?;
         bridge.shutdown()?;
         fs::remove_dir_all(root)?;
         Ok(())

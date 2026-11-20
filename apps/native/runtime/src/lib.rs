@@ -17,4 +17,5 @@ mod shell_input;
 pub mod worker;
 
 pub use model::{SessionEvent, SessionOptions, StorageFaultCode};
+mod readonly_export;
 pub mod workspace_paths;

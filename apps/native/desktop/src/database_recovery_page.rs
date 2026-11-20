@@ -36,6 +36,17 @@ pub const RECHECK_DATABASE: &str = "重新检查数据库";
 pub const CHECKING: &str = "正在检查…";
 pub const GENERIC_ERROR: &str = "数据库恢复操作失败";
 
+/// Frozen headline of the read-only workspace banner. The workspace also uses
+/// it verbatim as the disabled reason of blocked mutations.
+pub const READ_ONLY_TITLE: &str = "数据库处于只读恢复模式";
+const READ_ONLY_EXPLANATION: &str =
+    "现有工作空间、事项和会话仍可浏览、搜索与复制；可能改动数据的操作已暂停。";
+const SEARCH_TERMINAL: &str = "搜索当前终端";
+const EXPORT_DATABASE: &str = "导出数据库资料";
+const EXPORTING: &str = "正在导出…";
+const EXPORTED: &str = "数据库资料已导出";
+const EXPORT_FAILED: &str = "导出失败：";
+
 // Frozen light palette. The recovery page is deliberately light even when the
 // normal workspace follows a dark terminal theme.
 const PAGE_BACKGROUND: u32 = 0xf4f6f9;
@@ -52,6 +63,17 @@ const ERROR_BACKGROUND: u32 = 0xfff0ef;
 const PROGRESS_TEXT: u32 = 0x275da8;
 const PROGRESS_BACKGROUND: u32 = 0xedf4ff;
 const ROW_BORDER: u32 = 0xe2e6ec;
+
+// Frozen roles from `read-only-recovery.css`. The background is an sRGB mix of
+// the workspace terminal background with amber; the bottom rule is the darker
+// amber at 42% over that mixed background. The title and error colors are
+// fixed, exactly as in the stylesheet.
+const BANNER_AMBER_COLOR: u32 = 0xf4b740;
+const BANNER_HEADLINE_COLOR: u32 = 0x966300;
+const BANNER_BORDER_COLOR: u32 = 0xc88708;
+const BANNER_ERROR_COLOR: u32 = 0xb42318;
+const BANNER_TINT: u32 = 17;
+const BANNER_BORDER_TINT: u32 = 42;
 
 const CARD_MAX_WIDTH: f32 = 720.;
 const PAGE_PADDING_Y: f32 = 48.;
@@ -329,6 +351,204 @@ pub fn render(
                 .justify_center()
                 .child(card),
         )
+}
+
+/// Render the cross-workspace read-only banner.
+///
+/// `background` and `foreground` are the workspace terminal colors as
+/// `0xRRGGBB`. The amber wash, bottom rule and muted explanation are derived
+/// from them with the same sRGB mix as `read-only-recovery.css`; no extra
+/// dependency is involved.
+///
+/// `pending` drives the in-progress export label and disables the export
+/// button. `feedback` is the latest export result: `Ok(Some(path))` and
+/// `Ok(None)` render the success copy on the feedback row, `Err(reason)` renders
+/// the red failure copy. `search_enabled` and `export_enabled` only control the
+/// click bindings; a disabled control never receives `on_search`/`on_export`.
+pub fn render_read_only_banner(
+    background: u32,
+    foreground: u32,
+    pending: bool,
+    feedback: Option<Result<Option<&str>, &str>>,
+    search_enabled: bool,
+    export_enabled: bool,
+    on_search: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
+    on_export: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
+) -> Stateful<Div> {
+    let foreground = Hsla::from(rgb(foreground & 0x00ff_ffff));
+    let banner_background = mix_color(background, BANNER_AMBER_COLOR, BANNER_TINT);
+    let banner_border = mix_color(banner_background, BANNER_BORDER_COLOR, BANNER_BORDER_TINT);
+
+    let title = div()
+        .id("read-only-recovery-banner-title")
+        .debug_selector(|| "read-only-recovery-banner-title".to_owned())
+        .min_w_0()
+        .text_color(rgb(BANNER_HEADLINE_COLOR))
+        .font_weight(FontWeight::BOLD)
+        .whitespace_normal()
+        .child(ui_text(READ_ONLY_TITLE).normal_line_height());
+    let explanation = div()
+        .id("read-only-recovery-banner-explanation")
+        .debug_selector(|| "read-only-recovery-banner-explanation".to_owned())
+        .min_w_0()
+        .text_color(foreground.opacity(0.78))
+        .whitespace_normal()
+        .child(ui_text(READ_ONLY_EXPLANATION));
+    let message = div()
+        .id("read-only-recovery-banner-message")
+        .debug_selector(|| "read-only-recovery-banner-message".to_owned())
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap_y(px(4.))
+        .gap_x(px(10.))
+        .child(title)
+        .child(explanation);
+
+    let search_label = div()
+        .id("read-only-recovery-banner-search-label")
+        .debug_selector(|| "read-only-recovery-banner-search-label".to_owned())
+        .whitespace_nowrap()
+        .child(ui_text(SEARCH_TERMINAL).normal_line_height());
+    let search = div()
+        .id("read-only-recovery-banner-search")
+        .debug_selector(|| "read-only-recovery-banner-search".to_owned())
+        .flex_none()
+        .px(px(10.))
+        .py(px(5.))
+        .border_1()
+        .border_color(foreground)
+        .rounded(px(6.))
+        .bg(rgba(0x00000000))
+        .text_color(foreground)
+        .whitespace_nowrap()
+        .child(search_label);
+    let search = if search_enabled {
+        search
+            .tab_index(0)
+            .cursor_pointer()
+            .on_click(move |event, window, cx| on_search(event, window, cx))
+    } else {
+        search.opacity(0.55).cursor(CursorStyle::Arrow)
+    };
+
+    let export_label = if pending { EXPORTING } else { EXPORT_DATABASE };
+    let export_label = div()
+        .id("read-only-recovery-banner-export-label")
+        .debug_selector(|| "read-only-recovery-banner-export-label".to_owned())
+        .whitespace_nowrap()
+        .child(ui_text(export_label).normal_line_height());
+    let export = div()
+        .id("read-only-recovery-banner-export")
+        .debug_selector(|| "read-only-recovery-banner-export".to_owned())
+        .flex_none()
+        .px(px(10.))
+        .py(px(5.))
+        .border_1()
+        .border_color(foreground)
+        .rounded(px(6.))
+        .bg(rgba(0x00000000))
+        .text_color(foreground)
+        .whitespace_nowrap()
+        .child(export_label);
+    let export = if export_enabled && !pending {
+        export
+            .tab_index(0)
+            .cursor_pointer()
+            .on_click(move |event, window, cx| on_export(event, window, cx))
+    } else {
+        export.opacity(0.55).cursor(CursorStyle::Arrow)
+    };
+
+    let actions = div()
+        .id("read-only-recovery-banner-actions")
+        .debug_selector(|| "read-only-recovery-banner-actions".to_owned())
+        .flex_none()
+        .flex()
+        .flex_nowrap()
+        .items_center()
+        .justify_end()
+        .gap(px(10.))
+        .child(search)
+        .child(export);
+    let row = div()
+        .id("read-only-recovery-banner-row")
+        .debug_selector(|| "read-only-recovery-banner-row".to_owned())
+        .w_full()
+        .min_w_0()
+        .flex()
+        .items_center()
+        .gap_x(px(14.))
+        .child(message)
+        .child(actions);
+
+    let mut banner = div()
+        .id("read-only-recovery-banner")
+        .debug_selector(|| "read-only-recovery-banner".to_owned())
+        .w_full()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .gap(px(6.))
+        .px(px(14.))
+        .py(px(8.))
+        .border_b(px(1.))
+        .border_color(rgb(banner_border))
+        .bg(rgb(banner_background))
+        .text_color(foreground)
+        .child(row);
+
+    if let Some((text, error)) = read_only_feedback(feedback) {
+        let (id, selector, color) = if error {
+            (
+                "read-only-recovery-banner-error",
+                "read-only-recovery-banner-error",
+                Hsla::from(rgb(BANNER_ERROR_COLOR)).opacity(0.78),
+            )
+        } else {
+            (
+                "read-only-recovery-banner-feedback",
+                "read-only-recovery-banner-feedback",
+                foreground,
+            )
+        };
+        banner = banner.child(
+            div()
+                .id(id)
+                .debug_selector(move || selector.to_owned())
+                .w_full()
+                .min_w_0()
+                .text_size(px(12.))
+                .text_color(color)
+                .whitespace_normal()
+                .child(ui_text(text)),
+        );
+    }
+
+    banner
+}
+
+fn read_only_feedback(feedback: Option<Result<Option<&str>, &str>>) -> Option<(String, bool)> {
+    feedback.map(|result| match result {
+        Ok(Some(path)) => (format!("数据库资料已导出到 {path}"), false),
+        Ok(None) => (EXPORTED.to_owned(), false),
+        Err(reason) => (format!("{EXPORT_FAILED}{reason}"), true),
+    })
+}
+
+/// Mix two opaque `0xRRGGBB` colors in sRGB. `percent` is the weight of
+/// `tint`, matching CSS `color-mix(in srgb, …)`.
+fn mix_color(base: u32, tint: u32, percent: u32) -> u32 {
+    let tint_weight = percent.min(100);
+    let base_weight = 100 - tint_weight;
+    let channel = |shift: u32| {
+        let base = (base >> shift) & 0xff;
+        let tint = (tint >> shift) & 0xff;
+        (base * base_weight + tint * tint_weight + 50) / 100
+    };
+    (channel(16) << 16) | (channel(8) << 8) | channel(0)
 }
 
 /// The frozen page sorts by time descending, then ID descending, and keeps the

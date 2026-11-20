@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the existing K-storage-recovery inputs against a native protocol-2 child."""
+"""Run the existing K-storage-recovery inputs against a native protocol-3 child."""
 import importlib.util
 import json
 import os
@@ -33,8 +33,8 @@ class Runtime:
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
         )
         threading.Thread(target=self.read, daemon=True).start()
-        self.send({"Hello": {"version": 2}})
-        assert self.events.get(timeout=10) == {"Hello": {"version": 2}}
+        self.send({"Hello": {"version": 3}})
+        assert self.events.get(timeout=10) == {"Hello": {"version": 3}}
 
     def read(self):
         for line in self.process.stdout:
@@ -108,16 +108,21 @@ def verify(binary, stage):
         try:
             with Runtime(binary, data) as runtime:
                 event, result = runtime.event(
-                    "DatabaseRecoveryRequired", "StartupBlocked", "Diagnostic", "Ready",
+                    "DatabaseRecoveryRequired", "StartupBlocked", "Diagnostic", "Ready", "ReadOnlyReady",
                 )
                 if name.startswith("marker-"):
                     assert event == "Diagnostic" and "recovery marker is invalid" in result
                     assert runtime.event("Closed")[0] == "Closed"
                     assert runtime.process.wait(timeout=10) != 0
                     assert file_bytes(data) == before
-                elif name.startswith("read-only-"):
-                    kind = "ReadOnly" if name == "read-only-directory" else "Configuration"
-                    assert event == "StartupBlocked" and result["kind"] == kind, (event, result)
+                elif name == "read-only-directory":
+                    assert event == "ReadOnlyReady" and result["reason"] == "filesystem-read-only", (event, result)
+                    runtime.send({"Command": "Shutdown"})
+                    assert runtime.event("Closed")[0] == "Closed"
+                    assert runtime.process.wait(timeout=10) == 0
+                    assert file_bytes(data) == before
+                elif name == "read-only-damaged":
+                    assert event == "StartupBlocked" and result["kind"] == "Configuration", (event, result)
                     assert runtime.event("Closed")[0] == "Closed"
                     assert runtime.process.wait(timeout=10) != 0
                     assert file_bytes(data) == before
