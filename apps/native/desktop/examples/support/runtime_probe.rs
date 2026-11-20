@@ -26,6 +26,14 @@ impl ProbeReceiver {
             message: "probe read-only recovery".into(),
         });
     }
+    pub(super) fn database_recovery(&self, generation: u64, details: Arc<DatabaseRecoveryDetails>) {
+        let mut state = self.shared.state.lock().unwrap();
+        state.generation = generation;
+        state.phase = ConnectionPhase::DatabaseRecovery {
+            details,
+            pending: None,
+        };
+    }
 }
 pub(super) fn probe_channel() -> (RuntimeCommands, ProbeReceiver) {
     let (send, incoming) = mpsc::channel();

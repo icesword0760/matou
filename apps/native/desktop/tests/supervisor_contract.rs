@@ -330,3 +330,162 @@ fn deterministic_startup_blocks_without_loop_and_explicit_retry_rechecks() -> Re
     }
     Ok(())
 }
+
+#[test]
+fn recovery_request_is_retired_on_reconnect_and_requires_another_click() -> Result<()> {
+    use matou_native_desktop::runtime_bridge::DatabaseRecoveryAction;
+    use matou_native_runtime::host::{DATABASE_RECOVERY_INTERRUPTED, database_recovery_request_id};
+
+    let (root, options) = options()?;
+    fs::create_dir_all(&options.data_root)?;
+    let database = options.data_root.join("matou.sqlite");
+    let marker = options.data_root.join("matou.sqlite.recovery.json");
+    let recovery_id = "gate-generation";
+    sql(
+        &database,
+        "CREATE TABLE payload(value TEXT); INSERT INTO payload VALUES('test');",
+    )?;
+    let marker_bytes = serde_json::to_vec(&serde_json::json!({
+        "version": 1,
+        "state": "required",
+        "recoveryId": recovery_id,
+        "reason": "physical-corruption",
+        "durableDatabasePath": database,
+        "quarantinedPath": options.data_root.join("matou.sqlite.corrupt-123"),
+        "markerPath": marker,
+        "createdAt": 123,
+    }))?;
+    fs::write(&marker, &marker_bytes)?;
+    let mut bridge =
+        RuntimeBridge::start_with_binary(options.clone(), &support::runtime_binary()?)?;
+    let wait_recovery = |bridge: &RuntimeBridge, after| -> Result<u64> {
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            ensure!(Instant::now() < deadline, "missing recovery phase");
+            if let BridgeEvent::Connection {
+                generation,
+                phase: ConnectionPhase::DatabaseRecovery { details, pending },
+            } = next(bridge)?
+                && generation > after
+            {
+                ensure!(details.recovery_id == recovery_id && pending.is_none());
+                return Ok(generation);
+            }
+        }
+    };
+    let generation = wait_recovery(&bridge, 0)?;
+    ensure!(
+        bridge.commands.send_at(generation, Command::Refresh) == Err(SendError::StorageReadOnly)
+    );
+    let request = |request_id| Command::DatabaseRecovery {
+        request_id,
+        action: DatabaseRecoveryAction::RetryOpen {
+            expected_recovery_id: recovery_id.into(),
+        },
+    };
+    let signal = |kind: &str, pid: u32| -> Result<()> {
+        ensure!(
+            ProcessCommand::new("/bin/kill")
+                .arg(kind)
+                .arg(pid.to_string())
+                .status()?
+                .success()
+        );
+        Ok(())
+    };
+    let pid = bridge.runtime_pid();
+    signal("-STOP", pid)?;
+    let abandoned = database_recovery_request_id();
+    let admitted = bridge
+        .commands
+        .send_at(generation, request(abandoned.clone()));
+    let duplicate = bridge
+        .commands
+        .send_at(generation, request(database_recovery_request_id()));
+    signal("-KILL", pid)?;
+    admitted?;
+    ensure!(duplicate == Err(SendError::RecoveryBusy));
+    loop {
+        if let BridgeEvent::Runtime {
+            generation: ended,
+            event: Event::DatabaseRecoveryResult(result),
+        } = next(&bridge)?
+            && result.request_id == abandoned
+        {
+            ensure!(ended == generation);
+            ensure!(
+                result.error.context("interrupted error")?.message == DATABASE_RECOVERY_INTERRUPTED
+            );
+            break;
+        }
+    }
+    let next_generation = wait_recovery(&bridge, generation)?;
+    let successor = bridge.runtime_pid();
+    let old_operation = bridge
+        .commands
+        .send_at(generation, request(database_recovery_request_id()));
+    ensure!(matches!(
+        old_operation,
+        Err(SendError::WrongGeneration { .. })
+    ));
+    thread::sleep(Duration::from_millis(180));
+    ensure!(bridge.runtime_pid() == successor && successor != pid);
+    ensure!(matches!(
+        bridge.commands.connection().1,
+        ConnectionPhase::DatabaseRecovery { pending: None, .. }
+    ));
+    ensure!(fs::read(&marker)? == marker_bytes);
+    ensure!(
+        !options
+            .data_root
+            .join(format!("matou.sqlite.recovery.json.resolved-{recovery_id}"))
+            .exists()
+    );
+    ensure!(!options.data_root.join("matou.sqlite.owner").exists());
+    let new_request = database_recovery_request_id();
+    bridge
+        .commands
+        .send_at(next_generation, request(new_request.clone()))?;
+    ensure!(ready(&bridge)?.0 == next_generation && bridge.runtime_pid() == successor);
+    loop {
+        if let BridgeEvent::Runtime {
+            generation,
+            event: Event::DatabaseRecoveryResult(result),
+        } = next(&bridge)?
+            && result.request_id == new_request
+        {
+            ensure!(generation == next_generation && result.error.is_none());
+            break;
+        }
+    }
+    bridge.shutdown()?;
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn legacy_child_rejecting_hello_blocks_with_protocol_diagnostic() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let (root, options) = options()?;
+    let legacy = root.join("legacy-runtime");
+    fs::write(
+        &legacy,
+        "#!/bin/sh\nIFS= read -r hello\ncase \"$hello\" in *'\"version\":1'*) printf '%s\\n' '{\"Hello\":{\"version\":1}}';; *) exit 1;; esac\n",
+    )?;
+    fs::set_permissions(&legacy, fs::Permissions::from_mode(0o700))?;
+    let mut bridge = RuntimeBridge::start_with_binary(options.clone(), &legacy)?;
+    loop {
+        if let BridgeEvent::Connection {
+            phase: ConnectionPhase::Blocked(block),
+            ..
+        } = next(&bridge)?
+        {
+            ensure!(block.kind == StartupBlockKind::Protocol);
+            break;
+        }
+    }
+    ensure!(!options.data_root.exists());
+    bridge.shutdown()?;
+    fs::remove_dir_all(root)?;
+    Ok(())
+}

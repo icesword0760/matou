@@ -437,7 +437,7 @@ fn eof_truncation_invalid_json_palette_version_and_io_errors_remain_distinct() -
         check_version(VERSION + 1)
             .unwrap_err()
             .to_string()
-            .contains("version 2")
+            .contains(&format!("version {}", VERSION + 1))
     );
 
     let mut truncated = stream.clone();

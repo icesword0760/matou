@@ -32,6 +32,8 @@ use crate::{
 };
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use matou_native_core::{
+    backup::BackupReason,
+    database_recovery::{RECOVERY_ID_CHANGED, RecoveryActions},
     hierarchy::{
         self, BootstrapWindowInput, HierarchyIds, HierarchyResult, Scene, Task, Workspace,
         canvas::{
@@ -55,7 +57,7 @@ use matou_native_core::{
         read_claude_role_assignments, read_claude_role_launch_preferences,
         save_claude_role_assignments,
     },
-    startup::{self, BootstrapResult},
+    startup::{self, BootstrapResult, RecoveryError, RecoveryRequired},
     storage::{CommandMetadata, configure_connection},
     workspace_paths::WorkspacePathState,
 };
@@ -127,6 +129,11 @@ impl LaunchOptions {
 
 #[derive(Serialize, Deserialize)]
 pub enum Command {
+    DatabaseRecovery {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        action: DatabaseRecoveryAction,
+    },
     History(HistoryRequest),
     GetClaudeModelCatalog {
         request_id: u64,
@@ -399,9 +406,163 @@ pub struct StartupBlock {
     pub message: String,
 }
 
+pub const STORAGE_RECOVERY_WAITING: &str = "STORAGE_READ_ONLY: database is waiting for recovery";
+pub const DATABASE_RECOVERY_INTERRUPTED: &str = "数据库恢复操作未完成：Runtime 在恢复操作期间退出";
+pub const DATABASE_RECOVERY_NOT_PENDING: &str = "当前没有待处理的数据库恢复操作";
+pub const DATABASE_RECOVERY_BUSY: &str = "正在处理数据库恢复，请保持 Matou 开启…";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DatabaseRecoveryReason {
+    Ownership,
+    Wal,
+    Integrity,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DatabaseRecoveryBackup {
+    pub id: String,
+    pub created_at: i64,
+    pub schema_version: i64,
+    pub size: u64,
+    pub reason: BackupReason,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DatabaseRecoveryDetails {
+    pub recovery_id: String,
+    pub reason: DatabaseRecoveryReason,
+    pub durable_database_path: PathBuf,
+    pub quarantined_path: PathBuf,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ownership_issue: Option<String>,
+    pub backups: Vec<DatabaseRecoveryBackup>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<RecoveryError>,
+}
+
+impl From<&RecoveryRequired> for DatabaseRecoveryDetails {
+    fn from(recovery: &RecoveryRequired) -> Self {
+        Self {
+            recovery_id: recovery.recovery_id.clone(),
+            reason: match recovery.reason.as_str() {
+                "ownership-recovery-required" => DatabaseRecoveryReason::Ownership,
+                "wal-recovery-required" => DatabaseRecoveryReason::Wal,
+                _ => DatabaseRecoveryReason::Integrity,
+            },
+            durable_database_path: recovery.durable_database_path.clone(),
+            quarantined_path: recovery.quarantined_path.clone(),
+            ownership_issue: recovery.ownership_issue.clone(),
+            backups: recovery
+                .backups
+                .iter()
+                .map(|backup| DatabaseRecoveryBackup {
+                    id: backup.id.clone(),
+                    created_at: backup.created_at,
+                    schema_version: backup.schema_version,
+                    size: backup.size,
+                    reason: backup.reason,
+                    sha256: backup.sha256.clone(),
+                })
+                .collect(),
+            error: {
+                let errors = [
+                    &recovery.backup_list_error,
+                    &recovery.marker_error,
+                    &recovery.move_error,
+                ];
+                let mut errors = errors.into_iter().flatten();
+                errors.next().map(|first| {
+                    let mut error = first.clone();
+                    for next in errors {
+                        error.message.push('；');
+                        error.message.push_str(&next.message);
+                    }
+                    error
+                })
+            },
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "kebab-case",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum DatabaseRecoveryAction {
+    RestoreBackup {
+        backup_id: String,
+        #[serde(default)]
+        expected_recovery_id: String,
+    },
+    RetryOpen {
+        #[serde(default)]
+        expected_recovery_id: String,
+    },
+    StartEmptyDatabase {
+        #[serde(default)]
+        expected_recovery_id: String,
+    },
+    ExportRecoveryBundle,
+}
+
+impl DatabaseRecoveryAction {
+    pub fn expected_recovery_id(&self) -> Option<&str> {
+        match self {
+            Self::RetryOpen {
+                expected_recovery_id,
+            }
+            | Self::RestoreBackup {
+                expected_recovery_id,
+                ..
+            }
+            | Self::StartEmptyDatabase {
+                expected_recovery_id,
+            } => Some(expected_recovery_id),
+            Self::ExportRecoveryBundle => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DatabaseRecoveryResult {
+    pub request_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exported_path: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<RecoveryError>,
+}
+
+impl DatabaseRecoveryResult {
+    pub fn failed(request_id: String, code: &str, message: impl Into<String>) -> Self {
+        Self {
+            request_id,
+            exported_path: None,
+            error: Some(RecoveryError {
+                code: code.into(),
+                message: message.into(),
+                retryable: true,
+            }),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub enum Event {
     StartupBlocked(StartupBlock),
+    DatabaseRecoveryRequired(DatabaseRecoveryDetails),
+    DatabaseRecoveryResult(DatabaseRecoveryResult),
+    StorageCommandRejected {
+        request_id: Option<u64>,
+        message: String,
+    },
     History(HistoryReply),
     SearchResults {
         session_id: String,
@@ -686,20 +847,189 @@ const ACTIVE_PATH_INTERVAL: Duration = Duration::from_millis(400);
 const WORKSPACE_POLL_INTERVAL: Duration = Duration::from_secs(30);
 type WorkerOperation = (String, Receiver<Result<()>>, bool);
 
+pub fn database_recovery_request_id() -> String {
+    id()
+}
+
+fn recovery_result(
+    send: &async_channel::Sender<Event>,
+    result: DatabaseRecoveryResult,
+) -> Result<()> {
+    send.send_blocking(Event::DatabaseRecoveryResult(result))?;
+    Ok(())
+}
+
+fn reject_storage_command(command: Command, send: &async_channel::Sender<Event>) -> Result<()> {
+    if let Command::DatabaseRecovery { request_id, .. } = command {
+        return recovery_result(
+            send,
+            DatabaseRecoveryResult::failed(
+                request_id,
+                "RECOVERY_NOT_PENDING",
+                DATABASE_RECOVERY_NOT_PENDING,
+            ),
+        );
+    }
+    let request_id = match command {
+        Command::GetClaudeModelCatalog { request_id }
+        | Command::GetClaudeRoleAssignments { request_id }
+        | Command::SetClaudeRoleAssignments { request_id, .. }
+        | Command::GetProviderSettings { request_id }
+        | Command::SaveProvider { request_id, .. }
+        | Command::DeleteProvider { request_id, .. }
+        | Command::SetActiveProvider { request_id, .. }
+        | Command::ConfirmAntigravityRisk { request_id }
+        | Command::CopySelection { request_id, .. }
+        | Command::ScrollTo { request_id, .. } => Some(request_id),
+        Command::History(
+            HistoryRequest::Search { sequence, .. } | HistoryRequest::Context { sequence, .. },
+        )
+        | Command::PutGeometry { sequence, .. }
+        | Command::Applied { sequence, .. } => Some(sequence),
+        _ => None,
+    };
+    send.send_blocking(Event::StorageCommandRejected {
+        request_id,
+        message: STORAGE_RECOVERY_WAITING.into(),
+    })?;
+    Ok(())
+}
+
+type WritableDatabase = (
+    Connection,
+    matou_native_core::ownership::DatabaseOwner,
+    PathBuf,
+);
+
+fn await_database_recovery(
+    recovery: RecoveryRequired,
+    generation: &str,
+    incoming: &Receiver<Command>,
+    send: &async_channel::Sender<Event>,
+) -> Result<Option<(WritableDatabase, String)>> {
+    let details = DatabaseRecoveryDetails::from(&recovery);
+    send.send_blocking(Event::DatabaseRecoveryRequired(details.clone()))?;
+    thread::scope(|scope| {
+        type Attempt = (
+            RecoveryActions,
+            std::result::Result<
+                WritableDatabase,
+                matou_native_core::database_recovery::RecoveryActionError,
+            >,
+        );
+        let mut active: Option<(String, thread::ScopedJoinHandle<'_, Attempt>)> = None;
+        let mut actions = Some(RecoveryActions::default());
+        let mut closing = false;
+        loop {
+            if active
+                .as_ref()
+                .is_some_and(|(_, worker)| worker.is_finished())
+                || closing
+            {
+                let Some((request_id, worker)) = active.take() else {
+                    return Ok(None);
+                };
+                let (state, result) = worker
+                    .join()
+                    .map_err(|_| anyhow!("database recovery worker panicked"))?;
+                if closing {
+                    return Ok(None);
+                }
+                actions = Some(state);
+                match result {
+                    Ok(database) => return Ok(Some((database, request_id))),
+                    Err(error) => {
+                        send.send_blocking(Event::DatabaseRecoveryRequired(details.clone()))?;
+                        recovery_result(
+                            send,
+                            DatabaseRecoveryResult::failed(
+                                request_id,
+                                error.stage,
+                                format!("{:#}", error.cause),
+                            ),
+                        )?;
+                    }
+                }
+            }
+            let command = if active.is_some() {
+                incoming.recv_timeout(Duration::from_millis(10))
+            } else {
+                incoming
+                    .recv()
+                    .map_err(|_| mpsc::RecvTimeoutError::Disconnected)
+            };
+            match command {
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) | Ok(Command::Shutdown) => {
+                    closing = true;
+                }
+                Ok(Command::DatabaseRecovery { request_id, action }) => {
+                    let reject = if active.is_some() {
+                        Some(("RECOVERY_BUSY", DATABASE_RECOVERY_BUSY))
+                    } else if action
+                        .expected_recovery_id()
+                        .is_some_and(|id| id != recovery.recovery_id)
+                    {
+                        Some(("RECOVERY_ID_CHANGED", RECOVERY_ID_CHANGED))
+                    } else if !matches!(action, DatabaseRecoveryAction::RetryOpen { .. }) {
+                        Some(("RECOVERY_NOT_IMPLEMENTED", "此数据库恢复操作尚未实现"))
+                    } else {
+                        None
+                    };
+                    if let Some((code, message)) = reject {
+                        recovery_result(
+                            send,
+                            DatabaseRecoveryResult::failed(request_id, code, message),
+                        )?;
+                        continue;
+                    }
+                    let Ok(archive_id) = Uuid::parse_str(&request_id) else {
+                        recovery_result(
+                            send,
+                            DatabaseRecoveryResult::failed(
+                                request_id,
+                                "RECOVERY_REQUEST_ID_INVALID",
+                                "无效的数据库恢复请求编号",
+                            ),
+                        )?;
+                        continue;
+                    };
+                    let DatabaseRecoveryAction::RetryOpen {
+                        expected_recovery_id,
+                    } = action
+                    else {
+                        unreachable!()
+                    };
+                    let mut state = actions.take().expect("idle recovery state");
+                    let recovery = &recovery;
+                    let worker = thread::Builder::new()
+                        .name("matou-database-recovery".into())
+                        .spawn_scoped(scope, move || {
+                            let result = state.retry_open(
+                                recovery,
+                                generation,
+                                archive_id,
+                                &expected_recovery_id,
+                            );
+                            (state, result)
+                        })
+                        .context("start database recovery worker")?;
+                    active = Some((request_id, worker));
+                }
+                Ok(command) => reject_storage_command(command, send)?,
+            }
+        }
+    })
+}
+
 fn run(
     options: LaunchOptions,
     incoming: Receiver<Command>,
     send: &async_channel::Sender<Event>,
     shutdown_requested: &OnceLock<bool>,
 ) -> Result<()> {
-    let initialization = (|| -> Result<_> {
-        std::fs::create_dir_all(&options.workspace)?;
-        std::fs::create_dir_all(&options.shell_home)?;
-        let history = HistoryWorker::new(options.data_root.clone())?;
-        let generation = id();
-        Ok((history, startup::open(&options.data_root, &generation)?))
-    })();
-    let (history, bootstrap) = match initialization {
+    let generation = id();
+    let bootstrap = match startup::open(&options.data_root, &generation) {
         Ok(value) => value,
         Err(error) => {
             let kind = if error
@@ -729,12 +1059,12 @@ fn run(
             return Err(error);
         }
     };
-    let (mut connection, ownership, data_root) = match bootstrap {
+    let (database, mut recovery_request) = match bootstrap {
         BootstrapResult::Writable {
             connection,
             ownership,
             data_root,
-        } => (connection, ownership, data_root),
+        } => ((connection, ownership, data_root), None),
         BootstrapResult::ReadOnly { reason, .. } => {
             let message = format!("Native startup requires the recovery interface: {reason:?}");
             let _ = send.send_blocking(Event::StartupBlocked(StartupBlock {
@@ -744,18 +1074,53 @@ fn run(
             bail!(message)
         }
         BootstrapResult::RecoveryRequired(recovery) => {
-            let message = format!(
-                "Database recovery required: {} ({})",
-                recovery.reason,
-                recovery.durable_database_path.display()
-            );
-            let _ = send.send_blocking(Event::StartupBlocked(StartupBlock {
-                kind: StartupBlockKind::RecoveryRequired,
-                message: message.clone(),
-            }));
-            bail!(message)
+            let Some((database, request_id)) =
+                await_database_recovery(recovery, &generation, &incoming, send)?
+            else {
+                return Ok(());
+            };
+            (database, Some(request_id))
         }
     };
+    let result = run_writable(
+        options,
+        incoming,
+        send,
+        shutdown_requested,
+        database,
+        &mut recovery_request,
+    );
+    if let (Some(request_id), Err(error)) = (recovery_request, &result) {
+        recovery_result(
+            send,
+            DatabaseRecoveryResult::failed(
+                request_id,
+                "runtime-initialization",
+                format!("{error:#}"),
+            ),
+        )?;
+    }
+    result
+}
+
+fn run_writable(
+    options: LaunchOptions,
+    incoming: Receiver<Command>,
+    send: &async_channel::Sender<Event>,
+    shutdown_requested: &OnceLock<bool>,
+    (mut connection, ownership, data_root): WritableDatabase,
+    recovery_request: &mut Option<String>,
+) -> Result<()> {
+    for path in [&options.workspace, &options.shell_home] {
+        if let Err(error) = std::fs::create_dir_all(path) {
+            send.send_blocking(Event::StartupBlocked(StartupBlock {
+                kind: StartupBlockKind::Configuration,
+                message: error.to_string(),
+            }))?;
+            return Err(error.into());
+        }
+    }
+    let history = HistoryWorker::new(data_root.clone())?;
     let window_id = "main-window-1";
     let input = BootstrapWindowInput {
         window_id: window_id.into(),
@@ -866,7 +1231,7 @@ fn run(
         .transpose()?
         .unwrap_or_default();
     send_sidebar(&owner, window_id, send)?;
-    send.send_blocking(Event::Ready {
+    let ready_event = Event::Ready {
         hierarchy,
         scenes,
         graph,
@@ -875,13 +1240,7 @@ fn run(
             .map(|id| owner.geometry(id))
             .transpose()?
             .unwrap_or_default(),
-    })?;
-    for session_id in &startup_deferred {
-        send.send_blocking(Event::Recovery {
-            session_id: session_id.clone(),
-            state: RecoveryState::Deferred,
-        })?;
-    }
+    };
     let mut dirty = HashSet::<String>::new();
     let mut sequence = HashMap::<String, u64>::new();
     let mut views = HashMap::<String, PendingView>::new();
@@ -962,6 +1321,41 @@ fn run(
     let mut catalog_details = Vec::new();
     let mut catalog_load_errors = Vec::new();
     let mut tasks_dirty = false;
+    if recovery_request.is_some() {
+        // Reject commands already on the wire during the recovered bootstrap.
+        // Neither a second action nor ordinary writes join the new workspace.
+        for command in incoming.try_iter() {
+            match command {
+                Command::Shutdown => return Ok(()),
+                Command::DatabaseRecovery { request_id, .. } => recovery_result(
+                    send,
+                    DatabaseRecoveryResult::failed(
+                        request_id,
+                        "RECOVERY_BUSY",
+                        DATABASE_RECOVERY_BUSY,
+                    ),
+                )?,
+                command => reject_storage_command(command, send)?,
+            }
+        }
+    }
+    send.send_blocking(ready_event)?;
+    if let Some(request_id) = recovery_request.take() {
+        recovery_result(
+            send,
+            DatabaseRecoveryResult {
+                request_id,
+                exported_path: None,
+                error: None,
+            },
+        )?;
+    }
+    for session_id in &startup_deferred {
+        send.send_blocking(Event::Recovery {
+            session_id: session_id.clone(),
+            state: RecoveryState::Deferred,
+        })?;
+    }
     let clean_exit = 'running: loop {
         let now = Instant::now();
         if now >= next_active_check {
@@ -1692,6 +2086,10 @@ fn run(
             }
             let (reply, result) = mpsc::channel();
             let (session_id, request, refresh) = match command {
+                Command::DatabaseRecovery { .. } => {
+                    reject_storage_command(command, send)?;
+                    continue;
+                }
                 Command::GetClaudeModelCatalog { request_id } => {
                     if model_catalog_worker.is_err()
                         || model_catalog_requests.send(request_id).is_err()
