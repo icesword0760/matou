@@ -979,3 +979,9 @@ impl Render for HistoryView {
         )
     }
 }
+
+// The contract runner enables GPUI's test platform without changing desktop dependencies.
+#[allow(unexpected_cfgs)]
+#[cfg(all(test, matou_history_selection_gate))]
+#[path = "../../../../artifacts/native-parity/native/evidence/porting-map-01/gates/K-history-selection/capture_native.rs"]
+mod history_selection_gate;
