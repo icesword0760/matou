@@ -288,3 +288,134 @@ fn restoration_text_matches_frozen_crlf_and_divider() -> Result<()> {
     );
     Ok(())
 }
+
+#[derive(Deserialize)]
+struct GateInput {
+    seed: Vec<String>,
+    cases: Vec<GateCase>,
+}
+
+#[derive(Deserialize)]
+struct GateCase {
+    name: String,
+    operations: Vec<GateOperation>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "op", rename_all = "kebab-case", rename_all_fields = "camelCase")]
+enum GateOperation {
+    Ingest {
+        parts: Vec<Part>,
+        now: i64,
+    },
+    Insert {
+        block: CollectedShellBlock,
+        session_id: String,
+    },
+    List {
+        session_id: String,
+    },
+    Launch {
+        session_id: String,
+        enabled: bool,
+    },
+    Purge {
+        session_id: String,
+    },
+    Reopen,
+}
+
+fn capture_insert(
+    db: &mut Connection,
+    writes: &mut usize,
+    session_id: &str,
+    block: CollectedShellBlock,
+) -> Result<serde_json::Value> {
+    use serde_json::json;
+
+    *writes += 1;
+    match complete(
+        db,
+        &format!("row-{writes}"),
+        session_id,
+        "/tmp/workspace",
+        block,
+    ) {
+        Ok(row) => Ok(json!({ "row": row, "error": null })),
+        Err(error) => {
+            let Some(rusqlite::Error::SqliteFailure(code, _)) = error.downcast_ref() else {
+                return Err(error);
+            };
+            Ok(json!({
+                "row": null,
+                "error": { "sqliteCode": code.extended_code, "message": error.to_string() }
+            }))
+        }
+    }
+}
+
+#[test]
+#[ignore = "capture runner invoked by the K-shell-history gate"]
+fn capture_shell_history_gate() -> Result<()> {
+    use serde_json::json;
+    use std::{env, fs, path::PathBuf};
+
+    let input: GateInput =
+        serde_json::from_slice(&fs::read(env::var("MATOU_SHELL_HISTORY_INPUT")?)?)?;
+    let output = PathBuf::from(env::var("MATOU_SHELL_HISTORY_OUTPUT")?);
+    let stage = output.parent().context("capture output directory")?;
+    let mut cases = Vec::new();
+    for (index, case) in input.cases.into_iter().enumerate() {
+        let path = stage.join(format!("native-{index}.sqlite"));
+        let mut db = open_migrated(&path)?;
+        for sql in &input.seed {
+            db.execute(sql, [])?;
+        }
+        let mut collector = Collector::new();
+        let mut writes = 0;
+        let mut steps = Vec::new();
+        for operation in case.operations {
+            let result = match operation {
+                GateOperation::Ingest { parts, now } => {
+                    let completed = collector.ingest(&expand(&parts), now);
+                    let saved = completed
+                        .iter()
+                        .cloned()
+                        .map(|block| capture_insert(&mut db, &mut writes, "s", block))
+                        .collect::<Result<Vec<_>>>()?;
+                    json!({ "completed": completed, "writes": saved })
+                }
+                GateOperation::Insert { block, session_id } => {
+                    capture_insert(&mut db, &mut writes, &session_id, block)?
+                }
+                GateOperation::List { session_id } => json!(list(&db, &session_id)?),
+                GateOperation::Launch {
+                    session_id,
+                    enabled,
+                } => {
+                    let rows = list_for_launch(&db, &session_id, enabled)?;
+                    let payload =
+                        format_shell_history_for_terminal(&rows, "──────── 会话已恢复 ────────");
+                    json!({ "rows": rows, "payload": payload })
+                }
+                GateOperation::Purge { session_id } => {
+                    purge(&db, &session_id)?;
+                    json!(null)
+                }
+                GateOperation::Reopen => {
+                    db.close().map_err(|(_, error)| error)?;
+                    db = open_migrated(&path)?;
+                    collector = Collector::new();
+                    json!(null)
+                }
+            };
+            steps.push(result);
+        }
+        cases.push(json!({ "name": case.name, "steps": steps }));
+    }
+    fs::write(
+        output,
+        serde_json::to_string_pretty(&json!({ "cases": cases }))? + "\n",
+    )?;
+    Ok(())
+}
