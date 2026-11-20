@@ -1,4 +1,4 @@
-use matou_native_desktop::carousel_motion::{Curve, Transition};
+use matou_native_desktop::carousel_motion::{CardWidth, CarouselLayout, Curve, Transition};
 use serde_json::Value;
 
 #[test]
@@ -42,6 +42,65 @@ fn transitions_match_the_frozen_css_browser_samples() {
             elapsed += samples.last().unwrap()["ms"].as_f64().unwrap();
         }
     }
+}
+
+#[test]
+fn edge_confirmation_retargets_width_in_the_same_frame() {
+    let result = capture_case(&serde_json::json!({
+        "name": "confirm-right-edge",
+        "viewport": 1000,
+        "focus": 0,
+        "count": 3,
+        "steps": [
+            {"ms": 0, "event": "baseline"},
+            {"ms": 16, "event": "edge-right"}
+        ],
+        "frames": [0, 16, 195, 196, 197, 576]
+    }));
+    let frames = result["frames"].as_array().unwrap();
+    let before = &frames[2];
+    let confirmed = &frames[3];
+    let next = &frames[4];
+    assert_eq!(before["edge"], "confirming");
+    assert_eq!(confirmed["edge"], "cruising");
+    assert_eq!(confirmed["hover"], 2);
+    assert_eq!(confirmed["cards"][2]["targetWidth"], 470.4);
+    assert_eq!(confirmed["cards"][2]["width"], before["cards"][2]["width"]);
+    assert!(next["cards"][2]["width"].as_f64().unwrap() > 319.);
+    assert_eq!(
+        frames[5]["cards"][2]["width"],
+        frames[0]["cards"][0]["width"]
+    );
+}
+
+#[test]
+fn resize_animates_rule_changes_and_resolves_unchanged_rules_immediately() {
+    let wide = CarouselLayout::for_viewport(1000.);
+    let fewer_columns = CarouselLayout::for_viewport(760.);
+    let mut inactive = CardWidth::new(wide.width_rule(false, false));
+    let mut active = CardWidth::new(wide.width_rule(true, false));
+
+    active.retarget(fewer_columns.width_rule(true, false), 16., 380.);
+    assert_eq!(active.value(760., 16.), 355.2);
+    assert!(!active.is_running(16.));
+
+    inactive.retarget(fewer_columns.width_rule(false, false), 16., 380.);
+    assert!((inactive.value(760., 16.) - 238.6640625).abs() < 0.0078125);
+    assert!((inactive.value(760., 32.) - 260.0078125).abs() < 0.0078125);
+    assert_eq!(inactive.value(760., 396.), 364.);
+
+    let narrow = CarouselLayout::for_viewport(680.);
+    inactive.retarget(narrow.width_rule(false, false), 416., 380.);
+    assert_eq!(inactive.value(680., 416.), 324.);
+    assert_eq!(inactive.value(680., 796.), 176.);
+
+    let wider = CarouselLayout::for_viewport(1500.);
+    inactive.retarget(wider.width_rule(false, false), 816., 380.);
+    assert_eq!(inactive.value(1500., 816.), 176.);
+    assert!((inactive.value(1500., 832.) - 207.5).abs() < 0.0078125);
+    inactive.retarget(wider.width_rule(false, false), 832., 380.);
+    assert!(inactive.value(1540., 832.) > inactive.value(1500., 832.));
+    assert_eq!(inactive.value(1500., 1196.), 361.);
 }
 
 #[test]
@@ -108,10 +167,13 @@ fn capture_case(case: &Value) -> Value {
     let mut edge_target = -1;
     let mut geometry = Vec::<(f64, f64)>::new();
     let count = case["count"].as_u64().unwrap() as i64;
+    let initial_layout = CarouselLayout::for_viewport(viewport);
     let mut transitions: Vec<_> = (0..count)
         .map(|id| {
-            let selected = if id == focus { 1. } else { 0. };
-            (Transition::new(selected), Transition::new(selected))
+            (
+                CardWidth::new(initial_layout.width_rule(id == focus, false)),
+                Transition::new(if id == focus { 1. } else { 0. }),
+            )
         })
         .collect();
     let mut steps = case["steps"].as_array().unwrap().iter().peekable();
@@ -148,21 +210,14 @@ fn capture_case(case: &Value) -> Value {
                 }
             }
 
-            // Workspace::render receives carousel viewport width after the
-            // 260px sidebar. Only the private target/layout input is projected.
-            let content_width = viewport - 20.;
-            let columns = (((viewport + 12.) / 292.).floor()).clamp(1., 4.);
-            let narrow = viewport < 720.;
-            let base = if narrow {
-                (content_width * 0.28).clamp(112., 176.)
-            } else {
-                (content_width - (columns - 1.) * 12.) / columns
-            };
-            let expanded = if narrow {
-                (content_width * 0.68).clamp(260., 560.)
-            } else {
-                (content_width * 0.48).min(620.)
-            };
+            // Workspace confirms an edge preview before rebuilding geometry.
+            if edge_deadline.is_some_and(|deadline| ms >= deadline) {
+                hover = edge_target;
+                edge = "cruising";
+                edge_deadline = None;
+            }
+            let layout = CarouselLayout::for_viewport(viewport);
+            let base = layout.width_rule(false, false).width(viewport);
 
             let mut left = 10.;
             geometry.clear();
@@ -170,20 +225,16 @@ fn capture_case(case: &Value) -> Value {
                 .zip(&mut transitions)
                 .map(|(id, (width, lift))| {
                     let selected = if id == focus { 1. } else { 0. };
-                    let target = if id == focus || (!narrow && id == hover) {
-                        1.
-                    } else {
-                        0.
-                    };
-                    width.retarget(target, ms, 380., Curve::Width);
+                    let rule = layout.width_rule(id == focus, id == hover);
+                    width.retarget(rule, ms, 380.);
                     lift.retarget(selected, ms, 180., Curve::Lift);
-                    let rendered_width = base + (expanded - base) * width.value(ms);
+                    let rendered_width = width.value(viewport, ms);
                     geometry.push((left, rendered_width));
                     left += rendered_width + 12.;
                     let mut card = json!({
                         "width": f64::from(rendered_width as f32),
                         "lift": f64::from(-4. * lift.value(ms) as f32),
-                        "targetWidth": base + (expanded - base) * target,
+                        "targetWidth": width.target_rule().width(viewport),
                         "targetLift": -4. * selected,
                     });
                     if id + 1 < count {
@@ -192,15 +243,8 @@ fn capture_case(case: &Value) -> Value {
                     card
                 })
                 .collect();
-            // The Workspace render checks its edge deadline after computing
-            // this frame's card widths. The hover will retarget on the next frame.
-            if edge_deadline.is_some_and(|deadline| ms >= deadline) {
-                hover = edge_target;
-                edge = "cruising";
-                edge_deadline = None;
-            }
             json!({
-                "ms": ms, "viewport": viewport, "columns": columns, "narrow": narrow, "baseWidth": base,
+                "ms": ms, "viewport": viewport, "columns": layout.columns, "narrow": layout.narrow, "baseWidth": base,
                 "focus": focus, "hover": hover, "edge": edge, "cards": cards,
             })
         })

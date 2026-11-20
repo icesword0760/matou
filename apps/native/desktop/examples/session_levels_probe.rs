@@ -760,7 +760,11 @@ mod workspace {
 
         pub(super) fn assert_visual_focus(&self, id: &str) {
             assert_eq!(self.level_focus(), Some(id));
-            assert_eq!(self.card_motion[id].width.value(f64::INFINITY), 1.);
+            assert!(matches!(
+                self.card_motion[id].width.as_ref().unwrap().target_rule(),
+                crate::carousel_motion::WidthRule::WideExpanded
+                    | crate::carousel_motion::WidthRule::NarrowExpanded
+            ));
         }
 
         pub(super) fn assert_live_card(&self, id: &str, has_children: bool, cx: &Context<Self>) {
