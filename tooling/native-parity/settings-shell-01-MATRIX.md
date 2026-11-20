@@ -23,7 +23,10 @@
 
 ## MATRIX 待补项
 
-- **内容待后续关卡**。语言与时区的正文。Claude Code 下方的模型分配、对话压缩模型和派活也未接入。
+- **内容待后续关卡**。语言与时区的正文。Claude Code 下方的对话压缩模型和派活也未接入。
+- 网页搜索行随网关第 3 阶段一起补。冻结默认文案为「未指定（按档位供应商处理）」。原生搜索路由就绪后，控件才能实际改变请求去向。
+- 模型目录探测待专门关卡。冻结的 [nativeClaudeModels()](../../apps/runtime/src/session/native-model-catalog.ts) 离线启动 CLI，读取 `initialize.models`，再逐档读取上下文窗口和推理强度。原生当前只接收已保存的目录和映射，目录错误的「重试」重新读取设置快照。
+- 订阅供应商分配随网关第 4 阶段与订阅服务一起补。历史订阅分配保留原 ID，并显示冻结账号错误。
 - 模型发现与刷新、删除、订阅账号相关交互、上下文窗口编辑。
 - 切换说明正文待能力落地后补。原生在供应商列表下方保留加粗的「切换会影响所有 码头 窗口。」。冻结正文为「所有 Claude Code 会话跟随全局供应商；暂缓会话就绪后自动切换，旧会话再次打开时也会应用，历史保留。上下文窗口可在「编辑」中设置。」待暂缓会话自动切换、旧会话重开生效和上下文窗口编辑落地后补齐。[hierarchyShell.ts:188–190，正文续行 191](../../apps/desktop/src/renderer/src/i18n/messages/hierarchyShell.ts#L188-L191)
 - 缺「默认窗口」徽标，随上下文窗口能力一起补。参考实窗在活动卡名称「Anthropic 官方」右侧、「使用中」之后；原生同一名称行止于「使用中」。[参考实窗](output/settings-shell-01/screenshots/reference-settings.png) · [描边复测实窗](output/settings-shell-01/border/screenshots/settings-final.png) · [context-window-ui.tsx:69、93](../../apps/desktop/src/renderer/src/hierarchy/context-window-ui.tsx#L69) · [provider-setup.css:159](../../apps/desktop/src/renderer/src/hierarchy/provider-setup.css#L159)
@@ -85,3 +88,26 @@
 - 新增选择页只含 API，官方及订阅账号入口与筛选待后续。订阅卡从快照展示资料与状态，本轮实窗没有订阅夹具。角色模型可手填，未接已存模型选择下拉。原有模型信息参与强度限制。Key 一直遮蔽，省略明文切换与获取 Key 链接。
 - 原生为右工作区遮罩，弹窗开启时左侧工作区栏仍可滚动和点击。参考底层的模糊、字体栅格、部分字距和字号未完全复现。输入正文使用现有 12 点原生输入，参考为 14 点。实窗未量动画时间和断点，深色未验。
 - 编辑真实窗口曾出现一次未保存确认，选择「继续编辑」后成功保存，未确认首次触发原因。
+
+## 三档模型分配 · G-assignment-ui
+
+从原生设置页 `08053ba5` 继续，按 [冻结组件](../../apps/desktop/src/renderer/src/hierarchy/ClaudeRoleAssignments.tsx)、[校验规则](../../apps/desktop/src/renderer/src/hierarchy/claude-role-assignment-options.ts) 和 [冻结说明](../../artifacts/native-parity/native/evidence/assignment-ui-01/ui.md) 接入现有供应商快照与分配命令。macOS 原生使用独立测试应用、隔离 SQLite 和两个 `.invalid` API 配置。冻结 Electron `924de28d` 使用同组虚构供应商。
+
+| 场景 | 冻结参考证据 | 原生结果与证据 |
+| --- | --- | --- |
+| 两家供应商、三档默认 | Opus、Sonnet、Haiku 显示到默认供应商的「最终」目标，模型和强度禁用。 [参考默认态](output/assignment-ui-01/screenshots/reference-default.png) | 三行分别显示「最终：隔离默认供应商 · 测试 Opus／Sonnet／Haiku」，模型和强度禁用，保存禁用。 [原生默认态](output/assignment-ui-01/screenshots/native-default.png) · [初始存储](output/assignment-ui-01/default-readback.json) |
+| 指派供应商、模型与强度 | Opus 选隔离备用供应商、备用 Opus、高，另外两档仍继承。 [参考选中态](output/assignment-ui-01/screenshots/reference-selected.png) | 显示「当前目标：隔离备用供应商 · 备用 Opus · 高」，保存可点。 [原生选中态](output/assignment-ui-01/screenshots/native-selected.png) |
+| 下拉键盘操作 | 参考真实窗口可用方向键和回车选择强度。 | 原生实窗打开 Opus 供应商菜单，按两次方向下键移动高亮，回车选中备用供应商。隐藏 GPUI 探针也用真实按键事件完成同一路径。 [高亮](output/assignment-ui-01/screenshots/native-menu.png) · [回车结果](output/assignment-ui-01/screenshots/native-keyboard-selected.png) |
+| 保存、回执、重开 | 按钮旁绿字「模型分配已保存，新会话将使用此配置」。 [参考保存](output/assignment-ui-01/screenshots/reference-saved.png) | 实窗显示同文案，保存变灰。重开设置仍显示 Opus 分配。SQLite 只存 `opus`，值为备用供应商、`fixture-target-opus`、`high`。 [保存](output/assignment-ui-01/screenshots/native-saved.png) · [重开](output/assignment-ui-01/screenshots/native-reopened.png) · [存储](output/assignment-ui-01/saved-readback.json) |
+| 恢复默认 | 冻结实现先清草稿，再提交。 | 点击后立即回到三个「最终」目标，再点保存后 SQLite 分配值为 `{}`。 [恢复](output/assignment-ui-01/screenshots/native-restored.png) · [存储](output/assignment-ui-01/restored-readback.json) |
+| 无 Key | 冻结 `key` 校验先于模型判断。 | Opus 选择无 Key 的备用供应商即显示「API Key 未配置，请先编辑供应商。」，保存禁用，隔离 SQLite 无分配记录。 [原生错误](output/assignment-ui-01/screenshots/native-no-key.png) · [存储](output/assignment-ui-01/no-key-readback.json) |
+| 回包和失效值 | 草稿不同且全部行合法时提交，成功采用规范化回包，失败保留草稿。 | 隐藏 GPUI 探针验证忽略旧回包、保存中、请求只含显式目标、失败保留草稿、成功同步、恢复提交空分配和历史订阅值保留。单测覆盖手填、ID 长度和控制字符、目录成员、强度和官方目录缺失。 [探针](../../apps/native/desktop/examples/settings_shell_probe.rs) |
+| 新会话读取 | 分配应用于新会话。 | 原生进程用例验证新会话读取已存的 Opus 模型、供应商和强度。隔离真实窗口使用虚构地址，未发送模型请求。 |
+
+截图和脱敏存储读取均在 [本关证据目录](output/assignment-ui-01/)。[隔离脚本](probe-assignment-ui.py) 可重建数据夹具并读取 SQLite。窗口逻辑尺寸为 1200 × 780，截图含不同阴影边距。供应商／模型列在原生等宽，冻结比为 1.05／1。下拉使用原生设置页已有色阶和焦点样式，选单的外观与参考浏览器控件有差异。原生错误态使用整行浅红、下拉红边和提示，逐控件浅红底仍有差异。
+
+全区像素差、Windows、窄窗、主题、辅助功能和真实终端负载下的动画与响应未测。读取重试、手填、历史失效项和保存失败由探针或单测覆盖。实窗证据覆盖上表明确列出的场景。
+
+首轮截图发现下拉边线误读了灰色令牌的透明度。修正后，Opus 供应商控件顶边原始 RGB 由 `78,88,47` 回到与冻结实窗相同的 `225,226,228`，两者描边均为 2 个设备像素，高度均为 68 个设备像素（34 逻辑点）。这一读数取自中间直边，包含各自 PNG 的阴影边距。 [逐点读数](output/assignment-ui-01/window-readings.json) · [修正前](output/assignment-ui-01/native-default-before-border.png)
+
+桌面验证基线为 `f282956b`，使用独立源码副本加本关桌面文件构建。35 项桌面测试、隐藏 GPUI 探针和两项既有原生进程用例通过。Rust 格式、项目标识符和 Git 空白检查通过。
