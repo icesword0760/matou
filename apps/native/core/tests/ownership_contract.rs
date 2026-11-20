@@ -286,3 +286,241 @@ fn normalized(record: Option<OwnerRecord>) -> Value {
         "runtimeGeneration": record.runtime_generation,
     }))
 }
+
+#[cfg(unix)]
+mod gate {
+    use super::*;
+    use matou_native_core::ownership::assert_no_live_owner;
+    use serde::Deserialize;
+    use std::{collections::BTreeMap, env, os::unix::fs::PermissionsExt};
+
+    #[derive(Deserialize)]
+    struct Case {
+        id: String,
+        #[serde(default)]
+        seed: Vec<FixtureFile>,
+        steps: Vec<Step>,
+    }
+
+    #[derive(Deserialize)]
+    struct FixtureFile {
+        path: PathBuf,
+        text: String,
+        mode: String,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(tag = "op", rename_all = "kebab-case")]
+    enum Step {
+        File(FixtureFile),
+        Chmod {
+            mode: String,
+        },
+        Acquire {
+            lease: String,
+            generation: String,
+            db: Option<String>,
+        },
+        Release {
+            lease: String,
+        },
+        Guard {
+            db: Option<String>,
+        },
+    }
+
+    struct Pids {
+        live: u64,
+        exited: u64,
+    }
+
+    impl Pids {
+        fn values(&self) -> [(u64, &'static str); 3] {
+            [
+                (u64::from(std::process::id()), "@self@"),
+                (self.live, "@live@"),
+                (self.exited, "@exited@"),
+            ]
+        }
+
+        fn token(&self, pid: u64) -> Option<&'static str> {
+            self.values()
+                .into_iter()
+                .find_map(|(value, token)| (pid == value).then_some(token))
+        }
+
+        fn raw(&self, text: &str) -> String {
+            if let Some((prefix, tail)) = text.split_once("\"pid\":") {
+                let end = tail.bytes().take_while(u8::is_ascii_digit).count();
+                if let Some(token) = tail[..end].parse().ok().and_then(|pid| self.token(pid)) {
+                    return format!("{prefix}\"pid\":{token}{}", &tail[end..]);
+                }
+            }
+            text.to_owned()
+        }
+    }
+
+    #[test]
+    #[ignore = "run with K-storage-owner/run.sh"]
+    fn replay_fixed_owner_inputs() -> Result<()> {
+        let input = env::var("MATOU_OWNER_INPUT")?;
+        let root = PathBuf::from(env::var_os("MATOU_OWNER_ROOT").context("gate root")?);
+        let directory = root.canonicalize()?;
+        let pids = Pids {
+            live: env::var("MATOU_OWNER_LIVE_PID")?.parse()?,
+            exited: env::var("MATOU_OWNER_EXITED_PID")?.parse()?,
+        };
+        let cases: Vec<Case> = serde_json::from_slice(&fs::read(input)?)?;
+        let results = cases
+            .into_iter()
+            .map(|case| replay(case, &directory, &pids))
+            .collect::<Result<Vec<_>>>()?;
+        fs::write(
+            env::var_os("MATOU_OWNER_OUTPUT").context("gate output")?,
+            serde_json::to_string_pretty(&results)? + "\n",
+        )?;
+        Ok(())
+    }
+
+    fn replay(case: Case, root: &Path, pids: &Pids) -> Result<Value> {
+        let directory = root.join(&case.id);
+        fs::create_dir(&directory)?;
+        for file in case.seed {
+            write_fixture(&directory, file, pids)?;
+        }
+        let initial = snapshot(&directory, pids)?;
+        let mut steps = Vec::new();
+        let mut leases = BTreeMap::new();
+        for step in case.steps {
+            let (op, owner, outcome) = match step {
+                Step::File(file) => {
+                    write_fixture(&directory, file, pids)?;
+                    ("file", None, Ok(()))
+                }
+                Step::Chmod { mode } => {
+                    chmod(&directory, &mode)?;
+                    ("chmod", None, Ok(()))
+                }
+                Step::Acquire {
+                    lease,
+                    generation,
+                    db,
+                } => {
+                    let (database, owner) = paths(&directory, db);
+                    let result = DatabaseOwner::acquire(&database, &generation).map(|handle| {
+                        leases.insert(lease, (owner.clone(), handle));
+                    });
+                    ("acquire", Some(owner), result)
+                }
+                Step::Release { lease } => {
+                    let (owner, handle) =
+                        leases.get_mut(&lease).context("unknown fixture lease")?;
+                    ("release", Some(owner.clone()), handle.release())
+                }
+                Step::Guard { db } => {
+                    let (database, owner) = paths(&directory, db);
+                    ("guard", Some(owner), assert_no_live_owner(&database))
+                }
+            };
+            let mut observation = snapshot(&directory, pids)?;
+            observation["op"] = json!(op);
+            match outcome {
+                Ok(()) => observation["status"] = json!("ok"),
+                Err(error) => {
+                    let display = |text: &str| text.replace(directory.to_str().unwrap(), "<root>");
+                    let recovery = error.downcast_ref::<OwnerRecoveryError>();
+                    observation["status"] = json!("error");
+                    observation["message"] = json!(display(&error.to_string()));
+                    observation["code"] = json!(recovery.map(|error| error.code));
+                    observation["issue"] = json!(recovery.map(|error| error.issue));
+                    observation["statePath"] =
+                        json!(recovery.map(|error| display(&error.state_path.to_string_lossy())));
+                }
+            }
+            observation["record"] = json!(
+                owner
+                    .as_deref()
+                    .and_then(read_database_owner)
+                    .map(|record| json!({
+                        "pid": pids.token(record.pid).map_or_else(|| json!(record.pid), |token| json!(token.trim_matches('@'))),
+                        "runtimeGeneration": record.runtime_generation
+                    }))
+            );
+            steps.push(observation);
+        }
+        drop(leases);
+        Ok(json!({
+            "id": case.id, "initial": initial, "steps": steps, "afterHandlesDropped": snapshot(&directory, pids)?
+        }))
+    }
+
+    fn paths(directory: &Path, db: Option<String>) -> (PathBuf, PathBuf) {
+        let filename = db.as_deref().unwrap_or("matou.sqlite");
+        (
+            directory.join(filename),
+            directory.join(format!("{filename}.owner")),
+        )
+    }
+
+    fn write_fixture(directory: &Path, file: FixtureFile, pids: &Pids) -> Result<()> {
+        let path = directory.join(file.path);
+        fs::create_dir_all(path.parent().context("fixture parent")?)?;
+        let mut text = file.text;
+        for (pid, token) in pids.values() {
+            text = text.replace(token, &pid.to_string());
+        }
+        fs::write(&path, text)?;
+        chmod(&path, &file.mode)
+    }
+
+    fn chmod(path: &Path, mode: &str) -> Result<()> {
+        fs::set_permissions(
+            path,
+            fs::Permissions::from_mode(u32::from_str_radix(mode, 8)?),
+        )?;
+        Ok(())
+    }
+
+    fn mode(metadata: &fs::Metadata) -> String {
+        format!("{:04o}", metadata.permissions().mode() & 0o777)
+    }
+
+    fn snapshot(directory: &Path, pids: &Pids) -> Result<Value> {
+        let mut files = BTreeMap::new();
+        snapshot_entries(directory, directory, pids, &mut files)?;
+        Ok(json!({"directoryMode": mode(&fs::metadata(directory)?), "files": files}))
+    }
+
+    fn snapshot_entries(
+        root: &Path,
+        directory: &Path,
+        pids: &Pids,
+        files: &mut BTreeMap<String, Value>,
+    ) -> Result<()> {
+        for entry in fs::read_dir(directory)? {
+            let entry = entry?;
+            let path = entry.path();
+            let relative = path.strip_prefix(root)?.to_string_lossy().into_owned();
+            let metadata = entry.metadata()?;
+            let mode = mode(&metadata);
+            let state = if metadata.is_dir() {
+                snapshot_entries(root, &path, pids, files)?;
+                json!({"kind": "directory", "mode": mode})
+            } else {
+                match String::from_utf8(fs::read(&path)?) {
+                    Ok(text) => json!({"kind": "file", "mode": mode, "text": pids.raw(&text)}),
+                    Err(error) => {
+                        let hex: String = error
+                            .as_bytes()
+                            .iter()
+                            .map(|byte| format!("{byte:02x}"))
+                            .collect();
+                        json!({"kind": "file", "mode": mode, "hex": hex})
+                    }
+                }
+            };
+            files.insert(relative, state);
+        }
+        Ok(())
+    }
+}
