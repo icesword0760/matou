@@ -28,6 +28,7 @@ use crate::{
     claude_request_gateway::Gateway,
     codex_events,
     codex_launch::CodexLaunch,
+    codex_resume::{self, Resume as CodexResume},
     derived::{CwdTracker, WorkStatusTracker, terminal_summary_lines, utf16_tail},
     host_control::{RunControl, clear_control_environment},
     provider_hook::{
@@ -72,6 +73,7 @@ impl RunningShell {
 struct RunHook {
     _registration: Registration,
     codex: Option<codex_events::Run>,
+    codex_resume: Option<CodexResume>,
     launch_metadata: Value,
     secrets: Vec<String>,
     uses_gateway: bool,
@@ -198,7 +200,26 @@ impl ShellOwner {
         sessions::list_runs(&self.connection, id)
     }
     pub fn graph(&self, scene_id: &str, window_id: Option<&str>) -> Result<Value> {
-        session_graph::project_scene_graph(&self.connection, scene_id, window_id)
+        let mut graph = session_graph::project_scene_graph(&self.connection, scene_id, window_id)?;
+        if let Some(nodes) = graph["nodes"].as_array_mut() {
+            for node in nodes {
+                if node["currentMode"] == "codex"
+                    && node["providerRestoreState"] == "none"
+                    && matches!(node["workStatus"].as_str(), Some("error" | "starting"))
+                    && let Some(id) = node["sessionId"].as_str()
+                    && let Some(previous) = sessions::unbound_codex_restore(&self.connection, id)?
+                    && matches!(
+                        previous["restoreState"].as_str(),
+                        Some("failed" | "restoring")
+                    )
+                {
+                    node["providerRestoreState"] = previous["restoreState"].clone();
+                    node["providerRestoreError"] = previous["restoreError"].clone();
+                    node["providerSpawnRevision"] = previous["spawnRevision"].clone();
+                }
+            }
+        }
+        Ok(graph)
     }
 
     pub(crate) fn notification_scene_id(
@@ -728,7 +749,7 @@ impl ShellOwner {
                 .get(session_id)
                 .is_none_or(|shell| shell.ended && !shell.retiring)
             && self.session(session_id)?.is_some_and(|session| {
-                matches!(session.kind.as_str(), "shell" | "claude-code")
+                matches!(session.kind.as_str(), "shell" | "claude-code" | "codex")
                     && session.archived_at.is_none()
                     && (start_failed || session.status == "exited")
             })
@@ -823,7 +844,7 @@ impl ShellOwner {
              FROM sessions
              JOIN tasks ON tasks.id = sessions.task_id AND tasks.archived_at IS NULL
              JOIN workspaces ON workspaces.id = tasks.workspace_id AND workspaces.archived_at IS NULL
-             WHERE sessions.kind IN ('shell', 'claude-code') AND sessions.archived_at IS NULL
+             WHERE sessions.kind IN ('shell', 'claude-code', 'codex') AND sessions.archived_at IS NULL
                AND EXISTS (
                    SELECT 1 FROM session_mounts JOIN scenes ON scenes.id = session_mounts.scene_id
                    WHERE session_mounts.session_id = sessions.id AND scenes.archived_at IS NULL
@@ -853,6 +874,19 @@ impl ShellOwner {
             if kind == "shell" {
                 if has_run {
                     candidates.push((id, workspace, automatic));
+                }
+                continue;
+            }
+            if kind == "codex" {
+                let binding = self.codex_binding(&id)?;
+                let failed = binding
+                    .as_ref()
+                    .is_some_and(|b| b.restore_state == "failed")
+                    || (binding.is_none()
+                        && sessions::unbound_codex_restore(&self.connection, &id)?
+                            .is_some_and(|event| event["restoreState"] == "failed"));
+                if !failed && (has_run || binding.is_some()) {
+                    candidates.push((id, workspace, true));
                 }
                 continue;
             }
@@ -929,11 +963,111 @@ impl ShellOwner {
         Ok(true)
     }
 
+    pub(crate) fn codex_binding(&self, id: &str) -> Result<Option<sessions::ProviderBinding>> {
+        sessions::codex_binding(&self.connection, id)
+    }
+
+    pub(crate) fn pending_codex_fresh(&self, id: &str) -> Result<bool> {
+        // A committed fresh action has no run ID. The first verified identity
+        // supersedes it, even if the owner was restarted between the two.
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT event_type = 'session.restore-state-changed'
+                    AND json_extract(payload_json, '$.restoreState') = 'none'
+                    AND json_type(payload_json, '$.runId') IS NULL
+             FROM domain_events WHERE session_id = ?
+               AND event_type IN ('session.restore-state-changed', 'provider-binding.recorded')
+               AND json_extract(payload_json, '$.provider') = 'codex'
+             ORDER BY seq DESC LIMIT 1",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(false))
+    }
+
+    pub(crate) fn change_codex_restore(
+        &mut self,
+        session_id: &str,
+        change: ClaudeRestore<'_>,
+    ) -> Result<bool> {
+        let mut events = Vec::new();
+        let changed = self.commit_codex_restore(session_id, change, None, &mut events)?;
+        self.pending.extend(events);
+        Ok(changed)
+    }
+
+    fn commit_codex_restore(
+        &mut self,
+        session_id: &str,
+        change: ClaudeRestore<'_>,
+        run_id: Option<&str>,
+        events: &mut Vec<OwnerEvent>,
+    ) -> Result<bool> {
+        let result = match change {
+            ClaudeRestore::Begin(_) => "restoring",
+            ClaudeRestore::Fail { .. } => "restore-failed",
+            ClaudeRestore::Retry => "retrying",
+            ClaudeRestore::Fresh => "starting-fresh",
+            ClaudeRestore::PermissionFresh => unreachable!("Codex uses its own permission restart"),
+        };
+        let id = (self.next_id)();
+        let Some(commit) = sessions::change_codex_restore(
+            &mut self.connection,
+            &command(id.clone(), "session.restore-state-changed", id),
+            session_id,
+            change,
+            codex_resume::failure_title(),
+            now(),
+        )?
+        else {
+            return Ok(false);
+        };
+        let mut payload = commit.result.clone();
+        payload
+            .as_object_mut()
+            .expect("restore payload")
+            .remove("agentNotification");
+        payload["result"] = json!(result);
+        if let Some(run_id) = run_id {
+            payload["runId"] = json!(run_id);
+        }
+        events.push(OwnerEvent::ProviderIdentity(payload));
+        events.push(OwnerEvent::Domain(commit));
+        Ok(true)
+    }
+
+    fn park_codex_run(
+        &mut self,
+        session_id: &str,
+        run_id: &str,
+        binding_id: &str,
+        error: &str,
+        events: &mut Vec<OwnerEvent>,
+    ) {
+        self.retire_sessions(&[session_id.to_owned()]);
+        if let Err(error) = self.commit_codex_restore(
+            session_id,
+            ClaudeRestore::Fail { binding_id, error },
+            Some(run_id),
+            events,
+        ) {
+            diagnostic(
+                events,
+                session_id,
+                format!("persist Codex restore failure: {error:#}"),
+            );
+        }
+    }
+
     pub(crate) fn waiting_for_provider_restore(&self, session_id: &str) -> bool {
         self.shells
             .get(session_id)
             .and_then(|shell| shell.hook.as_ref())
-            .is_some_and(|hook| hook.resume.is_some() && hook.deadline.is_some())
+            .is_some_and(|hook| {
+                (hook.resume.is_some() || hook.codex_resume.is_some()) && hook.deadline.is_some()
+            })
     }
 
     pub(crate) fn provider_allows_derivation(&self, session_id: &str) -> bool {
@@ -1333,7 +1467,7 @@ impl ShellOwner {
             options.launch.profile == LaunchProfile::Shell,
             "Provider launch requires a hook registration"
         );
-        self.launch_run(options, restore_history, divider, None)
+        self.launch_run(options, restore_history, divider, None, None)
     }
 
     pub(crate) fn launch_claude(
@@ -1372,6 +1506,8 @@ impl ShellOwner {
         session_id: &str,
         terminal: matou_native_terminal::TerminalOptions,
         plan: CodexLaunch,
+        resume: Option<CodexResume>,
+        promotion: bool,
     ) -> Result<String> {
         let mut launch = plan.launch;
         launch.cols = terminal.cols;
@@ -1403,9 +1539,10 @@ impl ShellOwner {
             false,
             "",
             Some((metadata, secrets, None, None)),
+            resume,
         )?;
         let shell = self.shells.get_mut(session_id).unwrap();
-        shell.provider_startup_pending = true;
+        shell.provider_startup_pending = promotion;
         Ok(shell.run_id.clone())
     }
 
@@ -1494,6 +1631,7 @@ impl ShellOwner {
             false,
             "",
             Some((metadata, secrets, resume, gateway)),
+            None,
         )
     }
 
@@ -1508,6 +1646,7 @@ impl ShellOwner {
             Option<ResumeMonitor>,
             Option<ClaudeGatewayProjection>,
         )>,
+        codex_resume: Option<CodexResume>,
     ) -> Result<()> {
         ensure!(!self.closing, "Runtime is shutting down");
         if let Some(previous) = self.shells.get(&options.session_id) {
@@ -1610,15 +1749,23 @@ impl ShellOwner {
                 std::fs::write(path, serde_json::to_vec(&settings)?)
                     .context("Write Claude gateway launch settings")?;
             }
+            if let Some(resume) = &codex_resume {
+                options
+                    .launch
+                    .argv
+                    .extend(["resume".into(), resume.identity.to_string()]);
+            }
+            let deadline = (profile == LaunchProfile::ClaudeCode || codex_resume.is_some())
+                .then(|| Instant::now() + identity_wait);
             Some(RunHook {
                 _registration: registration,
+                codex_resume,
                 codex: (profile == LaunchProfile::Codex)
                     .then(|| codex_events::Run::new(&options.launch)),
                 launch_metadata,
                 secrets,
                 uses_gateway: gateway.is_some(),
-                deadline: (profile == LaunchProfile::ClaudeCode)
-                    .then(|| Instant::now() + identity_wait),
+                deadline,
                 last_observation: None,
                 last_submission: None,
                 resume,
@@ -2283,6 +2430,24 @@ impl ShellOwner {
         let Some(rollout) = codex.start_rollout(&payload, identity) else {
             return;
         };
+        if let Some(resume) = &hook.codex_resume
+            && resume.identity != identity
+        {
+            let binding_id = resume.binding_id.clone();
+            reject_identity(events, &scope, "identity-mismatch");
+            self.park_codex_run(
+                &scope.session_id,
+                &scope.run_id,
+                &binding_id,
+                codex_resume::identity_mismatch(),
+                events,
+            );
+            return;
+        }
+        let expected = hook
+            .codex_resume
+            .as_ref()
+            .map(|resume| resume.provider_session_id.as_str());
         let observed = observation
             .model
             .as_deref()
@@ -2301,8 +2466,8 @@ impl ShellOwner {
                 session_id: &scope.session_id,
                 run_id: &scope.run_id,
                 generation: &scope.generation,
-                provider_session_id: &identity_text,
-                expected_id: None,
+                provider_session_id: expected.unwrap_or(&identity_text),
+                expected_id: expected,
                 launch_metadata: &hook.launch_metadata,
                 observed_metadata: &observed,
                 event_name: observation.event,
@@ -2318,6 +2483,8 @@ impl ShellOwner {
             return;
         };
         codex.confirm(rollout);
+        hook.deadline = None;
+        hook.codex_resume = None;
         observation.identity = Some(identity_text);
         hook.last_observation = Some(observation);
         let mut confirmed = commit.result.clone();
@@ -2555,6 +2722,18 @@ impl ShellOwner {
         let shell = self.shells.get_mut(id).expect("registered session output");
         shell.emitted_output = true;
         if !self.closing
+            && let Some(resume) = shell
+                .hook
+                .as_mut()
+                .and_then(|hook| hook.codex_resume.as_mut())
+            && let Some(error) = resume.ingest(data)
+        {
+            let run_id = shell.run_id.clone();
+            let binding_id = resume.binding_id.clone();
+            self.park_codex_run(id, &run_id, &binding_id, error, events);
+            return;
+        }
+        if !self.closing
             && let Some(hook) = &mut shell.hook
             && hook.last_observation.is_none()
             && let Some(resume) = &mut hook.resume
@@ -2744,7 +2923,8 @@ impl ShellOwner {
         }
         shell.ended = true;
         shell.gateway.take();
-        let hook = shell.hook.take();
+        let mut hook = shell.hook.take();
+        let pending_codex = hook.as_mut().and_then(|hook| hook.codex_resume.take());
         let had_identity = hook
             .as_ref()
             .is_some_and(|hook| hook.last_observation.is_some());
@@ -2789,6 +2969,20 @@ impl ShellOwner {
             time,
         )?;
         events.push(OwnerEvent::Domain(commit));
+        if let Some(resume) = pending_codex
+            && !retiring
+            && !disposed
+            && !self.closing
+        {
+            self.park_codex_run(
+                id,
+                &run,
+                &resume.binding_id,
+                &format!("provider resume exited with code {}", status.exit_code),
+                events,
+            );
+            return Ok(());
+        }
         if provider_startup_pending
             || pending_restore
                 .as_ref()

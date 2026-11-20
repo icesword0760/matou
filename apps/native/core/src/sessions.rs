@@ -467,7 +467,11 @@ pub fn start_run(
         tx.execute(
             "UPDATE sessions
              SET status = 'running',
-                 work_status = CASE WHEN kind IN ('claude-code', 'codex') THEN work_status ELSE 'idle' END,
+                 work_status = CASE kind
+                     WHEN 'claude-code' THEN work_status
+                     WHEN 'codex' THEN 'starting'
+                     ELSE 'idle'
+                 END,
                  updated_at = ?, last_activity_at = ?,
                  version = version + 1
              WHERE id = ?",
@@ -513,9 +517,11 @@ pub fn finish_run(
         tx.execute(
             "UPDATE sessions
              SET status = CASE WHEN archived_at IS NULL THEN 'exited' ELSE 'archived' END,
-                 work_status = CASE WHEN ? AND NOT (work_status = 'error' AND EXISTS (
+                 work_status = CASE WHEN ? AND NOT (EXISTS (
                      SELECT 1 FROM provider_bindings WHERE session_id = sessions.id
-                       AND provider = sessions.kind AND restore_state = 'failed'
+                       AND provider = sessions.kind
+                       AND ((work_status = 'error' AND restore_state = 'failed')
+                         OR (provider = 'codex' AND work_status = 'starting' AND restore_state = 'restoring'))
                  )) THEN 'exited' ELSE work_status END,
                  updated_at = ?, last_activity_at = ?,
                  version = version + 1
@@ -534,13 +540,15 @@ pub fn finish_run(
     })
 }
 
-pub struct ClaudeBinding {
+pub struct ProviderBinding {
     pub id: String,
     pub provider_session_id: String,
     pub metadata: Value,
     pub resumable: bool,
     pub restore_state: String,
 }
+
+pub type ClaudeBinding = ProviderBinding;
 
 pub(crate) const NATIVE_FORK_PREFIX: &str = "native-fork:";
 
@@ -667,6 +675,55 @@ pub fn claude_binding(db: &Connection, session_id: &str) -> Result<Option<Claude
             },
         )
         .optional()?)
+}
+
+pub fn codex_binding(db: &Connection, session_id: &str) -> Result<Option<ProviderBinding>> {
+    Ok(db
+        .query_row(
+            "SELECT id, provider_session_id, metadata_json, restore_state,
+                (resume_state IN ('available', 'resumed') AND validated_at IS NOT NULL
+                    AND invalidated_at IS NULL AND user_exited_at IS NULL
+                    AND restore_state <> 'failed') AS resumable
+             FROM provider_bindings WHERE session_id = ? AND provider = 'codex'
+               AND EXISTS (SELECT 1 FROM sessions WHERE id = session_id AND kind = 'codex')
+             ORDER BY CASE WHEN restore_state IN ('restoring', 'failed') THEN 0
+                           WHEN resume_state IN ('available', 'resumed')
+                             AND validated_at IS NOT NULL AND invalidated_at IS NULL
+                             AND user_exited_at IS NULL THEN 1 ELSE 2 END,
+                      CASE WHEN resume_state IN ('available', 'resumed')
+                             AND invalidated_at IS NULL THEN validated_at END DESC,
+                      updated_at DESC, id DESC LIMIT 1",
+            [session_id],
+            |row| {
+                let metadata: String = row.get("metadata_json")?;
+                Ok(ProviderBinding {
+                    id: row.get("id")?,
+                    provider_session_id: row.get("provider_session_id")?,
+                    metadata: serde_json::from_str(&metadata).unwrap_or(Value::Null),
+                    resumable: row.get("resumable")?,
+                    restore_state: row.get("restore_state")?,
+                })
+            },
+        )
+        .optional()?)
+}
+
+// Legacy cards can have a run but no binding. Their existing domain event
+// records the failure without manufacturing a provider conversation identity.
+pub fn unbound_codex_restore(db: &Connection, session_id: &str) -> Result<Option<Value>> {
+    let payload: Option<String> = db
+        .query_row(
+            "SELECT payload_json FROM domain_events WHERE session_id = ?
+           AND event_type = 'session.restore-state-changed'
+           AND json_extract(payload_json, '$.provider') = 'codex'
+         ORDER BY seq DESC LIMIT 1",
+            [session_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(payload
+        .and_then(|payload| serde_json::from_str::<Value>(&payload).ok())
+        .filter(|payload| payload["bindingId"].is_null()))
 }
 
 /// A missing permission is distinct from an explicit default on rollback.
@@ -962,6 +1019,136 @@ pub fn change_claude_restore(
     .map(Some)
 }
 
+pub fn change_codex_restore(
+    db: &mut Connection,
+    command: &CommandMetadata,
+    session_id: &str,
+    change: ClaudeRestore<'_>,
+    failure_title: &str,
+    now: i64,
+) -> Result<Option<DomainCommit>> {
+    let binding = codex_binding(db, session_id)?;
+    let target = binding.as_ref().map(|binding| binding.id.as_str());
+    let unbound = if binding.is_none() {
+        unbound_codex_restore(db, session_id)?
+    } else {
+        None
+    };
+    let previous = binding
+        .as_ref()
+        .map(|binding| binding.restore_state.as_str())
+        .or_else(|| {
+            unbound
+                .as_ref()
+                .and_then(|event| event["restoreState"].as_str())
+        });
+    let mut metadata = binding
+        .as_ref()
+        .and_then(|binding| binding.metadata.as_object())
+        .cloned()
+        .unwrap_or_default();
+    let (resume, restore, error, work) = match change {
+        ClaudeRestore::Begin(id)
+            if target == Some(id)
+                && binding.as_ref().is_some_and(|binding| binding.resumable)
+                && previous != Some("restoring") =>
+        {
+            ("available", "restoring", None, "starting")
+        }
+        ClaudeRestore::Fail { binding_id, error }
+            if target.unwrap_or_default() == binding_id && previous != Some("failed") =>
+        {
+            ("failed", "failed", Some(error), "error")
+        }
+        ClaudeRestore::Retry if previous == Some("failed") => {
+            ("available", "restoring", None, "starting")
+        }
+        ClaudeRestore::Fresh if previous == Some("failed") => ("expired", "none", None, "starting"),
+        _ => return Ok(None),
+    };
+    let revision = match change {
+        ClaudeRestore::Retry | ClaudeRestore::Fresh => {
+            let revision = metadata
+                .get("spawnRevision")
+                .and_then(Value::as_i64)
+                .or_else(|| unbound.as_ref().and_then(|e| e["spawnRevision"].as_i64()))
+                .unwrap_or(0)
+                .saturating_add(1);
+            metadata.insert("spawnRevision".into(), json!(revision));
+            Some(revision)
+        }
+        _ => metadata
+            .get("spawnRevision")
+            .and_then(Value::as_i64)
+            .or_else(|| {
+                unbound
+                    .as_ref()
+                    .and_then(|event| event["spawnRevision"].as_i64())
+            }),
+    };
+    execute(db, command, now, |tx, events| {
+        let session = require_session(tx, session_id)?;
+        ensure!(
+            session.archived_at.is_none() && session.kind == "codex",
+            "Codex restore requires an active Codex card"
+        );
+        if matches!(change, ClaudeRestore::Fresh) {
+            tx.execute(
+                "UPDATE provider_bindings SET resume_state = 'expired', restore_state = 'none',
+                     restore_error = NULL, invalidated_at = COALESCE(invalidated_at, ?)
+                 WHERE session_id = ? AND provider = 'codex' AND id <> ?",
+                params![now, session_id, target.unwrap_or_default()],
+            )?;
+        }
+        if let Some(id) = target {
+            tx.execute(
+                "UPDATE provider_bindings SET resume_state = ?, restore_state = ?, restore_error = ?,
+                    metadata_json = ?, updated_at = ?, user_exited_at = NULL,
+                    invalidated_at = CASE WHEN ? = 'available' THEN NULL ELSE ? END
+                 WHERE id = ?",
+                params![resume, restore, error, serde_json::to_string(&metadata)?, now, resume, now, id],
+            )?;
+        }
+        tx.execute(
+            "UPDATE sessions SET work_status = ?, updated_at = ?, version = version + 1
+             WHERE id = ?",
+            params![work, now, session_id],
+        )?;
+        let mut payload = json!({
+            "sessionId": session_id, "provider": "codex", "bindingId": target,
+            "providerSessionId": binding.as_ref().map(|binding| &binding.provider_session_id),
+            "restoreState": restore, "restoreError": error, "spawnRevision": revision,
+        });
+        events.push(session_event(
+            command, "session.restore-state-changed", &session, now, payload.clone(),
+        ));
+        let replacement_key = format!("provider-restore:{session_id}");
+        let notification = match change {
+            ClaudeRestore::Fail { error, .. } => Some(json!({
+                "operation": "upsert", "replacementKey": replacement_key, "eventType": "error",
+                "title": failure_title, "body": error, "sound": true,
+            })),
+            ClaudeRestore::Retry | ClaudeRestore::Fresh => Some(json!({
+                "operation": "dismiss", "replacementKey": replacement_key,
+            })),
+            _ => None,
+        };
+        if let Some(notification) = notification {
+            let mut event = session_event(command, "agent.notification", &session, now, json!({
+                "targetSessionId": session_id, "provider": "codex",
+                "runId": format!("restore:{}", target.unwrap_or(session_id)), "event": notification,
+            }));
+            event.event_id.push_str(":agent.notification");
+            event.workspace_id = Some(tx.query_row(
+                "SELECT workspace_id FROM tasks WHERE id = ?", [&session.task_id], |row| row.get(0),
+            )?);
+            payload["agentNotification"] = notification_projection(&event);
+            events.push(event);
+        }
+        Ok(payload)
+    }).map(Some)
+}
+
 pub struct ProviderIdentity<'a> {
     pub binding_id: &'a str,
     pub session_id: &'a str,
@@ -993,8 +1180,8 @@ pub fn record_codex_identity(
     now: i64,
 ) -> Result<DomainCommit> {
     ensure!(
-        input.event_name == "SessionStart" && input.first_for_run && input.expected_id.is_none(),
-        "Codex identity requires SessionStart on its fresh run"
+        input.event_name == "SessionStart" && input.first_for_run,
+        "Codex identity requires SessionStart on its current run"
     );
     record_provider_identity(db, command, input, "codex", now)
 }
@@ -1086,9 +1273,27 @@ fn record_provider_identity(
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
+        if provider == "codex" && input.expected_id.is_none() {
+            let expired: bool = tx.query_row(
+                "SELECT EXISTS (SELECT 1 FROM provider_bindings
+                   WHERE session_id = ? AND provider = 'codex' AND resume_state = 'expired'
+                     AND lower(trim(provider_session_id)) = ?)",
+                params![input.session_id, provider_session_id],
+                |row| row.get(0),
+            )?;
+            ensure!(
+                !expired,
+                "Fresh Codex run returned an expired conversation identity"
+            );
+        }
         if input.expected_id.is_some() {
             ensure!(
-                claude_binding(tx, input.session_id)?.is_some_and(|binding| binding.resumable
+                (if provider == "codex" {
+                    codex_binding(tx, input.session_id)?
+                } else {
+                    claude_binding(tx, input.session_id)?
+                })
+                .is_some_and(|binding| binding.resumable
                     && binding.provider_session_id == provider_session_id),
                 "Provider hook no longer owns its restore binding"
             );
@@ -1152,6 +1357,14 @@ fn record_provider_identity(
                 now
             ],
         )?;
+        if provider == "codex" {
+            tx.execute(
+                "UPDATE provider_bindings SET resume_state = 'expired', restore_state = 'none',
+                     restore_error = NULL, invalidated_at = COALESCE(invalidated_at, ?)
+                 WHERE session_id = ? AND provider = 'codex' AND id <> ?",
+                params![now, input.session_id, binding_id],
+            )?;
+        }
         if fork.is_some() {
             tx.execute(
                 "UPDATE session_fork_intents SET state = 'succeeded', stage = 'succeeded',
@@ -1168,7 +1381,7 @@ fn record_provider_identity(
         if provider == "codex" {
             tx.execute(
                 "UPDATE sessions SET work_status = 'idle', updated_at = ?, version = version + 1
-                 WHERE id = ? AND work_status = 'starting'",
+                 WHERE id = ?",
                 params![now, input.session_id],
             )?;
         }

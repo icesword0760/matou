@@ -4600,8 +4600,11 @@ impl Workspace {
             .get(id)
             .filter(|preview| Some(preview.cwd.as_str()) == cwd);
         let result = state.and_then(|state| state.result.as_ref());
-        let agent = (node["currentMode"] == "claude-code").then_some("Claude Code");
-        let agent_short = if agent.is_some() { "Claude" } else { "Shell" };
+        let (agent, agent_short) = match node["currentMode"].as_str() {
+            Some("claude-code") => (Some("Claude Code"), "Claude"),
+            Some("codex") => (Some("Codex"), "Codex"),
+            _ => (None, "Shell"),
+        };
         let title = node["title"].as_str().unwrap_or(agent_short);
         let task = self
             .hierarchy
@@ -4677,7 +4680,7 @@ impl Workspace {
             updated_label: result.and_then(|detail| detail.updated_label.clone()),
             replies,
             loading: state.is_some_and(|state| state.loading),
-            can_open_history: agent.is_some(),
+            can_open_history: agent == Some("Claude Code"),
             can_restore: self.launch_action_blocked_reason(id, node).is_none(),
         })
     }
@@ -7286,7 +7289,7 @@ impl Workspace {
     }
 
     fn provider_restore_state(node: &Value) -> Option<&str> {
-        if node["currentMode"] != "claude-code" {
+        if !matches!(node["currentMode"].as_str(), Some("claude-code" | "codex")) {
             return None;
         }
         node["providerRestoreState"]
@@ -7302,12 +7305,20 @@ impl Workspace {
         if !node["archivedAt"].is_null() || node["forkState"] == "failed" {
             return None;
         }
+        let codex = node["currentMode"] == "codex";
         if Self::provider_restore_state(node)? == "restoring" {
             return Some(ProviderRestoreBanner::Restoring {
-                title: "正在恢复 Claude Code 会话…",
+                title: if codex {
+                    "正在恢复 Codex 会话…"
+                } else {
+                    "正在恢复 Claude Code 会话…"
+                },
             });
         }
         let reason = match node["providerRestoreError"].as_str() {
+            Some("provider session running in background") if codex => {
+                "此会话仍在 Codex 后台运行。请先停止对应后台会话，再重试恢复；聊天记录会保留。"
+            }
             Some("provider session running in background") => {
                 "此会话仍在 Claude 后台运行。请先停止对应后台会话，再重试恢复；聊天记录会保留。"
             }
@@ -7324,14 +7335,22 @@ impl Workspace {
             .then_some("当前终端仍在恢复")
         });
         Some(ProviderRestoreBanner::Failed {
-            title: "Claude Code 恢复失败",
+            title: if codex {
+                "Codex 恢复失败"
+            } else {
+                "Claude Code 恢复失败"
+            },
             reason,
             retry: if pending {
                 "正在恢复…"
             } else {
                 "重试恢复"
             },
-            fresh: "新开 Claude Code",
+            fresh: if codex {
+                "新开 Codex"
+            } else {
+                "新开 Claude Code"
+            },
             pending,
             retry_blocked,
             fresh_blocked,
