@@ -4390,6 +4390,7 @@ fn run_writable(
             }
             send.send_blocking(event)?;
         }
+        graph_dirty |= owner.poll_codex_hud();
         if (graph_dirty
             || !provider_identity_events.is_empty()
             || !permission_results.is_empty()
@@ -5872,6 +5873,9 @@ fn active_graph(
                         };
                         node["historyProviderSessionId"] =
                             json!(provider_session_id.map(|binding| binding.provider_session_id));
+                    }
+                    if codex && let Some(hud) = owner.codex_hud(&session.id) {
+                        node["codexHud"] = hud;
                     }
                     node["titleSource"] = json!(session.title_source);
                     node["providerTitle"] = json!(session.provider_title);

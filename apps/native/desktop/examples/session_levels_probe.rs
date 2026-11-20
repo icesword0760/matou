@@ -331,6 +331,15 @@ mod workspace {
             })
         }
 
+        pub(super) fn assert_fitted_footer_text(key: &'static str, expected: &str) -> String {
+            let ellipsis = FOOTER_READINGS.with_borrow(|readings| {
+                let labels = readings.as_ref().unwrap().text.borrow();
+                let (_, geometry) = labels.get(key).expect("painted HUD field");
+                geometry.borrow().as_ref().unwrap().layout.len < expected.len()
+            });
+            Self::assert_painted_footer_text(key, expected, ellipsis)
+        }
+
         pub(super) fn assert_permission_chip(&self, expected: Option<(&str, &str, bool)>) {
             let chip = self.permission_chip();
             assert_eq!(
@@ -5507,6 +5516,226 @@ mod probe {
         println!("Footer base hidden GPUI probe passed");
     }
 
+    fn verify_codex_hud(cx: &mut AsyncApp) {
+        use serde_json::{Value, json};
+
+        const LONG_MODEL: &str =
+            "fixture-long-model-name-for-testing-single-line-ellipsis-in-the-current-codex-run";
+        let long_label = format!("{LONG_MODEL} (high) (1.2M context)");
+        let root_hud = json!({
+            "model": LONG_MODEL, "effort": "high", "contextPercent": 86.0,
+            "contextWindowSize": 1_200_000.0,
+            "runningTools": [{"name": "Read", "target": "fixture.txt"}],
+            "toolCounts": [{"name": "Bash", "count": 2}],
+            "usageWindows": [{"label":"quota","percent":7}], "agents": [{"label":"hidden"}],
+            "todos":[{"content":"hidden"}], "configCounts":{"mcpServers":2,"hooks":4},
+            "teamRole":"hidden",
+        });
+        let parent_hud = json!({
+            "model": "fixture-parent", "effort": "low", "contextPercent": 0.0,
+            "contextWindowSize": 999.0, "toolCounts":[{"name":"Bash","count":1}]
+        });
+        let child_hud = json!({
+            "model": "fixture-child", "effort": "medium", "contextPercent": 70.0,
+            "contextWindowSize": 200_000.0, "toolCounts":[{"name":"Bash","count":4}]
+        });
+        let fitted = |window: WindowHandle<Workspace>, cx: &mut AsyncApp, model: &str| {
+            let status = footer_bounds(window, cx, "status").expect("HUD status");
+            let width = f32::from(status.size.width) - 13.;
+            if width > 210. {
+                window
+                    .update(cx, |_, _, _| {
+                        Workspace::assert_fitted_footer_text("name", model)
+                    })
+                    .unwrap()
+            } else {
+                assert!(footer_bounds(window, cx, "name").is_none());
+                "模型按宽度折叠".into()
+            }
+        };
+        for (width, show_model, show_context) in [
+            (610., false, false),
+            (650., true, false),
+            (720., true, true),
+            (900., true, true),
+            (1200., true, true),
+        ] {
+            let mut fixture = Fixture::new();
+            let Some(BootstrapResult::Writable { connection, .. }) = &fixture.db else {
+                unreachable!()
+            };
+            connection
+                .execute(
+                    "UPDATE sessions SET kind = 'codex' WHERE id IN (?, ?, ?)",
+                    [PARENT, PEER, CHILD],
+                )
+                .unwrap();
+
+            let update = |fixture: &Fixture, child_payload: Option<&Value>| {
+                let Event::Graph(mut graph) = fixture.graph_event() else {
+                    unreachable!()
+                };
+                for node in graph["nodes"].as_array_mut().unwrap() {
+                    let payload = match node["sessionId"].as_str() {
+                        Some(PEER) => Some(&root_hud),
+                        Some(PARENT) => Some(&parent_hud),
+                        Some(CHILD) => child_payload,
+                        _ => None,
+                    };
+                    if let Some(payload) = payload {
+                        node["codexHud"] = payload.clone();
+                    }
+                }
+                Event::Graph(graph)
+            };
+
+            let (window, sink) = open_hidden(cx, width);
+            window
+                .update(cx, |_, window, _| {
+                    assert!(!crate::macos::is_window_visible(window).unwrap());
+                    assert_eq!(window.viewport_size().width, px(width));
+                })
+                .unwrap();
+            deliver(window, cx, fixture.event(true));
+            deliver(window, cx, update(&fixture, Some(&child_hud)));
+            draw(window, cx);
+            draw(window, cx);
+            let displayed = if show_model {
+                assert_footer_text(window, cx, "name", &long_label, true)
+            } else {
+                assert!(footer_bounds(window, cx, "name").is_none());
+                "模型折叠".into()
+            };
+            let context = if show_context {
+                assert_footer_text(window, cx, "context", "86%", false)
+            } else {
+                assert!(footer_bounds(window, cx, "context").is_none());
+                "上下文折叠".into()
+            };
+            assert_footer_text(window, cx, "tools", "3 Tools", false);
+            let mut previous = footer_bounds(window, cx, "permission").unwrap();
+            for (field, active) in [
+                ("name", show_model),
+                ("context", show_context),
+                ("tools", true),
+                ("egress", true),
+            ] {
+                if !active {
+                    continue;
+                }
+                let bounds = footer_bounds(window, cx, field).unwrap();
+                assert!(
+                    previous.right() <= bounds.left() + px(0.5),
+                    "{field} overlaps another field"
+                );
+                assert!((previous.center().y - bounds.center().y).abs() <= px(1.));
+                previous = bounds;
+            }
+            assert_eq!(previous.right(), px(width - 20.));
+            for hidden in [
+                "account",
+                "quota",
+                "todos",
+                "team",
+                "agents",
+                "mcp",
+                "hooks",
+                "instructions",
+            ] {
+                assert!(
+                    footer_bounds(window, cx, hidden).is_none(),
+                    "{hidden} rendered"
+                );
+            }
+            let status_width =
+                f32::from(footer_bounds(window, cx, "status").unwrap().size.width) - 13.;
+            println!(
+                "codex HUD GPUI | {width} pt | status content {status_width} pt | {displayed} / {context} / 3 Tools on one line, exit at {} pt, hidden fields omitted",
+                width - 20.
+            );
+            if width < 720. {
+                window
+                    .update(cx, |_, window, _| window.remove_window())
+                    .unwrap();
+                continue;
+            }
+
+            if width < 1000. {
+                let point = window
+                    .update(cx, |view, window, _| view.footer_card_point(PARENT, window))
+                    .unwrap();
+                click(window, cx, point);
+            } else {
+                window
+                    .update(cx, |view, window, cx| view.select_footer_parent(window, cx))
+                    .unwrap();
+            }
+            assert_focus(fixture.process(window, cx, &sink), PARENT);
+            deliver(window, cx, update(&fixture, Some(&child_hud)));
+            draw(window, cx);
+            let parent = fitted(window, cx, "fixture-parent (low) (999 context)");
+            assert_footer_text(window, cx, "context", "0%", false);
+            assert_footer_text(window, cx, "tools", "1 Tools", false);
+            println!(
+                "codex HUD GPUI | {width} pt | activated root card shows {parent}, 0% and 1 Tools"
+            );
+
+            window
+                .update(cx, |view, window, cx| {
+                    view.open_footer_child_level(window, cx)
+                })
+                .unwrap();
+            assert_focus(fixture.process(window, cx, &sink), CHILD);
+            deliver(window, cx, update(&fixture, Some(&child_hud)));
+            draw(window, cx);
+            draw(window, cx);
+            let model = fitted(window, cx, "fixture-child (medium) (200K context)");
+            let status = footer_bounds(window, cx, "status").unwrap();
+            let context = if f32::from(status.size.width) - 13. > 250. {
+                assert_footer_text(window, cx, "context", "70%", false)
+            } else {
+                assert!(footer_bounds(window, cx, "context").is_none());
+                "上下文按宽度折叠".into()
+            };
+            assert_footer_text(window, cx, "tools", "4 Tools", false);
+            println!(
+                "codex HUD GPUI | {width} pt | child level shows {model}, {context} and 4 Tools"
+            );
+
+            deliver(window, cx, update(&fixture, None));
+            draw(window, cx);
+            for field in ["name", "context", "tools", "account"] {
+                assert!(
+                    footer_bounds(window, cx, field).is_none(),
+                    "{field} leaked from former run"
+                );
+            }
+            assert!(footer_bounds(window, cx, "permission").is_some());
+            assert_footer_text(window, cx, "egress", "出口", false);
+            let resumed = json!({"model":"fixture-resumed"});
+            deliver(window, cx, update(&fixture, Some(&resumed)));
+            draw(window, cx);
+            fitted(window, cx, "fixture-resumed");
+            assert!(footer_bounds(window, cx, "context").is_none());
+            assert!(footer_bounds(window, cx, "tools").is_none());
+            println!(
+                "codex HUD GPUI | {width} pt | replacement graph clears old fields and shows the new run model when it arrives"
+            );
+
+            let back = footer_bounds(window, cx, "return").unwrap().center();
+            click(window, cx, back);
+            assert_focus(fixture.process(window, cx, &sink), PARENT);
+            deliver(window, cx, update(&fixture, Some(&resumed)));
+            draw(window, cx);
+            fitted(window, cx, "fixture-parent (low) (999 context)");
+            println!("codex HUD GPUI | {width} pt | back arrow restored parent HUD");
+            window
+                .update(cx, |_, window, _| window.remove_window())
+                .unwrap();
+        }
+        println!("Codex HUD hidden GPUI probe passed");
+    }
+
     async fn verify_permission_mode(cx: &mut AsyncApp) {
         const LABELS: [(&str, &str, u32); 5] = [
             ("default", "Default", 0x8b949e),
@@ -6378,6 +6607,7 @@ mod probe {
 
     pub(super) fn run() {
         let footer_only = std::env::args().any(|arg| arg == "--footer-base");
+        let codex_hud_only = std::env::args().any(|arg| arg == "--codex-hud");
         let header_only = std::env::args().any(|arg| arg == "--card-header");
         let codex_title_only = std::env::args().any(|arg| arg == "--codex-title");
         let water_pointer_only = std::env::args().any(|arg| arg == "--recovery-water-pointer");
@@ -6390,6 +6620,13 @@ mod probe {
         let codex_loader_only = std::env::args().any(|arg| arg == "--codex-loader");
         let codex_history_only = std::env::args().any(|arg| arg == "--codex-history");
         Application::new().with_assets(NativeAssets).run(move |cx| {
+            if codex_hud_only {
+                cx.spawn(async |cx| {
+                    verify_codex_hud(cx);
+                    cx.update(|cx| cx.quit()).unwrap();
+                }).detach();
+                return;
+            }
             if footer_only {
                 cx.spawn(async |cx| {
                     verify_footer_base(cx);

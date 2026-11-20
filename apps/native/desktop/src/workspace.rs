@@ -43,6 +43,10 @@ mod session_levels {
     include!("session_levels.rs");
 }
 
+mod codex_hud {
+    include!("codex_hud.rs");
+}
+
 use crate::{
     carousel_motion::{
         CardWidth, CarouselLayout, Curve, Transition, centered_scroll, focus_scroll_step,
@@ -8484,8 +8488,11 @@ impl Workspace {
     fn footer_fields(&self) -> Option<FooterFields<'_>> {
         let node = self.graph_node(self.level_focus()?)?;
         let mode = node["currentMode"].as_str()?;
+        let codex = (mode == "codex").then(|| codex_hud::CodexHud::from_node(node));
         let name = if mode == "shell" {
             self.footer_shell.clone()
+        } else if let Some(codex) = codex.as_ref() {
+            codex.model_label().map(|label| label.to_string())
         } else {
             trimmed_graph_text(&node["model"]).map(|model| {
                 let model = if mode == "claude-code"
@@ -8515,6 +8522,7 @@ impl Workspace {
             git,
             environment,
             account: !matches!(mode, "codex" | "dsh" | "antigravity"),
+            codex,
         })
     }
 
@@ -12001,20 +12009,34 @@ impl Workspace {
             None::<FooterStatusMeasure>
         });
         let measure_key = (viewport_width, label.clone(), count.clone());
-        let show_cwd = status_measure
-            .read(cx)
+        let (status_content_width, show_cwd) = {
+            let measured = status_measure.read(cx);
+            let measured = measured
+                .as_ref()
+                .filter(|measure| measure.key == measure_key);
+            (
+                measured.map_or_else(
+                    || (status_max - FOOTER_STATUS_PADDING_LEFT - 1.).max(0.),
+                    |measure| measure.status_content_width,
+                ),
+                measured.map_or_else(
+                    || {
+                        let breadcrumb_width =
+                            (footer_text_estimate(&label) + count_width + breadcrumb_chrome)
+                                .min(breadcrumb_max);
+                        footer_room - breadcrumb_width - FOOTER_STATUS_PADDING_LEFT - 1.
+                            > FOOTER_CWD_HIDE_BELOW
+                    },
+                    |measure| measure.show_cwd,
+                ),
+            )
+        };
+        let codex_selected = fields
             .as_ref()
-            .filter(|measure| measure.key == measure_key)
-            .map_or_else(
-                || {
-                    let breadcrumb_width =
-                        (footer_text_estimate(&label) + count_width + breadcrumb_chrome)
-                            .min(breadcrumb_max);
-                    footer_room - breadcrumb_width - FOOTER_STATUS_PADDING_LEFT - 1.
-                        > FOOTER_CWD_HIDE_BELOW
-                },
-                |measure| measure.show_cwd,
-            );
+            .and_then(|fields| fields.codex.as_ref())
+            .is_some();
+        let show_model = !codex_selected || status_content_width > codex_hud::MODEL_HIDE_BELOW;
+        let show_context = codex_selected && status_content_width > codex_hud::CONTEXT_HIDE_BELOW;
         let content = div()
             .min_w_0()
             .flex_1()
@@ -12120,26 +12142,40 @@ impl Workspace {
         if let Some(chip) = chip.as_ref() {
             primary = primary.child(self.permission_primary(chip, menu_open, window, cx));
         }
-        if let Some(fields) = fields.as_ref()
-            && let Some(name) = fields
+        if let Some(fields) = fields.as_ref() {
+            if let Some(name) = fields
                 .name
                 .as_deref()
                 .map(str::trim)
                 .filter(|name| !name.is_empty())
-        {
-            primary = primary.child(
-                div()
-                    .children(footer_bounds_probe("name"))
-                    .id("footer-name")
-                    .flex_shrink()
-                    .min_w_0()
-                    .max_w(px(FOOTER_NAME_MAX_WIDTH))
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .text_color(rgb(if fields.is_shell { 0x606572 } else { 0x79c0ff }))
-                    .child(footer_text("name", name.to_owned())),
-            );
+            {
+                if fields.codex.is_none() {
+                    primary = primary.child(
+                        div()
+                            .children(footer_bounds_probe("name"))
+                            .id("footer-name")
+                            .flex_shrink()
+                            .min_w_0()
+                            .max_w(px(FOOTER_NAME_MAX_WIDTH))
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_color(rgb(if fields.is_shell { 0x606572 } else { 0x79c0ff }))
+                            .child(footer_text("name", name.to_owned())),
+                    );
+                } else if show_model {
+                    primary =
+                        primary.child(codex_hud::model_slot(SharedString::from(name.to_owned())));
+                }
+            }
+            if let Some(codex) = fields.codex.as_ref() {
+                if show_context && let Some(percent) = codex.context_percent() {
+                    primary = primary.child(codex_hud::context_ring(percent));
+                }
+                if let Some(tools) = codex.tools_slot() {
+                    primary = primary.child(tools);
+                }
+            }
         }
 
         // Secondary stays right-aligned. The optional fields shrink and clip
@@ -12266,21 +12302,29 @@ impl Workspace {
             })
             .child(
                 // Measure the real status content box after layout. The next
-                // frame hides the cwd when it is at or below the frozen 440pt
-                // budget; the observer on this keyed state repaints the view.
+                // frame hides the cwd below the frozen 440pt budget and the
+                // model/context cells at their 210pt/250pt priorities.
                 canvas(
                     |_, _, _| (),
                     move |bounds, _, _, cx| {
                         record_footer_bounds("status", bounds);
-                        let actual_show_cwd =
-                            f32::from(bounds.size.width) - FOOTER_STATUS_PADDING_LEFT - 1.
-                                > FOOTER_CWD_HIDE_BELOW;
+                        let actual_width = f32::from(bounds.size.width);
+                        let actual_content_width = actual_width - FOOTER_STATUS_PADDING_LEFT - 1.;
+                        let actual_show_cwd = actual_content_width > FOOTER_CWD_HIDE_BELOW;
+                        let actual_show_model =
+                            codex_selected && actual_content_width > codex_hud::MODEL_HIDE_BELOW;
+                        let actual_show_context =
+                            codex_selected && actual_content_width > codex_hud::CONTEXT_HIDE_BELOW;
                         measure.update(cx, |state, cx| {
                             *state = Some(FooterStatusMeasure {
                                 key: measure_key.clone(),
                                 show_cwd: actual_show_cwd,
+                                status_content_width: actual_content_width,
                             });
-                            if actual_show_cwd != show_cwd {
+                            if actual_show_cwd != show_cwd
+                                || actual_show_model != show_model
+                                || actual_show_context != show_context
+                            {
                                 cx.notify();
                             }
                         });
@@ -14303,10 +14347,13 @@ const FOOTER_SIDEBAR_WIDTH: f32 = 260.;
 const FOOTER_EGRESS_LABEL: &str = "出口";
 const FOOTER_ACCOUNT_LABEL: &str = "Claude 账户";
 
-/// Measured cwd visibility for the current window width and breadcrumb.
+/// Measured cwd/model/context visibility for the current window width and
+/// breadcrumb. `status_content_width` is the `.status-info` outer box minus its
+/// 12pt left padding and 1pt divider, matching the frozen container queries.
 struct FooterStatusMeasure {
     key: (Pixels, SharedString, SharedString),
     show_cwd: bool,
+    status_content_width: f32,
 }
 
 // Hidden probes install this sink before drawing a frame.
@@ -14683,6 +14730,7 @@ struct FooterFields<'a> {
     git: Option<FooterGit>,
     environment: Option<FooterEnvironment>,
     account: bool,
+    codex: Option<codex_hud::CodexHud>,
 }
 
 struct FooterGit {
