@@ -7,7 +7,9 @@ import {FOUNDATION_MIGRATIONS} from '../../apps/runtime/src/storage/migrations'
 import {MigrationRunner} from '../../apps/runtime/src/storage/migration-runner'
 import {DomainTransactionManager} from '../../apps/runtime/src/storage/domain-transaction'
 import {HierarchyApplicationService} from '../../apps/runtime/src/hierarchy/hierarchy-application-service'
+import {SessionCanvasService} from '../../apps/runtime/src/session-canvas/session-canvas-service'
 import {runtimeMessages} from '../../apps/runtime/src/i18n/messages'
+const gate = process.argv[3] === '--gate'
 const root=mkdtempSync(join(tmpdir(),'matou-tasks-contract-'))
 const db=RuntimeDatabase.open(join(root,'matou.sqlite'))
 await new MigrationRunner(db,FOUNDATION_MIGRATIONS).migrate()
@@ -17,22 +19,33 @@ const initial=service.bootstrapWindow(cmd('bootstrap'),{windowId:'window',defaul
 const workspaceId=initial.workspace!.id, first=initial.task!.id
 service.activateTask({windowId:'other-window',taskId:first,now:1001})
 const tables=['workspaces','tasks','execution_contexts','scenes','scene_nodes','sessions','session_mounts','session_canvas_memberships','session_relation_events','session_relations_current','app_windows','window_navigation','window_workspace_focus','window_task_focus','window_scene_focus','window_task_placements','workspace_path_state','task_status_entries','task_progress','task_logs','domain_events','command_deduplication']
+if (gate) tables.push('session_runs', 'session_environment_bindings', 'sqlite_sequence')
 const snapshot=()=>Object.fromEntries(tables.map(table=>[table,db.all(`SELECT * FROM ${table} ORDER BY rowid`)]))
 await db.backupTo(join(root,'seed.sqlite'))
 const seedBase64=readFileSync(join(root,'seed.sqlite')).toString('base64'), steps:any[]=[]
-function step(op:string,label:string,input:any,sql:string[]=[],command=cmd(label)){
+function step(op:string,label:string,input:any,sql:string[]=[],command=cmd(label),createCanvas?:()=>any){
  for(const statement of sql)db.exec(statement)
+ const before = gate ? snapshot() : undefined
  const existing=new Set(db.all<any>('SELECT id FROM tasks').map(x=>x.id))
- let result:any,error:any,errorCode:any
- try {result=op==='activate'?service.activateTask(input):(service as any)[op](command,input)}catch(e:any){error=e.message;errorCode=e.code}
+ let result:any,error:any,errorCode:any,sqliteExtendedCode:number|undefined
+ try {result=createCanvas?createCanvas():op==='activate'?service.activateTask(input):(service as any)[op](command,input)}catch(e:any){
+  error=e.message
+  errorCode=e.code
+  if (gate) sqliteExtendedCode=e.errcode
+ }
  const created=db.get<any>('SELECT * FROM tasks ORDER BY rowid DESC LIMIT 1')
  let ids:any
  if(created&&!existing.has(created.id)){
   const scene=db.get<any>('SELECT * FROM scenes WHERE task_id=?',created.id), session=db.get<any>('SELECT * FROM sessions WHERE task_id=?',created.id), mount=db.get<any>('SELECT * FROM session_mounts WHERE session_id=?',session.id)
   ids={workspaceId:created.workspace_id,executionContextId:created.execution_context_id,taskId:created.id,sceneId:scene.id,rootNodeId:scene.root_node_id,sessionId:session.id,mountId:mount.id}
  }
- const committedAt=db.get<any>('SELECT committed_at FROM command_deduplication WHERE command_id=?',command.commandId)?.committed_at??input.now
- steps.push({op,label,input,sql,command,ids,result,error,errorCode,committedAt,snapshot:snapshot()})
+ const canvasIds = createCanvas && result ? {
+  sceneId: result.created.scene.id, rootNodeId: result.created.mount.sceneNodeId,
+  sessionId: result.created.session.id, mountId: result.created.mount.id,
+  secondaryNodeId: '', relationId: ''
+ } : undefined
+ const committedAt=gate?Date.now():(db.get<any>('SELECT committed_at FROM command_deduplication WHERE command_id=?',command.commandId)?.committed_at??input.now)
+ steps.push({op,label,input,sql,command,ids,canvasIds,result,error,errorCode,sqliteExtendedCode,committedAt,before,snapshot:snapshot()})
  return result
 }
 const create=(label:string,extra:any={})=>step('createTask',label,{windowId:'window',workspaceId,now:2000+steps.length,...extra})
@@ -70,6 +83,92 @@ remove('delete-other-window-active',first)
 const replacement=remove('delete-last-replacement',third.task.id)
 step('createTask','create-invalid-path',{windowId:'window',workspaceId,now:2070},[`INSERT INTO workspace_path_state(workspace_id,status,reason,checked_at,validation_generation) VALUES ('${workspaceId}','invalid','missing',2070,1)`])
 remove('delete-last-invalid-path',replacement.task.id)
-writeFileSync(process.argv[2]!,JSON.stringify({versions:process.versions,messages:{newTask:runtimeMessages().hierarchy.newTask,defaultTask:runtimeMessages().hierarchy.defaultTask,workspacePathInvalid:runtimeMessages().hierarchy.workspacePathInvalid},seedBase64,steps},null,2)+'\n')
+if (gate) {
+  let now = 3000
+  const run = (op: string, label: string, input: object, sql: string[] = [], command = cmd(label)) =>
+    step(op, label, {now: now++, ...input}, sql, command)
+  const taskIn = (workspaceId: string) => ({windowId: 'window', workspaceId})
+  const mainOne = run('createTask', 'scope-main-first', taskIn(workspaceId), [
+    `DELETE FROM workspace_path_state WHERE workspace_id = '${workspaceId}'`
+  ]).created
+  const mainTwo = run('createTask', 'scope-main-second', taskIn(workspaceId)).created
+  const other = run('createWorkspace', 'scope-other-workspace', {
+    windowId: 'other-window', rootDirectory: '/tmp/task-contract-other-workspace', name: 'Other workspace'
+  }).created
+
+  run('closeScene', 'close-last-scene-protected', {
+    windowId: 'other-window', sceneId: other.scene.id, confirmedIntent: `close-scene:${other.scene.id}`
+  })
+  const pin = (label: string, taskId: string, pinned = true) =>
+    run('setTaskPinned', label, {taskId, pinned})
+  pin('scope-pin-main-first', mainOne.task.id)
+  pin('scope-pin-other-first', other.task.id)
+  pin('scope-pin-main-second', mainTwo.task.id)
+  run('reorderPinnedTask', 'scope-reorder-local', {
+    workspaceId, taskId: mainTwo.task.id, beforeTaskId: mainOne.task.id
+  })
+  pin('scope-pin-repeat-new-command', mainOne.task.id)
+  const repeatedPin = steps.at(-1)
+  run('setTaskPinned', 'scope-pin-repeat-replay', repeatedPin.input, [], repeatedPin.command)
+  run('reorderPinnedTask', 'scope-reorder-foreign-target', {
+    workspaceId, taskId: mainOne.task.id, beforeTaskId: other.task.id
+  })
+  run('reorderPinnedTask', 'scope-reorder-foreign-source', {workspaceId, taskId: other.task.id})
+  const mainThree = run('createTask', 'scope-create-after-pin', taskIn(workspaceId)).created
+  const otherTwo = run('createTask', 'scope-create-other-after-pin', {
+    windowId: 'other-window', workspaceId: other.workspace.id
+  }).created
+  pin('scope-pin-after-gap', mainThree.task.id)
+  pin('scope-unpin-main-second', mainTwo.task.id, false)
+  run('renameTask', 'rename-over-20', {taskId: mainThree.task.id, title: '界'.repeat(21)})
+  run('renameTask', 'rename-cross-workspace-main', {taskId: mainOne.task.id, title: '跨区同名'})
+  run('renameTask', 'rename-cross-workspace-other', {taskId: otherTwo.task.id, title: '跨区同名'})
+
+  run('closeScene', 'close-scene-makes-empty-task', {windowId: 'window', sceneId: mainTwo.scene.id})
+  const deleteInput = (taskId: string) => ({
+    windowId: 'window', taskId, confirmedIntent: `delete-task:${taskId}`
+  })
+  run('deleteTask', 'delete-empty-task', deleteInput(mainTwo.task.id))
+
+  const canvas = new SessionCanvasService(db, new DomainTransactionManager(db))
+  const canvasInput = {windowId: 'window', taskId: mainOne.task.id, now: now++}
+  const canvasCommand = cmd('create-delete-second-canvas')
+  step('createCanvas', canvasCommand.commandId, canvasInput, [], canvasCommand,
+    () => canvas.createCanvas(canvasCommand, canvasInput))
+  const runningTaskId = mainOne.task.id
+  const runningSessionId = mainOne.session.id
+  const failedDelete = cmd('delete-running')
+  const runningDeleteInput = {...deleteInput(runningTaskId), now: now++}
+  run('deleteTask', 'delete-rollback-during-archive', runningDeleteInput, [
+    `UPDATE sessions SET status = 'running', work_status = 'running' WHERE id = '${runningSessionId}'`,
+    `INSERT INTO session_runs (id, session_id, ordinal, runtime_generation, status, started_at)
+       VALUES ('fixture-running', '${runningSessionId}', 1, 'fixture-generation', 'running', 3020)`,
+    `INSERT INTO task_status_entries VALUES ('${runningTaskId}', 'phase', 'running', 'fixture-generation', 3020)`,
+    `INSERT INTO task_progress VALUES ('${runningTaskId}', 50, '运行中', 'fixture-generation', 3020)`,
+    `INSERT INTO task_logs (task_id, level, source, message, runtime_generation, created_at)
+       VALUES ('${runningTaskId}', 'info', 'fixture', '运行中', 'fixture-generation', 3020)`,
+    `CREATE TEMP TRIGGER abort_canvas_archive BEFORE UPDATE OF archived_at ON scenes
+       WHEN OLD.task_id = '${runningTaskId}' AND EXISTS (
+         SELECT 1 FROM sessions WHERE id = '${runningSessionId}' AND status = 'archived'
+       ) BEGIN SELECT RAISE(ABORT, 'fixture: abort canvas archive after session archive'); END`
+  ], failedDelete)
+  run('deleteTask', 'delete-rollback-at-receipt', runningDeleteInput, [
+    'DROP TRIGGER abort_canvas_archive',
+    `CREATE TEMP TRIGGER abort_delete_receipt BEFORE INSERT ON command_deduplication
+       WHEN NEW.command_id = '${failedDelete.commandId}' AND EXISTS (
+         SELECT 1 FROM domain_events WHERE event_id = '${failedDelete.commandId}:task-archived'
+       ) BEGIN SELECT RAISE(ABORT, 'fixture: abort receipt after event write'); END`
+  ], failedDelete)
+  run('deleteTask', 'delete-running-retry', runningDeleteInput, ['DROP TRIGGER abort_delete_receipt'], failedDelete)
+  run('deleteTask', 'delete-running-replay', runningDeleteInput, [], failedDelete)
+  run('deleteTask', 'delete-running-replay-conflict', {...runningDeleteInput, now: now++}, [], {
+    ...failedDelete, requestHash: 'different-delete-request'
+  })
+}
+const messages = runtimeMessages()
+writeFileSync(process.argv[2]!,JSON.stringify({versions:process.versions,messages:{newTask:messages.hierarchy.newTask,defaultTask:messages.hierarchy.defaultTask,workspacePathInvalid:messages.hierarchy.workspacePathInvalid,...(gate ? {
+ newCanvas: messages.sessionCanvas.newCanvas, duplicateSceneName: messages.hierarchy.duplicateSceneName,
+ detachedSessionMustReturn: messages.sessionCanvas.detachedSessionMustReturn
+} : {})},seedBase64,steps},null,2)+'\n')
 db.close()
 console.log(JSON.stringify({root,steps:steps.length}))
