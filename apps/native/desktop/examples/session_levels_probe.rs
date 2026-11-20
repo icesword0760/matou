@@ -304,6 +304,15 @@ mod workspace {
             self.project_instructions_request.is_none()
         }
 
+        pub(super) fn assert_instructions_entry_style() {
+            let mut entry = project_instructions::entry(ui_text("AGENTS.md"));
+            let style = entry.style();
+            assert_eq!(style.background, Some(rgba(0x00000014).into()));
+            let text = style.text.as_ref().unwrap();
+            assert_eq!(text.color, Some(rgb(0x2f3547).into()));
+            assert_eq!(text.font_weight, Some(FontWeight::SEMIBOLD));
+        }
+
         pub(super) fn assert_instructions_preview(
             &self,
             path: &std::path::Path,
@@ -351,7 +360,7 @@ mod workspace {
                     let prefix = expected
                         .get(..length)
                         .expect("ellipsis followed a text character");
-                    assert!(!prefix.is_empty() && geometry.layout.len < expected.len());
+                    assert!(!prefix.is_empty() && length < expected.len());
                     format!("{prefix}…")
                 } else {
                     assert_eq!(geometry.layout.len, expected.len());
@@ -2374,6 +2383,46 @@ mod probe {
                 assert!(window.dispatch_keystroke(Keystroke::parse(key).unwrap(), cx));
             })
             .unwrap();
+    }
+
+    fn press_native_escape(window: WindowHandle<Workspace>, cx: &mut AsyncApp) {
+        use cocoa::{
+            appkit::{NSEvent, NSEventModifierFlags},
+            base::{id, nil},
+            foundation::{NSInteger, NSPoint, NSString},
+        };
+        use objc::{msg_send, sel, sel_impl};
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+        let view = window
+            .update(cx, |_, window, _| {
+                let RawWindowHandle::AppKit(handle) =
+                    HasWindowHandle::window_handle(window).unwrap().as_raw()
+                else {
+                    unreachable!();
+                };
+                handle.ns_view.as_ptr() as id
+            })
+            .unwrap();
+        // Use the AppKit key path, including GPUI's native text-input routing.
+        // The event is sent only to this hidden NSView, just like probe clicks.
+        unsafe {
+            let native: id = msg_send![view, window];
+            let number: NSInteger = msg_send![native, windowNumber];
+            let characters = NSString::alloc(nil).init_str("\u{1b}");
+            for kind in [NSEventType::NSKeyDown, NSEventType::NSKeyUp] {
+                let event = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode_(
+                    nil, kind, NSPoint::new(0., 0.), NSEventModifierFlags::empty(),
+                    0., number, nil, characters, characters, false, 53,
+                );
+                if kind == NSEventType::NSKeyDown {
+                    let _: () = msg_send![view, keyDown: event];
+                } else {
+                    let _: () = msg_send![view, keyUp: event];
+                }
+            }
+            let _: () = msg_send![characters, release];
+        }
     }
 
     fn scroll(window: WindowHandle<Workspace>, cx: &mut AsyncApp) {
@@ -5437,12 +5486,12 @@ mod probe {
             println!("footer {width} | painted child title={title}");
             assert_footer_text(window, cx, "count", "· 4 个会话", false);
             let name = assert_footer_text(window, cx, "name", "Sonnet", width == 720.);
-            let environment =
-                assert_footer_text(window, cx, "environment", "待处理", width == 720.);
+            let environment = assert_footer_text(window, cx, "environment", "待处理", false);
             let secondary = footer_bounds(window, cx, "secondary").unwrap();
             let environment_bounds = footer_bounds(window, cx, "environment").unwrap();
-            assert!(environment_bounds.left() >= secondary.left() - px(0.5));
-            assert!(environment_bounds.right() <= secondary.right() + px(0.5));
+            let egress = footer_bounds(window, cx, "egress").unwrap();
+            assert!(environment_bounds.left() >= secondary.right() - px(0.5));
+            assert!(environment_bounds.right() <= egress.left() + px(0.5));
             assert!(footer_bounds(window, cx, "cwd").is_none());
             window
                 .update(cx, |view, _, _| {
@@ -5663,7 +5712,7 @@ mod probe {
             draw(window, cx);
             draw(window, cx);
             let displayed = if show_model {
-                assert_footer_text(window, cx, "name", &long_label, true)
+                assert_footer_text(window, cx, "name", &long_label, width < 1200.)
             } else {
                 assert!(footer_bounds(window, cx, "name").is_none());
                 "模型折叠".into()
@@ -5822,10 +5871,16 @@ mod probe {
         use std::fs;
         use std::os::unix::fs::PermissionsExt;
 
+        const MODEL: &str =
+            "gpt-6-hud-acceptance-model-with-a-deliberately-long-visible-name-and-distinct-suffix";
+        const SHORT_CWD: &str = "~/current-directory-with-a-name-long-enough-to-require-ellipsis";
+        let model_label = format!("{MODEL} (high) (200K context)");
+        let mut previous_model_width = px(0.);
+
         for width in [720., 900., 1200.] {
             let mut fixture = Fixture::new();
             let repository = fixture.root.join("project");
-            let root_cwd = repository.join("当前项目");
+            let root_cwd = repository.join(SHORT_CWD.trim_start_matches("~/"));
             let absent_cwd = root_cwd.join("nested");
             let child_cwd = absent_cwd.join("child");
             let unreadable_cwd = repository.join("unreadable");
@@ -5833,7 +5888,7 @@ mod probe {
             for dir in [&child_cwd, &unreadable_cwd, &changed_cwd] {
                 fs::create_dir_all(dir).unwrap();
             }
-            let root_file = root_cwd.join("AGENTS.md");
+            let root_file = repository.join("AGENTS.md");
             let child_file = child_cwd.join("AGENTS.md");
             let denied_file = unreadable_cwd.join("AGENTS.md");
             let changed_file = changed_cwd.join("AGENTS.md");
@@ -5843,6 +5898,7 @@ mod probe {
                 .collect::<String>();
             contents.push_str(&"一行很长的指令 ".repeat(100));
             fs::write(&root_file, &contents).unwrap();
+            fs::write(root_cwd.join("AGENTS.md"), "# Inner terminal cwd\n").unwrap();
             fs::write(&child_file, "# Child instructions\n").unwrap();
             fs::write(&changed_file, "# Updated cwd\n").unwrap();
             fs::write(&denied_file, "# Unreadable\n").unwrap();
@@ -5869,6 +5925,51 @@ mod probe {
             set_card(&fixture, PEER, "codex", &root_cwd);
             set_card(&fixture, PARENT, "codex", &absent_cwd);
             set_card(&fixture, CHILD, "codex", &child_cwd);
+            let Some(BootstrapResult::Writable { connection, .. }) = &fixture.db else {
+                unreachable!()
+            };
+            connection
+                .execute(
+                    "UPDATE execution_contexts SET cwd = ? WHERE id = 'levels-context'",
+                    [repository.to_str().unwrap()],
+                )
+                .unwrap();
+            for (id, cwd) in [(PARENT, &absent_cwd), (CHILD, &child_cwd)] {
+                connection
+                    .execute(
+                        "INSERT INTO execution_contexts (id, workspace_id, kind, cwd, created_at)
+                         VALUES (?, 'levels-workspace', 'plain-directory', ?, 10)",
+                        (id, cwd.to_str().unwrap()),
+                    )
+                    .unwrap();
+                connection
+                    .execute(
+                        "UPDATE sessions SET execution_context_id = ?1 WHERE id = ?1",
+                        [id],
+                    )
+                    .unwrap();
+                connection
+                    .execute(
+                        "UPDATE session_environment_bindings SET local_execution_context_id = ?1
+                         WHERE session_id = ?1",
+                        [id],
+                    )
+                    .unwrap();
+            }
+            let set_context = |fixture: &Fixture, cwd: &std::path::Path| {
+                let Some(BootstrapResult::Writable { connection, .. }) = &fixture.db else {
+                    unreachable!()
+                };
+                assert_eq!(
+                    connection
+                        .execute(
+                            "UPDATE execution_contexts SET cwd = ? WHERE id = 'levels-context'",
+                            [cwd.to_str().unwrap()],
+                        )
+                        .unwrap(),
+                    1
+                );
+            };
             let (window, sink) = open_hidden(cx, width);
             let viewport = window
                 .update(cx, |_, window, _| {
@@ -5888,13 +5989,16 @@ mod probe {
                 .find(|node| node["sessionId"] == PEER)
                 .unwrap();
             peer["codexHud"] = serde_json::json!({
-                "model": "test-model-with-a-long-name-to-exercise-the-hud",
+                "model": MODEL,
                 "effort": "high",
-                "contextPercent": 80.0,
-                "toolCounts": [{"name": "Bash", "count": 4}]
+                "contextPercent": 26.0,
+                "contextWindowSize": 200000,
+                "toolCounts": [{"name": "Bash", "count": 1}]
             });
             deliver(window, cx, Event::Graph(graph));
             wait_for_instructions(window, cx).await;
+            draw(window, cx);
+            Workspace::assert_instructions_entry_style();
             let entry = footer_bounds(window, cx, "instructions").unwrap();
             let permission = footer_bounds(window, cx, "permission").unwrap();
             let status = footer_bounds(window, cx, "status").unwrap();
@@ -5905,7 +6009,77 @@ mod probe {
             assert_footer_text(window, cx, "instructions", "AGENTS.md", false);
             let tools = footer_bounds(window, cx, "tools").unwrap();
             assert!(tools.left() > permission.right() && tools.right() < egress.left());
-            assert_footer_text(window, cx, "tools", "4 Tools", false);
+            assert_footer_text(window, cx, "label", "根会话", false);
+            assert_footer_text(window, cx, "count", "· 2 个会话", false);
+            assert_footer_text(window, cx, "context", "26%", false);
+            assert_footer_text(window, cx, "tools", "1 Tools", false);
+            let environment = footer_bounds(window, cx, "environment").unwrap();
+            assert_eq!(environment.size, size(px(22.), px(22.)));
+            let model = footer_bounds(window, cx, "name").unwrap();
+            assert!(model.size.width > previous_model_width);
+            previous_model_width = model.size.width;
+            let visible_model = if width == 1200. {
+                let visible = window
+                    .update(cx, |_, _, _| {
+                        Workspace::assert_fitted_footer_text("name", &model_label)
+                    })
+                    .unwrap();
+                assert!(visible.starts_with(&format!("{MODEL} (high)")), "{visible}");
+                visible
+            } else {
+                assert_footer_text(window, cx, "name", &model_label, true)
+            };
+            let cwd = match footer_bounds(window, cx, "cwd") {
+                Some(cwd) => {
+                    assert!(cwd.left() >= tools.right() && cwd.right() <= environment.left());
+                    assert_footer_text(window, cx, "cwd", SHORT_CWD, true)
+                }
+                None => "hidden".to_owned(),
+            };
+            let mut previous = footer_bounds(window, cx, "label").unwrap();
+            for key in [
+                "count",
+                "instructions",
+                "permission",
+                "name",
+                "context",
+                "tools",
+                "environment",
+                "egress",
+            ] {
+                let bounds = footer_bounds(window, cx, key).unwrap();
+                assert!(
+                    bounds.left() >= previous.right(),
+                    "{key} overlaps its predecessor"
+                );
+                previous = bounds;
+            }
+            println!(
+                "instructions | {width} pt | model {} pt: {visible_model}, cwd: {cwd}, complete breadcrumb/icon, context/tools and neutral gray entry",
+                f32::from(model.size.width)
+            );
+
+            click(window, cx, entry.center());
+            press_native_escape(window, cx);
+            draw(window, cx);
+            assert!(footer_bounds(window, cx, "instructions-dialog").is_none());
+
+            click(window, cx, entry.center());
+            wait_for_instructions(window, cx).await;
+            let body = window
+                .update(cx, |view, _, _| {
+                    view.assert_instructions_preview(&root_file, Ok(Some(&contents)))
+                        .bounds()
+                        .center()
+                })
+                .unwrap();
+            click(window, cx, body);
+            press_native_escape(window, cx);
+            draw(window, cx);
+            assert!(footer_bounds(window, cx, "instructions-dialog").is_none());
+            println!(
+                "instructions | {width} pt | native AppKit Esc closes immediately and after clicking the body"
+            );
 
             click(window, cx, entry.center());
             wait_for_instructions(window, cx).await;
@@ -5928,7 +6102,7 @@ mod probe {
                 })
                 .unwrap();
             println!(
-                "instructions | {width} pt | present: AGENTS.md before permission, tools and exit aligned, {:.0}×{:.0} panel, cwd path and exact UTF-8, preview autofocused",
+                "instructions | {width} pt | present: AGENTS.md before permission, tools and exit aligned, {:.0}×{:.0} panel, outer context path and exact UTF-8, preview autofocused",
                 f32::from(panel_width),
                 f32::from(panel_height),
             );
@@ -6009,11 +6183,19 @@ mod probe {
                     "instructions | {width} pt | close icon and backdrop dismiss; preview wheel stays inside"
                 );
 
-                // Deliver the same projection the runtime sends after an effective
-                // cwd change, while the read-only preview is still open.
+                // A terminal cd keeps the instructions scoped to the outer
+                // execution context. Changing that context reloads the file.
                 click(window, cx, entry.center());
                 wait_for_instructions(window, cx).await;
                 set_card(&fixture, PEER, "codex", &changed_cwd);
+                deliver(window, cx, fixture.graph_event());
+                wait_for_instructions(window, cx).await;
+                window
+                    .update(cx, |view, _, _| {
+                        view.assert_instructions_preview(&root_file, Ok(Some(&contents)))
+                    })
+                    .unwrap();
+                set_context(&fixture, &changed_cwd);
                 deliver(window, cx, fixture.graph_event());
                 wait_for_instructions(window, cx).await;
                 let new_scroll = window
@@ -6023,10 +6205,10 @@ mod probe {
                     .unwrap();
                 assert_eq!(new_scroll.offset().y, px(0.));
                 println!(
-                    "instructions | {width} pt | same card cwd change: new path, new content, reset scroll"
+                    "instructions | {width} pt | terminal cd preserves outer path; context change reloads and resets scroll"
                 );
 
-                set_card(&fixture, PEER, "codex", &unreadable_cwd);
+                set_context(&fixture, &unreadable_cwd);
                 deliver(window, cx, fixture.graph_event());
                 wait_for_instructions(window, cx).await;
                 window
@@ -6039,7 +6221,7 @@ mod probe {
                     "instructions | {width} pt | unreadable mode 000: existing entry retained, 读取失败, old text cleared"
                 );
 
-                set_card(&fixture, PEER, "codex", &absent_cwd);
+                set_context(&fixture, &absent_cwd);
                 deliver(window, cx, fixture.graph_event());
                 wait_for_instructions(window, cx).await;
                 window
@@ -6053,10 +6235,11 @@ mod probe {
                 draw(window, cx);
                 assert!(footer_bounds(window, cx, "instructions-dialog").is_none());
                 println!(
-                    "instructions | {width} pt | missing after cwd change: no entry, expected path and blank preview; ancestor file ignored"
+                    "instructions | {width} pt | missing after context change: no entry, expected path and blank preview"
                 );
 
                 set_card(&fixture, PEER, "codex", &root_cwd);
+                set_context(&fixture, &repository);
                 deliver(window, cx, fixture.graph_event());
                 wait_for_instructions(window, cx).await;
             }

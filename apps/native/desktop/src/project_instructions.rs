@@ -13,11 +13,14 @@ use gpui::{prelude::*, *};
 
 use crate::ui_text::ui_text;
 
-/// `.status-instructions`: frozen light keeps the blue label and semibold weight.
-const ENTRY_COLOR: u32 = 0x79c0ff;
+/// Frozen light entry: the screenshot's neutral dark label on a light gray
+/// pill. The pill is the existing `#00000014` light-theme hover wash and the
+/// label is its `#2f3547` text; hover deepens the same wash one step.
+const ENTRY_COLOR: u32 = 0x2f3547;
+const ENTRY_BG: u32 = 0x00000014;
 /// `.hierarchy-shell[data-theme="light"] .is-clickable:hover`.
 const ENTRY_HOVER_COLOR: u32 = 0x2f3547;
-const ENTRY_HOVER_BG: u32 = 0x00000014;
+const ENTRY_HOVER_BG: u32 = 0x0000001f;
 const ENTRY_PADDING_X: f32 = 6.;
 const ENTRY_PADDING_Y: f32 = 1.;
 const ENTRY_RADIUS: f32 = 4.;
@@ -67,6 +70,7 @@ pub(super) fn entry(label: impl IntoElement) -> Stateful<Div> {
         .px(px(ENTRY_PADDING_X))
         .py(px(ENTRY_PADDING_Y))
         .rounded(px(ENTRY_RADIUS))
+        .bg(rgba(ENTRY_BG))
         .text_color(rgb(ENTRY_COLOR))
         .font_weight(FontWeight::SEMIBOLD)
         .whitespace_nowrap()
