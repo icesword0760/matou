@@ -185,6 +185,7 @@ pub struct TerminalSurface {
     drag_scroll_amount: i32,
     drag_scroll_timer: Option<Task<()>>,
     composition: Composition,
+    composition_cell: Option<(usize, usize)>,
     caret: Option<Bounds<Pixels>>,
     wheel_lines: f32,
     mouse_reporter: MouseReporter,
@@ -228,6 +229,7 @@ impl TerminalSurface {
         self.set_input_disabled(true, cx);
         self.search = None;
         self.composition.clear();
+        self.composition_cell = None;
         self.caret = None;
         self.grid = None;
         self.stop_drag();
@@ -351,6 +353,7 @@ impl TerminalSurface {
             drag_scroll_amount: 0,
             drag_scroll_timer: None,
             composition: Composition::default(),
+            composition_cell: None,
             caret: None,
             wheel_lines: 0.,
             mouse_reporter: MouseReporter::default(),
@@ -1161,6 +1164,16 @@ impl TerminalSurface {
         if let Some(caret) = visible_caret {
             self.caret = Some(caret);
         }
+        if let Some(screen) = screen.filter(|screen| screen.cursor_has_position) {
+            let history_rows = screen
+                .scrollbar
+                .total
+                .saturating_sub(screen.scrollbar.len)
+                .saturating_sub(screen.scrollbar.offset);
+            if let Some(row) = (screen.cursor_row as u64).checked_sub(history_rows) {
+                self.composition_cell = Some((screen.cursor_col, row as usize));
+            }
+        }
         if !self.input_disabled {
             // Keep candidate positioning at the last valid cursor while the
             // render frame is still catching up to the return to live output.
@@ -1191,70 +1204,57 @@ impl TerminalSurface {
                     cx,
                 );
             }
-            if focused
-                && self.composition.is_active()
-                && let Some(caret) = visible_caret.or(self.caret)
-            {
-                self.paint_composition(caret, window, cx);
-            }
         });
+        if focused
+            && let Some(grid) = self.grid
+            && let Some(caret) = self.composition_caret(grid)
+        {
+            window.with_content_mask(
+                Some(ContentMask {
+                    bounds: grid.bounds,
+                }),
+                |window| {
+                    self.paint_composition(caret, window, cx);
+                },
+            );
+        }
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
             self.paint_scrollbar(bounds, rows, window, cx);
         });
     }
 
+    fn composition_caret(&self, grid: VisibleGrid) -> Option<Bounds<Pixels>> {
+        if !self.composition.is_active() {
+            return None;
+        }
+        // Keep the last active-screen cell while the cursor is outside the viewport.
+        let (col, row) = self.composition_cell?;
+        Some(self.metrics.cell(
+            grid.bounds.origin,
+            col.min(grid.cols - 1),
+            row.min(grid.rows - 1),
+            1,
+        ))
+    }
+
     fn paint_composition(&self, caret: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
         let line = self.shape_composition(window);
-        let marked = &self.composition.text;
-        let selection = &self.composition.selection;
-        let left = line.x_for_index(byte_from_utf16(marked, selection.start));
-        let right = line.x_for_index(byte_from_utf16(marked, selection.end));
-        let width = line.width.max(caret.size.width);
-        let base = self
-            .screen
-            .as_ref()
-            .map_or(self.theme.background, |screen| screen.background);
+        // The composition view is shrink-to-fit: no padding, the width is the
+        // natural advance of the single shaped line, and the height is the
+        // terminal cell height. It always uses a solid black background and
+        // plain white glyphs, independent of the terminal theme.
         window.paint_quad(fill(
-            Bounds::new(caret.origin, size(width, caret.size.height)),
-            rgb(base),
+            Bounds::new(caret.origin, size(line.width, caret.size.height)),
+            rgb(0x000000),
         ));
-        if left != right {
-            window.paint_quad(fill(
-                Bounds::new(
-                    point(caret.left() + left, caret.top()),
-                    size(right - left, caret.size.height),
-                ),
-                rgb(self.theme.selection_background),
-            ));
-        }
         let _ = line.paint(caret.origin, caret.size.height, window, cx);
-        paint_rule(
-            window,
-            caret.left(),
-            caret.bottom() - px(1.),
-            width,
-            self.theme.cursor,
-        );
-        if left == right {
-            window.paint_quad(fill(
-                Bounds::new(
-                    point(caret.left() + left, caret.top()),
-                    size(px(1.), caret.size.height),
-                ),
-                rgb(self.theme.cursor),
-            ));
-        }
     }
 
     fn shape_composition(&self, window: &mut Window) -> ShapedLine {
-        let fg = self
-            .screen
-            .as_ref()
-            .map_or(self.theme.foreground, |screen| screen.foreground);
         shape(
             self.composition.text.replace(['\n', '\r'], " ").into(),
             &self.font,
-            fg,
+            0xffffff,
             window,
         )
     }
