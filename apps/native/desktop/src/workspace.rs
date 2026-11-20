@@ -1,4 +1,5 @@
 use std::{
+    cell::Cell,
     collections::{HashMap, HashSet},
     path::PathBuf,
     rc::Rc,
@@ -112,9 +113,33 @@ struct CardMotion {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum LevelFocusRequest {
+    Card,
+    CardOnReady,
     OpenChildren,
     ReturnParent,
     Notification(u64),
+}
+
+const CARD_RADIUS: Pixels = px(12.);
+
+/// The card's activation area uses a half-open rectangle with four rounded corners.
+pub fn session_card_hit(bounds: &Bounds<Pixels>, position: Point<Pixels>) -> bool {
+    if position.x < bounds.left()
+        || position.y < bounds.top()
+        || position.x >= bounds.right()
+        || position.y >= bounds.bottom()
+    {
+        return false;
+    }
+    let width = bounds.size.width;
+    let height = bounds.size.height;
+    let radius = CARD_RADIUS.min(width / 2.).min(height / 2.);
+    let nearest_side = (position.x - bounds.left()).min(bounds.right() - position.x);
+    let dx = f32::from((radius - nearest_side).max(px(0.)));
+    let top_inset = radius - (position.y - bounds.top());
+    let bottom_inset = radius - (bounds.bottom() - position.y);
+    let dy = f32::from(top_inset.max(bottom_inset).max(px(0.)));
+    dx * dx + dy * dy <= f32::from(radius).powi(2)
 }
 
 struct WorkspaceDragMotion {
@@ -1154,8 +1179,6 @@ pub struct Workspace {
     #[cfg(target_os = "macos")]
     recovery_water_content: HashSet<String>,
     #[cfg(target_os = "macos")]
-    recovery_water_focus: Option<(String, String)>,
-    #[cfg(target_os = "macos")]
     recovery_water_visibility: Option<gpui::Task<()>>,
     storage_fault_sessions: HashSet<String>,
     order: Vec<String>,
@@ -2150,8 +2173,6 @@ impl Workspace {
             #[cfg(target_os = "macos")]
             recovery_water_content: HashSet::new(),
             #[cfg(target_os = "macos")]
-            recovery_water_focus: None,
-            #[cfg(target_os = "macos")]
             recovery_water_visibility: None,
             storage_fault_sessions: HashSet::new(),
             order: Vec::new(),
@@ -2618,9 +2639,11 @@ impl Workspace {
         self.pending_geometry = None;
         self.geometry_writes.clear();
         self.last_geometry_write.clear();
-        self.pending_focus = None;
+        if self.level_focus_request != Some(LevelFocusRequest::CardOnReady) {
+            self.pending_focus = None;
+            self.level_focus_request = None;
+        }
         self.pending_card_action = None;
-        self.level_focus_request = None;
         self.level_parent_by_scene.clear();
         self.refresh_level(cx);
         self.pending_close = None;
@@ -2934,11 +2957,17 @@ impl Workspace {
                     #[cfg(target_os = "macos")]
                     if matches!(phase, ConnectionPhase::Reconnecting) {
                         self.recovery_water_content.clear();
-                    } else if matches!(
+                    }
+                    if matches!(
                         phase,
                         ConnectionPhase::Stopped | ConnectionPhase::Blocked(_)
+                    ) && matches!(
+                        self.level_focus_request,
+                        Some(LevelFocusRequest::Card | LevelFocusRequest::CardOnReady)
                     ) {
-                        self.recovery_water_focus = None;
+                        self.pending_focus = None;
+                        self.level_focus_request = None;
+                        self.refresh_level(cx);
                     }
                     if matches!(&self.dialog, Some(TabDialog::RemoveSession { session_id, .. })
                         if self.is_stopped_session(session_id))
@@ -2972,6 +3001,13 @@ impl Workspace {
         let event = match event {
             Event::ReadOnlyReady { projection, .. } => {
                 self.database_recovery = None;
+                if matches!(
+                    self.level_focus_request,
+                    Some(LevelFocusRequest::Card | LevelFocusRequest::CardOnReady)
+                ) {
+                    self.pending_focus = None;
+                    self.level_focus_request = None;
+                }
                 let feedback = self
                     .read_only
                     .take()
@@ -3195,13 +3231,16 @@ impl Workspace {
                 let next_focus = hierarchy.session.as_ref().map(|session| session.id.clone());
                 let focus_changed = self.focused != next_focus;
                 let initializing = self.hierarchy.is_none();
-                let focus_confirmed =
-                    self.pending_focus.as_ref().is_some_and(|(scene, session)| {
+                let focus_confirmed = self.level_focus_request
+                    != Some(LevelFocusRequest::CardOnReady)
+                    && self.pending_focus.as_ref().is_some_and(|(scene, session)| {
                         Some(scene) == next_scene && Some(session) == next_focus.as_ref()
                     });
                 let level_focus_request = if scene_changed || focus_confirmed {
                     self.pending_focus = None;
-                    self.level_focus_request.take().filter(|_| focus_confirmed)
+                    self.level_focus_request
+                        .take()
+                        .filter(|request| focus_confirmed && *request != LevelFocusRequest::Card)
                 } else {
                     None
                 };
@@ -3229,10 +3268,7 @@ impl Workspace {
                 }
                 if scene_changed {
                     #[cfg(target_os = "macos")]
-                    {
-                        self.recovery_water_focus = None;
-                        self.retain_recovery_water(window, cx, |_, _| false);
-                    }
+                    self.retain_recovery_water(window, cx, |_, _| false);
                     // A newly mounted source carousel starts at its current styles.
                     for saved in &geometry {
                         if !self.geometry_dirty.contains(&saved.owner_key) {
@@ -3340,22 +3376,17 @@ impl Workspace {
                 } else {
                     self.reconcile_transport_geometry(&geometry, cx);
                 }
-                #[cfg(target_os = "macos")]
-                if fresh_ready
-                    && let Some((scene_id, session_id)) = self.recovery_water_focus.take()
-                    && self.active_scene_id() == Some(scene_id.as_str())
-                    && self.active_path_valid()
-                    && self.order.contains(&session_id)
-                    && !self.is_stopped_session(&session_id)
-                    && self.focused.as_ref() != Some(&session_id)
-                {
-                    self.send(
-                        Command::FocusSession {
-                            scene_id,
-                            session_id,
-                        },
-                        cx,
-                    );
+                if fresh_ready && self.level_focus_request == Some(LevelFocusRequest::CardOnReady) {
+                    self.level_focus_request = None;
+                    if let Some((scene_id, session_id)) = self.pending_focus.take()
+                        && self.active_scene_id() == Some(scene_id.as_str())
+                        && self.active_path_valid()
+                        && self.order.contains(&session_id)
+                        && !self.is_stopped_session(&session_id)
+                    {
+                        self.send_card_focus(&scene_id, &session_id, cx);
+                    }
+                    self.refresh_level(cx);
                 }
                 self.sync_terminal_input(window, cx);
                 if scene_changed
@@ -3540,10 +3571,14 @@ impl Workspace {
                 }
                 if attempted_focus.is_some() && self.pending_focus == attempted_focus {
                     self.pending_focus = None;
+                    let request = self.level_focus_request.take();
                     if matches!(
-                        self.level_focus_request.take(),
-                        Some(LevelFocusRequest::Notification(_))
+                        request,
+                        Some(LevelFocusRequest::Card | LevelFocusRequest::CardOnReady)
                     ) {
+                        self.refresh_level(cx);
+                    }
+                    if matches!(request, Some(LevelFocusRequest::Notification(_))) {
                         cx.notify();
                         return;
                     }
@@ -4089,10 +4124,8 @@ impl Workspace {
     }
 
     fn geometry_focus(&self) -> Option<&str> {
-        let pending = self.pending_focus.as_ref();
-        #[cfg(target_os = "macos")]
-        let pending = self.recovery_water_focus.as_ref().or(pending);
-        pending
+        self.pending_focus
+            .as_ref()
             .filter(|(scene_id, _)| {
                 self.hierarchy
                     .as_ref()
@@ -4102,6 +4135,57 @@ impl Workspace {
             .map(|(_, session_id)| session_id.as_str())
             .or(self.focused.as_deref())
             .filter(|id| !self.is_stopped_session(id))
+    }
+
+    fn send_card_focus(
+        &mut self,
+        scene_id: &str,
+        session_id: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.send(
+            Command::FocusSession {
+                scene_id: scene_id.to_owned(),
+                session_id: session_id.to_owned(),
+            },
+            cx,
+        );
+        let sent = self.pending_focus.is_some();
+        if sent && self.read_only.is_none() {
+            self.level_focus_request = Some(LevelFocusRequest::Card);
+        }
+        sent
+    }
+
+    fn activate_session_card(&mut self, session_id: &str, window: &Window, cx: &mut Context<Self>) {
+        self.hover_baseline = None;
+        self.hover_restore_at = None;
+        self.hover_follow_until = None;
+        self.capture_geometry(Some(session_id.to_owned()), false, window, cx);
+        if self.geometry_focus() == Some(session_id) {
+            return;
+        }
+        let Some(scene_id) = self.active_scene_id().map(str::to_owned) else {
+            return;
+        };
+        #[cfg(target_os = "macos")]
+        let can_defer = self.read_only.is_none() && self.recovery_water.contains_key(session_id);
+        #[cfg(not(target_os = "macos"))]
+        let can_defer = false;
+        let wait_for_ready = can_defer
+            && (!self.domain_ready
+                || !self.transport_connected
+                || self.commands.connection() != (self.runtime_generation, ConnectionPhase::Ready));
+        let sent = !wait_for_ready && self.send_card_focus(&scene_id, session_id, cx);
+        if can_defer && !sent {
+            if let Some(update) = self.pending_geometry.take() {
+                self.reconnect_geometry.insert(update.owner_key);
+            }
+            self.pending_focus = Some((scene_id, session_id.to_owned()));
+            self.level_focus_request = Some(LevelFocusRequest::CardOnReady);
+        }
+        self.refresh_level(cx);
+        cx.notify();
     }
 
     fn capture_geometry(
@@ -7665,14 +7749,17 @@ impl Workspace {
     }
 
     fn level_focus(&self) -> Option<&str> {
-        let focus = self.focused.as_ref();
-        #[cfg(target_os = "macos")]
-        let focus = self
-            .recovery_water_focus
-            .as_ref()
+        let card_focus = self.pending_focus.as_ref().filter(|(scene_id, id)| {
+            matches!(
+                self.level_focus_request,
+                Some(LevelFocusRequest::Card | LevelFocusRequest::CardOnReady)
+            ) && self.active_scene_id() == Some(scene_id.as_str())
+                && self.order.contains(id)
+                && !self.is_stopped_session(id)
+        });
+        card_focus
             .map(|(_, id)| id)
-            .or(focus);
-        focus
+            .or(self.focused.as_ref())
             .filter(|id| self.order.contains(id))
             .or_else(|| self.order.first())
             .map(String::as_str)
@@ -11076,7 +11163,6 @@ impl Render for Workspace {
                 .child("正在打开工作区…")
                 .into_any_element();
         }
-        const CARD_RADIUS: Pixels = px(12.);
         let level_focus = self.level_focus().map(str::to_owned);
         let active_level_focus = self.active_level_focus().map(str::to_owned);
         let viewport_width = f64::from(f32::from(window.viewport_size().width)) - 260.;
@@ -11426,17 +11512,11 @@ impl Render for Workspace {
             let focus = terminal.read(cx).focus.clone();
             let scrollbar_terminal = terminal.clone();
             let scrollbar_session = id.clone();
-            let scrollbar_scene = self
-                .hierarchy
-                .as_ref()
-                .and_then(|h| h.scene.as_ref())
-                .map(|s| s.id.clone());
             let session_id = id.clone();
-            let scene_id = self
-                .hierarchy
-                .as_ref()
-                .and_then(|h| h.scene.as_ref())
-                .map(|s| s.id.clone());
+            // Read the bounds from the frame that registered the handlers, including lift and scroll.
+            let card_bounds = Rc::new(Cell::new(None::<Bounds<Pixels>>));
+            let capture_bounds = card_bounds.clone();
+            let measure_bounds = card_bounds.clone();
             #[cfg(target_os = "macos")]
             let water = if recovery_water_available
                 && (!narrow || selected)
@@ -11477,7 +11557,11 @@ impl Render for Workspace {
             let card = card
                 .capture_any_mouse_down(cx.listener(
                     move |this, event: &MouseDownEvent, window, cx| {
-                        if this.is_stopped_session(&scrollbar_session) {
+                        if this.is_stopped_session(&scrollbar_session)
+                            || !capture_bounds
+                                .get()
+                                .is_some_and(|bounds| session_card_hit(&bounds, event.position))
+                        {
                             return;
                         }
                         // Compact cards mount no badge bounds, so a stale hit
@@ -11497,72 +11581,34 @@ impl Render for Workspace {
                         if scrollbar_terminal.read(cx).scrollbar_hit(event.position)
                             && this.geometry_focus() != Some(scrollbar_session.as_str())
                         {
-                            this.hover_baseline = None;
-                            this.hover_restore_at = None;
-                            this.hover_follow_until = None;
-                            this.capture_geometry(
-                                Some(scrollbar_session.clone()),
-                                false,
-                                window,
-                                cx,
-                            );
-                            if let Some(scene_id) = &scrollbar_scene {
-                                this.send(
-                                    Command::FocusSession {
-                                        scene_id: scene_id.clone(),
-                                        session_id: scrollbar_session.clone(),
-                                    },
-                                    cx,
-                                );
-                            }
+                            this.activate_session_card(&scrollbar_session, window, cx);
                         }
                     },
                 ))
                 .on_mouse_down(
                     MouseButton::Left,
-                    cx.listener(move |this, _, window, cx| {
-                        if this.is_stopped_session(&session_id) {
+                    cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                        if this.is_stopped_session(&session_id)
+                            || !card_bounds
+                                .get()
+                                .is_some_and(|bounds| session_card_hit(&bounds, event.position))
+                        {
                             return;
                         }
                         if this.active_path_valid() && !this.recovery_blocked(&session_id) {
                             window.focus(&focus);
                         }
-                        this.hover_baseline = None;
-                        this.hover_restore_at = None;
-                        this.hover_follow_until = None;
-                        this.capture_geometry(Some(session_id.clone()), false, window, cx);
-                        #[cfg(target_os = "macos")]
-                        if this.read_only.is_none()
-                            && this.recovery_water.contains_key(&session_id)
-                            && (!this.domain_ready
-                                || !this.transport_connected
-                                || this.commands.connection()
-                                    != (this.runtime_generation, ConnectionPhase::Ready))
-                            && let Some(scene_id) = &scene_id
-                        {
-                            // This click belongs to the visible card, even while
-                            // the replacement runtime cannot receive commands.
-                            if let Some(update) = this.pending_geometry.take() {
-                                this.reconnect_geometry.insert(update.owner_key);
-                            }
-                            this.recovery_water_focus =
-                                Some((scene_id.clone(), session_id.clone()));
-                            this.refresh_level(cx);
-                            cx.notify();
-                            return;
-                        }
-                        if this.geometry_focus() != Some(session_id.as_str()) {
-                            if let Some(scene_id) = &scene_id {
-                                this.send(
-                                    Command::FocusSession {
-                                        scene_id: scene_id.clone(),
-                                        session_id: session_id.clone(),
-                                    },
-                                    cx,
-                                );
-                            }
-                        }
+                        this.activate_session_card(&session_id, window, cx);
                     }),
+                )
+                .child(
+                    canvas(
+                        move |bounds, _, _| measure_bounds.set(Some(bounds)),
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .inset_0()
+                    .size_full(),
                 );
             let fork_failure = node
                 .filter(|_| !compact && self.read_only.is_none())
