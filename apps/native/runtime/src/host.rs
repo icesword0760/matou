@@ -18,6 +18,7 @@ use std::{
 use crate::{
     SessionEvent, SessionOptions, claude_model_catalog,
     history_worker::{HistoryReply, HistoryRequest, HistoryWorker},
+    host_control::ControlServer,
     owner::{OwnerEvent, ShellOwner},
     protocol::{
         ClaudeModelCatalogReply, ClaudeModelCatalogResult, ClaudeRoleAssignmentsReply,
@@ -1236,6 +1237,7 @@ fn run(
         shutdown_requested,
         database,
         &mut recovery_request,
+        &generation,
     );
     if let (Some(request_id), Err(error)) = (recovery_request, &result) {
         recovery_result(
@@ -1585,6 +1587,7 @@ fn run_writable(
     shutdown_requested: &OnceLock<bool>,
     (mut connection, ownership, data_root): WritableDatabase,
     recovery_request: &mut Option<String>,
+    generation: &str,
 ) -> Result<()> {
     for path in [&options.workspace, &options.shell_home] {
         if let Err(error) = std::fs::create_dir_all(path) {
@@ -1818,6 +1821,22 @@ fn run_writable(
             }
         }
     }
+    // A recovery startup keeps its existing isolation even after it opens a
+    // replacement database. A subsequent ordinary startup may serve control.
+    let control = if recovery_request.is_none() {
+        match ControlServer::start(&data_root, generation) {
+            Ok(control) => {
+                owner.set_run_control(control.runs());
+                Some(control)
+            }
+            Err(error) => {
+                eprintln!("[host-control] {error:#}");
+                None
+            }
+        }
+    } else {
+        None
+    };
     send.send_blocking(ready_event)?;
     if let Some(request_id) = recovery_request.take() {
         recovery_result(
@@ -3773,6 +3792,12 @@ fn run_writable(
             permission_results.push(permission_result(&id, &change.mode, error));
             graph_dirty = true;
         }
+        if shutdown_requested.get().is_none()
+            && let Some(control) = &control
+        {
+            // Process worker exits and disposal before revalidating queued requests.
+            control.poll();
+        }
         let released: Vec<_> = provider_starting
             .keys()
             .filter(|id| !owner.waiting_for_provider_restore(id))
@@ -3987,6 +4012,7 @@ fn run_writable(
             dirty.remove(&session_id);
         }
     };
+    drop(control);
     shell_promotions.retain(|id, promotion| !promotion.started_at_shutdown(&mut owner, id));
     for (id, change) in permission_changes {
         if let Err(error) = change.rollback_if_pending(&mut owner, &id) {
