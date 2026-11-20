@@ -82,6 +82,12 @@ unsafe extern "C" {
         cell_height_px: u32,
     ) -> c_int;
     fn matou_vt_scroll(terminal: *mut c_void, lines: i32) -> c_int;
+    fn matou_vt_scrollbar(
+        terminal: *const c_void,
+        offset: *mut u64,
+        total: *mut u64,
+        len: *mut u64,
+    ) -> c_int;
     fn matou_vt_expire_hold(terminal: *mut c_void) -> c_int;
     fn matou_vt_screen(
         terminal: *mut c_void,
@@ -122,6 +128,11 @@ struct HistoryContent {
     invalid_text: bool,
 }
 
+struct ResizeAnchor {
+    viewport: Scrollbar,
+    position_row: u64,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct TerminalOptions {
     pub cols: u16,
@@ -156,7 +167,10 @@ pub struct Terminal {
     effects: NonNull<Effects>,
     pending_utf8: [u8; 4],
     pending_utf8_len: usize,
+    cols: u16,
     rows: u16,
+    resize_pull_scrollback: bool,
+    resize_anchor: Option<ResizeAnchor>,
     selection: SelectionState,
     last_selection_epoch: usize,
     last_history_trim: usize,
@@ -197,7 +211,10 @@ impl Terminal {
             effects,
             pending_utf8: [0; 4],
             pending_utf8_len: 0,
+            cols: options.cols,
             rows: options.rows,
+            resize_pull_scrollback: options.resize_pull_scrollback,
+            resize_anchor: None,
             selection: SelectionState::default(),
             last_selection_epoch: 0,
             last_history_trim: 0,
@@ -267,6 +284,14 @@ impl Terminal {
     ) -> Result<()> {
         check_dimensions(cols, rows, cell_width_px, cell_height_px)?;
         self.reconcile_selection()?;
+        let rows_changed = rows != self.rows;
+        let cols_changed = cols != self.cols;
+        let before = if rows_changed && !cols_changed && self.resize_pull_scrollback {
+            let viewport = self.scrollbar()?;
+            (viewport.offset < viewport.total.saturating_sub(viewport.len)).then_some(viewport)
+        } else {
+            None
+        };
         check(
             unsafe {
                 matou_vt_resize(
@@ -279,11 +304,62 @@ impl Terminal {
             },
             "resize",
         )?;
-        if rows != self.rows {
+        if rows_changed {
             self.rows = rows;
             self.selection.clear();
         }
+        self.cols = cols;
+        if let Some(before) = before {
+            self.anchor_resized_viewport(before)?;
+        } else if rows_changed || cols_changed {
+            self.resize_anchor = None;
+        }
         self.reconcile_selection()
+    }
+
+    fn scrollbar(&self) -> Result<Scrollbar> {
+        let mut value = Scrollbar {
+            offset: 0,
+            total: 0,
+            len: 0,
+        };
+        check(
+            unsafe {
+                matou_vt_scrollbar(
+                    self.handle.as_ptr(),
+                    &mut value.offset,
+                    &mut value.total,
+                    &mut value.len,
+                )
+            },
+            "read viewport position",
+        )?;
+        Ok(value)
+    }
+
+    fn resize_position_row(&self, viewport: Scrollbar) -> Option<u64> {
+        self.resize_anchor
+            .as_ref()
+            .filter(|anchor| anchor.viewport == viewport)
+            .map(|anchor| anchor.position_row)
+    }
+
+    fn anchor_resized_viewport(&mut self, before: Scrollbar) -> Result<()> {
+        let mut viewport = self.scrollbar()?;
+        let old_end = before.total.saturating_sub(before.len);
+        let new_end = viewport.total.saturating_sub(viewport.len);
+        let target = new_end.saturating_sub(old_end.saturating_sub(before.offset));
+        let position_row = self
+            .resize_position_row(before)
+            .unwrap_or(before.offset)
+            .min(new_end);
+        self.scroll_to_viewport_row(viewport, target)?;
+        viewport.offset = target;
+        self.resize_anchor = (position_row != target).then_some(ResizeAnchor {
+            viewport,
+            position_row,
+        });
+        Ok(())
     }
 
     pub fn set_theme(&mut self, theme: Theme) -> Result<()> {
@@ -369,6 +445,15 @@ impl Terminal {
             3 => CursorStyle::BlockHollow,
             style => bail!("Ghostty VT returned unsupported cursor style {style}"),
         };
+        let scrollbar = Scrollbar {
+            offset: metadata.scroll_offset,
+            total: metadata.scroll_total,
+            len: metadata.scroll_len,
+        };
+        let resize_position_row = self.resize_position_row(scrollbar);
+        if resize_position_row.is_none() {
+            self.resize_anchor = None;
+        }
         Ok(Screen {
             cols,
             rows,
@@ -385,11 +470,8 @@ impl Terminal {
             cursor_color: (metadata.cursor_has_color != 0).then_some(metadata.cursor_color),
             palette: metadata.palette,
             history_lines: metadata.history_lines,
-            scrollbar: Scrollbar {
-                offset: metadata.scroll_offset,
-                total: metadata.scroll_total,
-                len: metadata.scroll_len,
-            },
+            scrollbar,
+            resize_position_row,
             alternate: metadata.alternate != 0,
         })
     }
@@ -524,7 +606,38 @@ impl Terminal {
         check(
             unsafe { matou_vt_scroll(self.handle.as_ptr(), lines) },
             "scroll viewport",
-        )
+        )?;
+        self.resize_anchor = None;
+        Ok(())
+    }
+
+    /// A pixel target already names the row under the requested track position.
+    /// A line target advances the track by the difference from the visible row.
+    pub fn scroll_to(&mut self, row: u64, pixel_target: bool) -> Result<()> {
+        let viewport = self.scrollbar()?;
+        let last = viewport.total.saturating_sub(viewport.len);
+        let target = match self.resize_position_row(viewport) {
+            Some(position) if !pixel_target => {
+                if row == viewport.offset {
+                    return Ok(());
+                }
+                (i128::from(position) + i128::from(row) - i128::from(viewport.offset))
+                    .clamp(0, i128::from(last)) as u64
+            }
+            _ => row.min(last),
+        };
+        self.scroll_to_viewport_row(viewport, target)
+    }
+
+    fn scroll_to_viewport_row(&mut self, viewport: Scrollbar, target: u64) -> Result<()> {
+        let mut lines = i128::from(viewport.offset) - i128::from(target);
+        while lines != 0 {
+            let step = lines.clamp(i128::from(i32::MIN), i128::from(i32::MAX)) as i32;
+            self.scroll(step)?;
+            lines -= i128::from(step);
+        }
+        self.resize_anchor = None;
+        Ok(())
     }
 
     pub fn drain_clipboard(&mut self) -> Vec<String> {

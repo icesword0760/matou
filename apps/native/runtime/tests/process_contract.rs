@@ -441,11 +441,13 @@ fn real_pipe_owner_pty_ack_scroll_fifo_and_explicit_shutdown() -> Result<()> {
         Command::ScrollTo {
             session_id: child.session.clone(),
             row: 30,
+            pixel_target: false,
             request_id: request_id - 1,
         },
         Command::ScrollTo {
             session_id: child.session.clone(),
             row: 0,
+            pixel_target: false,
             request_id,
         },
         Command::Scroll {

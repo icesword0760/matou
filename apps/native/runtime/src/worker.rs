@@ -110,6 +110,7 @@ pub enum WorkerCommand {
     },
     ScrollTo {
         row: u64,
+        pixel_target: bool,
         reply: Sender<Result<()>>,
     },
     ScrollSelection {
@@ -481,16 +482,21 @@ fn run(
                 WorkerCommand::Scroll { lines, reply } => {
                     let _ = reply.send(session.scroll(lines));
                 }
-                WorkerCommand::ScrollTo { row, reply } => {
+                WorkerCommand::ScrollTo {
+                    row,
+                    pixel_target,
+                    reply,
+                } => {
                     let (mut row, mut reply) = (row, reply);
                     // Multiple pointer samples can arrive before this worker runs.
-                    // Replace adjacent destinations up to the next ordered command.
+                    // A different target kind can change the resize anchor in between.
                     for _ in 0..127 {
                         match incoming.try_recv() {
                             Ok(WorkerCommand::ScrollTo {
                                 row: newer_row,
+                                pixel_target: newer_pixel_target,
                                 reply: newer_reply,
-                            }) => {
+                            }) if newer_pixel_target == pixel_target => {
                                 let _ = reply.send(Ok(()));
                                 (row, reply) = (newer_row, newer_reply);
                             }
@@ -501,7 +507,7 @@ fn run(
                             Err(_) => break,
                         }
                     }
-                    let _ = reply.send(session.scroll_to(row));
+                    let _ = reply.send(session.scroll_to(row, pixel_target));
                 }
                 WorkerCommand::ScrollSelection { lines, reply } => {
                     let _ = reply.send(session.scroll_selection(lines));

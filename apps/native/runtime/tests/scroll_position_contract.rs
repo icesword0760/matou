@@ -149,7 +149,11 @@ fn queued_absolute_scroll_targets_use_the_latest_committed_viewport() -> Result<
         (u64::MAX, last),
     ] {
         let (reply, scrolled) = mpsc::channel();
-        worker.send(WorkerCommand::ScrollTo { row: target, reply })?;
+        worker.send(WorkerCommand::ScrollTo {
+            row: target,
+            pixel_target: false,
+            reply,
+        })?;
         let (reply, view) = mpsc::channel();
         worker.send(WorkerCommand::SelectedView { reply })?;
         reads.push((expected, scrolled, view));
@@ -235,7 +239,12 @@ fn geometry(screen: &Screen, cell_height: u32, pending: Option<f64>) -> Value {
     let cell = f64::from(cell_height);
     let viewport = screen.rows as f64 * cell;
     let extent = screen.scrollbar.total as f64 * cell;
-    let position = pending.unwrap_or(screen.scrollbar.offset as f64 * cell);
+    let position = pending.unwrap_or(
+        screen
+            .resize_position_row
+            .unwrap_or(screen.scrollbar.offset) as f64
+            * cell,
+    );
     let metrics = ScrollbarMetrics::new(viewport, extent, position);
     json!({
         "viewport": viewport,
@@ -302,14 +311,6 @@ fn run_mapping(probe: &str, cell: u32, args: &[String]) -> Result<Vec<String>> {
         .collect())
 }
 
-fn scroll_absolute(terminal: &mut Terminal, screen: &Screen, row: u64) -> Result<()> {
-    let last = screen.scrollbar.total.saturating_sub(screen.rows as u64);
-    // A fixture-sized destination is a single VT scroll. The host capture below
-    // separately exercises the runtime's actual Session::scroll_to path.
-    let lines = i64::try_from(screen.scrollbar.offset)? - i64::try_from(row.min(last))?;
-    terminal.scroll(i32::try_from(lines)?)
-}
-
 fn capture_scenario(grid: &Grid, scenario: Scenario) -> Result<Value> {
     let mut options = TerminalOptions::new(grid.cols, scenario.rows, 9, grid.cell_height);
     if let Some(history) = scenario.history {
@@ -320,7 +321,6 @@ fn capture_scenario(grid: &Grid, scenario: Scenario) -> Result<Value> {
     let mut next_line = scenario.seed;
     let mut drag: Option<ScrollbarMetrics> = None;
     let mut pending = None;
-    let mut remainder = String::from("0");
     let mut states = Vec::new();
     let cell = f64::from(grid.cell_height);
 
@@ -332,14 +332,19 @@ fn capture_scenario(grid: &Grid, scenario: Scenario) -> Result<Value> {
             let number = || step[1].as_u64().unwrap();
             let viewport = screen.rows as f64 * cell;
             let extent = screen.scrollbar.total as f64 * cell;
-            let position = pending.unwrap_or(screen.scrollbar.offset as f64 * cell);
+            let position = pending.unwrap_or(
+                screen
+                    .resize_position_row
+                    .unwrap_or(screen.scrollbar.offset) as f64
+                    * cell,
+            );
             if op != "drag" {
                 drag = None;
             }
             match op {
                 "absolute" => {
                     pending = None;
-                    scroll_absolute(&mut terminal, &screen, number())?;
+                    terminal.scroll_to(number(), false)?;
                 }
                 "track" | "drag" => {
                     let metrics = ScrollbarMetrics::new(viewport, extent, position)
@@ -351,7 +356,7 @@ fn capture_scenario(grid: &Grid, scenario: Scenario) -> Result<Value> {
                         drag.get_or_insert(metrics).drag_position(value)
                     };
                     let mapped = run_mapping("row", grid.cell_height, &[pixels.to_string()])?;
-                    scroll_absolute(&mut terminal, &screen, mapped[0].parse()?)?;
+                    terminal.scroll_to(mapped[0].parse()?, true)?;
                     pending = Some(pixels);
                 }
                 "wheel" => {
@@ -361,27 +366,12 @@ fn capture_scenario(grid: &Grid, scenario: Scenario) -> Result<Value> {
                         (-step[3].as_f64().unwrap()).to_string(),
                         step[4].as_bool().unwrap().to_string(),
                     ];
-                    if path == "track" {
-                        args.extend([viewport, extent, position].map(|n| n.to_string()));
-                        let result = run_mapping(path, grid.cell_height, &args)?;
-                        if let Some(output) = result.first() {
-                            let (pixels, row) = output.split_once(' ').context("wheel target")?;
-                            scroll_absolute(&mut terminal, &screen, row.parse()?)?;
-                            pending = Some(pixels.parse()?);
-                        }
-                    } else {
-                        args.push(remainder);
-                        let mut result = run_mapping(path, grid.cell_height, &args)?;
-                        remainder = result
-                            .pop()
-                            .context("wheel remainder")?
-                            .strip_prefix("remainder:")
-                            .context("wheel remainder field")?
-                            .into();
-                        if let Some(lines) = result.first() {
-                            pending = None;
-                            terminal.scroll(lines.parse()?)?;
-                        }
+                    args.extend([viewport, extent, position].map(|n| n.to_string()));
+                    let result = run_mapping(path, grid.cell_height, &args)?;
+                    if let Some(output) = result.first() {
+                        let (pixels, row) = output.split_once(' ').context("wheel target")?;
+                        terminal.scroll_to(row.parse()?, true)?;
+                        pending = Some(pixels.parse()?);
                     }
                 }
                 "page" => {
@@ -392,20 +382,18 @@ fn capture_scenario(grid: &Grid, scenario: Scenario) -> Result<Value> {
                             step[1].to_string(),
                             screen.rows.to_string(),
                             screen.scrollbar.total.to_string(),
-                            screen.scrollbar.offset.to_string(),
+                            position.to_string(),
                         ],
                     )?;
-                    if result.len() == 2 {
-                        pending = None;
-                        terminal.scroll(result[0].parse()?)?;
+                    if let Some(output) = result.first() {
+                        if let Some(bytes) = output.strip_prefix("bytes:") {
+                            action_output = json!(bytes);
+                        } else {
+                            let (pixels, row) = output.split_once(' ').context("page target")?;
+                            terminal.scroll_to(row.parse()?, true)?;
+                            pending = Some(pixels.parse()?);
+                        }
                     }
-                    action_output = json!(
-                        result
-                            .last()
-                            .context("page action")?
-                            .strip_prefix("bytes:")
-                            .context("PTY bytes field")?
-                    );
                 }
                 "append" => {
                     let count = u32::try_from(number())?;
@@ -522,12 +510,13 @@ fn capture_host_frames(grid: &Grid, case: FrameCase) -> Result<Value> {
         for step in batch {
             let value = step[1].as_u64().unwrap();
             let command = match step[0].as_str().unwrap() {
-                "absolute" => {
+                "absolute" | "pixel" => {
                     request += 1;
                     HostCommand::ScrollTo {
                         session_id: id.clone(),
                         row: value,
                         request_id: request,
+                        pixel_target: step[0] == "pixel",
                     }
                 }
                 "resize" => {
@@ -581,6 +570,39 @@ fn capture_host_frames(grid: &Grid, case: FrameCase) -> Result<Value> {
     Ok(
         json!({ "id": case.id, "initial": snapshot(&initial), "frames": frames, "resizeRecords": resize_records }),
     )
+}
+
+#[test]
+fn resize_preserves_order_between_pixel_and_line_targets() -> Result<()> {
+    let result = capture_host_frames(
+        &Grid {
+            cols: 80,
+            cell_height: 14,
+        },
+        FrameCase {
+            id: "mixed-scroll-targets".into(),
+            rows: 20,
+            seed: 80,
+            batches: serde_json::from_value(json!([
+                [["absolute", 16]],
+                [["resize", 30], ["pixel", 27], ["absolute", 37]],
+                [["resize", 20], ["absolute", 20], ["pixel", 32]]
+            ]))?,
+        },
+    )?;
+    let frames = result["frames"].as_array().context("mixed target frames")?;
+    assert_eq!(frames.len(), 3);
+    for (frame, (ordinal, request, expected, line)) in frames.iter().zip([
+        (1, 1, 16, "ROW_00016"),
+        (2, 3, 37, "ROW_00037"),
+        (3, 5, 32, "ROW_00032"),
+    ]) {
+        assert_eq!(frame["ordinal"], ordinal);
+        assert_eq!(frame["scrollRequestId"], request);
+        assert_eq!(frame["offset"], expected);
+        assert_eq!(frame["firstLine"], line);
+    }
+    Ok(())
 }
 
 #[test]
