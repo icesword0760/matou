@@ -12,7 +12,9 @@ use uuid::Uuid;
 
 use crate::{
     backup::{BackupDescriptor, BackupReason, BackupService, DEFAULT_MAX_BACKUPS},
-    ownership::{DatabaseOwner, OwnerRecoveryError, assert_no_live_owner_read_only},
+    ownership::{
+        DatabaseOwner, OwnerRecoveryError, assert_no_live_owner_read_only, canonicalize_parent,
+    },
     recovery_marker::{self, RecoveryMarker},
     storage::{configure_connection, migrate_with_backup, supported_schema_version},
 };
@@ -80,15 +82,32 @@ pub fn open(data_root: &Path, runtime_generation: &str) -> Result<BootstrapResul
         return Ok(BootstrapResult::RecoveryRequired(result));
     }
 
+    if !root.is_dir() {
+        fs::create_dir_all(&root)?;
+    }
+    // Recovery markers keep their recorded paths. Bind the SQLite and
+    // lease operations to the resolved directory for this startup.
+    let sqlite_path = canonicalize_parent(&database_path)?;
+    let sqlite_root = sqlite_path.parent().context("missing database directory")?;
+    match fs::symlink_metadata(&sqlite_path) {
+        Ok(metadata) => ensure!(
+            !metadata.is_symlink(),
+            "database path is a symbolic link: {}",
+            database_path.display()
+        ),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+
     let mut ownership = None;
     let attempt = (|| {
         let mut integrity_verified = false;
-        if database_path.exists() {
-            let write_allowed = is_writable(&root) && is_writable(&database_path);
+        if sqlite_path.exists() {
+            let write_allowed = is_writable(sqlite_root) && is_writable(&sqlite_path);
             if !write_allowed {
-                assert_no_live_owner_read_only(&database_path)?;
-                assert_wal_bundle_ready(&database_path)?;
-                let connection = open_recovery_read_only(&database_path)?;
+                assert_no_live_owner_read_only(&sqlite_path)?;
+                assert_wal_bundle_ready(&sqlite_path)?;
+                let connection = open_recovery_read_only(&sqlite_path)?;
                 assert_startup_integrity(&connection)?;
                 return Ok(BootstrapResult::ReadOnly {
                     connection,
@@ -98,19 +117,19 @@ pub fn open(data_root: &Path, runtime_generation: &str) -> Result<BootstrapResul
             }
             // Classify a newer database before taking a lease or replacing stale
             // ownership evidence. Any inconclusive inspection follows normal startup.
-            if assert_no_live_owner_read_only(&database_path).is_ok()
-                && let Ok(connection) = open_recovery_read_only(&database_path)
+            if assert_no_live_owner_read_only(&sqlite_path).is_ok()
+                && let Ok(connection) = open_recovery_read_only(&sqlite_path)
                 && read_schema_version(&connection).is_ok_and(|version| {
                     supported_schema_version().is_ok_and(|supported| version > supported)
                 })
             {
-                assert_no_live_owner_read_only(&database_path)?;
+                assert_no_live_owner_read_only(&sqlite_path)?;
                 if let Some(marker) = recovery_marker::read_active(&database_path)? {
                     return Ok(BootstrapResult::RecoveryRequired(recovery_result(
                         marker, &backups,
                     )));
                 }
-                assert_wal_bundle_ready(&database_path)?;
+                assert_wal_bundle_ready(&sqlite_path)?;
                 assert_startup_integrity(&connection)?;
                 return Ok(BootstrapResult::ReadOnly {
                     connection,
@@ -118,7 +137,7 @@ pub fn open(data_root: &Path, runtime_generation: &str) -> Result<BootstrapResul
                     reason: ReadOnlyReason::NewerSchema,
                 });
             }
-            match DatabaseOwner::acquire(&database_path, runtime_generation) {
+            match DatabaseOwner::acquire(&sqlite_path, runtime_generation) {
                 Ok(lease) => {
                     ownership = Some(lease);
                     if let Some(marker) = recovery_marker::read_active(&database_path)? {
@@ -137,8 +156,8 @@ pub fn open(data_root: &Path, runtime_generation: &str) -> Result<BootstrapResul
                     return Err(error);
                 }
             }
-            assert_wal_bundle_ready(&database_path)?;
-            let inspection = open_recovery_read_only(&database_path)?;
+            assert_wal_bundle_ready(&sqlite_path)?;
+            let inspection = open_recovery_read_only(&sqlite_path)?;
             assert_startup_integrity(&inspection)?;
             integrity_verified = true;
             let version = read_schema_version(&inspection)?;
@@ -151,14 +170,14 @@ pub fn open(data_root: &Path, runtime_generation: &str) -> Result<BootstrapResul
                 });
             }
         } else {
-            ownership = Some(DatabaseOwner::acquire(&database_path, runtime_generation)?);
+            ownership = Some(DatabaseOwner::acquire(&sqlite_path, runtime_generation)?);
             if let Some(marker) = recovery_marker::read_active(&database_path)? {
                 release(&mut ownership)?;
                 return Ok(BootstrapResult::RecoveryRequired(recovery_result(
                     marker, &backups,
                 )));
             }
-            if database_path.exists() {
+            if sqlite_path.exists() {
                 release(&mut ownership)?;
                 return open(&root, runtime_generation);
             }
@@ -167,12 +186,12 @@ pub fn open(data_root: &Path, runtime_generation: &str) -> Result<BootstrapResul
             .as_ref()
             .context("missing writable database lease")?;
         let connection = open_writable(
-            &database_path,
+            &sqlite_path,
             runtime_generation,
             lease,
             &mut backups,
             !integrity_verified,
-            OpenFlags::default(),
+            OpenFlags::default() | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )?;
         Ok(BootstrapResult::Writable {
             connection,
@@ -203,7 +222,7 @@ pub fn open(data_root: &Path, runtime_generation: &str) -> Result<BootstrapResul
             }
             if is_write_denied(&error) || is_newer_schema(&error) {
                 let readonly = (|| {
-                    let connection = open_recovery_read_only(&database_path)?;
+                    let connection = open_recovery_read_only(&sqlite_path)?;
                     assert_startup_integrity(&connection)?;
                     Ok::<_, anyhow::Error>(connection)
                 })();
@@ -402,7 +421,7 @@ pub fn open_read_only(path: &Path) -> Result<Connection> {
         let error = WalRecoveryError("database WAL requires recovery before read-only open".into());
         return Err(error.into());
     }
-    open_read_only_uri(path, "immutable=1")
+    open_read_only_uri(path, "immutable=1", OpenFlags::empty())
 }
 
 fn open_recovery_read_only(path: &Path) -> Result<Connection> {
@@ -414,13 +433,13 @@ fn open_recovery_read_only(path: &Path) -> Result<Connection> {
     } else {
         "immutable=1"
     };
-    open_read_only_uri(path, options)
+    open_read_only_uri(path, options, OpenFlags::SQLITE_OPEN_NOFOLLOW)
 }
 
-fn open_read_only_uri(path: &Path, options: &str) -> Result<Connection> {
+fn open_read_only_uri(path: &Path, options: &str, flags: OpenFlags) -> Result<Connection> {
     let path_text = path.to_str().context("SQLite path is not valid Unicode")?;
-    #[cfg(windows)]
-    let path_text = path_text.replace('\\', "/");
+    // Percent-encode Windows backslashes too, so a canonical \\?\ prefix
+    // reaches the VFS intact without being parsed as a URI authority.
     let mut uri = String::from("file:");
     for byte in path_text.as_bytes() {
         if byte.is_ascii_alphanumeric() || b"/:.-_~".contains(byte) {
@@ -434,7 +453,7 @@ fn open_read_only_uri(path: &Path, options: &str) -> Result<Connection> {
     uri.push_str(options);
     let connection = Connection::open_with_flags(
         uri,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI | flags,
     )?;
     connection.execute_batch("PRAGMA query_only=ON;")?;
     Ok(connection)
