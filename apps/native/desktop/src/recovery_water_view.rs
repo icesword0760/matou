@@ -125,6 +125,38 @@ struct MacState {
     error: Option<String>,
     observers: Vec<Subscription>,
 }
+#[cfg(target_os = "macos")]
+impl MacState {
+    fn new(id: u64) -> Self {
+        Self {
+            id,
+            origin: Instant::now(),
+            fluid: Some(Fluid::default()),
+            revision: 1,
+            sequence: 0,
+            spec: None,
+            images_spec: None,
+            effective_visible: false,
+            reset_previous: Some(0.),
+            needs_frame: true,
+            inflight: false,
+            images: Images::default(),
+            painted_sequence: 0,
+            error: None,
+            observers: Vec::new(),
+        }
+    }
+
+    fn resize(&mut self, spec: Spec, reduced_motion: bool, now: Instant) {
+        if reduced_motion && self.spec.is_some() {
+            // A reduced-motion size change restarts the delta clock, just
+            // as the frozen ResizeObserver does when it schedules a draw.
+            self.reset_previous = Some(now.duration_since(self.origin).as_secs_f64() * 1000.);
+        }
+        self.spec = Some(spec);
+        self.needs_frame = true;
+    }
+}
 impl RecoveryWater {
     pub fn new(
         generation: u64,
@@ -154,23 +186,7 @@ impl RecoveryWater {
             #[cfg(target_os = "macos")]
             bottom_radius: Pixels::ZERO,
             #[cfg(target_os = "macos")]
-            state: MacState {
-                id: cx.entity_id().as_u64(),
-                origin: Instant::now(),
-                fluid: Some(Fluid::default()),
-                revision: 1,
-                sequence: 0,
-                spec: None,
-                images_spec: None,
-                effective_visible: false,
-                reset_previous: Some(0.),
-                needs_frame: true,
-                inflight: false,
-                images: Images::default(),
-                painted_sequence: 0,
-                error: None,
-                observers: Vec::new(),
-            },
+            state: MacState::new(cx.entity_id().as_u64()),
         }
     }
     #[cfg(target_os = "macos")]
@@ -296,11 +312,10 @@ impl RecoveryWater {
             && spec.width > 0.
             && spec.height > 0.;
         if self.state.spec != Some(spec) {
-            self.state.spec = Some(spec);
             // Card activation can change the bounds every display frame.
             // Paint results at the current bounds while the next size renders.
             // Cancelling every in-flight job here can starve the first image.
-            self.state.needs_frame = true;
+            self.state.resize(spec, self.reduced_motion, Instant::now());
             trace!(
                 self.state.id,
                 "size",
@@ -414,6 +429,43 @@ impl RecoveryWater {
             }
             if !matches!(updated,Ok(Ok(()))) { trace(id,"orphan_finish",serde_json::json!({"sequence":sequence})); }
         }).detach();
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::{MacState, Spec};
+    use std::time::Duration;
+
+    #[test]
+    fn only_reduced_motion_resize_resets_the_previous_frame_time() {
+        let initial = Spec {
+            width: 560.,
+            height: 600.,
+            dpr: 2.,
+        };
+        let resized = Spec {
+            width: 561.,
+            height: 601.,
+            ..initial
+        };
+        for (reduced, expected_reset, expected_scale) in
+            [(true, Some(4000.), 0.35), (false, None, 1.5)]
+        {
+            let mut state = MacState::new(0);
+            state.resize(initial, reduced, state.origin);
+            let mut fluid = state.fluid.take().unwrap();
+            fluid.reset_previous_frame(state.reset_previous.take().unwrap());
+            fluid.sample(0., initial.width, initial.height, initial.dpr, reduced);
+
+            state.resize(resized, reduced, state.origin + Duration::from_secs(4));
+            assert_eq!(state.reset_previous, expected_reset);
+            if let Some(previous) = state.reset_previous.take() {
+                fluid.reset_previous_frame(previous);
+            }
+            let frame = fluid.sample(4000., resized.width, resized.height, resized.dpr, reduced);
+            assert_eq!(frame["frameScale"], expected_scale);
+        }
     }
 }
 impl Render for RecoveryWater {

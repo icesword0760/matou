@@ -98,6 +98,9 @@ fn capture_recovery_water_gate() {
             let (width, height) = (num(&step["width"]), num(&step["height"]));
             dpr = step["dpr"].as_f64().unwrap_or(dpr);
             if spec != Some((width, height, dpr)) {
+                if reduced && spec.is_some() {
+                    reset_previous = Some(time);
+                }
                 spec = Some((width, height, dpr));
                 dirty = true;
             }
