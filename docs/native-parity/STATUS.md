@@ -1375,3 +1375,8 @@ On 2026-11-16 the user explicitly chose `保持原样` after the concrete scenar
 ### Porting-map batch B20 — canvas tab gate (2026-11-20)
 
 - `K-tab-close`: 24 fixed cases over canvas naming and order, rename, closing the current or a background tab, focus inheritance, the last-tab protection and two database reopen passes. Names, order, focus and close receipts persist identically; the only field differences are the known native-only `permissionMode` node field on five graph snapshots. Real close-confirmation dialogs, process exit, app restart and drag reordering stay with the G-level gate.
+
+### Porting-map batch B21 — canvas anchor gate (2026-11-20)
+
+- `K-canvas-anchor`: 36 fixed cases over canvas level and parent chains, switching into and out of child levels, scroll-anchor restoration, anchor persistence across reopen and resize, retry of anchor writes and priority focus with fallbacks. Levels, focus, events and errors match.
+- Two recorded differences: (1) before the anchor card is mounted frozen computes an anchor of 0 while native computes 318 — both agree at 318 once mounted, so this is a possible one-frame jump on restore that waits for the `workspace.rs` owner to free up; (2) the A31–A33 retry rows differ only in the recorded clock (frozen logs send time, native logs sample time) with identical retry counts and final anchors. Real scroll gestures, live window resizes, focus rings, app restart and cross-window behaviour stay with the G-level gate.
