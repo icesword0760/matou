@@ -35,6 +35,24 @@ pub struct ClaudeRoleAssignmentsReply {
     pub error: Option<String>,
 }
 
+/// Returned in the Graph event's `providerSettingsResult` field.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderSettingsReply {
+    pub request_id: u64,
+    #[serde(flatten)]
+    pub result: ProviderSettingsResult,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ProviderSettingsResult {
+    Snapshot(serde_json::Value),
+    Provider(serde_json::Value),
+    Accepted(bool),
+    Error(String),
+}
+
 pub fn check_version(version: u32) -> Result<()> {
     ensure!(
         version == VERSION,
