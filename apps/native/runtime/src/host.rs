@@ -19,7 +19,7 @@ use crate::{
     SessionEvent, SessionOptions,
     history_worker::{HistoryReply, HistoryRequest, HistoryWorker},
     owner::{OwnerEvent, ShellOwner},
-    protocol::ClaudeRoleAssignmentsReply,
+    protocol::{ClaudeRoleAssignmentsReply, ProviderSettingsReply, ProviderSettingsResult},
     provider_catalog,
     provider_hook::HookSetup,
     search::{SearchRequest, SearchResult},
@@ -40,6 +40,7 @@ use matou_native_core::{
         tasks, workspaces,
     },
     journal::JournalOptions,
+    provider_config::{ProviderConfigLocale, ProviderConfigStore},
     provider_launch::{
         CLAUDE_PERMISSION_MODES, ClaudeLaunch, ClaudeRoleAssignments, prepare_claude_fork,
         prepare_claude_launch, prepare_claude_permission_restart, prepare_new_claude_launch,
@@ -129,6 +130,26 @@ pub enum Command {
     SetClaudeRoleAssignments {
         request_id: u64,
         assignments: Value,
+    },
+    GetProviderSettings {
+        request_id: u64,
+    },
+    SaveProvider {
+        request_id: u64,
+        input: Value,
+    },
+    DeleteProvider {
+        request_id: u64,
+        cli: String,
+        id: String,
+    },
+    SetActiveProvider {
+        request_id: u64,
+        cli: String,
+        id: String,
+    },
+    ConfirmAntigravityRisk {
+        request_id: u64,
     },
     Search {
         session_id: String,
@@ -546,6 +567,96 @@ enum RoleAssignmentsRequest {
     ForLaunch(Sender<ClaudeRoleAssignments>),
 }
 
+enum ProviderSettingsRequest {
+    Get(u64),
+    Save(u64, Value),
+    Delete(u64, String, String),
+    SetActive(u64, String, String),
+    ConfirmRisk(u64),
+}
+
+struct ProviderSettingsWorker {
+    requests: Option<Sender<ProviderSettingsRequest>>,
+    replies: Receiver<ProviderSettingsReply>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl ProviderSettingsWorker {
+    fn new(data_root: PathBuf) -> Result<Self> {
+        let locale = match std::env::var("MATOU_LOCALE").as_deref() {
+            Ok("en") => ProviderConfigLocale::En,
+            _ => ProviderConfigLocale::ZhCn,
+        };
+        let (requests, incoming) = mpsc::channel();
+        let (outgoing, replies) = mpsc::channel();
+        let thread = thread::Builder::new()
+            .name("matou-provider-settings".into())
+            .spawn(move || {
+                // The host's owner lease excludes another native runtime for this root.
+                // Legacy or external processes writing the file outside that lease can race.
+                // Store construction does no I/O, so a bad file cannot block runtime startup.
+                let store = ProviderConfigStore::new(data_root, locale);
+                use ProviderSettingsResult::{Accepted, Error, Provider, Snapshot};
+                for request in incoming {
+                    let (request_id, result) = match request {
+                        ProviderSettingsRequest::Get(id) => (id, store.snapshot().map(Snapshot)),
+                        ProviderSettingsRequest::Save(id, input) => {
+                            (id, store.upsert(&input).map(Provider))
+                        }
+                        ProviderSettingsRequest::Delete(id, cli, provider_id) => {
+                            (id, store.delete(&cli, &provider_id).map(Snapshot))
+                        }
+                        ProviderSettingsRequest::SetActive(id, cli, provider_id) => {
+                            (id, store.set_active(&cli, &provider_id).map(Snapshot))
+                        }
+                        ProviderSettingsRequest::ConfirmRisk(id) => (
+                            id,
+                            store.confirm_antigravity_risk().map(|()| Accepted(true)),
+                        ),
+                    };
+                    let result = result.unwrap_or_else(|error| Error(error.to_string()));
+                    if outgoing
+                        .send(ProviderSettingsReply { request_id, result })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            })
+            .context("start provider settings worker")?;
+        Ok(Self {
+            requests: Some(requests),
+            replies,
+            thread: Some(thread),
+        })
+    }
+
+    fn send(&self, request: ProviderSettingsRequest) -> Result<()> {
+        self.requests
+            .as_ref()
+            .context("provider settings worker stopped")?
+            .send(request)
+            .map_err(|_| anyhow!("provider settings worker stopped"))
+    }
+
+    fn shutdown(&mut self) -> Result<()> {
+        // Close the queue and wait for accepted writes before releasing the owner lease.
+        self.requests.take();
+        if let Some(thread) = self.thread.take() {
+            thread
+                .join()
+                .map_err(|_| anyhow!("provider settings worker panicked"))?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for ProviderSettingsWorker {
+    fn drop(&mut self) {
+        let _ = self.shutdown();
+    }
+}
+
 struct PendingInput {
     workspace_id: String,
     session_id: String,
@@ -672,6 +783,8 @@ fn run(
     let mut scene_id = hierarchy.scene.as_ref().map(|scene| scene.id.clone());
     let mut active_task = hierarchy.task.as_ref().map(|task| task.id.clone());
     let mut owner = ShellOwner::new(connection, ownership, id)?;
+    // Declared after the lease-owning host state so early returns also join the worker first.
+    let mut provider_settings = ProviderSettingsWorker::new(data_root.clone())?;
     let mut sessions = HashSet::new();
     let mut active_workspace = hierarchy
         .workspace
@@ -1558,6 +1671,35 @@ fn run(
                     assignments,
                 } => {
                     role_requests.send(RoleAssignmentsRequest::Set(request_id, assignments))?;
+                    continue;
+                }
+                Command::GetProviderSettings { request_id } => {
+                    provider_settings.send(ProviderSettingsRequest::Get(request_id))?;
+                    continue;
+                }
+                Command::SaveProvider { request_id, input } => {
+                    provider_settings.send(ProviderSettingsRequest::Save(request_id, input))?;
+                    continue;
+                }
+                Command::DeleteProvider {
+                    request_id,
+                    cli,
+                    id,
+                } => {
+                    provider_settings.send(ProviderSettingsRequest::Delete(request_id, cli, id))?;
+                    continue;
+                }
+                Command::SetActiveProvider {
+                    request_id,
+                    cli,
+                    id,
+                } => {
+                    provider_settings
+                        .send(ProviderSettingsRequest::SetActive(request_id, cli, id))?;
+                    continue;
+                }
+                Command::ConfirmAntigravityRisk { request_id } => {
+                    provider_settings.send(ProviderSettingsRequest::ConfirmRisk(request_id))?;
                     continue;
                 }
                 Command::Input {
@@ -2712,10 +2854,17 @@ fn run(
         while let Some(reply) = history.try_recv()? {
             send.send_blocking(Event::History(reply))?;
         }
-        for reply in role_replies.try_iter() {
+        let role_graph_replies = role_replies
+            .try_iter()
+            .map(|reply| ("claudeRoleAssignmentsResult", serde_json::to_value(reply)));
+        let provider_graph_replies = provider_settings
+            .replies
+            .try_iter()
+            .map(|reply| ("providerSettingsResult", serde_json::to_value(reply)));
+        for (field, reply) in role_graph_replies.chain(provider_graph_replies) {
             let mut graph =
                 active_graph(&owner, scene_id.as_deref(), window_id, &startup_deferred)?;
-            graph["claudeRoleAssignmentsResult"] = serde_json::to_value(reply)?;
+            graph[field] = reply?;
             let event = Event::Graph(graph);
             if navigation_publications.is_empty() {
                 send.send_blocking(event)?;
@@ -2906,6 +3055,7 @@ fn run(
     let role_worker = role_worker
         .join()
         .map_err(|_| anyhow!("Claude role assignment worker panicked"));
+    let provider_worker = provider_settings.shutdown();
     let mut sessions = owner.shutdown().context("stop native runtime sessions");
     for (id, promotion) in shell_promotions {
         if !promotion.promoted {
@@ -2922,7 +3072,10 @@ fn run(
     }
     let backup = clean_exit.then(|| owner.backup_for_clean_exit(&data_root));
     drop(owner);
-    shutdown_result(sessions.map(|_| ()).and(role_worker), backup)
+    shutdown_result(
+        sessions.map(|_| ()).and(role_worker).and(provider_worker),
+        backup,
+    )
 }
 
 fn shutdown_result(sessions: Result<()>, backup: Option<Result<()>>) -> Result<()> {
