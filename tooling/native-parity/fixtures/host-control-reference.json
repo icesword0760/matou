@@ -1,0 +1,4222 @@
+{
+  "source": {
+    "commit": "924de28da27999543aeef7a7c9797334fca45d97",
+    "inventory": [
+      "MT-01",
+      "MT-07",
+      "MT-08",
+      "MT-09",
+      "MT-11",
+      "MT-12",
+      "MT-15"
+    ]
+  },
+  "setup": {
+    "locale": "zh-CN",
+    "clock_ms": 1700000000000,
+    "root_directory": "/__fixture__/workspace",
+    "domain_clock": "For seeded changes and Fork coordinator operations increment the domain tick by one starting at 1 and add it to the current clock. The facade reads the current clock as-is.",
+    "runtime_generation": "fixture-generation",
+    "confirmation_reference": "On each preview in a case, supply <confirmation-N>, starting at N=1. Each independent case starts over.",
+    "terminal_stub": "For terminal-child-default return the stub_output when the resolved session is Child. For terminal.send-text in discovery record session_id, text, submit. Do not write to a real terminal.",
+    "callback_stub": "Accumulate disposed session IDs per callback after recording a response. In fork, record the title on every create-child call; inject Error(\"fixture create failure\") on the first Beta call before persistence.",
+    "deterministic_ids": "Reset the UUID counter per wire case. Return 00000000-0000-4000-8000- followed by a 12-digit ascending decimal starting at 1. The in-memory database consumes the first UUID for its runtime generation.",
+    "capabilities": {
+      "<capability-token>": {
+        "caller": "bootstrap session, run-fixture",
+        "methods": [
+          "host.identify",
+          "host.list",
+          "terminal.read-current",
+          "terminal.send-text",
+          "structure.create.workspace",
+          "structure.create.task",
+          "structure.create.canvas",
+          "structure.create.session",
+          "structure.fork.children",
+          "structure.remove.preview",
+          "structure.remove.commit",
+          "structure.canvas-close.preview",
+          "structure.canvas-close.commit"
+        ],
+        "expires_at": 1700001000000
+      },
+      "<out-of-scope-token>": {
+        "caller": "bootstrap session, run-fixture",
+        "methods": [
+          "host.identify"
+        ],
+        "expires_at": 1700001000000
+      },
+      "<expired-token>": {
+        "caller": "bootstrap session, run-fixture",
+        "methods": [
+          "host.list"
+        ],
+        "expires_at": 1699999999999
+      },
+      "<other-run-token>": {
+        "caller": "bootstrap session, run-other",
+        "methods": [
+          "host.identify",
+          "host.list",
+          "terminal.read-current",
+          "terminal.send-text",
+          "structure.create.workspace",
+          "structure.create.task",
+          "structure.create.canvas",
+          "structure.create.session",
+          "structure.fork.children",
+          "structure.remove.preview",
+          "structure.remove.commit",
+          "structure.canvas-close.preview",
+          "structure.canvas-close.commit"
+        ],
+        "expires_at": 1700001000000
+      }
+    },
+    "virtual_directories": [
+      "/__fixture__/workspace",
+      "/__fixture__/secondary",
+      "/__fixture__/workspace/components"
+    ],
+    "scenarios": {
+      "base": {
+        "seed": "bootstrapWindow window-1, Default fixture workspace, /__fixture__/workspace, now=1; unregistered PTY"
+      },
+      "discovery": {
+        "extends": "base",
+        "seed": "Create sibling Peer of caller, child Child of caller, then task Remote with navigation preserve. Refocus caller."
+      },
+      "leaf": {
+        "extends": "base",
+        "seed": "Create one sibling named Leaf and return focus to caller."
+      },
+      "second_canvas": {
+        "extends": "base",
+        "seed": "Create another canvas named Secondary in the caller task with navigation preserve."
+      },
+      "fork": {
+        "extends": "base",
+        "seed": "Use normal batch coordinator. Its create-child hook fails once before committing the Beta item, then succeeds. The hook creates Shell children in the source canvas and returns forkState succeeded. No provider startup."
+      },
+      "cli-stub": {
+        "seed": "No database; use ordered host_stubs unless the CLI must resolve its environment."
+      }
+    }
+  },
+  "cases": [
+    {
+      "id": "identify-caller",
+      "description": "identify 从已验证的调用者身份返回 caller 和当前卡片路径。",
+      "request": {
+        "category": "normal",
+        "scenario": "base",
+        "calls": [
+          {
+            "envelope": {
+              "version": 1,
+              "requestId": "identify-caller-1",
+              "method": "host.identify",
+              "params": {},
+              "token": "<capability-token>",
+              "deadlineAt": 1700000500000
+            }
+          }
+        ]
+      },
+      "expected_response": {
+        "frames": [
+          {
+            "version": 1,
+            "requestId": "identify-caller-1",
+            "ok": true,
+            "result": {
+              "caller": {
+                "runId": "run-fixture",
+                "sessionId": "00000000-0000-4000-8000-000000000008"
+              },
+              "target": {
+                "ref": "session:00000000-0000-4000-8000-000000000008",
+                "workspaceId": "00000000-0000-4000-8000-000000000002",
+                "taskId": "00000000-0000-4000-8000-000000000004",
+                "sessionId": "00000000-0000-4000-8000-000000000008",
+                "mountId": "00000000-0000-4000-8000-000000000009",
+                "title": "Shell",
+                "profile": "shell",
+                "cwd": "/__fixture__/workspace",
+                "workStatus": "idle",
+                "environment": {
+                  "executionContextRef": "context:00000000-0000-4000-8000-000000000003",
+                  "mode": "directory"
+                },
+                "window": {
+                  "id": "window-1",
+                  "kind": "main",
+                  "ordinal": 1
+                },
+                "workspace": {
+                  "id": "00000000-0000-4000-8000-000000000002",
+                  "name": "Default fixture workspace",
+                  "ordinal": 1
+                },
+                "task": {
+                  "id": "00000000-0000-4000-8000-000000000004",
+                  "name": "默认",
+                  "ordinal": 1
+                },
+                "canvas": {
+                  "id": "00000000-0000-4000-8000-000000000005",
+                  "name": "Shell · /__fixture__/workspace",
+                  "ordinal": 1
+                },
+                "session": {
+                  "id": "00000000-0000-4000-8000-000000000008",
+                  "ordinal": 1,
+                  "detached": false
+                },
+                "dag": {
+                  "depth": 0,
+                  "childRefs": [],
+                  "siblingRefs": [
+                    "session:00000000-0000-4000-8000-000000000008"
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      },
+      "source": [
+        "apps/runtime/src/control/host-control-server.ts:256-290",
+        "apps/runtime/src/control/host-control-server.ts:416-428",
+        "apps/runtime/src/control/host-control-server.ts:126-136",
+        "apps/runtime/src/control/host-control-server.ts:298-304",
+        "apps/runtime/src/control/runtime-control-backend.ts:127-129",
+        "apps/runtime/src/control/host-topology-projector.ts:55-59",
+        "apps/runtime/src/control/host-topology-projector.ts:194-282",
+        "apps/runtime/src/control/host-control-types.ts:22-25",
+        "apps/runtime/src/control/host-control-types.ts:48-69"
+      ]
+    },
+    {
+      "id": "list-scopes",
+      "description": "缺省和显式 current-level 只列同画布同父节点的会话，all 还包括子卡和另一事项。",
+      "request": {
+        "category": "normal",
+        "scenario": "discovery",
+        "calls": [
+          {
+            "envelope": {
+              "version": 1,
+              "requestId": "list-scopes-1",
+              "method": "host.list",
+              "params": {},
+              "token": "<capability-token>",
+              "deadlineAt": 1700000500000
+            }
+          },
+          {
+            "envelope": {
+              "version": 1,
+              "requestId": "list-scopes-2",
+              "method": "host.list",
+              "params": {
+                "scope": "current-level"
+              },
+              "token": "<capability-token>",
+              "deadlineAt": 1700000500000
+            }
+          },
+          {
+            "envelope": {
+              "version": 1,
+              "requestId": "list-scopes-3",
+              "method": "host.list",
+              "params": {
+                "scope": "all"
+              },
+              "token": "<capability-token>",
+              "deadlineAt": 1700000500000
+            }
+          }
+        ]
+      },
+      "expected_response": {
+        "frames": [
+          {
+            "version": 1,
+            "requestId": "list-scopes-1",
+            "ok": true,
+            "result": {
+              "projectionRevision": "dfce604041d54782fa457a435225ff082fcce75d9845a4537d21691ca5cd6a51",
+              "scope": "current-level",
+              "targets": [
+                {
+                  "ref": "session:00000000-0000-4000-8000-000000000008",
+                  "workspaceId": "00000000-0000-4000-8000-000000000002",
+                  "taskId": "00000000-0000-4000-8000-000000000004",
+                  "sessionId": "00000000-0000-4000-8000-000000000008",
+                  "mountId": "00000000-0000-4000-8000-000000000009",
+                  "title": "Shell",
+                  "profile": "shell",
+                  "cwd": "/__fixture__/workspace",
+                  "workStatus": "idle",
+                  "environment": {
+                    "executionContextRef": "context:00000000-0000-4000-8000-000000000003",
+                    "mode": "directory"
+                  },
+                  "window": {
+                    "id": "window-1",
+                    "kind": "main",
+                    "ordinal": 1
+                  },
+                  "workspace": {
+                    "id": "00000000-0000-4000-8000-000000000002",
+                    "name": "Default fixture workspace",
+                    "ordinal": 1
+                  },
+                  "task": {
+                    "id": "00000000-0000-4000-8000-000000000004",
+                    "name": "默认",
+                    "ordinal": 1
+                  },
+                  "canvas": {
+                    "id": "00000000-0000-4000-8000-000000000005",
+                    "name": "Shell · /__fixture__/workspace",
+                    "ordinal": 1
+                  },
+                  "session": {
+                    "id": "00000000-0000-4000-8000-000000000008",
+                    "ordinal": 1,
+                    "detached": false
+                  },
+                  "dag": {
+                    "depth": 0,
+                    "childRefs": [
+                      "session:00000000-0000-4000-8000-000000000025"
+                    ],
+                    "siblingRefs": [
+                      "session:00000000-0000-4000-8000-000000000008",
+                      "session:00000000-0000-4000-8000-000000000016"
+                    ]
+                  }
+                },
+                {
+                  "ref": "session:00000000-0000-4000-8000-000000000016",
+                  "workspaceId": "00000000-0000-4000-8000-000000000002",
+                  "taskId": "00000000-0000-4000-8000-000000000004",
+                  "sessionId": "00000000-0000-4000-8000-000000000016",
+                  "mountId": "00000000-0000-4000-8000-000000000017",
+                  "title": "Peer",
+                  "profile": "shell",
+                  "cwd": "/__fixture__/workspace",
+                  "workStatus": "idle",
+                  "environment": {
+                    "executionContextRef": "context:00000000-0000-4000-8000-000000000003",
+                    "mode": "directory"
+                  },
+                  "window": {
+                    "id": "window-1",
+                    "kind": "main",
+                    "ordinal": 1
+                  },
+                  "workspace": {
+                    "id": "00000000-0000-4000-8000-000000000002",
+                    "name": "Default fixture workspace",
+                    "ordinal": 1
+                  },
+                  "task": {
+                    "id": "00000000-0000-4000-8000-000000000004",
+                    "name": "默认",
+                    "ordinal": 1
+                  },
+                  "canvas": {
+                    "id": "00000000-0000-4000-8000-000000000005",
+                    "name": "Shell · /__fixture__/workspace",
+                    "ordinal": 1
+                  },
+                  "session": {
+                    "id": "00000000-0000-4000-8000-000000000016",
+                    "ordinal": 2,
+                    "detached": false
+                  },
+                  "dag": {
+                    "depth": 0,
+                    "childRefs": [],
+                    "siblingRefs": [
+                      "session:00000000-0000-4000-8000-000000000008",
+                      "session:00000000-0000-4000-8000-000000000016"
+                    ]
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "version": 1,
+            "requestId": "list-scopes-2",
+            "ok": true,
+            "result": {
+              "projectionRevision": "dfce604041d54782fa457a435225ff082fcce75d9845a4537d21691ca5cd6a51",
+              "scope": "current-level",
+              "targets": [
+                {
+                  "ref": "session:00000000-0000-4000-8000-000000000008",
+                  "workspaceId": "00000000-0000-4000-8000-000000000002",
+                  "taskId": "00000000-0000-4000-8000-000000000004",
+                  "sessionId": "00000000-0000-4000-8000-000000000008",
+                  "mountId": "00000000-0000-4000-8000-000000000009",
+                  "title": "Shell",
+                  "profile": "shell",
+                  "cwd": "/__fixture__/workspace",
+                  "workStatus": "idle",
+                  "environment": {
+                    "executionContextRef": "context:00000000-0000-4000-8000-000000000003",
+                    "mode": "directory"
+                  },
+                  "window": {
+                    "id": "window-1",
+                    "kind": "main",
+                    "ordinal": 1
+                  },
+                  "workspace": {
+                    "id": "00000000-0000-4000-8000-000000000002",
+                    "name": "Default fixture workspace",
+                    "ordinal": 1
+                  },
+                  "task": {
+                    "id": "00000000-0000-4000-8000-000000000004",
+                    "name": "默认",
+                    "ordinal": 1
+                  },
+                  "canvas": {
+                    "id": "00000000-0000-4000-8000-000000000005",
+                    "name": "Shell · /__fixture__/workspace",
+                    "ordinal": 1
+                  },
+                  "session": {
+                    "id": "00000000-0000-4000-8000-000000000008",
+                    "ordinal": 1,
+                    "detached": false
+                  },
+                  "dag": {
+                    "depth": 0,
+                    "childRefs": [
+                      "session:00000000-0000-4000-8000-000000000025"
+                    ],
+                    "siblingRefs": [
+                      "session:00000000-0000-4000-8000-000000000008",
+                      "session:00000000-0000-4000-8000-000000000016"
+                    ]
+                  }
+                },
+                {
+                  "ref": "session:00000000-0000-4000-8000-000000000016",
+                  "workspaceId": "00000000-0000-4000-8000-000000000002",
+                  "taskId": "00000000-0000-4000-8000-000000000004",
+                  "sessionId": "00000000-0000-4000-8000-000000000016",
+                  "mountId": "00000000-0000-4000-8000-000000000017",
+                  "title": "Peer",
+                  "profile": "shell",
+                  "cwd": "/__fixture__/workspace",
+                  "workStatus": "idle",
+                  "environment": {
+                    "executionContextRef": "context:00000000-0000-4000-8000-000000000003",
+                    "mode": "directory"
+                  },
+                  "window": {
+                    "id": "window-1",
+                    "kind": "main",
+                    "ordinal": 1
+                  },
+                  "workspace": {
+                    "id": "00000000-0000-4000-8000-000000000002",
+                    "name": "Default fixture workspace",
+                    "ordinal": 1
+                  },
+                  "task": {
+                    "id": "00000000-0000-4000-8000-000000000004",
+                    "name": "默认",
+                    "ordinal": 1
+                  },
+                  "canvas": {
+                    "id": "00000000-0000-4000-8000-000000000005",
+                    "name": "Shell · /__fixture__/workspace",
+                    "ordinal": 1
+                  },
+                  "session": {
+                    "id": "00000000-0000-4000-8000-000000000016",
+                    "ordinal": 2,
+                    "detached": false
+                  },
+                  "dag": {
+                    "depth": 0,
+                    "childRefs": [],
+                    "siblingRefs": [
+                      "session:00000000-0000-4000-8000-000000000008",
+                      "session:00000000-0000-4000-8000-000000000016"
+                    ]
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "version": 1,
+            "requestId": "list-scopes-3",
+            "ok": true,
+            "result": {
+              "projectionRevision": "b6962452e67bd16bd018f68257ce78cae7682dfb487a555e3b513ea9796194f4",
+              "scope": "all",
+              "targets": [
+                {
+                  "ref": "session:00000000-0000-4000-8000-000000000008",
+                  "workspaceId": "00000000-0000-4000-8000-000000000002",
+                  "taskId": "00000000-0000-4000-8000-000000000004",
+                  "sessionId": "00000000-0000-4000-8000-000000000008",
+                  "mountId": "00000000-0000-4000-8000-000000000009",
+                  "title": "Shell",
+                  "profile": "shell",
+                  "cwd": "/__fixture__/workspace",
+                  "workStatus": "idle",
+                  "environment": {
+                    "executionContextRef": "context:00000000-0000-4000-8000-000000000003",
+                    "mode": "directory"
+                  },
+                  "window": {
+                    "id": "window-1",
+                    "kind": "main",
+                    "ordinal": 1
+                  },
+                  "workspace": {
+                    "id": "00000000-0000-4000-8000-000000000002",
+                    "name": "Default fixture workspace",
+                    "ordinal": 1
+                  },
+                  "task": {
+                    "id": "00000000-0000-4000-8000-000000000004",
+                    "name": "默认",
+                    "ordinal": 1
+                  },
+                  "canvas": {
+                    "id": "00000000-0000-4000-8000-000000000005",
+                    "name": "Shell · /__fixture__/workspace",
+                    "ordinal": 1
+                  },
+                  "session": {
+                    "id": "00000000-0000-4000-8000-000000000008",
+                    "ordinal": 1,
+                    "detached": false
+                  },
+                  "dag": {
+                    "depth": 0,
+                    "childRefs": [
+                      "session:00000000-0000-4000-8000-000000000025"
+                    ],
+                    "siblingRefs": [
+                      "session:00000000-0000-4000-8000-000000000008",
+                      "session:00000000-0000-4000-8000-000000000016"
+                    ]
+                  }
+                },
+                {
+                  "ref": "session:00000000-0000-4000-8000-000000000016",
+                  "workspaceId": "00000000-0000-4000-8000-000000000002",
+                  "taskId": "00000000-0000-4000-8000-000000000004",
+                  "sessionId": "00000000-0000-4000-8000-000000000016",
+                  "mountId": "00000000-0000-4000-8000-000000000017",
+                  "title": "Peer",
+                  "profile": "shell",
+                  "cwd": "/__fixture__/workspace",
+                  "workStatus": "idle",
+                  "environment": {
+                    "executionContextRef": "context:00000000-0000-4000-8000-000000000003",
+                    "mode": "directory"
+                  },
+                  "window": {
+                    "id": "window-1",
+                    "kind": "main",
+                    "ordinal": 1
+                  },
+                  "workspace": {
+                    "id": "00000000-0000-4000-8000-000000000002",
+                    "name": "Default fixture workspace",
+                    "ordinal": 1
+                  },
+                  "task": {
+                    "id": "00000000-0000-4000-8000-000000000004",
+                    "name": "默认",
+                    "ordinal": 1
+                  },
+                  "canvas": {
+                    "id": "00000000-0000-4000-8000-000000000005",
+                    "name": "Shell · /__fixture__/workspace",
+                    "ordinal": 1
+                  },
+                  "session": {
+                    "id": "00000000-0000-4000-8000-000000000016",
+                    "ordinal": 2,
+                    "detached": false
+                  },
+                  "dag": {
+                    "depth": 0,
+                    "childRefs": [],
+                    "siblingRefs": [
+                      "session:00000000-0000-4000-8000-000000000008",
+                      "session:00000000-0000-4000-8000-000000000016"
+                    ]
+                  }
+                },
+                {
+                  "ref": "session:00000000-0000-4000-8000-000000000025",
+                  "workspaceId": "00000000-0000-4000-8000-000000000002",
+                  "taskId": "00000000-0000-4000-8000-000000000004",
+                  "sessionId": "00000000-0000-4000-8000-000000000025",
+                  "mountId": "00000000-0000-4000-8000-000000000026",
+                  "title": "Child",
+                  "profile": "shell",
+                  "cwd": "/__fixture__/workspace",
+                  "workStatus": "idle",
+                  "environment": {
+                    "executionContextRef": "context:00000000-0000-4000-8000-000000000003",
+                    "mode": "directory"
+                  },
+                  "window": {
+                    "id": "window-1",
+                    "kind": "main",
+                    "ordinal": 1
+                  },
+                  "workspace": {
+                    "id": "00000000-0000-4000-8000-000000000002",
+                    "name": "Default fixture workspace",
+                    "ordinal": 1
+                  },
+                  "task": {
+                    "id": "00000000-0000-4000-8000-000000000004",
+                    "name": "默认",
+                    "ordinal": 1
+                  },
+                  "canvas": {
+                    "id": "00000000-0000-4000-8000-000000000005",
+                    "name": "Shell · /__fixture__/workspace",
+                    "ordinal": 1
+                  },
+                  "session": {
+                    "id": "00000000-0000-4000-8000-000000000025",
+                    "ordinal": 1,
+                    "detached": false
+                  },
+                  "dag": {
+                    "depth": 1,
+                    "parentRef": "session:00000000-0000-4000-8000-000000000008",
+                    "childRefs": [],
+                    "siblingRefs": [
+                      "session:00000000-0000-4000-8000-000000000025"
+                    ]
+                  }
+                },
+                {
+                  "ref": "session:00000000-0000-4000-8000-000000000034",
+                  "workspaceId": "00000000-0000-4000-8000-000000000002",
+                  "taskId": "00000000-0000-4000-8000-000000000030",
+                  "sessionId": "00000000-0000-4000-8000-000000000034",
+                  "mountId": "00000000-0000-4000-8000-000000000035",
+                  "title": "Shell",
+                  "profile": "shell",
+                  "cwd": "/__fixture__/workspace",
+                  "workStatus": "idle",
+                  "environment": {
+                    "executionContextRef": "context:00000000-0000-4000-8000-000000000029",
+                    "mode": "directory"
+                  },
+                  "window": {
+                    "id": "window-1",
+                    "kind": "main",
+                    "ordinal": 1
+                  },
+                  "workspace": {
+                    "id": "00000000-0000-4000-8000-000000000002",
+                    "name": "Default fixture workspace",
+                    "ordinal": 1
+                  },
+                  "task": {
+                    "id": "00000000-0000-4000-8000-000000000030",
+                    "name": "Remote",
+                    "ordinal": 2
+                  },
+                  "canvas": {
+                    "id": "00000000-0000-4000-8000-000000000031",
+                    "name": "Shell · /__fixture__/workspace",
+                    "ordinal": 1
+                  },
+                  "session": {
+                    "id": "00000000-0000-4000-8000-000000000034",
+                    "ordinal": 1,
+                    "detached": false
+                  },
+                  "dag": {
+                    "depth": 0,
+                    "childRefs": [],
+                    "siblingRefs": [
+                      "session:00000000-0000-4000-8000-000000000034"
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "source": [
+        "apps/runtime/src/control/host-control-server.ts:256-290",
+        "apps/runtime/src/control/host-control-server.ts:416-428",
+        "apps/runtime/src/control/host-control-server.ts:309-314",
+        "apps/runtime/src/control/host-topology-projector.ts:61-69",
+        "apps/runtime/src/control/host-target-revision.ts:6-17",
+        "apps/runtime/src/cli/mt-cli.ts:71-74"
+      ]
+    },
+    {
+      "id": "terminal-child-default",
+      "description": "终端相对关系兼容不带 revision 的 child，省略 ordinal 取第一个子卡。",
+      "request": {
+        "category": "boundary",
+        "scenario": "discovery",
+        "calls": [
+          {
+            "envelope": {
+              "version": 1,
+              "requestId": "terminal-child-default-1",
+              "method": "terminal.read-current",
+              "params": {
+                "target": {
+                  "kind": "relation",
+                  "relation": "child"
+                },
+                "maxLines": 1,
+                "maxBytes": 100
+              },
+              "token": "<capability-token>",
+              "deadlineAt": 1700000500000
+            }
+          }
+        ],
+        "stub_output": "fixture child output"
+      },
+      "expected_response": {
+        "frames": [
+          {
+            "version": 1,
+            "requestId": "terminal-child-default-1",
+            "ok": true,
+            "result": {
+              "text": "fixture child output"
+            }
+          }
+        ]
+      },
+      "source": [
+        "apps/runtime/src/control/host-control-server.ts:256-290",
+        "apps/runtime/src/control/host-control-server.ts:416-428",
+        "apps/runtime/src/control/host-control-server.ts:359-374",
+        "apps/runtime/src/control/host-control-server.ts:462-472",
+        "apps/runtime/src/control/host-topology-projector.ts:110-124",
+        "apps/runtime/src/control/runtime-control-backend.ts:131-137",
+        "apps/runtime/src/cli/mt-cli.ts:641-659"
+      ]
+    },
+    {
+      "id": "stale-terminal-sibling",
+      "description": "终端 sibling 携带过期投影时，在读终端前拒绝。",
+      "request": {
+        "category": "failure",
+        "scenario": "discovery",
+        "calls": [
+          {
+            "envelope": {
+              "version": 1,
+              "requestId": "stale-terminal-sibling-1",
+              "method": "terminal.read-current",
+              "params": {
+                "target": {
+                  "kind": "sibling",
+                  "ordinal": 1,
+                  "projectionRevision": "fixture-old-revision"
+                },
+                "maxLines": 1,
+                "maxBytes": 100
+              },
+              "token": "<capability-token>",
+              "deadlineAt": 1700000500000
+            }
+          }
+        ]
+      },
+      "expected_response": {
+        "frames": [
+          {
+            "version": 1,
+            "requestId": "stale-terminal-sibling-1",
+            "ok": false,
+            "error": {
+              "code": "STALE_PROJECTION",
+              "message": "target ordinal projection is stale; list targets again"
+            }
+          }
+        ]
+      },
+      "source": [
+        "apps/runtime/src/control/host-control-server.ts:256-290",
+        "apps/runtime/src/control/host-control-server.ts:416-428",
+        "apps/runtime/src/control/host-control-server.ts:309-313",
+        "apps/runtime/src/control/host-control-server.ts:359-374",
+        "apps/runtime/src/control/host-control-server.ts:474-479",
+        "apps/runtime/src/control/host-control-server.ts:491-497",
+        "apps/runtime/src/cli/mt-cli.ts:647-653"
+      ]
+    },
+    {
+      "id": "request-id-does-not-deduplicate-send",
+      "description": "两次相同请求标识和正文仍分发两次终端写入，记录写入替身的次数。",
+      "request": {
+        "category": "boundary",
+        "scenario": "discovery",
+        "calls": [
+          {
+            "envelope": {
+              "version": 1,
+              "requestId": "fixture-same-id",
+              "method": "terminal.send-text",
+              "params": {
+                "target": {
+                  "kind": "self"
+                },
+                "text": "fixture text"
+              },
+              "token": "<capability-token>",
+              "deadlineAt": 1700000500000
+            }
+          },
+          {
+            "envelope": {
+              "version": 1,
+              "requestId": "fixture-same-id",
+              "method": "terminal.send-text",
+              "params": {
+                "target": {
+                  "kind": "self"
+                },
+                "text": "fixture text"
+              },
+              "token": "<capability-token>",
+              "deadlineAt": 1700000500000
+            }
+          }
+        ]
+      },
+      "expected_response": {
+        "frames": [
+          {
+            "version": 1,
+            "requestId": "fixture-same-id",
+            "ok": true,
+            "result": {
+              "sent": true
+            }
+          },
+          {
+            "version": 1,
+            "requestId": "fixture-same-id",
+            "ok": true,
+            "result": {
+              "sent": true
+            }
+          }
+        ],
+        "observations": {
+          "terminal_writes": [
+            {
+              "session_id": "00000000-0000-4000-8000-000000000008",
+              "text": "fixture text",
+              "submit": false
+            },
+            {
+              "session_id": "00000000-0000-4000-8000-000000000008",
+              "text": "fixture text",
+              "submit": false
+            }
+          ]
+        }
+      },
+      "source": [
+        "apps/runtime/src/control/host-control-server.ts:256-290",
+        "apps/runtime/src/control/host-control-server.ts:416-428",
+        "apps/runtime/src/control/host-control-server.ts:251-252",
+        "apps/runtime/src/control/host-control-server.ts:264-279",
+        "apps/runtime/src/control/host-control-server.ts:359-387",
+        "apps/runtime/src/control/runtime-control-backend.ts:176-184"
+      ],
+      "requires_runtime": true
+    },
+    {
+      "id": "wire-invalid-version",
+      "description": "版本不受支持时在解析请求失败，响应的 requestId 为 unknown。",
+      "request": {
+        "category": "failure",
+        "scenario": "base",
+        "calls": [
+          {
+            "envelope": {
+              "version": 2,
+              "requestId": "wire-invalid-version-1",
+              "method": "host.list",
+              "params": {},
+              "token": "<capability-token>",
+              "deadlineAt": 1700000500000
+            }
+          }
+        ]
+      },
+      "expected_response": {
+        "frames": [
+          {
+            "version": 1,
+            "requestId": "unknown",
+            "ok": false,
+            "error": {
+              "code": "INVALID_REQUEST",
+              "message": "unsupported control protocol version"
+            }
+          }
+        ]
+      },
+      "source": [
+        "apps/runtime/src/control/host-control-server.ts:256-290",
+        "apps/runtime/src/control/host-control-server.ts:416-428"
+      ]
+    },
+    {
+      "id": "wire-missing-token",
+      "description": "线协议缺 token 字段时属于形状错误，响应的 requestId 为 unknown。",
+      "request": {
+        "category": "failure",
+        "scenario": "base",
+        "calls": [
+          {
+            "envelope": {
+              "version": 1,
+              "requestId": "wire-missing-token-1",
+              "method": "host.list",
+              "params": {},
+              "deadlineAt": 1700000500000
+            }
+          }
+        ]
+      },
+      "expected_response": {
+        "frames": [
+          {
+            "version": 1,
+            "requestId": "unknown",
+            "ok": false,
+            "error": {
+              "code": "INVALID_REQUEST",
+              "message": "token must be a non-empty bounded string"
+            }
+          }
+        ]
+      },
+      "source": [
+        "apps/runtime/src/control/host-control-server.ts:256-290",
+        "apps/runtime/src/control/host-control-server.ts:416-428",
+        "apps/runtime/src/control/host-control-server.ts:538-542",
+        "apps/runtime/src/control/host-control-server.ts:502-513"
+      ]
+    },
+    {
+      "id": "wire-denied-token",
+      "description": "非空占位在未签发、方法 scope 不符及令牌过期时均返回 CAPABILITY_DENIED。",
+      "request": {
+        "category": "failure",
+        "scenario": "base",
+        "calls": [
+          {
+            "envelope": {
+              "version": 1,
+              "requestId": "wire-denied-token-1",
+              "method": "host.list",
+              "params": {},
+              "token": "<unknown-token>",
+              "deadlineAt": 1700000500000
+            }
+          },
+          {
+            "envelope": {
+              "version": 1,
+              "requestId": "wire-denied-token-2",
+              "method": "host.list",
+              "params": {},
+              "token": "<out-of-scope-token>",
+              "deadlineAt": 1700000500000
+            }
+          },
+          {
+            "envelope": {
+              "version": 1,
+              "requestId": "wire-denied-token-3",
+              "method": "host.list",
+              "params": {},
+              "token": "<expired-token>",
+              "deadlineAt": 1700000500000
+            }
+          }
+        ]
+      },
+      "expected_response": {
+        "frames": [
+          {
+            "version": 1,
+            "requestId": "wire-denied-token-1",
+            "ok": false,
+            "error": {
+              "code": "CAPABILITY_DENIED",
+              "message": "capability token is missing, expired, or out of scope"
+            }
+          },
+          {
+            "version": 1,
+            "requestId": "wire-denied-token-2",
+            "ok": false,
+            "error": {
+              "code": "CAPABILITY_DENIED",
+              "message": "capability token is missing, expired, or out of scope"
+            }
+          },
+          {
+            "version": 1,
+            "requestId": "wire-denied-token-3",
+            "ok": false,
+            "error": {
+              "code": "CAPABILITY_DENIED",
+              "message": "capability token is missing, expired, or out of scope"
+            }
+          }
+        ]
+      },
+      "source": [
+        "apps/runtime/src/control/host-control-server.ts:256-290",
+        "apps/runtime/src/control/host-control-server.ts:416-428",
+        "apps/runtime/src/control/host-control-server.ts:105-137",
+        "apps/runtime/src/control/host-control-server.ts:502-513",
+        "apps/runtime/src/runtime-server.ts:2322-2335"
+      ]
+    },
+    {
+      "id": "wire-run-token-revoked",
+      "description": "撤销合成 run 后，原令牌从允许变为 CAPABILITY_DENIED。",
+      "request": {
+        "category": "failure",
+        "scenario": "base",
+        "calls": [
+          {
+            "envelope": {
+              "version": 1,
+              "requestId": "wire-run-token-revoked-1",
+              "method": "host.identify",
+              "params": {},
+              "token": "<capability-token>",
+              "deadlineAt": 1700000500000
+            }
+          },
+          {
+            "revoke_caller_run": true
+          },
+          {
+            "envelope": {
+              "version": 1,
+              "requestId": "wire-run-token-revoked-2",
+              "method": "host.identify",
+              "params": {},
+              "token": "<capability-token>",
+              "deadlineAt": 1700000500000
+            }
+          }
+        ]
+      },
+      "expected_response": {
+        "frames": [
+          {
+            "version": 1,
+            "requestId": "wire-run-token-revoked-1",
+            "ok": true,
+            "result": {
+              "caller": {
+                "runId": "run-fixture",
+                "sessionId": "00000000-0000-4000-8000-000000000008"
+              },
+              "target": {
+                "ref": "session:00000000-0000-4000-8000-000000000008",
+                "workspaceId": "00000000-0000-4000-8000-000000000002",
+                "taskId": "00000000-0000-4000-8000-000000000004",
+                "sessionId": "00000000-0000-4000-8000-000000000008",
+                "mountId": "00000000-0000-4000-8000-000000000009",
+                "title": "Shell",
+                "profile": "shell",
+                "cwd": "/__fixture__/workspace",
+                "workStatus": "idle",
+                "environment": {
+                  "executionContextRef": "context:00000000-0000-4000-8000-000000000003",
+                  "mode": "directory"
+                },
+                "window": {
+                  "id": "window-1",
+                  "kind": "main",
+                  "ordinal": 1
+                },
+                "workspace": {
+                  "id": "00000000-0000-4000-8000-000000000002",
+                  "name": "Default fixture workspace",
+                  "ordinal": 1
+                },
+                "task": {
+                  "id": "00000000-0000-4000-8000-000000000004",
+                  "name": "默认",
+                  "ordinal": 1
+                },
+                "canvas": {
+                  "id": "00000000-0000-4000-8000-000000000005",
+                  "name": "Shell · /__fixture__/workspace",
+                  "ordinal": 1
+                },
+                "session": {
+                  "id": "00000000-0000-4000-8000-000000000008",
+                  "ordinal": 1,
+                  "detached": false
+                },
+                "dag": {
+                  "depth": 0,
+                  "childRefs": [],
+                  "siblingRefs": [
+                    "session:00000000-0000-4000-8000-000000000008"
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "version": 1,
+            "requestId": "wire-run-token-revoked-2",
+            "ok": false,
+            "error": {
+              "code": "CAPABILITY_DENIED",
+              "message": "capability token is missing, expired, or out of scope"
+            }
+          }
+        ]
+      },
+      "source": [
+        "apps/runtime/src/control/host-control-server.ts:256-290",
+        "apps/runtime/src/control/host-control-server.ts:416-428",
+        "apps/runtime/src/control/host-control-server.ts:105-144",
+        "apps/runtime/src/control/host-control-server.ts:298-304",
+        "apps/runtime/src/control/host-topology-projector.ts:55-59"
+      ]
+    },
+    {
+      "id": "wire-timeout-precedes-token-validation",
+      "description": "已过 deadline 的合法封套先返回 TIMEOUT。",
+      "request": {
+        "category": "boundary",
+        "scenario": "base",
+        "calls": [
+          {
+            "envelope": {
+              "version": 1,
+              "requestId": "wire-timeout-precedes-token-validation-1",
+              "method": "host.list",
+              "params": {},
+              "token": "<unknown-token>",
+              "deadlineAt": 1699999999999
+            }
+          }
+        ]
+      },
+      "expected_response": {
+        "frames": [
+          {
+            "version": 1,
+            "requestId": "wire-timeout-precedes-token-validation-1",
+            "ok": false,
+            "error": {
+              "code": "TIMEOUT",
+              "message": "request deadline elapsed"
+            }
+          }
+        ]
+      },
+      "source": [
+        "apps/runtime/src/control/host-control-server.ts:256-290",
+        "apps/runtime/src/control/host-control-server.ts:416-428"
+      ]
+    },
+    {
+      "id": "renderer-rpc-name-unsupported",
+      "description": "向 Host Control 发送内部 hierarchy.close-scene 方法名得到 UNSUPPORTED。",
+      "request": {
+        "category": "failure",
+        "scenario": "base",
+        "calls": [
+          {
+            "envelope": {
+              "version": 1,
+              "requestId": "renderer-rpc-name-unsupported-1",
+              "method": "hierarchy.close-scene",
+              "params": {},
+              "token": "<capability-token>",
+              "deadlineAt": 1700000500000
+            }
+          }
+        ]
+      },
+      "expected_response": {
+        "frames": [
+          {
+            "version": 1,
+            "requestId": "unknown",
+            "ok": false,
+            "error": {
+              "code": "UNSUPPORTED",
+              "message": "unsupported control method"
+            }
+          }
+        ]
+      },
+      "source": [
+        "apps/runtime/src/control/host-control-server.ts:256-290",
+        "apps/runtime/src/control/host-control-server.ts:416-428",
+        "apps/runtime/src/control/host-control-server.ts:586-603",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:676-684"
+      ]
+    },
+    {
+      "id": "create-workspace-replay",
+      "description": "创建工作空间并聚焦。使用新传输 requestId 重放同一提交键时复用已创建对象。同键改标题冲突。",
+      "request": {
+        "category": "normal",
+        "scenario": "base",
+        "calls": [
+          {
+            "envelope": {
+              "version": 1,
+              "requestId": "create-workspace-replay-1",
+              "method": "structure.create.workspace",
+              "params": {
+                "path": "/__fixture__/secondary",
+                "title": "Secondary workspace",
+                "submissionKey": "fixture-workspace",
+                "enter": true
+              },
+              "token": "<capability-token>",
+              "deadlineAt": 1700000500000
+            }
+          },
+          {
+            "envelope": {
+              "version": 1,
+              "requestId": "create-workspace-replay-2",
+              "method": "structure.create.workspace",
+              "params": {
+                "path": "/__fixture__/secondary",
+                "title": "Secondary workspace",
+                "submissionKey": "fixture-workspace",
+                "enter": true
+              },
+              "token": "<capability-token>",
+              "deadlineAt": 1700000500000
+            }
+          },
+          {
+            "envelope": {
+              "version": 1,
+              "requestId": "create-workspace-replay-3",
+              "method": "structure.create.workspace",
+              "params": {
+                "path": "/__fixture__/secondary",
+                "title": "Changed workspace",
+                "submissionKey": "fixture-workspace",
+                "enter": true
+              },
+              "token": "<capability-token>",
+              "deadlineAt": 1700000500000
+            }
+          }
+        ]
+      },
+      "expected_response": {
+        "frames": [
+          {
+            "version": 1,
+            "requestId": "create-workspace-replay-1",
+            "ok": true,
+            "result": {
+              "kind": "created",
+              "entity": "workspace",
+              "createdRef": "workspace:00000000-0000-4000-8000-000000000010",
+              "path": {
+                "window": {
+                  "ref": "window:window-1",
+                  "title": "主窗口"
+                },
+                "workspace": {
+                  "ref": "workspace:00000000-0000-4000-8000-000000000010",
+                  "title": "Secondary workspace",
+                  "path": "/__fixture__/secondary"
+                },
+                "task": {
+                  "ref": "task:00000000-0000-4000-8000-000000000012",
+                  "title": "默认"
+                },
+                "canvas": {
+                  "ref": "scene:00000000-0000-4000-8000-000000000013",
+                  "title": "Shell · /__fixture__/secondary"
+                },
+                "session": {
+                  "ref": "session:00000000-0000-4000-8000-000000000016",
+                  "title": "Shell"
+                }
+              },
+              "focusedPath": {
+                "window": {
+                  "ref": "window:window-1",
+                  "title": "主窗口"
+                },
+                "workspace": {
+                  "ref": "workspace:00000000-0000-4000-8000-000000000010",
+                  "title": "Secondary workspace",
+                  "path": "/__fixture__/secondary"
+                },
+                "task": {
+                  "ref": "task:00000000-0000-4000-8000-000000000012",
+                  "title": "默认"
+                },
+                "canvas": {
+                  "ref": "scene:00000000-0000-4000-8000-000000000013",
+                  "title": "Shell · /__fixture__/secondary"
+                },
+                "session": {
+                  "ref": "session:00000000-0000-4000-8000-000000000016",
+                  "title": "Shell"
+                }
+              }
+            }
+          },
+          {
+            "version": 1,
+            "requestId": "create-workspace-replay-2",
+            "ok": true,
+            "result": {
+              "kind": "created",
+              "entity": "workspace",
+              "createdRef": "workspace:00000000-0000-4000-8000-000000000010",
+              "path": {
+                "window": {
+                  "ref": "window:window-1",
+                  "title": "主窗口"
+                },
+                "workspace": {
+                  "ref": "workspace:00000000-0000-4000-8000-000000000010",
+                  "title": "Secondary workspace",
+                  "path": "/__fixture__/secondary"
+                },
+                "task": {
+                  "ref": "task:00000000-0000-4000-8000-000000000012",
+                  "title": "默认"
+                },
+                "canvas": {
+                  "ref": "scene:00000000-0000-4000-8000-000000000013",
+                  "title": "Shell · /__fixture__/secondary"
+                },
+                "session": {
+                  "ref": "session:00000000-0000-4000-8000-000000000016",
+                  "title": "Shell"
+                }
+              },
+              "focusedPath": {
+                "window": {
+                  "ref": "window:window-1",
+                  "title": "主窗口"
+                },
+                "workspace": {
+                  "ref": "workspace:00000000-0000-4000-8000-000000000010",
+                  "title": "Secondary workspace",
+                  "path": "/__fixture__/secondary"
+                },
+                "task": {
+                  "ref": "task:00000000-0000-4000-8000-000000000012",
+                  "title": "默认"
+                },
+                "canvas": {
+                  "ref": "scene:00000000-0000-4000-8000-000000000013",
+                  "title": "Shell · /__fixture__/secondary"
+                },
+                "session": {
+                  "ref": "session:00000000-0000-4000-8000-000000000016",
+                  "title": "Shell"
+                }
+              }
+            }
+          },
+          {
+            "version": 1,
+            "requestId": "create-workspace-replay-3",
+            "ok": false,
+            "error": {
+              "code": "PATH_CONFLICT",
+              "message": "submission key 已被不同输入使用"
+            }
+          }
+        ],
+        "observations": {
+          "active_workspaces": 2
+        }
+      },
+      "source": [
+        "apps/runtime/src/control/host-control-server.ts:256-290",
+        "apps/runtime/src/control/host-control-server.ts:416-428",
+        "apps/runtime/src/control/host-control-server.ts:298-307",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:160-202",
+        "apps/runtime/src/control/host-action-types.ts:191-192",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:205-222",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:1106-1119",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:1138-1150",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:900-949",
+        "apps/runtime/src/control/host-action-types.ts:80-86",
+        "apps/runtime/src/control/host-action-types.ts:126-136",
+        "apps/runtime/src/i18n/messages/control.ts:123",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:1314-1326"
+      ]
+    },
+    {
+      "id": "create-task-workspace-ref",
+      "description": "以全量投影和稳定工作区引用建事项，缺省导航保留原焦点。",
+      "request": {
+        "category": "normal",
+        "scenario": "base",
+        "calls": [
+          {
+            "envelope": {
+              "version": 1,
+              "requestId": "create-task-workspace-ref-1",
+              "method": "structure.create.task",
+              "params": {
+                "workspace": {
+                  "kind": "ref",
+                  "ref": "workspace:00000000-0000-4000-8000-000000000002",
+                  "projectionRevision": "4cbbab809e0d7c0a07a5f6acd280b01b520c638885ee6de4bf5fae49680f4514"
+                },
+                "title": "New task",
+                "submissionKey": "fixture-task"
+              },
+              "token": "<capability-token>",
+              "deadlineAt": 1700000500000
+            }
+          }
+        ]
+      },
+      "expected_response": {
+        "frames": [
+          {
+            "version": 1,
+            "requestId": "create-task-workspace-ref-1",
+            "ok": true,
+            "result": {
+              "kind": "created",
+              "entity": "task",
+              "createdRef": "task:00000000-0000-4000-8000-000000000012",
+              "path": {
+                "window": {
+                  "ref": "window:window-1",
+                  "title": "主窗口"
+                },
+                "workspace": {
+                  "ref": "workspace:00000000-0000-4000-8000-000000000002",
+                  "title": "Default fixture workspace",
+                  "path": "/__fixture__/workspace"
+                },
+                "task": {
+                  "ref": "task:00000000-0000-4000-8000-000000000012",
+                  "title": "New task"
+                },
+                "canvas": {
+                  "ref": "scene:00000000-0000-4000-8000-000000000013",
+                  "title": "Shell · /__fixture__/workspace"
+                },
+                "session": {
+                  "ref": "session:00000000-0000-4000-8000-000000000016",
+                  "title": "Shell"
+                }
+              },
+              "focusedPath": {
+                "window": {
+                  "ref": "window:window-1",
+                  "title": "主窗口"
+                },
+                "workspace": {
+                  "ref": "workspace:00000000-0000-4000-8000-000000000002",
+                  "title": "Default fixture workspace",
+                  "path": "/__fixture__/workspace"
+                },
+                "task": {
+                  "ref": "task:00000000-0000-4000-8000-000000000004",
+                  "title": "默认"
+                },
+                "canvas": {
+                  "ref": "scene:00000000-0000-4000-8000-000000000005",
+                  "title": "Shell · /__fixture__/workspace"
+                },
+                "session": {
+                  "ref": "session:00000000-0000-4000-8000-000000000008",
+                  "title": "Shell"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "source": [
+        "apps/runtime/src/control/host-control-server.ts:256-290",
+        "apps/runtime/src/control/host-control-server.ts:416-428",
+        "apps/runtime/src/control/host-control-server.ts:298-307",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:160-202",
+        "apps/runtime/src/control/host-action-types.ts:156-167",
+        "apps/runtime/src/control/host-action-types.ts:191-194",
+        "apps/runtime/src/control/host-action-target-resolver.ts:141-159",
+        "apps/runtime/src/control/host-action-target-resolver.ts:288-312",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:225-240",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:900-949",
+        "apps/runtime/src/control/host-action-types.ts:80-86",
+        "apps/runtime/src/control/host-action-types.ts:126-136"
+      ]
+    },
+    {
+      "id": "create-canvas-current-task",
+      "description": "以 current/task 定位调用卡所在事项，显式 enter 激活新画布。",
+      "request": {
+        "category": "normal",
+        "scenario": "base",
+        "calls": [
+          {
+            "envelope": {
+              "version": 1,
+              "requestId": "create-canvas-current-task-1",
+              "method": "structure.create.canvas",
+              "params": {
+                "task": {
+                  "kind": "current",
+                  "entity": "task"
+                },
+                "title": "New canvas",
+                "submissionKey": "fixture-canvas",
+                "enter": true
+              },
+              "token": "<capability-token>",
+              "deadlineAt": 1700000500000
+            }
+          }
+        ]
+      },
+      "expected_response": {
+        "frames": [
+          {
+            "version": 1,
+            "requestId": "create-canvas-current-task-1",
+            "ok": true,
+            "result": {
+              "kind": "created",
+              "entity": "canvas",
+              "createdRef": "scene:00000000-0000-4000-8000-000000000013",
+              "path": {
+                "window": {
+                  "ref": "window:window-1",
+                  "title": "主窗口"
+                },
+                "workspace": {
+                  "ref": "workspace:00000000-0000-4000-8000-000000000002",
+                  "title": "Default fixture workspace",
+                  "path": "/__fixture__/workspace"
+                },
+                "task": {
+                  "ref": "task:00000000-0000-4000-8000-000000000004",
+                  "title": "默认"
+                },
+                "canvas": {
+                  "ref": "scene:00000000-0000-4000-8000-000000000013",
+                  "title": "New canvas"
+                },
+                "session": {
+                  "ref": "session:00000000-0000-4000-8000-000000000016",
+                  "title": "Shell"
+                }
+              },
+              "focusedPath": {
+                "window": {
+                  "ref": "window:window-1",
+                  "title": "主窗口"
+                },
+                "workspace": {
+                  "ref": "workspace:00000000-0000-4000-8000-000000000002",
+                  "title": "Default fixture workspace",
+                  "path": "/__fixture__/workspace"
+                },
+                "task": {
+                  "ref": "task:00000000-0000-4000-8000-000000000004",
+                  "title": "默认"
+                },
+                "canvas": {
+                  "ref": "scene:00000000-0000-4000-8000-000000000013",
+                  "title": "New canvas"
+                },
+                "session": {
+                  "ref": "session:00000000-0000-4000-8000-000000000016",
+                  "title": "Shell"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "source": [
+        "apps/runtime/src/control/host-control-server.ts:256-290",
+        "apps/runtime/src/control/host-control-server.ts:416-428",
+        "apps/runtime/src/control/host-control-server.ts:298-307",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:160-202",
+        "apps/runtime/src/control/host-action-types.ts:165-168",
+        "apps/runtime/src/control/host-action-types.ts:194",
+        "apps/runtime/src/control/host-action-target-resolver.ts:141-159",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:243-258",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:900-949",
+        "apps/runtime/src/control/host-action-types.ts:80-86",
+        "apps/runtime/src/control/host-action-types.ts:126-136"
+      ]
+    },
+    {
+      "id": "create-session-canvas-alias",
+      "description": "接受 canvas: 稳定引用，创建指定 cwd 和权限模式的会话，回执使用 scene: 并聚焦新卡。",
+      "request": {
+        "category": "normal",
+        "scenario": "base",
+        "calls": [
+          {
+            "envelope": {
+              "version": 1,
+              "requestId": "create-session-canvas-alias-1",
+              "method": "structure.create.session",
+              "params": {
+                "canvas": {
+                  "kind": "ref",
+                  "ref": "canvas:00000000-0000-4000-8000-000000000005",
+                  "projectionRevision": "4cbbab809e0d7c0a07a5f6acd280b01b520c638885ee6de4bf5fae49680f4514"
+                },
+                "title": "Fixture Claude",
+                "profile": "claude-code",
+                "cwd": "/__fixture__/workspace/components",
+                "permissionMode": "plan",
+                "submissionKey": "fixture-session",
+                "enter": true
+              },
+              "token": "<capability-token>",
+              "deadlineAt": 1700000500000
+            }
+          }
+        ]
+      },
+      "expected_response": {
+        "frames": [
+          {
+            "version": 1,
+            "requestId": "create-session-canvas-alias-1",
+            "ok": true,
+            "result": {
+              "kind": "created",
+              "entity": "session",
+              "createdRef": "session:00000000-0000-4000-8000-000000000016",
+              "path": {
+                "window": {
+                  "ref": "window:window-1",
+                  "title": "主窗口"
+                },
+                "workspace": {
+                  "ref": "workspace:00000000-0000-4000-8000-000000000002",
+                  "title": "Default fixture workspace",
+                  "path": "/__fixture__/workspace"
+                },
+                "task": {
+                  "ref": "task:00000000-0000-4000-8000-000000000004",
+                  "title": "默认"
+                },
+                "canvas": {
+                  "ref": "scene:00000000-0000-4000-8000-000000000005",
+                  "title": "Shell · /__fixture__/workspace"
+                },
+                "session": {
+                  "ref": "session:00000000-0000-4000-8000-000000000016",
+                  "title": "Fixture Claude"
+                }
+              },
+              "focusedPath": {
+                "window": {
+                  "ref": "window:window-1",
+                  "title": "主窗口"
+                },
+                "workspace": {
+                  "ref": "workspace:00000000-0000-4000-8000-000000000002",
+                  "title": "Default fixture workspace",
+                  "path": "/__fixture__/workspace"
+                },
+                "task": {
+                  "ref": "task:00000000-0000-4000-8000-000000000004",
+                  "title": "默认"
+                },
+                "canvas": {
+                  "ref": "scene:00000000-0000-4000-8000-000000000005",
+                  "title": "Shell · /__fixture__/workspace"
+                },
+                "session": {
+                  "ref": "session:00000000-0000-4000-8000-000000000016",
+                  "title": "Fixture Claude"
+                }
+              }
+            }
+          }
+        ],
+        "observations": {
+          "stored_session": {
+            "cwd": "/__fixture__/workspace/components",
+            "permission_mode": "plan"
+          }
+        }
+      },
+      "source": [
+        "apps/runtime/src/control/host-control-server.ts:256-290",
+        "apps/runtime/src/control/host-control-server.ts:416-428",
+        "apps/runtime/src/control/host-control-server.ts:298-307",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:160-202",
+        "apps/runtime/src/control/host-action-types.ts:189-195",
+        "apps/runtime/src/control/host-action-target-resolver.ts:288-312",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:261-280",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:900-949",
+        "apps/runtime/src/control/host-action-types.ts:80-86",
+        "apps/runtime/src/control/host-action-types.ts:126-136",
+        "apps/runtime/src/session-canvas/session-canvas-service.ts:373-395"
+      ]
+    },
+    {
+      "id": "action-ref-stale-projection",
+      "description": "结构动作的 ref 携带旧 revision 时，即使工作区仍存在也拒绝创建。",
+      "request": {
+        "category": "failure",
+        "scenario": "base",
+        "calls": [
+          {
+            "envelope": {
+              "version": 1,
+              "requestId": "action-ref-stale-projection-1",
+              "method": "structure.create.task",
+              "params": {
+                "workspace": {
+                  "kind": "ref",
+                  "ref": "workspace:00000000-0000-4000-8000-000000000002",
+                  "projectionRevision": "fixture-old-revision"
+                },
+                "title": "New task",
+                "submissionKey": "fixture-task"
+              },
+              "token": "<capability-token>",
+              "deadlineAt": 1700000500000
+            }
+          }
+        ]
+      },
+      "expected_response": {
+        "frames": [
+          {
+            "version": 1,
+            "requestId": "action-ref-stale-projection-1",
+            "ok": false,
+            "error": {
+              "code": "STALE_PROJECTION",
+              "message": "目标列表已更新，请重新列举后再执行"
+            }
+          }
+        ],
+        "observations": {
+          "active_tasks": 1
+        }
+      },
+      "source": [
+        "apps/runtime/src/control/host-control-server.ts:256-290",
+        "apps/runtime/src/control/host-control-server.ts:416-428",
+        "apps/runtime/src/control/host-control-server.ts:298-307",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:160-202",
+        "apps/runtime/src/control/host-action-types.ts:156-167",
+        "apps/runtime/src/control/host-action-target-resolver.ts:141-159",
+        "apps/runtime/src/control/host-action-target-resolver.ts:288-312",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:225-240",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:697-700",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:1344-1348",
+        "apps/runtime/src/i18n/messages/control.ts:54"
+      ]
+    },
+    {
+      "id": "remove-leaf-and-replay",
+      "description": "对叶子申请 subtree 时预览降为 node。确认成功移除，重放已消费引用得到 CONFIRMATION_REQUIRED。",
+      "request": {
+        "category": "boundary",
+        "scenario": "leaf",
+        "calls": [
+          {
+            "envelope": {
+              "version": 1,
+              "requestId": "remove-leaf-and-replay-1",
+              "method": "structure.remove.preview",
+              "params": {
+                "target": {
+                  "kind": "session",
+                  "sessionId": "00000000-0000-4000-8000-000000000016"
+                },
+                "scope": "subtree"
+              },
+              "token": "<capability-token>",
+              "deadlineAt": 1700000500000
+            }
+          },
+          {
+            "envelope": {
+              "version": 1,
+              "requestId": "remove-leaf-and-replay-2",
+              "method": "structure.remove.commit",
+              "params": {
+                "confirmationRef": "<confirmation-1>"
+              },
+              "token": "<capability-token>",
+              "deadlineAt": 1700000500000
+            }
+          },
+          {
+            "envelope": {
+              "version": 1,
+              "requestId": "remove-leaf-and-replay-3",
+              "method": "structure.remove.commit",
+              "params": {
+                "confirmationRef": "<confirmation-1>"
+              },
+              "token": "<capability-token>",
+              "deadlineAt": 1700000500000
+            }
+          }
+        ]
+      },
+      "expected_response": {
+        "frames": [
+          {
+            "version": 1,
+            "requestId": "remove-leaf-and-replay-1",
+            "ok": true,
+            "result": {
+              "kind": "removal-preview",
+              "impact": {
+                "target": {
+                  "window": {
+                    "ref": "window:window-1",
+                    "title": "主窗口"
+                  },
+                  "workspace": {
+                    "ref": "workspace:00000000-0000-4000-8000-000000000002",
+                    "title": "Default fixture workspace",
+                    "path": "/__fixture__/workspace"
+                  },
+                  "task": {
+                    "ref": "task:00000000-0000-4000-8000-000000000004",
+                    "title": "默认"
+                  },
+                  "canvas": {
+                    "ref": "scene:00000000-0000-4000-8000-000000000005",
+                    "title": "Shell · /__fixture__/workspace"
+                  },
+                  "session": {
+                    "ref": "session:00000000-0000-4000-8000-000000000016",
+                    "title": "Leaf"
+                  }
+                },
+                "scope": "node",
+                "tasks": 0,
+                "canvases": 0,
+                "sessions": 1,
+                "descendants": 0,
+                "liveRuns": 0,
+                "terminalProcesses": 0,
+                "preservesProjectFiles": true,
+                "preservesBranches": true,
+                "preservesWorktrees": true
+              },
+              "confirmationRef": "<confirmation-1>"
+            }
+          },
+          {
+            "version": 1,
+            "requestId": "remove-leaf-and-replay-2",
+            "ok": true,
+            "result": {
+              "kind": "removed",
+              "targetRef": "session:00000000-0000-4000-8000-000000000016",
+              "removedTasks": 0,
+              "removedCanvases": 0,
+              "removedSessions": 1,
+              "activePath": {
+                "window": {
+                  "ref": "window:window-1",
+                  "title": "主窗口"
+                },
+                "workspace": {
+                  "ref": "workspace:00000000-0000-4000-8000-000000000002",
+                  "title": "Default fixture workspace",
+                  "path": "/__fixture__/workspace"
+                },
+                "task": {
+                  "ref": "task:00000000-0000-4000-8000-000000000004",
+                  "title": "默认"
+                },
+                "canvas": {
+                  "ref": "scene:00000000-0000-4000-8000-000000000005",
+                  "title": "Shell · /__fixture__/workspace"
+                },
+                "session": {
+                  "ref": "session:00000000-0000-4000-8000-000000000008",
+                  "title": "Shell"
+                }
+              }
+            }
+          },
+          {
+            "version": 1,
+            "requestId": "remove-leaf-and-replay-3",
+            "ok": false,
+            "error": {
+              "code": "CONFIRMATION_REQUIRED",
+              "message": "确认已失效，请先重新预览"
+            }
+          }
+        ],
+        "observations": {
+          "active_sessions": 1,
+          "disposals": [
+            [
+              "00000000-0000-4000-8000-000000000016"
+            ]
+          ]
+        }
+      },
+      "source": [
+        "apps/runtime/src/control/host-control-server.ts:256-290",
+        "apps/runtime/src/control/host-control-server.ts:416-428",
+        "apps/runtime/src/control/host-control-server.ts:298-307",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:160-202",
+        "apps/runtime/src/control/host-action-types.ts:216-219",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:654-694",
+        "apps/runtime/src/control/host-action-confirmation-service.ts:87-162",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:1353-1355",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:532-552",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:606-626",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:884-897",
+        "apps/runtime/src/control/host-action-target-resolver.ts:231-285",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:1122-1130",
+        "apps/runtime/src/i18n/messages/control.ts:67-72"
+      ],
+      "requires_runtime": true
+    },
+    {
+      "id": "remove-subtree-confirm",
+      "description": "预览调用卡及其后代。提交后，仅被选子树移除，保留同级卡和另一个事项。",
+      "request": {
+        "category": "normal",
+        "scenario": "discovery",
+        "calls": [
+          {
+            "envelope": {
+              "version": 1,
+              "requestId": "remove-subtree-confirm-1",
+              "method": "structure.remove.preview",
+              "params": {
+                "target": {
+                  "kind": "self"
+                },
+                "scope": "subtree"
+              },
+              "token": "<capability-token>",
+              "deadlineAt": 1700000500000
+            }
+          },
+          {
+            "envelope": {
+              "version": 1,
+              "requestId": "remove-subtree-confirm-2",
+              "method": "structure.remove.commit",
+              "params": {
+                "confirmationRef": "<confirmation-1>"
+              },
+              "token": "<capability-token>",
+              "deadlineAt": 1700000500000
+            }
+          }
+        ]
+      },
+      "expected_response": {
+        "frames": [
+          {
+            "version": 1,
+            "requestId": "remove-subtree-confirm-1",
+            "ok": true,
+            "result": {
+              "kind": "removal-preview",
+              "impact": {
+                "target": {
+                  "window": {
+                    "ref": "window:window-1",
+                    "title": "主窗口"
+                  },
+                  "workspace": {
+                    "ref": "workspace:00000000-0000-4000-8000-000000000002",
+                    "title": "Default fixture workspace",
+                    "path": "/__fixture__/workspace"
+                  },
+                  "task": {
+                    "ref": "task:00000000-0000-4000-8000-000000000004",
+                    "title": "默认"
+                  },
+                  "canvas": {
+                    "ref": "scene:00000000-0000-4000-8000-000000000005",
+                    "title": "Shell · /__fixture__/workspace"
+                  },
+                  "session": {
+                    "ref": "session:00000000-0000-4000-8000-000000000008",
+                    "title": "Shell"
+                  }
+                },
+                "scope": "subtree",
+                "tasks": 0,
+                "canvases": 0,
+                "sessions": 2,
+                "descendants": 1,
+                "liveRuns": 0,
+                "terminalProcesses": 0,
+                "preservesProjectFiles": true,
+                "preservesBranches": true,
+                "preservesWorktrees": true
+              },
+              "confirmationRef": "<confirmation-1>"
+            }
+          },
+          {
+            "version": 1,
+            "requestId": "remove-subtree-confirm-2",
+            "ok": true,
+            "result": {
+              "kind": "removed",
+              "targetRef": "session:00000000-0000-4000-8000-000000000008",
+              "removedTasks": 0,
+              "removedCanvases": 0,
+              "removedSessions": 2,
+              "activePath": {
+                "window": {
+                  "ref": "window:window-1",
+                  "title": "主窗口"
+                },
+                "workspace": {
+                  "ref": "workspace:00000000-0000-4000-8000-000000000002",
+                  "title": "Default fixture workspace",
+                  "path": "/__fixture__/workspace"
+                },
+                "task": {
+                  "ref": "task:00000000-0000-4000-8000-000000000004",
+                  "title": "默认"
+                },
+                "canvas": {
+                  "ref": "scene:00000000-0000-4000-8000-000000000005",
+                  "title": "Shell · /__fixture__/workspace"
+                },
+                "session": {
+                  "ref": "session:00000000-0000-4000-8000-000000000016",
+                  "title": "Peer"
+                }
+              }
+            }
+          }
+        ],
+        "observations": {
+          "active_sessions": 2,
+          "disposals": [
+            [
+              "00000000-0000-4000-8000-000000000008",
+              "00000000-0000-4000-8000-000000000025"
+            ]
+          ]
+        }
+      },
+      "source": [
+        "apps/runtime/src/control/host-control-server.ts:256-290",
+        "apps/runtime/src/control/host-control-server.ts:416-428",
+        "apps/runtime/src/control/host-control-server.ts:298-307",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:160-202",
+        "apps/runtime/src/control/host-action-types.ts:216-219",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:654-694",
+        "apps/runtime/src/control/host-action-confirmation-service.ts:87-162",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:1353-1355",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:532-552",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:606-626",
+        "apps/runtime/src/control/host-action-target-resolver.ts:543-562",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:1122-1130",
+        "apps/runtime/src/session-canvas/session-canvas-service.ts:598-674"
+      ],
+      "requires_runtime": true
+    },
+    {
+      "id": "remove-confirmation-other-run",
+      "description": "另一 run 使用该引用时被拒绝，原 run 仍能提交。",
+      "request": {
+        "category": "failure",
+        "scenario": "leaf",
+        "calls": [
+          {
+            "envelope": {
+              "version": 1,
+              "requestId": "remove-confirmation-other-run-1",
+              "method": "structure.remove.preview",
+              "params": {
+                "target": {
+                  "kind": "self"
+                },
+                "scope": "node"
+              },
+              "token": "<capability-token>",
+              "deadlineAt": 1700000500000
+            }
+          },
+          {
+            "envelope": {
+              "version": 1,
+              "requestId": "remove-confirmation-other-run-2",
+              "method": "structure.remove.commit",
+              "params": {
+                "confirmationRef": "<confirmation-1>"
+              },
+              "token": "<other-run-token>",
+              "deadlineAt": 1700000500000
+            }
+          },
+          {
+            "envelope": {
+              "version": 1,
+              "requestId": "remove-confirmation-other-run-3",
+              "method": "structure.remove.commit",
+              "params": {
+                "confirmationRef": "<confirmation-1>"
+              },
+              "token": "<capability-token>",
+              "deadlineAt": 1700000500000
+            }
+          }
+        ]
+      },
+      "expected_response": {
+        "frames": [
+          {
+            "version": 1,
+            "requestId": "remove-confirmation-other-run-1",
+            "ok": true,
+            "result": {
+              "kind": "removal-preview",
+              "impact": {
+                "target": {
+                  "window": {
+                    "ref": "window:window-1",
+                    "title": "主窗口"
+                  },
+                  "workspace": {
+                    "ref": "workspace:00000000-0000-4000-8000-000000000002",
+                    "title": "Default fixture workspace",
+                    "path": "/__fixture__/workspace"
+                  },
+                  "task": {
+                    "ref": "task:00000000-0000-4000-8000-000000000004",
+                    "title": "默认"
+                  },
+                  "canvas": {
+                    "ref": "scene:00000000-0000-4000-8000-000000000005",
+                    "title": "Shell · /__fixture__/workspace"
+                  },
+                  "session": {
+                    "ref": "session:00000000-0000-4000-8000-000000000008",
+                    "title": "Shell"
+                  }
+                },
+                "scope": "node",
+                "tasks": 0,
+                "canvases": 0,
+                "sessions": 1,
+                "descendants": 0,
+                "liveRuns": 0,
+                "terminalProcesses": 0,
+                "preservesProjectFiles": true,
+                "preservesBranches": true,
+                "preservesWorktrees": true
+              },
+              "confirmationRef": "<confirmation-1>"
+            }
+          },
+          {
+            "version": 1,
+            "requestId": "remove-confirmation-other-run-2",
+            "ok": false,
+            "error": {
+              "code": "CONFIRMATION_REQUIRED",
+              "message": "当前运行没有可用的确认"
+            }
+          },
+          {
+            "version": 1,
+            "requestId": "remove-confirmation-other-run-3",
+            "ok": true,
+            "result": {
+              "kind": "removed",
+              "targetRef": "session:00000000-0000-4000-8000-000000000008",
+              "removedTasks": 0,
+              "removedCanvases": 0,
+              "removedSessions": 1,
+              "activePath": {
+                "window": {
+                  "ref": "window:window-1",
+                  "title": "主窗口"
+                },
+                "workspace": {
+                  "ref": "workspace:00000000-0000-4000-8000-000000000002",
+                  "title": "Default fixture workspace",
+                  "path": "/__fixture__/workspace"
+                },
+                "task": {
+                  "ref": "task:00000000-0000-4000-8000-000000000004",
+                  "title": "默认"
+                },
+                "canvas": {
+                  "ref": "scene:00000000-0000-4000-8000-000000000005",
+                  "title": "Shell · /__fixture__/workspace"
+                },
+                "session": {
+                  "ref": "session:00000000-0000-4000-8000-000000000016",
+                  "title": "Leaf"
+                }
+              }
+            }
+          }
+        ],
+        "observations": {
+          "active_sessions": 1
+        }
+      },
+      "source": [
+        "apps/runtime/src/control/host-control-server.ts:256-290",
+        "apps/runtime/src/control/host-control-server.ts:416-428",
+        "apps/runtime/src/control/host-control-server.ts:298-307",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:160-202",
+        "apps/runtime/src/control/host-action-types.ts:216-219",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:654-694",
+        "apps/runtime/src/control/host-action-confirmation-service.ts:87-162",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:1353-1355",
+        "apps/runtime/src/control/host-action-confirmation-service.ts:177-179",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:577-626",
+        "apps/runtime/src/i18n/messages/control.ts:67-72"
+      ]
+    },
+    {
+      "id": "remove-confirmation-impact-changed",
+      "description": "拓扑 revision 相同，预览后会话多出运行记录仍会令确认失效。",
+      "request": {
+        "category": "failure",
+        "scenario": "leaf",
+        "calls": [
+          {
+            "envelope": {
+              "version": 1,
+              "requestId": "remove-confirmation-impact-changed-1",
+              "method": "structure.remove.preview",
+              "params": {
+                "target": {
+                  "kind": "session",
+                  "sessionId": "00000000-0000-4000-8000-000000000016"
+                },
+                "scope": "node"
+              },
+              "token": "<capability-token>",
+              "deadlineAt": 1700000500000
+            }
+          },
+          {
+            "add_live_run": "00000000-0000-4000-8000-000000000016"
+          },
+          {
+            "envelope": {
+              "version": 1,
+              "requestId": "remove-confirmation-impact-changed-2",
+              "method": "structure.remove.commit",
+              "params": {
+                "confirmationRef": "<confirmation-1>"
+              },
+              "token": "<capability-token>",
+              "deadlineAt": 1700000500000
+            }
+          }
+        ]
+      },
+      "expected_response": {
+        "frames": [
+          {
+            "version": 1,
+            "requestId": "remove-confirmation-impact-changed-1",
+            "ok": true,
+            "result": {
+              "kind": "removal-preview",
+              "impact": {
+                "target": {
+                  "window": {
+                    "ref": "window:window-1",
+                    "title": "主窗口"
+                  },
+                  "workspace": {
+                    "ref": "workspace:00000000-0000-4000-8000-000000000002",
+                    "title": "Default fixture workspace",
+                    "path": "/__fixture__/workspace"
+                  },
+                  "task": {
+                    "ref": "task:00000000-0000-4000-8000-000000000004",
+                    "title": "默认"
+                  },
+                  "canvas": {
+                    "ref": "scene:00000000-0000-4000-8000-000000000005",
+                    "title": "Shell · /__fixture__/workspace"
+                  },
+                  "session": {
+                    "ref": "session:00000000-0000-4000-8000-000000000016",
+                    "title": "Leaf"
+                  }
+                },
+                "scope": "node",
+                "tasks": 0,
+                "canvases": 0,
+                "sessions": 1,
+                "descendants": 0,
+                "liveRuns": 0,
+                "terminalProcesses": 0,
+                "preservesProjectFiles": true,
+                "preservesBranches": true,
+                "preservesWorktrees": true
+              },
+              "confirmationRef": "<confirmation-1>"
+            }
+          },
+          {
+            "version": 1,
+            "requestId": "remove-confirmation-impact-changed-2",
+            "ok": false,
+            "error": {
+              "code": "CONFIRMATION_STALE",
+              "message": "确认对应的目标或影响已变化，请重新预览"
+            }
+          }
+        ],
+        "observations": {
+          "active_sessions": 2
+        }
+      },
+      "source": [
+        "apps/runtime/src/control/host-control-server.ts:256-290",
+        "apps/runtime/src/control/host-control-server.ts:416-428",
+        "apps/runtime/src/control/host-control-server.ts:298-307",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:160-202",
+        "apps/runtime/src/control/host-action-types.ts:216-219",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:654-694",
+        "apps/runtime/src/control/host-action-confirmation-service.ts:87-162",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:1353-1355",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:532-552",
+        "apps/runtime/src/control/host-action-target-resolver.ts:231-268",
+        "apps/runtime/src/control/host-action-target-resolver.ts:565-575",
+        "apps/runtime/src/control/host-target-revision.ts:6-17",
+        "apps/runtime/src/i18n/messages/control.ts:67-72"
+      ]
+    },
+    {
+      "id": "canvas-close-last-canvas",
+      "description": "关闭唯一事项的唯一画布，预览影响为零，回执保留活动路径。关闭命令由确认引用提交。",
+      "request": {
+        "category": "boundary",
+        "scenario": "base",
+        "calls": [
+          {
+            "envelope": {
+              "version": 1,
+              "requestId": "canvas-close-last-canvas-1",
+              "method": "structure.canvas-close.preview",
+              "params": {
+                "target": {
+                  "kind": "current",
+                  "entity": "canvas"
+                }
+              },
+              "token": "<capability-token>",
+              "deadlineAt": 1700000500000
+            }
+          },
+          {
+            "envelope": {
+              "version": 1,
+              "requestId": "canvas-close-last-canvas-2",
+              "method": "structure.canvas-close.commit",
+              "params": {
+                "confirmationRef": "<confirmation-1>"
+              },
+              "token": "<capability-token>",
+              "deadlineAt": 1700000500000
+            }
+          }
+        ]
+      },
+      "expected_response": {
+        "frames": [
+          {
+            "version": 1,
+            "requestId": "canvas-close-last-canvas-1",
+            "ok": true,
+            "result": {
+              "kind": "canvas-close-preview",
+              "impact": {
+                "target": {
+                  "window": {
+                    "ref": "window:window-1",
+                    "title": "主窗口"
+                  },
+                  "workspace": {
+                    "ref": "workspace:00000000-0000-4000-8000-000000000002",
+                    "title": "Default fixture workspace",
+                    "path": "/__fixture__/workspace"
+                  },
+                  "task": {
+                    "ref": "task:00000000-0000-4000-8000-000000000004",
+                    "title": "默认"
+                  },
+                  "canvas": {
+                    "ref": "scene:00000000-0000-4000-8000-000000000005",
+                    "title": "Shell · /__fixture__/workspace"
+                  }
+                },
+                "scope": "subtree",
+                "tasks": 0,
+                "canvases": 0,
+                "sessions": 0,
+                "descendants": 0,
+                "liveRuns": 0,
+                "terminalProcesses": 0,
+                "preservesProjectFiles": true,
+                "preservesBranches": true,
+                "preservesWorktrees": true
+              },
+              "confirmationRef": "<confirmation-1>"
+            }
+          },
+          {
+            "version": 1,
+            "requestId": "canvas-close-last-canvas-2",
+            "ok": true,
+            "result": {
+              "kind": "canvas-closed",
+              "targetRef": "scene:00000000-0000-4000-8000-000000000005",
+              "removedSessions": 0,
+              "activePath": {
+                "window": {
+                  "ref": "window:window-1",
+                  "title": "主窗口"
+                },
+                "workspace": {
+                  "ref": "workspace:00000000-0000-4000-8000-000000000002",
+                  "title": "Default fixture workspace",
+                  "path": "/__fixture__/workspace"
+                },
+                "task": {
+                  "ref": "task:00000000-0000-4000-8000-000000000004",
+                  "title": "默认"
+                },
+                "canvas": {
+                  "ref": "scene:00000000-0000-4000-8000-000000000005",
+                  "title": "Shell · /__fixture__/workspace"
+                },
+                "session": {
+                  "ref": "session:00000000-0000-4000-8000-000000000008",
+                  "title": "Shell"
+                }
+              }
+            }
+          }
+        ],
+        "observations": {
+          "active_canvases": 1,
+          "active_sessions": 1,
+          "disposals": []
+        }
+      },
+      "source": [
+        "apps/runtime/src/control/host-control-server.ts:256-290",
+        "apps/runtime/src/control/host-control-server.ts:416-428",
+        "apps/runtime/src/control/host-control-server.ts:298-307",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:160-202",
+        "apps/runtime/src/control/host-action-types.ts:216-219",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:654-694",
+        "apps/runtime/src/control/host-action-confirmation-service.ts:87-162",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:1353-1355",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:555-574",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:629-652",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:860-881",
+        "apps/runtime/src/hierarchy/hierarchy-application-service.ts:1222-1237"
+      ]
+    },
+    {
+      "id": "canvas-close-other-canvas",
+      "description": "关闭非末画布，返回活动路径，并在响应之后调用会话处置。",
+      "request": {
+        "category": "normal",
+        "scenario": "second_canvas",
+        "calls": [
+          {
+            "envelope": {
+              "version": 1,
+              "requestId": "canvas-close-other-canvas-1",
+              "method": "structure.canvas-close.preview",
+              "params": {
+                "target": {
+                  "kind": "ref",
+                  "ref": "scene:00000000-0000-4000-8000-000000000005",
+                  "projectionRevision": "27233dd8468afa44b26ecf264121305326220e5d4af2dc25d627575ed034bd7d"
+                }
+              },
+              "token": "<capability-token>",
+              "deadlineAt": 1700000500000
+            }
+          },
+          {
+            "envelope": {
+              "version": 1,
+              "requestId": "canvas-close-other-canvas-2",
+              "method": "structure.canvas-close.commit",
+              "params": {
+                "confirmationRef": "<confirmation-1>"
+              },
+              "token": "<capability-token>",
+              "deadlineAt": 1700000500000
+            }
+          }
+        ]
+      },
+      "expected_response": {
+        "frames": [
+          {
+            "version": 1,
+            "requestId": "canvas-close-other-canvas-1",
+            "ok": true,
+            "result": {
+              "kind": "canvas-close-preview",
+              "impact": {
+                "target": {
+                  "window": {
+                    "ref": "window:window-1",
+                    "title": "主窗口"
+                  },
+                  "workspace": {
+                    "ref": "workspace:00000000-0000-4000-8000-000000000002",
+                    "title": "Default fixture workspace",
+                    "path": "/__fixture__/workspace"
+                  },
+                  "task": {
+                    "ref": "task:00000000-0000-4000-8000-000000000004",
+                    "title": "默认"
+                  },
+                  "canvas": {
+                    "ref": "scene:00000000-0000-4000-8000-000000000005",
+                    "title": "Shell · /__fixture__/workspace"
+                  }
+                },
+                "scope": "subtree",
+                "tasks": 0,
+                "canvases": 1,
+                "sessions": 1,
+                "descendants": 1,
+                "liveRuns": 0,
+                "terminalProcesses": 0,
+                "preservesProjectFiles": true,
+                "preservesBranches": true,
+                "preservesWorktrees": true
+              },
+              "confirmationRef": "<confirmation-1>"
+            }
+          },
+          {
+            "version": 1,
+            "requestId": "canvas-close-other-canvas-2",
+            "ok": true,
+            "result": {
+              "kind": "canvas-closed",
+              "targetRef": "scene:00000000-0000-4000-8000-000000000005",
+              "removedSessions": 1,
+              "activePath": {
+                "window": {
+                  "ref": "window:window-1",
+                  "title": "主窗口"
+                },
+                "workspace": {
+                  "ref": "workspace:00000000-0000-4000-8000-000000000002",
+                  "title": "Default fixture workspace",
+                  "path": "/__fixture__/workspace"
+                },
+                "task": {
+                  "ref": "task:00000000-0000-4000-8000-000000000004",
+                  "title": "默认"
+                },
+                "canvas": {
+                  "ref": "scene:00000000-0000-4000-8000-000000000013",
+                  "title": "Secondary"
+                },
+                "session": {
+                  "ref": "session:00000000-0000-4000-8000-000000000016",
+                  "title": "Shell"
+                }
+              }
+            }
+          }
+        ],
+        "observations": {
+          "active_canvases": 1,
+          "active_sessions": 1,
+          "disposals": [
+            [
+              "00000000-0000-4000-8000-000000000008"
+            ]
+          ],
+          "event_order": [
+            "response",
+            "response",
+            "dispose"
+          ]
+        }
+      },
+      "source": [
+        "apps/runtime/src/control/host-control-server.ts:256-290",
+        "apps/runtime/src/control/host-control-server.ts:416-428",
+        "apps/runtime/src/control/host-control-server.ts:298-307",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:160-202",
+        "apps/runtime/src/control/host-action-types.ts:216-219",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:654-694",
+        "apps/runtime/src/control/host-action-confirmation-service.ts:87-162",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:1353-1355",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:555-574",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:629-652",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:1122-1130",
+        "apps/runtime/src/control/host-control-server.ts:279-294",
+        "apps/runtime/src/hierarchy/hierarchy-application-service.ts:1253-1300",
+        "apps/runtime/src/control/host-control-post-response.ts:30-56"
+      ],
+      "requires_runtime": true
+    },
+    {
+      "id": "canvas-close-confirmation-expired",
+      "description": "在确认 TTL 整点提交会过期。引用清理以后再提交，得到 CONFIRMATION_REQUIRED。",
+      "request": {
+        "category": "failure",
+        "scenario": "base",
+        "calls": [
+          {
+            "envelope": {
+              "version": 1,
+              "requestId": "canvas-close-confirmation-expired-1",
+              "method": "structure.canvas-close.preview",
+              "params": {
+                "target": {
+                  "kind": "current",
+                  "entity": "canvas"
+                }
+              },
+              "token": "<capability-token>",
+              "deadlineAt": 1700000500000
+            }
+          },
+          {
+            "advance_ms": 120000
+          },
+          {
+            "envelope": {
+              "version": 1,
+              "requestId": "canvas-close-confirmation-expired-2",
+              "method": "structure.canvas-close.commit",
+              "params": {
+                "confirmationRef": "<confirmation-1>"
+              },
+              "token": "<capability-token>",
+              "deadlineAt": 1700000500000
+            }
+          },
+          {
+            "envelope": {
+              "version": 1,
+              "requestId": "canvas-close-confirmation-expired-3",
+              "method": "structure.canvas-close.commit",
+              "params": {
+                "confirmationRef": "<confirmation-1>"
+              },
+              "token": "<capability-token>",
+              "deadlineAt": 1700000500000
+            }
+          }
+        ]
+      },
+      "expected_response": {
+        "frames": [
+          {
+            "version": 1,
+            "requestId": "canvas-close-confirmation-expired-1",
+            "ok": true,
+            "result": {
+              "kind": "canvas-close-preview",
+              "impact": {
+                "target": {
+                  "window": {
+                    "ref": "window:window-1",
+                    "title": "主窗口"
+                  },
+                  "workspace": {
+                    "ref": "workspace:00000000-0000-4000-8000-000000000002",
+                    "title": "Default fixture workspace",
+                    "path": "/__fixture__/workspace"
+                  },
+                  "task": {
+                    "ref": "task:00000000-0000-4000-8000-000000000004",
+                    "title": "默认"
+                  },
+                  "canvas": {
+                    "ref": "scene:00000000-0000-4000-8000-000000000005",
+                    "title": "Shell · /__fixture__/workspace"
+                  }
+                },
+                "scope": "subtree",
+                "tasks": 0,
+                "canvases": 0,
+                "sessions": 0,
+                "descendants": 0,
+                "liveRuns": 0,
+                "terminalProcesses": 0,
+                "preservesProjectFiles": true,
+                "preservesBranches": true,
+                "preservesWorktrees": true
+              },
+              "confirmationRef": "<confirmation-1>"
+            }
+          },
+          {
+            "version": 1,
+            "requestId": "canvas-close-confirmation-expired-2",
+            "ok": false,
+            "error": {
+              "code": "CONFIRMATION_EXPIRED",
+              "message": "确认已过期，请重新预览"
+            }
+          },
+          {
+            "version": 1,
+            "requestId": "canvas-close-confirmation-expired-3",
+            "ok": false,
+            "error": {
+              "code": "CONFIRMATION_REQUIRED",
+              "message": "确认已失效，请先重新预览"
+            }
+          }
+        ],
+        "observations": {
+          "active_sessions": 1
+        }
+      },
+      "source": [
+        "apps/runtime/src/control/host-control-server.ts:256-290",
+        "apps/runtime/src/control/host-control-server.ts:416-428",
+        "apps/runtime/src/control/host-control-server.ts:298-307",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:160-202",
+        "apps/runtime/src/control/host-action-types.ts:216-219",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:654-694",
+        "apps/runtime/src/control/host-action-confirmation-service.ts:87-162",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:1353-1355",
+        "apps/runtime/src/control/host-action-confirmation-service.ts:52",
+        "apps/runtime/src/control/host-action-confirmation-service.ts:170-173",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:555-574",
+        "apps/runtime/src/i18n/messages/control.ts:67-72"
+      ]
+    },
+    {
+      "id": "confirmation-wrong-action",
+      "description": "将移除预览的引用用于关闭画布时拒绝，原移除确认仍可提交。",
+      "request": {
+        "category": "failure",
+        "scenario": "leaf",
+        "calls": [
+          {
+            "envelope": {
+              "version": 1,
+              "requestId": "confirmation-wrong-action-1",
+              "method": "structure.remove.preview",
+              "params": {
+                "target": {
+                  "kind": "session",
+                  "sessionId": "00000000-0000-4000-8000-000000000016"
+                },
+                "scope": "node"
+              },
+              "token": "<capability-token>",
+              "deadlineAt": 1700000500000
+            }
+          },
+          {
+            "envelope": {
+              "version": 1,
+              "requestId": "confirmation-wrong-action-2",
+              "method": "structure.canvas-close.commit",
+              "params": {
+                "confirmationRef": "<confirmation-1>"
+              },
+              "token": "<capability-token>",
+              "deadlineAt": 1700000500000
+            }
+          },
+          {
+            "envelope": {
+              "version": 1,
+              "requestId": "confirmation-wrong-action-3",
+              "method": "structure.remove.commit",
+              "params": {
+                "confirmationRef": "<confirmation-1>"
+              },
+              "token": "<capability-token>",
+              "deadlineAt": 1700000500000
+            }
+          }
+        ]
+      },
+      "expected_response": {
+        "frames": [
+          {
+            "version": 1,
+            "requestId": "confirmation-wrong-action-1",
+            "ok": true,
+            "result": {
+              "kind": "removal-preview",
+              "impact": {
+                "target": {
+                  "window": {
+                    "ref": "window:window-1",
+                    "title": "主窗口"
+                  },
+                  "workspace": {
+                    "ref": "workspace:00000000-0000-4000-8000-000000000002",
+                    "title": "Default fixture workspace",
+                    "path": "/__fixture__/workspace"
+                  },
+                  "task": {
+                    "ref": "task:00000000-0000-4000-8000-000000000004",
+                    "title": "默认"
+                  },
+                  "canvas": {
+                    "ref": "scene:00000000-0000-4000-8000-000000000005",
+                    "title": "Shell · /__fixture__/workspace"
+                  },
+                  "session": {
+                    "ref": "session:00000000-0000-4000-8000-000000000016",
+                    "title": "Leaf"
+                  }
+                },
+                "scope": "node",
+                "tasks": 0,
+                "canvases": 0,
+                "sessions": 1,
+                "descendants": 0,
+                "liveRuns": 0,
+                "terminalProcesses": 0,
+                "preservesProjectFiles": true,
+                "preservesBranches": true,
+                "preservesWorktrees": true
+              },
+              "confirmationRef": "<confirmation-1>"
+            }
+          },
+          {
+            "version": 1,
+            "requestId": "confirmation-wrong-action-2",
+            "ok": false,
+            "error": {
+              "code": "CONFIRMATION_STALE",
+              "message": "确认对应的操作已变化，请重新预览"
+            }
+          },
+          {
+            "version": 1,
+            "requestId": "confirmation-wrong-action-3",
+            "ok": true,
+            "result": {
+              "kind": "removed",
+              "targetRef": "session:00000000-0000-4000-8000-000000000016",
+              "removedTasks": 0,
+              "removedCanvases": 0,
+              "removedSessions": 1,
+              "activePath": {
+                "window": {
+                  "ref": "window:window-1",
+                  "title": "主窗口"
+                },
+                "workspace": {
+                  "ref": "workspace:00000000-0000-4000-8000-000000000002",
+                  "title": "Default fixture workspace",
+                  "path": "/__fixture__/workspace"
+                },
+                "task": {
+                  "ref": "task:00000000-0000-4000-8000-000000000004",
+                  "title": "默认"
+                },
+                "canvas": {
+                  "ref": "scene:00000000-0000-4000-8000-000000000005",
+                  "title": "Shell · /__fixture__/workspace"
+                },
+                "session": {
+                  "ref": "session:00000000-0000-4000-8000-000000000008",
+                  "title": "Shell"
+                }
+              }
+            }
+          }
+        ],
+        "observations": {
+          "active_sessions": 1
+        }
+      },
+      "source": [
+        "apps/runtime/src/control/host-control-server.ts:256-290",
+        "apps/runtime/src/control/host-control-server.ts:416-428",
+        "apps/runtime/src/control/host-control-server.ts:298-307",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:160-202",
+        "apps/runtime/src/control/host-action-types.ts:216-219",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:654-694",
+        "apps/runtime/src/control/host-action-confirmation-service.ts:87-162",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:1353-1355",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:532-552",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:577-626",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:629-652",
+        "apps/runtime/src/i18n/messages/control.ts:67-72"
+      ]
+    },
+    {
+      "id": "remove-canvas-uses-close",
+      "description": "remove preview 解析到画布时直接拒绝，画布使用独立 close 命令。",
+      "request": {
+        "category": "failure",
+        "scenario": "base",
+        "calls": [
+          {
+            "envelope": {
+              "version": 1,
+              "requestId": "remove-canvas-uses-close-1",
+              "method": "structure.remove.preview",
+              "params": {
+                "target": {
+                  "kind": "current",
+                  "entity": "canvas"
+                },
+                "scope": "node"
+              },
+              "token": "<capability-token>",
+              "deadlineAt": 1700000500000
+            }
+          }
+        ]
+      },
+      "expected_response": {
+        "frames": [
+          {
+            "version": 1,
+            "requestId": "remove-canvas-uses-close-1",
+            "ok": false,
+            "error": {
+              "code": "TARGET_NOT_READY",
+              "message": "画布使用关闭画布操作"
+            }
+          }
+        ]
+      },
+      "source": [
+        "apps/runtime/src/control/host-control-server.ts:256-290",
+        "apps/runtime/src/control/host-control-server.ts:416-428",
+        "apps/runtime/src/control/host-control-server.ts:298-307",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:160-202",
+        "apps/runtime/src/control/host-action-types.ts:216-219",
+        "apps/runtime/src/control/host-action-target-resolver.ts:148-154",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:532-552",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:1060-1068",
+        "apps/runtime/src/i18n/messages/control.ts:131"
+      ]
+    },
+    {
+      "id": "fork-mixed-replay-selective-retry",
+      "description": "三个 fork 项目产生部分成功。重复提交返回现有结果，显式重试只补失败项，同一重试请求可重放。",
+      "request": {
+        "category": "boundary",
+        "scenario": "fork",
+        "calls": [
+          {
+            "envelope": {
+              "version": 1,
+              "requestId": "fork-mixed-replay-selective-retry-1",
+              "method": "structure.fork.children",
+              "params": {
+                "source": {
+                  "kind": "self"
+                },
+                "batchKey": "fixture-batch",
+                "items": [
+                  {
+                    "itemKey": "a",
+                    "title": "Alpha",
+                    "environment": {
+                      "mode": "current"
+                    }
+                  },
+                  {
+                    "itemKey": "b",
+                    "title": "Beta",
+                    "environment": {
+                      "mode": "current"
+                    }
+                  },
+                  {
+                    "itemKey": "c",
+                    "title": "Gamma",
+                    "environment": {
+                      "mode": "current"
+                    }
+                  }
+                ]
+              },
+              "token": "<capability-token>",
+              "deadlineAt": 1700000500000
+            }
+          },
+          {
+            "envelope": {
+              "version": 1,
+              "requestId": "fork-mixed-replay-selective-retry-2",
+              "method": "structure.fork.children",
+              "params": {
+                "source": {
+                  "kind": "self"
+                },
+                "batchKey": "fixture-batch",
+                "items": [
+                  {
+                    "itemKey": "a",
+                    "title": "Alpha",
+                    "environment": {
+                      "mode": "current"
+                    }
+                  },
+                  {
+                    "itemKey": "b",
+                    "title": "Beta",
+                    "environment": {
+                      "mode": "current"
+                    }
+                  },
+                  {
+                    "itemKey": "c",
+                    "title": "Gamma",
+                    "environment": {
+                      "mode": "current"
+                    }
+                  }
+                ]
+              },
+              "token": "<capability-token>",
+              "deadlineAt": 1700000500000
+            }
+          },
+          {
+            "envelope": {
+              "version": 1,
+              "requestId": "fork-mixed-replay-selective-retry-3",
+              "method": "structure.fork.children",
+              "params": {
+                "source": {
+                  "kind": "self"
+                },
+                "batchKey": "fixture-batch",
+                "items": [
+                  {
+                    "itemKey": "a",
+                    "title": "Alpha",
+                    "environment": {
+                      "mode": "current"
+                    }
+                  },
+                  {
+                    "itemKey": "b",
+                    "title": "Beta",
+                    "environment": {
+                      "mode": "current"
+                    }
+                  },
+                  {
+                    "itemKey": "c",
+                    "title": "Gamma",
+                    "environment": {
+                      "mode": "current"
+                    }
+                  }
+                ],
+                "retryItemKeys": [
+                  "b"
+                ]
+              },
+              "token": "<capability-token>",
+              "deadlineAt": 1700000500000
+            }
+          },
+          {
+            "envelope": {
+              "version": 1,
+              "requestId": "fork-mixed-replay-selective-retry-4",
+              "method": "structure.fork.children",
+              "params": {
+                "source": {
+                  "kind": "self"
+                },
+                "batchKey": "fixture-batch",
+                "items": [
+                  {
+                    "itemKey": "a",
+                    "title": "Alpha",
+                    "environment": {
+                      "mode": "current"
+                    }
+                  },
+                  {
+                    "itemKey": "b",
+                    "title": "Beta",
+                    "environment": {
+                      "mode": "current"
+                    }
+                  },
+                  {
+                    "itemKey": "c",
+                    "title": "Gamma",
+                    "environment": {
+                      "mode": "current"
+                    }
+                  }
+                ],
+                "retryItemKeys": [
+                  "b"
+                ]
+              },
+              "token": "<capability-token>",
+              "deadlineAt": 1700000500000
+            }
+          }
+        ]
+      },
+      "expected_response": {
+        "frames": [
+          {
+            "version": 1,
+            "requestId": "fork-mixed-replay-selective-retry-1",
+            "ok": true,
+            "result": {
+              "kind": "fork-batch",
+              "batchKey": "fixture-batch",
+              "succeeded": 2,
+              "failed": 1,
+              "items": [
+                {
+                  "itemKey": "a",
+                  "title": "Alpha",
+                  "state": "ready",
+                  "sessionRef": "session:00000000-0000-4000-8000-000000000016",
+                  "environment": {
+                    "mode": "current"
+                  }
+                },
+                {
+                  "itemKey": "b",
+                  "title": "Beta",
+                  "state": "failed",
+                  "environment": {
+                    "mode": "current"
+                  },
+                  "error": "fixture create failure"
+                },
+                {
+                  "itemKey": "c",
+                  "title": "Gamma",
+                  "state": "ready",
+                  "sessionRef": "session:00000000-0000-4000-8000-000000000025",
+                  "environment": {
+                    "mode": "current"
+                  }
+                }
+              ],
+              "retry": {
+                "batchKey": "fixture-batch",
+                "itemKeys": [
+                  "b"
+                ]
+              }
+            }
+          },
+          {
+            "version": 1,
+            "requestId": "fork-mixed-replay-selective-retry-2",
+            "ok": true,
+            "result": {
+              "kind": "fork-batch",
+              "batchKey": "fixture-batch",
+              "succeeded": 2,
+              "failed": 1,
+              "items": [
+                {
+                  "itemKey": "a",
+                  "title": "Alpha",
+                  "state": "ready",
+                  "sessionRef": "session:00000000-0000-4000-8000-000000000016",
+                  "environment": {
+                    "mode": "current"
+                  }
+                },
+                {
+                  "itemKey": "b",
+                  "title": "Beta",
+                  "state": "failed",
+                  "environment": {
+                    "mode": "current"
+                  },
+                  "error": "fixture create failure"
+                },
+                {
+                  "itemKey": "c",
+                  "title": "Gamma",
+                  "state": "ready",
+                  "sessionRef": "session:00000000-0000-4000-8000-000000000025",
+                  "environment": {
+                    "mode": "current"
+                  }
+                }
+              ],
+              "retry": {
+                "batchKey": "fixture-batch",
+                "itemKeys": [
+                  "b"
+                ]
+              }
+            }
+          },
+          {
+            "version": 1,
+            "requestId": "fork-mixed-replay-selective-retry-3",
+            "ok": true,
+            "result": {
+              "kind": "fork-batch",
+              "batchKey": "fixture-batch",
+              "succeeded": 3,
+              "failed": 0,
+              "items": [
+                {
+                  "itemKey": "a",
+                  "title": "Alpha",
+                  "state": "ready",
+                  "sessionRef": "session:00000000-0000-4000-8000-000000000016",
+                  "environment": {
+                    "mode": "current"
+                  }
+                },
+                {
+                  "itemKey": "b",
+                  "title": "Beta",
+                  "state": "ready",
+                  "sessionRef": "session:00000000-0000-4000-8000-000000000034",
+                  "environment": {
+                    "mode": "current"
+                  }
+                },
+                {
+                  "itemKey": "c",
+                  "title": "Gamma",
+                  "state": "ready",
+                  "sessionRef": "session:00000000-0000-4000-8000-000000000025",
+                  "environment": {
+                    "mode": "current"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "version": 1,
+            "requestId": "fork-mixed-replay-selective-retry-4",
+            "ok": true,
+            "result": {
+              "kind": "fork-batch",
+              "batchKey": "fixture-batch",
+              "succeeded": 3,
+              "failed": 0,
+              "items": [
+                {
+                  "itemKey": "a",
+                  "title": "Alpha",
+                  "state": "ready",
+                  "sessionRef": "session:00000000-0000-4000-8000-000000000016",
+                  "environment": {
+                    "mode": "current"
+                  }
+                },
+                {
+                  "itemKey": "b",
+                  "title": "Beta",
+                  "state": "ready",
+                  "sessionRef": "session:00000000-0000-4000-8000-000000000034",
+                  "environment": {
+                    "mode": "current"
+                  }
+                },
+                {
+                  "itemKey": "c",
+                  "title": "Gamma",
+                  "state": "ready",
+                  "sessionRef": "session:00000000-0000-4000-8000-000000000025",
+                  "environment": {
+                    "mode": "current"
+                  }
+                }
+              ]
+            }
+          }
+        ],
+        "observations": {
+          "fork_create_calls": [
+            "Alpha",
+            "Beta",
+            "Gamma",
+            "Beta"
+          ],
+          "active_sessions": 4
+        }
+      },
+      "source": [
+        "apps/runtime/src/control/host-control-server.ts:256-290",
+        "apps/runtime/src/control/host-control-server.ts:416-428",
+        "apps/runtime/src/control/host-control-server.ts:298-307",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:160-202",
+        "apps/runtime/src/control/host-action-types.ts:102-112",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:495-529",
+        "apps/runtime/src/control/fork-batch-coordinator.ts:1129-1156",
+        "apps/runtime/src/control/fork-batch-coordinator.ts:195-234",
+        "apps/runtime/src/control/fork-batch-coordinator.ts:250-278",
+        "apps/runtime/src/control/fork-batch-coordinator.ts:341-355",
+        "apps/runtime/src/control/fork-batch-coordinator.ts:458-505",
+        "apps/runtime/src/control/fork-batch-coordinator.ts:1160-1162",
+        "apps/runtime/src/control/fork-batch-coordinator.ts:1253-1264",
+        "apps/runtime/src/control/fork-batch-coordinator.ts:737-771"
+      ],
+      "requires_runtime": true
+    },
+    {
+      "id": "fork-batch-key-changed-input",
+      "description": "相同 batchKey 在变更项目顺序后返回 PATH_CONFLICT。",
+      "request": {
+        "category": "failure",
+        "scenario": "fork",
+        "calls": [
+          {
+            "envelope": {
+              "version": 1,
+              "requestId": "fork-batch-key-changed-input-1",
+              "method": "structure.fork.children",
+              "params": {
+                "source": {
+                  "kind": "self"
+                },
+                "batchKey": "fixture-batch",
+                "items": [
+                  {
+                    "itemKey": "a",
+                    "title": "Alpha",
+                    "environment": {
+                      "mode": "current"
+                    }
+                  },
+                  {
+                    "itemKey": "b",
+                    "title": "Beta",
+                    "environment": {
+                      "mode": "current"
+                    }
+                  },
+                  {
+                    "itemKey": "c",
+                    "title": "Gamma",
+                    "environment": {
+                      "mode": "current"
+                    }
+                  }
+                ]
+              },
+              "token": "<capability-token>",
+              "deadlineAt": 1700000500000
+            }
+          },
+          {
+            "envelope": {
+              "version": 1,
+              "requestId": "fork-batch-key-changed-input-2",
+              "method": "structure.fork.children",
+              "params": {
+                "source": {
+                  "kind": "self"
+                },
+                "batchKey": "fixture-batch",
+                "items": [
+                  {
+                    "itemKey": "c",
+                    "title": "Gamma",
+                    "environment": {
+                      "mode": "current"
+                    }
+                  },
+                  {
+                    "itemKey": "b",
+                    "title": "Beta",
+                    "environment": {
+                      "mode": "current"
+                    }
+                  },
+                  {
+                    "itemKey": "a",
+                    "title": "Alpha",
+                    "environment": {
+                      "mode": "current"
+                    }
+                  }
+                ]
+              },
+              "token": "<capability-token>",
+              "deadlineAt": 1700000500000
+            }
+          }
+        ]
+      },
+      "expected_response": {
+        "frames": [
+          {
+            "version": 1,
+            "requestId": "fork-batch-key-changed-input-1",
+            "ok": true,
+            "result": {
+              "kind": "fork-batch",
+              "batchKey": "fixture-batch",
+              "succeeded": 2,
+              "failed": 1,
+              "items": [
+                {
+                  "itemKey": "a",
+                  "title": "Alpha",
+                  "state": "ready",
+                  "sessionRef": "session:00000000-0000-4000-8000-000000000016",
+                  "environment": {
+                    "mode": "current"
+                  }
+                },
+                {
+                  "itemKey": "b",
+                  "title": "Beta",
+                  "state": "failed",
+                  "environment": {
+                    "mode": "current"
+                  },
+                  "error": "fixture create failure"
+                },
+                {
+                  "itemKey": "c",
+                  "title": "Gamma",
+                  "state": "ready",
+                  "sessionRef": "session:00000000-0000-4000-8000-000000000025",
+                  "environment": {
+                    "mode": "current"
+                  }
+                }
+              ],
+              "retry": {
+                "batchKey": "fixture-batch",
+                "itemKeys": [
+                  "b"
+                ]
+              }
+            }
+          },
+          {
+            "version": 1,
+            "requestId": "fork-batch-key-changed-input-2",
+            "ok": false,
+            "error": {
+              "code": "PATH_CONFLICT",
+              "message": "批次 fixture-batch 与已提交输入不一致"
+            }
+          }
+        ],
+        "observations": {
+          "fork_create_calls": [
+            "Alpha",
+            "Beta",
+            "Gamma"
+          ]
+        }
+      },
+      "source": [
+        "apps/runtime/src/control/host-control-server.ts:256-290",
+        "apps/runtime/src/control/host-control-server.ts:416-428",
+        "apps/runtime/src/control/host-control-server.ts:298-307",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:160-202",
+        "apps/runtime/src/control/host-action-types.ts:102-112",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:495-529",
+        "apps/runtime/src/control/fork-batch-coordinator.ts:1129-1156",
+        "apps/runtime/src/control/fork-batch-coordinator.ts:221-239",
+        "apps/runtime/src/control/fork-batch-coordinator.ts:1253-1264",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:1395-1402",
+        "apps/runtime/src/i18n/messages/control.ts:96-101"
+      ]
+    },
+    {
+      "id": "fork-missing-batch-on-retry",
+      "description": "没有原批次记录时，显式重试返回 TARGET_NOT_FOUND。",
+      "request": {
+        "category": "failure",
+        "scenario": "base",
+        "calls": [
+          {
+            "envelope": {
+              "version": 1,
+              "requestId": "fork-missing-batch-on-retry-1",
+              "method": "structure.fork.children",
+              "params": {
+                "source": {
+                  "kind": "self"
+                },
+                "batchKey": "fixture-batch",
+                "items": [
+                  {
+                    "itemKey": "a",
+                    "title": "Alpha",
+                    "environment": {
+                      "mode": "current"
+                    }
+                  },
+                  {
+                    "itemKey": "b",
+                    "title": "Beta",
+                    "environment": {
+                      "mode": "current"
+                    }
+                  },
+                  {
+                    "itemKey": "c",
+                    "title": "Gamma",
+                    "environment": {
+                      "mode": "current"
+                    }
+                  }
+                ],
+                "retryItemKeys": [
+                  "b"
+                ]
+              },
+              "token": "<capability-token>",
+              "deadlineAt": 1700000500000
+            }
+          }
+        ]
+      },
+      "expected_response": {
+        "frames": [
+          {
+            "version": 1,
+            "requestId": "fork-missing-batch-on-retry-1",
+            "ok": false,
+            "error": {
+              "code": "TARGET_NOT_FOUND",
+              "message": "批次 fixture-batch 没有可重试的上一轮结果"
+            }
+          }
+        ],
+        "observations": {
+          "fork_create_calls": []
+        }
+      },
+      "source": [
+        "apps/runtime/src/control/host-control-server.ts:256-290",
+        "apps/runtime/src/control/host-control-server.ts:416-428",
+        "apps/runtime/src/control/host-control-server.ts:298-307",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:160-202",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:499-529",
+        "apps/runtime/src/control/fork-batch-coordinator.ts:250-266",
+        "apps/runtime/src/control/fork-batch-coordinator.ts:649-674",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:1332-1336",
+        "apps/runtime/src/i18n/messages/control.ts:111"
+      ]
+    },
+    {
+      "id": "fork-retry-not-a-member",
+      "description": "重试键不在本次提交的 items 中，严格请求校验先返回 INVALID_REQUEST。",
+      "request": {
+        "category": "failure",
+        "scenario": "base",
+        "calls": [
+          {
+            "envelope": {
+              "version": 1,
+              "requestId": "fork-retry-not-a-member-1",
+              "method": "structure.fork.children",
+              "params": {
+                "source": {
+                  "kind": "self"
+                },
+                "batchKey": "fixture-batch",
+                "items": [
+                  {
+                    "itemKey": "a",
+                    "title": "Alpha",
+                    "environment": {
+                      "mode": "current"
+                    }
+                  },
+                  {
+                    "itemKey": "b",
+                    "title": "Beta",
+                    "environment": {
+                      "mode": "current"
+                    }
+                  },
+                  {
+                    "itemKey": "c",
+                    "title": "Gamma",
+                    "environment": {
+                      "mode": "current"
+                    }
+                  }
+                ],
+                "retryItemKeys": [
+                  "unknown"
+                ]
+              },
+              "token": "<capability-token>",
+              "deadlineAt": 1700000500000
+            }
+          }
+        ]
+      },
+      "expected_response": {
+        "frames": [
+          {
+            "version": 1,
+            "requestId": "fork-retry-not-a-member-1",
+            "ok": false,
+            "error": {
+              "code": "INVALID_REQUEST",
+              "message": "请求参数 retryItemKeys.0 不符合约束"
+            }
+          }
+        ],
+        "observations": {
+          "fork_create_calls": []
+        }
+      },
+      "source": [
+        "apps/runtime/src/control/host-control-server.ts:256-290",
+        "apps/runtime/src/control/host-control-server.ts:416-428",
+        "apps/runtime/src/control/host-control-server.ts:298-307",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:160-202",
+        "apps/runtime/src/control/host-action-types.ts:197-224",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:1337-1342",
+        "apps/runtime/src/control/runtime-host-action-facade.ts:1417-1436",
+        "apps/runtime/src/i18n/messages/control.ts:135-140"
+      ]
+    },
+    {
+      "id": "cli-identify-text",
+      "description": "CLI 文本模式按窗口、工作空间、事项、画布、会话展示身份。",
+      "request": {
+        "category": "normal",
+        "scenario": "cli-stub",
+        "argv": [
+          "identify"
+        ],
+        "environment": {},
+        "host_stubs": [
+          {
+            "result": {
+              "caller": {
+                "runId": "run-fixture",
+                "sessionId": "00000000-0000-4000-8000-000000000008"
+              },
+              "target": {
+                "ref": "session:00000000-0000-4000-8000-000000000008",
+                "workspaceId": "00000000-0000-4000-8000-000000000002",
+                "taskId": "00000000-0000-4000-8000-000000000004",
+                "sessionId": "00000000-0000-4000-8000-000000000008",
+                "mountId": "00000000-0000-4000-8000-000000000009",
+                "title": "Shell",
+                "profile": "shell",
+                "cwd": "/__fixture__/workspace",
+                "workStatus": "idle",
+                "environment": {
+                  "executionContextRef": "context:00000000-0000-4000-8000-000000000003",
+                  "mode": "directory"
+                },
+                "window": {
+                  "id": "window-1",
+                  "kind": "main",
+                  "ordinal": 1
+                },
+                "workspace": {
+                  "id": "00000000-0000-4000-8000-000000000002",
+                  "name": "Default fixture workspace",
+                  "ordinal": 1
+                },
+                "task": {
+                  "id": "00000000-0000-4000-8000-000000000004",
+                  "name": "默认",
+                  "ordinal": 1
+                },
+                "canvas": {
+                  "id": "00000000-0000-4000-8000-000000000005",
+                  "name": "Shell · /__fixture__/workspace",
+                  "ordinal": 1
+                },
+                "session": {
+                  "id": "00000000-0000-4000-8000-000000000008",
+                  "ordinal": 1,
+                  "detached": false
+                },
+                "dag": {
+                  "depth": 0,
+                  "childRefs": [],
+                  "siblingRefs": [
+                    "session:00000000-0000-4000-8000-000000000008"
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      },
+      "expected_response": {
+        "exit_code": 0,
+        "stdout": [
+          "窗口 1 / 工作空间 Default fixture workspace / 事项 默认 / 画布 Shell · /__fixture__/workspace / 会话 1（Shell）"
+        ],
+        "stderr": [],
+        "host_requests": [
+          {
+            "method": "host.identify",
+            "params": {}
+          }
+        ]
+      },
+      "source": [
+        "apps/runtime/src/cli/mt-cli.ts:56-69",
+        "apps/runtime/src/cli/mt-cli.ts:673-691"
+      ]
+    },
+    {
+      "id": "cli-discovery-modes",
+      "description": "CLI 将 --all 与 --json 传入全量列表路径，stdout 写结果正文。",
+      "request": {
+        "category": "normal",
+        "scenario": "cli-stub",
+        "argv": [
+          "list",
+          "--all",
+          "--json"
+        ],
+        "environment": {},
+        "host_stubs": [
+          {
+            "result": {
+              "projectionRevision": "fixture-empty-revision",
+              "scope": "all",
+              "targets": []
+            }
+          }
+        ]
+      },
+      "expected_response": {
+        "exit_code": 0,
+        "stdout": [
+          "{\n  \"projectionRevision\": \"fixture-empty-revision\",\n  \"scope\": \"all\",\n  \"targets\": []\n}"
+        ],
+        "stderr": [],
+        "host_requests": [
+          {
+            "method": "host.list",
+            "params": {
+              "scope": "all"
+            }
+          }
+        ]
+      },
+      "source": [
+        "apps/runtime/src/cli/mt-cli.ts:56-74",
+        "apps/runtime/src/cli/mt-cli.ts:673-680"
+      ]
+    },
+    {
+      "id": "cli-missing-managed-identity",
+      "description": "无环境令牌时 CLI 先返回 CAPABILITY_DENIED，未发出请求。",
+      "request": {
+        "category": "failure",
+        "scenario": "cli-stub",
+        "argv": [
+          "identify",
+          "--json"
+        ],
+        "environment": {
+          "MATOU_CONTROL_ENDPOINT": "<control-endpoint>"
+        }
+      },
+      "expected_response": {
+        "exit_code": 4,
+        "stdout": [],
+        "stderr": [
+          "{\n  \"code\": \"CAPABILITY_DENIED\",\n  \"message\": \"`mt` 仅在 Matou 托管终端中可用；当前进程缺少会话控制身份\"\n}"
+        ],
+        "host_requests": []
+      },
+      "source": [
+        "apps/runtime/src/cli/mt-cli.ts:62-69",
+        "apps/runtime/src/cli/mt-cli.ts:203-214",
+        "apps/runtime/src/cli/mt-cli.ts:139-142",
+        "apps/runtime/src/cli/mt-cli.ts:896-909",
+        "apps/runtime/src/cli/mt-cli.ts:956-968"
+      ]
+    },
+    {
+      "id": "cli-create-invalid-permission",
+      "description": "不支持的权限模式在本地报 INVALID_REQUEST，退出 2。",
+      "request": {
+        "category": "failure",
+        "scenario": "cli-stub",
+        "argv": [
+          "create",
+          "session",
+          "--canvas",
+          "current",
+          "--permission-mode",
+          "invalid-mode",
+          "--submission-key",
+          "fixture-key",
+          "--json"
+        ],
+        "environment": {},
+        "host_stubs": []
+      },
+      "expected_response": {
+        "exit_code": 2,
+        "stdout": [],
+        "stderr": [
+          "{\n  \"code\": \"INVALID_REQUEST\",\n  \"message\": \"--permission-mode 需要 default、acceptEdits、plan 或 bypassPermissions\"\n}"
+        ],
+        "host_requests": []
+      },
+      "source": [
+        "apps/runtime/src/cli/mt-cli.ts:233-246",
+        "apps/runtime/src/cli/mt-cli.ts:271-288",
+        "apps/runtime/src/cli/mt-cli.ts:139-142",
+        "apps/runtime/src/cli/mt-cli.ts:896-909",
+        "apps/runtime/src/cli/mt-cli.ts:956-968"
+      ]
+    },
+    {
+      "id": "cli-create-session-selector",
+      "description": "CLI 将 current 解析为明确的 canvas 层级，并保留 cwd、权限模式、enter 和提交键。",
+      "request": {
+        "category": "normal",
+        "scenario": "cli-stub",
+        "argv": [
+          "create",
+          "session",
+          "--canvas",
+          "current",
+          "--profile",
+          "claude-code",
+          "--cwd",
+          "/__fixture__/workspace/components",
+          "--permission-mode",
+          "plan",
+          "--enter",
+          "--submission-key",
+          "fixture-key",
+          "--json"
+        ],
+        "environment": {},
+        "host_stubs": [
+          {
+            "result": {
+              "kind": "created",
+              "entity": "session",
+              "createdRef": "session:00000000-0000-4000-8000-000000000016",
+              "path": {
+                "window": {
+                  "ref": "window:window-1",
+                  "title": "主窗口"
+                },
+                "workspace": {
+                  "ref": "workspace:00000000-0000-4000-8000-000000000002",
+                  "title": "Default fixture workspace",
+                  "path": "/__fixture__/workspace"
+                },
+                "task": {
+                  "ref": "task:00000000-0000-4000-8000-000000000004",
+                  "title": "默认"
+                },
+                "canvas": {
+                  "ref": "scene:00000000-0000-4000-8000-000000000005",
+                  "title": "Shell · /__fixture__/workspace"
+                },
+                "session": {
+                  "ref": "session:00000000-0000-4000-8000-000000000016",
+                  "title": "Fixture Claude"
+                }
+              },
+              "focusedPath": {
+                "window": {
+                  "ref": "window:window-1",
+                  "title": "主窗口"
+                },
+                "workspace": {
+                  "ref": "workspace:00000000-0000-4000-8000-000000000002",
+                  "title": "Default fixture workspace",
+                  "path": "/__fixture__/workspace"
+                },
+                "task": {
+                  "ref": "task:00000000-0000-4000-8000-000000000004",
+                  "title": "默认"
+                },
+                "canvas": {
+                  "ref": "scene:00000000-0000-4000-8000-000000000005",
+                  "title": "Shell · /__fixture__/workspace"
+                },
+                "session": {
+                  "ref": "session:00000000-0000-4000-8000-000000000016",
+                  "title": "Fixture Claude"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "expected_response": {
+        "exit_code": 0,
+        "stdout": [
+          "{\n  \"kind\": \"created\",\n  \"entity\": \"session\",\n  \"createdRef\": \"session:00000000-0000-4000-8000-000000000016\",\n  \"path\": {\n    \"window\": {\n      \"ref\": \"window:window-1\",\n      \"title\": \"主窗口\"\n    },\n    \"workspace\": {\n      \"ref\": \"workspace:00000000-0000-4000-8000-000000000002\",\n      \"title\": \"Default fixture workspace\",\n      \"path\": \"/__fixture__/workspace\"\n    },\n    \"task\": {\n      \"ref\": \"task:00000000-0000-4000-8000-000000000004\",\n      \"title\": \"默认\"\n    },\n    \"canvas\": {\n      \"ref\": \"scene:00000000-0000-4000-8000-000000000005\",\n      \"title\": \"Shell · /__fixture__/workspace\"\n    },\n    \"session\": {\n      \"ref\": \"session:00000000-0000-4000-8000-000000000016\",\n      \"title\": \"Fixture Claude\"\n    }\n  },\n  \"focusedPath\": {\n    \"window\": {\n      \"ref\": \"window:window-1\",\n      \"title\": \"主窗口\"\n    },\n    \"workspace\": {\n      \"ref\": \"workspace:00000000-0000-4000-8000-000000000002\",\n      \"title\": \"Default fixture workspace\",\n      \"path\": \"/__fixture__/workspace\"\n    },\n    \"task\": {\n      \"ref\": \"task:00000000-0000-4000-8000-000000000004\",\n      \"title\": \"默认\"\n    },\n    \"canvas\": {\n      \"ref\": \"scene:00000000-0000-4000-8000-000000000005\",\n      \"title\": \"Shell · /__fixture__/workspace\"\n    },\n    \"session\": {\n      \"ref\": \"session:00000000-0000-4000-8000-000000000016\",\n      \"title\": \"Fixture Claude\"\n    }\n  }\n}"
+        ],
+        "stderr": [],
+        "host_requests": [
+          {
+            "method": "structure.create.session",
+            "params": {
+              "canvas": {
+                "kind": "current",
+                "entity": "canvas"
+              },
+              "profile": "claude-code",
+              "cwd": "/__fixture__/workspace/components",
+              "permissionMode": "plan",
+              "submissionKey": "fixture-key",
+              "enter": true
+            }
+          }
+        ]
+      },
+      "source": [
+        "apps/runtime/src/cli/mt-cli.ts:233-246",
+        "apps/runtime/src/cli/mt-cli.ts:271-288",
+        "apps/runtime/src/cli/mt-cli.ts:451-460",
+        "apps/runtime/src/cli/mt-cli.ts:87-96",
+        "apps/runtime/src/cli/mt-cli.ts:890-898"
+      ]
+    },
+    {
+      "id": "cli-fork-partial-success",
+      "description": "部分成功的业务回执进入 stdout，CLI 退出 6。",
+      "request": {
+        "category": "boundary",
+        "scenario": "cli-stub",
+        "argv": [
+          "fork",
+          "children",
+          "self",
+          "--batch-key",
+          "fixture-batch",
+          "--items-json",
+          "[{\"itemKey\":\"a\",\"title\":\"Alpha\",\"environment\":{\"mode\":\"current\"}},{\"itemKey\":\"b\",\"title\":\"Beta\",\"environment\":{\"mode\":\"current\"}},{\"itemKey\":\"c\",\"title\":\"Gamma\",\"environment\":{\"mode\":\"current\"}}]",
+          "--json"
+        ],
+        "environment": {},
+        "host_stubs": [
+          {
+            "result": {
+              "kind": "fork-batch",
+              "batchKey": "fixture-batch",
+              "succeeded": 2,
+              "failed": 1,
+              "items": [
+                {
+                  "itemKey": "a",
+                  "title": "Alpha",
+                  "state": "ready",
+                  "sessionRef": "session:00000000-0000-4000-8000-000000000016",
+                  "environment": {
+                    "mode": "current"
+                  }
+                },
+                {
+                  "itemKey": "b",
+                  "title": "Beta",
+                  "state": "failed",
+                  "environment": {
+                    "mode": "current"
+                  },
+                  "error": "fixture create failure"
+                },
+                {
+                  "itemKey": "c",
+                  "title": "Gamma",
+                  "state": "ready",
+                  "sessionRef": "session:00000000-0000-4000-8000-000000000025",
+                  "environment": {
+                    "mode": "current"
+                  }
+                }
+              ],
+              "retry": {
+                "batchKey": "fixture-batch",
+                "itemKeys": [
+                  "b"
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "expected_response": {
+        "exit_code": 6,
+        "stdout": [
+          "{\n  \"kind\": \"fork-batch\",\n  \"batchKey\": \"fixture-batch\",\n  \"succeeded\": 2,\n  \"failed\": 1,\n  \"items\": [\n    {\n      \"itemKey\": \"a\",\n      \"title\": \"Alpha\",\n      \"state\": \"ready\",\n      \"sessionRef\": \"session:00000000-0000-4000-8000-000000000016\",\n      \"environment\": {\n        \"mode\": \"current\"\n      }\n    },\n    {\n      \"itemKey\": \"b\",\n      \"title\": \"Beta\",\n      \"state\": \"failed\",\n      \"environment\": {\n        \"mode\": \"current\"\n      },\n      \"error\": \"fixture create failure\"\n    },\n    {\n      \"itemKey\": \"c\",\n      \"title\": \"Gamma\",\n      \"state\": \"ready\",\n      \"sessionRef\": \"session:00000000-0000-4000-8000-000000000025\",\n      \"environment\": {\n        \"mode\": \"current\"\n      }\n    }\n  ],\n  \"retry\": {\n    \"batchKey\": \"fixture-batch\",\n    \"itemKeys\": [\n      \"b\"\n    ]\n  }\n}"
+        ],
+        "stderr": [],
+        "host_requests": [
+          {
+            "method": "structure.fork.children",
+            "params": {
+              "source": {
+                "kind": "self"
+              },
+              "batchKey": "fixture-batch",
+              "items": [
+                {
+                  "itemKey": "a",
+                  "title": "Alpha",
+                  "environment": {
+                    "mode": "current"
+                  }
+                },
+                {
+                  "itemKey": "b",
+                  "title": "Beta",
+                  "environment": {
+                    "mode": "current"
+                  }
+                },
+                {
+                  "itemKey": "c",
+                  "title": "Gamma",
+                  "environment": {
+                    "mode": "current"
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "source": [
+        "apps/runtime/src/cli/mt-cli.ts:292-339",
+        "apps/runtime/src/cli/mt-cli.ts:451-460",
+        "apps/runtime/src/cli/mt-cli.ts:87-96",
+        "apps/runtime/src/cli/mt-cli.ts:890-898"
+      ]
+    },
+    {
+      "id": "cli-fork-retry-without-batch-key",
+      "description": "带重试项却没提供原 batch key，CLI 在发请求前报用法错误。",
+      "request": {
+        "category": "failure",
+        "scenario": "cli-stub",
+        "argv": [
+          "fork",
+          "children",
+          "self",
+          "--items-json",
+          "[{\"itemKey\":\"a\",\"title\":\"Alpha\",\"environment\":{\"mode\":\"current\"}},{\"itemKey\":\"b\",\"title\":\"Beta\",\"environment\":{\"mode\":\"current\"}},{\"itemKey\":\"c\",\"title\":\"Gamma\",\"environment\":{\"mode\":\"current\"}}]",
+          "--retry-item-key",
+          "b",
+          "--json"
+        ],
+        "environment": {},
+        "host_stubs": []
+      },
+      "expected_response": {
+        "exit_code": 2,
+        "stdout": [],
+        "stderr": [
+          "{\n  \"code\": \"INVALID_REQUEST\",\n  \"message\": \"重试失败项时必须显式提供原 --batch-key\"\n}"
+        ],
+        "host_requests": []
+      },
+      "source": [
+        "apps/runtime/src/cli/mt-cli.ts:316-337",
+        "apps/runtime/src/cli/mt-cli.ts:139-142",
+        "apps/runtime/src/cli/mt-cli.ts:896-909",
+        "apps/runtime/src/cli/mt-cli.ts:956-968"
+      ]
+    },
+    {
+      "id": "cli-ambiguity-sanitized-details",
+      "description": "结构动作的 ref 先读取全量投影。上游歧义错误在 stderr 显示候选路径，CLI 退出 3。",
+      "request": {
+        "category": "failure",
+        "scenario": "cli-stub",
+        "argv": [
+          "remove",
+          "preview",
+          "fixture-ambiguous",
+          "--scope",
+          "node",
+          "--json"
+        ],
+        "environment": {},
+        "host_stubs": [
+          {
+            "result": {
+              "projectionRevision": "fixture-revision",
+              "scope": "all",
+              "targets": []
+            }
+          },
+          {
+            "error": {
+              "code": "AMBIGUOUS_TARGET",
+              "message": "fixture ambiguous",
+              "details": {
+                "candidates": [
+                  {
+                    "humanPath": "Fixture A / Card"
+                  },
+                  {
+                    "humanPath": "Fixture B / Card"
+                  }
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "expected_response": {
+        "exit_code": 3,
+        "stdout": [],
+        "stderr": [
+          "{\n  \"code\": \"AMBIGUOUS_TARGET\",\n  \"message\": \"fixture ambiguous\",\n  \"details\": {\n    \"candidates\": [\n      {\n        \"humanPath\": \"Fixture A / Card\"\n      },\n      {\n        \"humanPath\": \"Fixture B / Card\"\n      }\n    ]\n  }\n}"
+        ],
+        "host_requests": [
+          {
+            "method": "host.list",
+            "params": {
+              "scope": "all"
+            }
+          },
+          {
+            "method": "structure.remove.preview",
+            "params": {
+              "target": {
+                "kind": "ref",
+                "ref": "fixture-ambiguous",
+                "projectionRevision": "fixture-revision"
+              },
+              "scope": "node"
+            }
+          }
+        ]
+      },
+      "source": [
+        "apps/runtime/src/cli/mt-cli.ts:370-385",
+        "apps/runtime/src/cli/mt-cli.ts:480-487",
+        "apps/runtime/src/control/host-control-client.ts:120-137",
+        "apps/runtime/src/control/host-control-server.ts:610-625",
+        "apps/runtime/src/cli/mt-cli.ts:139-142",
+        "apps/runtime/src/cli/mt-cli.ts:896-909",
+        "apps/runtime/src/cli/mt-cli.ts:956-968"
+      ]
+    },
+    {
+      "id": "cli-close-usage-requires-confirmation",
+      "description": "close canvas-commit 未给引用时在本地报用法错误。",
+      "request": {
+        "category": "failure",
+        "scenario": "cli-stub",
+        "argv": [
+          "close",
+          "canvas-commit",
+          "--json"
+        ],
+        "environment": {},
+        "host_stubs": []
+      },
+      "expected_response": {
+        "exit_code": 2,
+        "stdout": [],
+        "stderr": [
+          "{\n  \"code\": \"INVALID_REQUEST\",\n  \"message\": \"close canvas-commit 需要确认引用\"\n}"
+        ],
+        "host_requests": []
+      },
+      "source": [
+        "apps/runtime/src/cli/mt-cli.ts:399-421",
+        "apps/runtime/src/cli/mt-cli.ts:543-547",
+        "apps/runtime/src/cli/mt-cli.ts:139-142",
+        "apps/runtime/src/cli/mt-cli.ts:896-909",
+        "apps/runtime/src/cli/mt-cli.ts:956-968"
+      ]
+    }
+  ]
+}

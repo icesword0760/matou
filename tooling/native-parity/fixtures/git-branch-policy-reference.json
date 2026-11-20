@@ -1,0 +1,2798 @@
+{
+  "source": {
+    "commit": "924de28da27999543aeef7a7c9797334fca45d97",
+    "inventory": [
+      "GIT-01",
+      "GIT-05"
+    ]
+  },
+  "cases": [
+    {
+      "id": "ref-ascii-punctuation",
+      "description": "折叠 ASCII 标点与斜杠，身份取小写前缀",
+      "input": {
+        "operation": "generate-ref",
+        "category": "normal",
+        "displayName": "  Feature/API..v2  ",
+        "sessionIds": [
+          "A1B2C3D4-0000-4000-8000-000000000000"
+        ]
+      },
+      "expected": {
+        "branches": [
+          "matou/feature-api-v2-a1b2c3d4"
+        ]
+      },
+      "source": [
+        "apps/runtime/src/session-canvas/branch-name.ts:37",
+        "apps/runtime/src/session-canvas/branch-name.ts:38",
+        "apps/runtime/src/session-canvas/branch-name.ts:39",
+        "apps/runtime/src/session-canvas/branch-name.ts:41",
+        "apps/runtime/src/session-canvas/branch-name.ts:42",
+        "apps/runtime/src/session-canvas/branch-name.ts:43",
+        "apps/runtime/src/session-canvas/branch-name.ts:47",
+        "apps/runtime/src/session-canvas/branch-name.ts:48",
+        "apps/runtime/src/session-canvas/branch-name.ts:49"
+      ],
+      "requires_git": false
+    },
+    {
+      "id": "ref-unicode-nfkc",
+      "description": "全角字母与数字按 NFKC 折叠，保留中文文字",
+      "input": {
+        "operation": "generate-ref",
+        "category": "normal",
+        "displayName": "  修复／ＡＰＩ　版本２  ",
+        "sessionIds": [
+          "A1B2C3D4-0000-4000-8000-000000000000"
+        ]
+      },
+      "expected": {
+        "branches": [
+          "matou/修复-api-版本2-a1b2c3d4"
+        ]
+      },
+      "source": [
+        "apps/runtime/src/session-canvas/branch-name.ts:37",
+        "apps/runtime/src/session-canvas/branch-name.ts:38",
+        "apps/runtime/src/session-canvas/branch-name.ts:39",
+        "apps/runtime/src/session-canvas/branch-name.ts:41",
+        "apps/runtime/src/session-canvas/branch-name.ts:42",
+        "apps/runtime/src/session-canvas/branch-name.ts:43",
+        "apps/runtime/src/session-canvas/branch-name.ts:47",
+        "apps/runtime/src/session-canvas/branch-name.ts:48",
+        "apps/runtime/src/session-canvas/branch-name.ts:49"
+      ],
+      "requires_git": false
+    },
+    {
+      "id": "ref-hash-raw-identity",
+      "description": "相同身份稳定，不同身份及原始身份外围空格参与散列",
+      "input": {
+        "operation": "generate-ref",
+        "category": "normal",
+        "displayName": "Feature!",
+        "sessionIds": [
+          "fixture-session-a",
+          "fixture-session-b",
+          "fixture-session-a",
+          " fixture-session-a "
+        ]
+      },
+      "expected": {
+        "branches": [
+          "matou/feature-e279159a",
+          "matou/feature-de40e18a",
+          "matou/feature-e279159a",
+          "matou/feature-ed9a9e6c"
+        ]
+      },
+      "source": [
+        "apps/runtime/src/session-canvas/branch-name.ts:37",
+        "apps/runtime/src/session-canvas/branch-name.ts:38",
+        "apps/runtime/src/session-canvas/branch-name.ts:39",
+        "apps/runtime/src/session-canvas/branch-name.ts:41",
+        "apps/runtime/src/session-canvas/branch-name.ts:42",
+        "apps/runtime/src/session-canvas/branch-name.ts:43",
+        "apps/runtime/src/session-canvas/branch-name.ts:47",
+        "apps/runtime/src/session-canvas/branch-name.ts:48",
+        "apps/runtime/src/session-canvas/branch-name.ts:50"
+      ],
+      "requires_git": false
+    },
+    {
+      "id": "ref-short-prefix-pattern",
+      "description": "trim 后匹配八位十六进制加连字符的前缀",
+      "input": {
+        "operation": "generate-ref",
+        "category": "boundary",
+        "displayName": "Preview",
+        "sessionIds": [
+          "  DEADBEEF-fixture  "
+        ]
+      },
+      "expected": {
+        "branches": [
+          "matou/preview-deadbeef"
+        ]
+      },
+      "source": [
+        "apps/runtime/src/session-canvas/branch-name.ts:37",
+        "apps/runtime/src/session-canvas/branch-name.ts:38",
+        "apps/runtime/src/session-canvas/branch-name.ts:39",
+        "apps/runtime/src/session-canvas/branch-name.ts:41",
+        "apps/runtime/src/session-canvas/branch-name.ts:42",
+        "apps/runtime/src/session-canvas/branch-name.ts:43",
+        "apps/runtime/src/session-canvas/branch-name.ts:47",
+        "apps/runtime/src/session-canvas/branch-name.ts:48",
+        "apps/runtime/src/session-canvas/branch-name.ts:49"
+      ],
+      "requires_git": false
+    },
+    {
+      "id": "ref-empty-slug",
+      "description": "纯空白直调生成器时使用缺省 slug",
+      "input": {
+        "operation": "generate-ref",
+        "category": "boundary",
+        "displayName": " \t ",
+        "sessionIds": [
+          "A1B2C3D4-0000-4000-8000-000000000000"
+        ]
+      },
+      "expected": {
+        "branches": [
+          "matou/branch-a1b2c3d4"
+        ]
+      },
+      "source": [
+        "apps/runtime/src/session-canvas/branch-name.ts:37",
+        "apps/runtime/src/session-canvas/branch-name.ts:38",
+        "apps/runtime/src/session-canvas/branch-name.ts:39",
+        "apps/runtime/src/session-canvas/branch-name.ts:41",
+        "apps/runtime/src/session-canvas/branch-name.ts:42",
+        "apps/runtime/src/session-canvas/branch-name.ts:43",
+        "apps/runtime/src/session-canvas/branch-name.ts:49",
+        "apps/runtime/src/session-canvas/branch-name.ts:54"
+      ],
+      "requires_git": false
+    },
+    {
+      "id": "ref-no-letters-slug",
+      "description": "只有 emoji 和标点时使用缺省 slug",
+      "input": {
+        "operation": "generate-ref",
+        "category": "boundary",
+        "displayName": "🚀 ! /",
+        "sessionIds": [
+          "A1B2C3D4-0000-4000-8000-000000000000"
+        ]
+      },
+      "expected": {
+        "branches": [
+          "matou/branch-a1b2c3d4"
+        ]
+      },
+      "source": [
+        "apps/runtime/src/session-canvas/branch-name.ts:37",
+        "apps/runtime/src/session-canvas/branch-name.ts:38",
+        "apps/runtime/src/session-canvas/branch-name.ts:39",
+        "apps/runtime/src/session-canvas/branch-name.ts:41",
+        "apps/runtime/src/session-canvas/branch-name.ts:42",
+        "apps/runtime/src/session-canvas/branch-name.ts:43",
+        "apps/runtime/src/session-canvas/branch-name.ts:49",
+        "apps/runtime/src/session-canvas/branch-name.ts:54"
+      ],
+      "requires_git": false
+    },
+    {
+      "id": "ref-long-codepoints",
+      "description": "以 Unicode 码点截断 slug 而非字节或 UTF-16 单元",
+      "input": {
+        "operation": "generate-ref",
+        "category": "boundary",
+        "displayName": "𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀",
+        "sessionIds": [
+          "A1B2C3D4-0000-4000-8000-000000000000"
+        ]
+      },
+      "expected": {
+        "branches": [
+          "matou/𐐨𐐨𐐨𐐨𐐨𐐨𐐨𐐨𐐨𐐨𐐨𐐨𐐨𐐨𐐨𐐨𐐨𐐨𐐨𐐨𐐨𐐨𐐨𐐨𐐨𐐨𐐨𐐨𐐨𐐨𐐨𐐨𐐨𐐨𐐨𐐨𐐨𐐨𐐨𐐨𐐨𐐨𐐨𐐨𐐨𐐨𐐨𐐨-a1b2c3d4"
+        ]
+      },
+      "source": [
+        "apps/runtime/src/session-canvas/branch-name.ts:37",
+        "apps/runtime/src/session-canvas/branch-name.ts:38",
+        "apps/runtime/src/session-canvas/branch-name.ts:39",
+        "apps/runtime/src/session-canvas/branch-name.ts:41",
+        "apps/runtime/src/session-canvas/branch-name.ts:42",
+        "apps/runtime/src/session-canvas/branch-name.ts:43",
+        "apps/runtime/src/session-canvas/branch-name.ts:49",
+        "apps/runtime/src/session-canvas/branch-name.ts:53",
+        "apps/runtime/src/session-canvas/branch-name.ts:54"
+      ],
+      "requires_git": false
+    },
+    {
+      "id": "ref-trim-after-truncate",
+      "description": "截断点为分隔符时去掉末尾连字符",
+      "input": {
+        "operation": "generate-ref",
+        "category": "boundary",
+        "displayName": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA / second",
+        "sessionIds": [
+          "A1B2C3D4-0000-4000-8000-000000000000"
+        ]
+      },
+      "expected": {
+        "branches": [
+          "matou/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-a1b2c3d4"
+        ]
+      },
+      "source": [
+        "apps/runtime/src/session-canvas/branch-name.ts:37",
+        "apps/runtime/src/session-canvas/branch-name.ts:38",
+        "apps/runtime/src/session-canvas/branch-name.ts:39",
+        "apps/runtime/src/session-canvas/branch-name.ts:41",
+        "apps/runtime/src/session-canvas/branch-name.ts:42",
+        "apps/runtime/src/session-canvas/branch-name.ts:43",
+        "apps/runtime/src/session-canvas/branch-name.ts:49",
+        "apps/runtime/src/session-canvas/branch-name.ts:53",
+        "apps/runtime/src/session-canvas/branch-name.ts:54"
+      ],
+      "requires_git": false
+    },
+    {
+      "id": "name-trim-unicode",
+      "description": "显示名去掉外围空白，保留显示用的 Unicode 文本",
+      "input": {
+        "operation": "validate-display-name",
+        "category": "normal",
+        "name": "  示例 🚀  ",
+        "activeSiblingNames": [],
+        "locale": "zh-CN"
+      },
+      "expected": {
+        "validation": {
+          "ok": true,
+          "displayName": "示例 🚀"
+        }
+      },
+      "source": [
+        "apps/runtime/src/session-canvas/branch-name.ts:19",
+        "apps/runtime/src/session-canvas/branch-name.ts:34"
+      ],
+      "requires_git": false
+    },
+    {
+      "id": "name-case-sensitive",
+      "description": "大小写不同的同层显示名可以并存",
+      "input": {
+        "operation": "validate-display-name",
+        "category": "normal",
+        "name": "Review",
+        "activeSiblingNames": [
+          "review"
+        ],
+        "locale": "en"
+      },
+      "expected": {
+        "validation": {
+          "ok": true,
+          "displayName": "Review"
+        }
+      },
+      "source": [
+        "apps/runtime/src/session-canvas/branch-name.ts:19",
+        "apps/runtime/src/session-canvas/branch-name.ts:26",
+        "apps/runtime/src/session-canvas/branch-name.ts:34"
+      ],
+      "requires_git": false
+    },
+    {
+      "id": "name-sixty-four-codepoints",
+      "description": "64 个补充平面码点仍可以作为显示名",
+      "input": {
+        "operation": "validate-display-name",
+        "category": "boundary",
+        "name": "🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀",
+        "activeSiblingNames": [],
+        "locale": "en"
+      },
+      "expected": {
+        "validation": {
+          "ok": true,
+          "displayName": "🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀"
+        }
+      },
+      "source": [
+        "apps/runtime/src/session-canvas/branch-name.ts:19",
+        "apps/runtime/src/session-canvas/branch-name.ts:23",
+        "apps/runtime/src/session-canvas/branch-name.ts:34"
+      ],
+      "requires_git": false
+    },
+    {
+      "id": "name-empty-zh",
+      "description": "空白显示名保留原输入并返回中文错误",
+      "input": {
+        "operation": "validate-display-name",
+        "category": "failure",
+        "name": " \t ",
+        "activeSiblingNames": [],
+        "locale": "zh-CN"
+      },
+      "expected": {
+        "validation": {
+          "ok": false,
+          "code": "EMPTY",
+          "message": "请输入分支名称",
+          "input": " \t "
+        },
+        "workflowError": {
+          "name": "ForkWorkflowError",
+          "message": "请输入分支名称",
+          "code": "EMPTY_NAME",
+          "input": " \t "
+        },
+        "rpc": {
+          "name": "RpcFault",
+          "message": "请输入分支名称",
+          "code": "INVALID_REQUEST",
+          "retryable": false
+        }
+      },
+      "source": [
+        "apps/runtime/src/session-canvas/branch-name.ts:18",
+        "apps/runtime/src/session-canvas/branch-name.ts:19",
+        "apps/runtime/src/session-canvas/branch-name.ts:20",
+        "apps/runtime/src/session-canvas/branch-name.ts:21",
+        "apps/runtime/src/i18n/messages/sessionCanvas.ts:26",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:60",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:64",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:597",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:598",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1298",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1300",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1302",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1303",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:63",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:67",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:170",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:171",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:172"
+      ],
+      "requires_git": false
+    },
+    {
+      "id": "name-empty-en",
+      "description": "英文 Fork 名称校验的空名文案",
+      "input": {
+        "operation": "validate-display-name",
+        "category": "failure",
+        "name": "",
+        "activeSiblingNames": [],
+        "locale": "en"
+      },
+      "expected": {
+        "validation": {
+          "ok": false,
+          "code": "EMPTY",
+          "message": "Enter a fork name",
+          "input": ""
+        },
+        "workflowError": {
+          "name": "ForkWorkflowError",
+          "message": "Enter a fork name",
+          "code": "EMPTY_NAME",
+          "input": ""
+        },
+        "rpc": {
+          "name": "RpcFault",
+          "message": "Enter a fork name",
+          "code": "INVALID_REQUEST",
+          "retryable": false
+        }
+      },
+      "source": [
+        "apps/runtime/src/session-canvas/branch-name.ts:18",
+        "apps/runtime/src/session-canvas/branch-name.ts:19",
+        "apps/runtime/src/session-canvas/branch-name.ts:20",
+        "apps/runtime/src/session-canvas/branch-name.ts:21",
+        "apps/runtime/src/i18n/messages/sessionCanvas.ts:69",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:60",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:64",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:597",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:598",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1298",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1300",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1302",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1303",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:63",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:67",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:170",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:171",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:172"
+      ],
+      "requires_git": false
+    },
+    {
+      "id": "name-too-long",
+      "description": "65 个码点触发限制并早于重名匹配",
+      "input": {
+        "operation": "validate-display-name",
+        "category": "failure",
+        "name": "🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀",
+        "activeSiblingNames": [
+          "🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀"
+        ],
+        "locale": "en"
+      },
+      "expected": {
+        "validation": {
+          "ok": false,
+          "code": "TOO_LONG",
+          "message": "The fork name can be at most 64 characters",
+          "input": "🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀"
+        },
+        "workflowError": {
+          "name": "ForkWorkflowError",
+          "message": "The fork name can be at most 64 characters",
+          "code": "TOO_LONG_NAME",
+          "input": "🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀"
+        },
+        "rpc": {
+          "name": "RpcFault",
+          "message": "The fork name can be at most 64 characters",
+          "code": "INVALID_REQUEST",
+          "retryable": false
+        }
+      },
+      "source": [
+        "apps/runtime/src/session-canvas/branch-name.ts:18",
+        "apps/runtime/src/session-canvas/branch-name.ts:23",
+        "apps/runtime/src/session-canvas/branch-name.ts:24",
+        "apps/runtime/src/session-canvas/branch-name.ts:26",
+        "apps/runtime/src/i18n/messages/sessionCanvas.ts:70",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:60",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:64",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:597",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:598",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1298",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1300",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1302",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1303",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:63",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:67",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:170",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:171",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:172"
+      ],
+      "requires_git": false
+    },
+    {
+      "id": "name-duplicate-exact",
+      "description": "用 trim 后名称匹配同层占名，错误仍回传原输入",
+      "input": {
+        "operation": "validate-display-name",
+        "category": "failure",
+        "name": "  Review  ",
+        "activeSiblingNames": [
+          "Review",
+          "Review 2"
+        ],
+        "locale": "zh-CN"
+      },
+      "expected": {
+        "validation": {
+          "ok": false,
+          "code": "DUPLICATE",
+          "message": "同一层已存在“Review”",
+          "input": "  Review  "
+        },
+        "workflowError": {
+          "name": "ForkWorkflowError",
+          "message": "同一层已存在“Review”",
+          "code": "DUPLICATE_NAME",
+          "input": "  Review  "
+        },
+        "rpc": {
+          "name": "RpcFault",
+          "message": "同一层已存在“Review”",
+          "code": "CONFLICT",
+          "retryable": false
+        }
+      },
+      "source": [
+        "apps/runtime/src/session-canvas/branch-name.ts:18",
+        "apps/runtime/src/session-canvas/branch-name.ts:19",
+        "apps/runtime/src/session-canvas/branch-name.ts:26",
+        "apps/runtime/src/session-canvas/branch-name.ts:29",
+        "apps/runtime/src/session-canvas/branch-name.ts:30",
+        "apps/runtime/src/session-canvas/branch-name.ts:31",
+        "apps/runtime/src/i18n/messages/sessionCanvas.ts:28",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:60",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:64",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:597",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:598",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1298",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1300",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1302",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1303",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:63",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:67",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:170",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:171",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:172"
+      ],
+      "requires_git": false
+    },
+    {
+      "id": "fork-ref-available-with-slash",
+      "description": "未被占用的斜杠分支名保留原样",
+      "input": {
+        "operation": "check-fork-ref",
+        "category": "normal",
+        "branch": "feature/review",
+        "localBranches": [
+          "main"
+        ],
+        "locale": "en",
+        "checkRef": {}
+      },
+      "expected": {
+        "result": "available",
+        "gitCalls": [
+          [
+            "check-ref-format",
+            "--branch",
+            "feature/review"
+          ],
+          [
+            "-C",
+            "repo",
+            "show-ref",
+            "--verify",
+            "--quiet",
+            "refs/heads/feature/review"
+          ]
+        ]
+      },
+      "source": [
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:60",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:64",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:882",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:925",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1383",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1385",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1386",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1389",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1394",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1397",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1401",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1405",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1409",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1415",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1419",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1422",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1458"
+      ],
+      "requires_git": false
+    },
+    {
+      "id": "fork-ref-collision-with-free-number",
+      "description": "原名和 -2 均已占用且 -3 空闲时，原名仍返回冲突",
+      "input": {
+        "operation": "check-fork-ref",
+        "category": "failure",
+        "branch": "feature/review",
+        "localBranches": [
+          "feature/review",
+          "feature/review-2"
+        ],
+        "locale": "zh-CN",
+        "checkRef": {}
+      },
+      "expected": {
+        "error": {
+          "name": "ForkWorkflowError",
+          "message": "分支 feature/review 已存在",
+          "code": "BRANCH_CONFLICT",
+          "input": "feature/review"
+        },
+        "gitCalls": [
+          [
+            "check-ref-format",
+            "--branch",
+            "feature/review"
+          ],
+          [
+            "-C",
+            "repo",
+            "show-ref",
+            "--verify",
+            "--quiet",
+            "refs/heads/feature/review"
+          ]
+        ]
+      },
+      "source": [
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:60",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:64",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:882",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:925",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1383",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1385",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1386",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1389",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1394",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1397",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1401",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1405",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1409",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1415",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1419",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1422",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1458",
+        "apps/runtime/src/i18n/messages/sessionCanvas.ts:43"
+      ],
+      "requires_git": false
+    },
+    {
+      "id": "fork-ref-explicit-free-number",
+      "description": "由调用方显式提交空闲编号后缀时检查可用",
+      "input": {
+        "operation": "check-fork-ref",
+        "category": "boundary",
+        "branch": "feature/review-3",
+        "localBranches": [
+          "feature/review",
+          "feature/review-2"
+        ],
+        "locale": "en",
+        "checkRef": {}
+      },
+      "expected": {
+        "result": "available",
+        "gitCalls": [
+          [
+            "check-ref-format",
+            "--branch",
+            "feature/review-3"
+          ],
+          [
+            "-C",
+            "repo",
+            "show-ref",
+            "--verify",
+            "--quiet",
+            "refs/heads/feature/review-3"
+          ]
+        ]
+      },
+      "source": [
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:60",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:64",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:882",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:925",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1383",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1385",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1386",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1389",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1394",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1397",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1401",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1405",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1409",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1415",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1419",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1422",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1458"
+      ],
+      "requires_git": false
+    },
+    {
+      "id": "fork-ref-invalid-format",
+      "description": "Git 格式检查失败时返回冻结 Fork 错误",
+      "input": {
+        "operation": "check-fork-ref",
+        "category": "failure",
+        "branch": "feature//review",
+        "localBranches": [],
+        "locale": "en",
+        "checkRef": {
+          "status": 128,
+          "stdout": ""
+        }
+      },
+      "expected": {
+        "error": {
+          "name": "ForkWorkflowError",
+          "message": "The branch name is invalid",
+          "code": "INVALID_BRANCH",
+          "input": "feature//review"
+        },
+        "gitCalls": [
+          [
+            "check-ref-format",
+            "--branch",
+            "feature//review"
+          ]
+        ]
+      },
+      "source": [
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:60",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:64",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:882",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:925",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1383",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1385",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1386",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1389",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1394",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1397",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1401",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1405",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1409",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1415",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1419",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1422",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1458",
+        "apps/runtime/src/i18n/messages/sessionCanvas.ts:84"
+      ],
+      "requires_git": false
+    },
+    {
+      "id": "fork-ref-expanded-shorthand",
+      "description": "拒绝 Git 展开后与提交值不同的简写",
+      "input": {
+        "operation": "check-fork-ref",
+        "category": "failure",
+        "branch": "@{-1}",
+        "localBranches": [],
+        "locale": "zh-CN",
+        "checkRef": {
+          "stdout": "previous-branch\n"
+        }
+      },
+      "expected": {
+        "error": {
+          "name": "ForkWorkflowError",
+          "message": "分支名称无效",
+          "code": "INVALID_BRANCH",
+          "input": "@{-1}"
+        },
+        "gitCalls": [
+          [
+            "check-ref-format",
+            "--branch",
+            "@{-1}"
+          ]
+        ]
+      },
+      "source": [
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:60",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:64",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:882",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:925",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1383",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1385",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1386",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1389",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1394",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1397",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1401",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1405",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1409",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1415",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1419",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1422",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1458",
+        "apps/runtime/src/i18n/messages/sessionCanvas.ts:42"
+      ],
+      "requires_git": false
+    },
+    {
+      "id": "fork-reservation-conflict",
+      "description": "另一个 Fork 仍保有同名预留，返回预留冲突文案",
+      "input": {
+        "operation": "check-fork-reservation",
+        "category": "failure",
+        "branch": "feature/review",
+        "operationId": "operation-a",
+        "submissionKey": "submission-a",
+        "locale": "en",
+        "worktrees": [
+          [
+            "worktree-b",
+            "repo",
+            "feature/review",
+            "creating"
+          ]
+        ],
+        "intents": [
+          [
+            "worktree-b",
+            "creating-worktree",
+            "operation-b",
+            "submission-b"
+          ]
+        ]
+      },
+      "expected": {
+        "error": {
+          "name": "ForkWorkflowError",
+          "message": "Branch feature/review is already reserved by another fork",
+          "code": "BRANCH_CONFLICT",
+          "input": "feature/review"
+        }
+      },
+      "source": [
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:924",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:926",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1428",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1434",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1437",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1438",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1440",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1443",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1448",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1450",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1451",
+        "apps/runtime/src/i18n/messages/sessionCanvas.ts:86"
+      ],
+      "requires_git": false
+    },
+    {
+      "id": "fork-reservation-removed-but-pending",
+      "description": "已移除 Worktree 的未完成 Fork 仍保留分支名",
+      "input": {
+        "operation": "check-fork-reservation",
+        "category": "failure",
+        "branch": "feature/review",
+        "operationId": "operation-a",
+        "submissionKey": "submission-a",
+        "locale": "en",
+        "worktrees": [
+          [
+            "worktree-b",
+            "repo",
+            "feature/review",
+            "removed"
+          ]
+        ],
+        "intents": [
+          [
+            "worktree-b",
+            "creating-worktree",
+            "operation-b",
+            "submission-b"
+          ]
+        ]
+      },
+      "expected": {
+        "error": {
+          "name": "ForkWorkflowError",
+          "message": "Branch feature/review is already reserved by another fork",
+          "code": "BRANCH_CONFLICT",
+          "input": "feature/review"
+        }
+      },
+      "source": [
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:924",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:926",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1428",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1434",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1437",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1438",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1440",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1443",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1448",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1450",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1451",
+        "apps/runtime/src/i18n/messages/sessionCanvas.ts:86"
+      ],
+      "requires_git": false
+    },
+    {
+      "id": "fork-reservation-removed-and-finished",
+      "description": "已移除且意图已结束时释放分支名",
+      "input": {
+        "operation": "check-fork-reservation",
+        "category": "boundary",
+        "branch": "feature/review",
+        "operationId": "operation-a",
+        "submissionKey": "submission-a",
+        "locale": "en",
+        "worktrees": [
+          [
+            "worktree-b",
+            "repo",
+            "feature/review",
+            "removed"
+          ]
+        ],
+        "intents": [
+          [
+            "worktree-b",
+            "failed",
+            "operation-b",
+            "submission-b"
+          ]
+        ]
+      },
+      "expected": {
+        "result": "available"
+      },
+      "source": [
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:924",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:926",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1428",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1434",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1437",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1438",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1440",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1443",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1448",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1450",
+        "apps/runtime/src/session-canvas/fork-workflow-service.ts:1451",
+        "apps/runtime/src/i18n/messages/sessionCanvas.ts:86"
+      ],
+      "requires_git": false
+    },
+    {
+      "id": "git-create-explicit-slash",
+      "description": "手工新建保留斜杠、裁掉外围空格并传给 Git",
+      "input": {
+        "operation": "git-rpc",
+        "category": "normal",
+        "method": "git.create-branch",
+        "branch": "  feature/next  ",
+        "status": {
+          "repositoryRoot": "repo",
+          "cwd": "repo",
+          "currentBranch": "feature/next",
+          "defaultBranch": "main",
+          "dirty": false,
+          "stagedCount": 0,
+          "unstagedCount": 0,
+          "untrackedCount": 0,
+          "additions": 0,
+          "deletions": 0,
+          "ahead": 0,
+          "behind": 0,
+          "hasRemote": false,
+          "canPush": false,
+          "branches": [],
+          "worktrees": []
+        }
+      },
+      "expected": {
+        "result": {
+          "repositoryRoot": "repo",
+          "cwd": "repo",
+          "currentBranch": "feature/next",
+          "defaultBranch": "main",
+          "dirty": false,
+          "stagedCount": 0,
+          "unstagedCount": 0,
+          "untrackedCount": 0,
+          "additions": 0,
+          "deletions": 0,
+          "ahead": 0,
+          "behind": 0,
+          "hasRemote": false,
+          "canPush": false,
+          "branches": [],
+          "worktrees": []
+        },
+        "gitCalls": [
+          [
+            "-C",
+            "repo",
+            "checkout",
+            "-b",
+            "feature/next"
+          ]
+        ]
+      },
+      "source": [
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:418",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:419",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:420",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:1255",
+        "apps/runtime/src/git/git-workspace-service.ts:99",
+        "apps/runtime/src/git/git-workspace-service.ts:100",
+        "apps/runtime/src/git/git-workspace-service.ts:101",
+        "apps/runtime/src/git/git-workspace-service.ts:315",
+        "apps/runtime/src/git/git-workspace-service.ts:319",
+        "apps/runtime/src/git/git-workspace-service.ts:322",
+        "apps/runtime/src/git/git-workspace-service.ts:324",
+        "apps/runtime/src/git/git-workspace-service.ts:327"
+      ],
+      "requires_git": false
+    },
+    {
+      "id": "git-create-empty-rpc",
+      "description": "Git RPC 在调用服务前拒绝全空白字段",
+      "input": {
+        "operation": "git-rpc",
+        "category": "failure",
+        "method": "git.create-branch",
+        "branch": " \t ",
+        "locale": "zh-CN"
+      },
+      "expected": {
+        "error": {
+          "name": "RpcFault",
+          "message": "branch must be a non-empty string",
+          "code": "INVALID_REQUEST",
+          "retryable": false
+        },
+        "wireError": {
+          "code": "INVALID_REQUEST",
+          "message": "branch must be a non-empty string",
+          "retryable": false
+        },
+        "gitCalls": []
+      },
+      "source": [
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:63",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:67",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:169",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:418",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:420",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:1253",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:1254",
+        "apps/runtime/src/runtime-server.ts:1406",
+        "apps/runtime/src/runtime-server.ts:1407",
+        "apps/runtime/src/runtime-server.ts:1409"
+      ],
+      "requires_git": false
+    },
+    {
+      "id": "git-service-create-empty",
+      "description": "直接调用 Git 服务时，空白分支返回本地化错误",
+      "input": {
+        "operation": "git-service-create",
+        "category": "failure",
+        "branch": " \t ",
+        "locale": "zh-CN"
+      },
+      "expected": {
+        "error": {
+          "name": "Error",
+          "message": "请输入分支名称"
+        },
+        "gitCalls": []
+      },
+      "source": [
+        "apps/runtime/src/git/git-workspace-service.ts:99",
+        "apps/runtime/src/git/git-workspace-service.ts:100",
+        "apps/runtime/src/git/git-workspace-service.ts:315",
+        "apps/runtime/src/git/git-workspace-service.ts:316",
+        "apps/runtime/src/git/git-workspace-service.ts:317",
+        "apps/runtime/src/i18n/messages/git.ts:9"
+      ],
+      "requires_git": false
+    },
+    {
+      "id": "git-create-leading-dash",
+      "description": "拒绝以连字符起始的分支，结果为服务原始 Error",
+      "input": {
+        "operation": "git-rpc",
+        "category": "failure",
+        "method": "git.create-branch",
+        "branch": "  -sample  ",
+        "locale": "zh-CN"
+      },
+      "expected": {
+        "error": {
+          "name": "Error",
+          "message": "分支名称格式不正确"
+        },
+        "wireError": {
+          "code": "INTERNAL_ERROR",
+          "message": "分支名称格式不正确",
+          "retryable": false
+        },
+        "gitCalls": []
+      },
+      "source": [
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:174",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:179",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:418",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:420",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:1255",
+        "apps/runtime/src/git/git-workspace-service.ts:99",
+        "apps/runtime/src/git/git-workspace-service.ts:100",
+        "apps/runtime/src/git/git-workspace-service.ts:315",
+        "apps/runtime/src/git/git-workspace-service.ts:316",
+        "apps/runtime/src/git/git-workspace-service.ts:318",
+        "apps/runtime/src/i18n/messages/git.ts:10",
+        "apps/runtime/src/runtime-server.ts:1406",
+        "apps/runtime/src/runtime-server.ts:1407",
+        "apps/runtime/src/runtime-server.ts:1409"
+      ],
+      "requires_git": false
+    },
+    {
+      "id": "git-create-duplicate-no-retry",
+      "description": "手动建同名分支时透传模拟 Git 诊断，只尝试原名",
+      "input": {
+        "operation": "git-rpc",
+        "category": "failure",
+        "method": "git.create-branch",
+        "branch": "feature/review",
+        "locale": "en",
+        "checkout": {
+          "status": 128,
+          "stderr": "fatal: a branch named 'feature/review' already exists\n"
+        }
+      },
+      "expected": {
+        "error": {
+          "name": "RpcFault",
+          "message": "fatal: a branch named 'feature/review' already exists",
+          "code": "CONFLICT",
+          "retryable": false
+        },
+        "wireError": {
+          "code": "CONFLICT",
+          "message": "fatal: a branch named 'feature/review' already exists",
+          "retryable": false
+        },
+        "gitCalls": [
+          [
+            "-C",
+            "repo",
+            "checkout",
+            "-b",
+            "feature/review"
+          ]
+        ]
+      },
+      "source": [
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:63",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:67",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:174",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:175",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:176",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:177",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:418",
+        "apps/runtime/src/git/git-workspace-service.ts:99",
+        "apps/runtime/src/git/git-workspace-service.ts:100",
+        "apps/runtime/src/git/git-workspace-service.ts:322",
+        "apps/runtime/src/git/git-workspace-service.ts:324",
+        "apps/runtime/src/git/git-workspace-service.ts:328",
+        "apps/runtime/src/git/git-workspace-service.ts:329",
+        "apps/runtime/src/git/git-workspace-service.ts:341",
+        "apps/runtime/src/git/git-workspace-service.ts:343",
+        "apps/runtime/src/git/git-workspace-service.ts:348",
+        "apps/runtime/src/git/git-workspace-service.ts:349",
+        "apps/runtime/src/git/git-workspace-service.ts:353",
+        "apps/runtime/src/git/git-workspace-service.ts:357",
+        "apps/runtime/src/git/git-workspace-service.ts:359",
+        "apps/runtime/src/runtime-server.ts:1406",
+        "apps/runtime/src/runtime-server.ts:1407",
+        "apps/runtime/src/runtime-server.ts:1409"
+      ],
+      "requires_git": false
+    },
+    {
+      "id": "git-create-failure-default-copy",
+      "description": "Git 进程无诊断输出时使用默认本地化文案",
+      "input": {
+        "operation": "git-rpc",
+        "category": "failure",
+        "method": "git.create-branch",
+        "branch": "feature/review",
+        "locale": "en",
+        "checkout": {
+          "status": 128,
+          "stderr": " \n",
+          "stdout": ""
+        }
+      },
+      "expected": {
+        "error": {
+          "name": "GitExecutionError",
+          "message": "The Git operation failed"
+        },
+        "wireError": {
+          "code": "INTERNAL_ERROR",
+          "message": "The Git operation failed",
+          "retryable": false
+        },
+        "gitCalls": [
+          [
+            "-C",
+            "repo",
+            "checkout",
+            "-b",
+            "feature/review"
+          ]
+        ]
+      },
+      "source": [
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:174",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:179",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:418",
+        "apps/runtime/src/git/git-workspace-service.ts:99",
+        "apps/runtime/src/git/git-workspace-service.ts:100",
+        "apps/runtime/src/git/git-workspace-service.ts:322",
+        "apps/runtime/src/git/git-workspace-service.ts:328",
+        "apps/runtime/src/git/git-workspace-service.ts:329",
+        "apps/runtime/src/git/git-workspace-service.ts:343",
+        "apps/runtime/src/git/git-workspace-service.ts:348",
+        "apps/runtime/src/git/git-workspace-service.ts:349",
+        "apps/runtime/src/git/git-workspace-service.ts:353",
+        "apps/runtime/src/git/git-workspace-service.ts:357",
+        "apps/runtime/src/git/git-workspace-service.ts:359",
+        "apps/runtime/src/i18n/messages/git.ts:33",
+        "apps/runtime/src/runtime-server.ts:1406",
+        "apps/runtime/src/runtime-server.ts:1407",
+        "apps/runtime/src/runtime-server.ts:1409"
+      ],
+      "requires_git": false
+    },
+    {
+      "id": "git-checkout-dirty-conflict",
+      "description": "覆盖冲突返回结构化结果和模拟冲突文件顺序",
+      "input": {
+        "operation": "git-rpc",
+        "category": "failure",
+        "method": "git.checkout",
+        "branch": "feature/review",
+        "status": {
+          "repositoryRoot": "repo",
+          "cwd": "repo",
+          "currentBranch": "main",
+          "defaultBranch": "main",
+          "dirty": true,
+          "stagedCount": 0,
+          "unstagedCount": 2,
+          "untrackedCount": 0,
+          "additions": 0,
+          "deletions": 0,
+          "ahead": 0,
+          "behind": 0,
+          "hasRemote": false,
+          "canPush": false,
+          "branches": [],
+          "worktrees": []
+        },
+        "checkout": {
+          "status": 1,
+          "stderr": "error: Your local changes to the following files would be overwritten by checkout:\n\ta.txt\n\tdocs/b.txt\nPlease commit your changes or stash them before you switch branches.\nAborting\n"
+        }
+      },
+      "expected": {
+        "result": {
+          "kind": "blocked-by-working-tree-changes",
+          "targetBranch": "feature/review",
+          "conflictingPaths": [
+            "a.txt",
+            "docs/b.txt"
+          ],
+          "status": {
+            "repositoryRoot": "repo",
+            "cwd": "repo",
+            "currentBranch": "main",
+            "defaultBranch": "main",
+            "dirty": true,
+            "stagedCount": 0,
+            "unstagedCount": 2,
+            "untrackedCount": 0,
+            "additions": 0,
+            "deletions": 0,
+            "ahead": 0,
+            "behind": 0,
+            "hasRemote": false,
+            "canPush": false,
+            "branches": [],
+            "worktrees": []
+          }
+        },
+        "gitCalls": [
+          [
+            "-C",
+            "repo",
+            "checkout",
+            "feature/review"
+          ]
+        ]
+      },
+      "source": [
+        "packages/contracts/src/git.ts:41",
+        "packages/contracts/src/git.ts:44",
+        "packages/contracts/src/git.ts:45",
+        "packages/contracts/src/git.ts:46",
+        "packages/contracts/src/git.ts:47",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:414",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:415",
+        "apps/runtime/src/rpc/runtime-rpc-router.ts:416",
+        "apps/runtime/src/git/git-workspace-service.ts:82",
+        "apps/runtime/src/git/git-workspace-service.ts:83",
+        "apps/runtime/src/git/git-workspace-service.ts:85",
+        "apps/runtime/src/git/git-workspace-service.ts:88",
+        "apps/runtime/src/git/git-workspace-service.ts:89",
+        "apps/runtime/src/git/git-workspace-service.ts:90",
+        "apps/runtime/src/git/git-workspace-service.ts:93",
+        "apps/runtime/src/git/git-workspace-service.ts:94",
+        "apps/runtime/src/git/git-workspace-service.ts:328",
+        "apps/runtime/src/git/git-workspace-service.ts:353",
+        "apps/runtime/src/git/git-workspace-service.ts:359",
+        "apps/runtime/src/git/git-workspace-service.ts:437",
+        "apps/runtime/src/git/git-workspace-service.ts:438",
+        "apps/runtime/src/git/git-workspace-service.ts:440"
+      ],
+      "requires_git": false
+    },
+    {
+      "id": "list-branch-summary-order",
+      "description": "本地分支保留当前标记、Unix 秒与已检出目录，并按冻结优先级排列",
+      "input": {
+        "operation": "list-branches",
+        "category": "normal",
+        "currentBranch": "topic/current",
+        "originHead": "origin/release\n",
+        "worktrees": [
+          {
+            "branch": "topic/current",
+            "path": "repo"
+          },
+          {
+            "branch": "topic/b",
+            "path": "wt-b"
+          },
+          {
+            "branch": "(detached)",
+            "path": "wt-detached"
+          }
+        ],
+        "refOutput": "main\u0000800\ntopic/a\u0000300\ntopic/b\u0000300\ntopic/current\u0000100\nrelease\u000050\n"
+      },
+      "expected": {
+        "defaultBranch": "release",
+        "branches": [
+          {
+            "name": "release",
+            "current": false,
+            "commitTimestamp": 50
+          },
+          {
+            "name": "topic/current",
+            "current": true,
+            "commitTimestamp": 100,
+            "checkedOutPath": "repo"
+          },
+          {
+            "name": "main",
+            "current": false,
+            "commitTimestamp": 800
+          },
+          {
+            "name": "topic/a",
+            "current": false,
+            "commitTimestamp": 300
+          },
+          {
+            "name": "topic/b",
+            "current": false,
+            "commitTimestamp": 300,
+            "checkedOutPath": "wt-b"
+          }
+        ]
+      },
+      "source": [
+        "packages/contracts/src/git.ts:1",
+        "packages/contracts/src/git.ts:5",
+        "apps/runtime/src/git/git-workspace-service.ts:61",
+        "apps/runtime/src/git/git-workspace-service.ts:62",
+        "apps/runtime/src/git/git-workspace-service.ts:63",
+        "apps/runtime/src/git/git-workspace-service.ts:231",
+        "apps/runtime/src/git/git-workspace-service.ts:236",
+        "apps/runtime/src/git/git-workspace-service.ts:237",
+        "apps/runtime/src/git/git-workspace-service.ts:239",
+        "apps/runtime/src/git/git-workspace-service.ts:244",
+        "apps/runtime/src/git/git-workspace-service.ts:247",
+        "apps/runtime/src/git/git-workspace-service.ts:248",
+        "apps/runtime/src/git/git-workspace-service.ts:249",
+        "apps/runtime/src/git/git-workspace-service.ts:414",
+        "apps/runtime/src/git/git-workspace-service.ts:417",
+        "apps/runtime/src/git/git-workspace-service.ts:418",
+        "apps/runtime/src/git/git-workspace-service.ts:424",
+        "apps/runtime/src/git/git-workspace-service.ts:429",
+        "apps/runtime/src/git/git-workspace-service.ts:430",
+        "apps/runtime/src/git/git-workspace-service.ts:433"
+      ],
+      "requires_git": false
+    },
+    {
+      "id": "list-branch-default-fallback",
+      "description": "远端默认分支缺席时用本地 main，坏时间戳投影为零",
+      "input": {
+        "operation": "list-branches",
+        "category": "boundary",
+        "originHead": "origin/missing\n",
+        "worktrees": [],
+        "refOutput": "topic/early\u0000bad\nmain\u00001\n"
+      },
+      "expected": {
+        "defaultBranch": "main",
+        "branches": [
+          {
+            "name": "main",
+            "current": false,
+            "commitTimestamp": 1
+          },
+          {
+            "name": "topic/early",
+            "current": false,
+            "commitTimestamp": 0
+          }
+        ]
+      },
+      "source": [
+        "packages/contracts/src/git.ts:1",
+        "packages/contracts/src/git.ts:4",
+        "apps/runtime/src/git/git-workspace-service.ts:61",
+        "apps/runtime/src/git/git-workspace-service.ts:62",
+        "apps/runtime/src/git/git-workspace-service.ts:63",
+        "apps/runtime/src/git/git-workspace-service.ts:244",
+        "apps/runtime/src/git/git-workspace-service.ts:247",
+        "apps/runtime/src/git/git-workspace-service.ts:248",
+        "apps/runtime/src/git/git-workspace-service.ts:249",
+        "apps/runtime/src/git/git-workspace-service.ts:414",
+        "apps/runtime/src/git/git-workspace-service.ts:417",
+        "apps/runtime/src/git/git-workspace-service.ts:418",
+        "apps/runtime/src/git/git-workspace-service.ts:419",
+        "apps/runtime/src/git/git-workspace-service.ts:430",
+        "apps/runtime/src/git/git-workspace-service.ts:433"
+      ],
+      "requires_git": false
+    },
+    {
+      "id": "shared-clean-one-other",
+      "description": "同工作区跨事项的第二个会话触发确认，干净目录省略文件提示",
+      "input": {
+        "operation": "shared-checkout",
+        "category": "normal",
+        "cwd": "sample/area/team/repo",
+        "branch": "feature/review",
+        "branches": [
+          {
+            "name": "main",
+            "current": true,
+            "commitTimestamp": 2
+          },
+          {
+            "name": "feature/review",
+            "current": false,
+            "commitTimestamp": 1
+          }
+        ],
+        "context": {
+          "environmentKind": "local",
+          "hasOwnedWorktree": false
+        },
+        "sessions": [
+          [
+            "session-a",
+            "task-a",
+            "sample/area/team/repo"
+          ],
+          [
+            "session-b",
+            "task-b",
+            "sample/area/team/repo"
+          ]
+        ]
+      },
+      "expected": {
+        "projection": {
+          "sharedWorkingDirectory": true,
+          "sharedSessionCount": 2
+        },
+        "statusCounts": {
+          "stagedCount": 0,
+          "unstagedCount": 0,
+          "untrackedCount": 0
+        },
+        "rowDisabled": false,
+        "confirmation": {
+          "title": "切换分支会影响其他会话",
+          "paragraphs": [
+            "这个会话和另外 1 个会话共用 …/area/team/repo。直接切换会把它们一起带到「feature/review」，未提交的修改也会一起过去。",
+            "为这个会话新建独立 Worktree 后切换，其他会话保持原样；这个会话会在新目录里重新启动。"
+          ],
+          "actions": [
+            "取消",
+            "切换整个目录",
+            "新建独立 Worktree 并切换"
+          ]
+        },
+        "callsBeforeChoice": []
+      },
+      "source": [
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:357",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:359",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:361",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:363",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:365",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:366",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:367",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:376",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:423",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:424",
+        "apps/desktop/src/renderer/src/hierarchy/HierarchyShell.tsx:1421",
+        "apps/desktop/src/renderer/src/hierarchy/HierarchyShell.tsx:1426",
+        "apps/desktop/src/renderer/src/hierarchy/HierarchyShell.tsx:1427",
+        "apps/desktop/src/renderer/src/hierarchy/HierarchyShell.tsx:1429",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:293",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:295",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:296",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:297",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:298",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:63",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:69",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:119",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:121",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:122",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:123",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:125",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:126",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:127",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:128",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:130",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:132",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:196",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:197",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:240",
+        "apps/runtime/src/git/git-workspace-service.ts:362",
+        "apps/runtime/src/git/git-workspace-service.ts:368",
+        "apps/runtime/src/git/git-workspace-service.ts:370",
+        "apps/runtime/src/git/git-workspace-service.ts:374",
+        "apps/runtime/src/git/git-workspace-service.ts:375",
+        "apps/runtime/src/git/git-workspace-service.ts:377",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:369",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:372",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:373",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:374",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:376",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:377",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:378",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:379",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:431",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:433",
+        "apps/desktop/src/renderer/src/i18n/messages/hud.ts:98",
+        "apps/desktop/src/renderer/src/i18n/messages/hud.ts:99",
+        "apps/desktop/src/renderer/src/i18n/messages/hud.ts:100",
+        "apps/desktop/src/renderer/src/i18n/messages/hud.ts:101",
+        "apps/desktop/src/renderer/src/i18n/messages/hud.ts:102",
+        "apps/desktop/src/renderer/src/i18n/messages/hud.ts:103",
+        "apps/desktop/src/renderer/src/i18n/messages/hud.ts:104",
+        "apps/desktop/src/renderer/src/hierarchy/ConfirmDialog.tsx:62",
+        "apps/desktop/src/renderer/src/hierarchy/ConfirmDialog.tsx:63",
+        "apps/desktop/src/renderer/src/hierarchy/ConfirmDialog.tsx:64",
+        "apps/desktop/src/renderer/src/hierarchy/ConfirmDialog.tsx:65",
+        "apps/desktop/src/renderer/src/hierarchy/ConfirmDialog.tsx:66",
+        "apps/desktop/src/renderer/src/i18n/messages/common.ts:4"
+      ],
+      "requires_git": false
+    },
+    {
+      "id": "shared-dirty-count-index-and-worktree",
+      "description": "同一文件的暂存与未暂存分别计数，另加未跟踪项",
+      "input": {
+        "operation": "shared-checkout",
+        "category": "boundary",
+        "cwd": "sample/area/team/repo",
+        "branch": "feature/review",
+        "branches": [
+          {
+            "name": "main",
+            "current": true,
+            "commitTimestamp": 2
+          },
+          {
+            "name": "feature/review",
+            "current": false,
+            "commitTimestamp": 1
+          }
+        ],
+        "context": {
+          "environmentKind": "local",
+          "hasOwnedWorktree": false
+        },
+        "sessions": [
+          [
+            "session-a",
+            "task-a",
+            "sample/area/team/repo"
+          ],
+          [
+            "session-b",
+            "task-b",
+            "sample/area/team/repo"
+          ],
+          [
+            "session-c",
+            "task-b",
+            "sample/area/team/repo"
+          ]
+        ],
+        "porcelain": "MM sample.txt\n?? untracked.txt\n",
+        "locale": "en"
+      },
+      "expected": {
+        "projection": {
+          "sharedWorkingDirectory": true,
+          "sharedSessionCount": 3
+        },
+        "statusCounts": {
+          "stagedCount": 1,
+          "unstagedCount": 1,
+          "untrackedCount": 1
+        },
+        "rowDisabled": false,
+        "confirmation": {
+          "title": "Switching branches affects other sessions",
+          "paragraphs": [
+            "This session shares …/area/team/repo with 2 other sessions. Switching here takes all of them to “feature/review”, including uncommitted changes.",
+            "Create a separate worktree for this session to switch only this one; other sessions stay as they are. This session restarts in the new directory.",
+            "3 uncommitted files will stay in the original directory when the worktree is created."
+          ],
+          "actions": [
+            "Cancel",
+            "Switch the whole directory",
+            "Create worktree and switch"
+          ]
+        },
+        "callsBeforeChoice": []
+      },
+      "source": [
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:357",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:359",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:361",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:363",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:365",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:366",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:367",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:376",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:423",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:424",
+        "apps/desktop/src/renderer/src/hierarchy/HierarchyShell.tsx:1421",
+        "apps/desktop/src/renderer/src/hierarchy/HierarchyShell.tsx:1426",
+        "apps/desktop/src/renderer/src/hierarchy/HierarchyShell.tsx:1427",
+        "apps/desktop/src/renderer/src/hierarchy/HierarchyShell.tsx:1429",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:293",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:295",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:296",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:297",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:298",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:63",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:69",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:119",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:121",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:122",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:123",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:125",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:126",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:127",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:128",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:130",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:132",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:196",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:197",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:240",
+        "apps/runtime/src/git/git-workspace-service.ts:362",
+        "apps/runtime/src/git/git-workspace-service.ts:368",
+        "apps/runtime/src/git/git-workspace-service.ts:370",
+        "apps/runtime/src/git/git-workspace-service.ts:374",
+        "apps/runtime/src/git/git-workspace-service.ts:375",
+        "apps/runtime/src/git/git-workspace-service.ts:377",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:369",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:372",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:373",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:374",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:376",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:377",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:378",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:379",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:431",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:433",
+        "apps/desktop/src/renderer/src/i18n/messages/hud.ts:284",
+        "apps/desktop/src/renderer/src/i18n/messages/hud.ts:285",
+        "apps/desktop/src/renderer/src/i18n/messages/hud.ts:286",
+        "apps/desktop/src/renderer/src/i18n/messages/hud.ts:287",
+        "apps/desktop/src/renderer/src/i18n/messages/hud.ts:288",
+        "apps/desktop/src/renderer/src/i18n/messages/hud.ts:289",
+        "apps/desktop/src/renderer/src/i18n/messages/hud.ts:290",
+        "apps/desktop/src/renderer/src/hierarchy/ConfirmDialog.tsx:62",
+        "apps/desktop/src/renderer/src/hierarchy/ConfirmDialog.tsx:63",
+        "apps/desktop/src/renderer/src/hierarchy/ConfirmDialog.tsx:64",
+        "apps/desktop/src/renderer/src/hierarchy/ConfirmDialog.tsx:65",
+        "apps/desktop/src/renderer/src/hierarchy/ConfirmDialog.tsx:66",
+        "apps/desktop/src/renderer/src/i18n/messages/common.ts:13"
+      ],
+      "requires_git": false
+    },
+    {
+      "id": "shared-count-exclusions",
+      "description": "归档会话、异工作区与不同字面目录的会话不计入",
+      "input": {
+        "operation": "shared-checkout",
+        "category": "boundary",
+        "cwd": "sample/area/team/repo",
+        "branch": "feature/review",
+        "branches": [
+          {
+            "name": "main",
+            "current": true,
+            "commitTimestamp": 2
+          },
+          {
+            "name": "feature/review",
+            "current": false,
+            "commitTimestamp": 1
+          }
+        ],
+        "context": {
+          "environmentKind": "local",
+          "hasOwnedWorktree": false
+        },
+        "sessions": [
+          [
+            "session-a",
+            "task-a",
+            "sample/area/team/repo"
+          ],
+          [
+            "archived",
+            "task-b",
+            "sample/area/team/repo",
+            1
+          ],
+          [
+            "outside",
+            "task-c",
+            "sample/area/team/repo"
+          ],
+          [
+            "different",
+            "task-b",
+            "sample/area/team/repo/."
+          ]
+        ]
+      },
+      "expected": {
+        "projection": {
+          "sharedWorkingDirectory": false,
+          "sharedSessionCount": 1
+        },
+        "statusCounts": {
+          "stagedCount": 0,
+          "unstagedCount": 0,
+          "untrackedCount": 0
+        },
+        "rowDisabled": false,
+        "confirmation": null,
+        "callsBeforeChoice": [
+          {
+            "method": "git.checkout",
+            "cwd": "sample/area/team/repo",
+            "branch": "feature/review"
+          }
+        ]
+      },
+      "source": [
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:357",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:359",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:361",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:363",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:365",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:366",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:367",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:376",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:423",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:424",
+        "apps/desktop/src/renderer/src/hierarchy/HierarchyShell.tsx:1421",
+        "apps/desktop/src/renderer/src/hierarchy/HierarchyShell.tsx:1426",
+        "apps/desktop/src/renderer/src/hierarchy/HierarchyShell.tsx:1427",
+        "apps/desktop/src/renderer/src/hierarchy/HierarchyShell.tsx:1429",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:293",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:295",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:296",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:297",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:298",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:63",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:69",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:119",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:121",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:122",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:123",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:125",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:126",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:127",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:128",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:130",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:132",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:196",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:197",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:240",
+        "apps/runtime/src/git/git-workspace-service.ts:362",
+        "apps/runtime/src/git/git-workspace-service.ts:368",
+        "apps/runtime/src/git/git-workspace-service.ts:370",
+        "apps/runtime/src/git/git-workspace-service.ts:374",
+        "apps/runtime/src/git/git-workspace-service.ts:375",
+        "apps/runtime/src/git/git-workspace-service.ts:377"
+      ],
+      "requires_git": false
+    },
+    {
+      "id": "shared-count-default-one",
+      "description": "计数投影缺省时以一为下限并直接检出",
+      "input": {
+        "operation": "shared-checkout",
+        "category": "boundary",
+        "cwd": "sample/area/team/repo",
+        "branch": "feature/review",
+        "branches": [
+          {
+            "name": "main",
+            "current": true,
+            "commitTimestamp": 2
+          },
+          {
+            "name": "feature/review",
+            "current": false,
+            "commitTimestamp": 1
+          }
+        ],
+        "context": {
+          "environmentKind": "local",
+          "hasOwnedWorktree": false
+        },
+        "sessions": []
+      },
+      "expected": {
+        "projection": {
+          "sharedWorkingDirectory": false,
+          "sharedSessionCount": 1
+        },
+        "statusCounts": {
+          "stagedCount": 0,
+          "unstagedCount": 0,
+          "untrackedCount": 0
+        },
+        "rowDisabled": false,
+        "confirmation": null,
+        "callsBeforeChoice": [
+          {
+            "method": "git.checkout",
+            "cwd": "sample/area/team/repo",
+            "branch": "feature/review"
+          }
+        ]
+      },
+      "source": [
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:357",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:359",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:361",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:363",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:365",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:366",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:367",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:376",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:423",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:424",
+        "apps/desktop/src/renderer/src/hierarchy/HierarchyShell.tsx:1421",
+        "apps/desktop/src/renderer/src/hierarchy/HierarchyShell.tsx:1426",
+        "apps/desktop/src/renderer/src/hierarchy/HierarchyShell.tsx:1427",
+        "apps/desktop/src/renderer/src/hierarchy/HierarchyShell.tsx:1429",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:293",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:295",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:296",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:297",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:298",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:63",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:69",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:119",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:121",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:122",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:123",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:125",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:126",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:127",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:128",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:130",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:132",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:196",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:197",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:240",
+        "apps/runtime/src/git/git-workspace-service.ts:362",
+        "apps/runtime/src/git/git-workspace-service.ts:368",
+        "apps/runtime/src/git/git-workspace-service.ts:370",
+        "apps/runtime/src/git/git-workspace-service.ts:374",
+        "apps/runtime/src/git/git-workspace-service.ts:375",
+        "apps/runtime/src/git/git-workspace-service.ts:377"
+      ],
+      "requires_git": false
+    },
+    {
+      "id": "shared-no-count",
+      "description": "共享标记存在但计数缺省时直接检出",
+      "input": {
+        "operation": "shared-checkout",
+        "category": "boundary",
+        "cwd": "sample/area/team/repo",
+        "branch": "feature/review",
+        "branches": [
+          {
+            "name": "main",
+            "current": true,
+            "commitTimestamp": 2
+          },
+          {
+            "name": "feature/review",
+            "current": false,
+            "commitTimestamp": 1
+          }
+        ],
+        "context": {
+          "environmentKind": "local",
+          "sharedWorkingDirectory": true
+        }
+      },
+      "expected": {
+        "statusCounts": {
+          "stagedCount": 0,
+          "unstagedCount": 0,
+          "untrackedCount": 0
+        },
+        "rowDisabled": false,
+        "confirmation": null,
+        "callsBeforeChoice": [
+          {
+            "method": "git.checkout",
+            "cwd": "sample/area/team/repo",
+            "branch": "feature/review"
+          }
+        ]
+      },
+      "source": [
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:63",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:69",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:119",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:121",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:122",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:123",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:125",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:126",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:127",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:128",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:130",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:132",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:196",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:197",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:240",
+        "apps/runtime/src/git/git-workspace-service.ts:362",
+        "apps/runtime/src/git/git-workspace-service.ts:368",
+        "apps/runtime/src/git/git-workspace-service.ts:370",
+        "apps/runtime/src/git/git-workspace-service.ts:374",
+        "apps/runtime/src/git/git-workspace-service.ts:375",
+        "apps/runtime/src/git/git-workspace-service.ts:377"
+      ],
+      "requires_git": false
+    },
+    {
+      "id": "shared-owned-worktree-skips-confirm",
+      "description": "本地会话已有自有 Worktree 时直接检出",
+      "input": {
+        "operation": "shared-checkout",
+        "category": "boundary",
+        "cwd": "sample/area/team/repo",
+        "branch": "feature/review",
+        "branches": [
+          {
+            "name": "main",
+            "current": true,
+            "commitTimestamp": 2
+          },
+          {
+            "name": "feature/review",
+            "current": false,
+            "commitTimestamp": 1
+          }
+        ],
+        "context": {
+          "environmentKind": "local",
+          "hasOwnedWorktree": true
+        },
+        "sessions": [
+          [
+            "session-a",
+            "task-a",
+            "sample/area/team/repo"
+          ],
+          [
+            "session-b",
+            "task-b",
+            "sample/area/team/repo"
+          ]
+        ]
+      },
+      "expected": {
+        "projection": {
+          "sharedWorkingDirectory": true,
+          "sharedSessionCount": 2
+        },
+        "statusCounts": {
+          "stagedCount": 0,
+          "unstagedCount": 0,
+          "untrackedCount": 0
+        },
+        "rowDisabled": false,
+        "confirmation": null,
+        "callsBeforeChoice": [
+          {
+            "method": "git.checkout",
+            "cwd": "sample/area/team/repo",
+            "branch": "feature/review"
+          }
+        ]
+      },
+      "source": [
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:357",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:359",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:361",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:363",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:365",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:366",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:367",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:376",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:423",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:424",
+        "apps/desktop/src/renderer/src/hierarchy/HierarchyShell.tsx:1421",
+        "apps/desktop/src/renderer/src/hierarchy/HierarchyShell.tsx:1426",
+        "apps/desktop/src/renderer/src/hierarchy/HierarchyShell.tsx:1427",
+        "apps/desktop/src/renderer/src/hierarchy/HierarchyShell.tsx:1429",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:293",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:295",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:296",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:297",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:298",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:63",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:69",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:119",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:121",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:122",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:123",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:125",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:126",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:127",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:128",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:130",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:132",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:196",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:197",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:240",
+        "apps/runtime/src/git/git-workspace-service.ts:362",
+        "apps/runtime/src/git/git-workspace-service.ts:368",
+        "apps/runtime/src/git/git-workspace-service.ts:370",
+        "apps/runtime/src/git/git-workspace-service.ts:374",
+        "apps/runtime/src/git/git-workspace-service.ts:375",
+        "apps/runtime/src/git/git-workspace-service.ts:377"
+      ],
+      "requires_git": false
+    },
+    {
+      "id": "shared-worktree-environment-skips-confirm",
+      "description": "会话在 Worktree 环境时直接检出",
+      "input": {
+        "operation": "shared-checkout",
+        "category": "boundary",
+        "cwd": "sample/area/team/repo",
+        "branch": "feature/review",
+        "branches": [
+          {
+            "name": "main",
+            "current": true,
+            "commitTimestamp": 2
+          },
+          {
+            "name": "feature/review",
+            "current": false,
+            "commitTimestamp": 1
+          }
+        ],
+        "context": {
+          "environmentKind": "worktree",
+          "hasOwnedWorktree": false
+        },
+        "sessions": [
+          [
+            "session-a",
+            "task-a",
+            "sample/area/team/repo"
+          ],
+          [
+            "session-b",
+            "task-b",
+            "sample/area/team/repo"
+          ]
+        ]
+      },
+      "expected": {
+        "projection": {
+          "sharedWorkingDirectory": true,
+          "sharedSessionCount": 2
+        },
+        "statusCounts": {
+          "stagedCount": 0,
+          "unstagedCount": 0,
+          "untrackedCount": 0
+        },
+        "rowDisabled": false,
+        "confirmation": null,
+        "callsBeforeChoice": [
+          {
+            "method": "git.checkout",
+            "cwd": "sample/area/team/repo",
+            "branch": "feature/review"
+          }
+        ]
+      },
+      "source": [
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:357",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:359",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:361",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:363",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:365",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:366",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:367",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:376",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:423",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:424",
+        "apps/desktop/src/renderer/src/hierarchy/HierarchyShell.tsx:1421",
+        "apps/desktop/src/renderer/src/hierarchy/HierarchyShell.tsx:1426",
+        "apps/desktop/src/renderer/src/hierarchy/HierarchyShell.tsx:1427",
+        "apps/desktop/src/renderer/src/hierarchy/HierarchyShell.tsx:1429",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:293",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:295",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:296",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:297",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:298",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:63",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:69",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:119",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:121",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:122",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:123",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:125",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:126",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:127",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:128",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:130",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:132",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:196",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:197",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:240",
+        "apps/runtime/src/git/git-workspace-service.ts:362",
+        "apps/runtime/src/git/git-workspace-service.ts:368",
+        "apps/runtime/src/git/git-workspace-service.ts:370",
+        "apps/runtime/src/git/git-workspace-service.ts:374",
+        "apps/runtime/src/git/git-workspace-service.ts:375",
+        "apps/runtime/src/git/git-workspace-service.ts:377"
+      ],
+      "requires_git": false
+    },
+    {
+      "id": "shared-already-checked-out-disabled",
+      "description": "目标在别处检出时禁用分支行",
+      "input": {
+        "operation": "shared-checkout",
+        "category": "boundary",
+        "cwd": "sample/area/team/repo",
+        "branch": "feature/review",
+        "branches": [
+          {
+            "name": "main",
+            "current": true,
+            "commitTimestamp": 2
+          },
+          {
+            "name": "feature/review",
+            "current": false,
+            "commitTimestamp": 1,
+            "checkedOutPath": "sample/worktree"
+          }
+        ],
+        "context": {
+          "environmentKind": "local",
+          "hasOwnedWorktree": false
+        },
+        "sessions": [
+          [
+            "session-a",
+            "task-a",
+            "sample/area/team/repo"
+          ],
+          [
+            "session-b",
+            "task-b",
+            "sample/area/team/repo"
+          ]
+        ]
+      },
+      "expected": {
+        "projection": {
+          "sharedWorkingDirectory": true,
+          "sharedSessionCount": 2
+        },
+        "statusCounts": {
+          "stagedCount": 0,
+          "unstagedCount": 0,
+          "untrackedCount": 0
+        },
+        "rowDisabled": true,
+        "confirmation": null,
+        "callsBeforeChoice": []
+      },
+      "source": [
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:357",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:359",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:361",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:363",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:365",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:366",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:367",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:376",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:423",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:424",
+        "apps/desktop/src/renderer/src/hierarchy/HierarchyShell.tsx:1421",
+        "apps/desktop/src/renderer/src/hierarchy/HierarchyShell.tsx:1426",
+        "apps/desktop/src/renderer/src/hierarchy/HierarchyShell.tsx:1427",
+        "apps/desktop/src/renderer/src/hierarchy/HierarchyShell.tsx:1429",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:293",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:295",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:296",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:297",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:298",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:63",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:69",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:119",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:121",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:122",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:123",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:125",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:126",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:127",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:128",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:130",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:132",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:196",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:197",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:240",
+        "apps/runtime/src/git/git-workspace-service.ts:362",
+        "apps/runtime/src/git/git-workspace-service.ts:368",
+        "apps/runtime/src/git/git-workspace-service.ts:370",
+        "apps/runtime/src/git/git-workspace-service.ts:374",
+        "apps/runtime/src/git/git-workspace-service.ts:375",
+        "apps/runtime/src/git/git-workspace-service.ts:377"
+      ],
+      "requires_git": false
+    },
+    {
+      "id": "shared-current-branch-does-nothing",
+      "description": "点当前分支时不进入检出流程",
+      "input": {
+        "operation": "shared-checkout",
+        "category": "boundary",
+        "cwd": "sample/area/team/repo",
+        "branch": "main",
+        "branches": [
+          {
+            "name": "main",
+            "current": true,
+            "commitTimestamp": 2
+          },
+          {
+            "name": "feature/review",
+            "current": false,
+            "commitTimestamp": 1
+          }
+        ],
+        "context": {
+          "environmentKind": "local",
+          "hasOwnedWorktree": false
+        },
+        "sessions": [
+          [
+            "session-a",
+            "task-a",
+            "sample/area/team/repo"
+          ],
+          [
+            "session-b",
+            "task-b",
+            "sample/area/team/repo"
+          ]
+        ]
+      },
+      "expected": {
+        "projection": {
+          "sharedWorkingDirectory": true,
+          "sharedSessionCount": 2
+        },
+        "statusCounts": {
+          "stagedCount": 0,
+          "unstagedCount": 0,
+          "untrackedCount": 0
+        },
+        "rowDisabled": false,
+        "confirmation": null,
+        "callsBeforeChoice": []
+      },
+      "source": [
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:357",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:359",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:361",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:363",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:365",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:366",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:367",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:376",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:423",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:424",
+        "apps/desktop/src/renderer/src/hierarchy/HierarchyShell.tsx:1421",
+        "apps/desktop/src/renderer/src/hierarchy/HierarchyShell.tsx:1426",
+        "apps/desktop/src/renderer/src/hierarchy/HierarchyShell.tsx:1427",
+        "apps/desktop/src/renderer/src/hierarchy/HierarchyShell.tsx:1429",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:293",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:295",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:296",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:297",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:298",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:63",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:69",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:119",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:121",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:122",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:123",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:125",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:126",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:127",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:128",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:130",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:132",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:196",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:197",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:240",
+        "apps/runtime/src/git/git-workspace-service.ts:362",
+        "apps/runtime/src/git/git-workspace-service.ts:368",
+        "apps/runtime/src/git/git-workspace-service.ts:370",
+        "apps/runtime/src/git/git-workspace-service.ts:374",
+        "apps/runtime/src/git/git-workspace-service.ts:375",
+        "apps/runtime/src/git/git-workspace-service.ts:377"
+      ],
+      "requires_git": false
+    },
+    {
+      "id": "shared-cancel",
+      "description": "取消关闭确认且不发送检出请求",
+      "input": {
+        "operation": "shared-checkout",
+        "category": "normal",
+        "cwd": "sample/area/team/repo",
+        "branch": "feature/review",
+        "branches": [
+          {
+            "name": "main",
+            "current": true,
+            "commitTimestamp": 2
+          },
+          {
+            "name": "feature/review",
+            "current": false,
+            "commitTimestamp": 1
+          }
+        ],
+        "context": {
+          "environmentKind": "local",
+          "hasOwnedWorktree": false
+        },
+        "sessions": [
+          [
+            "session-a",
+            "task-a",
+            "sample/area/team/repo"
+          ],
+          [
+            "session-b",
+            "task-b",
+            "sample/area/team/repo"
+          ]
+        ],
+        "choice": 0
+      },
+      "expected": {
+        "projection": {
+          "sharedWorkingDirectory": true,
+          "sharedSessionCount": 2
+        },
+        "statusCounts": {
+          "stagedCount": 0,
+          "unstagedCount": 0,
+          "untrackedCount": 0
+        },
+        "rowDisabled": false,
+        "confirmation": {
+          "title": "切换分支会影响其他会话",
+          "paragraphs": [
+            "这个会话和另外 1 个会话共用 …/area/team/repo。直接切换会把它们一起带到「feature/review」，未提交的修改也会一起过去。",
+            "为这个会话新建独立 Worktree 后切换，其他会话保持原样；这个会话会在新目录里重新启动。"
+          ],
+          "actions": [
+            "取消",
+            "切换整个目录",
+            "新建独立 Worktree 并切换"
+          ]
+        },
+        "callsBeforeChoice": [],
+        "callsAfterChoice": [],
+        "dialogAfterChoice": false
+      },
+      "source": [
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:357",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:359",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:361",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:363",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:365",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:366",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:367",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:376",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:423",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:424",
+        "apps/desktop/src/renderer/src/hierarchy/HierarchyShell.tsx:1421",
+        "apps/desktop/src/renderer/src/hierarchy/HierarchyShell.tsx:1426",
+        "apps/desktop/src/renderer/src/hierarchy/HierarchyShell.tsx:1427",
+        "apps/desktop/src/renderer/src/hierarchy/HierarchyShell.tsx:1429",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:293",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:295",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:296",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:297",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:298",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:63",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:69",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:119",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:121",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:122",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:123",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:125",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:126",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:127",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:128",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:130",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:132",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:196",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:197",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:240",
+        "apps/runtime/src/git/git-workspace-service.ts:362",
+        "apps/runtime/src/git/git-workspace-service.ts:368",
+        "apps/runtime/src/git/git-workspace-service.ts:370",
+        "apps/runtime/src/git/git-workspace-service.ts:374",
+        "apps/runtime/src/git/git-workspace-service.ts:375",
+        "apps/runtime/src/git/git-workspace-service.ts:377",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:369",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:372",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:373",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:374",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:376",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:377",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:378",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:379",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:431",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:433",
+        "apps/desktop/src/renderer/src/i18n/messages/hud.ts:98",
+        "apps/desktop/src/renderer/src/i18n/messages/hud.ts:99",
+        "apps/desktop/src/renderer/src/i18n/messages/hud.ts:100",
+        "apps/desktop/src/renderer/src/i18n/messages/hud.ts:101",
+        "apps/desktop/src/renderer/src/i18n/messages/hud.ts:102",
+        "apps/desktop/src/renderer/src/i18n/messages/hud.ts:103",
+        "apps/desktop/src/renderer/src/i18n/messages/hud.ts:104",
+        "apps/desktop/src/renderer/src/hierarchy/ConfirmDialog.tsx:62",
+        "apps/desktop/src/renderer/src/hierarchy/ConfirmDialog.tsx:63",
+        "apps/desktop/src/renderer/src/hierarchy/ConfirmDialog.tsx:64",
+        "apps/desktop/src/renderer/src/hierarchy/ConfirmDialog.tsx:65",
+        "apps/desktop/src/renderer/src/hierarchy/ConfirmDialog.tsx:66",
+        "apps/desktop/src/renderer/src/i18n/messages/common.ts:4"
+      ],
+      "requires_git": false
+    },
+    {
+      "id": "shared-checkout-whole-directory",
+      "description": "切换整个目录后走一次普通检出",
+      "input": {
+        "operation": "shared-checkout",
+        "category": "normal",
+        "cwd": "sample/area/team/repo",
+        "branch": "feature/review",
+        "branches": [
+          {
+            "name": "main",
+            "current": true,
+            "commitTimestamp": 2
+          },
+          {
+            "name": "feature/review",
+            "current": false,
+            "commitTimestamp": 1
+          }
+        ],
+        "context": {
+          "environmentKind": "local",
+          "hasOwnedWorktree": false
+        },
+        "sessions": [
+          [
+            "session-a",
+            "task-a",
+            "sample/area/team/repo"
+          ],
+          [
+            "session-b",
+            "task-b",
+            "sample/area/team/repo"
+          ]
+        ],
+        "choice": 1
+      },
+      "expected": {
+        "projection": {
+          "sharedWorkingDirectory": true,
+          "sharedSessionCount": 2
+        },
+        "statusCounts": {
+          "stagedCount": 0,
+          "unstagedCount": 0,
+          "untrackedCount": 0
+        },
+        "rowDisabled": false,
+        "confirmation": {
+          "title": "切换分支会影响其他会话",
+          "paragraphs": [
+            "这个会话和另外 1 个会话共用 …/area/team/repo。直接切换会把它们一起带到「feature/review」，未提交的修改也会一起过去。",
+            "为这个会话新建独立 Worktree 后切换，其他会话保持原样；这个会话会在新目录里重新启动。"
+          ],
+          "actions": [
+            "取消",
+            "切换整个目录",
+            "新建独立 Worktree 并切换"
+          ]
+        },
+        "callsBeforeChoice": [],
+        "callsAfterChoice": [
+          {
+            "method": "git.checkout",
+            "cwd": "sample/area/team/repo",
+            "branch": "feature/review"
+          }
+        ],
+        "dialogAfterChoice": false
+      },
+      "source": [
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:357",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:359",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:361",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:363",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:365",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:366",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:367",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:376",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:423",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:424",
+        "apps/desktop/src/renderer/src/hierarchy/HierarchyShell.tsx:1421",
+        "apps/desktop/src/renderer/src/hierarchy/HierarchyShell.tsx:1426",
+        "apps/desktop/src/renderer/src/hierarchy/HierarchyShell.tsx:1427",
+        "apps/desktop/src/renderer/src/hierarchy/HierarchyShell.tsx:1429",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:293",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:295",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:296",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:297",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:298",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:63",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:69",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:119",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:121",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:122",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:123",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:125",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:126",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:127",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:128",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:130",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:132",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:196",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:197",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:240",
+        "apps/runtime/src/git/git-workspace-service.ts:362",
+        "apps/runtime/src/git/git-workspace-service.ts:368",
+        "apps/runtime/src/git/git-workspace-service.ts:370",
+        "apps/runtime/src/git/git-workspace-service.ts:374",
+        "apps/runtime/src/git/git-workspace-service.ts:375",
+        "apps/runtime/src/git/git-workspace-service.ts:377",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:369",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:372",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:373",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:374",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:376",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:377",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:378",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:379",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:431",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:433",
+        "apps/desktop/src/renderer/src/i18n/messages/hud.ts:98",
+        "apps/desktop/src/renderer/src/i18n/messages/hud.ts:99",
+        "apps/desktop/src/renderer/src/i18n/messages/hud.ts:100",
+        "apps/desktop/src/renderer/src/i18n/messages/hud.ts:101",
+        "apps/desktop/src/renderer/src/i18n/messages/hud.ts:102",
+        "apps/desktop/src/renderer/src/i18n/messages/hud.ts:103",
+        "apps/desktop/src/renderer/src/i18n/messages/hud.ts:104",
+        "apps/desktop/src/renderer/src/hierarchy/ConfirmDialog.tsx:62",
+        "apps/desktop/src/renderer/src/hierarchy/ConfirmDialog.tsx:63",
+        "apps/desktop/src/renderer/src/hierarchy/ConfirmDialog.tsx:64",
+        "apps/desktop/src/renderer/src/hierarchy/ConfirmDialog.tsx:65",
+        "apps/desktop/src/renderer/src/hierarchy/ConfirmDialog.tsx:66",
+        "apps/desktop/src/renderer/src/i18n/messages/common.ts:4"
+      ],
+      "requires_git": false
+    },
+    {
+      "id": "shared-isolate-session",
+      "description": "新建独立 Worktree 选择发送当前会话及目标分支",
+      "input": {
+        "operation": "shared-checkout",
+        "category": "normal",
+        "cwd": "sample/area/team/repo",
+        "branch": "feature/review",
+        "branches": [
+          {
+            "name": "main",
+            "current": true,
+            "commitTimestamp": 2
+          },
+          {
+            "name": "feature/review",
+            "current": false,
+            "commitTimestamp": 1
+          }
+        ],
+        "context": {
+          "environmentKind": "local",
+          "hasOwnedWorktree": false
+        },
+        "sessions": [
+          [
+            "session-a",
+            "task-a",
+            "sample/area/team/repo"
+          ],
+          [
+            "session-b",
+            "task-b",
+            "sample/area/team/repo"
+          ]
+        ],
+        "choice": 2
+      },
+      "expected": {
+        "projection": {
+          "sharedWorkingDirectory": true,
+          "sharedSessionCount": 2
+        },
+        "statusCounts": {
+          "stagedCount": 0,
+          "unstagedCount": 0,
+          "untrackedCount": 0
+        },
+        "rowDisabled": false,
+        "confirmation": {
+          "title": "切换分支会影响其他会话",
+          "paragraphs": [
+            "这个会话和另外 1 个会话共用 …/area/team/repo。直接切换会把它们一起带到「feature/review」，未提交的修改也会一起过去。",
+            "为这个会话新建独立 Worktree 后切换，其他会话保持原样；这个会话会在新目录里重新启动。"
+          ],
+          "actions": [
+            "取消",
+            "切换整个目录",
+            "新建独立 Worktree 并切换"
+          ]
+        },
+        "callsBeforeChoice": [],
+        "callsAfterChoice": [
+          {
+            "method": "session.environment-isolate",
+            "sessionId": "session-a",
+            "branch": "feature/review"
+          }
+        ],
+        "dialogAfterChoice": false
+      },
+      "source": [
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:357",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:359",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:361",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:363",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:365",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:366",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:367",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:376",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:423",
+        "apps/runtime/src/session-canvas/session-graph-repository.ts:424",
+        "apps/desktop/src/renderer/src/hierarchy/HierarchyShell.tsx:1421",
+        "apps/desktop/src/renderer/src/hierarchy/HierarchyShell.tsx:1426",
+        "apps/desktop/src/renderer/src/hierarchy/HierarchyShell.tsx:1427",
+        "apps/desktop/src/renderer/src/hierarchy/HierarchyShell.tsx:1429",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:293",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:295",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:296",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:297",
+        "apps/desktop/src/renderer/src/hud/TerminalHud.tsx:298",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:63",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:69",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:119",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:121",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:122",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:123",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:125",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:126",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:127",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:128",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:130",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:132",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:196",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:197",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:240",
+        "apps/runtime/src/git/git-workspace-service.ts:362",
+        "apps/runtime/src/git/git-workspace-service.ts:368",
+        "apps/runtime/src/git/git-workspace-service.ts:370",
+        "apps/runtime/src/git/git-workspace-service.ts:374",
+        "apps/runtime/src/git/git-workspace-service.ts:375",
+        "apps/runtime/src/git/git-workspace-service.ts:377",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:369",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:372",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:373",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:374",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:376",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:377",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:378",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:379",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:431",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:433",
+        "apps/desktop/src/renderer/src/i18n/messages/hud.ts:98",
+        "apps/desktop/src/renderer/src/i18n/messages/hud.ts:99",
+        "apps/desktop/src/renderer/src/i18n/messages/hud.ts:100",
+        "apps/desktop/src/renderer/src/i18n/messages/hud.ts:101",
+        "apps/desktop/src/renderer/src/i18n/messages/hud.ts:102",
+        "apps/desktop/src/renderer/src/i18n/messages/hud.ts:103",
+        "apps/desktop/src/renderer/src/i18n/messages/hud.ts:104",
+        "apps/desktop/src/renderer/src/hierarchy/ConfirmDialog.tsx:62",
+        "apps/desktop/src/renderer/src/hierarchy/ConfirmDialog.tsx:63",
+        "apps/desktop/src/renderer/src/hierarchy/ConfirmDialog.tsx:64",
+        "apps/desktop/src/renderer/src/hierarchy/ConfirmDialog.tsx:65",
+        "apps/desktop/src/renderer/src/hierarchy/ConfirmDialog.tsx:66",
+        "apps/desktop/src/renderer/src/i18n/messages/common.ts:4",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:142",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:144",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:149",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:150",
+        "apps/desktop/src/renderer/src/hud/GitControlMenu.tsx:151"
+      ],
+      "requires_git": false
+    }
+  ]
+}
