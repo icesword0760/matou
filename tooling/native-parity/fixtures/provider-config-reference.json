@@ -1,0 +1,111 @@
+{
+  "version": 1,
+  "revision": 6,
+  "providers": {
+    "claude-code": [
+      {
+        "id": "anthropic-official",
+        "cli": "claude-code",
+        "name": "Anthropic 官方",
+        "endpoint": "https://api.anthropic.com",
+        "model": "",
+        "builtIn": true
+      },
+      {
+        "id": "6c3e5c40-5795-4fdf-968e-a3de83097aa6",
+        "cli": "claude-code",
+        "name": "隔离示例（编辑）",
+        "endpoint": "https://example.invalid/base",
+        "model": "demo-a",
+        "effortMapping": {
+          "opus": "high",
+          "sonnet": "follow"
+        },
+        "modelMapping": {
+          "opus": "demo-a",
+          "sonnet": "",
+          "haiku": "demo-z"
+        },
+        "apiKey": "SYNTHETIC-FIXTURE-ONLY",
+        "modelMetadata": [
+          {
+            "id": "demo-a",
+            "displayName": "示例模型",
+            "contextWindow": 200000,
+            "maxContextWindow": 1000000,
+            "maxOutputTokens": 4096,
+            "supportedEfforts": [
+              "high",
+              "low"
+            ]
+          },
+          {
+            "id": "demo-z"
+          }
+        ],
+        "legacyProvider": {
+          "keep": 7
+        }
+      },
+      {
+        "id": "ee8a641e-f247-48ed-9ad1-3d175c8693d9",
+        "cli": "claude-code",
+        "kind": "subscription",
+        "name": "订阅示例",
+        "endpoint": "",
+        "model": "demo-sub",
+        "modelMapping": {
+          "opus": "demo-sub",
+          "sonnet": "demo-sub",
+          "haiku": "demo-sub"
+        },
+        "effortMapping": {
+          "opus": "follow"
+        },
+        "subscription": {
+          "provider": "codex",
+          "credentialRef": {
+            "name": "fixture-only.json"
+          },
+          "account": {
+            "status": "ready",
+            "plan": "Fixture"
+          },
+          "modelMetadata": [
+            {
+              "id": "demo-sub",
+              "displayName": "示例订阅模型",
+              "contextWindow": 272000,
+              "maxContextWindow": 512000,
+              "supportedEfforts": [
+                "high"
+              ],
+              "maxOutputTokens": 4096
+            }
+          ]
+        }
+      }
+    ],
+    "codex": [
+      {
+        "id": "openai-official",
+        "cli": "codex",
+        "name": "OpenAI 官方",
+        "endpoint": "https://api.openai.com/v1",
+        "model": "",
+        "builtIn": true
+      }
+    ]
+  },
+  "activeProviderIds": {
+    "claude-code": "6c3e5c40-5795-4fdf-968e-a3de83097aa6",
+    "codex": "openai-official"
+  },
+  "legacyRoot": {
+    "untouched": true
+  },
+  "policies": {
+    "legacyPolicy": "retained",
+    "antigravityRiskAcceptedAt": "2000-01-01T00:00:00.000Z"
+  }
+}
