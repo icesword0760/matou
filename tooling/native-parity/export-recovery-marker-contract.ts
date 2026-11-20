@@ -4,6 +4,12 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { openRecoverableRuntimeDatabase, resolveRuntimeDatabaseRecoveryMarker, isRuntimeDatabaseRecoveryResolved } from '../../apps/runtime/src/storage/runtime-database-bootstrap'
 
+if (process.argv[2] === '--gate') {
+  // run.sh bundles the gate-only probe next to this exporter.
+  const probe = new URL('./frozen-probe.js', import.meta.url)
+  const { capture } = await import(probe.href)
+  await capture(process.argv.slice(3))
+} else {
 const temporary = await mkdtemp(join(tmpdir(), 'matou-recovery-marker-contract-'))
 const cases: unknown[] = []
 const markerFor = (root: string, id = 'reference-generation') => ({
@@ -73,3 +79,4 @@ for (const name of ['legacy-no-id', 'legacy-with-id', 'required', 'invalid-state
 }
 await writeFile(process.argv[2]!, JSON.stringify({ versions: process.versions, cases }, null, 2) + '\n')
 console.log(JSON.stringify({ output: process.argv[2], cases: cases.length, temporary }))
+}
