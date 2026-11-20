@@ -238,6 +238,75 @@ pub struct PtyProcess {
     handles: Option<Handles>,
 }
 
+#[cfg(unix)]
+pub struct ForegroundProcessGroup {
+    pgid: libc::pid_t,
+    session: libc::pid_t,
+}
+
+#[cfg(unix)]
+impl ForegroundProcessGroup {
+    pub fn hang_up(&self) -> io::Result<()> {
+        // The direct Shell receives its own HUP through PtyProcess::terminate.
+        if self.pgid != self.session && self.is_running()? {
+            send_signal(-self.pgid, libc::SIGCONT)?;
+            send_signal(-self.pgid, libc::SIGHUP)?;
+        }
+        Ok(())
+    }
+
+    pub fn force_kill(&self) -> io::Result<()> {
+        if self.is_running()? {
+            send_signal(-self.pgid, libc::SIGKILL)?;
+        }
+        Ok(())
+    }
+
+    pub fn is_running(&self) -> io::Result<bool> {
+        #[cfg(target_os = "macos")]
+        {
+            // The leader can exit before other members. Confirm that any
+            // surviving member is still in this PTY's original session.
+            let mut members = vec![0; 16];
+            loop {
+                let count = unsafe {
+                    libc::proc_listpgrppids(
+                        self.pgid,
+                        members.as_mut_ptr().cast(),
+                        std::mem::size_of_val(members.as_slice()) as libc::c_int,
+                    )
+                };
+                if count < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                let count = count as usize;
+                if members[..count]
+                    .iter()
+                    .any(|&pid| unsafe { libc::getsid(pid) } == self.session)
+                {
+                    return Ok(true);
+                }
+                if count < members.len() {
+                    return Ok(false);
+                }
+                members.resize(members.len() * 2, 0);
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            if unsafe { libc::kill(-self.pgid, 0) } == 0 {
+                return Ok(true);
+            }
+            let error = io::Error::last_os_error();
+            match error.raw_os_error() {
+                Some(libc::ESRCH) => Ok(false),
+                Some(libc::EPERM) => Ok(true),
+                _ => Err(error),
+            }
+        }
+    }
+}
+
 impl PtyProcess {
     pub fn spawn(launch: &ShellLaunch) -> Result<(Self, Box<dyn Read + Send>)> {
         let geometry = pty_size(launch.cols, launch.rows)?;
@@ -347,6 +416,17 @@ impl PtyProcess {
 
     pub fn process_id(&self) -> Option<u32> {
         self.handles.as_ref()?.child.process_id()
+    }
+
+    #[cfg(unix)]
+    pub fn foreground_process_group(&self) -> Option<ForegroundProcessGroup> {
+        let handles = self.handles.as_ref()?;
+        let session = unix_pid(&*handles.child).ok()?;
+        // The Unix PTY backend reads tcgetpgrp on this master and creates
+        // the controlling session with the direct child as its leader.
+        let pgid = handles.master.process_group_leader()?;
+        (pgid > 1 && pgid != unsafe { libc::getpgrp() })
+            .then_some(ForegroundProcessGroup { pgid, session })
     }
 
     pub fn try_wait(&mut self) -> Result<Option<ProcessExit>> {

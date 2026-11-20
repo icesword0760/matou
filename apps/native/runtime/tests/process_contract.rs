@@ -12,6 +12,8 @@ mod codex_launch;
 mod codex_resume;
 #[path = "process_contract/database_recovery.rs"]
 mod database_recovery;
+#[path = "process_contract/quit.rs"]
+mod quit;
 
 use std::{
     fs,

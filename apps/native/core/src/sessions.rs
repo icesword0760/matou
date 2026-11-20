@@ -1,5 +1,5 @@
 //! Persistent lifecycle of sessions and their process runs.
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -799,6 +799,62 @@ pub fn load_claude_catalog_binding(
     input: &ClaudeCatalogLoad<'_>,
     now: i64,
 ) -> Result<DomainCommit> {
+    load_provider_catalog_binding(db, command, input, "claude-code", false, now)
+}
+
+pub fn catalog_binding_owners(
+    db: &Connection,
+    provider: &str,
+    provider_ids: &[&str],
+) -> Result<Vec<(String, String, String)>> {
+    let mut query = db.prepare(
+        "SELECT binding.provider_session_id, session.id, session.title
+         FROM provider_bindings AS binding
+         JOIN sessions AS session ON session.id = binding.session_id
+         JOIN tasks ON tasks.id = session.task_id
+         JOIN workspaces ON workspaces.id = tasks.workspace_id
+         WHERE binding.provider = ?1
+           AND (binding.resume_state = 'available'
+                OR (?1 = 'codex' AND binding.resume_state = 'resumed'))
+           AND binding.invalidated_at IS NULL AND binding.user_exited_at IS NULL
+           AND session.kind = ?1 AND session.archived_at IS NULL
+           AND tasks.archived_at IS NULL AND workspaces.archived_at IS NULL
+           AND binding.provider_session_id IN (SELECT value FROM json_each(?2))
+         ORDER BY binding.updated_at DESC, session.id",
+    )?;
+    let rows = query.query_map(
+        params![provider, serde_json::to_string(provider_ids)?],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+pub fn ensure_codex_catalog_available(
+    db: &Connection,
+    session_id: &str,
+    provider_session_id: &str,
+) -> Result<()> {
+    if let Some((_, owner, title)) =
+        catalog_binding_owners(db, "codex", &[provider_session_id])?.first()
+    {
+        ensure!(owner != session_id, "已载入当前卡片");
+        bail!("已载入“{title}”");
+    }
+    Ok(())
+}
+
+pub fn load_provider_catalog_binding(
+    db: &mut Connection,
+    command: &CommandMetadata,
+    input: &ClaudeCatalogLoad<'_>,
+    provider: &str,
+    completed_turn: bool,
+    now: i64,
+) -> Result<DomainCommit> {
+    ensure!(
+        matches!(provider, "claude-code" | "codex"),
+        "Unsupported catalog provider"
+    );
     execute(db, command, now, |tx, events| {
         let session = require_session(tx, input.session_id)?;
         ensure!(session.archived_at.is_none(), "Session does not exist");
@@ -812,7 +868,7 @@ pub fn load_claude_catalog_binding(
         ensure!(
             in_scene
                 && session.cwd == input.cwd
-                && matches!(session.kind.as_str(), "shell" | "claude-code"),
+                && matches!(session.kind.as_str(), "shell" | "claude-code" | "codex"),
             "Card is no longer available in this scene and working directory"
         );
         let workspace_id: String = tx
@@ -835,11 +891,14 @@ pub fn load_claude_catalog_binding(
             "Card has an unconfirmed fork"
         );
 
+        if provider == "codex" {
+            ensure_codex_catalog_available(tx, input.session_id, input.provider_session_id)?;
+        }
         let existing: Option<(String, String)> = tx
             .query_row(
                 "SELECT id, metadata_json FROM provider_bindings
-                 WHERE session_id = ? AND provider = 'claude-code' AND provider_session_id = ?",
-                params![input.session_id, input.provider_session_id],
+                 WHERE session_id = ? AND provider = ? AND provider_session_id = ?",
+                params![input.session_id, provider, input.provider_session_id],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
@@ -860,20 +919,29 @@ pub fn load_claude_catalog_binding(
             ("permissionMode".into(), json!(input.permission_mode)),
             ("loadedFromCatalog".into(), json!(true)),
             ("spawnRevision".into(), json!(now)),
-            ("observedUserPrompt".into(), json!(false)),
-            ("observedNormalStop".into(), json!(false)),
-            ("canFork".into(), json!(true)),
+            (
+                "observedUserPrompt".into(),
+                json!(provider == "codex" && completed_turn),
+            ),
+            (
+                "observedNormalStop".into(),
+                json!(provider == "codex" && completed_turn),
+            ),
+            (
+                "canFork".into(),
+                json!(provider == "claude-code" || completed_turn),
+            ),
         ]);
         tx.execute(
             "UPDATE provider_bindings SET resume_state = 'expired', restore_state = 'none',
                 restore_error = NULL, invalidated_at = ?, updated_at = ?
-             WHERE session_id = ? AND provider = 'claude-code' AND id <> ?",
-            params![now, now, input.session_id, binding_id],
+             WHERE session_id = ? AND provider = ? AND id <> ?",
+            params![now, now, input.session_id, provider, binding_id],
         )?;
         tx.execute(
             "INSERT INTO provider_bindings (id, session_id, provider, provider_session_id,
                 resume_state, restore_state, metadata_json, created_at, updated_at, validated_at)
-             VALUES (?, ?, 'claude-code', ?, 'available', 'restoring', ?, ?, ?, ?)
+             VALUES (?, ?, ?, ?, 'available', 'restoring', ?, ?, ?, ?)
              ON CONFLICT(session_id, provider, provider_session_id) DO UPDATE SET
                 resume_state = excluded.resume_state, restore_state = excluded.restore_state,
                 restore_error = NULL, invalidated_at = NULL, user_exited_at = NULL,
@@ -882,6 +950,7 @@ pub fn load_claude_catalog_binding(
             params![
                 binding_id,
                 input.session_id,
+                provider,
                 input.provider_session_id,
                 serde_json::to_string(&metadata)?,
                 now,
@@ -890,13 +959,13 @@ pub fn load_claude_catalog_binding(
             ],
         )?;
         tx.execute(
-            "UPDATE sessions SET kind = 'claude-code', title = ?, status = 'starting',
+            "UPDATE sessions SET kind = ?, title = ?, status = 'starting',
                  work_status = 'starting', updated_at = ?, last_activity_at = ?, version = version + 1
              WHERE id = ?",
-            params![input.title, now, now, input.session_id],
+            params![provider, input.title, now, now, input.session_id],
         )?;
         let mut payload = json!({
-            "sessionId": input.session_id, "provider": "claude-code", "bindingId": binding_id,
+            "sessionId": input.session_id, "provider": provider, "bindingId": binding_id,
             "providerSessionId": input.provider_session_id, "restoreState": "restoring",
             "restoreError": null, "spawnRevision": now,
         });
@@ -922,7 +991,7 @@ pub fn load_claude_catalog_binding(
             now,
             json!({
                 "targetSessionId": session.id,
-                "provider": "claude-code",
+                "provider": provider,
                 "runId": format!("restore:{binding_id}"),
                 "event": dismissal,
             }),

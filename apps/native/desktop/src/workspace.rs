@@ -489,9 +489,59 @@ impl LoaderEvent {
 struct LoaderDetailRequest {
     id: String,
     start: Option<i64>,
+    request_id: Option<u64>,
+    around: Option<i64>,
+}
+
+struct LoaderListRequest {
+    id: u64,
+    query: String,
+    offset: usize,
+    refresh: bool,
+}
+
+struct LoaderSearchHit {
+    index: i64,
+    excerpt: String,
+}
+
+#[derive(Clone, Default)]
+struct LoaderRemembered {
+    provider: Option<&'static str>,
+    claude: Option<String>,
+    codex: Option<String>,
+    focus: LoaderFocus,
+}
+
+#[derive(Clone, Copy, Default)]
+enum LoaderFocus {
+    #[default]
+    Filter,
+    List,
+    Content,
+    Control(usize),
+}
+
+impl LoaderRemembered {
+    fn selected(&self, provider: &str) -> Option<String> {
+        if provider == "codex" {
+            self.codex.clone()
+        } else {
+            self.claude.clone()
+        }
+    }
+
+    fn set_selected(&mut self, provider: &str, selection: Option<String>) {
+        if provider == "codex" {
+            self.codex = selection;
+        } else {
+            self.claude = selection;
+        }
+    }
 }
 
 struct LoaderLoad {
+    provider: &'static str,
     id: String,
     title: String,
     previous_revision: u64,
@@ -523,6 +573,27 @@ struct DeferredPreview {
 
 struct SessionLoader {
     history: bool,
+    provider: &'static str,
+    confirm_running: bool,
+    remembered: LoaderRemembered,
+    restore_selection: Option<String>,
+    list_total: usize,
+    list_next: usize,
+    has_more_sessions: bool,
+    pending_list: Option<LoaderListRequest>,
+    list_query: String,
+    catalog_revision: Vec<(String, String, String, u64, bool)>,
+    refresh_catalog: bool,
+    content_input: Entity<RenameInput>,
+    _content_subscription: Subscription,
+    _focus_subscriptions: Vec<Subscription>,
+    search_query: String,
+    pending_search: Option<(u64, String)>,
+    search_hits: Vec<LoaderSearchHit>,
+    has_more_hits: bool,
+    search_next: usize,
+    detail_model: Option<String>,
+    detail_permission: Option<String>,
     scene_id: String,
     session_id: String,
     cwd: String,
@@ -548,7 +619,11 @@ impl SessionLoader {
         &'a self,
         cx: &App,
     ) -> impl Iterator<Item = &'a LoaderSession> + use<'a> {
-        let query = self.input.read(cx).text.trim().to_lowercase();
+        let query = if self.provider == "codex" {
+            String::new()
+        } else {
+            self.input.read(cx).text.trim().to_lowercase()
+        };
         let cwd_matches = query.is_empty() || self.cwd.to_lowercase().contains(&query);
         self.sessions.iter().filter(move |session| {
             cwd_matches
@@ -1185,6 +1260,8 @@ pub struct Workspace {
     provider_restore_controls: HashMap<String, [FocusHandle; 2]>,
     pending_provider_restores: HashMap<String, PendingProviderRestore>,
     pending_loader_loads: HashMap<String, LoaderLoad>,
+    loader_remembered: HashMap<String, LoaderRemembered>,
+    loader_request_id: u64,
     #[cfg(target_os = "macos")]
     recovery_water: HashMap<String, Entity<RecoveryWater>>,
     #[cfg(target_os = "macos")]
@@ -2179,6 +2256,8 @@ impl Workspace {
             provider_restore_controls: HashMap::new(),
             pending_provider_restores: HashMap::new(),
             pending_loader_loads: HashMap::new(),
+            loader_remembered: HashMap::new(),
+            loader_request_id: 0,
             #[cfg(target_os = "macos")]
             recovery_water: HashMap::new(),
             #[cfg(target_os = "macos")]
@@ -3478,6 +3557,7 @@ impl Workspace {
                     self.provider_restore_controls.remove(&id);
                     self.pending_provider_restores.remove(&id);
                     self.pending_loader_loads.remove(&id);
+                    self.loader_remembered.remove(&id);
                     self.permission_changes.remove(&id);
                     self.permission_identities.remove(&id);
                     self.storage_fault_sessions.remove(&id);
@@ -3660,9 +3740,12 @@ impl Workspace {
                         _ => Vec::new(),
                     };
                     self.finish_session_loader(&rows(errors), window, cx);
-                    self.loader_detail_result(&rows(details), cx);
+                    let details = rows(details);
+                    self.loader_detail_result(&details, cx);
+                    self.loader_search_result(&details, cx);
                     self.loader_catalog_result(&rows(catalog), cx);
                 }
+                self.refresh_loader_catalog_if_changed();
                 self.sync_terminal_input(window, cx);
             }
             Event::ClipboardWrite { session_id, text } => {
@@ -5898,6 +5981,32 @@ impl Workspace {
     }
     fn close_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let dialog = self.dialog.take();
+        if let Some(TabDialog::SessionLoader(state)) = &dialog
+            && !state.history
+        {
+            let mut remembered = state.remembered.clone();
+            remembered.provider = Some(state.provider);
+            remembered.set_selected(
+                state.provider,
+                state
+                    .restore_selection
+                    .clone()
+                    .or_else(|| state.selected.clone()),
+            );
+            remembered.focus = if state.list_focus.is_focused(window) {
+                LoaderFocus::List
+            } else if state.content_input.read(cx).focus.is_focused(window) {
+                LoaderFocus::Content
+            } else {
+                self.dialog_controls
+                    .iter()
+                    .position(|focus| focus.is_focused(window))
+                    .filter(|index| *index != 0)
+                    .map_or(remembered.focus, LoaderFocus::Control)
+            };
+            self.loader_remembered
+                .insert(state.session_id.clone(), remembered);
+        }
         self.dialog_subscription = None;
         self.dialog_controls.clear();
         let focus = match dialog {
@@ -6852,7 +6961,13 @@ impl Workspace {
 
     fn session_loader_can_submit(&self, state: &SessionLoader) -> bool {
         !state.history
-            && state.selected.is_some()
+            && state.selected.as_ref().is_some_and(|id| {
+                state.provider != "codex"
+                    || state
+                        .sessions
+                        .iter()
+                        .any(|row| &row.id == id && row.loaded_by.is_none())
+            })
             && !self.pending_loader_loads.contains_key(&state.session_id)
             && self.graph_node(&state.session_id).is_some_and(|node| {
                 self.launch_action_blocked_reason(&state.session_id, node)
@@ -6899,6 +7014,17 @@ impl Workspace {
         let Some(cwd) = node["cwd"].as_str().filter(|path| !path.is_empty()) else {
             return;
         };
+        let remembered = self.loader_remembered.get(id).cloned().unwrap_or_default();
+        let initial_provider = if node["currentMode"] == "codex" {
+            "codex"
+        } else {
+            "claude-code"
+        };
+        let provider = if history {
+            "claude-code"
+        } else {
+            remembered.provider.unwrap_or(initial_provider)
+        };
         let selected = history
             .then(|| trimmed_graph_text(&node["historyProviderSessionId"]))
             .flatten()
@@ -6907,46 +7033,94 @@ impl Workspace {
         let cwd = cwd.to_owned();
         let input =
             cx.new(|cx| RenameInput::session_loader_search(SESSION_LOADER_FILTER_PLACEHOLDER, cx));
+        let content_input = cx.new(|cx| RenameInput::session_loader_search("查找右侧内容", cx));
         self.dialog_subscription =
             Some(cx.subscribe_in(&input, window, |this, _, event, _, cx| {
                 if matches!(event, RenameInputEvent::Changed) {
-                    this.refresh_loader_selection(true, cx);
+                    this.loader_filter_changed(cx);
                 }
             }));
-        self.dialog_controls = (0..4).map(|_| cx.focus_handle().tab_stop(true)).collect();
-        let result = if history {
-            window.focus(&self.dialog_controls[0]);
-            None
+        let content_subscription =
+            cx.subscribe_in(&content_input, window, |this, _, event, _, cx| {
+                if matches!(event, RenameInputEvent::Changed) {
+                    this.loader_search_changed(cx);
+                }
+            });
+        self.dialog_controls = (0..8).map(|_| cx.focus_handle().tab_stop(true)).collect();
+        let list_focus = cx.focus_handle().tab_stop(true);
+        let focus_subscriptions = [
+            (input.read(cx).focus.clone(), LoaderFocus::Filter),
+            (list_focus.clone(), LoaderFocus::List),
+            (content_input.read(cx).focus.clone(), LoaderFocus::Content),
+            (self.dialog_controls[4].clone(), LoaderFocus::Control(4)),
+            (self.dialog_controls[5].clone(), LoaderFocus::Control(5)),
+        ]
+        .into_iter()
+        .map(|(handle, saved)| {
+            cx.on_focus(&handle, window, move |this, _, _| {
+                if let Some(TabDialog::SessionLoader(state)) = &mut this.dialog {
+                    state.remembered.focus = saved;
+                }
+            })
+        })
+        .collect();
+        let focus = if history {
+            self.dialog_controls[0].clone()
         } else {
-            window.focus(&input.read(cx).focus);
-            Some(self.commands.send_at(
-                self.runtime_generation,
-                Command::ListProviderSessions { cwd: cwd.clone() },
-            ))
+            match remembered.focus {
+                LoaderFocus::List => list_focus.clone(),
+                LoaderFocus::Content if provider == "codex" => content_input.read(cx).focus.clone(),
+                LoaderFocus::Control(index @ (4 | 5)) => self.dialog_controls[index].clone(),
+                _ => input.read(cx).focus.clone(),
+            }
         };
+        window.focus(&focus);
         self.dialog = Some(TabDialog::SessionLoader(SessionLoader {
             history,
+            provider,
+            confirm_running: false,
+            restore_selection: remembered.selected(provider),
+            remembered,
+            list_total: 0,
+            list_next: 0,
+            has_more_sessions: false,
+            pending_list: None,
+            list_query: String::new(),
+            catalog_revision: loader_catalog_revision(&self.graph),
+            refresh_catalog: false,
+            content_input,
+            _content_subscription: content_subscription,
+            _focus_subscriptions: focus_subscriptions,
+            search_query: String::new(),
+            pending_search: None,
+            search_hits: Vec::new(),
+            has_more_hits: false,
+            search_next: 0,
+            detail_model: None,
+            detail_permission: None,
             scene_id,
             session_id: id.to_owned(),
-            cwd: cwd.to_owned(),
+            cwd,
             input,
             sessions: Vec::new(),
             selected,
             events: Vec::new(),
             first_event: None,
             total_events: 0,
-            loading_list: result.as_ref().is_some_and(Result::is_ok),
+            loading_list: false,
             loading_detail: false,
             loading_earlier: false,
             pending_detail: None,
             has_earlier: false,
-            error: result.and_then(Result::err).map(|error| error.to_string()),
+            error: None,
             list_scroll: ScrollHandle::new(),
             preview_scroll: ScrollHandle::new(),
-            list_focus: cx.focus_handle().tab_stop(true),
+            list_focus,
         }));
         if history {
             self.request_loader_detail(None);
+        } else {
+            self.request_loader_list(0, false);
         }
         self.workspace_menu = None;
         self.task_menu = None;
@@ -6966,6 +7140,134 @@ impl Workspace {
         }
     }
 
+    fn loader_filter_changed(&mut self, cx: &mut Context<Self>) {
+        let Some(TabDialog::SessionLoader(state)) = &mut self.dialog else {
+            return;
+        };
+        if state.provider != "codex" {
+            self.refresh_loader_selection(true, cx);
+            return;
+        }
+        let query = state.input.read(cx).text.trim().to_owned();
+        if state.list_query != query {
+            state.list_query = query;
+            state.restore_selection = None;
+            state.error = None;
+            state.confirm_running = false;
+            state.has_more_sessions = false;
+            state.list_scroll.set_offset(Point::default());
+            self.request_loader_list(0, false);
+            cx.notify();
+        }
+    }
+
+    fn switch_loader_provider(&mut self, provider: &'static str, cx: &mut Context<Self>) {
+        let Some(TabDialog::SessionLoader(state)) = &mut self.dialog else {
+            return;
+        };
+        if state.history
+            || state.provider == provider
+            || self.pending_loader_loads.contains_key(&state.session_id)
+        {
+            return;
+        }
+        state.remembered.set_selected(
+            state.provider,
+            state
+                .restore_selection
+                .take()
+                .or_else(|| state.selected.clone()),
+        );
+        state.provider = provider;
+        state.restore_selection = state.remembered.selected(provider);
+        state.pending_list = None;
+        state.pending_detail = None;
+        state.pending_search = None;
+        state.list_query = state.input.read(cx).text.trim().to_owned();
+        state.sessions.clear();
+        state.list_total = 0;
+        state.list_next = 0;
+        state.has_more_sessions = false;
+        state.loading_list = false;
+        state.refresh_catalog = false;
+        state.list_scroll.set_offset(Point::default());
+        self.set_loader_selection(None, cx);
+        self.request_loader_list(0, false);
+        cx.notify();
+    }
+
+    fn request_loader_list(&mut self, from: usize, refresh: bool) {
+        let Some(TabDialog::SessionLoader(state)) = &mut self.dialog else {
+            return;
+        };
+        if state.pending_list.is_some() || state.history {
+            return;
+        }
+        let command = if state.provider == "codex" {
+            self.loader_request_id += 1;
+            Command::ListCodexSessions {
+                request_id: self.loader_request_id,
+                cwd: state.cwd.clone(),
+                query: state.list_query.clone(),
+                full_text: false,
+                offset: Some(from as i64),
+                limit: Some(if refresh {
+                    state.sessions.len().clamp(50, 200) as i64
+                } else {
+                    50
+                }),
+            }
+        } else {
+            Command::ListProviderSessions {
+                cwd: state.cwd.clone(),
+            }
+        };
+        match self.commands.send_at(self.runtime_generation, command) {
+            Ok(()) => {
+                state.loading_list = !refresh;
+                state.pending_list = Some(LoaderListRequest {
+                    id: self.loader_request_id,
+                    query: state.list_query.clone(),
+                    offset: from,
+                    refresh,
+                });
+            }
+            Err(error) if !refresh => {
+                state.loading_list = false;
+                state.error = Some(error.to_string());
+            }
+            Err(_) => {}
+        }
+    }
+
+    fn load_more_loader_sessions(&mut self, cx: &mut Context<Self>) {
+        if let Some(TabDialog::SessionLoader(state)) = &self.dialog
+            && state.has_more_sessions
+        {
+            let from = state.list_next;
+            self.request_loader_list(from, false);
+            cx.notify();
+        }
+    }
+
+    fn refresh_loader_catalog_if_changed(&mut self) {
+        let Some(TabDialog::SessionLoader(state)) = &mut self.dialog else {
+            return;
+        };
+        if state.history || state.provider != "codex" {
+            return;
+        }
+        let revision = loader_catalog_revision(&self.graph);
+        if state.catalog_revision != revision {
+            state.catalog_revision = revision;
+            state.refresh_catalog = true;
+        }
+        if state.refresh_catalog && state.pending_list.is_none() {
+            state.refresh_catalog = false;
+            self.request_loader_list(0, true);
+        }
+    }
+
     fn refresh_loader_selection(&mut self, reset_scroll: bool, cx: &mut Context<Self>) {
         let Some(TabDialog::SessionLoader(state)) = &self.dialog else {
             return;
@@ -6978,18 +7280,40 @@ impl Workspace {
         }
         let mut visible = state.visible_sessions(cx);
         let first = visible.next();
-        let selected = state.selected.as_deref();
-        let next = first
+        let selected = state
+            .restore_selection
+            .as_deref()
+            .or(state.selected.as_deref());
+        let matching = first
             .filter(|first| Some(first.id.as_str()) == selected)
-            .or_else(|| visible.find(|session| Some(session.id.as_str()) == selected))
-            .or(first)
-            .map(|session| session.id.clone());
+            .or_else(|| visible.find(|session| Some(session.id.as_str()) == selected));
+        let need_more =
+            state.restore_selection.is_some() && matching.is_none() && state.has_more_sessions;
+        if state.restore_selection.is_some()
+            && let Some(matching) = matching
+            && let Some(position) = state
+                .visible_sessions(cx)
+                .position(|row| row.id == matching.id)
+        {
+            state.list_scroll.scroll_to_item(position);
+        }
+        let next = matching.or(first).map(|session| session.id.clone());
         drop(visible);
+        if need_more {
+            self.load_more_loader_sessions(cx);
+            return;
+        }
+        if let Some(TabDialog::SessionLoader(state)) = &mut self.dialog {
+            state.restore_selection = None;
+        }
         self.set_loader_selection(next, cx);
         cx.notify();
     }
 
     fn select_loader_session(&mut self, id: &str, cx: &mut Context<Self>) {
+        if let Some(TabDialog::SessionLoader(state)) = &mut self.dialog {
+            state.restore_selection = None;
+        }
         self.set_loader_selection(Some(id.to_owned()), cx);
     }
 
@@ -7018,6 +7342,17 @@ impl Workspace {
             return;
         }
         state.selected = next;
+        state.confirm_running = false;
+        state.detail_model = None;
+        state.detail_permission = None;
+        if state.provider == "codex" {
+            state.pending_detail = None;
+            state.pending_search = None;
+            state.search_hits.clear();
+            state.search_next = 0;
+            state.has_more_hits = false;
+            state.search_query = state.content_input.read(cx).text.trim().to_owned();
+        }
         state.events.clear();
         state.first_event = None;
         state.total_events = 0;
@@ -7028,11 +7363,16 @@ impl Workspace {
         state.preview_scroll.set_offset(Point::default());
         if state.loading_detail {
             self.request_loader_detail(None);
+            self.request_loader_search(0);
         }
         cx.notify();
     }
 
     fn request_loader_detail(&mut self, page: Option<(i64, i64)>) {
+        self.request_loader_detail_at(page, None);
+    }
+
+    fn request_loader_detail_at(&mut self, page: Option<(i64, i64)>, around: Option<i64>) {
         let Some(TabDialog::SessionLoader(state)) = &mut self.dialog else {
             return;
         };
@@ -7044,19 +7384,37 @@ impl Workspace {
             return;
         };
         let start = page.map(|(start, _)| start);
-        match self.commands.send_at(
-            self.runtime_generation,
+        let request_id = if state.provider == "codex" {
+            self.loader_request_id += 1;
+            Some(self.loader_request_id)
+        } else {
+            None
+        };
+        let limit = page.map(|(_, limit)| limit);
+        let command = if let Some(request_id) = request_id {
+            Command::GetCodexSession {
+                request_id,
+                cwd: state.cwd.clone(),
+                provider_session_id: id.clone(),
+                start_event_index: start,
+                around_event_index: around,
+                limit,
+            }
+        } else {
             Command::GetProviderSession {
                 cwd: state.cwd.clone(),
                 provider_session_id: id.clone(),
                 start_event_index: start,
-                limit: page.map(|(_, limit)| limit),
-            },
-        ) {
+                limit,
+            }
+        };
+        match self.commands.send_at(self.runtime_generation, command) {
             Ok(()) => {
                 state.pending_detail = Some(LoaderDetailRequest {
                     id: id.clone(),
                     start,
+                    request_id,
+                    around,
                 });
                 state.loading_detail = page.is_none();
                 state.loading_earlier = page.is_some();
@@ -7067,6 +7425,106 @@ impl Workspace {
                 state.error = Some(error.to_string());
             }
         }
+    }
+
+    fn loader_search_changed(&mut self, cx: &mut Context<Self>) {
+        let Some(TabDialog::SessionLoader(state)) = &mut self.dialog else {
+            return;
+        };
+        if state.provider != "codex" {
+            return;
+        }
+        let query = state.content_input.read(cx).text.trim().to_owned();
+        if state.search_query == query {
+            return;
+        }
+        state.search_query = query;
+        state.search_hits.clear();
+        state.has_more_hits = false;
+        state.search_next = 0;
+        self.request_loader_search(0);
+        cx.notify();
+    }
+
+    fn request_loader_search(&mut self, offset: usize) {
+        let Some(TabDialog::SessionLoader(state)) = &mut self.dialog else {
+            return;
+        };
+        let Some(id) = state.selected.as_ref().filter(|_| {
+            state.provider == "codex"
+                && !state.search_query.is_empty()
+                && state.pending_search.is_none()
+        }) else {
+            return;
+        };
+        self.loader_request_id += 1;
+        let request_id = self.loader_request_id;
+        match self.commands.send_at(
+            self.runtime_generation,
+            Command::SearchCodexSession {
+                request_id,
+                cwd: state.cwd.clone(),
+                provider_session_id: id.clone(),
+                query: state.search_query.clone(),
+                offset: Some(offset as i64),
+                limit: None,
+            },
+        ) {
+            Ok(()) => state.pending_search = Some((request_id, state.search_query.clone())),
+            Err(error) => state.error = Some(error.to_string()),
+        }
+    }
+
+    fn load_more_loader_hits(&mut self, cx: &mut Context<Self>) {
+        if let Some(TabDialog::SessionLoader(state)) = &self.dialog
+            && state.has_more_hits
+        {
+            let from = state.search_next;
+            self.request_loader_search(from);
+            cx.notify();
+        }
+    }
+
+    fn select_loader_hit(&mut self, index: i64, cx: &mut Context<Self>) {
+        let Some(TabDialog::SessionLoader(state)) = &mut self.dialog else {
+            return;
+        };
+        state.pending_detail = None;
+        state.error = None;
+        self.request_loader_detail_at(None, Some(index));
+        cx.notify();
+    }
+
+    fn loader_search_result(&mut self, results: &[Value], cx: &mut Context<Self>) {
+        let Some(TabDialog::SessionLoader(state)) = &mut self.dialog else {
+            return;
+        };
+        let Some((id, query)) = &state.pending_search else {
+            return;
+        };
+        let Some(result) = results
+            .iter()
+            .find(|result| result["search"] == true && result["requestId"] == *id)
+        else {
+            return;
+        };
+        let stale = query != &state.search_query;
+        state.pending_search = None;
+        if stale {
+            self.request_loader_search(0);
+        } else if let Some(error) = result["error"].as_str() {
+            state.error = Some(error.to_owned());
+        } else if let Some(hits) = result["hits"].as_array() {
+            state.search_hits.extend(hits.iter().filter_map(|hit| {
+                Some(LoaderSearchHit {
+                    index: hit["eventIndex"].as_i64()?,
+                    excerpt: hit["excerpt"].as_str()?.to_owned(),
+                })
+            }));
+            state.has_more_hits = result["hasMore"] == true;
+            state.search_next = result["nextOffset"].as_u64().unwrap_or_default() as usize;
+        }
+        cx.notify();
     }
 
     fn load_earlier_session_events(&mut self, cx: &mut Context<Self>) {
@@ -7093,6 +7551,16 @@ impl Workspace {
         if !self.session_loader_can_submit(state) {
             return;
         }
+        if state.provider == "codex"
+            && !state.confirm_running
+            && self.session_loader_running(&state.session_id)
+        {
+            if let Some(TabDialog::SessionLoader(state)) = &mut self.dialog {
+                state.confirm_running = true;
+            }
+            cx.notify();
+            return;
+        }
         let Some(session) = state
             .sessions
             .iter()
@@ -7106,17 +7574,23 @@ impl Workspace {
             .and_then(|node| node["providerSpawnRevision"].as_u64())
             .unwrap_or(0);
         let load = LoaderLoad {
+            provider: state.provider,
             id: session.id.clone(),
             title: session.title.clone(),
             previous_revision,
         };
-        let result = self.commands.send_at(
-            self.runtime_generation,
+        let command = if state.provider == "codex" {
+            Command::LoadCodexSession {
+                session_id: session_id.clone(),
+                provider_session_id: load.id.clone(),
+            }
+        } else {
             Command::LoadProviderSession {
                 session_id: session_id.clone(),
                 provider_session_id: load.id.clone(),
-            },
-        );
+            }
+        };
+        let result = self.commands.send_at(self.runtime_generation, command);
         if let Some(TabDialog::SessionLoader(state)) = &mut self.dialog {
             state.error = result.err().map(|error| error.to_string());
             if state.error.is_none() {
@@ -7130,21 +7604,63 @@ impl Workspace {
         let Some(TabDialog::SessionLoader(state)) = &mut self.dialog else {
             return;
         };
-        let Some(result) = results
-            .iter()
-            .find(|result| state.loading_list && result["cwd"] == state.cwd)
-        else {
+        let Some(request) = &state.pending_list else {
             return;
         };
+        let Some(result) = results.iter().find(|result| {
+            result["cwd"] == state.cwd
+                && if state.provider == "codex" {
+                    result["provider"] == "codex" && result["requestId"] == request.id
+                } else {
+                    result["provider"].is_null()
+                }
+        }) else {
+            return;
+        };
+        let request = state.pending_list.take().unwrap();
         state.loading_list = false;
+        if state.provider == "codex" && request.query != state.list_query {
+            self.request_loader_list(0, false);
+            return;
+        }
         if let Some(error) = result["error"].as_str() {
-            state.error = Some(error.to_owned());
-        } else if let Some(sessions) = result["sessions"].as_array() {
-            state.sessions = sessions
-                .iter()
-                .filter_map(LoaderSession::from_graph)
-                .collect();
-            self.refresh_loader_selection(true, cx);
+            if !request.refresh {
+                state.error = Some(error.to_owned());
+            }
+            return;
+        }
+        if let Some(rows) = result["sessions"].as_array() {
+            let rows: Vec<_> = rows.iter().filter_map(LoaderSession::from_graph).collect();
+            state.list_total = result["total"]
+                .as_u64()
+                .map_or(rows.len(), |total| total as usize);
+            let next = result["nextOffset"]
+                .as_u64()
+                .map_or(rows.len(), |offset| offset as usize);
+            if request.refresh && state.list_next > next && result["hasMore"] == true {
+                for row in rows {
+                    if let Some(existing) = state
+                        .sessions
+                        .iter_mut()
+                        .find(|existing| existing.id == row.id)
+                    {
+                        *existing = row;
+                    }
+                }
+            } else {
+                state.list_next = next;
+                state.has_more_sessions = result["hasMore"] == true;
+                if request.offset == 0 {
+                    state.sessions = rows;
+                } else {
+                    for row in rows {
+                        if !state.sessions.iter().any(|existing| existing.id == row.id) {
+                            state.sessions.push(row);
+                        }
+                    }
+                }
+            }
+            self.refresh_loader_selection(!request.refresh && request.offset == 0, cx);
         }
     }
 
@@ -7156,7 +7672,13 @@ impl Workspace {
             return;
         };
         let Some(result) = results.iter().find(|result| {
-            result["cwd"] == state.cwd
+            if let Some(request_id) = request.request_id {
+                return result["provider"] == "codex"
+                    && result["requestId"] == request_id
+                    && result["search"] != true;
+            }
+            result["provider"].is_null()
+                && result["cwd"] == state.cwd
                 && result["providerSessionId"] == request.id
                 && (result["error"].is_string()
                     || match request.start {
@@ -7182,6 +7704,8 @@ impl Workspace {
         if let Some(error) = result["error"].as_str() {
             state.error = Some(error.to_owned());
         } else if let Some(rows) = result["events"].as_array() {
+            state.detail_model = result["model"].as_str().map(str::to_owned);
+            state.detail_permission = result["permissionMode"].as_str().map(str::to_owned);
             let page = &result["page"];
             let previous_first = state.first_event;
             state.first_event = page["startEventIndex"].as_i64();
@@ -7197,7 +7721,18 @@ impl Workspace {
                 state.preview_scroll.scroll_to_top_of_item(anchor);
             } else {
                 state.events = events.collect();
-                state.preview_scroll.scroll_to_bottom();
+                if let Some(index) = request.around
+                    && let Some(position) = state
+                        .events
+                        .iter()
+                        .position(|event| event.index as i64 == index)
+                {
+                    state
+                        .preview_scroll
+                        .scroll_to_top_of_item(position + usize::from(state.has_earlier));
+                } else {
+                    state.preview_scroll.scroll_to_bottom();
+                }
             }
         }
         cx.notify();
@@ -7233,6 +7768,8 @@ impl Workspace {
             let identity = identities.and_then(|events| {
                 events.iter().find(|result| {
                     result["sessionId"] == *session_id
+                        && (result["provider"] == load.provider
+                            || (load.provider == "claude-code" && result["provider"].is_null()))
                         && result["providerSessionId"] == load.id
                         && match result["result"].as_str() {
                             Some("confirmed") => {
@@ -7251,7 +7788,7 @@ impl Workspace {
             });
             // The committed binding hands off subsequent recovery to the card.
             let committed = session_levels::node(nodes, session_id).is_some_and(|node| {
-                node["currentMode"] == "claude-code"
+                node["currentMode"] == load.provider
                     && newer_revision(&node["providerSpawnRevision"])
                     && node["title"] == load.title
             });
@@ -7271,6 +7808,7 @@ impl Workspace {
             Some(Err(error)) => {
                 if let Some(TabDialog::SessionLoader(state)) = &mut self.dialog {
                     state.error = Some(error);
+                    state.confirm_running = false;
                 }
             }
             None => {}
@@ -7280,13 +7818,17 @@ impl Workspace {
     fn fail_pending_loader_commands(&mut self, message: String) {
         if let Some(TabDialog::SessionLoader(state)) = &mut self.dialog
             && (state.loading_list
+                || state.pending_list.is_some()
                 || state.pending_detail.is_some()
+                || state.pending_search.is_some()
                 || self.pending_loader_loads.contains_key(&state.session_id))
         {
             state.loading_list = false;
             state.loading_detail = false;
             state.loading_earlier = false;
+            state.pending_list = None;
             state.pending_detail = None;
+            state.pending_search = None;
             state.error = Some(message);
         }
         self.pending_loader_loads.clear();
@@ -8138,11 +8680,24 @@ impl Workspace {
                 cx.stop_propagation();
             } else if stroke.key == "tab" && !mods.alt && !mods.control && !mods.platform {
                 let input = state.input.read(cx);
-                let mut controls = vec![&self.dialog_controls[0], &input.focus];
+                let mut controls = vec![&self.dialog_controls[0]];
+                if !state.history {
+                    controls.extend([&self.dialog_controls[4], &self.dialog_controls[5]]);
+                }
+                controls.push(&input.focus);
                 if !input.text.is_empty() {
                     controls.push(&self.dialog_controls[3]);
                 }
                 controls.push(&state.list_focus);
+                if state.provider == "codex" {
+                    if state.has_more_sessions && !state.loading_list {
+                        controls.push(&self.dialog_controls[6]);
+                    }
+                    controls.push(&state.content_input.read(cx).focus);
+                    if state.has_more_hits && state.pending_search.is_none() {
+                        controls.push(&self.dialog_controls[7]);
+                    }
+                }
                 if state.has_earlier && !state.loading_earlier {
                     controls.push(&self.dialog_controls[1]);
                 }
@@ -9030,7 +9585,14 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let blocked = self.session_loader_blocked_reason(id, node);
-        let tooltip: SharedString = blocked.unwrap_or(SESSION_LOADER_TITLE).to_owned().into();
+        let tooltip: SharedString = blocked
+            .unwrap_or(if node["currentMode"] == "codex" {
+                "载入 Codex 会话"
+            } else {
+                SESSION_LOADER_TITLE
+            })
+            .to_owned()
+            .into();
         let button = div()
             .id(SharedString::from(format!("session-loader-open-{id}")))
             .size(px(24.))
@@ -9323,6 +9885,10 @@ impl Workspace {
         let input = state.input.read(cx);
         let filter_empty = input.text.is_empty();
         let filter_focused = input.focus.is_focused(window);
+        let is_codex = state.provider == "codex";
+        let content_input = state.content_input.read(cx);
+        let content_empty = content_input.text.is_empty();
+        let content_focused = content_input.focus.is_focused(window);
         let selected = state
             .selected
             .as_ref()
@@ -9333,6 +9899,13 @@ impl Workspace {
             .unwrap_or("Shell")
             .to_owned();
         let running = !state.history && self.session_loader_running(&state.session_id);
+        // Claude keeps the always-on running warning; Codex only reveals the
+        // same warning after the first press moves the button into confirm mode.
+        let confirm_warning = if is_codex {
+            state.confirm_running
+        } else {
+            running
+        };
         let can_submit = self.session_loader_can_submit(state);
         let mut focus_ring: Hsla = rgb(0x5b9de9).into();
         focus_ring.a = 0.13;
@@ -9393,6 +9966,46 @@ impl Workspace {
                 )
             }));
 
+        // Codex body search reuses the loader filter field: same height,
+        // border, focus ring, icon and 11px editor text.
+        let content_search = div().flex_none().flex().items_center().gap(px(7.)).child(
+            div()
+                .id("session-loader-content")
+                .w(px(220.))
+                .h(px(34.))
+                .flex()
+                .items_center()
+                .gap(px(7.))
+                .px(px(9.))
+                .border_1()
+                .border_color(if content_focused {
+                    rgb(0x5b9de9)
+                } else {
+                    rgb(0x414854)
+                })
+                .rounded(px(9.))
+                .bg(rgb(0x15181c))
+                .when(content_focused, |content| {
+                    content.shadow(vec![BoxShadow {
+                        color: focus_ring,
+                        offset: point(px(0.), px(0.)),
+                        blur_radius: px(0.),
+                        spread_radius: px(3.),
+                    }])
+                })
+                .child(icon("search", 15., 0x858e9b))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .flex()
+                        .items_center()
+                        .child(state.content_input.clone()),
+                ),
+        );
+
+        let provider_name = if is_codex { "Codex" } else { "Claude Code" };
         let mut rows = Vec::with_capacity(sessions.len());
         for session in &sessions {
             let is_selected = state.selected.as_deref() == Some(session.id.as_str());
@@ -9401,18 +10014,20 @@ impl Workspace {
                 .model
                 .as_deref()
                 .filter(|model| !model.is_empty())
-                .unwrap_or("Claude Code");
+                .unwrap_or(provider_name);
             let meta = format!("{} · {}", loader_relative_time(session.updated_at), model);
-            let detail = format!(
-                "{} · {} 条内容",
-                loader_permission_label(&session.permission_mode),
-                session.message_count
-            );
+            let detail = (!is_codex).then(|| {
+                format!(
+                    "{} · {} 条内容",
+                    loader_permission_label(&session.permission_mode),
+                    session.message_count
+                )
+            });
             let loaded = session.loaded_by.as_ref().map(|owner| {
                 if owner.session_id == state.session_id {
                     "已载入当前卡片".to_owned()
                 } else {
-                    format!("已载入{}", owner.title)
+                    format!("已载入“{}”", owner.title)
                 }
             });
             rows.push(
@@ -9469,7 +10084,7 @@ impl Workspace {
                                     .text_color(rgb(0x8a939f))
                                     .child(ui_text(meta).normal_line_height()),
                             )
-                            .child(
+                            .children(detail.map(|detail| {
                                 div()
                                     .min_w_0()
                                     .overflow_hidden()
@@ -9477,8 +10092,8 @@ impl Workspace {
                                     .text_ellipsis()
                                     .text_size(px(9.))
                                     .text_color(rgb(0x8a939f))
-                                    .child(ui_text(detail).normal_line_height()),
-                            )
+                                    .child(ui_text(detail).normal_line_height())
+                            }))
                             .children(loaded.map(|loaded| {
                                 div()
                                     .min_w_0()
@@ -9504,6 +10119,26 @@ impl Workspace {
             .overflow_y_scroll()
             .track_scroll(&state.list_scroll)
             .track_focus(&state.list_focus)
+            .when(
+                is_codex && state.has_more_sessions && !state.loading_list,
+                |list| {
+                    list.on_scroll_wheel(cx.listener(
+                        |this, event: &ScrollWheelEvent, window, cx| {
+                            let Some(TabDialog::SessionLoader(state)) = &this.dialog else {
+                                return;
+                            };
+                            let delta = event.delta.pixel_delta(window.line_height()).y;
+                            let scroll = &state.list_scroll;
+                            if delta < px(0.)
+                                && scroll.max_offset().height + scroll.offset().y + delta
+                                    <= px(140.)
+                            {
+                                this.load_more_loader_sessions(cx);
+                            }
+                        },
+                    ))
+                },
+            )
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |_, _, window, _| {
@@ -9546,10 +10181,44 @@ impl Workspace {
                     .text_size(px(11.))
                     .text_color(rgb(0x77818e))
                     .child(ui_text(if filter_empty {
-                        SESSION_LOADER_NO_SESSIONS
+                        if is_codex {
+                            "当前工作空间内没有 Codex 会话"
+                        } else {
+                            SESSION_LOADER_NO_SESSIONS
+                        }
                     } else {
                         SESSION_LOADER_NO_MATCHES
                     })),
+            )
+        } else if state.has_more_sessions {
+            list_results.child(
+                self.button(
+                    div()
+                        .id("session-loader-more-sessions")
+                        .w_full()
+                        .h(px(30.))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .border_1()
+                        .border_color(rgba(0x5b9de926))
+                        .rounded(px(8.))
+                        .bg(rgba(0xffffff08))
+                        .text_size(px(10.))
+                        .text_color(rgb(0x9aa4b1))
+                        .cursor_pointer()
+                        .hover(|style| {
+                            style
+                                .border_color(rgb(0x3c4653))
+                                .text_color(rgb(0xb5c0cd))
+                                .bg(rgba(0xffffff0f))
+                        })
+                        .child("载入更多会话"),
+                    &self.dialog_controls[6],
+                    |this, _, cx| this.load_more_loader_sessions(cx),
+                    cx,
+                ),
             )
         } else {
             list_results
@@ -9577,12 +10246,8 @@ impl Workspace {
                     .text_size(px(9.))
                     .text_color(rgb(0x747e8c))
                     .child(
-                        ui_text(format!(
-                            "{} / {} 个会话",
-                            sessions.len(),
-                            state.sessions.len()
-                        ))
-                        .normal_line_height(),
+                        ui_text(format!("{} / {} 个会话", sessions.len(), state.list_total))
+                            .normal_line_height(),
                     ),
             )
             .child(list_results);
@@ -9594,11 +10259,37 @@ impl Workspace {
                 .map(|session| session.title.clone())
                 .unwrap_or_else(|| SESSION_LOADER_SELECT_SESSION.to_owned())
         };
+        // Keep the Codex list compact while preserving permission in its preview.
+        let preview_meta = if !is_codex {
+            state
+                .first_event
+                .map(|_| format!("{} 条内容", state.total_events))
+        } else {
+            selected.map(|session| {
+                let model = state
+                    .detail_model
+                    .as_deref()
+                    .or(session.model.as_deref())
+                    .filter(|model| !model.is_empty())
+                    .unwrap_or(provider_name);
+                format!(
+                    "{} · {}",
+                    model,
+                    loader_permission_label(
+                        state
+                            .detail_permission
+                            .as_deref()
+                            .unwrap_or(&session.permission_mode)
+                    )
+                )
+            })
+        };
         let preview_header = div()
             .h(px(48.))
             .flex_none()
             .flex()
             .items_center()
+            .gap(px(12.))
             .px(px(16.))
             .border_b_1()
             .border_color(rgb(0x303640))
@@ -9619,12 +10310,18 @@ impl Workspace {
                             .font_weight(FontWeight::BOLD)
                             .child(ui_text(preview_title).normal_line_height()),
                     )
-                    .when(state.first_event.is_some(), |title| {
-                        title.child(div().text_size(px(9.)).text_color(rgb(0x818b98)).child(
-                            ui_text(format!("{} 条内容", state.total_events)).normal_line_height(),
-                        ))
-                    }),
-            );
+                    .children(preview_meta.map(|meta| {
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_size(px(9.))
+                            .text_color(rgb(0x818b98))
+                            .child(ui_text(meta).normal_line_height())
+                    })),
+            )
+            .when(is_codex, |header| header.child(content_search));
 
         let mut events = div()
             .id("session-loader-events")
@@ -9768,6 +10465,84 @@ impl Workspace {
             );
         }
 
+        let mut hit_rows = Vec::with_capacity(state.search_hits.len());
+        for hit in &state.search_hits {
+            let index = hit.index;
+            hit_rows.push(
+                div()
+                    .id(SharedString::from(format!("session-loader-hit-{index}")))
+                    .w_full()
+                    .mb(px(4.))
+                    .px(px(7.))
+                    .py(px(5.))
+                    .rounded(px(6.))
+                    .bg(rgba(0x5b9de914))
+                    .text_size(px(9.))
+                    .text_color(rgb(0x9dbfe6))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .cursor_pointer()
+                    .hover(|style| style.bg(rgba(0x5b9de926)).text_color(rgb(0xd9dde3)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.select_loader_hit(index, cx);
+                    }))
+                    .child(ui_text(format!("#{index}  {}", hit.excerpt))),
+            );
+        }
+        let hit_status = if state.pending_search.is_some() {
+            "正在查找…".to_owned()
+        } else if state.search_hits.is_empty() {
+            "0 条命中".to_owned()
+        } else {
+            format!("{} 条命中", state.search_hits.len())
+        };
+        let hits_panel = div()
+            .id("session-loader-hits")
+            .flex_none()
+            .max_h(px(150.))
+            .overflow_y_scroll()
+            .border_b_1()
+            .border_color(rgb(0x303640))
+            .bg(rgb(0x1a1d22))
+            .px(px(12.))
+            .py(px(8.))
+            .child(
+                div()
+                    .mb(px(6.))
+                    .text_size(px(9.))
+                    .text_color(rgb(0x8d96a3))
+                    .child(ui_text(hit_status).normal_line_height()),
+            )
+            .children(hit_rows)
+            .when(
+                state.has_more_hits && state.pending_search.is_none(),
+                |panel| {
+                    panel.child(
+                        self.button(
+                            div()
+                                .id("session-loader-more-hits")
+                                .h(px(24.))
+                                .w_full()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(6.))
+                                .bg(rgba(0xffffff08))
+                                .text_size(px(9.))
+                                .text_color(rgb(0x9aa4b1))
+                                .cursor_pointer()
+                                .hover(|style| style.text_color(rgb(0xb5c0cd)).bg(rgba(0xffffff0f)))
+                                .child("载入更多命中"),
+                            &self.dialog_controls[7],
+                            |this, _, cx| this.load_more_loader_hits(cx),
+                            cx,
+                        ),
+                    )
+                },
+            );
+        let hits_panel = (is_codex && !content_empty).then_some(hits_panel);
+
         let preview = div()
             .id("session-loader-preview")
             .flex_1()
@@ -9777,6 +10552,7 @@ impl Workspace {
             .flex_col()
             .bg(rgb(0x181b20))
             .child(preview_header)
+            .children(hits_panel)
             .child(events);
 
         let body = div()
@@ -9790,6 +10566,8 @@ impl Workspace {
 
         let primary_label = if self.pending_loader_loads.contains_key(&state.session_id) {
             SESSION_LOADER_LOADING.to_owned()
+        } else if is_codex && state.confirm_running {
+            "结束当前进程并载入".to_owned()
         } else {
             format!("载入到“{target_title}”")
         };
@@ -9854,7 +10632,7 @@ impl Workspace {
                             .text_color(rgb(0xff8276))
                             .child(ui_text(error.clone()).normal_line_height())
                     }))
-                    .when(running, |left| {
+                    .when(confirm_warning, |left| {
                         left.child(
                             div()
                                 .w_full()
@@ -9909,6 +10687,63 @@ impl Workspace {
                 )
             }));
 
+        // Frozen provider switch: Claude Code then Codex, between the title
+        // block and the close button. Only indices 4/5 are claimed here.
+        let provider_tab = |provider: &'static str,
+                            label: &'static str,
+                            focus: &FocusHandle,
+                            cx: &mut Context<Self>|
+         -> Stateful<Div> {
+            let active = state.provider == provider;
+            let tab = div()
+                .id(SharedString::from(format!(
+                    "session-loader-provider-{provider}"
+                )))
+                .h(px(24.))
+                .px(px(10.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(6.))
+                .text_size(px(11.))
+                .text_color(if active { rgb(0xffffff) } else { rgb(0x8d96a3) })
+                .bg(if active {
+                    rgb(0x347bc8)
+                } else {
+                    rgba(0x00000000)
+                })
+                .when(!active, |tab| {
+                    tab.hover(|style| style.text_color(rgb(0xd9dde3)).bg(rgba(0xffffff0d)))
+                })
+                .cursor_pointer()
+                .child(label);
+            self.button(
+                tab,
+                focus,
+                move |this, _, cx| this.switch_loader_provider(provider, cx),
+                cx,
+            )
+        };
+        let providers = (!state.history).then(|| {
+            div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap(px(4.))
+                .p(px(3.))
+                .border_1()
+                .border_color(rgb(0x39404b))
+                .rounded(px(9.))
+                .bg(rgb(0x16191e))
+                .child(provider_tab(
+                    "claude-code",
+                    "Claude Code",
+                    &self.dialog_controls[4],
+                    cx,
+                ))
+                .child(provider_tab("codex", "Codex", &self.dialog_controls[5], cx))
+        });
+
         let header = div()
             .h(px(58.))
             .flex_none()
@@ -9938,6 +10773,8 @@ impl Workspace {
                             .child(
                                 ui_text(if state.history {
                                     "会话历史"
+                                } else if is_codex {
+                                    "载入 Codex 会话"
                                 } else {
                                     SESSION_LOADER_TITLE
                                 })
@@ -9962,6 +10799,7 @@ impl Workspace {
                             ),
                     ),
             )
+            .children(providers)
             .child(
                 self.button(
                     div()
@@ -12940,6 +13778,26 @@ fn generic_agent_title(title: &str, short: &str) -> bool {
                 | "未命名会话"
                 | "未命名 claude 会话"
         )
+}
+
+fn loader_catalog_revision(graph: &Value) -> Vec<(String, String, String, u64, bool)> {
+    session_levels::nodes(graph)
+        .iter()
+        .filter_map(|node| {
+            (node["currentMode"] == "codex").then(|| {
+                (
+                    node["sessionId"].as_str().unwrap_or_default().to_owned(),
+                    node["title"].as_str().unwrap_or_default().to_owned(),
+                    node["providerRestoreState"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned(),
+                    node["providerSpawnRevision"].as_u64().unwrap_or_default(),
+                    node["workStatus"] == "exited" || !node["archivedAt"].is_null(),
+                )
+            })
+        })
+        .collect()
 }
 
 fn loader_relative_time(updated_at: i64) -> String {

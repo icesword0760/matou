@@ -16,7 +16,7 @@ use std::{
 };
 
 use crate::{
-    SessionEvent, SessionOptions, claude_model_catalog,
+    SessionEvent, SessionOptions, claude_model_catalog, codex_catalog,
     codex_launch::{self, CodexLaunch},
     codex_permissions,
     codex_resume::{self, Resume as CodexResume},
@@ -293,6 +293,34 @@ pub enum Command {
         session_id: String,
     },
     LoadProviderSession {
+        session_id: String,
+        provider_session_id: String,
+    },
+    ListCodexSessions {
+        request_id: u64,
+        cwd: String,
+        query: String,
+        full_text: bool,
+        offset: Option<i64>,
+        limit: Option<i64>,
+    },
+    GetCodexSession {
+        request_id: u64,
+        cwd: String,
+        provider_session_id: String,
+        start_event_index: Option<i64>,
+        around_event_index: Option<i64>,
+        limit: Option<i64>,
+    },
+    SearchCodexSession {
+        request_id: u64,
+        cwd: String,
+        provider_session_id: String,
+        query: String,
+        offset: Option<i64>,
+        limit: Option<i64>,
+    },
+    LoadCodexSession {
         session_id: String,
         provider_session_id: String,
     },
@@ -3140,6 +3168,82 @@ fn run_writable(
                     }
                     continue;
                 }
+                Command::ListCodexSessions {
+                    request_id,
+                    cwd,
+                    query,
+                    full_text,
+                    offset,
+                    limit,
+                } => {
+                    let request = CatalogRequest::CodexList {
+                        request_id,
+                        cwd: cwd.clone(),
+                        options: codex_catalog::ListOptions {
+                            query,
+                            full_text,
+                            offset,
+                            limit,
+                        },
+                    };
+                    if catalog_requests.try_send(request).is_err() {
+                        catalog_lists.push(codex_catalog_result(
+                            request_id,
+                            &cwd,
+                            Err(CODEX_CATALOG_BUSY),
+                        ));
+                    }
+                    continue;
+                }
+                Command::GetCodexSession {
+                    request_id,
+                    cwd,
+                    provider_session_id,
+                    start_event_index,
+                    around_event_index,
+                    limit,
+                } => {
+                    let request = CatalogRequest::CodexDetail {
+                        request_id,
+                        cwd: cwd.clone(),
+                        provider_session_id,
+                        start: start_event_index,
+                        around: around_event_index,
+                        limit,
+                    };
+                    if catalog_requests.try_send(request).is_err() {
+                        catalog_details.push(codex_catalog_result(
+                            request_id,
+                            &cwd,
+                            Err(CODEX_CATALOG_BUSY),
+                        ));
+                    }
+                    continue;
+                }
+                Command::SearchCodexSession {
+                    request_id,
+                    cwd,
+                    provider_session_id,
+                    query,
+                    offset,
+                    limit,
+                } => {
+                    let request = CatalogRequest::CodexSearch {
+                        request_id,
+                        cwd: cwd.clone(),
+                        provider_session_id,
+                        query,
+                        offset,
+                        limit,
+                    };
+                    if catalog_requests.try_send(request).is_err() {
+                        let mut result =
+                            codex_catalog_result(request_id, &cwd, Err(CODEX_CATALOG_BUSY));
+                        result["search"] = json!(true);
+                        catalog_details.push(result);
+                    }
+                    continue;
+                }
                 Command::GetDeferredRecoveryPreview { session_id } => {
                     if !startup_deferred.contains(&session_id)
                         || !foreground_sessions.contains(&session_id)
@@ -3175,10 +3279,23 @@ fn run_writable(
                     }
                     continue;
                 }
-                Command::LoadProviderSession {
-                    session_id,
-                    provider_session_id,
-                } => {
+                command @ (Command::LoadProviderSession { .. }
+                | Command::LoadCodexSession { .. }) => {
+                    let (provider, session_id, provider_session_id) = match command {
+                        Command::LoadProviderSession {
+                            session_id,
+                            provider_session_id,
+                        } => ("claude-code", session_id, provider_session_id),
+                        Command::LoadCodexSession {
+                            session_id,
+                            provider_session_id,
+                        } => (
+                            "codex",
+                            session_id,
+                            provider_session_id.to_ascii_lowercase(),
+                        ),
+                        _ => unreachable!(),
+                    };
                     let attempt = (|| -> Result<()> {
                         anyhow::ensure!(
                             foreground_sessions.contains(&session_id),
@@ -3189,15 +3306,30 @@ fn run_writable(
                                 && !shell_promotions.contains_key(&session_id),
                             "AI Session is already stopping or recovering"
                         );
+                        if provider == "codex" {
+                            owner.ensure_codex_catalog_available(
+                                &session_id,
+                                &provider_session_id,
+                            )?;
+                            ensure_codex_catalog_not_pending(
+                                &catalog_loads,
+                                &session_id,
+                                &provider_session_id,
+                            )?;
+                        }
                         if let Some(loading) = catalog_loads.get(&session_id) {
                             anyhow::ensure!(
-                                loading.provider_session_id == provider_session_id,
+                                loading.provider == provider
+                                    && loading.provider_session_id == provider_session_id,
                                 "Another conversation is already loading"
                             );
                             return Ok(());
                         }
-                        if let Some(identity) = owner
-                            .already_loaded_catalog_identity(&session_id, &provider_session_id)?
+                        if provider == "claude-code"
+                            && let Some(identity) = owner.already_loaded_catalog_identity(
+                                &session_id,
+                                &provider_session_id,
+                            )?
                         {
                             provider_identity_events.push(identity);
                             return Ok(());
@@ -3205,8 +3337,8 @@ fn run_writable(
                         if launch_retries.contains_key(&session_id)
                             || owner.waiting_for_provider_restore(&session_id)
                         {
-                            let duplicate =
-                                owner.claude_binding(&session_id)?.is_some_and(|binding| {
+                            let duplicate = provider == "claude-code"
+                                && owner.claude_binding(&session_id)?.is_some_and(|binding| {
                                     binding.resumable
                                         && binding.provider_session_id == provider_session_id
                                         && binding.metadata["loadedFromCatalog"] == true
@@ -3227,26 +3359,43 @@ fn run_writable(
                                 || (owner.can_replace_catalog_run(&session_id)
                                     && !owner.claude_binding(&session_id)?.is_some_and(
                                         |binding| { binding.restore_state == "failed" }
-                                    )),
+                                    )
+                                    && !owner.codex_binding(&session_id)?.is_some_and(|binding| {
+                                        binding.restore_state == "failed"
+                                    })),
                             "Card already has a running or starting process"
                         );
                         let stored = owner
                             .session(&session_id)?
-                            .filter(|session| session.archived_at.is_none())
+                            .filter(|session| {
+                                session.archived_at.is_none()
+                                    && matches!(
+                                        session.kind.as_str(),
+                                        "shell" | "claude-code" | "codex"
+                                    )
+                            })
                             .context("Card is no longer available")?;
                         catalog_requests
                             .try_send(CatalogRequest::Index {
                                 cwd: stored.cwd,
                                 load: Some(CatalogLoadTarget {
+                                    provider,
                                     scene_id: scene_id.clone().context("No active scene")?,
                                     session_id: session_id.clone(),
                                     provider_session_id: provider_session_id.clone(),
                                 }),
                             })
-                            .map_err(|_| anyhow!(CATALOG_BUSY))?;
+                            .map_err(|_| {
+                                anyhow!(if provider == "codex" {
+                                    CODEX_CATALOG_BUSY
+                                } else {
+                                    CATALOG_BUSY
+                                })
+                            })?;
                         catalog_loads.insert(
                             session_id.clone(),
                             CatalogLoad {
+                                provider,
                                 provider_session_id: provider_session_id.clone(),
                                 spawn_revision: None,
                                 stopping: None,
@@ -3287,6 +3436,27 @@ fn run_writable(
                         || launch_retries.contains_key(session_id)
                         || (!owner.can_launch_provider(session_id)
                             && !(codex && owner.shell_worker_is_retiring(session_id)));
+                    if codex
+                        && !fresh
+                        && !blocked
+                        && let Some(binding) = owner
+                            .codex_binding(session_id)?
+                            .filter(|binding| binding.restore_state == "failed")
+                    {
+                        let id = &binding.provider_session_id;
+                        if let Err(error) = owner
+                            .ensure_codex_catalog_available(session_id, id)
+                            .and_then(|_| {
+                                ensure_codex_catalog_not_pending(&catalog_loads, session_id, id)
+                            })
+                        {
+                            provider_identity_events.push(json!({
+                                "result": "rejected", "provider": "codex", "sessionId": session_id,
+                                "reason": "catalog-identity-occupied", "error": error.to_string(),
+                            }));
+                            continue;
+                        }
+                    }
                     let accepted = if blocked {
                         false
                     } else if codex {
@@ -3588,7 +3758,7 @@ fn run_writable(
             .into_iter()
             .chain(catalog_replies.try_iter().map(|reply| (reply, None)))
         {
-            let (cwd, load, result) = match reply {
+            let (cwd, target, result) = match reply {
                 CatalogReply::Detail(result) => {
                     catalog_details.push(result);
                     continue;
@@ -3597,34 +3767,79 @@ fn run_writable(
                     send.send_blocking(event)?;
                     continue;
                 }
-                CatalogReply::Index { cwd, load, result } => (cwd, load, result),
+                CatalogReply::Index { cwd, result } => {
+                    let result = result.and_then(|mut entries| {
+                        let ids: Vec<_> = entries
+                            .iter()
+                            .map(|entry| entry.provider_session_id.as_str())
+                            .collect();
+                        let mut owners = owner
+                            .catalog_binding_owners("claude-code", &ids)
+                            .map_err(|_| "Could not read provider session bindings")?;
+                        for entry in &mut entries {
+                            entry.loaded_by = owners.remove(&entry.provider_session_id);
+                        }
+                        Ok(entries)
+                    });
+                    catalog_lists.push(match result {
+                        Ok(sessions) => json!({"cwd": cwd, "sessions": sessions}),
+                        Err(error) => json!({"cwd": cwd, "error": error}),
+                    });
+                    continue;
+                }
+                CatalogReply::CodexList {
+                    request_id,
+                    cwd,
+                    result,
+                } => {
+                    let result = result.and_then(|mut page| {
+                        let ids: Vec<_> = page
+                            .items
+                            .iter()
+                            .map(|entry| entry.provider_session_id.as_str())
+                            .collect();
+                        let mut owners = owner
+                            .catalog_binding_owners("codex", &ids)
+                            .map_err(|_| "无法读取 Codex 会话占用状态")?;
+                        for (session_id, load) in &catalog_loads {
+                            if load.provider == "codex"
+                                && ids.contains(&load.provider_session_id.as_str())
+                                && let Some(session) = owner
+                                    .session(session_id)
+                                    .map_err(|_| "无法读取 Codex 会话占用状态")?
+                            {
+                                owners
+                                    .entry(load.provider_session_id.clone())
+                                    .or_insert_with(
+                                        || json!({"sessionId": session_id, "title": session.title}),
+                                    );
+                            }
+                        }
+                        for entry in &mut page.items {
+                            entry.loaded_by = owners.remove(&entry.provider_session_id);
+                        }
+                        let mut result = json!(page.window);
+                        result["sessions"] = json!(page.items);
+                        Ok(result)
+                    });
+                    catalog_lists.push(codex_catalog_result(request_id, &cwd, result));
+                    continue;
+                }
+                CatalogReply::Load {
+                    cwd,
+                    target,
+                    result,
+                } => (cwd, target, result),
             };
-            let Some(CatalogLoadTarget {
+            let CatalogLoadTarget {
+                provider,
                 scene_id: requested_scene,
                 session_id,
                 provider_session_id,
-            }) = load
-            else {
-                let result = result.and_then(|mut entries| {
-                    let ids: Vec<_> = entries
-                        .iter()
-                        .map(|entry| entry.provider_session_id.as_str())
-                        .collect();
-                    let mut owners = owner
-                        .catalog_binding_owners(&ids)
-                        .map_err(|_| "Could not read provider session bindings")?;
-                    for entry in &mut entries {
-                        entry.loaded_by = owners.remove(&entry.provider_session_id);
-                    }
-                    Ok(entries)
-                });
-                catalog_lists.push(match result {
-                    Ok(sessions) => json!({"cwd": cwd, "sessions": sessions}),
-                    Err(error) => json!({"cwd": cwd, "error": error}),
-                });
-                continue;
-            };
-            let Some(load) = catalog_loads.get_mut(&session_id) else {
+            } = target;
+            let Some(load) = catalog_loads.get_mut(&session_id).filter(|load| {
+                load.provider == provider && load.provider_session_id == provider_session_id
+            }) else {
                 // The navigation command already rejected and disposed this load.
                 continue;
             };
@@ -3645,11 +3860,10 @@ fn run_writable(
                         && !owner.waiting_for_provider_restore(&session_id),
                     "Card already has a running or starting process"
                 );
-                let entry = result
-                    .map_err(|error| anyhow!(error))?
-                    .into_iter()
-                    .next()
-                    .context("Provider session was not found in this working directory")?;
+                let entry = result.map_err(|error| anyhow!(error))?;
+                if provider == "codex" {
+                    owner.ensure_codex_catalog_available(&session_id, &provider_session_id)?;
+                }
                 if !owner.can_launch_provider(&session_id) {
                     anyhow::ensure!(!replaced, "Card already has a running or starting process");
                     anyhow::ensure!(
@@ -3660,14 +3874,15 @@ fn run_writable(
                     );
                     let completion = owner.stop_for_provider_relaunch(&session_id)?;
                     load.stopping = Some(CatalogStop {
-                        selection: CatalogReply::Index {
+                        selection: CatalogReply::Load {
                             cwd,
-                            load: Some(CatalogLoadTarget {
+                            target: CatalogLoadTarget {
+                                provider,
                                 scene_id: requested_scene,
                                 session_id: session_id.clone(),
                                 provider_session_id: provider_session_id.clone(),
-                            }),
-                            result: Ok(vec![entry]),
+                            },
+                            result: Ok(entry),
                         },
                         completion,
                     });
@@ -3677,16 +3892,20 @@ fn run_writable(
                     .session_workspace(&session_id)?
                     .context("Card is no longer available")?;
                 checks.request(&owner, &workspace_id)?;
-                let revision = owner.load_claude_catalog_binding(&ClaudeCatalogLoad {
-                    binding_id: &id(),
-                    session_id: &session_id,
-                    scene_id: &requested_scene,
-                    cwd: &cwd,
-                    provider_session_id: &entry.provider_session_id,
-                    title: &entry.title,
-                    model: entry.model.as_deref(),
-                    permission_mode: &entry.permission_mode,
-                })?;
+                let revision = owner.load_provider_catalog_binding(
+                    &ClaudeCatalogLoad {
+                        binding_id: &id(),
+                        session_id: &session_id,
+                        scene_id: &requested_scene,
+                        cwd: &cwd,
+                        provider_session_id: &entry.provider_session_id,
+                        title: &entry.title,
+                        model: entry.model.as_deref(),
+                        permission_mode: &entry.permission_mode,
+                    },
+                    provider,
+                    entry.completed_turn,
+                )?;
                 Ok(Some((workspace_id, revision)))
             })();
             match attempt {
@@ -3781,6 +4000,7 @@ fn run_writable(
                             load.spawn_revision.is_some()
                                 && load.spawn_revision == result["spawnRevision"].as_i64()
                                 && result["providerSessionId"] == load.provider_session_id
+                                && result["provider"] == load.provider
                         })
                     {
                         catalog_loads.remove(session_id);
@@ -4266,6 +4486,11 @@ fn run_writable(
             sessions = sessions.and(Err(error));
         }
     }
+    #[cfg(unix)]
+    let clean_exit = clean_exit
+        && !sessions
+            .as_ref()
+            .is_err_and(|error| error.is::<crate::session::PtyShutdownIncomplete>());
     let backup = clean_exit.then(|| owner.backup_for_clean_exit(&data_root));
     drop(owner);
     shutdown_result(
@@ -4290,6 +4515,7 @@ fn workspace_path_error(state: &WorkspacePathState) -> String {
 }
 
 const CATALOG_BUSY: &str = "Claude Code catalog is busy or unavailable";
+const CODEX_CATALOG_BUSY: &str = "Codex 会话目录暂时不可用";
 // Process contract tests can allow more time for the provider stub to exit.
 static PERMISSION_STARTUP_WINDOW: LazyLock<Duration> = LazyLock::new(|| {
     let millis = std::env::var("MATOU_PERMISSION_STARTUP_WINDOW_MS")
@@ -4728,9 +4954,24 @@ fn permission_result(session_id: &str, mode: &str, error: Option<String>) -> Val
 }
 
 struct CatalogLoad {
+    provider: &'static str,
     provider_session_id: String,
     spawn_revision: Option<i64>,
     stopping: Option<CatalogStop>,
+}
+
+fn ensure_codex_catalog_not_pending(
+    loads: &HashMap<String, CatalogLoad>,
+    session_id: &str,
+    provider_session_id: &str,
+) -> Result<()> {
+    if let Some((owner, _)) = loads.iter().find(|(_, load)| {
+        load.provider == "codex" && load.provider_session_id == provider_session_id
+    }) {
+        ensure!(owner != session_id, "正在载入当前卡片");
+        bail!("Codex 会话正在载入另一张卡片");
+    }
+    Ok(())
 }
 
 struct CatalogStop {
@@ -4739,6 +4980,7 @@ struct CatalogStop {
 }
 
 struct CatalogLoadTarget {
+    provider: &'static str,
     scene_id: String,
     session_id: String,
     provider_session_id: String,
@@ -4751,6 +4993,27 @@ enum CatalogRequest {
     },
     Detail(CatalogDetailRequest),
     Recent(CatalogRecentRequest),
+    CodexList {
+        request_id: u64,
+        cwd: String,
+        options: codex_catalog::ListOptions,
+    },
+    CodexDetail {
+        request_id: u64,
+        cwd: String,
+        provider_session_id: String,
+        start: Option<i64>,
+        around: Option<i64>,
+        limit: Option<i64>,
+    },
+    CodexSearch {
+        request_id: u64,
+        cwd: String,
+        provider_session_id: String,
+        query: String,
+        offset: Option<i64>,
+        limit: Option<i64>,
+    },
 }
 
 struct CatalogRecentRequest {
@@ -4790,29 +5053,133 @@ impl CatalogDetailRequest {
     }
 }
 
+struct CatalogSelection {
+    provider_session_id: String,
+    title: String,
+    model: Option<String>,
+    permission_mode: String,
+    completed_turn: bool,
+}
+
 enum CatalogReply {
     Index {
         cwd: String,
-        load: Option<CatalogLoadTarget>,
         result: Result<Vec<provider_catalog::CatalogEntry>, &'static str>,
+    },
+    Load {
+        cwd: String,
+        target: CatalogLoadTarget,
+        result: Result<CatalogSelection, &'static str>,
+    },
+    CodexList {
+        request_id: u64,
+        cwd: String,
+        result: Result<codex_catalog::Page<codex_catalog::CatalogEntry>, &'static str>,
     },
     Detail(Value),
     Recent(Event),
+}
+
+fn codex_catalog_result(request_id: u64, cwd: &str, result: Result<Value, &'static str>) -> Value {
+    let mut result = result.unwrap_or_else(|error| json!({"error": error}));
+    result["provider"] = json!("codex");
+    result["cwd"] = json!(cwd);
+    result["requestId"] = json!(request_id);
+    result
 }
 
 fn start_provider_catalog() -> Result<(mpsc::SyncSender<CatalogRequest>, Receiver<CatalogReply>)> {
     let (requests, incoming) = mpsc::sync_channel::<CatalogRequest>(16);
     let (outgoing, replies) = mpsc::channel();
     let root = provider_catalog::projects_root();
+    let mut codex = codex_catalog::Catalog::new(codex_catalog::root());
     thread::Builder::new()
         .name("provider-catalog".into())
         .spawn(move || {
             for request in incoming {
                 let reply = match request {
-                    CatalogRequest::Index { cwd, load } => {
-                        let selected = load.as_ref().map(|load| load.provider_session_id.as_str());
-                        let result = provider_catalog::read(root.as_deref(), &cwd, selected);
-                        CatalogReply::Index { cwd, load, result }
+                    CatalogRequest::Index { cwd, load: None } => {
+                        let result = provider_catalog::read(root.as_deref(), &cwd, None);
+                        CatalogReply::Index { cwd, result }
+                    }
+                    CatalogRequest::Index {
+                        cwd,
+                        load: Some(target),
+                    } => {
+                        let id = target.provider_session_id.as_str();
+                        let result = if target.provider == "codex" {
+                            codex.load(&cwd, id).map(|entry| CatalogSelection {
+                                provider_session_id: entry.provider_session_id,
+                                title: entry.title,
+                                model: entry.model,
+                                permission_mode: entry.permission_mode.to_owned(),
+                                completed_turn: entry.has_completed_turn,
+                            })
+                        } else {
+                            provider_catalog::read(root.as_deref(), &cwd, Some(id))
+                                .and_then(|entries| {
+                                    entries.into_iter().next().ok_or(
+                                        "Provider session was not found in this working directory",
+                                    )
+                                })
+                                .map(|entry| CatalogSelection {
+                                    provider_session_id: entry.provider_session_id,
+                                    title: entry.title,
+                                    model: entry.model,
+                                    permission_mode: entry.permission_mode,
+                                    completed_turn: false,
+                                })
+                        };
+                        CatalogReply::Load {
+                            cwd,
+                            target,
+                            result,
+                        }
+                    }
+                    CatalogRequest::CodexList {
+                        request_id,
+                        cwd,
+                        options,
+                    } => {
+                        let result = codex.list(&cwd, &options);
+                        CatalogReply::CodexList {
+                            request_id,
+                            cwd,
+                            result,
+                        }
+                    }
+                    CatalogRequest::CodexDetail {
+                        request_id,
+                        cwd,
+                        provider_session_id,
+                        start,
+                        around,
+                        limit,
+                    } => {
+                        let result = codex.detail(&cwd, &provider_session_id, start, around, limit);
+                        let mut result = codex_catalog_result(request_id, &cwd, result);
+                        result["providerSessionId"] = json!(provider_session_id);
+                        CatalogReply::Detail(result)
+                    }
+                    CatalogRequest::CodexSearch {
+                        request_id,
+                        cwd,
+                        provider_session_id,
+                        query,
+                        offset,
+                        limit,
+                    } => {
+                        let result = codex
+                            .search(&cwd, &provider_session_id, &query, offset, limit)
+                            .map(|page| {
+                                let mut result = json!(page.window);
+                                result["hits"] = json!(page.items);
+                                result
+                            });
+                        let mut result = codex_catalog_result(request_id, &cwd, result);
+                        result["providerSessionId"] = json!(provider_session_id);
+                        result["search"] = json!(true);
+                        CatalogReply::Detail(result)
                     }
                     CatalogRequest::Recent(request) => {
                         let preview = provider_catalog::recent_replies(

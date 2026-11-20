@@ -4,7 +4,7 @@
 //! The existing product uses the system Sidebar material with active effects.
 #![allow(unexpected_cfgs)] // objc 0.2 macros probe their historical cargo-clippy feature.
 use std::{
-    cell::Cell,
+    cell::RefCell,
     ffi::c_void,
     ptr,
     sync::mpsc,
@@ -505,7 +505,7 @@ enum Termination {
 }
 
 thread_local! {
-    static TERMINATION: Cell<Termination> = const { Cell::new(Termination::Immediate) };
+    static TERMINATION: RefCell<Termination> = const { RefCell::new(Termination::Immediate) };
 }
 
 #[repr(C)]
@@ -571,7 +571,7 @@ pub fn defer_termination(begin: impl FnOnce() -> RuntimeShutdown + 'static) -> R
             schedule_termination_reply();
         })
         .context("start native runtime shutdown worker")?;
-    TERMINATION.set(Termination::Armed(Box::new(move || {
+    TERMINATION.replace(Termination::Armed(Box::new(move || {
         // The worker only waits on this channel until the first quit request.
         send.send(begin())
             .expect("native runtime shutdown worker is waiting for its request");
@@ -580,6 +580,10 @@ pub fn defer_termination(begin: impl FnOnce() -> RuntimeShutdown + 'static) -> R
 }
 
 extern "C" fn application_should_terminate(_: &Object, _: Sel, _: id) -> usize {
+    request_termination()
+}
+
+fn request_termination() -> usize {
     match TERMINATION.replace(Termination::Waiting) {
         Termination::Armed(begin) => {
             begin();
@@ -587,10 +591,15 @@ extern "C" fn application_should_terminate(_: &Object, _: Sel, _: id) -> usize {
         }
         Termination::Waiting => TERMINATE_LATER,
         Termination::Immediate => {
-            TERMINATION.set(Termination::Immediate);
+            TERMINATION.replace(Termination::Immediate);
             TERMINATE_NOW
         }
     }
+}
+
+pub fn termination_pending() -> bool {
+    // The main thread owns the delegate and window close callbacks.
+    TERMINATION.with(|termination| matches!(*termination.borrow(), Termination::Waiting))
 }
 
 fn schedule_termination_reply() {
@@ -618,14 +627,45 @@ fn schedule_termination_reply() {
 }
 
 fn reply_to_termination() {
-    if !matches!(
-        TERMINATION.replace(Termination::Immediate),
-        Termination::Waiting
-    ) {
-        return;
+    if finish_termination() {
+        unsafe {
+            let _: () = msg_send![NSApp(), replyToApplicationShouldTerminate: YES];
+        }
     }
-    unsafe {
-        let _: () = msg_send![NSApp(), replyToApplicationShouldTerminate: YES];
+}
+
+fn finish_termination() -> bool {
+    if termination_pending() {
+        TERMINATION.replace(Termination::Immediate);
+        true
+    } else {
+        false
+    }
+}
+
+#[cfg(test)]
+mod termination_tests {
+    use super::*;
+    use std::{cell::Cell, rc::Rc};
+
+    #[test]
+    fn close_stays_deferred_until_the_shutdown_reply() {
+        let starts = Rc::new(Cell::new(0));
+        let begin = starts.clone();
+        TERMINATION.replace(Termination::Armed(Box::new(move || {
+            assert!(termination_pending());
+            begin.set(begin.get() + 1);
+        })));
+
+        assert!(!finish_termination());
+        assert_eq!(request_termination(), TERMINATE_LATER);
+        assert_eq!(request_termination(), TERMINATE_LATER);
+        assert_eq!(starts.get(), 1);
+        assert!(termination_pending());
+        assert!(finish_termination());
+        assert!(!termination_pending());
+        assert!(!finish_termination());
+        assert_eq!(request_termination(), TERMINATE_NOW);
     }
 }
 

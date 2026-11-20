@@ -60,10 +60,7 @@ fn main() -> Result<()> {
                 && let Err(error) = macos::defer_termination(move || {
                     quitting.set(true);
                     if let Some(window) = window.get()
-                        && let Err(error) = window.update(&mut cx, |view, window, cx| {
-                            if let Err(error) = macos::hide_window(window) {
-                                eprintln!("Hide native window before quitting: {error:#}");
-                            }
+                        && let Err(error) = window.update(&mut cx, |view, _, cx| {
                             // Queue the last geometry write while the runtime still accepts commands.
                             view.flush_geometry(cx);
                         })
@@ -118,12 +115,7 @@ fn main() -> Result<()> {
                     let quitting = quitting.clone();
                     window.on_window_should_close(cx, move |window, cx| {
                         if quitting.get() {
-                            if let Err(error) =
-                                workspace.update(cx, |view, cx| view.flush_geometry(cx))
-                            {
-                                eprintln!("Flush native window geometry before closing: {error:#}");
-                            }
-                            return true;
+                            return !macos::termination_pending();
                         }
                         if let Err(error) = workspace.update(cx, |view, cx| view.flush_geometry(cx))
                         {
