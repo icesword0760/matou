@@ -27,6 +27,7 @@ use crate::{
     SessionEvent, SessionOptions,
     claude_request_gateway::Gateway,
     derived::{CwdTracker, WorkStatusTracker, terminal_summary_lines, utf16_tail},
+    host_control::{RunControl, clear_control_environment},
     provider_hook::{
         HOOK_QUEUE_CAPACITY, HookMessage, HookSetup, IDENTITY_TIMEOUT, Observation,
         ProviderHookServer, Registration, Scope,
@@ -118,6 +119,7 @@ pub struct ShellOwner {
     generation: String,
     next_id: Box<dyn FnMut() -> String>,
     hook_server: Option<ProviderHookServer>,
+    run_control: Option<RunControl>,
     closing: bool,
 }
 
@@ -146,6 +148,7 @@ impl ShellOwner {
             generation,
             next_id: Box::new(next_id),
             hook_server: None,
+            run_control: None,
             closing: false,
         };
         let runs = {
@@ -176,6 +179,10 @@ impl ShellOwner {
             )?;
         }
         Ok(owner)
+    }
+
+    pub(crate) fn set_run_control(&mut self, control: RunControl) {
+        self.run_control = Some(control);
     }
 
     pub fn session(&self, id: &str) -> Result<Option<StoredSession>> {
@@ -647,6 +654,9 @@ impl ShellOwner {
             if let Some(shell) = self.shells.get_mut(id)
                 && !shell.retiring
             {
+                if let Some(control) = &self.run_control {
+                    control.revoke(&shell.run_id);
+                }
                 shell.retiring = true;
                 shell.gateway.take();
                 shell.hook = None;
@@ -1449,6 +1459,9 @@ impl ShellOwner {
             );
         }
         if let Some(mut previous) = self.shells.remove(&options.session_id) {
+            if let Some(control) = &self.run_control {
+                control.revoke(&previous.run_id);
+            }
             previous.gateway.take();
             previous.worker.shutdown()?;
         }
@@ -1555,7 +1568,21 @@ impl ShellOwner {
         } else {
             None
         };
-        let mut worker = SessionWorker::spawn(options, self.send.clone(), run_id.clone())?;
+        clear_control_environment(&mut options.launch);
+        if let Some(control) = &self.run_control
+            && let Err(error) = control.inject(&mut options.launch, &session_id, &run_id)
+        {
+            eprintln!("[host-control] {error:#}");
+        }
+        let mut worker = match SessionWorker::spawn(options, self.send.clone(), run_id.clone()) {
+            Ok(worker) => worker,
+            Err(error) => {
+                if let Some(control) = &self.run_control {
+                    control.revoke(&run_id);
+                }
+                return Err(error);
+            }
+        };
         let time = now();
         let commit = sessions::start_run(
             &mut self.connection,
@@ -1578,6 +1605,9 @@ impl ShellOwner {
         let commit = match commit {
             Ok(commit) => commit,
             Err(error) => {
+                if let Some(control) = &self.run_control {
+                    control.revoke(&run_id);
+                }
                 drop(gateway);
                 let _ = worker.shutdown();
                 return Err(error);
@@ -1649,6 +1679,13 @@ impl ShellOwner {
 
     pub fn poll(&mut self, max_wait: Duration) -> Result<Vec<OwnerEvent>> {
         let mut events = std::mem::take(&mut self.pending);
+        if let Some(control) = &self.run_control {
+            for shell in self.shells.values() {
+                if !shell.ended && shell.worker.is_finished() {
+                    control.revoke(&shell.run_id);
+                }
+            }
+        }
         let finished_before_poll: Vec<_> = self
             .shells
             .iter_mut()
@@ -2410,6 +2447,9 @@ impl ShellOwner {
         observed_at: Instant,
         events: &mut Vec<OwnerEvent>,
     ) -> Result<()> {
+        if let Some(control) = &self.run_control {
+            control.revoke(&self.shells[id].run_id);
+        }
         let retiring = self.shells[id].retiring;
         let promotion_verified = self.shells[id].promotion_verified();
         if !self.closing && promotion_verified {
@@ -2591,6 +2631,9 @@ impl ShellOwner {
         }
         self.closing = true;
         for shell in self.shells.values_mut() {
+            if let Some(control) = &self.run_control {
+                control.revoke(&shell.run_id);
+            }
             shell.gateway.take();
             if !shell.promotion_verified() {
                 shell.hook = None;
