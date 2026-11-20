@@ -718,7 +718,7 @@ fn provider_binding_requires_current_run_and_validation_replays_once() -> Result
 }
 
 #[test]
-fn catalog_binding_replaces_available_history_without_validating_the_new_id() -> Result<()> {
+fn catalog_binding_replaces_history_and_dismisses_recovery_once() -> Result<()> {
     use matou_native_core::sessions::{
         ClaudeCatalogLoad, ClaudeRestore, change_claude_restore, claude_binding,
         load_claude_catalog_binding,
@@ -743,10 +743,12 @@ fn catalog_binding_replaces_available_history_without_validating_the_new_id() ->
     )?;
     db.execute(
         "INSERT INTO provider_bindings (id, session_id, provider, provider_session_id,
-            resume_state, metadata_json, created_at, updated_at, validated_at)
+            resume_state, metadata_json, created_at, updated_at, validated_at, invalidated_at)
          VALUES ('old', ?, 'claude-code', 'old-conversation', 'available',
-                 '{\"spawnRevision\":7}', 9, 9, 9)",
-        [session_id],
+                 '{\"spawnRevision\":7}', 9, 9, 9, NULL),
+                ('older', ?, 'claude-code', 'older-conversation', 'expired',
+                 '{}', 8, 8, NULL, 8)",
+        [session_id, session_id],
     )?;
     let command = |name: &str| CommandMetadata {
         command_id: name.into(),
@@ -765,42 +767,38 @@ fn catalog_binding_replaces_available_history_without_validating_the_new_id() ->
         model: Some("test-model"),
         permission_mode: "plan",
     };
-    assert!(
-        load_claude_catalog_binding(
-            &mut db,
-            &command("wrong-scene"),
-            &ClaudeCatalogLoad {
-                scene_id: "another",
-                ..input
-            },
-            10
-        )
-        .is_err()
-    );
-    assert!(
-        load_claude_catalog_binding(
-            &mut db,
-            &command("changed-cwd"),
-            &ClaudeCatalogLoad {
-                cwd: "/changed",
-                ..input
-            },
-            10
-        )
-        .is_err()
-    );
+    for invalid in [
+        ClaudeCatalogLoad {
+            scene_id: "another",
+            ..input
+        },
+        ClaudeCatalogLoad {
+            cwd: "/changed",
+            ..input
+        },
+    ] {
+        let error = load_claude_catalog_binding(&mut db, &command("wrong-target"), &invalid, 10)
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Card is no longer available in this scene and working directory"
+        );
+    }
     assert_eq!(claude_binding(&db, session_id)?.unwrap().id, "old");
 
-    load_claude_catalog_binding(&mut db, &command("load"), &input, 10)?;
+    let load = load_claude_catalog_binding(&mut db, &command("load"), &input, 10)?;
+    assert_eq!(load.result["restoreState"], "restoring");
+    assert_eq!(load.result["spawnRevision"], 10);
     let binding = claude_binding(&db, session_id)?.unwrap();
     assert_eq!(binding.id, "catalog-binding");
     assert_eq!(binding.provider_session_id, "catalog-conversation");
-    assert_eq!(binding.restore_state, "none");
+    assert_eq!(binding.restore_state, "restoring");
     assert!(binding.resumable);
     assert_eq!(binding.metadata["loadedFromCatalog"], true);
     assert_eq!(binding.metadata["model"], "test-model");
     assert_eq!(binding.metadata["permissionMode"], "plan");
-    assert_eq!(binding.metadata["spawnRevision"], 8);
+    assert_eq!(binding.metadata["spawnRevision"], 10);
+    assert_eq!(binding.metadata["canFork"], true);
     let rows = read_rows(
         &db,
         "SELECT id, resume_state, validated_at, invalidated_at FROM provider_bindings ORDER BY id",
@@ -808,26 +806,91 @@ fn catalog_binding_replaces_available_history_without_validating_the_new_id() ->
     assert_eq!(
         rows,
         [
-            json!({"id": "catalog-binding", "resume_state": "available", "validated_at": null, "invalidated_at": null}),
-            json!({"id": "old", "resume_state": "expired", "validated_at": 9, "invalidated_at": 10})
+            json!({"id": "catalog-binding", "resume_state": "available", "validated_at": 10, "invalidated_at": null}),
+            json!({"id": "old", "resume_state": "expired", "validated_at": 9, "invalidated_at": 10}),
+            json!({"id": "older", "resume_state": "expired", "validated_at": null, "invalidated_at": 10})
         ]
     );
     let session = get_session(&db, session_id)?.unwrap();
     assert_eq!(session.title, input.title);
     assert_eq!(session.status, "starting");
 
-    change_claude_restore(
-        &mut db,
-        &command("begin"),
-        session_id,
-        ClaudeRestore::Begin(&binding.id),
-        11,
+    let replay = load_claude_catalog_binding(&mut db, &command("load"), &input, 11)?;
+    assert!(replay.replayed);
+    assert_eq!(replay.result, load.result);
+    assert_eq!(replay.first_event_sequence, load.first_event_sequence);
+    assert_eq!(replay.last_event_sequence, load.last_event_sequence);
+    let events = read_rows(
+        &db,
+        "SELECT event_id, event_type, aggregate_type, aggregate_id, workspace_id,
+                task_id, session_id, occurred_at, payload_json
+         FROM domain_events WHERE command_id = 'load' ORDER BY seq",
     )?;
+    assert_eq!(events.len(), 2);
+    for (event, event_type) in events
+        .iter()
+        .zip(["session.mode-changed", "agent.notification"])
+    {
+        assert_eq!(event["event_id"], format!("load:{event_type}"));
+        assert_eq!(event["event_type"], event_type);
+        assert_eq!(event["aggregate_type"], "session");
+        assert_eq!(event["aggregate_id"], session_id);
+        assert_eq!(event["workspace_id"], seed.ids.workspace_id);
+        assert_eq!(event["task_id"], seed.ids.task_id);
+        assert_eq!(event["session_id"], session_id);
+        assert_eq!(event["occurred_at"], 10);
+    }
     assert_eq!(
-        claude_binding(&db, session_id)?.unwrap().restore_state,
-        "restoring"
+        serde_json::from_str::<Value>(events[1]["payload_json"].as_str().unwrap())?,
+        json!({
+            "targetSessionId": session_id,
+            "provider": "claude-code",
+            "runId": "restore:catalog-binding",
+            "event": {
+                "operation": "dismiss",
+                "replacementKey": format!("provider-restore:{session_id}"),
+            },
+        })
     );
 
+    assert!(
+        change_claude_restore(
+            &mut db,
+            &command("begin"),
+            session_id,
+            ClaudeRestore::Begin(&binding.id),
+            11,
+        )?
+        .is_none()
+    );
+    db.execute(
+        "UPDATE provider_bindings SET resume_state='failed', restore_state='failed',
+            restore_error='old failure', invalidated_at=11, user_exited_at=11
+         WHERE id='catalog-binding'",
+        [],
+    )?;
+    let reload = load_claude_catalog_binding(
+        &mut db,
+        &command("reload"),
+        &ClaudeCatalogLoad {
+            binding_id: "unused-new-id",
+            ..input
+        },
+        12,
+    )?;
+    assert_eq!(reload.result["bindingId"], "catalog-binding");
+    assert_eq!(
+        read_rows(
+            &db,
+            "SELECT resume_state, restore_state, restore_error, invalidated_at,
+                    user_exited_at, validated_at FROM provider_bindings WHERE id='catalog-binding'"
+        )?,
+        [json!({
+            "resume_state": "available", "restore_state": "restoring",
+            "restore_error": null, "invalidated_at": null, "user_exited_at": null,
+            "validated_at": 12,
+        })]
+    );
     start_run(
         &mut db,
         &command("run"),
@@ -838,21 +901,27 @@ fn catalog_binding_replaces_available_history_without_validating_the_new_id() ->
             pid: None,
             cols: 80,
             rows: 24,
-            now: 12,
+            now: 13,
         },
-        12,
+        13,
     )?;
     for status in ["running", "starting"] {
         db.execute(
             "UPDATE session_runs SET status = ? WHERE id = 'running'",
             [status],
         )?;
-        let error = load_claude_catalog_binding(&mut db, &command(status), &input, 13).unwrap_err();
+        let error = load_claude_catalog_binding(&mut db, &command(status), &input, 14).unwrap_err();
         assert_eq!(error.to_string(), "Card already has a running process");
     }
     assert_eq!(
         claude_binding(&db, session_id)?.unwrap().metadata["spawnRevision"],
-        8
+        12
     );
+    db.execute(
+        "UPDATE sessions SET archived_at=15 WHERE id=?",
+        [session_id],
+    )?;
+    let error = load_claude_catalog_binding(&mut db, &command("archived"), &input, 16).unwrap_err();
+    assert_eq!(error.to_string(), "Session does not exist");
     Ok(())
 }

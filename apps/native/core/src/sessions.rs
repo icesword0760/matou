@@ -676,6 +676,7 @@ pub fn load_claude_catalog_binding(
 ) -> Result<DomainCommit> {
     execute(db, command, now, |tx, events| {
         let session = require_session(tx, input.session_id)?;
+        ensure!(session.archived_at.is_none(), "Session does not exist");
         let in_scene: bool = tx.query_row(
             "SELECT EXISTS (SELECT 1 FROM session_canvas_memberships AS member
                 JOIN scenes ON scenes.id = member.scene_id AND scenes.archived_at IS NULL
@@ -684,12 +685,19 @@ pub fn load_claude_catalog_binding(
             |row| row.get(0),
         )?;
         ensure!(
-            session.archived_at.is_none()
-                && in_scene
+            in_scene
                 && session.cwd == input.cwd
                 && matches!(session.kind.as_str(), "shell" | "claude-code"),
             "Card is no longer available in this scene and working directory"
         );
+        let workspace_id: String = tx
+            .query_row(
+                "SELECT workspace_id FROM tasks WHERE id = ? AND archived_at IS NULL",
+                [&session.task_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .context("Session does not exist")?;
         let running: bool = tx.query_row(
             "SELECT EXISTS (SELECT 1 FROM session_runs
                 WHERE session_id = ? AND status IN ('starting', 'running'))",
@@ -710,13 +718,6 @@ pub fn load_claude_catalog_binding(
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
-        let revision: i64 = tx.query_row(
-            "SELECT COALESCE(MAX(CASE WHEN json_valid(metadata_json)
-                THEN CAST(json_extract(metadata_json, '$.spawnRevision') AS INTEGER) END), 0)
-             FROM provider_bindings WHERE session_id = ? AND provider = 'claude-code'",
-            [input.session_id],
-            |row| row.get(0),
-        )?;
         let binding_id = existing.as_ref().map_or(input.binding_id, |(id, _)| id);
         let mut metadata: serde_json::Map<String, Value> = existing
             .as_ref()
@@ -730,34 +731,35 @@ pub fn load_claude_catalog_binding(
         } else {
             metadata.remove("model");
         }
-        let revision = revision.saturating_add(1);
         metadata.extend([
             ("permissionMode".into(), json!(input.permission_mode)),
             ("loadedFromCatalog".into(), json!(true)),
-            ("spawnRevision".into(), json!(revision)),
+            ("spawnRevision".into(), json!(now)),
             ("observedUserPrompt".into(), json!(false)),
             ("observedNormalStop".into(), json!(false)),
-            ("canFork".into(), json!(false)),
+            ("canFork".into(), json!(true)),
         ]);
         tx.execute(
             "UPDATE provider_bindings SET resume_state = 'expired', restore_state = 'none',
-                restore_error = NULL, invalidated_at = COALESCE(invalidated_at, ?), updated_at = ?
+                restore_error = NULL, invalidated_at = ?, updated_at = ?
              WHERE session_id = ? AND provider = 'claude-code' AND id <> ?",
             params![now, now, input.session_id, binding_id],
         )?;
         tx.execute(
             "INSERT INTO provider_bindings (id, session_id, provider, provider_session_id,
-                resume_state, restore_state, metadata_json, created_at, updated_at)
-             VALUES (?, ?, 'claude-code', ?, 'available', 'none', ?, ?, ?)
+                resume_state, restore_state, metadata_json, created_at, updated_at, validated_at)
+             VALUES (?, ?, 'claude-code', ?, 'available', 'restoring', ?, ?, ?, ?)
              ON CONFLICT(session_id, provider, provider_session_id) DO UPDATE SET
-                resume_state = 'available', restore_state = 'none', restore_error = NULL,
-                invalidated_at = NULL, user_exited_at = NULL, validated_at = NULL,
+                resume_state = excluded.resume_state, restore_state = excluded.restore_state,
+                restore_error = NULL, invalidated_at = NULL, user_exited_at = NULL,
+                validated_at = excluded.validated_at,
                 metadata_json = excluded.metadata_json, updated_at = excluded.updated_at",
             params![
                 binding_id,
                 input.session_id,
                 input.provider_session_id,
                 serde_json::to_string(&metadata)?,
+                now,
                 now,
                 now
             ],
@@ -768,18 +770,42 @@ pub fn load_claude_catalog_binding(
              WHERE id = ?",
             params![input.title, now, now, input.session_id],
         )?;
-        let payload = json!({
+        let mut payload = json!({
             "sessionId": input.session_id, "provider": "claude-code", "bindingId": binding_id,
-            "providerSessionId": input.provider_session_id, "restoreState": "none",
-            "restoreError": null, "spawnRevision": revision,
+            "providerSessionId": input.provider_session_id, "restoreState": "restoring",
+            "restoreError": null, "spawnRevision": now,
         });
-        events.push(session_event(
+        let mut mode_changed = session_event(
             command,
             "session.mode-changed",
             &session,
             now,
             payload.clone(),
-        ));
+        );
+        mode_changed.event_id = format!("{}:session.mode-changed", command.command_id);
+        mode_changed.workspace_id = Some(workspace_id.clone());
+        events.push(mode_changed);
+
+        let dismissal = json!({
+            "operation": "dismiss",
+            "replacementKey": format!("provider-restore:{}", session.id),
+        });
+        let mut notification = session_event(
+            command,
+            "agent.notification",
+            &session,
+            now,
+            json!({
+                "targetSessionId": session.id,
+                "provider": "claude-code",
+                "runId": format!("restore:{binding_id}"),
+                "event": dismissal,
+            }),
+        );
+        notification.event_id = format!("{}:agent.notification", command.command_id);
+        notification.workspace_id = Some(workspace_id);
+        payload["agentNotification"] = notification_projection(&notification);
+        events.push(notification);
         Ok(payload)
     })
 }
@@ -1147,18 +1173,8 @@ pub fn publish_claude_notification(
         let Some((workspace_id, task_id)) = owner else {
             return Ok(json!({"published": false}));
         };
-        let mut notification = event
-            .as_object()
-            .context("Expected a notification object")?
-            .clone();
-        notification.extend([
-            ("eventId".into(), json!(command.command_id)),
-            ("workspaceId".into(), json!(workspace_id)),
-            ("taskId".into(), json!(task_id)),
-            ("sessionId".into(), json!(session_id)),
-            ("occurredAt".into(), json!(now)),
-        ]);
-        events.push(DomainEventInput {
+        ensure!(event.is_object(), "Expected a notification object");
+        let notification = DomainEventInput {
             event_id: command.command_id.clone(),
             event_type: "agent.notification".into(),
             aggregate_type: "session".into(),
@@ -1175,9 +1191,21 @@ pub fn publish_claude_notification(
             schema_version: Some(1),
             required_terminal_sequence: None,
             occurred_at: now,
-        });
-        Ok(json!({"published": true, "agentNotification": notification}))
+        };
+        let projection = notification_projection(&notification);
+        events.push(notification);
+        Ok(json!({"published": true, "agentNotification": projection}))
     })
+}
+
+fn notification_projection(notification: &DomainEventInput) -> Value {
+    let mut event = notification.payload["event"].clone();
+    event["eventId"] = json!(notification.event_id);
+    event["workspaceId"] = json!(notification.workspace_id);
+    event["taskId"] = json!(notification.task_id);
+    event["sessionId"] = json!(notification.session_id);
+    event["occurredAt"] = json!(notification.occurred_at);
+    event
 }
 
 pub fn interrupt_run(
