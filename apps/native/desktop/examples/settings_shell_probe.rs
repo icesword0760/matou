@@ -126,6 +126,7 @@ mod workspace {
 #[cfg(all(target_os = "macos", debug_assertions))]
 mod probe {
     use gpui::*;
+    use matou_native_core::provider_config::{ProviderConfigLocale, ProviderConfigStore};
     use matou_native_runtime::protocol::{
         ClaudeRoleAssignmentsReply, ProviderSettingsReply, ProviderSettingsResult,
     };
@@ -543,6 +544,195 @@ mod probe {
             .unwrap();
         println!(
             "Hidden GPUI: settings button keyboard activation and toggle, remount, Graph response, editor Save and original error, modal Escape, terminal focus restoration"
+        );
+    }
+
+    fn verify_delete_window(cx: &mut AsyncApp) {
+        const CLI: &str = "claude-code";
+        const BUILT_IN: &str = "anthropic-official";
+        struct Fixture(std::path::PathBuf);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let fixture = Fixture(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../target")
+                .join(format!("settings-delete-probe-{}", uuid::Uuid::new_v4())),
+        );
+        let open_store = || ProviderConfigStore::new(&fixture.0, ProviderConfigLocale::ZhCn);
+        let store = open_store();
+        let add = |name: &str| {
+            store
+                .upsert(&json!({
+                    "cli": CLI, "name": name, "endpoint": "https://api.example.invalid/v1",
+                    "model": "probe-model", "apiKey": "probe-fixture-key"
+                }))
+                .unwrap()
+        };
+        let active = add("隔离活动供应商");
+        let target = add("隔离待删除供应商");
+        let active_id = active["id"].as_str().unwrap();
+        let target_id = target["id"].as_str().unwrap();
+        store.set_active(CLI, active_id).unwrap();
+
+        let (window, sink) = cx.update(|cx| open_window(None, cx)).unwrap();
+        let reply = |cx: &mut AsyncApp, request, response| {
+            window
+                .update(cx, |view, window, cx| {
+                    view.provider_reply(result(request, response), window, cx);
+                })
+                .unwrap();
+        };
+        let open_settings = |cx: &mut AsyncApp, snapshot| {
+            window
+                .update(cx, |view, window, cx| view.open_settings(window, cx))
+                .unwrap();
+            let request = request_id(&sink);
+            assignment_request_id(&sink);
+            reply(cx, request, ProviderSettingsResult::Snapshot(snapshot));
+            draw(window, cx);
+        };
+        open_settings(cx, store.snapshot().unwrap());
+
+        let editor_state = |cx: &mut AsyncApp| {
+            window
+                .update(cx, |view, window, cx| {
+                    let shell = view.settings_entity().unwrap();
+                    shell.read(cx).diagnostics_delete_editor(window, cx)
+                })
+                .unwrap()
+        };
+        for (id, has_delete) in [(BUILT_IN, false), (active_id, false), (target_id, true)] {
+            window
+                .update(cx, |view, window, cx| {
+                    view.settings_entity()
+                        .unwrap()
+                        .read(cx)
+                        .diagnostics_focus_provider_edit(id, window);
+                })
+                .unwrap();
+            press(window, "enter", cx);
+            draw(window, cx);
+            if has_delete {
+                press(window, "x", cx);
+            }
+            // Reverse from the Key field through Close and the two save controls.
+            for _ in 0..4 {
+                press(window, "shift-tab", cx);
+            }
+            assert_eq!(editor_state(cx).0, has_delete, "delete control for {id}");
+            if !has_delete {
+                press(window, "escape", cx);
+                draw(window, cx);
+                assert!(matches!(
+                    sink.try_recv(),
+                    Err(std::sync::mpsc::TryRecvError::Empty)
+                ));
+            }
+        }
+
+        press(window, "enter", cx);
+        draw(window, cx);
+        assert_eq!(editor_state(cx), (false, true, "x".to_owned()));
+        // The confirmation initially focuses Keep editing.
+        press(window, "enter", cx);
+        draw(window, cx);
+        assert_eq!(editor_state(cx), (true, false, "x".to_owned()));
+        assert!(matches!(
+            sink.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        assert_eq!(
+            store.snapshot().unwrap()["providers"][CLI]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+
+        let confirm_delete = |cx: &mut AsyncApp| {
+            press(window, "enter", cx);
+            draw(window, cx);
+            press(window, "tab", cx);
+            press(window, "enter", cx);
+            let Command::DeleteProvider {
+                request_id,
+                cli,
+                id,
+            } = sink.try_recv().unwrap()
+            else {
+                panic!("Confirm delete did not send the runtime command");
+            };
+            assert_eq!(cli, CLI);
+            assert_eq!(id, target_id);
+            request_id
+        };
+        let rejected = confirm_delete(cx);
+        draw(window, cx);
+        AnyWindowHandle::from(window)
+            .update(cx, |_, window, cx| {
+                for key in ["enter", "tab", "escape"] {
+                    window.dispatch_keystroke(Keystroke::parse(key).unwrap(), cx);
+                }
+            })
+            .unwrap();
+        assert!(editor_state(cx).1);
+        assert!(matches!(
+            sink.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+
+        // Change the active provider on disk before executing the pending delete.
+        // The store's guard rejects the now-active ID even though the UI was eligible.
+        store.set_active(CLI, target_id).unwrap();
+        let error = store.delete(CLI, target_id).unwrap_err();
+        reply(
+            cx,
+            rejected,
+            ProviderSettingsResult::Error(error.to_string()),
+        );
+        check_shell(window, cx, |shell, _| {
+            assert!(shell.diagnostics_dialog() == Some(EditorStep::Form));
+            assert_eq!(shell.diagnostics_dialog_error(), Some("删除失败"));
+            assert_eq!(shell.diagnostics_providers().0.len(), 3);
+        });
+        assert_eq!(editor_state(cx), (false, true, "x".to_owned()));
+
+        store.set_active(CLI, active_id).unwrap();
+        draw(window, cx);
+        press(window, "escape", cx);
+        draw(window, cx);
+        assert_eq!(editor_state(cx), (true, false, "x".to_owned()));
+        let deleted = confirm_delete(cx);
+        let snapshot = store.delete(CLI, target_id).unwrap();
+        reply(cx, deleted, ProviderSettingsResult::Snapshot(snapshot));
+        let check_list = |shell: &SettingsShell, notice| {
+            assert!(shell.diagnostics_dialog().is_none());
+            let (rows, actual_notice) = shell.diagnostics_providers();
+            assert_eq!(rows.len(), 2);
+            assert_eq!(rows[0]["id"], active_id);
+            assert_eq!(rows[1]["id"], BUILT_IN);
+            assert_eq!(actual_notice, notice);
+        };
+        check_shell(window, cx, |shell, _| {
+            check_list(shell, Some(("供应商已删除", "", false)));
+        });
+        draw(window, cx);
+        window
+            .update(cx, |view, window, cx| {
+                view.open_settings(window, cx);
+                assert!(view.settings_entity().is_none());
+            })
+            .unwrap();
+        open_settings(cx, open_store().snapshot().unwrap());
+        check_shell(window, cx, |shell, _| check_list(shell, None));
+        window
+            .update(cx, |_, window, _| window.remove_window())
+            .unwrap();
+        println!(
+            "Hidden GPUI delete: built-in/active hidden, ordinary shown, cancel preserves draft, pending blocks duplicate input, store rejection says 删除失败 and preserves draft, success says 供应商已删除 and count 3 → 2, remount reads persisted deletion"
         );
     }
 
@@ -989,6 +1179,7 @@ mod probe {
                 verify_commands();
                 cx.spawn(async |cx| {
                     verify_window(cx);
+                    verify_delete_window(cx);
                     verify_assignments_window(cx);
                     verify_model_catalog_window(cx);
                     cx.update(|cx| cx.quit()).unwrap();

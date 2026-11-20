@@ -20,6 +20,12 @@
 | 活动和切换 | 「使用中」「默认使用」「切换」「切换中…」。活动项置顶，其他按快照顺序。 [参考设置页](output/settings-shell-01/screenshots/reference-settings.png) | 隐藏探针覆盖命令、排序、失败状态和再次发送。原生接口没有现有 Claude 会话迁移结果，仅反馈全局默认和新会话。 |
 | 新增 | 四个 API 预设、搜索和自定义。冻结还包含官方及订阅入口。 [参考新增](output/settings-shell-01/screenshots/reference-add.png) · [参考自定义](output/settings-shell-01/screenshots/reference-custom.png) | 本关为 API 新增，订阅登录待后续。弹窗只遮罩右区并在右区居中，宽 520。返工移除了左侧工作区遮挡层。 |
 | 编辑与错误 | 编辑起始 Key 为空，已配置显示「已配置 · 留空保持原密钥」。原文错误仍保留编辑器。 [参考编辑](output/settings-shell-01/screenshots/reference-edit.png) | 隐藏探针验证提交命令、Key 留空不入参、错误原文、对话框继续打开及 Escape。实窗保存与重启已核对。 |
+| 供应商删除入口 | 已保存且非内置、非活动的供应商显示「删除」。 [冻结表单](../../apps/desktop/src/renderer/src/hierarchy/ProviderSetupDialog.tsx#L389) | 隐藏 GPUI 探针从三类卡片打开编辑。只有普通供应商可键盘进入「删除」。 |
+| 确认与继续编辑 | 滚动到内联「删除「供应商名」？」及「此操作移除保存的配置，不会注销账户。」显示「继续编辑」「确认删除」。 [冻结确认](../../apps/desktop/src/renderer/src/hierarchy/ProviderSetupDialog.tsx#L386) | 沿用编辑表单内的确认区域。隐藏探针触发「继续编辑」后确认收起，草稿及三项配置保留，且未发送删除命令。 |
+| 确认删除与重开 | 删除成功采用回包快照并关闭编辑器，提示「供应商已删除」。 [冻结提交](../../apps/desktop/src/renderer/src/hierarchy/ModelSwitchSettings.tsx#L290) | 隐藏探针核对命令的 CLI 和配置 ID。请求等待期间无重复命令。隔离配置删除后，弹窗关闭，列表及配置数由 3 变为 2，提示「供应商已删除」。关闭设置再打开并从磁盘重读后，被删配置仍缺席。 |
+| 删除被拒 | 本关冻结失败文案为「删除失败」，保留编辑器和草稿。 | 隐藏探针在命令发出后将隔离目标切为活动项，触发配置存储守卫。弹窗内显示「删除失败」，确认和草稿保留，列表仍有 3 项。恢复隔离默认项后可重新确认删除。 [隐藏探针](../../apps/native/desktop/examples/settings_shell_probe.rs) |
+
+本轮删除交互通过隐藏 GPUI 探针及运行时子进程的供应商删除守卫测试。桌面测试 37 项通过，既有动效证据采集用例默认忽略。Rust 格式、项目标识符和 Git 空白检查通过。实窗待空闲窗口。无法确认截图期间桌面持续空闲，验收采用隐藏 GPUI 窗口和工作区内的隔离配置。
 
 ## MATRIX 待补项
 
@@ -27,7 +33,7 @@
 - 网页搜索行随网关第 3 阶段一起补。冻结默认文案为「未指定（按档位供应商处理）」。原生搜索路由就绪后，控件才能实际改变请求去向。
 - 官方模型目录探测已接入。分配区读取原生宿主从 CLI 离线取得的目录，保留别名、具体模型 ID、名称、强度和上下文上限。错误行的「重试」重新向宿主发请求，沿用其 60 秒缓存。自定义供应商继续使用其自身配置。 [冻结目录规则](../../apps/runtime/src/session/agent-model-settings.ts)
 - 订阅供应商分配随网关第 4 阶段与订阅服务一起补。历史订阅分配保留原 ID，并显示冻结账号错误。
-- 模型发现与刷新、删除、订阅账号相关交互、上下文窗口编辑。
+- 模型发现与刷新、订阅账号相关交互、上下文窗口编辑。
 - 切换说明正文待能力落地后补。原生在供应商列表下方保留加粗的「切换会影响所有 码头 窗口。」。冻结正文为「所有 Claude Code 会话跟随全局供应商；暂缓会话就绪后自动切换，旧会话再次打开时也会应用，历史保留。上下文窗口可在「编辑」中设置。」待暂缓会话自动切换、旧会话重开生效和上下文窗口编辑落地后补齐。[hierarchyShell.ts:188–190，正文续行 191](../../apps/desktop/src/renderer/src/i18n/messages/hierarchyShell.ts#L188-L191)
 - 缺「默认窗口」徽标，随上下文窗口能力一起补。参考实窗在活动卡名称「Anthropic 官方」右侧、「使用中」之后；原生同一名称行止于「使用中」。[参考实窗](output/settings-shell-01/screenshots/reference-settings.png) · [描边复测实窗](output/settings-shell-01/border/screenshots/settings-final.png) · [context-window-ui.tsx:69、93](../../apps/desktop/src/renderer/src/hierarchy/context-window-ui.tsx#L69) · [provider-setup.css:159](../../apps/desktop/src/renderer/src/hierarchy/provider-setup.css#L159)
 - 冻结活动行处于非末行时有 1 点蓝色底边。原生活动卡仍统一使用灰色外框，此多卡边界待补。

@@ -12,6 +12,7 @@ const ROLES: [&str; 3] = ["opus", "sonnet", "haiku"];
 const CONNECTING: &str = "供应商配置服务正在连接，请稍后重试";
 const LOAD_FAILED: &str = "供应商配置载入失败";
 const SAVE_FAILED: &str = "供应商配置保存失败";
+pub(crate) const DELETE_FAILED: &str = "删除失败";
 const SWITCH_FAILED: &str = "切换失败";
 static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
 
@@ -194,6 +195,8 @@ pub(crate) enum ProviderUpdate {
     None,
     Saved,
     SaveFailed(String),
+    Deleted,
+    DeleteFailed,
 }
 
 enum Operation {
@@ -202,6 +205,7 @@ enum Operation {
         activate: bool,
         editing: bool,
     },
+    Delete,
     Switch {
         id: String,
         committed: Option<Value>,
@@ -279,6 +283,16 @@ impl ProviderSettings {
         &self.providers
     }
 
+    pub(crate) fn deletable_provider(&self, id: Option<&str>) -> Option<&Value> {
+        let id = id?;
+        if self.active_id() == Some(id) {
+            return None;
+        }
+        self.providers
+            .iter()
+            .find(|row| row["id"] == id && row["builtIn"] != true)
+    }
+
     pub(crate) fn switching(&self) -> Option<&str> {
         match &self.pending.as_ref()?.operation {
             Operation::Switch { id, .. } => Some(id),
@@ -297,6 +311,13 @@ impl ProviderSettings {
                     }
             )
         })
+    }
+
+    pub(crate) fn deleting(&self) -> bool {
+        matches!(
+            self.pending.as_ref().map(|pending| &pending.operation),
+            Some(Operation::Delete)
+        )
     }
 
     pub(crate) fn notice(&self) -> Option<(&str, &str, bool)> {
@@ -354,6 +375,18 @@ impl ProviderSettings {
         } else {
             Err(CONNECTING.into())
         }
+    }
+
+    pub(crate) fn delete(&mut self, id: &str) -> bool {
+        if self.pending.is_some() || self.deletable_provider(Some(id)).is_none() {
+            return false;
+        }
+        self.dismiss_notice();
+        self.send(Operation::Delete, |request_id| Command::DeleteProvider {
+            request_id,
+            cli: CLI.to_owned(),
+            id: id.to_owned(),
+        })
     }
 
     fn request_switch(&mut self, id: String, committed: Option<Value>) -> ProviderUpdate {
@@ -426,6 +459,13 @@ impl ProviderSettings {
                 });
                 ProviderUpdate::Saved
             }
+            (Operation::Delete, ProviderSettingsResult::Snapshot(snapshot)) => {
+                if !self.accept_snapshot(snapshot) {
+                    return ProviderUpdate::DeleteFailed;
+                }
+                self.notice = Some(("供应商已删除", String::new(), false));
+                ProviderUpdate::Deleted
+            }
             (Operation::Switch { id, committed }, ProviderSettingsResult::Snapshot(snapshot)) => {
                 if !self.accept_snapshot(snapshot) {
                     return self.switch_failed(id, committed, SWITCH_FAILED.into());
@@ -481,6 +521,7 @@ impl ProviderSettings {
             Operation::Save { .. } => {
                 ProviderUpdate::SaveFailed(message.unwrap_or_else(|| SAVE_FAILED.into()))
             }
+            Operation::Delete => ProviderUpdate::DeleteFailed,
             Operation::Switch { id, committed } => self.switch_failed(
                 id,
                 committed,
