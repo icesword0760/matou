@@ -4298,7 +4298,38 @@ fn catalog_replaces_a_live_process_once_and_requires_its_persisted_exit() -> Res
             assert_eq!(runs[0].status, "running");
             db.execute_batch("DROP TRIGGER fail_exit;")?;
         } else {
-            child.frame(|_, screen, _| screen_has_line(screen, "resuming replace-id"))?;
+            let deadline = Instant::now() + TIMEOUT;
+            let mut saw_resume = false;
+            let mut dismissal = None;
+            while !saw_resume || dismissal.is_none() {
+                match child.event(deadline, true)? {
+                    Event::Frame {
+                        session_id, screen, ..
+                    } if session_id == session => {
+                        saw_resume |= screen_has_line(&screen, "resuming replace-id");
+                    }
+                    Event::Graph(graph) if !graph["agentNotifications"].is_null() => {
+                        let notifications = graph["agentNotifications"].as_array().unwrap();
+                        assert_eq!(notifications.len(), 1);
+                        assert_eq!(notifications[0]["operation"], "dismiss");
+                        assert_eq!(
+                            notifications[0]["replacementKey"],
+                            format!("provider-restore:{session}")
+                        );
+                        assert_eq!(notifications[0]["sessionId"], session);
+                        assert_eq!(notifications[0]["sceneId"], child.scene);
+                        assert_eq!(graph["nodes"][0]["providerRestoreState"], "restoring");
+                        assert_eq!(graph["nodes"][0]["canFork"], false);
+                        assert_eq!(
+                            graph["nodes"][0]["providerSpawnRevision"],
+                            notifications[0]["occurredAt"]
+                        );
+                        assert!(dismissal.replace(notifications[0].clone()).is_none());
+                    }
+                    Event::Diagnostic(error) => bail!("host diagnostic: {error}"),
+                    _ => {}
+                }
+            }
             let runs = list_runs(&db, &session)?;
             assert_eq!(runs.len(), 2);
             assert_eq!(runs[0].id, old_run.id);
@@ -4311,7 +4342,15 @@ fn catalog_replaces_a_live_process_once_and_requires_its_persisted_exit() -> Res
             assert_eq!(binding.provider_session_id, "replace-id");
             assert_eq!(binding.restore_state, "restoring");
             assert_eq!(binding.metadata["loadedFromCatalog"], true);
-            assert_eq!(binding.metadata["spawnRevision"], 1);
+            assert_eq!(binding.metadata["canFork"], true);
+            let dismissal = dismissal.unwrap();
+            assert_eq!(binding.metadata["spawnRevision"], dismissal["occurredAt"]);
+            let validated_at: i64 = db.query_row(
+                "SELECT validated_at FROM provider_bindings WHERE id = ?",
+                [&binding.id],
+                |row| row.get(0),
+            )?;
+            assert_eq!(dismissal["occurredAt"], validated_at);
             let event_order: (i64, i64) = db.query_row(
                 "SELECT
                    (SELECT rowid FROM domain_events WHERE event_type='session.run-exited'),
@@ -4503,7 +4542,12 @@ fn catalog_rejects_absent_ids_and_closing_a_pending_load_stops_its_only_run() ->
     };
     let active = claude_binding(&db, &session)?.context("catalog binding")?;
     assert_eq!(active.restore_state, "restoring");
-    assert_eq!(active.metadata["spawnRevision"], 1);
+    let revision: i64 = db.query_row(
+        "SELECT validated_at FROM provider_bindings WHERE id = ?",
+        [&active.id],
+        |row| row.get(0),
+    )?;
+    assert_eq!(active.metadata["spawnRevision"], revision);
 
     child.send(Command::CloseSessionCard {
         scene_id: scene,
