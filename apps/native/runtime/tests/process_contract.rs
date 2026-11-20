@@ -2469,6 +2469,200 @@ exec /bin/sleep 60
 }
 
 #[test]
+fn claude_role_budget_projects_the_actual_fresh_process_environment() -> Result<()> {
+    use matou_native_runtime::host::RecoveryState;
+    use serde_json::{Value, json};
+
+    let absent = ["unset"; 5];
+    for (scenario, assigned_role, mode, compact_window, expected) in [
+        (
+            "search excluded",
+            Some("opus"),
+            "maximum",
+            Some(180_000),
+            Ok(["260000", "90", "1", "unset", "unset"]),
+        ),
+        (
+            "1M cap",
+            Some("opus"),
+            "maximum",
+            None,
+            Ok(["1000000", "90", "0", "unset", "unset"]),
+        ),
+        (
+            "fallback tier limits",
+            Some("opus"),
+            "512k",
+            None,
+            Ok(["200000", "90", "1", "unset", "unset"]),
+        ),
+        (
+            "100K",
+            Some("opus"),
+            "512k",
+            Some(100_000),
+            Ok(["100000", "90", "1", "unset", "unset"]),
+        ),
+        (
+            "under 100K",
+            Some("opus"),
+            "512k",
+            Some(99_999),
+            Err("compaction · Compaction API: context window is under 100K"),
+        ),
+        ("unknown", Some("opus"), "512k", None, Ok(absent)),
+        (
+            "assignment misses startup tier",
+            Some("sonnet"),
+            "512k",
+            Some(99_999),
+            Ok(absent),
+        ),
+        ("no assignments", None, "512k", Some(99_999), Ok(["old"; 5])),
+    ] {
+        let root = tempfile::tempdir()?;
+        let no_shell = root.path().join("missing-shell");
+        let mut seed = RuntimeChild::spawn_configured(root.path(), "", &no_shell, None)?;
+        seed.ready()?;
+        seed.send(Command::Shutdown)?;
+        seed.closed()?;
+        let (status, stderr) = seed.wait()?;
+        ensure!(
+            status.success(),
+            "{scenario}: seed runtime shutdown: {stderr}"
+        );
+
+        let metadata = |id, window, max| {
+            if scenario == "unknown" {
+                json!({"id": id})
+            } else {
+                json!({"id": id, "contextWindow": window, "maxContextWindow": max})
+            }
+        };
+        fs::write(seed.data.join("provider-config.json"), json!({
+            "version": 1,
+            "activeProviderIds": {"claude-code": "source"},
+            "providers": {"claude-code": [
+                {"id": "source", "name": "Source API", "model": "main",
+                 "endpoint": "https://source.example.invalid", "apiKey": "fixture",
+                 "modelMapping": {"opus": "main", "sonnet": "medium", "haiku": "small"},
+                 "modelMetadata": [metadata("main", 300_000, 1_500_000),
+                                   metadata("medium", 200_000, 1_200_000),
+                                   metadata("small", 600_000, 1_300_000)]},
+                {"id": "assigned", "name": "Assigned API", "model": "chosen",
+                 "endpoint": "https://assigned.example.invalid", "apiKey": "fixture",
+                 "modelMetadata": [metadata("chosen", 800_000, 1_600_000)]},
+                {"id": "compact", "name": "Compaction API", "model": "summary",
+                 "endpoint": "https://compact.example.invalid", "apiKey": "fixture",
+                 "modelMetadata": [metadata("summary", compact_window.unwrap_or(90_000), 260_000)]},
+                {"id": "search", "name": "Search API", "model": "search-model",
+                 "endpoint": "https://search.example.invalid", "apiKey": "fixture",
+                 "modelMetadata": [metadata("search-model", 32_000, 32_000)]}
+            ]}
+        }).to_string())?;
+        let compaction = if compact_window.is_some() {
+            json!({"mode": "custom", "providerId": "compact", "model": "summary", "effort": "follow"})
+        } else {
+            json!({"mode": "follow", "effort": "follow"})
+        };
+        let mut assignments = json!({});
+        if let Some(role) = assigned_role {
+            assignments[role] = json!({"providerId": "assigned", "model": "chosen"});
+        }
+        let assigned_mode = if scenario == "search excluded" {
+            "512k"
+        } else {
+            mode
+        };
+        let prefs: Value = json!({
+            "claudeRoleAssignments": assignments,
+            "compaction": compaction,
+            "contextWindows": {"source": mode, "assigned": assigned_mode, "compact": mode},
+            "claudeWebSearch": {"providerId": "search", "model": "search-model"}
+        });
+        let db = Connection::open(seed.data.join("matou.sqlite"))?;
+        db.execute(
+            "UPDATE sessions SET kind='claude-code' WHERE id=?",
+            [&seed.session],
+        )?;
+        db.execute(
+            "INSERT INTO preferences VALUES ('agent.modelPreferences', ?, 1)",
+            [prefs.to_string()],
+        )?;
+        drop(db);
+
+        let stub = root.path().join("claude-role-budget-cli");
+        fs::write(
+            &stub,
+            r#"#!/bin/sh
+printf '%s\n' "${CLAUDE_CODE_MAX_CONTEXT_TOKENS-unset}" "${CLAUDE_AUTOCOMPACT_PCT_OVERRIDE-unset}" \
+    "${CLAUDE_CODE_DISABLE_1M_CONTEXT-unset}" "${CLAUDE_CODE_MAX_OUTPUT_TOKENS-unset}" \
+    "${CLAUDE_CODE_AUTO_COMPACT_WINDOW-unset}" > "$0.env"
+printf 'budget process ready\n'
+exec /bin/sleep 60
+"#,
+        )?;
+        fs::set_permissions(&stub, fs::Permissions::from_mode(0o700))?;
+        let mut child = RuntimeChild::spawn_configured_with(
+            root.path(),
+            "",
+            &no_shell,
+            Some(&stub),
+            |command| {
+                for key in [
+                    "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
+                    "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE",
+                    "CLAUDE_CODE_DISABLE_1M_CONTEXT",
+                    "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
+                    "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+                ] {
+                    command.env(key, "old");
+                }
+            },
+        )?;
+        child.connect()?;
+        assert_eq!(child.session, seed.session, "{scenario}");
+        let environment = stub.with_extension("env");
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            match child
+                .event(deadline, true)
+                .with_context(|| scenario.to_owned())?
+            {
+                Event::Frame {
+                    session_id, screen, ..
+                } if session_id == child.session
+                    && screen_has_line(&screen, "budget process ready") =>
+                {
+                    let expected = expected.expect("under-limit budget must stop the spawn");
+                    let actual = fs::read_to_string(&environment)?;
+                    assert_eq!(actual.lines().collect::<Vec<_>>(), expected, "{scenario}");
+                    break;
+                }
+                Event::Recovery {
+                    session_id,
+                    state: RecoveryState::StartFailed(reason),
+                } if session_id == child.session => {
+                    let expected = expected.expect_err(&reason);
+                    assert!(reason.ends_with(expected), "{scenario}: {reason}");
+                    assert!(
+                        !environment.exists(),
+                        "{scenario}: CLI spawned before budget check"
+                    );
+                    break;
+                }
+                _ => {}
+            }
+        }
+        child.send(Command::Shutdown)?;
+        child.closed()?;
+        let (status, stderr) = child.wait()?;
+        ensure!(status.success(), "{scenario}: runtime shutdown: {stderr}");
+    }
+    Ok(())
+}
+
+#[test]
 fn first_claude_start_and_recovery_without_binding_use_saved_opus_assignment() -> Result<()> {
     use matou_native_core::sessions::{claude_binding, get_session, list_runs};
     use matou_native_runtime::host::RecoveryState;
