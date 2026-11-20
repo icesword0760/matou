@@ -187,7 +187,7 @@ def launch_reference(record_directory=EVIDENCE):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("step", choices=("prepare", "seal-reference", "native", "reference"))
-    parser.add_argument("--reference-record-subdir", choices=("continuous",))
+    parser.add_argument("--reference-record-subdir", choices=("continuous", "unlocked", "cleared", "completion"))
     args = parser.parse_args()
     if args.reference_record_subdir:
         if args.step != "reference":
