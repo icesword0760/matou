@@ -34,6 +34,13 @@ mod terminal_surface;
 mod ui_text;
 
 #[cfg(target_os = "macos")]
+#[path = "../src/provider_settings.rs"]
+mod provider_settings;
+#[cfg(target_os = "macos")]
+#[path = "../src/settings_shell.rs"]
+mod settings_shell;
+
+#[cfg(target_os = "macos")]
 #[allow(dead_code)]
 mod workspace {
     include!("../src/workspace.rs");
