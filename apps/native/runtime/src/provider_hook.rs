@@ -1,4 +1,4 @@
-//! Private HTTP ingress for a Claude run. SQLite remains owned by the host thread.
+//! Private HTTP ingress for a provider run. SQLite remains owned by the host thread.
 use std::{
     collections::HashMap,
     fs::{self, File, OpenOptions},
@@ -15,8 +15,11 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
+use matou_native_core::pty::{LaunchProfile, ShellLaunch};
 use serde_json::{Map, Value, json};
 use uuid::Uuid;
+
+use crate::codex_events;
 
 pub(crate) const IDENTITY_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) const HOOK_QUEUE_CAPACITY: usize = 128;
@@ -52,6 +55,7 @@ pub(crate) struct Scope {
     pub session_id: String,
     pub run_id: String,
     pub generation: String,
+    pub profile: LaunchProfile,
     pub expected_id: Option<String>,
     pub fork_source_id: Option<String>,
 }
@@ -64,17 +68,33 @@ pub(crate) struct Observation {
     pub permission_mode: Option<String>,
     pub cwd: Option<String>,
     pub notification: Option<(Notification, Instant)>,
+    pub codex: Option<codex_events::Hook>,
 }
 
 impl Observation {
+    #[cfg(test)]
     pub(super) fn parse(payload: &Map<String, Value>) -> Self {
+        Self::parse_for(payload, LaunchProfile::ClaudeCode)
+    }
+
+    fn parse_for(payload: &Map<String, Value>, profile: LaunchProfile) -> Self {
+        let events: &[_] = if profile == LaunchProfile::Codex {
+            &codex_events::EVENTS
+        } else {
+            &EVENTS
+        };
+        let title = if profile == LaunchProfile::Codex {
+            "Codex"
+        } else {
+            "Claude Code"
+        };
         let text = |names: &[&str]| {
             names
                 .iter()
                 .find_map(|&name| payload.get(name).and_then(nonempty))
         };
         let event = text(&["hook_event_name", "hookEventName"])
-            .and_then(|name| EVENTS.iter().find(|(event, _)| *event == name))
+            .and_then(|name| events.iter().find(|(event, _)| *event == name))
             .map_or("unknown", |&(event, _)| event);
         let identity = [
             "session_id",
@@ -100,7 +120,10 @@ impl Observation {
                 .map(str::to_owned),
             permission_mode: text(&["permission_mode", "permissionMode"]).map(str::to_owned),
             cwd: text(&["cwd"]).map(str::to_owned),
-            notification: Notification::parse(event, payload).map(|event| (event, Instant::now())),
+            notification: Notification::parse(event, payload, title)
+                .map(|event| (event, Instant::now())),
+            codex: (profile == LaunchProfile::Codex)
+                .then(|| codex_events::Hook::parse(payload, event)),
         }
     }
 }
@@ -116,13 +139,14 @@ pub(crate) enum NotificationKind {
 #[derive(PartialEq, Eq)]
 pub(crate) struct Notification {
     pub kind: NotificationKind,
+    title: &'static str,
     subtitle: String,
     body: String,
     cooldown_key: &'static str,
 }
 
 impl Notification {
-    fn parse(event: &str, payload: &Map<String, Value>) -> Option<Self> {
+    fn parse(event: &str, payload: &Map<String, Value>, title: &'static str) -> Option<Self> {
         let text = |key: &str| payload.get(key).and_then(nonempty);
         let nested = |key: &str, field: &str| payload.get(key)?.get(field).and_then(nonempty);
         let (kind, subtitle, body, limit, cooldown_key) = match event {
@@ -138,9 +162,10 @@ impl Notification {
                     .or_else(|| text("result"))
                     .map_or_else(
                         || {
+                            let provider = if title == "Codex" { title } else { "Claude" };
                             project.map_or_else(
-                                || "Claude session completed".into(),
-                                |project| format!("Claude session completed in {project}"),
+                                || format!("{provider} session completed"),
+                                |project| format!("{provider} session completed in {project}"),
                             )
                         },
                         str::to_owned,
@@ -201,6 +226,7 @@ impl Notification {
         };
         Some(Self {
             kind,
+            title,
             subtitle,
             body: compact(&body, limit),
             cooldown_key,
@@ -210,7 +236,7 @@ impl Notification {
     pub fn payload(&self) -> Value {
         json!({
             "eventType": self.kind.labels().0,
-            "title": "Claude Code",
+            "title": self.title,
             "subtitle": self.subtitle,
             "body": self.body,
             "sound": true,
@@ -260,7 +286,7 @@ impl NotificationKind {
     }
 }
 
-fn nonempty(value: &Value) -> Option<&str> {
+pub(crate) fn nonempty(value: &Value) -> Option<&str> {
     let value = value.as_str()?.trim_matches(js_whitespace);
     (!value.is_empty()).then_some(value)
 }
@@ -269,12 +295,16 @@ fn js_whitespace(c: char) -> bool {
     c == '\u{feff}' || (c != '\u{85}' && c.is_whitespace())
 }
 
-fn compact(value: &str, limit: usize) -> String {
-    let line = value
+pub(crate) fn one_line(value: &str) -> String {
+    value
         .split(js_whitespace)
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>()
-        .join(" ");
+        .join(" ")
+}
+
+fn compact(value: &str, limit: usize) -> String {
+    let line = one_line(value);
     let mut units: Vec<_> = line.encode_utf16().take(limit + 1).collect();
     if units.len() <= limit {
         return line;
@@ -287,7 +317,7 @@ fn compact(value: &str, limit: usize) -> String {
     shortened
 }
 
-fn transcript_uuid(path: &str) -> Option<&str> {
+pub(crate) fn transcript_uuid(path: &str) -> Option<&str> {
     path.as_bytes()
         .windows(6)
         .enumerate()
@@ -330,6 +360,32 @@ pub(crate) struct Registration {
     token: String,
     registry: Registry,
     pub settings_path: PathBuf,
+    script_path: PathBuf,
+}
+
+impl Registration {
+    pub fn attach_codex(&self, launch: &mut ShellLaunch) -> Result<()> {
+        let command = json!(script_command(&self.script_path)?);
+        let status = if launch
+            .env
+            .get(std::ffi::OsStr::new("MATOU_LOCALE"))
+            .is_some_and(|locale| locale == "en")
+        {
+            "Confirming the session"
+        } else {
+            "正在确认会话"
+        };
+        let status = json!(status);
+        let hooks = codex_events::EVENTS.map(|(event, timeout)| {
+            format!(r#"{event} = [{{ hooks = [{{ type = "command", command = {command}, timeout = {timeout}, statusMessage = {status} }}] }}]"#)
+        });
+        launch.argv.extend([
+            "-c".into(),
+            format!("hooks={{ {} }}", hooks.join(", ")),
+            "--dangerously-bypass-hook-trust".into(),
+        ]);
+        Ok(())
+    }
 }
 
 impl Drop for Registration {
@@ -407,18 +463,26 @@ impl ProviderHookServer {
             script: directory.join(format!("{token}.statusline.sh")),
             temporary: directory.join(format!("{token}.settings.json.tmp")),
         };
-        let settings = settings(&url, &files.script, permission_respawn)?;
-        write_private(&files.script, status_script(&url).as_bytes(), 0o700)
-            .context("write provider statusline script")?;
-        write_private(
-            &files.temporary,
-            &serde_json::to_vec_pretty(&settings)?,
-            0o600,
-        )
-        .context("write provider settings")?;
-        fs::rename(&files.temporary, &files.settings).context("publish provider settings")?;
-        File::open(&files.settings).context("read provider settings")?;
+        let script = if scope.profile == LaunchProfile::Codex {
+            format!(
+                "#!/bin/sh\n/usr/bin/curl --noproxy '*' --silent --show-error --max-time 2 --request POST --header 'content-type: application/json' --data-binary @- '{url}' >/dev/null 2>&1 || true\n"
+            )
+        } else {
+            let settings = settings(&url, &files.script, permission_respawn)?;
+            write_private(
+                &files.temporary,
+                &serde_json::to_vec_pretty(&settings)?,
+                0o600,
+            )
+            .context("write provider settings")?;
+            fs::rename(&files.temporary, &files.settings).context("publish provider settings")?;
+            File::open(&files.settings).context("read provider settings")?;
+            status_script(&url)
+        };
+        write_private(&files.script, script.as_bytes(), 0o700)
+            .context("write provider hook script")?;
         let settings_path = files.settings.clone();
+        let script_path = files.script.clone();
         self.registry.lock().unwrap().insert(
             token.clone(),
             Record {
@@ -432,6 +496,7 @@ impl ProviderHookServer {
             token,
             registry: Arc::clone(&self.registry),
             settings_path,
+            script_path,
         })
     }
 
@@ -480,7 +545,7 @@ fn write_private(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
     set_mode(path, mode)
 }
 
-fn settings(url: &str, script: &Path, permission_respawn: bool) -> Result<Value> {
+fn script_command(script: &Path) -> Result<String> {
     let script = script
         .to_str()
         .context("provider statusline path is not UTF-8")?;
@@ -494,7 +559,12 @@ fn settings(url: &str, script: &Path, permission_respawn: bool) -> Result<Value>
         format!("'{}'", script.replace('\'', "'\\''"))
     };
     #[cfg(not(unix))]
-    let command = script;
+    let command = script.to_owned();
+    Ok(command)
+}
+
+fn settings(url: &str, script: &Path, permission_respawn: bool) -> Result<Value> {
+    let command = script_command(script)?;
     let mut hooks: Map<String, Value> = EVENTS
         .into_iter()
         .map(|(event, timeout)| {
@@ -741,10 +811,11 @@ fn read_request(
         }
         return Ok(());
     }
-    let mut observation = Observation::parse(&payload);
+    let mut observation = Observation::parse_for(&payload, record.scope.profile);
     if statusline {
         observation.event = "unknown";
         observation.notification = None;
+        observation.codex = None;
     }
     match send.try_send(HookMessage::Observed(
         record.scope.clone(),
@@ -807,6 +878,7 @@ mod tests {
 
     fn scope(run: &str) -> Scope {
         Scope {
+            profile: LaunchProfile::ClaudeCode,
             session_id: "session".into(),
             run_id: run.into(),
             generation: "generation".into(),

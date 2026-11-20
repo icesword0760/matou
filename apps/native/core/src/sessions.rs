@@ -962,7 +962,7 @@ pub fn change_claude_restore(
     .map(Some)
 }
 
-pub struct ClaudeIdentity<'a> {
+pub struct ProviderIdentity<'a> {
     pub binding_id: &'a str,
     pub session_id: &'a str,
     pub run_id: &'a str,
@@ -975,10 +975,35 @@ pub struct ClaudeIdentity<'a> {
     pub first_for_run: bool,
 }
 
+pub type ClaudeIdentity<'a> = ProviderIdentity<'a>;
+
 pub fn record_claude_identity(
     db: &mut Connection,
     command: &CommandMetadata,
     input: &ClaudeIdentity<'_>,
+    now: i64,
+) -> Result<DomainCommit> {
+    record_provider_identity(db, command, input, "claude-code", now)
+}
+
+pub fn record_codex_identity(
+    db: &mut Connection,
+    command: &CommandMetadata,
+    input: &ProviderIdentity<'_>,
+    now: i64,
+) -> Result<DomainCommit> {
+    ensure!(
+        input.event_name == "SessionStart" && input.first_for_run && input.expected_id.is_none(),
+        "Codex identity requires SessionStart on its fresh run"
+    );
+    record_provider_identity(db, command, input, "codex", now)
+}
+
+fn record_provider_identity(
+    db: &mut Connection,
+    command: &CommandMetadata,
+    input: &ProviderIdentity<'_>,
+    provider: &str,
     now: i64,
 ) -> Result<DomainCommit> {
     let provider_session_id = if let Some(expected) = input.expected_id {
@@ -1017,26 +1042,29 @@ pub fn record_claude_identity(
             .optional()?;
         ensure!(
             session.archived_at.is_none()
-                && session.kind == "claude-code"
+                && session.kind == provider
                 && run
                     .as_ref()
                     .is_some_and(|(id, generation, status, profile)| {
                         id == input.run_id
                             && generation == input.generation
                             && status == "running"
-                            && profile == "claude-code"
+                            && profile == provider
                     }),
             "Provider hook no longer owns its SessionRun"
         );
-        let fork: Option<(String, String)> = tx
-            .query_row(
+        let fork: Option<(String, String)> = if provider == "claude-code" {
+            tx.query_row(
                 "SELECT state, source_provider_session_id FROM session_fork_intents
              WHERE session_id = ? AND operation_id = ? || session_id
                AND state <> 'succeeded'",
                 params![input.session_id, NATIVE_FORK_PREFIX],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
-            .optional()?;
+            .optional()?
+        } else {
+            None
+        };
         if let Some((state, source_id)) = &fork {
             ensure!(
                 state == "starting"
@@ -1053,8 +1081,8 @@ pub fn record_claude_identity(
         let existing: Option<(String, String)> = tx
             .query_row(
                 "SELECT id, metadata_json FROM provider_bindings
-             WHERE session_id = ? AND provider = 'claude-code' AND provider_session_id = ?",
-                params![input.session_id, provider_session_id],
+             WHERE session_id = ? AND provider = ? AND provider_session_id = ?",
+                params![input.session_id, provider, provider_session_id],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
@@ -1088,23 +1116,27 @@ pub fn record_claude_identity(
         metadata.remove("invalidationReason");
         metadata.remove("provisional");
         metadata.insert("lastHookEvent".into(), json!(input.event_name));
-        for (key, observed) in [
-            ("observedUserPrompt", input.event_name == "UserPromptSubmit"),
-            ("observedNormalStop", input.event_name == "Stop"),
-        ] {
-            metadata.insert(
-                key.into(),
-                Value::Bool(observed || metadata.get(key).and_then(Value::as_bool) == Some(true)),
-            );
+        if provider == "claude-code" {
+            for (key, observed) in [
+                ("observedUserPrompt", input.event_name == "UserPromptSubmit"),
+                ("observedNormalStop", input.event_name == "Stop"),
+            ] {
+                metadata.insert(
+                    key.into(),
+                    Value::Bool(
+                        observed || metadata.get(key).and_then(Value::as_bool) == Some(true),
+                    ),
+                );
+            }
+            let can_fork =
+                metadata["observedUserPrompt"] == true && metadata["observedNormalStop"] == true;
+            metadata.insert("canFork".into(), json!(can_fork));
         }
-        let can_fork =
-            metadata["observedUserPrompt"] == true && metadata["observedNormalStop"] == true;
-        metadata.insert("canFork".into(), json!(can_fork));
         tx.execute(
             "INSERT INTO provider_bindings (
                  id, session_id, provider, provider_session_id, resume_state,
                  metadata_json, created_at, updated_at, validated_at
-             ) VALUES (?, ?, 'claude-code', ?, 'available', ?, ?, ?, ?)
+             ) VALUES (?, ?, ?, ?, 'available', ?, ?, ?, ?)
              ON CONFLICT(session_id, provider, provider_session_id) DO UPDATE SET
                  resume_state = 'available', metadata_json = excluded.metadata_json,
                  updated_at = excluded.updated_at, validated_at = excluded.validated_at,
@@ -1112,6 +1144,7 @@ pub fn record_claude_identity(
             params![
                 binding_id,
                 input.session_id,
+                provider,
                 provider_session_id,
                 serde_json::to_string(&metadata)?,
                 now,
@@ -1126,6 +1159,13 @@ pub fn record_claude_identity(
                  WHERE session_id = ?",
                 params![now, now, input.session_id],
             )?;
+            tx.execute(
+                "UPDATE sessions SET work_status = 'idle', updated_at = ?, version = version + 1
+                 WHERE id = ? AND work_status = 'starting'",
+                params![now, input.session_id],
+            )?;
+        }
+        if provider == "codex" {
             tx.execute(
                 "UPDATE sessions SET work_status = 'idle', updated_at = ?, version = version + 1
                  WHERE id = ? AND work_status = 'starting'",
@@ -1152,7 +1192,7 @@ pub fn record_claude_identity(
         }
         let payload = json!({
             "sessionId": input.session_id, "runId": input.run_id,
-            "provider": "claude-code", "providerSessionId": provider_session_id,
+            "provider": provider, "providerSessionId": provider_session_id,
             "bindingId": binding_id, "metadata": public_metadata,
             "restoreState": "none", "restoreError": null,
             "spawnRevision": metadata.get("spawnRevision")
@@ -1197,7 +1237,7 @@ pub fn record_claude_identity(
                 "session.mode-changed",
                 &session,
                 now,
-                json!({"runId": input.run_id, "provider": "claude-code", "workStatus": work_status}),
+                json!({"runId": input.run_id, "provider": provider, "workStatus": work_status}),
             );
             event.event_id.push_str(":mode");
             events.push(event);
@@ -1216,6 +1256,29 @@ pub fn publish_claude_notification(
     event: Value,
     now: i64,
 ) -> Result<DomainCommit> {
+    publish_provider_notification(
+        db,
+        command,
+        session_id,
+        run_id,
+        generation,
+        "claude-code",
+        event,
+        now,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn publish_provider_notification(
+    db: &mut Connection,
+    command: &CommandMetadata,
+    session_id: &str,
+    run_id: &str,
+    generation: &str,
+    provider: &str,
+    event: Value,
+    now: i64,
+) -> Result<DomainCommit> {
     execute(db, command, now, |tx, events| {
         let owner: Option<(String, String)> = tx
             .query_row(
@@ -1226,10 +1289,10 @@ pub fn publish_claude_notification(
                      ORDER BY ordinal DESC LIMIT 1
                  )
                  WHERE sessions.id = ? AND sessions.archived_at IS NULL
-                   AND sessions.kind = 'claude-code' AND session_runs.id = ?
+                   AND sessions.kind = ? AND session_runs.id = ?
                    AND session_runs.runtime_generation = ?
-                   AND session_runs.status = 'running' AND session_runs.profile = 'claude-code'",
-                params![session_id, run_id, generation],
+                   AND session_runs.status = 'running' AND session_runs.profile = ?",
+                params![session_id, provider, run_id, generation, provider],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
@@ -1248,7 +1311,7 @@ pub fn publish_claude_notification(
             payload: json!({
                 "targetSessionId": session_id,
                 "runId": run_id,
-                "provider": "claude-code",
+                "provider": provider,
                 "event": event,
             }),
             schema_version: Some(1),

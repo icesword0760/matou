@@ -4,6 +4,8 @@
 mod claude_gateway_restart;
 #[path = "process_contract/claude_model_catalog.rs"]
 mod claude_model_catalog;
+#[path = "process_contract/codex_events.rs"]
+mod codex_events;
 #[path = "process_contract/codex_launch.rs"]
 mod codex_launch;
 #[path = "process_contract/database_recovery.rs"]
