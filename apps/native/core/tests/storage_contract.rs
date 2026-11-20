@@ -735,3 +735,119 @@ fn export_fixed_storage_cases() -> Result<()> {
     );
     Ok(())
 }
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FileHandoffInputs {
+    upgrade_at: i64,
+    reopen_at: i64,
+    cases: Vec<FileHandoffCase>,
+    receipts: Vec<TransactionInput>,
+    queries: Map<String, Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FileHandoffCase {
+    id: String,
+    #[serde(default)]
+    expect_failure: bool,
+}
+
+fn file_handoff_snapshot(
+    db: &Connection,
+    queries: &Map<String, Value>,
+) -> Result<Map<String, Value>> {
+    let version = number(db, "SELECT max(version) FROM schema_migrations")?;
+    queries
+        .iter()
+        .filter(|(name, _)| *name != "shellHistory" || version >= 18)
+        .map(|(name, sql)| {
+            let sql = sql
+                .as_str()
+                .with_context(|| format!("invalid query {name}"))?;
+            Ok((
+                name.clone(),
+                query_json(db, sql).with_context(|| name.clone())?,
+            ))
+        })
+        .collect()
+}
+
+fn file_handoff_migration(db: &mut Connection, at: i64) -> Value {
+    match migrate(db, at) {
+        Ok(value) => json!({"kind": "ok", "value": value}),
+        Err(error) => json!({"kind": "error", "error": describe_fixed_error(&error)}),
+    }
+}
+
+#[test]
+#[ignore = "file handoff evidence export; run with the G-storage-schema runner"]
+fn export_frozen_file_handoff() -> Result<()> {
+    use sha2::{Digest, Sha256};
+
+    let directory = env::var_os("MATOU_STORAGE_GATE").context("MATOU_STORAGE_GATE is required")?;
+    let directory = Path::new(&directory);
+    let work = env::var_os("MATOU_G_STORAGE_WORK").context("MATOU_G_STORAGE_WORK is required")?;
+    let work = Path::new(&work);
+    let inputs: FileHandoffInputs =
+        serde_json::from_slice(&fs::read(directory.join("inputs.json"))?)?;
+    let mut cases = Map::new();
+
+    for fixture in &inputs.cases {
+        let seed = work.join(format!("{}.sqlite", fixture.id));
+        let path = work.join(format!("native-{}.sqlite", fixture.id));
+        fs::copy(seed, &path)?;
+        let seed_sha256 = format!("{:x}", Sha256::digest(fs::read(&path)?));
+
+        let mut db = Connection::open(&path)?;
+        configure_connection(&db)?;
+        let before = file_handoff_snapshot(&db, &inputs.queries)?;
+        let migration = file_handoff_migration(&mut db, inputs.upgrade_at);
+        let after = file_handoff_snapshot(&db, &inputs.queries)?;
+        db.close().map_err(|(_, error)| error)?;
+
+        let mut reopened = Connection::open(&path)?;
+        configure_connection(&reopened)?;
+        let reopened_before = file_handoff_snapshot(&reopened, &inputs.queries)?;
+        let reopen_migration = file_handoff_migration(&mut reopened, inputs.reopen_at);
+        let mut replays = Map::new();
+        if !fixture.expect_failure {
+            for receipt in &inputs.receipts {
+                let mut callback_calls = 0;
+                let commit = execute(&mut reopened, &receipt.command, inputs.reopen_at, |_, _| {
+                    callback_calls += 1;
+                    bail!("stored receipt unexpectedly invoked mutation");
+                })?;
+                replays.insert(
+                    receipt.command.command_id.clone(),
+                    json!({"commit": commit, "callbackCalls": callback_calls}),
+                );
+            }
+        }
+        let reopened_after = file_handoff_snapshot(&reopened, &inputs.queries)?;
+        cases.insert(
+            fixture.id.clone(),
+            json!({
+                "seedSha256": seed_sha256,
+                "before": before,
+                "migration": migration,
+                "after": after,
+                "reopenedBefore": reopened_before,
+                "reopenMigration": reopen_migration,
+                "replays": replays,
+                "reopenedAfter": reopened_after,
+            }),
+        );
+    }
+    fs::write(
+        directory.join("native.json"),
+        format!("{}\n", serde_json::to_string_pretty(&cases)?),
+    )?;
+    println!(
+        "Native SQLite {} · {} shared file samples",
+        rusqlite::version(),
+        cases.len()
+    );
+    Ok(())
+}
