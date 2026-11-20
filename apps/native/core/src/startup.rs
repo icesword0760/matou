@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use crate::{
     backup::{BackupDescriptor, BackupReason, BackupService, DEFAULT_MAX_BACKUPS},
-    ownership::{DatabaseOwner, OwnerRecoveryError, assert_no_live_owner},
+    ownership::{DatabaseOwner, OwnerRecoveryError, assert_no_live_owner_read_only},
     recovery_marker::{self, RecoveryMarker},
     storage::{configure_connection, migrate_with_backup, supported_schema_version},
 };
@@ -84,50 +84,68 @@ pub fn open(data_root: &Path, runtime_generation: &str) -> Result<BootstrapResul
     let attempt = (|| {
         let mut integrity_verified = false;
         if database_path.exists() {
-            if is_writable(&root) {
-                match DatabaseOwner::acquire(&database_path, runtime_generation) {
-                    Ok(lease) => {
-                        ownership = Some(lease);
-                        if let Some(marker) = recovery_marker::read_active(&database_path)? {
-                            release(&mut ownership)?;
-                            return Ok(BootstrapResult::RecoveryRequired(recovery_result(
-                                marker, &backups,
-                            )));
-                        }
-                    }
-                    Err(error) => {
-                        if let Some(marker) = wait_for_recovery_marker(&database_path)? {
-                            return Ok(BootstrapResult::RecoveryRequired(recovery_result(
-                                marker, &backups,
-                            )));
-                        }
-                        return Err(error);
-                    }
-                }
-            } else {
-                assert_no_live_owner(&database_path)?;
-            }
-            assert_wal_bundle_ready(&database_path)?;
-            if !is_writable(&root) || !is_writable(&database_path) {
-                let connection = open_read_only(&database_path)?;
+            let write_allowed = is_writable(&root) && is_writable(&database_path);
+            if !write_allowed {
+                assert_no_live_owner_read_only(&database_path)?;
+                assert_wal_bundle_ready(&database_path)?;
+                let connection = open_recovery_read_only(&database_path)?;
                 assert_startup_integrity(&connection)?;
-                release(&mut ownership)?;
                 return Ok(BootstrapResult::ReadOnly {
                     connection,
                     data_root: root.clone(),
                     reason: ReadOnlyReason::FilesystemReadOnly,
                 });
             }
-            let inspection = open_read_only(&database_path)?;
+            // Classify a newer database before taking a lease or replacing stale
+            // ownership evidence. Any inconclusive inspection follows normal startup.
+            if assert_no_live_owner_read_only(&database_path).is_ok()
+                && let Ok(connection) = open_recovery_read_only(&database_path)
+                && read_schema_version(&connection).is_ok_and(|version| {
+                    supported_schema_version().is_ok_and(|supported| version > supported)
+                })
+            {
+                assert_no_live_owner_read_only(&database_path)?;
+                if let Some(marker) = recovery_marker::read_active(&database_path)? {
+                    return Ok(BootstrapResult::RecoveryRequired(recovery_result(
+                        marker, &backups,
+                    )));
+                }
+                assert_wal_bundle_ready(&database_path)?;
+                assert_startup_integrity(&connection)?;
+                return Ok(BootstrapResult::ReadOnly {
+                    connection,
+                    data_root: root.clone(),
+                    reason: ReadOnlyReason::NewerSchema,
+                });
+            }
+            match DatabaseOwner::acquire(&database_path, runtime_generation) {
+                Ok(lease) => {
+                    ownership = Some(lease);
+                    if let Some(marker) = recovery_marker::read_active(&database_path)? {
+                        release(&mut ownership)?;
+                        return Ok(BootstrapResult::RecoveryRequired(recovery_result(
+                            marker, &backups,
+                        )));
+                    }
+                }
+                Err(error) => {
+                    if let Some(marker) = wait_for_recovery_marker(&database_path)? {
+                        return Ok(BootstrapResult::RecoveryRequired(recovery_result(
+                            marker, &backups,
+                        )));
+                    }
+                    return Err(error);
+                }
+            }
+            assert_wal_bundle_ready(&database_path)?;
+            let inspection = open_recovery_read_only(&database_path)?;
             assert_startup_integrity(&inspection)?;
             integrity_verified = true;
             let version = read_schema_version(&inspection)?;
-            drop(inspection);
             if version > supported_schema_version()? {
-                let connection = open_read_only(&database_path)?;
                 release(&mut ownership)?;
                 return Ok(BootstrapResult::ReadOnly {
-                    connection,
+                    connection: inspection,
                     data_root: root.clone(),
                     reason: ReadOnlyReason::NewerSchema,
                 });
@@ -185,7 +203,7 @@ pub fn open(data_root: &Path, runtime_generation: &str) -> Result<BootstrapResul
             }
             if is_write_denied(&error) || is_newer_schema(&error) {
                 let readonly = (|| {
-                    let connection = open_read_only(&database_path)?;
+                    let connection = open_recovery_read_only(&database_path)?;
                     assert_startup_integrity(&connection)?;
                     Ok::<_, anyhow::Error>(connection)
                 })();
@@ -384,6 +402,22 @@ pub fn open_read_only(path: &Path) -> Result<Connection> {
         let error = WalRecoveryError("database WAL requires recovery before read-only open".into());
         return Err(error.into());
     }
+    open_read_only_uri(path, "immutable=1")
+}
+
+fn open_recovery_read_only(path: &Path) -> Result<Connection> {
+    // SQLite may update read marks or rebuild a writable SHM even with a
+    // read-only main handle. Force read-only SHM for a committed WAL. With
+    // no WAL to replay, immutable mode avoids opening or creating sidecars.
+    let options = if committed_wal(path) {
+        "readonly_shm=1"
+    } else {
+        "immutable=1"
+    };
+    open_read_only_uri(path, options)
+}
+
+fn open_read_only_uri(path: &Path, options: &str) -> Result<Connection> {
     let path_text = path.to_str().context("SQLite path is not valid Unicode")?;
     #[cfg(windows)]
     let path_text = path_text.replace('\\', "/");
@@ -396,7 +430,8 @@ pub fn open_read_only(path: &Path) -> Result<Connection> {
             write!(uri, "%{byte:02X}")?;
         }
     }
-    uri.push_str("?immutable=1");
+    uri.push('?');
+    uri.push_str(options);
     let connection = Connection::open_with_flags(
         uri,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,

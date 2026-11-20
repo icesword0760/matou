@@ -25,6 +25,55 @@ pub enum HistoryRequest {
         sequence: u64,
         cursor: HistoryCursor,
     },
+    Page {
+        session_id: String,
+        sequence: u64,
+        before: Option<HistoryCursor>,
+    },
+}
+
+impl HistoryRequest {
+    pub(crate) fn session_id(&self) -> &str {
+        match self {
+            Self::Search { session_id, .. }
+            | Self::Context { session_id, .. }
+            | Self::Page { session_id, .. } => session_id,
+        }
+    }
+
+    pub(crate) fn failed(self, message: String) -> HistoryReply {
+        match self {
+            Self::Search {
+                session_id,
+                sequence,
+                ..
+            } => HistoryReply::Search {
+                session_id,
+                sequence,
+                result: Err(message),
+            },
+            Self::Context {
+                session_id,
+                sequence,
+                cursor,
+            } => HistoryReply::Context {
+                session_id,
+                sequence,
+                cursor,
+                result: Err(message),
+            },
+            Self::Page {
+                session_id,
+                sequence,
+                before,
+            } => HistoryReply::Page {
+                session_id,
+                sequence,
+                before,
+                result: Err(message),
+            },
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -38,6 +87,12 @@ pub enum HistoryReply {
         session_id: String,
         sequence: u64,
         cursor: HistoryCursor,
+        result: Result<HistoryPage, String>,
+    },
+    Page {
+        session_id: String,
+        sequence: u64,
+        before: Option<HistoryCursor>,
         result: Result<HistoryPage, String>,
     },
 }
@@ -99,6 +154,27 @@ impl HistoryWorker {
                                 session_id,
                                 sequence,
                                 cursor,
+                                result,
+                            }
+                        }
+                        HistoryRequest::Page {
+                            session_id,
+                            sequence,
+                            before,
+                        } => {
+                            let result = reader
+                                .page(
+                                    &session_id,
+                                    HistoryPageInput {
+                                        before,
+                                        ..HistoryPageInput::default()
+                                    },
+                                )
+                                .map_err(|error| format!("{error:#}"));
+                            HistoryReply::Page {
+                                session_id,
+                                sequence,
+                                before,
                                 result,
                             }
                         }

@@ -468,6 +468,14 @@ fn read_focus(
 /// Read the window's persisted navigation and the entities along its active path.
 pub fn read_hierarchy(connection: &Connection, window_id: &str) -> Result<HierarchyResult> {
     let navigation = read_navigation(connection, window_id)?;
+    read_hierarchy_at(connection, navigation)
+}
+
+/// Resolve the active path of a window's temporary, in-memory navigation.
+pub fn read_hierarchy_at(
+    connection: &Connection,
+    navigation: WindowNavigation,
+) -> Result<HierarchyResult> {
     let workspace = match &navigation.active_workspace_id {
         Some(workspace_id) => connection
             .query_row(

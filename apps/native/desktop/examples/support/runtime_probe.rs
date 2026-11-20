@@ -26,6 +26,12 @@ impl ProbeReceiver {
             message: "probe read-only recovery".into(),
         });
     }
+    #[allow(dead_code)]
+    pub(super) fn read_only_mode(&self, generation: u64) {
+        let mut state = self.shared.state.lock().unwrap();
+        state.generation = generation;
+        state.phase = ConnectionPhase::ReadOnly { pending: None };
+    }
     pub(super) fn database_recovery(&self, generation: u64, details: Arc<DatabaseRecoveryDetails>) {
         let mut state = self.shared.state.lock().unwrap();
         state.generation = generation;

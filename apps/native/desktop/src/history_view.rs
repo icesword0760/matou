@@ -1,7 +1,7 @@
 use std::{cell::Cell, ops::Range, rc::Rc};
 
 use gpui::{prelude::*, *};
-use matou_native_runtime::history::HistoryPage;
+use matou_native_runtime::history::{HistoryCursor as HistoryPageCursor, HistoryPage};
 
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -18,10 +18,20 @@ pub enum HistoryViewState {
         result_count: usize,
         page: HistoryPage,
     },
+    /// Journal history read without a PTY. Pagination is driven by the two
+    /// explicit actions; there is no live terminal to return to.
+    Offline {
+        page: Option<HistoryPage>,
+        pending: bool,
+        show_latest: bool,
+        error: Option<String>,
+    },
 }
 
 pub enum HistoryViewEvent {
     ReturnToLive,
+    OlderPage(HistoryPageCursor),
+    LatestPage,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -76,6 +86,28 @@ impl SelectableText {
 
 const RETURN_LABEL: usize = 3;
 
+const OFFLINE_OLDER_LABEL: usize = 2;
+const OFFLINE_LATEST_LABEL: usize = 3;
+const OFFLINE_EMPTY: &str = "暂无历史记录";
+const OFFLINE_LOADING: &str = "正在读取历史记录…";
+const OFFLINE_OLDER: &str = "加载更早记录";
+const OFFLINE_LATEST: &str = "返回最新记录";
+
+#[derive(Clone, Copy)]
+enum PageAction {
+    Older(HistoryPageCursor),
+    Latest,
+}
+
+impl PageAction {
+    fn event(self) -> HistoryViewEvent {
+        match self {
+            Self::Older(cursor) => HistoryViewEvent::OlderPage(cursor),
+            Self::Latest => HistoryViewEvent::LatestPage,
+        }
+    }
+}
+
 /// A read-only overlay. The live surface remains owned by the workspace.
 pub struct HistoryView {
     pub focus: FocusHandle,
@@ -84,6 +116,8 @@ pub struct HistoryView {
     entries: Vec<SelectableText>,
     body_entries: Range<usize>,
     return_bounds: BoundsHandle,
+    older_focus: FocusHandle,
+    latest_focus: FocusHandle,
     selection: Option<TextSelection>,
     drag: Option<SelectionDrag>,
     drag_frame_pending: bool,
@@ -120,6 +154,8 @@ impl HistoryView {
             entries: Vec::new(),
             body_entries: 0..0,
             return_bounds: BoundsHandle::default(),
+            older_focus: cx.focus_handle().tab_stop(true),
+            latest_focus: cx.focus_handle().tab_stop(true),
             selection: None,
             drag: None,
             drag_frame_pending: false,
@@ -131,6 +167,10 @@ impl HistoryView {
     }
 
     pub fn set_state(&mut self, state: HistoryViewState, cx: &mut Context<Self>) {
+        if matches!(&state, HistoryViewState::Offline { .. }) {
+            self.set_offline_state(state, cx);
+            return;
+        }
         self.center_on_anchor =
             matches!(&state, HistoryViewState::Ready { page, .. } if page.anchor_index.is_some());
         self.scroll.set_offset(Point::default());
@@ -145,6 +185,9 @@ impl HistoryView {
                 result_count,
                 page,
             } => (*result_index, *result_count, Some(page), page.gaps.len()),
+            HistoryViewState::Offline { .. } => {
+                unreachable!("offline history is handled before the live state")
+            }
         };
 
         // Keep the same text order as the panel's block and flex children.
@@ -193,6 +236,88 @@ impl HistoryView {
         cx.notify();
     }
 
+    fn set_offline_state(&mut self, state: HistoryViewState, cx: &mut Context<Self>) {
+        let HistoryViewState::Offline {
+            page,
+            pending,
+            show_latest,
+            error,
+        } = &state
+        else {
+            return;
+        };
+        let same_page = self.is_offline() && self.page() == page.as_ref();
+        let previous_body = self.body_entries.clone();
+        let previous_entries = std::mem::replace(
+            &mut self.entries,
+            vec![
+                SelectableText::new("历史记录"),
+                SelectableText::new("只读"),
+                SelectableText::new(OFFLINE_OLDER),
+            ],
+        );
+        if *show_latest {
+            self.entries.push(SelectableText::new(OFFLINE_LATEST));
+        }
+        let body_start = self.entries.len();
+        if let Some(page) = page.as_ref().filter(|page| !page.lines.is_empty()) {
+            self.entries.extend(page.lines.iter().map(|line| {
+                SelectableText::new(if line.text.is_empty() {
+                    " "
+                } else {
+                    &line.text
+                })
+            }));
+        } else {
+            let status = if *pending {
+                OFFLINE_LOADING
+            } else if let Some(error) = error {
+                error.as_str()
+            } else {
+                OFFLINE_EMPTY
+            };
+            self.entries.push(SelectableText::new(status));
+        }
+        self.body_entries = body_start..self.entries.len();
+        if let Some(page) = page {
+            if !page.gaps.is_empty() {
+                self.entries.push(SelectableText::new(format!(
+                    "{} 处历史缺口",
+                    page.gaps.len()
+                )));
+            }
+            if !page.lines.is_empty() {
+                if let Some(error) = error {
+                    self.entries.push(SelectableText::new(error.as_str()));
+                }
+            }
+        }
+
+        if !same_page {
+            self.scroll.set_offset(Point::default());
+            self.center_on_anchor = page
+                .as_ref()
+                .is_some_and(|page| page.anchor_index.is_some());
+            if !show_latest && page.as_ref().is_some_and(|page| !page.lines.is_empty()) {
+                self.scroll.scroll_to_bottom();
+            }
+        }
+        let same_layout = same_page
+            && previous_body == self.body_entries
+            && previous_entries.len() == self.entries.len()
+            && previous_entries
+                .iter()
+                .zip(&self.entries)
+                .all(|(left, right)| left.source == right.source);
+        self.return_bounds.set(None);
+        if !same_layout {
+            self.selection = None;
+        }
+        self.stop_drag();
+        self.state = Some(state);
+        cx.notify();
+    }
+
     fn selection_after_state(
         &self,
         previous_entries: &[SelectableText],
@@ -221,14 +346,14 @@ impl HistoryView {
             } else {
                 let previous_page = self.page()?;
                 let page = page?;
-                let previous_lines = history_line_entries(previous_body.start, previous_page);
+                let previous_lines = history_line_entries(previous_body.start, previous_page, true);
                 if !previous_lines.contains(&row) {
                     return None;
                 }
                 // The frozen view keys each row by archive cursor, even if its position changes.
                 let cursor = previous_page.lines[row - previous_lines.start].cursor;
                 let index = page.lines.iter().position(|line| line.cursor == cursor)?;
-                Some(history_line_entries(self.body_entries.start, page).start + index)
+                Some(history_line_entries(self.body_entries.start, page, true).start + index)
             }
         };
         let remap = |point: TextPoint| {
@@ -245,7 +370,42 @@ impl HistoryView {
     fn page(&self) -> Option<&HistoryPage> {
         match &self.state {
             Some(HistoryViewState::Ready { page, .. }) => Some(page),
+            Some(HistoryViewState::Offline {
+                page: Some(page), ..
+            }) => Some(page),
             _ => None,
+        }
+    }
+
+    fn is_offline(&self) -> bool {
+        matches!(&self.state, Some(HistoryViewState::Offline { .. }))
+    }
+
+    fn scrolls_body(&self) -> bool {
+        match &self.state {
+            Some(HistoryViewState::Ready { .. }) => true,
+            Some(HistoryViewState::Offline {
+                page: Some(page), ..
+            }) => !page.lines.is_empty(),
+            _ => false,
+        }
+    }
+
+    fn body_leading_boundary(&self) -> bool {
+        match &self.state {
+            Some(HistoryViewState::Offline { .. }) => false,
+            _ => self
+                .page()
+                .is_some_and(|page| page.has_more_before == Some(true)),
+        }
+    }
+
+    fn is_button_entry(&self, index: usize) -> bool {
+        match &self.state {
+            Some(HistoryViewState::Offline { show_latest, .. }) => {
+                index == OFFLINE_OLDER_LABEL || (*show_latest && index == OFFLINE_LATEST_LABEL)
+            }
+            _ => index == RETURN_LABEL,
         }
     }
 
@@ -267,7 +427,7 @@ impl HistoryView {
         unit: SelectionUnit,
         starting: bool,
     ) -> Option<TextPoint> {
-        let scrolling = self.page().is_some();
+        let scrolling = self.scrolls_body();
         let body = if scrolling {
             self.scroll.bounds()
         } else {
@@ -276,7 +436,8 @@ impl HistoryView {
         let row = if position.y < body.top() {
             self.text_at_x(0..self.body_entries.start, position.x)?
         } else if position.y >= body.bottom() {
-            self.text_at_x(self.body_entries.end..self.entries.len(), position.x)?
+            self.text_at_x(self.body_entries.end..self.entries.len(), position.x)
+                .or_else(|| (self.is_offline() && !starting).then(|| self.body_entries.end - 1))?
         } else {
             let entries = &self.entries[self.body_entries.clone()];
             let last = entries.len().checked_sub(1)?;
@@ -328,7 +489,9 @@ impl HistoryView {
     fn unit_range(&self, point: TextPoint, unit: SelectionUnit) -> Range<TextPoint> {
         if matches!(unit, SelectionUnit::Line)
             && self.page().is_some_and(|page| {
-                history_line_entries(self.body_entries.start, page).next_back() == Some(point.row)
+                history_line_entries(self.body_entries.start, page, self.body_leading_boundary())
+                    .next_back()
+                    == Some(point.row)
             })
         {
             // End at the start of the next block to include the final line break.
@@ -402,7 +565,7 @@ impl HistoryView {
             initial,
             unit,
             position: None,
-            scroll_body: self.page().is_some() && self.body_entries.contains(&point.row),
+            scroll_body: self.scrolls_body() && self.body_entries.contains(&point.row),
         });
         cx.stop_propagation();
         cx.notify();
@@ -521,9 +684,10 @@ impl HistoryView {
             if row != selection.start.row {
                 text.push('\n');
             }
-            let line = &self.entries[row].source;
-            if let Some(range) = selected_bytes(&selection, row, line.len()) {
-                text.push_str(&line[range]);
+            if let Some(entry) = self.entries.get(row)
+                && let Some(range) = selected_bytes(&selection, row, entry.source.len())
+            {
+                text.push_str(&entry.source[range]);
             }
         }
         Some(text)
@@ -536,9 +700,9 @@ impl HistoryView {
     ) -> impl Iterator<Item = AnyElement> + use<> {
         let entry = &self.entries[index];
         let geometry = entry.geometry.clone();
-        let continues = self
-            .selection
-            .is_some_and(|selection| index < selection.ordered().end.row && index != RETURN_LABEL);
+        let continues = self.selection.is_some_and(|selection| {
+            index < selection.ordered().end.row && !self.is_button_entry(index)
+        });
         let highlight = self
             .selection
             .and_then(|selection| selected_bytes(&selection.ordered(), index, entry.source.len()))
@@ -590,7 +754,24 @@ impl HistoryView {
         highlight.into_iter().chain(std::iter::once(text))
     }
 
-    fn heading(&self, selection_background: Rgba, cx: &mut Context<Self>) -> Div {
+    fn heading(&self, selection_background: Rgba, cx: &mut Context<Self>) -> AnyElement {
+        if let Some(HistoryViewState::Offline {
+            page,
+            pending,
+            show_latest,
+            ..
+        }) = &self.state
+        {
+            return self
+                .offline_heading(
+                    page.as_ref(),
+                    *pending,
+                    *show_latest,
+                    selection_background,
+                    cx,
+                )
+                .into_any_element();
+        }
         let focus = self.focus.clone();
         let return_bounds = self.return_bounds.clone();
         let return_button = div()
@@ -682,17 +863,190 @@ impl HistoryView {
                     ),
             )
             .child(return_button)
+            .into_any_element()
+    }
+
+    fn offline_heading(
+        &self,
+        page: Option<&HistoryPage>,
+        pending: bool,
+        show_latest: bool,
+        selection_background: Rgba,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let older_cursor = page.and_then(offline_older_cursor);
+        let older = self.pagination_button(
+            "history-offline-older",
+            "history-offline-older-page",
+            OFFLINE_OLDER_LABEL,
+            older_cursor.map(PageAction::Older),
+            older_cursor.is_some() && !pending,
+            &self.older_focus,
+            selection_background,
+            cx,
+        );
+        let latest = show_latest.then(|| {
+            self.pagination_button(
+                "history-offline-latest",
+                "history-offline-latest-page",
+                OFFLINE_LATEST_LABEL,
+                Some(PageAction::Latest),
+                !pending,
+                &self.latest_focus,
+                selection_background,
+                cx,
+            )
+        });
+        let actions = div()
+            .id("history-offline-actions")
+            .debug_selector(|| "history-offline-actions".to_owned())
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(6.))
+            .child(older)
+            .children(latest);
+
+        div()
+            .id("history-offline-heading")
+            .debug_selector(|| "history-offline-heading".to_owned())
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_between()
+            .gap(px(12.))
+            .px(px(12.))
+            .py(px(9.))
+            .border_b_1()
+            .border_color(rgba(0x3038481f))
+            .bg(rgb(0xeef1f6))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .min_w_0()
+                    .gap(px(9.))
+                    .whitespace_nowrap()
+                    .child(
+                        div()
+                            .id("history-offline-title")
+                            .debug_selector(|| "history-offline-title".to_owned())
+                            .relative()
+                            .text_color(rgb(0x202735))
+                            .font_weight(FontWeight::BOLD)
+                            .children(self.selectable_text(0, selection_background)),
+                    )
+                    .child(
+                        div()
+                            .id("history-offline-read-only")
+                            .debug_selector(|| "history-offline-read-only".to_owned())
+                            .relative()
+                            .px(px(6.))
+                            .py(px(1.))
+                            .rounded(px(4.))
+                            .text_color(rgb(0xc98a39))
+                            .bg(rgba(0xc98a3921))
+                            .children(self.selectable_text(1, selection_background)),
+                    ),
+            )
+            .child(actions)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn pagination_button(
+        &self,
+        id: &'static str,
+        selector: &'static str,
+        label_index: usize,
+        action: Option<PageAction>,
+        enabled: bool,
+        focus: &FocusHandle,
+        selection_background: Rgba,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let button = div()
+            .id(id)
+            .debug_selector(move || selector.to_owned())
+            .relative()
+            .flex_none()
+            .px(px(9.))
+            .py(px(4.))
+            .border_1()
+            .border_color(rgba(0x30384829))
+            .rounded(px(6.))
+            .bg(rgba(0x3038480d))
+            .whitespace_nowrap()
+            .children(self.selectable_text(label_index, selection_background));
+        if !enabled {
+            return button
+                .opacity(0.55)
+                .cursor(CursorStyle::OperationNotAllowed)
+                .on_mouse_down(MouseButton::Left, |_, window, cx| {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                });
+        }
+        let action = action.expect("enabled history pagination has a cursor");
+        let focus = focus.clone();
+        let mouse_focus = focus.clone();
+        let key_focus = focus.clone();
+        button
+            .hover(|style| style.bg(rgba(0x30384817)))
+            .cursor_pointer()
+            .track_focus(&focus)
+            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                window.focus(&mouse_focus);
+                window.prevent_default();
+                cx.stop_propagation();
+            })
+            .on_key_down(cx.listener(move |_, event: &KeyDownEvent, _, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space")
+                    && !event.keystroke.modifiers.modified()
+                {
+                    cx.stop_propagation();
+                    cx.emit(action.event());
+                }
+            }))
+            .on_click(cx.listener(move |_, event, _, cx| {
+                if matches!(event, ClickEvent::Keyboard(_)) {
+                    return;
+                }
+                cx.stop_propagation();
+                cx.emit(action.event());
+            }))
+            .child(
+                canvas(
+                    |_, _, _| (),
+                    move |bounds, _, window, _| {
+                        if key_focus.is_focused(window) {
+                            window.paint_quad(
+                                outline(
+                                    bounds.dilate(px(3.)),
+                                    rgb(0x548cff),
+                                    BorderStyle::default(),
+                                )
+                                .corner_radii(px(9.))
+                                .border_widths(px(2.)),
+                            );
+                        }
+                    },
+                )
+                .absolute()
+                .inset_0()
+                .size_full(),
+            )
     }
 
     fn body(
         &self,
         page: &HistoryPage,
         selection_background: Rgba,
+        boundaries: bool,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let view = cx.entity().downgrade();
-        let before = page.has_more_before == Some(true);
-        let line_start = history_line_entries(self.body_entries.start, page).start;
+        let before = boundaries && page.has_more_before == Some(true);
+        let line_start = history_line_entries(self.body_entries.start, page, boundaries).start;
         let rows = page.lines.iter().enumerate().map(|(index, _)| {
             let current = page.anchor_index == Some(index);
             let entry = line_start + index;
@@ -781,7 +1135,7 @@ impl HistoryView {
             .children(before.then(|| self.boundary(self.body_entries.start, selection_background)))
             .children(rows)
             .children(
-                (page.has_more_after == Some(true))
+                (boundaries && page.has_more_after == Some(true))
                     .then(|| self.boundary(self.body_entries.end - 1, selection_background)),
             )
     }
@@ -800,11 +1154,113 @@ impl HistoryView {
             .child(track_bounds(self.entries[index].bounds.clone()))
             .children(self.selectable_text(index, selection_background))
     }
+
+    fn offline_status(
+        &self,
+        error: bool,
+        selector: &'static str,
+        selection_background: Rgba,
+    ) -> AnyElement {
+        let entry = self.body_entries.start;
+        div()
+            .id(selector)
+            .debug_selector(move || selector.to_owned())
+            .relative()
+            .flex()
+            .flex_1()
+            .min_h_0()
+            .items_center()
+            .justify_center()
+            .px(px(24.))
+            .text_color(if error { rgb(0xa12525) } else { rgb(0x8d95a7) })
+            .whitespace_normal()
+            .child(track_bounds(self.entries[entry].bounds.clone()))
+            .child(
+                div()
+                    .relative()
+                    .children(self.selectable_text(entry, selection_background)),
+            )
+            .into_any_element()
+    }
+
+    fn offline_footer(
+        &self,
+        page: Option<&HistoryPage>,
+        error: Option<&str>,
+        selection_background: Rgba,
+    ) -> Option<Stateful<Div>> {
+        let page = page?;
+        let show_gaps = !page.gaps.is_empty();
+        let show_error = !page.lines.is_empty() && error.is_some();
+        if !show_gaps && !show_error {
+            return None;
+        }
+        let gap_index = self.body_entries.end;
+        let error_index = gap_index + usize::from(show_gaps);
+        let mut children = Vec::new();
+        if show_gaps {
+            children.push(
+                div()
+                    .relative()
+                    .debug_selector(|| "history-offline-gaps".to_owned())
+                    .children(self.selectable_text(gap_index, selection_background))
+                    .into_any_element(),
+            );
+        }
+        if show_error {
+            children.push(
+                div()
+                    .relative()
+                    .debug_selector(|| "history-offline-footer-error".to_owned())
+                    .flex_1()
+                    .min_w_0()
+                    .whitespace_normal()
+                    .text_color(rgb(0xa12525))
+                    .children(self.selectable_text(error_index, selection_background))
+                    .into_any_element(),
+            );
+        }
+        Some(
+            div()
+                .id("history-offline-footer")
+                .debug_selector(|| "history-offline-footer".to_owned())
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap(px(12.))
+                .px(px(12.))
+                .py(px(9.))
+                .border_t_1()
+                .border_color(rgba(0x3038481f))
+                .bg(rgb(0xeef1f6))
+                .text_color(rgb(0x8d95a7))
+                .whitespace_nowrap()
+                .children(children),
+        )
+    }
 }
 
-fn history_line_entries(body_start: usize, page: &HistoryPage) -> Range<usize> {
-    let start = body_start + usize::from(page.has_more_before == Some(true));
+fn history_line_entries(
+    body_start: usize,
+    page: &HistoryPage,
+    leading_boundary: bool,
+) -> Range<usize> {
+    let start = body_start + usize::from(leading_boundary && page.has_more_before == Some(true));
     start..start + page.lines.len()
+}
+
+/// The cursor to page before. A search hit context carries newer lines after
+/// the anchor too, so only `has_more_before` may enable its older-page action.
+fn offline_older_cursor(page: &HistoryPage) -> Option<HistoryPageCursor> {
+    let has_earlier = if page.anchor_index.is_some() {
+        page.has_more_before == Some(true)
+    } else {
+        page.has_more || page.has_more_before == Some(true)
+    };
+    if !has_earlier {
+        return None;
+    }
+    page.lines.first().map(|line| line.cursor)
 }
 
 // Frozen Chromium 150's ordinary DOM selection scrolls a 1-device-pixel
@@ -978,6 +1434,71 @@ mod tests {
         }
 
         #[test]
+        fn offline_last_line_can_be_selected_and_copied_without_a_live_terminal() {
+            use gpui::{KeyDownEvent, Keystroke};
+            let mut cx = TestAppContext::single();
+            let window = cx.add_window(|_, cx| HistoryView::new(cx));
+            let HistoryViewState::Ready { mut page, .. } = ready(4, 5, false, false) else {
+                unreachable!()
+            };
+            page.gaps.clear();
+            page.has_more = true;
+            let cursor = page.lines[0].cursor;
+            window
+                .update(&mut cx, |view, window, cx| {
+                    view.set_state(
+                        HistoryViewState::Offline {
+                            page: Some(page),
+                            pending: false,
+                            show_latest: false,
+                            error: None,
+                        },
+                        cx,
+                    );
+                    assert_eq!(
+                        super::super::offline_older_cursor(view.page().unwrap()),
+                        Some(cursor)
+                    );
+                    assert!(
+                        !view
+                            .entries
+                            .iter()
+                            .any(|entry| entry.source == "返回实时终端")
+                    );
+                    let range = view.unit_range(
+                        TextPoint {
+                            row: view.body_entries.end - 1,
+                            byte: 1,
+                        },
+                        SelectionUnit::Line,
+                    );
+                    view.selection = Some(TextSelection {
+                        anchor: range.start,
+                        head: range.end,
+                    });
+                    assert_eq!(view.selected_text().as_deref(), Some("A中文🙂 é Z\n"));
+                    view.copy(
+                        &KeyDownEvent {
+                            keystroke: Keystroke::parse(if cfg!(target_os = "macos") {
+                                "cmd-c"
+                            } else {
+                                "ctrl-c"
+                            })
+                            .unwrap(),
+                            is_held: false,
+                        },
+                        window,
+                        cx,
+                    );
+                })
+                .unwrap();
+            assert_eq!(
+                cx.read_from_clipboard().unwrap().text().as_deref(),
+                Some("A中文🙂 é Z\n")
+            );
+        }
+
+        #[test]
         fn footer_selection_survives_loading_and_ready() {
             with_view(|view, cx| {
                 view.set_state(ready(1, 3, false, false), cx);
@@ -1079,8 +1600,14 @@ impl Render for HistoryView {
             ]);
         }
         let entity = cx.entity().downgrade();
-        let view = div()
-            .id("terminal-history-context")
+        let offline = self.is_offline();
+        let view = div().id("terminal-history-context");
+        let view = if offline {
+            view.debug_selector(|| "history-offline".to_owned())
+        } else {
+            view
+        };
+        let view = view
             .size_full()
             .min_w_0()
             .min_h_0()
@@ -1095,10 +1622,12 @@ impl Render for HistoryView {
             .track_focus(&self.text_focus)
             .on_mouse_down(MouseButton::Left, cx.listener(Self::begin_selection))
             .on_key_down(cx.listener(Self::copy))
-            .on_key_down(cx.listener(|_, event: &KeyDownEvent, _, cx| {
+            .on_key_down(cx.listener(move |_, event: &KeyDownEvent, _, cx| {
                 if event.keystroke.key == "escape" {
                     cx.stop_propagation();
-                    cx.emit(HistoryViewEvent::ReturnToLive);
+                    if !offline {
+                        cx.emit(HistoryViewEvent::ReturnToLive);
+                    }
                 }
             }))
             .child(
@@ -1149,9 +1678,34 @@ impl Render for HistoryView {
             selection_background
         };
         let heading = self.heading(selection_background, cx);
-        let body =
+        let body = if offline {
+            let (page, pending, error) = match &self.state {
+                Some(HistoryViewState::Offline {
+                    page,
+                    pending,
+                    error,
+                    ..
+                }) => (page.as_ref(), *pending, error.as_deref()),
+                _ => unreachable!("offline history state changed during render"),
+            };
+            if let Some(page) = page.filter(|page| !page.lines.is_empty()) {
+                self.body(page, selection_background, false, cx)
+                    .into_any_element()
+            } else {
+                let (is_error, selector) = if pending {
+                    (false, "history-offline-loading")
+                } else if error.is_some() {
+                    (true, "history-offline-error")
+                } else {
+                    (false, "history-offline-empty")
+                };
+                self.offline_status(is_error, selector, selection_background)
+            }
+        } else {
             match self.page() {
-                Some(page) => self.body(page, selection_background, cx).into_any_element(),
+                Some(page) => self
+                    .body(page, selection_background, true, cx)
+                    .into_any_element(),
                 None => div()
                     .relative()
                     .flex()
@@ -1166,26 +1720,41 @@ impl Render for HistoryView {
                         self.selectable_text(self.body_entries.start, selection_background),
                     ))
                     .into_any_element(),
+            }
+        };
+        let mut view = view.child(heading).child(body);
+        if offline {
+            let (page, error) = match &self.state {
+                Some(HistoryViewState::Offline { page, error, .. }) => {
+                    (page.as_ref(), error.as_deref())
+                }
+                _ => unreachable!("offline history state changed during render"),
             };
-        view.child(heading).child(body).child(
-            div()
-                .flex()
-                .flex_none()
-                .items_center()
-                .gap(px(12.))
-                .px(px(12.))
-                .py(px(9.))
-                .border_t_1()
-                .border_color(rgba(0x3038481f))
-                .bg(rgb(0xeef1f6))
-                .text_color(rgb(0x8d95a7))
-                .whitespace_nowrap()
-                .children((self.body_entries.end..self.entries.len()).map(|index| {
-                    div()
-                        .relative()
-                        .children(self.selectable_text(index, selection_background))
-                })),
-        )
+            if let Some(footer) = self.offline_footer(page, error, selection_background) {
+                view = view.child(footer);
+            }
+        } else {
+            view = view.child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(12.))
+                    .px(px(12.))
+                    .py(px(9.))
+                    .border_t_1()
+                    .border_color(rgba(0x3038481f))
+                    .bg(rgb(0xeef1f6))
+                    .text_color(rgb(0x8d95a7))
+                    .whitespace_nowrap()
+                    .children((self.body_entries.end..self.entries.len()).map(|index| {
+                        div()
+                            .relative()
+                            .children(self.selectable_text(index, selection_background))
+                    })),
+            );
+        }
+        view
     }
 }
 

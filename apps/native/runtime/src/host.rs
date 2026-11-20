@@ -35,7 +35,8 @@ use matou_native_core::{
     backup::BackupReason,
     database_recovery::{RECOVERY_ID_CHANGED, RecoveryActions},
     hierarchy::{
-        self, BootstrapWindowInput, HierarchyIds, HierarchyResult, Scene, Task, Workspace,
+        self, BootstrapWindowInput, HierarchyIds, HierarchyResult, Scene, Task, WindowNavigation,
+        Workspace,
         canvas::{
             CanvasError, CanvasIds, CanvasMessages, CreateCanvasInput, CreateShellSiblingInput,
             ForkSessionInput,
@@ -57,7 +58,7 @@ use matou_native_core::{
         read_claude_role_assignments, read_claude_role_launch_preferences,
         save_claude_role_assignments,
     },
-    startup::{self, BootstrapResult, RecoveryError, RecoveryRequired},
+    startup::{self, BootstrapResult, ReadOnlyReason, RecoveryError, RecoveryRequired},
     storage::{CommandMetadata, configure_connection},
     workspace_paths::WorkspacePathState,
 };
@@ -135,6 +136,10 @@ pub enum Command {
         action: DatabaseRecoveryAction,
     },
     History(HistoryRequest),
+    ReadOnlyQuery {
+        request_id: u64,
+        query: ReadOnlyQuery,
+    },
     GetClaudeModelCatalog {
         request_id: u64,
     },
@@ -407,9 +412,75 @@ pub struct StartupBlock {
 }
 
 pub const STORAGE_RECOVERY_WAITING: &str = "STORAGE_READ_ONLY: database is waiting for recovery";
+pub const STORAGE_READ_ONLY: &str = "STORAGE_READ_ONLY";
+pub const STORAGE_READ_ONLY_MESSAGE: &str =
+    "STORAGE_READ_ONLY: database is open in read-only recovery mode";
+pub const STORAGE_READ_ONLY_TITLE: &str = "数据库处于只读恢复模式";
 pub const DATABASE_RECOVERY_INTERRUPTED: &str = "数据库恢复操作未完成：Runtime 在恢复操作期间退出";
 pub const DATABASE_RECOVERY_NOT_PENDING: &str = "当前没有待处理的数据库恢复操作";
 pub const DATABASE_RECOVERY_BUSY: &str = "正在处理数据库恢复，请保持 Matou 开启…";
+
+const MAIN_WINDOW_ID: &str = "main-window-1";
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum StoragePhase {
+    Writable,
+    Recovery,
+    ReadOnly,
+}
+
+impl StoragePhase {
+    pub fn accepts(self, command: &Command) -> bool {
+        match (self, command) {
+            (_, Command::Shutdown) => true,
+            (Self::Writable, Command::DatabaseRecovery { .. } | Command::ReadOnlyQuery { .. }) => {
+                false
+            }
+            (Self::Writable, _) | (Self::Recovery, Command::DatabaseRecovery { .. }) => true,
+            (Self::ReadOnly, Command::ReadOnlyQuery { .. } | Command::History(_)) => true,
+            (
+                Self::ReadOnly,
+                Command::DatabaseRecovery {
+                    action: DatabaseRecoveryAction::ExportRecoveryBundle,
+                    ..
+                },
+            ) => true,
+            _ => false,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+pub enum ReadOnlyQuery {
+    Workspace {
+        workspace_id: String,
+    },
+    Task {
+        task_id: String,
+    },
+    Scene {
+        scene_id: String,
+    },
+    Session {
+        scene_id: String,
+        session_id: String,
+    },
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct ReadOnlyNavigation {
+    pub hierarchy: HierarchyResult,
+    pub scenes: Vec<Scene>,
+    pub graph: Value,
+    pub geometry: Vec<matou_native_core::geometry::GeometryUpdate>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct ReadOnlyProjection {
+    pub workspaces: Vec<Workspace>,
+    pub tasks: Vec<Task>,
+    pub active: ReadOnlyNavigation,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -561,7 +632,16 @@ pub enum Event {
     DatabaseRecoveryResult(DatabaseRecoveryResult),
     StorageCommandRejected {
         request_id: Option<u64>,
+        code: String,
         message: String,
+    },
+    ReadOnlyReady {
+        reason: ReadOnlyReason,
+        projection: Result<ReadOnlyProjection, String>,
+    },
+    ReadOnlyQueryResult {
+        request_id: u64,
+        result: Result<ReadOnlyNavigation, String>,
     },
     History(HistoryReply),
     SearchResults {
@@ -859,18 +939,24 @@ fn recovery_result(
     Ok(())
 }
 
-fn reject_storage_command(command: Command, send: &async_channel::Sender<Event>) -> Result<()> {
+pub fn storage_command_rejected(command: Command, code: &str, message: &str) -> Event {
     if let Command::DatabaseRecovery { request_id, .. } = command {
-        return recovery_result(
-            send,
-            DatabaseRecoveryResult::failed(
-                request_id,
-                "RECOVERY_NOT_PENDING",
-                DATABASE_RECOVERY_NOT_PENDING,
-            ),
-        );
+        let mut result = DatabaseRecoveryResult::failed(request_id, code, message);
+        if code == STORAGE_READ_ONLY {
+            result.error.as_mut().unwrap().retryable = false;
+        }
+        return Event::DatabaseRecoveryResult(result);
     }
-    let request_id = match command {
+    if let Command::ReadOnlyQuery { request_id, .. } = command {
+        return Event::ReadOnlyQueryResult {
+            request_id,
+            result: Err(message.into()),
+        };
+    }
+    if let Command::History(request) = command {
+        return Event::History(request.failed(message.into()));
+    }
+    let request_id = match &command {
         Command::GetClaudeModelCatalog { request_id }
         | Command::GetClaudeRoleAssignments { request_id }
         | Command::SetClaudeRoleAssignments { request_id, .. }
@@ -880,19 +966,17 @@ fn reject_storage_command(command: Command, send: &async_channel::Sender<Event>)
         | Command::SetActiveProvider { request_id, .. }
         | Command::ConfirmAntigravityRisk { request_id }
         | Command::CopySelection { request_id, .. }
-        | Command::ScrollTo { request_id, .. } => Some(request_id),
-        Command::History(
-            HistoryRequest::Search { sequence, .. } | HistoryRequest::Context { sequence, .. },
-        )
-        | Command::PutGeometry { sequence, .. }
-        | Command::Applied { sequence, .. } => Some(sequence),
+        | Command::ScrollTo { request_id, .. } => Some(*request_id),
+        Command::PutGeometry { sequence, .. } | Command::Applied { sequence, .. } => {
+            Some(*sequence)
+        }
         _ => None,
     };
-    send.send_blocking(Event::StorageCommandRejected {
+    Event::StorageCommandRejected {
         request_id,
-        message: STORAGE_RECOVERY_WAITING.into(),
-    })?;
-    Ok(())
+        code: code.into(),
+        message: message.into(),
+    }
 }
 
 type WritableDatabase = (
@@ -963,6 +1047,13 @@ fn await_database_recovery(
                 Err(mpsc::RecvTimeoutError::Disconnected) | Ok(Command::Shutdown) => {
                     closing = true;
                 }
+                Ok(command) if !StoragePhase::Recovery.accepts(&command) => {
+                    send.send_blocking(storage_command_rejected(
+                        command,
+                        STORAGE_READ_ONLY,
+                        STORAGE_RECOVERY_WAITING,
+                    ))?;
+                }
                 Ok(Command::DatabaseRecovery { request_id, action }) => {
                     let reject = if active.is_some() {
                         Some(("RECOVERY_BUSY", DATABASE_RECOVERY_BUSY))
@@ -1016,7 +1107,7 @@ fn await_database_recovery(
                         .context("start database recovery worker")?;
                     active = Some((request_id, worker));
                 }
-                Ok(command) => reject_storage_command(command, send)?,
+                Ok(_) => unreachable!("only recovery commands passed the storage gate"),
             }
         }
     })
@@ -1065,14 +1156,11 @@ fn run(
             ownership,
             data_root,
         } => ((connection, ownership, data_root), None),
-        BootstrapResult::ReadOnly { reason, .. } => {
-            let message = format!("Native startup requires the recovery interface: {reason:?}");
-            let _ = send.send_blocking(Event::StartupBlocked(StartupBlock {
-                kind: StartupBlockKind::ReadOnly,
-                message: message.clone(),
-            }));
-            bail!(message)
-        }
+        BootstrapResult::ReadOnly {
+            connection,
+            data_root,
+            reason,
+        } => return run_read_only(connection, data_root, reason, incoming, send),
         BootstrapResult::RecoveryRequired(recovery) => {
             let Some((database, request_id)) =
                 await_database_recovery(recovery, &generation, &incoming, send)?
@@ -1103,6 +1191,334 @@ fn run(
     result
 }
 
+fn run_read_only(
+    connection: Connection,
+    data_root: PathBuf,
+    reason: ReadOnlyReason,
+    incoming: Receiver<Command>,
+    send: &async_channel::Sender<Event>,
+) -> Result<()> {
+    let history = HistoryWorker::new(data_root.clone())?;
+    let (workspace, projection) = match ReadOnlyWorkspace::new(&connection) {
+        Ok((workspace, active)) => {
+            let projection = ReadOnlyProjection {
+                workspaces: workspace.workspaces.clone(),
+                tasks: workspace.tasks.clone(),
+                active,
+            };
+            (Ok(workspace), Ok(projection))
+        }
+        Err(error) => {
+            let message = format!("{error:#}");
+            (Err(message.clone()), Err(message))
+        }
+    };
+    send.send_blocking(Event::ReadOnlyReady { reason, projection })?;
+    thread::scope(|scope| -> Result<()> {
+        let mut export: Option<(String, thread::ScopedJoinHandle<'_, Result<PathBuf>>)> = None;
+        let mut pending_history = 0;
+        loop {
+            while let Some(reply) = history.try_recv()? {
+                pending_history -= 1;
+                send.send_blocking(Event::History(reply))?;
+            }
+            if export.as_ref().is_some_and(|(_, job)| job.is_finished()) {
+                let (request_id, job) = export.take().unwrap();
+                let result = job
+                    .join()
+                    .map_err(|_| anyhow!("database export worker panicked"))?;
+                recovery_result(
+                    send,
+                    match result {
+                        Ok(path) => DatabaseRecoveryResult {
+                            request_id,
+                            exported_path: Some(path),
+                            error: None,
+                        },
+                        Err(error) => DatabaseRecoveryResult::failed(
+                            request_id,
+                            "DATABASE_EXPORT_FAILED",
+                            format!("{error:#}"),
+                        ),
+                    },
+                )?;
+            }
+            let received = if export.is_some() || pending_history != 0 {
+                incoming.recv_timeout(Duration::from_millis(10))
+            } else {
+                incoming
+                    .recv()
+                    .map_err(|_| mpsc::RecvTimeoutError::Disconnected)
+            };
+            let command = match received {
+                Ok(Command::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Ok(command) => command,
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            };
+            if !StoragePhase::ReadOnly.accepts(&command) {
+                send.send_blocking(storage_command_rejected(
+                    command,
+                    STORAGE_READ_ONLY,
+                    STORAGE_READ_ONLY_MESSAGE,
+                ))?;
+                continue;
+            }
+            match command {
+                Command::ReadOnlyQuery { request_id, query } => {
+                    let result = match &workspace {
+                        Ok(workspace) => workspace
+                            .navigate(query)
+                            .map_err(|error| format!("{error:#}")),
+                        Err(error) => Err(error.clone()),
+                    };
+                    send.send_blocking(Event::ReadOnlyQueryResult { request_id, result })?;
+                }
+                Command::History(request) => {
+                    let id = request.session_id();
+                    match matou_native_core::sessions::get_session(&connection, id)
+                        .and_then(|session| session.with_context(|| format!("会话不存在：{id}")))
+                    {
+                        Ok(_) => {
+                            history.send(request)?;
+                            pending_history += 1;
+                        }
+                        Err(error) => send
+                            .send_blocking(Event::History(request.failed(format!("{error:#}"))))?,
+                    }
+                }
+                Command::DatabaseRecovery { request_id, .. } => {
+                    if export.is_some() {
+                        recovery_result(
+                            send,
+                            DatabaseRecoveryResult::failed(
+                                request_id,
+                                "RECOVERY_BUSY",
+                                DATABASE_RECOVERY_BUSY,
+                            ),
+                        )?;
+                    } else if Uuid::parse_str(&request_id).is_err() {
+                        recovery_result(
+                            send,
+                            DatabaseRecoveryResult::failed(
+                                request_id,
+                                "RECOVERY_REQUEST_ID_INVALID",
+                                "无效的数据库恢复请求编号",
+                            ),
+                        )?;
+                    } else {
+                        let root = &data_root;
+                        let job = thread::Builder::new()
+                            .name("matou-read-only-export".into())
+                            .spawn_scoped(scope, move || {
+                                crate::readonly_export::export(root, now())
+                            });
+                        match job {
+                            Ok(job) => export = Some((request_id, job)),
+                            Err(error) => recovery_result(
+                                send,
+                                DatabaseRecoveryResult::failed(
+                                    request_id,
+                                    "DATABASE_EXPORT_FAILED",
+                                    error.to_string(),
+                                ),
+                            )?,
+                        }
+                    }
+                }
+                _ => unreachable!("only read-only commands passed the storage gate"),
+            }
+        }
+        Ok(())
+    })?;
+    drop(workspace);
+    connection.close().map_err(|(_, error)| error)?;
+    Ok(())
+}
+
+struct ReadOnlyWorkspace<'a> {
+    connection: &'a Connection,
+    navigation: WindowNavigation,
+    workspaces: Vec<Workspace>,
+    tasks: Vec<Task>,
+}
+
+impl<'a> ReadOnlyWorkspace<'a> {
+    fn new(connection: &'a Connection) -> Result<(Self, ReadOnlyNavigation)> {
+        let hierarchy = hierarchy::read_hierarchy(connection, MAIN_WINDOW_ID)?;
+        let mut workspaces = workspaces::list_workspaces(connection)?;
+        sort_workspaces(&mut workspaces);
+        let mut tasks = Vec::new();
+        for workspace in &workspaces {
+            tasks.extend(tasks::list_tasks(
+                connection,
+                MAIN_WINDOW_ID,
+                &workspace.id,
+            )?);
+        }
+        let mut workspace = Self {
+            connection,
+            navigation: hierarchy.navigation,
+            workspaces,
+            tasks,
+        };
+        let initial = workspace.project(workspace.navigation.clone(), None)?;
+        workspace.navigation = initial.hierarchy.navigation.clone();
+        Ok((workspace, initial))
+    }
+
+    fn navigate(&self, query: ReadOnlyQuery) -> Result<ReadOnlyNavigation> {
+        let mut navigation = self.navigation.clone();
+        let mut required_session = None;
+        let selected_scene = match query {
+            ReadOnlyQuery::Workspace { workspace_id } => {
+                ensure!(
+                    self.workspaces
+                        .iter()
+                        .any(|workspace| workspace.id == workspace_id),
+                    "工作空间不存在：{workspace_id}"
+                );
+                navigation.active_workspace_id = Some(workspace_id);
+                None
+            }
+            ReadOnlyQuery::Task { task_id } => {
+                self.select_task(&mut navigation, &task_id)?;
+                None
+            }
+            ReadOnlyQuery::Scene { scene_id } => Some(scene_id),
+            ReadOnlyQuery::Session {
+                scene_id,
+                session_id,
+            } => {
+                navigation
+                    .session_by_scene
+                    .insert(scene_id.clone(), session_id.clone());
+                required_session = Some(session_id);
+                Some(scene_id)
+            }
+        };
+        if let Some(scene_id) = selected_scene {
+            let task_id: String = self
+                .connection
+                .query_row(
+                    "SELECT task_id FROM scenes WHERE id = ? AND archived_at IS NULL",
+                    [&scene_id],
+                    |row| row.get(0),
+                )
+                .with_context(|| format!("页签不存在或无法读取：{scene_id}"))?;
+            self.select_task(&mut navigation, &task_id)?;
+            navigation.scene_by_task.insert(task_id, scene_id);
+        }
+        self.project(navigation, required_session.as_deref())
+    }
+
+    fn select_task(&self, navigation: &mut WindowNavigation, task_id: &str) -> Result<()> {
+        let task = self
+            .tasks
+            .iter()
+            .find(|task| task.id == task_id)
+            .with_context(|| format!("事项不存在：{task_id}"))?;
+        navigation.active_workspace_id = Some(task.workspace_id.clone());
+        navigation
+            .task_by_workspace
+            .insert(task.workspace_id.clone(), task_id.into());
+        Ok(())
+    }
+
+    fn project(
+        &self,
+        mut navigation: WindowNavigation,
+        required_session: Option<&str>,
+    ) -> Result<ReadOnlyNavigation> {
+        let workspace = choose_read_only(
+            &self.workspaces,
+            navigation.active_workspace_id.as_ref(),
+            |w| &w.id,
+        );
+        navigation.active_workspace_id = workspace.map(|workspace| workspace.id.clone());
+        let mut scenes = Vec::new();
+        let mut graph = json!({"nodes": []});
+        let mut geometry = Vec::new();
+        if let Some(workspace) = workspace {
+            let tasks = self
+                .tasks
+                .iter()
+                .filter(|task| task.workspace_id == workspace.id);
+            let task = navigation
+                .task_by_workspace
+                .get(&workspace.id)
+                .and_then(|id| tasks.clone().find(|task| &task.id == id))
+                .or_else(|| tasks.clone().next());
+            if let Some(task) = task {
+                navigation
+                    .task_by_workspace
+                    .insert(workspace.id.clone(), task.id.clone());
+                scenes = hierarchy::list_scenes(self.connection, &task.id)?;
+                let scene =
+                    choose_read_only(&scenes, navigation.scene_by_task.get(&task.id), |s| &s.id);
+                if let Some(scene) = scene {
+                    navigation
+                        .scene_by_task
+                        .insert(task.id.clone(), scene.id.clone());
+                    graph = matou_native_core::session_graph::project_scene_graph(
+                        self.connection,
+                        &scene.id,
+                        None,
+                    )?;
+                    graph["workspaceSessionCount"] =
+                        json!(hierarchy::cards::scene_workspace_session_count(
+                            self.connection,
+                            &scene.id
+                        )?);
+                    let ids = graph["nodes"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter(|node| node["archivedAt"].is_null())
+                        .filter_map(|node| node["sessionId"].as_str());
+                    let session = navigation
+                        .session_by_scene
+                        .get(&scene.id)
+                        .and_then(|id| ids.clone().find(|session_id| *session_id == id))
+                        .or_else(|| ids.clone().next());
+                    if let Some(id) = required_session {
+                        ensure!(session == Some(id), "页签中没有该会话：{id}");
+                    }
+                    if let Some(id) = session {
+                        navigation
+                            .session_by_scene
+                            .insert(scene.id.clone(), id.into());
+                        graph["focusedSessionId"] = json!(id);
+                    } else {
+                        navigation.session_by_scene.remove(&scene.id);
+                    }
+                    geometry = matou_native_core::geometry::list(self.connection, &scene.id)?;
+                } else {
+                    navigation.scene_by_task.remove(&task.id);
+                }
+            } else {
+                navigation.task_by_workspace.remove(&workspace.id);
+            }
+        }
+        let hierarchy = hierarchy::read_hierarchy_at(self.connection, navigation)?;
+        Ok(ReadOnlyNavigation {
+            hierarchy,
+            scenes,
+            graph,
+            geometry,
+        })
+    }
+}
+
+fn choose_read_only<'a, T>(
+    items: &'a [T],
+    preferred: Option<&String>,
+    id: impl Fn(&T) -> &String,
+) -> Option<&'a T> {
+    preferred
+        .and_then(|preferred| items.iter().find(|item| id(item) == preferred))
+        .or_else(|| items.first())
+}
+
 fn run_writable(
     options: LaunchOptions,
     incoming: Receiver<Command>,
@@ -1121,7 +1537,7 @@ fn run_writable(
         }
     }
     let history = HistoryWorker::new(data_root.clone())?;
-    let window_id = "main-window-1";
+    let window_id = MAIN_WINDOW_ID;
     let input = BootstrapWindowInput {
         window_id: window_id.into(),
         default_root_directory: options.workspace.to_string_lossy().into_owned(),
@@ -1335,7 +1751,11 @@ fn run_writable(
                         DATABASE_RECOVERY_BUSY,
                     ),
                 )?,
-                command => reject_storage_command(command, send)?,
+                command => send.send_blocking(storage_command_rejected(
+                    command,
+                    STORAGE_READ_ONLY,
+                    STORAGE_RECOVERY_WAITING,
+                ))?,
             }
         }
     }
@@ -1746,6 +2166,14 @@ fn run_writable(
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => break 'running false,
             };
+            if !StoragePhase::Writable.accepts(&command) {
+                send.send_blocking(storage_command_rejected(
+                    command,
+                    "RECOVERY_NOT_PENDING",
+                    DATABASE_RECOVERY_NOT_PENDING,
+                ))?;
+                continue;
+            }
             if let Command::Input { session_id, .. } | Command::CopySelection { session_id, .. } =
                 &command
                 && let Some(pending) = shell_submissions.get_mut(session_id)
@@ -2086,9 +2514,8 @@ fn run_writable(
             }
             let (reply, result) = mpsc::channel();
             let (session_id, request, refresh) = match command {
-                Command::DatabaseRecovery { .. } => {
-                    reject_storage_command(command, send)?;
-                    continue;
+                Command::DatabaseRecovery { .. } | Command::ReadOnlyQuery { .. } => {
+                    unreachable!("storage-only commands cannot pass the writable gate");
                 }
                 Command::GetClaudeModelCatalog { request_id } => {
                     if model_catalog_worker.is_err()
@@ -4569,6 +4996,17 @@ fn send_sidebar(
     send: &async_channel::Sender<Event>,
 ) -> Result<()> {
     let mut workspaces = owner.workspaces()?;
+    sort_workspaces(&mut workspaces);
+    let mut tasks = Vec::new();
+    for workspace in &workspaces {
+        tasks.extend(owner.tasks(window_id, &workspace.id)?);
+    }
+    send.send_blocking(Event::Workspaces(workspaces))?;
+    send.send_blocking(Event::Tasks(tasks))?;
+    Ok(())
+}
+
+fn sort_workspaces(workspaces: &mut [Workspace]) {
     workspaces.sort_by(|left, right| {
         right
             .is_pinned
@@ -4585,13 +5023,6 @@ fn send_sidebar(
             })
             .then(left.id.cmp(&right.id))
     });
-    let mut tasks = Vec::new();
-    for workspace in &workspaces {
-        tasks.extend(owner.tasks(window_id, &workspace.id)?);
-    }
-    send.send_blocking(Event::Workspaces(workspaces))?;
-    send.send_blocking(Event::Tasks(tasks))?;
-    Ok(())
 }
 
 fn resolve_workspace_directory(directory: &str) -> Result<PathBuf> {

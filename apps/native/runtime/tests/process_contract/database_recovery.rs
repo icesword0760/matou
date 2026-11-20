@@ -1,10 +1,11 @@
 use super::*;
-use matou_native_core::ownership::DatabaseOwner;
+use matou_native_core::{ownership::DatabaseOwner, startup::ReadOnlyReason};
 use matou_native_runtime::host::{
     DatabaseRecoveryAction, DatabaseRecoveryDetails, DatabaseRecoveryReason,
-    DatabaseRecoveryResult, STORAGE_RECOVERY_WAITING, StartupBlockKind,
+    DatabaseRecoveryResult, ReadOnlyQuery, STORAGE_READ_ONLY, STORAGE_RECOVERY_WAITING,
     database_recovery_request_id,
 };
+use serde_json::Value;
 
 const MARKER: &str = "matou.sqlite.recovery.json";
 const DB: &str = "matou.sqlite";
@@ -187,7 +188,7 @@ fn damaged_database_retry_keeps_evidence_and_enters_ready_in_same_process() -> R
         matches!(event, Event::StorageCommandRejected { .. })
     })?;
     ensure!(matches!(rejected, Event::StorageCommandRejected {
-        request_id: Some(42), message,
+        request_id: Some(42), message, ..
     } if message == STORAGE_RECOVERY_WAITING));
     fence.execute_batch("ROLLBACK;")?;
     drop(fence);
@@ -272,45 +273,460 @@ fn ownership_retry_refuses_new_live_owner_and_archives_malformed_evidence() -> R
 }
 
 #[test]
-fn invalid_marker_and_permission_read_only_keep_existing_startup_paths() -> Result<()> {
-    for malformed in [true, false] {
-        let root = tempfile::tempdir()?;
-        let mut child = RuntimeChild::spawn(root.path())?;
-        let healthy = seed(&child.data)?;
-        let database = child.data.join(DB);
-        let marker = child.data.join(MARKER);
-        if malformed {
-            fs::write(&marker, b"{")?;
-        } else {
-            fs::set_permissions(&database, fs::Permissions::from_mode(0o444))?;
-            fs::set_permissions(&child.data, fs::Permissions::from_mode(0o555))?;
+fn invalid_marker_keeps_existing_startup_path() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let mut child = RuntimeChild::spawn(root.path())?;
+    let healthy = seed(&child.data)?;
+    let marker = child.data.join(MARKER);
+    fs::write(&marker, b"{")?;
+    hello(&mut child)?;
+    let event = next(&mut child, |event| matches!(event, Event::Diagnostic(_)))?;
+    ensure!(
+        matches!(event, Event::Diagnostic(text) if text.contains("recovery marker is invalid"))
+    );
+    ensure!(fs::read(&marker)? == b"{");
+    child.closed()?;
+    ensure!(!child.wait()?.0.success());
+    ensure!(fs::read(child.data.join(DB))? == healthy);
+    ensure!(!child.workspace.exists());
+    Ok(())
+}
+
+fn seed_read_only(data: &Path, newer: bool) -> Result<()> {
+    use matou_native_core::{
+        hierarchy::{self, BootstrapWindowInput, HierarchyIds, workspaces::CreateWorkspaceInput},
+        journal::{Frame, JournalOptions, Record, SegmentJournal},
+        storage::{CommandMetadata, configure_connection, migrate},
+    };
+    let ids = |suffix: &str| HierarchyIds {
+        workspace_id: format!("workspace-{suffix}"),
+        execution_context_id: format!("context-{suffix}"),
+        task_id: format!("task-{suffix}"),
+        scene_id: format!("scene-{suffix}"),
+        root_node_id: format!("root-{suffix}"),
+        session_id: format!("session-{suffix}"),
+        mount_id: format!("mount-{suffix}"),
+    };
+    let metadata = |name: &str| CommandMetadata {
+        command_id: name.into(),
+        command_type: name.into(),
+        request_hash: name.into(),
+        causation_id: None,
+        correlation_id: None,
+    };
+    fs::create_dir_all(data)?;
+    let scratch = tempfile::tempdir()?;
+    let source = scratch.path().join(DB);
+    let mut db = Connection::open(&source)?;
+    configure_connection(&db)?;
+    migrate(&mut db, 1)?;
+    let window_id = "main-window-1";
+    let root = data.parent().context("fixture root")?;
+    hierarchy::bootstrap_window(
+        &mut db,
+        &metadata("bootstrap"),
+        &BootstrapWindowInput {
+            window_id: window_id.into(),
+            default_root_directory: root.join("first").display().to_string(),
+            default_name: "第一工作空间".into(),
+            now: 2,
+        },
+        &ids("first"),
+        "第一事项",
+        2,
+    )?;
+    hierarchy::workspaces::create_workspace(
+        &mut db,
+        &metadata("create"),
+        &CreateWorkspaceInput {
+            window_id: window_id.into(),
+            name: "第二工作空间".into(),
+            root_directory: root.join("second").display().to_string(),
+            navigation: None,
+            now: 3,
+        },
+        &ids("second"),
+        "第二事项",
+        3,
+    )?;
+    matou_native_core::geometry::put(
+        &db,
+        &matou_native_core::geometry::GeometryUpdate {
+            scene_id: "scene-first".into(),
+            owner_key: "scene".into(),
+            layout_revision: 1.,
+            geometry: serde_json::json!({"scrollLeft": 11}),
+            now: 4,
+        },
+    )?;
+    if newer {
+        db.execute_batch(
+            "PRAGMA wal_checkpoint(TRUNCATE);
+             INSERT INTO schema_migrations (version, name, checksum, applied_at)
+             VALUES (999, 'newer', 'newer', 5);",
+        )?;
+        for name in [DB, "matou.sqlite-wal", "matou.sqlite-shm"] {
+            fs::copy(scratch.path().join(name), data.join(name))?;
         }
+        fs::write(
+            data.join("matou.sqlite.owner"),
+            br#"{"pid":9007199254740991,"runtimeGeneration":"expired-fixture"}"#,
+        )?;
+    } else {
+        db.close().map_err(|(_, error)| error)?;
+        fs::copy(source, data.join(DB))?;
+    }
+    let mut journal = SegmentJournal::open(data, "session-first", JournalOptions::default())?;
+    journal.append(&Record {
+        timestamp: 3,
+        frame: Frame::Output {
+            sequence: 1,
+            data: format!(
+                "{}\r\n末行哨兵\r\n",
+                (0..1100)
+                    .map(|line| format!("历史 {line}\r\n"))
+                    .collect::<String>()
+            )
+            .into_bytes(),
+        },
+    })?;
+    journal.close()?;
+    Ok(())
+}
+
+fn file_tree(root: &Path) -> Result<std::collections::BTreeMap<PathBuf, Vec<u8>>> {
+    fn visit(
+        root: &Path,
+        path: &Path,
+        tree: &mut std::collections::BTreeMap<PathBuf, Vec<u8>>,
+    ) -> Result<()> {
+        for entry in fs::read_dir(path)? {
+            let entry = entry?;
+            let path = entry.path();
+            if entry.file_type()?.is_dir() {
+                visit(root, &path, tree)?;
+            } else {
+                tree.insert(path.strip_prefix(root)?.to_owned(), fs::read(&path)?);
+            }
+        }
+        Ok(())
+    }
+    let mut tree = std::collections::BTreeMap::new();
+    visit(root, root, &mut tree)?;
+    Ok(tree)
+}
+
+#[test]
+fn both_read_only_sources_can_browse_search_and_export_without_changing_source() -> Result<()> {
+    use matou_native_runtime::{
+        history::HistorySearchOptions,
+        history_worker::{HistoryReply, HistoryRequest},
+    };
+    for reason in [
+        ReadOnlyReason::FilesystemReadOnly,
+        ReadOnlyReason::NewerSchema,
+    ] {
+        let root = tempfile::tempdir()?;
+        let destination = root.path().join("导出");
+        let mut child = RuntimeChild::spawn_configured_with(
+            root.path(),
+            "exit 97",
+            Path::new("/shell-must-not-open"),
+            None,
+            |command| {
+                command.env("MATOU_RECOVERY_EXPORT_DIR", &destination);
+            },
+        )?;
+        seed_read_only(&child.data, reason == ReadOnlyReason::NewerSchema)?;
+        let before = file_tree(&child.data)?;
+        let owner = child.data.join("matou.sqlite.owner");
+        let owner_mode = owner
+            .metadata()
+            .ok()
+            .map(|metadata| metadata.permissions().mode());
+        // Restore permissions before removal even when a later assertion fails.
+        struct ReadOnlyDirectory(PathBuf);
+        impl Drop for ReadOnlyDirectory {
+            fn drop(&mut self) {
+                let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
+            }
+        }
+        let _permissions = if reason == ReadOnlyReason::FilesystemReadOnly {
+            fs::set_permissions(&child.data.join(DB), fs::Permissions::from_mode(0o444))?;
+            fs::set_permissions(&child.data, fs::Permissions::from_mode(0o555))?;
+            Some(ReadOnlyDirectory(child.data.clone()))
+        } else {
+            None
+        };
         hello(&mut child)?;
         let event = next(&mut child, |event| {
             matches!(
                 event,
-                Event::Diagnostic(_)
-                    | Event::StartupBlocked(_)
-                    | Event::DatabaseRecoveryRequired(_)
-                    | Event::Ready { .. },
+                Event::ReadOnlyReady { .. } | Event::Diagnostic(_) | Event::Frame { .. }
             )
         })?;
-        if malformed {
-            ensure!(
-                matches!(event, Event::Diagnostic(text) if text.contains("recovery marker is invalid"))
-            );
-            ensure!(fs::read(&marker)? == b"{");
-        } else {
-            fs::set_permissions(&child.data, fs::Permissions::from_mode(0o755))?;
-            ensure!(
-                matches!(event, Event::StartupBlocked(reason) if reason.kind == StartupBlockKind::ReadOnly)
-            );
-            ensure!(!marker.exists());
+        let Event::ReadOnlyReady {
+            reason: actual,
+            projection,
+        } = event
+        else {
+            bail!("expected read-only ready")
+        };
+        ensure!(actual == reason);
+        let projection = projection.map_err(anyhow::Error::msg)?;
+        ensure!(projection.workspaces.len() == 2 && projection.tasks.len() == 2);
+        ensure!(
+            projection
+                .active
+                .hierarchy
+                .workspace
+                .context("saved workspace")?
+                .id
+                == "workspace-second"
+        );
+        ensure!(projection.active.hierarchy.scene.context("saved scene")?.id == "scene-second");
+        for (request_id, query) in [
+            (
+                1,
+                ReadOnlyQuery::Workspace {
+                    workspace_id: "workspace-first".into(),
+                },
+            ),
+            (
+                2,
+                ReadOnlyQuery::Task {
+                    task_id: "task-first".into(),
+                },
+            ),
+            (
+                3,
+                ReadOnlyQuery::Scene {
+                    scene_id: "scene-first".into(),
+                },
+            ),
+            (
+                4,
+                ReadOnlyQuery::Session {
+                    scene_id: "scene-first".into(),
+                    session_id: "session-first".into(),
+                },
+            ),
+            (
+                5,
+                ReadOnlyQuery::Session {
+                    scene_id: "scene-first".into(),
+                    session_id: "session-second".into(),
+                },
+            ),
+        ] {
+            child.send(Command::ReadOnlyQuery { request_id, query })?;
+            let reply = next(
+                &mut child,
+                |event| matches!(event, Event::ReadOnlyQueryResult { request_id: id, .. } if *id == request_id),
+            )?;
+            let Event::ReadOnlyQueryResult { result, .. } = reply else {
+                unreachable!()
+            };
+            if request_id == 5 {
+                ensure!(result.is_err());
+                continue;
+            }
+            let active = result.map_err(anyhow::Error::msg)?;
+            ensure!(active.graph["focusedSessionId"] == "session-first");
+            ensure!(active.geometry[0].geometry["scrollLeft"] == 11);
         }
-        child.closed()?;
-        ensure!(!child.wait()?.0.success());
-        ensure!(fs::read(&database)? == healthy);
+        for (session_id, sequence) in [("session-first", 6), ("../missing", 7)] {
+            child.send(Command::History(HistoryRequest::Search {
+                session_id: session_id.into(),
+                sequence,
+                query: "末行哨兵".into(),
+                options: HistorySearchOptions::default(),
+            }))?;
+            let reply = next(
+                &mut child,
+                |event| matches!(event, Event::History(HistoryReply::Search { sequence: id, .. }) if *id == sequence),
+            )?;
+            let Event::History(HistoryReply::Search { result, .. }) = reply else {
+                unreachable!()
+            };
+            if sequence == 6 {
+                ensure!(result.map_err(anyhow::Error::msg)?.matches[0].text == "末行哨兵");
+            } else {
+                ensure!(result.is_err_and(|error| error.contains("会话不存在")));
+            }
+        }
+        let mut before_cursor = None;
+        for sequence in [8, 9] {
+            child.send(Command::History(HistoryRequest::Page {
+                session_id: "session-first".into(),
+                sequence,
+                before: before_cursor,
+            }))?;
+            let reply = next(
+                &mut child,
+                |event| matches!(event, Event::History(HistoryReply::Page { sequence: id, .. }) if *id == sequence),
+            )?;
+            let Event::History(HistoryReply::Page { before, result, .. }) = reply else {
+                unreachable!()
+            };
+            ensure!(before == before_cursor);
+            let page = result.map_err(anyhow::Error::msg)?;
+            if let Some(cursor) = before {
+                ensure!(page.lines.last().context("older page")?.cursor < cursor);
+                ensure!(page.lines.first().context("first archived line")?.text == "历史 0");
+                ensure!(!page.has_more);
+            } else {
+                ensure!(
+                    page.has_more && page.lines.last().context("latest page")?.text == "末行哨兵"
+                );
+                before_cursor = Some(page.lines.first().context("latest page cursor")?.cursor);
+            }
+        }
+        let writes = [
+            (
+                None,
+                Command::CreateWorkspace {
+                    root_directory: "/unused".into(),
+                },
+            ),
+            (
+                None,
+                Command::Input {
+                    session_id: "session-first".into(),
+                    bytes: vec![b'x'],
+                    defer_ordering: false,
+                },
+            ),
+            (
+                None,
+                Command::RestartSession {
+                    session_id: "session-first".into(),
+                },
+            ),
+            (
+                None,
+                Command::SelectScene {
+                    scene_id: "scene-second".into(),
+                },
+            ),
+            (
+                Some(10),
+                Command::SetClaudeRoleAssignments {
+                    request_id: 10,
+                    assignments: Value::Null,
+                },
+            ),
+        ];
+        for (expected, command) in writes {
+            child.send(command)?;
+            let rejected = next(&mut child, |event| {
+                matches!(event, Event::StorageCommandRejected { .. })
+            })?;
+            ensure!(
+                matches!(rejected, Event::StorageCommandRejected { request_id, code, .. }
+                if request_id == expected && code == STORAGE_READ_ONLY)
+            );
+        }
+        let request_id = database_recovery_request_id();
+        child.send(Command::DatabaseRecovery {
+            request_id: request_id.clone(),
+            action: DatabaseRecoveryAction::ExportRecoveryBundle,
+        })?;
+        let export = result(&mut child, &request_id)?;
+        ensure!(export.error.is_none(), "export: {:?}", export.error);
+        let export = export.exported_path.context("read-only export path")?;
+        ensure!(export.starts_with(destination.canonicalize()?));
+        let manifest: Value = serde_json::from_slice(&fs::read(export.join("manifest.json"))?)?;
+        ensure!(manifest["mode"] == "read-only" && manifest["exportedAt"].as_i64().is_some());
+        ensure!(manifest["sourceDatabasePath"] == child.data.join(DB).display().to_string());
+        let expected: Vec<_> = [DB, "matou.sqlite-wal", "matou.sqlite-shm"]
+            .into_iter()
+            .filter(|name| before.contains_key(Path::new(name)))
+            .collect();
+        ensure!(manifest["exportedFiles"] == serde_json::json!(expected));
+        ensure!(file_tree(&export)?.len() == expected.len() + 1);
+        ensure!(
+            fs::metadata(export.join("manifest.json"))?
+                .permissions()
+                .mode()
+                & 0o777
+                == 0o600
+        );
+        for name in expected {
+            ensure!(fs::read(export.join(name))? == before[Path::new(name)]);
+        }
+        let denied = retry(&mut child, "no-recovery-marker")?;
+        let error = result(&mut child, &denied)?
+            .error
+            .context("write recovery action rejected")?;
+        ensure!(error.code == STORAGE_READ_ONLY && !error.retryable);
+        shutdown(&mut child)?;
         ensure!(!child.workspace.exists());
+        ensure!(
+            owner
+                .metadata()
+                .ok()
+                .map(|metadata| metadata.permissions().mode())
+                == owner_mode
+        );
+        let after = file_tree(&child.data)?;
+        ensure!(
+            before.keys().eq(after.keys())
+                && before.iter().all(|(name, bytes)| after[name] == *bytes),
+            "read-only startup or shutdown changed source: {:?}",
+            before
+                .keys()
+                .chain(after.keys())
+                .filter(|name| before.get(*name) != after.get(*name))
+                .collect::<Vec<_>>()
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn read_only_export_rejects_the_source_tree_and_reports_destination_errors() -> Result<()> {
+    for inside_source in [true, false] {
+        let root = tempfile::tempdir()?;
+        let destination = if inside_source {
+            root.path().join("数据 空间/nested/export")
+        } else {
+            let file = root.path().join("blocked");
+            fs::write(&file, "not a directory")?;
+            file
+        };
+        let mut child = RuntimeChild::spawn_configured_with(
+            root.path(),
+            "exit 97",
+            Path::new("/shell-must-not-open"),
+            None,
+            |command| {
+                command.env("MATOU_RECOVERY_EXPORT_DIR", &destination);
+            },
+        )?;
+        seed_read_only(&child.data, true)?;
+        let before = file_tree(&child.data)?;
+        hello(&mut child)?;
+        next(&mut child, |event| {
+            matches!(event, Event::ReadOnlyReady { .. })
+        })?;
+        let request_id = database_recovery_request_id();
+        child.send(Command::DatabaseRecovery {
+            request_id: request_id.clone(),
+            action: DatabaseRecoveryAction::ExportRecoveryBundle,
+        })?;
+        let error = result(&mut child, &request_id)?
+            .error
+            .context("export must fail")?;
+        ensure!(error.code == "DATABASE_EXPORT_FAILED");
+        ensure!(error.message.contains(if inside_source {
+            "数据库目录之外"
+        } else {
+            "blocked"
+        }));
+        shutdown(&mut child)?;
+        ensure!(file_tree(&child.data)? == before);
+        ensure!(!child.data.join("nested").exists());
     }
     Ok(())
 }

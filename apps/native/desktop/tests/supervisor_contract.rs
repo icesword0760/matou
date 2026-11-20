@@ -258,7 +258,7 @@ fn actual_crash_reaps_owner_recovers_pty_and_rejects_old_producers_and_events() 
 }
 #[test]
 fn deterministic_startup_blocks_without_loop_and_explicit_retry_rechecks() -> Result<()> {
-    for fixture in ["newer", "checksum", "path"] {
+    for fixture in ["checksum", "path"] {
         let (root, options) = options()?;
         let database = options.data_root.join("matou.sqlite");
         if fixture != "path" {
@@ -266,17 +266,10 @@ fn deterministic_startup_blocks_without_loop_and_explicit_retry_rechecks() -> Re
                 RuntimeBridge::start_with_binary(options.clone(), &support::runtime_binary()?)?;
             ready(&seed)?;
             seed.shutdown()?;
-            if fixture == "newer" {
-                sql(
-                    &database,
-                    "INSERT INTO schema_migrations(version,name,checksum,applied_at) VALUES(999999,'fixture','fixture',0)",
-                )?;
-            } else {
-                sql(
-                    &database,
-                    "UPDATE schema_migrations SET checksum='fixture' WHERE version=(SELECT MIN(version) FROM schema_migrations)",
-                )?;
-            }
+            sql(
+                &database,
+                "UPDATE schema_migrations SET checksum='fixture' WHERE version=(SELECT MIN(version) FROM schema_migrations)",
+            )?;
         } else {
             fs::write(&options.data_root, b"not a directory")?;
         }
@@ -288,7 +281,6 @@ fn deterministic_startup_blocks_without_loop_and_explicit_retry_rechecks() -> Re
                     phase: ConnectionPhase::Blocked(reason),
                 } => {
                     let expected = match fixture {
-                        "newer" => StartupBlockKind::ReadOnly,
                         "checksum" => StartupBlockKind::MigrationChecksum,
                         _ => StartupBlockKind::Configuration,
                     };
@@ -328,6 +320,69 @@ fn deterministic_startup_blocks_without_loop_and_explicit_retry_rechecks() -> Re
         bridge.shutdown()?;
         fs::remove_dir_all(root)?;
     }
+    Ok(())
+}
+
+#[test]
+fn newer_schema_keeps_child_for_browsing_and_reopens_after_repair() -> Result<()> {
+    use matou_native_core::startup::ReadOnlyReason;
+
+    let (root, options) = options()?;
+    let database = options.data_root.join("matou.sqlite");
+    let runtime = support::runtime_binary()?;
+    let mut seed = RuntimeBridge::start_with_binary(options.clone(), &runtime)?;
+    let (_, saved_session) = ready(&seed)?;
+    seed.shutdown()?;
+    sql(
+        &database,
+        "INSERT INTO schema_migrations(version,name,checksum,applied_at) VALUES(999999,'fixture','fixture',0)",
+    )?;
+
+    let mut bridge = RuntimeBridge::start_with_binary(options.clone(), &runtime)?;
+    let (generation, active_session) = loop {
+        match next(&bridge)? {
+            BridgeEvent::Runtime {
+                generation,
+                event:
+                    Event::ReadOnlyReady {
+                        reason: ReadOnlyReason::NewerSchema,
+                        projection,
+                    },
+            } => {
+                let projection = projection.map_err(anyhow::Error::msg)?;
+                break (
+                    generation,
+                    projection
+                        .active
+                        .hierarchy
+                        .session
+                        .context("offline Shell session")?
+                        .id,
+                );
+            }
+            BridgeEvent::Runtime {
+                event: Event::Ready { .. },
+                ..
+            } => bail!("newer schema reported writable Ready"),
+            _ => {}
+        }
+    };
+    ensure!(active_session == saved_session);
+    ensure!(bridge.runtime_pid() > 0);
+    ensure!(
+        bridge.commands.send_at(generation, Command::Refresh) == Err(SendError::StorageReadOnly)
+    );
+    ensure!(!bridge.retry_startup());
+    bridge.shutdown()?;
+
+    sql(
+        &database,
+        "DELETE FROM schema_migrations WHERE version=999999",
+    )?;
+    let mut reopened = RuntimeBridge::start_with_binary(options, &runtime)?;
+    ensure!(ready(&reopened)?.1 == saved_session);
+    reopened.shutdown()?;
+    fs::remove_dir_all(root)?;
     Ok(())
 }
 
@@ -375,7 +430,7 @@ fn recovery_request_is_retired_on_reconnect_and_requires_another_click() -> Resu
     };
     let generation = wait_recovery(&bridge, 0)?;
     ensure!(
-        bridge.commands.send_at(generation, Command::Refresh) == Err(SendError::StorageReadOnly)
+        bridge.commands.send_at(generation, Command::Refresh) == Err(SendError::RecoveryWaiting)
     );
     let request = |request_id| Command::DatabaseRecovery {
         request_id,
@@ -470,7 +525,7 @@ fn legacy_child_rejecting_hello_blocks_with_protocol_diagnostic() -> Result<()> 
     let legacy = root.join("legacy-runtime");
     fs::write(
         &legacy,
-        "#!/bin/sh\nIFS= read -r hello\ncase \"$hello\" in *'\"version\":1'*) printf '%s\\n' '{\"Hello\":{\"version\":1}}';; *) exit 1;; esac\n",
+        "#!/bin/sh\nIFS= read -r hello\ncase \"$hello\" in *'\"version\":2'*) printf '%s\\n' '{\"Hello\":{\"version\":2}}';; *) exit 1;; esac\n",
     )?;
     fs::set_permissions(&legacy, fs::Permissions::from_mode(0o700))?;
     let mut bridge = RuntimeBridge::start_with_binary(options.clone(), &legacy)?;

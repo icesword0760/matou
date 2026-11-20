@@ -96,6 +96,56 @@ mod workspace {
         pub(super) fn workspaces_ready(&self) -> bool {
             self.database_recovery.is_none() && self.domain_ready && self.hierarchy.is_some()
         }
+
+        pub(super) fn export(&mut self, cx: &mut Context<Self>) {
+            self.export_read_only_database(cx);
+        }
+
+        pub(super) fn request_older(
+            &mut self,
+            cursor: HistoryCursor,
+            window: &mut Window,
+            cx: &mut Context<Self>,
+        ) {
+            self.request_read_only_history(Some(cursor), window, cx);
+        }
+
+        pub(super) fn read_only_page(&self) -> Option<&OfflineHistoryPage> {
+            self.read_only.as_ref()?.history.page.as_ref()
+        }
+
+        pub(super) fn search_read_only(
+            &mut self,
+            query: &str,
+            window: &mut Window,
+            cx: &mut Context<Self>,
+        ) {
+            self.open_search(window, cx);
+            self.search.as_mut().unwrap().query = query.into();
+            self.run_search(false, cx);
+        }
+
+        pub(super) fn verify_mutations_disabled(
+            &mut self,
+            window: &mut Window,
+            cx: &mut Context<Self>,
+        ) {
+            let id = self.focused.as_ref().unwrap();
+            let node = self.graph_node(id).unwrap();
+            assert_eq!(
+                self.card_action_blocked_reason(id, node),
+                Some("数据库处于只读恢复模式")
+            );
+            assert_eq!(
+                self.session_loader_blocked_reason(id, node),
+                Some("数据库处于只读恢复模式")
+            );
+            let scene = self.active_scene_id().unwrap().to_owned();
+            self.create_canvas(cx);
+            self.split_horizontal(cx);
+            self.open_rename(scene, window, cx);
+            assert!(self.dialog.is_none());
+        }
     }
 }
 
@@ -104,12 +154,19 @@ mod probe {
     use std::{cell::RefCell, sync::Arc};
 
     use gpui::*;
-    use matou_native_core::{backup::BackupReason, startup::RecoveryError};
-    use matou_native_runtime::host::{DatabaseRecoveryBackup, DatabaseRecoveryReason, RuntimeHost};
+    use matou_native_core::{
+        backup::BackupReason,
+        startup::{ReadOnlyReason, RecoveryError},
+    };
+    use matou_native_runtime::{
+        history::{HistoryCursor, HistoryLine, HistoryPage, HistorySearchResult},
+        history_worker::{HistoryReply, HistoryRequest},
+        host::{DatabaseRecoveryBackup, DatabaseRecoveryReason, ReadOnlyProjection, RuntimeHost},
+    };
 
     use crate::runtime_bridge::{
         self, Command, ConnectionPhase, DatabaseRecoveryAction, DatabaseRecoveryDetails,
-        DatabaseRecoveryResult, Event, LaunchOptions,
+        DatabaseRecoveryResult, Event, LaunchOptions, ReadOnlyNavigation,
     };
     use crate::workspace::Workspace;
 
@@ -320,6 +377,31 @@ mod probe {
                 _ => {}
             }
         };
+        let Event::Ready {
+            hierarchy,
+            scenes,
+            graph,
+            geometry,
+        } = &ready
+        else {
+            unreachable!()
+        };
+        let projection = ReadOnlyProjection {
+            workspaces: hierarchy.workspace.clone().into_iter().collect(),
+            tasks: hierarchy.task.clone().into_iter().collect(),
+            active: ReadOnlyNavigation {
+                hierarchy: hierarchy.clone(),
+                scenes: scenes.clone(),
+                graph: graph.clone(),
+                geometry: geometry.clone(),
+            },
+        };
+        let writable_ready = Event::Ready {
+            hierarchy: hierarchy.clone(),
+            scenes: scenes.clone(),
+            graph: graph.clone(),
+            geometry: geometry.clone(),
+        };
         sink.generation(1);
         window
             .update(cx, |view, window, cx| {
@@ -340,6 +422,253 @@ mod probe {
         );
         println!(
             "hidden verified seven backups, progress, error correlation and one Ready projection handoff"
+        );
+
+        sink.read_only_mode(2);
+        window
+            .update(cx, |view, window, cx| {
+                view.change(2, ConnectionPhase::ReadOnly { pending: None }, window, cx);
+                view.receive(
+                    2,
+                    Event::ReadOnlyReady {
+                        reason: ReadOnlyReason::NewerSchema,
+                        projection: Ok(projection),
+                    },
+                    window,
+                    cx,
+                );
+                view.verify_mutations_disabled(window, cx);
+            })
+            .unwrap();
+        let labels = draw(window, cx, false);
+        for expected in [
+            "数据库处于只读恢复模式",
+            "现有工作空间、事项和会话仍可浏览、搜索与复制；可能改动数据的操作已暂停。",
+            "搜索当前终端",
+            "导出数据库资料",
+        ] {
+            has(&labels, expected);
+        }
+        let Command::History(HistoryRequest::Page {
+            session_id,
+            sequence,
+            before: None,
+        }) = sink.try_recv().unwrap()
+        else {
+            panic!("expected a latest offline page")
+        };
+        assert!(sink.try_recv().is_err());
+        let cursor = HistoryCursor {
+            sequence: 4,
+            line_index: 2,
+        };
+        window
+            .update(cx, |view, window, cx| {
+                view.receive(
+                    2,
+                    Event::History(HistoryReply::Page {
+                        session_id: session_id.clone(),
+                        sequence,
+                        before: None,
+                        result: Ok(HistoryPage {
+                            lines: vec![HistoryLine {
+                                sequence: 4,
+                                cursor,
+                                text: "新页哨兵".into(),
+                            }],
+                            has_more: true,
+                            ..HistoryPage::default()
+                        }),
+                    }),
+                    window,
+                    cx,
+                );
+                assert_eq!(view.read_only_page().unwrap().lines[0].text, "新页哨兵");
+                view.request_older(cursor, window, cx);
+            })
+            .unwrap();
+        let Command::History(HistoryRequest::Page {
+            session_id: older_session,
+            sequence,
+            before: Some(before),
+        }) = sink.try_recv().unwrap()
+        else {
+            panic!("expected a cursor-based offline page")
+        };
+        assert_eq!((older_session, before), (session_id.clone(), cursor));
+        window
+            .update(cx, |view, window, cx| {
+                view.receive(
+                    2,
+                    Event::History(HistoryReply::Page {
+                        session_id: session_id.clone(),
+                        sequence,
+                        before: Some(cursor),
+                        result: Ok(HistoryPage {
+                            lines: vec![HistoryLine {
+                                sequence: 3,
+                                cursor: HistoryCursor {
+                                    sequence: 3,
+                                    line_index: 0,
+                                },
+                                text: "早页哨兵".into(),
+                            }],
+                            ..HistoryPage::default()
+                        }),
+                    }),
+                    window,
+                    cx,
+                );
+                assert_eq!(view.read_only_page().unwrap().lines[0].text, "早页哨兵");
+            })
+            .unwrap();
+
+        let query = "历史搜索哨兵";
+        let hit = HistoryLine {
+            sequence: 7,
+            cursor: HistoryCursor {
+                sequence: 7,
+                line_index: 0,
+            },
+            text: query.into(),
+        };
+        window
+            .update(cx, |view, window, cx| {
+                view.search_read_only(query, window, cx)
+            })
+            .unwrap();
+        let Command::History(HistoryRequest::Search {
+            sequence,
+            query: sent_query,
+            session_id: sent_id,
+            ..
+        }) = sink.try_recv().unwrap()
+        else {
+            panic!("read-only search must use the Journal, not a PTY")
+        };
+        assert_eq!(
+            (sent_query.as_str(), sent_id.as_str()),
+            (query, session_id.as_str())
+        );
+        window
+            .update(cx, |view, window, cx| {
+                view.receive(
+                    2,
+                    Event::History(HistoryReply::Search {
+                        session_id: session_id.clone(),
+                        sequence,
+                        result: Ok(HistorySearchResult {
+                            matches: vec![hit.clone()],
+                            ..HistorySearchResult::default()
+                        }),
+                    }),
+                    window,
+                    cx,
+                );
+            })
+            .unwrap();
+        let Command::History(HistoryRequest::Context {
+            sequence: selected,
+            cursor: selected_cursor,
+            session_id: selected_id,
+        }) = sink.try_recv().unwrap()
+        else {
+            panic!("expected offline search context request")
+        };
+        assert_eq!(
+            (selected, selected_cursor, selected_id.as_str()),
+            (sequence, hit.cursor, session_id.as_str())
+        );
+        window
+            .update(cx, |view, window, cx| {
+                view.receive(
+                    2,
+                    Event::History(HistoryReply::Context {
+                        session_id,
+                        sequence,
+                        cursor: hit.cursor,
+                        result: Ok(HistoryPage {
+                            lines: vec![hit],
+                            anchor_index: Some(0),
+                            ..HistoryPage::default()
+                        }),
+                    }),
+                    window,
+                    cx,
+                );
+                let page = view.read_only_page().unwrap();
+                assert_eq!(page.lines[page.anchor_index.unwrap()].text, query);
+            })
+            .unwrap();
+
+        for (path, error, label) in [
+            (
+                Some("/isolated/recovery/export"),
+                None,
+                "数据库资料已导出到 /isolated/recovery/export",
+            ),
+            (None, None, "数据库资料已导出"),
+            (None, Some("测试目的地拒写"), "导出失败：测试目的地拒写"),
+        ] {
+            window
+                .update(cx, |view, _, cx| {
+                    view.export(cx);
+                    view.export(cx);
+                })
+                .unwrap();
+            let Command::DatabaseRecovery {
+                request_id,
+                action: DatabaseRecoveryAction::ExportRecoveryBundle,
+            } = sink.try_recv().unwrap()
+            else {
+                panic!("expected a single export request")
+            };
+            assert!(sink.try_recv().is_err());
+            has(&draw(window, cx, false), "正在导出…");
+            // In production the transport has already cleared the pending ID before delivery.
+            sink.read_only_mode(2);
+            window
+                .update(cx, |view, window, cx| {
+                    let result = match error {
+                        Some(error) => DatabaseRecoveryResult::failed(
+                            request_id,
+                            "DATABASE_EXPORT_FAILED",
+                            error,
+                        ),
+                        None => DatabaseRecoveryResult {
+                            request_id,
+                            exported_path: path.map(Into::into),
+                            error: None,
+                        },
+                    };
+                    view.receive(2, Event::DatabaseRecoveryResult(result), window, cx);
+                })
+                .unwrap();
+            let labels = draw(window, cx, false);
+            has(&labels, label);
+            has(&labels, "导出数据库资料");
+            assert!(!labels.iter().any(|text| text == "正在导出…"));
+        }
+        sink.generation(2);
+        window
+            .update(cx, |view, window, cx| {
+                view.change(2, ConnectionPhase::Ready, window, cx);
+            })
+            .unwrap();
+        has(&draw(window, cx, false), "数据库处于只读恢复模式");
+        window
+            .update(cx, |view, window, cx| {
+                view.receive(2, writable_ready, window, cx);
+                assert!(view.workspaces_ready());
+            })
+            .unwrap();
+        assert!(
+            !draw(window, cx, false)
+                .iter()
+                .any(|text| text == "数据库处于只读恢复模式")
+        );
+        println!(
+            "hidden verified read-only banner, disabled controls, paging, export progress/success/failure and writable handoff"
         );
         host.shutdown().unwrap();
         std::fs::remove_dir_all(scratch).unwrap();

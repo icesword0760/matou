@@ -1,6 +1,8 @@
-# G-storage-recovery 第一段交互对照矩阵
+# 数据库恢复第一、二段交互对照矩阵
 
-冻结口径见仓库内 `artifacts/native-parity/native/evidence/recovery-page-study-01/facts.md` 和 `plan.md`。离线输入复用 K-storage-recovery 的 `inputs.json` 和 SQLite 制备函数。当前矩阵用于第一段工程验收。
+冻结口径见仓库内 `artifacts/native-parity/native/evidence/recovery-page-study-01/facts.md` 和 `plan.md`。恢复页离线输入复用 K-storage-recovery 的 `inputs.json` 和 SQLite 制备函数。两种只读工作区使用隔离的双工作空间、事项、页签与 Journal 样本。
+
+## 第一段 · 恢复页
 
 | 场景 | 冻结证据 | 原生结果及证据 | 差异或待验 |
 | --- | --- | --- | --- |
@@ -9,9 +11,28 @@
 | 重新检查失败 | F13、F15–F16、F20 | 原位缺失给冻结文案。错 ID、变更后的 marker 与结算冲突返回分阶段错误。错误回包按请求关联，页面继续显示。占用测试连接活 owner 时保留现场。 | 真实文件系统强制错误下的界面签收待补。 |
 | 重新检查成功 | F15–F16、F20，K 的 `retry-action-and-reopen` | K 输入和 Runtime 测试确认复查后沿用子进程，保留隔离库、旧备份和 required marker 字节，发布结算，再进 Ready。隐藏 GPUI 探针验证恢复页到投影的一次性交接。 | 屏幕上的无闪切换和实际鼠标操作待验。 |
 | 请求单飞、业务门禁和断线 | F14、F27–F30 | 桌面和 Runtime 各自拦截。测试直发写命令、围栏内重复动作、请求中断、旧 generation 和重连后不自动发命令。 | 真实前台关闭窗口或操作时崩溃待验。 |
-| 无效 marker、活 owner 或权限只读启动 | F03–F07，K 同名样本 | 无效 marker 留原状，走已有诊断。新活 owner 拒绝复查并保留记录。非 root 的只读样本仍分类为 ReadOnly。 | 只读工作区、横幅、查询和导出留后续。 |
+| 无效 marker、活 owner 或权限只读启动 | F03–F07，K 同名样本 | 无效 marker 留原状，走已有诊断。新活 owner 拒绝复查并保留记录。非 root 的只读样本进入下表的只读工作区。 | 前台切页与异常显示待真机。 |
 | 恢复备份、导出恢复资料、创建空数据库 | F11、F17–F19、F21 | 四项动作共用控制命令和请求级回包，三项未接动作返回未实现，页面只展示重新检查。 | 三项按钮、确认、导出和文件动作待接。 |
 
 - 空库动作进入后续阶段时，先用隔离的七份备份复现常规迁移与退出轮转，再对照冻结端的备份保留表现。
 - 按阶段报告后段失败。结算前错误保留已落盘候选或证据，结算硬链接已发布后仍按已提交处理。后续导出允许记录部分目录。
-- 恢复阶段的 bridge 在 [桌面源码目录](../../apps/native/desktop/src/runtime_bridge.rs)。同包私有协议升级到版本 2，旧端拒绝握手时由 supervisor 报 Protocol 阻塞。
+- 恢复阶段的 bridge 在 [桌面源码目录](../../apps/native/desktop/src/runtime_bridge.rs)。第二段私有协议为版本 3，旧端在握手阶段报告 Protocol 阻塞。
+
+## 第二段 · 只读工作区与导出
+
+| 场景 | 冻结证据 | 原生结果及证据 | 差异或待验 |
+| --- | --- | --- | --- |
+| 权限拒写或 schema 过新 | F22–F25，§2.3 | `process_contract::database_recovery::both_read_only_sources_can_browse_search_and_export_without_changing_source` 覆盖非 root 下 0555/0444 和以 WAL 保存 schema 999 的副本。两者发布对应理由及既有工作区投影，非法 Shell 路径和不存在的启动目录未被使用。 | 真实只读卷、退出重开和前台截图待空闲窗口。 |
+| 浏览、焦点和关系 | F23–F24，§3.3 | 同一子进程合约验证上次选择、两组工作空间/事项/页签、会话归属、关系图投影和几何。桌面在每个 Workspace 记住当次选择。错归属或不存在的 ID 返回相关请求的错误。 | 当前原生工作区可通过会话层级浏览关系。独立关系图和独立终端窗口未在本关验证。 |
+| 终端历史 | F23–F24，§2.3 | 两种来源各读最新页和游标前的更早页，验证搜索哨兵及不存在的会话 ID。隐藏工作区探针验证分页请求及命中上下文，GPUI 测试剪贴板验证无 PTY 下选择、复制中英文和组合字符。在线归档探针通过，K-history-selection 原生结果与存档逐字节一致。 | 原生 Journal 提供归档文本。现有实现没有写入的检查点正文，屏幕末态与归档文本的视觉等价待验。 |
+| 禁用写入 | F22–F24 | 子进程直发新增工作空间、终端输入、重启、持久切换、角色配置和恢复动作均返回 `STORAGE_READ_ONLY`，有请求编号的回包保持关联。桌面桥和 host 共用命令表。隐藏 GPUI 探针验证会话移除和载入的禁用原因，并确认新增页签、分屏和重命名没有发命令。 | 前台菜单、拖拽、快捷键和终端输入待真机。 |
+| 导出目录和失败 | F25 | 主库和现存 WAL/SHM 对照源文件逐字节验证，manifest 对照顺序、源路径、时间、模式和 Unix 0600。另测拒绝源树内导出、目标为普通文件的 I/O 错误。 | 部分产物可能保留。导出位置在真机文件管理器中的呈现待验。 |
+| 退出、断开、重连 | F24–F25、F30 | 两种来源退出均比较完整源树，覆盖侧文件和无新增备份。桌面桥测试暂停旧管道写入、结束子进程并验证请求只结束一次和后续 generation 无自动重发。 | 真机退出、权限修复后重启恢复输入待签。 |
+| 横幅与正常 Ready | F12、F22、F25 | 隐藏 GPUI 探针回读标题、说明、按钮、导出中、成功有无路径、实际错误，以及正常投影到达后隐藏横幅。 | 工作区顶部横幅位于页签栏与会话内容间，侧栏标题行由原生窗口保留。真实尺寸与视觉待签。 |
+
+命令与样本位置
+
+- 子进程和断线验证位于 `apps/native/runtime/tests/process_contract/database_recovery.rs` 和 `apps/native/desktop/src/runtime_bridge.rs`。
+- 隐藏探针入口为 `cargo run --manifest-path apps/native/Cargo.toml -p matou-native-desktop --example database_recovery_probe`。
+- 在线归档探针入口为同包的 `archive_context_probe`。选择复制复用 K-history-selection 的原生测试环境，运行 `history_view::` 下的 6 个测试。
+- 第一段冻结样本的复跑入口为 `python3 tooling/native-parity/check-database-recovery.py`。

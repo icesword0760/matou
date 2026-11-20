@@ -16,11 +16,13 @@ use matou_native_core::hierarchy::canvas::{ForkPlacement, ForkWorktreeMode};
 use matou_native_core::hierarchy::cards::RemoveScope;
 use matou_native_core::hierarchy::{HierarchyResult, Scene, Task, Workspace as HierarchyWorkspace};
 use matou_native_core::workspace_paths::WorkspacePathState;
-use matou_native_runtime::history::{HistoryCursor, HistoryLine, HistorySearchOptions};
+use matou_native_runtime::history::{
+    HistoryCursor, HistoryLine, HistoryPage as OfflineHistoryPage, HistorySearchOptions,
+};
 use matou_native_runtime::history_worker::{HistoryReply, HistoryRequest};
 use matou_native_runtime::host::{
-    DATABASE_RECOVERY_INTERRUPTED, RecentReplies, database_recovery_request_id,
-    deferred_summary_text,
+    DATABASE_RECOVERY_INTERRUPTED, RecentReplies, STORAGE_READ_ONLY_TITLE, StoragePhase,
+    database_recovery_request_id, deferred_summary_text,
 };
 use matou_native_runtime::protocol::{
     ClaudeModelCatalogReply, ClaudeRoleAssignmentsReply, ProviderSettingsReply,
@@ -47,7 +49,7 @@ use crate::{
     rename_input::{RenameInput, RenameInputEvent, trim_name},
     runtime_bridge::{
         BridgeEvent, Command, ConnectionPhase, DatabaseRecoveryAction, DatabaseRecoveryDetails,
-        Event, RecoveryState, RuntimeCommands, StartupBlockKind,
+        Event, ReadOnlyNavigation, ReadOnlyQuery, RecoveryState, RuntimeCommands, StartupBlockKind,
     },
     settings_shell::{SettingsShell, SettingsShellEvent, settings_button},
     sidebar_scrollbar::{self, SidebarScrollbarState},
@@ -933,6 +935,87 @@ impl DatabaseRecoveryPageState {
     }
 }
 
+#[derive(Default)]
+struct ReadOnlyState {
+    pending_export: Option<String>,
+    export_feedback: Option<Result<Option<PathBuf>, String>>,
+    pending_navigation: Option<u64>,
+    navigation_sequence: u64,
+    projection_error: Option<String>,
+    task_by_workspace: HashMap<String, String>,
+    scene_by_task: HashMap<String, String>,
+    session_by_scene: HashMap<String, String>,
+    history: ReadOnlyHistory,
+}
+
+#[derive(Default)]
+struct ReadOnlyHistory {
+    sequence: u64,
+    pending: Option<u64>,
+    context_pending: bool,
+    page: Option<OfflineHistoryPage>,
+    show_latest: bool,
+    error: Option<String>,
+}
+
+impl ReadOnlyState {
+    fn disconnect(&mut self) {
+        if self.pending_export.take().is_some() {
+            self.export_feedback = Some(Err(DATABASE_RECOVERY_INTERRUPTED.into()));
+        }
+        self.pending_navigation = None;
+        self.history.pending = None;
+        self.history.context_pending = false;
+    }
+
+    fn remember(&mut self, path: &HierarchyResult) {
+        if let Some((workspace, task)) = path.workspace.as_ref().zip(path.task.as_ref()) {
+            self.task_by_workspace
+                .insert(workspace.id.clone(), task.id.clone());
+        }
+        if let Some((task, scene)) = path.task.as_ref().zip(path.scene.as_ref()) {
+            self.scene_by_task.insert(task.id.clone(), scene.id.clone());
+        }
+        if let Some((scene, session)) = path.scene.as_ref().zip(path.session.as_ref()) {
+            self.session_by_scene
+                .insert(scene.id.clone(), session.id.clone());
+        }
+    }
+
+    fn workspace_query(&self, workspace_id: String) -> ReadOnlyQuery {
+        match self.task_by_workspace.get(&workspace_id) {
+            Some(task_id) => self.task_query(task_id.clone()),
+            None => ReadOnlyQuery::Workspace { workspace_id },
+        }
+    }
+
+    fn task_query(&self, task_id: String) -> ReadOnlyQuery {
+        match self.scene_by_task.get(&task_id) {
+            Some(scene_id) => self.scene_query(scene_id.clone()),
+            None => ReadOnlyQuery::Task { task_id },
+        }
+    }
+
+    fn scene_query(&self, scene_id: String) -> ReadOnlyQuery {
+        match self.session_by_scene.get(&scene_id) {
+            Some(session_id) => ReadOnlyQuery::Session {
+                scene_id,
+                session_id: session_id.clone(),
+            },
+            None => ReadOnlyQuery::Scene { scene_id },
+        }
+    }
+}
+
+fn read_only_navigation(active: ReadOnlyNavigation) -> Event {
+    Event::Navigation {
+        hierarchy: active.hierarchy,
+        scenes: active.scenes,
+        graph: active.graph,
+        geometry: active.geometry,
+    }
+}
+
 pub struct Workspace {
     history_view: Option<Entity<HistoryView>>,
     history_request: Option<HistoryContextRequest>,
@@ -941,6 +1024,7 @@ pub struct Workspace {
     commands: RuntimeCommands,
     runtime_generation: u64,
     database_recovery: Option<DatabaseRecoveryPageState>,
+    read_only: Option<ReadOnlyState>,
     transport_connected: bool,
     domain_ready: bool,
     session_frames: HashSet<String>,
@@ -1183,6 +1267,38 @@ impl Workspace {
             result_count: context.result_count,
             gap_count: archive.gap_count,
         };
+        let command = HistoryRequest::Context {
+            session_id: context.session_id.clone(),
+            sequence: context.sequence,
+            cursor: context.cursor,
+        };
+        self.ensure_history_view(window, cx);
+        if let Some(read_only) = &mut self.read_only {
+            read_only.history.pending = None;
+            read_only.history.context_pending = true;
+            read_only.history.error = None;
+            self.sync_read_only_history(cx);
+        } else if let Some(view) = &self.history_view {
+            view.update(cx, |view, cx| view.set_state(state, cx));
+        }
+        self.history_request = Some(context);
+        self.sync_terminal_input(window, cx);
+        if let Some(read_only) = &mut self.read_only {
+            if let Err(error) = self
+                .commands
+                .send_at(self.runtime_generation, Command::History(command))
+            {
+                self.history_request = None;
+                read_only.history.context_pending = false;
+                read_only.history.error = Some(error.to_string());
+                self.sync_read_only_history(cx);
+            }
+        } else {
+            self.send(Command::History(command), cx);
+        }
+    }
+
+    fn ensure_history_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.history_view.is_none() {
             let view = cx.new(HistoryView::new);
             let generation = self.runtime_generation;
@@ -1197,27 +1313,89 @@ impl Workspace {
                     }
                     match event {
                         HistoryViewEvent::ReturnToLive => this.exit_history(window, cx),
+                        HistoryViewEvent::OlderPage(cursor) => {
+                            this.request_read_only_history(Some(*cursor), window, cx);
+                        }
+                        HistoryViewEvent::LatestPage => {
+                            this.request_read_only_history(None, window, cx);
+                        }
                     }
                 },
             ));
             self.history_view = Some(view);
         }
-        self.history_view
-            .as_ref()
-            .unwrap()
-            .update(cx, |view, cx| view.set_state(state, cx));
-        let command = HistoryRequest::Context {
-            session_id: context.session_id.clone(),
-            sequence: context.sequence,
-            cursor: context.cursor,
+    }
+
+    fn request_read_only_history(
+        &mut self,
+        before: Option<HistoryCursor>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (Some(read_only), Some(session_id)) = (&mut self.read_only, self.focused.clone())
+        else {
+            return;
         };
-        self.history_request = Some(context);
-        self.sync_terminal_input(window, cx);
-        self.send(Command::History(command), cx);
+        read_only.history.sequence += 1;
+        let sequence = read_only.history.sequence;
+        read_only.history.context_pending = false;
+        read_only.history.error = None;
+        self.history_request = None;
+        match self.commands.send_at(
+            self.runtime_generation,
+            Command::History(HistoryRequest::Page {
+                session_id,
+                sequence,
+                before,
+            }),
+        ) {
+            Ok(()) => read_only.history.pending = Some(sequence),
+            Err(error) => {
+                read_only.history.pending = None;
+                read_only.history.error = Some(error.to_string());
+            }
+        }
+        self.ensure_history_view(window, cx);
+        self.sync_read_only_history(cx);
+    }
+
+    fn sync_read_only_history(&self, cx: &mut Context<Self>) {
+        if let (Some(read_only), Some(view)) = (&self.read_only, &self.history_view) {
+            let history = &read_only.history;
+            let state = HistoryViewState::Offline {
+                page: history.page.clone(),
+                pending: history.pending.is_some() || history.context_pending,
+                show_latest: history.show_latest,
+                error: history.error.clone(),
+            };
+            view.update(cx, |view, cx| view.set_state(state, cx));
+        }
     }
 
     fn apply_history(&mut self, reply: HistoryReply, window: &mut Window, cx: &mut Context<Self>) {
         match reply {
+            HistoryReply::Page {
+                session_id,
+                sequence,
+                before,
+                result,
+            } => {
+                let Some(state) = self.read_only.as_mut().filter(|state| {
+                    self.focused.as_deref() == Some(&session_id)
+                        && state.history.pending == Some(sequence)
+                }) else {
+                    return;
+                };
+                state.history.pending = None;
+                match result {
+                    Ok(page) => {
+                        state.history.page = Some(page);
+                        state.history.show_latest = before.is_some();
+                    }
+                    Err(error) => state.history.error = Some(error),
+                }
+                self.sync_read_only_history(cx);
+            }
             HistoryReply::Search {
                 session_id,
                 sequence,
@@ -1236,10 +1414,19 @@ impl Workspace {
                     Ok(result) => {
                         let mut matches = result.matches;
                         matches.reverse();
-                        let index = if search.previous {
-                            matches.len().saturating_sub(1)
-                        } else {
-                            0
+                        let index = match search.archive.as_ref().filter(|archive| {
+                            self.read_only.is_some()
+                                && !matches.is_empty()
+                                && archive.query == search.query
+                                && archive.options == search.options
+                                && archive.matches == matches
+                        }) {
+                            Some(archive) if search.previous => {
+                                (archive.index + matches.len() - 1) % matches.len()
+                            }
+                            Some(archive) => (archive.index + 1) % matches.len(),
+                            None if search.previous => matches.len().saturating_sub(1),
+                            None => 0,
                         };
                         search.archive = Some(ArchivedMatches {
                             query: search.query.clone(),
@@ -1253,8 +1440,11 @@ impl Workspace {
                         });
                         self.open_history_context(window, cx);
                     }
-                    Err(_) => {
+                    Err(error) => {
                         // Frozen archive RPC failures quietly return to the live view.
+                        if self.read_only.is_some() {
+                            search.error = Some(error);
+                        }
                         if let Some(archive) = &mut search.archive {
                             archive.show_summary = false;
                         }
@@ -1284,16 +1474,31 @@ impl Workspace {
                             .and_then(|index| page.lines.get(index))
                             .is_some_and(|line| line.cursor == cursor) =>
                     {
-                        let state = HistoryViewState::Ready {
-                            result_index: context.result_index,
-                            result_count: context.result_count,
-                            page,
-                        };
-                        if let Some(view) = &self.history_view {
-                            view.update(cx, |view, cx| view.set_state(state, cx));
+                        if let Some(read_only) = &mut self.read_only {
+                            read_only.history.context_pending = false;
+                            read_only.history.page = Some(page);
+                            read_only.history.show_latest = true;
+                            self.sync_read_only_history(cx);
+                        } else {
+                            let state = HistoryViewState::Ready {
+                                result_index: context.result_index,
+                                result_count: context.result_count,
+                                page,
+                            };
+                            if let Some(view) = &self.history_view {
+                                view.update(cx, |view, cx| view.set_state(state, cx));
+                            }
                         }
                     }
-                    _ => {
+                    result => {
+                        if let Some(read_only) = &mut self.read_only {
+                            read_only.history.context_pending = false;
+                            read_only.history.error = Some(match result {
+                                Ok(_) => "找不到这条历史记录".into(),
+                                Err(error) => error,
+                            });
+                            self.sync_read_only_history(cx);
+                        }
                         self.dismiss_history_context(cx);
                     }
                 }
@@ -1305,9 +1510,29 @@ impl Workspace {
 
     fn dismiss_history_context(&mut self, cx: &mut Context<Self>) {
         self.history_request = None;
+        if let Some(read_only) = &mut self.read_only
+            && std::mem::take(&mut read_only.history.context_pending)
+        {
+            self.sync_read_only_history(cx);
+        }
         if let Some(view) = &self.history_view {
             view.update(cx, |view, _| view.stop_drag());
         }
+    }
+
+    fn clear_read_only_history(&mut self, cx: &mut Context<Self>) {
+        self.history_request = None;
+        if let Some(view) = self.history_view.take() {
+            view.update(cx, |view, cx| view.retire(cx));
+        }
+        if let Some(search) = &mut self.search {
+            search.open = false;
+            search.session_id = None;
+            search.archive = None;
+            search.archive_pending = None;
+            search.archive_count = None;
+        }
+        self.search_after_restore = false;
     }
 
     fn exit_history(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1317,6 +1542,13 @@ impl Workspace {
             if let Some(archive) = &mut search.archive {
                 archive.show_summary = false;
             }
+        }
+        if self.read_only.is_some() {
+            self.request_read_only_history(None, window, cx);
+            if let Some(view) = &self.history_view {
+                window.focus(&view.read(cx).focus);
+            }
+            return;
         }
         self.sync_terminal_input(window, cx);
         if let Some(terminal) = self.focused.as_ref().and_then(|id| self.terminals.get(id)) {
@@ -1479,12 +1711,14 @@ impl Workspace {
         let dismiss = search.session_id.as_ref() != Some(&session_id) || search.query.is_empty();
         if search.session_id.as_ref() != Some(&session_id) {
             if let Some(old) = search.session_id.take() {
-                let _ = self.commands.send_at(
-                    self.runtime_generation,
-                    Command::ClearSearch {
-                        session_id: old.clone(),
-                    },
-                );
+                if self.read_only.is_none() {
+                    let _ = self.commands.send_at(
+                        self.runtime_generation,
+                        Command::ClearSearch {
+                            session_id: old.clone(),
+                        },
+                    );
+                }
                 if let Some(terminal) = self.terminals.get(&old) {
                     terminal.update(cx, |terminal, cx| terminal.set_search(None, cx));
                 }
@@ -1499,6 +1733,40 @@ impl Workspace {
         search.error = None;
         if let Some(archive) = &mut search.archive {
             archive.show_summary = false;
+        }
+        if self.read_only.is_some() {
+            let command = if search.query.is_empty() {
+                search.archive = None;
+                search.archive_count = None;
+                search.archive_pending = None;
+                None
+            } else {
+                search.archive_pending = Some(search.sequence);
+                Some(HistoryRequest::Search {
+                    session_id,
+                    sequence: search.sequence,
+                    query: search.query.clone(),
+                    options: HistorySearchOptions {
+                        case_sensitive: search.options.case_sensitive,
+                        regex: search.options.regex,
+                        whole_word: search.options.whole_word,
+                    },
+                })
+            };
+            if dismiss {
+                self.dismiss_history_context(cx);
+            }
+            if let Some(command) = command
+                && let Err(error) = self
+                    .commands
+                    .send_at(self.runtime_generation, Command::History(command))
+                && let Some(search) = &mut self.search
+            {
+                search.archive_pending = None;
+                search.error = Some(error.to_string());
+            }
+            cx.notify();
+            return;
         }
         let request = matou_native_runtime::search::SearchRequest {
             sequence: search.sequence,
@@ -1531,19 +1799,25 @@ impl Workspace {
             search.result = None;
             search.error = None;
             if let Some(session_id) = &search.session_id {
-                let _ = self.commands.send_at(
-                    self.runtime_generation,
-                    Command::ClearSearch {
-                        session_id: session_id.clone(),
-                    },
-                );
+                if self.read_only.is_none() {
+                    let _ = self.commands.send_at(
+                        self.runtime_generation,
+                        Command::ClearSearch {
+                            session_id: session_id.clone(),
+                        },
+                    );
+                }
                 if let Some(terminal) = self.terminals.get(session_id) {
                     terminal.update(cx, |terminal, cx| terminal.set_search(None, cx));
                 }
             }
         }
         self.sync_terminal_input(window, cx);
-        if let Some(terminal) = self.focused.as_ref().and_then(|id| self.terminals.get(id)) {
+        if self.read_only.is_some()
+            && let Some(view) = &self.history_view
+        {
+            window.focus(&view.read(cx).focus);
+        } else if let Some(terminal) = self.focused.as_ref().and_then(|id| self.terminals.get(id)) {
             window.focus(&terminal.read(cx).focus);
         }
         cx.notify();
@@ -1738,6 +2012,7 @@ impl Workspace {
             settings: None,
             runtime_generation: 0,
             database_recovery: None,
+            read_only: None,
             transport_connected: false,
             domain_ready: false,
             session_frames: HashSet::new(),
@@ -1965,6 +2240,9 @@ impl Workspace {
     }
 
     fn toggle_notification_sound(&mut self, cx: &mut Context<Self>) {
+        if self.read_only.is_some() {
+            return;
+        }
         self.notifications
             .set_sound(!self.notifications.sound_enabled);
         cx.notify();
@@ -2079,6 +2357,44 @@ impl Workspace {
     }
 
     fn send(&mut self, command: Command, cx: &mut Context<Self>) {
+        if let Some(state) = &mut self.read_only {
+            let query = match command {
+                Command::SelectWorkspace { workspace_id } => state.workspace_query(workspace_id),
+                Command::SelectTask { task_id } => state.task_query(task_id),
+                Command::SelectScene { scene_id } => state.scene_query(scene_id),
+                Command::FocusSession {
+                    scene_id,
+                    session_id,
+                } => {
+                    self.pending_focus = Some((scene_id.clone(), session_id.clone()));
+                    ReadOnlyQuery::Session {
+                        scene_id,
+                        session_id,
+                    }
+                }
+                command if StoragePhase::ReadOnly.accepts(&command) => {
+                    let _ = self.commands.send_at(self.runtime_generation, command);
+                    return;
+                }
+                _ => return,
+            };
+            state.navigation_sequence += 1;
+            let request_id = state.navigation_sequence;
+            match self.commands.send_at(
+                self.runtime_generation,
+                Command::ReadOnlyQuery { request_id, query },
+            ) {
+                Ok(()) => state.pending_navigation = Some(request_id),
+                Err(error) => {
+                    state.pending_navigation = None;
+                    self.pending_focus = None;
+                    self.level_focus_request = None;
+                    state.projection_error = Some(error.to_string());
+                    cx.notify();
+                }
+            }
+            return;
+        }
         if matches!(
             &command,
             Command::CreateWorkspace { .. }
@@ -2146,9 +2462,36 @@ impl Workspace {
         cx.notify();
     }
 
+    fn export_read_only_database(&mut self, cx: &mut Context<Self>) {
+        let Some(state) = &mut self.read_only else {
+            return;
+        };
+        if state.pending_export.is_some() {
+            return;
+        }
+        let request_id = database_recovery_request_id();
+        match self.commands.send_at(
+            self.runtime_generation,
+            Command::DatabaseRecovery {
+                request_id: request_id.clone(),
+                action: DatabaseRecoveryAction::ExportRecoveryBundle,
+            },
+        ) {
+            Ok(()) => {
+                state.pending_export = Some(request_id);
+                state.export_feedback = None;
+            }
+            Err(error) => state.export_feedback = Some(Err(error.to_string())),
+        }
+        cx.notify();
+    }
+
     fn retire_transport(&mut self, generation: u64, cx: &mut Context<Self>) {
         if let Some(recovery) = &mut self.database_recovery {
             recovery.disconnect();
+        }
+        if let Some(state) = &mut self.read_only {
+            state.disconnect();
         }
         let reason = crate::runtime_bridge::SendError::NotReady.to_string();
         self.fail_pending_forks(&reason);
@@ -2360,6 +2703,59 @@ impl Workspace {
             self.close_dialog(window, cx);
         }
     }
+    fn apply_workspaces(&mut self, workspaces: Vec<HierarchyWorkspace>, cx: &mut Context<Self>) {
+        self.workspace_drag_motion
+            .retain(|id, _| workspaces.iter().any(|w| &w.id == id));
+        self.workspace_controls
+            .retain(|id, _| workspaces.iter().any(|workspace| &workspace.id == id));
+        self.workspace_group_bounds
+            .retain(|id, _| workspaces.iter().any(|workspace| &workspace.id == id));
+        self.workspace_bounds
+            .retain(|id, _| workspaces.iter().any(|workspace| &workspace.id == id));
+        self.workspace_collapsed
+            .retain(|id| workspaces.iter().any(|workspace| &workspace.id == id));
+        if self
+            .workspace_menu
+            .as_ref()
+            .is_some_and(|(id, _, _)| !workspaces.iter().any(|w| &w.id == id))
+        {
+            self.workspace_menu = None;
+        }
+        for workspace in &workspaces {
+            self.workspace_controls
+                .entry(workspace.id.clone())
+                .or_insert_with(|| {
+                    [
+                        cx.focus_handle().tab_stop(true),
+                        cx.focus_handle().tab_stop(true),
+                        cx.focus_handle().tab_stop(true),
+                        cx.focus_handle().tab_stop(true),
+                    ]
+                });
+        }
+        self.workspaces = workspaces;
+    }
+
+    fn apply_tasks(&mut self, tasks: Vec<Task>, cx: &mut Context<Self>) {
+        self.notification_scene_sessions
+            .retain(|_, (task_id, _)| tasks.iter().any(|task| &task.id == task_id));
+        self.task_controls
+            .retain(|id, _| tasks.iter().any(|task| &task.id == id));
+        self.task_bounds
+            .retain(|id, _| tasks.iter().any(|task| &task.id == id));
+        for task in &tasks {
+            self.task_controls
+                .entry(task.id.clone())
+                .or_insert_with(|| {
+                    [
+                        cx.focus_handle().tab_stop(true),
+                        cx.focus_handle().tab_stop(true),
+                    ]
+                });
+        }
+        self.tasks = tasks;
+    }
+
     fn apply(&mut self, envelope: BridgeEvent, window: &mut Window, cx: &mut Context<Self>) {
         if !self.commands.accepts(&envelope) {
             return;
@@ -2400,12 +2796,17 @@ impl Workspace {
                         if let Some(recovery) = &mut self.database_recovery {
                             recovery.disconnect();
                         }
+                        if let Some(state) = &mut self.read_only {
+                            state.disconnect();
+                            self.sync_read_only_history(cx);
+                        }
                     }
                     ConnectionPhase::Blocked(_) | ConnectionPhase::Stopped => {
                         self.database_recovery = None;
+                        self.read_only = None;
                     }
-                    // Only the Ready projection may replace the recovery page.
-                    ConnectionPhase::Ready => {}
+                    // The next projection atomically replaces the workspace.
+                    ConnectionPhase::Ready | ConnectionPhase::ReadOnly { .. } => {}
                 }
                 if let Some((settings, _)) = &self.settings {
                     settings.update(cx, |settings, cx| settings.connection_changed(window, cx));
@@ -2450,10 +2851,91 @@ impl Workspace {
         let fresh_ready = matches!(&event, Event::Ready { .. });
         if fresh_ready {
             self.database_recovery = None;
+            if self.read_only.take().is_some() {
+                self.clear_read_only_history(cx);
+                self.geometry.clear();
+                self.hierarchy = None;
+                self.level_parent_by_scene.clear();
+            }
             self.domain_ready = true;
             self.transport_connected = true;
             self.transport_fault = None;
         }
+        let fresh_read_only = matches!(&event, Event::ReadOnlyReady { .. });
+        let event = match event {
+            Event::ReadOnlyReady { projection, .. } => {
+                self.database_recovery = None;
+                let feedback = self
+                    .read_only
+                    .take()
+                    .and_then(|state| state.export_feedback);
+                self.read_only = Some(ReadOnlyState {
+                    export_feedback: feedback,
+                    ..ReadOnlyState::default()
+                });
+                self.transport_connected = false;
+                self.domain_ready = false;
+                self.transport_fault = None;
+                self.workspace_paths.clear();
+                self.geometry.clear();
+                self.geometry_dirty.clear();
+                self.reconnect_geometry.clear();
+                self.pending_geometry = None;
+                self.clear_read_only_history(cx);
+                self.recovery.clear();
+                self.storage_fault_sessions.clear();
+                self.deferred_previews.clear();
+                self.dialog = None;
+                match projection {
+                    Ok(projection) => {
+                        self.read_only
+                            .as_mut()
+                            .unwrap()
+                            .remember(&projection.active.hierarchy);
+                        self.apply_workspaces(projection.workspaces, cx);
+                        self.apply_tasks(projection.tasks, cx);
+                        read_only_navigation(projection.active)
+                    }
+                    Err(error) => {
+                        self.read_only.as_mut().unwrap().projection_error = Some(error);
+                        self.hierarchy = None;
+                        self.scenes.clear();
+                        self.focused = None;
+                        self.apply_workspaces(Vec::new(), cx);
+                        self.apply_tasks(Vec::new(), cx);
+                        self.replace_fork_graph(Value::Null, window, cx);
+                        self.refresh_terminals(window, cx);
+                        cx.notify();
+                        return;
+                    }
+                }
+            }
+            Event::ReadOnlyQueryResult { request_id, result } => {
+                let Some(state) = self
+                    .read_only
+                    .as_mut()
+                    .filter(|state| state.pending_navigation == Some(request_id))
+                else {
+                    return;
+                };
+                state.pending_navigation = None;
+                match result {
+                    Ok(active) => {
+                        state.projection_error = None;
+                        state.remember(&active.hierarchy);
+                        read_only_navigation(active)
+                    }
+                    Err(error) => {
+                        self.pending_focus = None;
+                        self.level_focus_request = None;
+                        state.projection_error = Some(error);
+                        cx.notify();
+                        return;
+                    }
+                }
+            }
+            event => event,
+        };
         match &event {
             Event::StorageFault { session_id, .. } => {
                 self.storage_fault_sessions.insert(session_id.clone());
@@ -2465,7 +2947,15 @@ impl Workspace {
         }
         match event {
             Event::DatabaseRecoveryResult(result) => {
-                if let Some(state) = &mut self.database_recovery
+                if let Some(state) = &mut self.read_only
+                    && state.pending_export.as_ref() == Some(&result.request_id)
+                {
+                    state.pending_export = None;
+                    state.export_feedback = Some(match result.error {
+                        Some(error) => Err(error.message),
+                        None => Ok(result.exported_path),
+                    });
+                } else if let Some(state) = &mut self.database_recovery
                     && state.pending.as_ref() == Some(&result.request_id)
                     && let Some(error) = result.error
                 {
@@ -2473,39 +2963,18 @@ impl Workspace {
                     state.error = Some(error.message);
                 }
             }
-            Event::DatabaseRecoveryRequired(_) | Event::StorageCommandRejected { .. } => {}
-            Event::Workspaces(workspaces) => {
-                self.workspace_drag_motion
-                    .retain(|id, _| workspaces.iter().any(|w| &w.id == id));
-                self.workspace_controls
-                    .retain(|id, _| workspaces.iter().any(|workspace| &workspace.id == id));
-                self.workspace_group_bounds
-                    .retain(|id, _| workspaces.iter().any(|workspace| &workspace.id == id));
-                self.workspace_bounds
-                    .retain(|id, _| workspaces.iter().any(|workspace| &workspace.id == id));
-                self.workspace_collapsed
-                    .retain(|id| workspaces.iter().any(|workspace| &workspace.id == id));
-                if self
-                    .workspace_menu
-                    .as_ref()
-                    .is_some_and(|(id, _, _)| !workspaces.iter().any(|w| &w.id == id))
-                {
-                    self.workspace_menu = None;
-                }
-                for workspace in &workspaces {
-                    self.workspace_controls
-                        .entry(workspace.id.clone())
-                        .or_insert_with(|| {
-                            [
-                                cx.focus_handle().tab_stop(true),
-                                cx.focus_handle().tab_stop(true),
-                                cx.focus_handle().tab_stop(true),
-                                cx.focus_handle().tab_stop(true),
-                            ]
-                        });
-                }
-                self.workspaces = workspaces;
+            Event::StorageCommandRejected { message, .. } => {
+                self.fail_pending_forks(&message);
+                self.fail_pending_permission_modes(&message, cx);
+                self.fail_pending_loader_commands(message);
+                self.pending_focus = None;
+                self.pending_close = None;
+                self.pending_card_action = None;
+                self.creating_workspace = false;
             }
+            Event::DatabaseRecoveryRequired(_) => {}
+            Event::ReadOnlyReady { .. } | Event::ReadOnlyQueryResult { .. } => unreachable!(),
+            Event::Workspaces(workspaces) => self.apply_workspaces(workspaces, cx),
             Event::WorkspacePaths(paths) => {
                 self.workspace_paths = paths;
                 if matches!(&self.dialog, Some(TabDialog::RemoveSession { session_id, .. })
@@ -2561,25 +3030,7 @@ impl Workspace {
                 }
                 _ => {}
             },
-            Event::Tasks(tasks) => {
-                self.notification_scene_sessions
-                    .retain(|_, (task_id, _)| tasks.iter().any(|task| &task.id == task_id));
-                self.task_controls
-                    .retain(|id, _| tasks.iter().any(|task| &task.id == id));
-                self.task_bounds
-                    .retain(|id, _| tasks.iter().any(|task| &task.id == id));
-                for task in &tasks {
-                    self.task_controls
-                        .entry(task.id.clone())
-                        .or_insert_with(|| {
-                            [
-                                cx.focus_handle().tab_stop(true),
-                                cx.focus_handle().tab_stop(true),
-                            ]
-                        });
-                }
-                self.tasks = tasks;
-            }
+            Event::Tasks(tasks) => self.apply_tasks(tasks, cx),
             Event::TaskRenameResult {
                 task_id,
                 title,
@@ -2724,6 +3175,20 @@ impl Workspace {
                 self.scenes = scenes;
                 let search_focus_changed = self.focused != next_focus;
                 self.focused = next_focus;
+                if let Some(read_only) = &mut self.read_only
+                    && (fresh_read_only || scene_changed || focus_changed)
+                {
+                    let sequence = read_only.history.sequence;
+                    read_only.history = ReadOnlyHistory {
+                        sequence,
+                        ..ReadOnlyHistory::default()
+                    };
+                    self.dismiss_history_context(cx);
+                    if let Some(view) = &self.history_view {
+                        view.update(cx, |view, cx| view.clear_selection(cx));
+                    }
+                    self.request_read_only_history(None, window, cx);
+                }
                 if search_focus_changed {
                     self.run_search(false, cx);
                 }
@@ -2754,7 +3219,15 @@ impl Workspace {
                 if fresh_ready || self.dialog.as_ref().is_some_and(TabDialog::is_session_card) {
                     self.close_invalid_dialog(window, cx);
                 }
-                self.reconcile_transport_geometry(&geometry, cx);
+                if self.read_only.is_some() {
+                    for saved in geometry {
+                        self.geometry
+                            .entry(saved.owner_key.clone())
+                            .or_insert(saved);
+                    }
+                } else {
+                    self.reconcile_transport_geometry(&geometry, cx);
+                }
                 #[cfg(target_os = "macos")]
                 if fresh_ready
                     && let Some((scene_id, session_id)) = self.recovery_water_focus.take()
@@ -2820,7 +3293,13 @@ impl Workspace {
                         .filter(|id| self.active_level_focus() == Some(id.as_str()))
                         .and_then(|id| self.terminals.get(id))
                 {
-                    window.focus(&terminal.read(cx).focus);
+                    if self.read_only.is_some()
+                        && let Some(view) = &self.history_view
+                    {
+                        window.focus(&view.read(cx).focus);
+                    } else {
+                        window.focus(&terminal.read(cx).focus);
+                    }
                 }
             }
             Event::ScenesDisposed(ids) => {
@@ -3478,6 +3957,9 @@ impl Workspace {
     }
 
     fn write_geometry(&mut self, update: GeometryUpdate, attempt: u8, cx: &mut Context<Self>) {
+        if self.read_only.is_some() {
+            return;
+        }
         if self.active_scene_id() == Some(update.scene_id.as_str())
             && update.geometry["focusedSessionId"]
                 .as_str()
@@ -3575,6 +4057,10 @@ impl Workspace {
                 .unwrap_or_default()
                 .as_millis() as i64,
         };
+        if self.read_only.is_some() {
+            self.geometry.insert(owner_key, update);
+            return;
+        }
         let elapsed = self
             .last_geometry_write
             .get(&owner_key)
@@ -3852,6 +4338,7 @@ impl Workspace {
             #[cfg(target_os = "macos")]
             let blocked = blocked || self.recovery_water_covers_terminal(id);
             let disabled = disabled
+                || self.read_only.is_some()
                 || blocked
                 || self.settings.is_some()
                 || self
@@ -3859,7 +4346,7 @@ impl Workspace {
                     .as_ref()
                     .is_some_and(|request| request.session_id == *id);
             terminal.update(cx, |terminal, cx| {
-                terminal.set_transport_available(!blocked, cx);
+                terminal.set_transport_available(!blocked && self.read_only.is_none(), cx);
                 terminal.set_input_disabled(disabled, cx);
             });
         }
@@ -4015,10 +4502,11 @@ impl Workspace {
     }
 
     fn recovery_blocked(&self, session_id: &str) -> bool {
-        !self.domain_ready
-            || !self.transport_connected
-            || !self.session_frames.contains(session_id)
-            || !matches!(self.recovery.get(session_id), Some(RecoveryState::Ready))
+        self.read_only.is_none()
+            && (!self.domain_ready
+                || !self.transport_connected
+                || !self.session_frames.contains(session_id)
+                || !matches!(self.recovery.get(session_id), Some(RecoveryState::Ready)))
     }
 
     fn clear_start_failure_focus(&self, id: &str, window: &mut Window) {
@@ -4174,6 +4662,9 @@ impl Workspace {
         cx.notify();
     }
     fn choose_workspace_directory(&mut self, cx: &mut Context<Self>) {
+        if self.read_only.is_some() {
+            return;
+        }
         if self.creating_workspace {
             return;
         }
@@ -4200,6 +4691,9 @@ impl Workspace {
     }
 
     fn relink_workspace_directory(&mut self, workspace_id: String, cx: &mut Context<Self>) {
+        if self.read_only.is_some() {
+            return;
+        }
         let picker = cx.prompt_for_paths(PathPromptOptions {
             files: false,
             directories: true,
@@ -4252,6 +4746,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.read_only.is_some() {
+            return;
+        }
         self.dialog = Some(TabDialog::RemoveWorkspace { workspace_id, name });
         self.dialog_controls = (0..3).map(|_| cx.focus_handle().tab_stop(true)).collect();
         window.focus(&self.dialog_controls[0]);
@@ -4469,7 +4966,7 @@ impl Workspace {
         let add_el = if invalid {
             add_btn.into_any_element()
         } else {
-            self.button(
+            self.mutation_button(
                 add_btn,
                 &controls[1],
                 move |this, window, cx| {
@@ -4675,7 +5172,7 @@ impl Workspace {
                 .size_full(),
             );
 
-        if workspace.is_pinned {
+        if workspace.is_pinned && self.read_only.is_none() {
             let drag_target = workspace.id.clone();
             let move_target = drag_target.clone();
             let view = cx.entity().downgrade();
@@ -4772,7 +5269,7 @@ impl Workspace {
         let new_workspace = if self.creating_workspace {
             self.focus_control(new_workspace, &self.control_focus["new-workspace"])
         } else {
-            self.button(
+            self.mutation_button(
                 new_workspace,
                 &self.control_focus["new-workspace"],
                 |this, _, cx| this.choose_workspace_directory(cx),
@@ -5041,7 +5538,7 @@ impl Workspace {
                 .inset_0()
                 .size_full(),
             );
-        if task.is_pinned {
+        if task.is_pinned && self.read_only.is_none() {
             let target = task.id.clone();
             let workspace_id = task.workspace_id.clone();
             row.on_drag(
@@ -5094,6 +5591,9 @@ impl Workspace {
     }
 
     fn open_task_rename(&mut self, task_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only.is_some() {
+            return;
+        }
         let Some(task) = self.tasks.iter().find(|task| task.id == task_id) else {
             return;
         };
@@ -5147,6 +5647,9 @@ impl Workspace {
     }
 
     fn open_task_delete(&mut self, task_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only.is_some() {
+            return;
+        }
         let Some(task) = self.tasks.iter().find(|task| task.id == task_id) else {
             return;
         };
@@ -5211,6 +5714,9 @@ impl Workspace {
         cx.notify();
     }
     fn open_rename(&mut self, scene_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only.is_some() {
+            return;
+        }
         let Some(scene) = self.scenes.iter().find(|s| s.id == scene_id) else {
             return;
         };
@@ -5358,6 +5864,9 @@ impl Workspace {
         }
     }
     fn create_canvas(&mut self, cx: &mut Context<Self>) {
+        if self.read_only.is_some() {
+            return;
+        }
         if !self.active_path_valid() {
             return;
         }
@@ -5372,6 +5881,9 @@ impl Workspace {
     }
 
     fn split_horizontal(&mut self, cx: &mut Context<Self>) {
+        if self.read_only.is_some() {
+            return;
+        }
         if !self.active_path_valid()
             || (self.level_focus().is_some() && self.active_level_focus().is_none())
         {
@@ -5418,9 +5930,10 @@ impl Workspace {
 
     fn permission_blocked_reason(&self, id: &str, node: &Value) -> Option<&'static str> {
         let (generation, phase) = self.commands.connection();
-        if matches!(&phase, ConnectionPhase::Blocked(block) if block.kind == StartupBlockKind::ReadOnly)
+        if self.read_only.is_some()
+            || matches!(&phase, ConnectionPhase::Blocked(block) if block.kind == StartupBlockKind::ReadOnly)
         {
-            Some("数据库处于只读恢复模式")
+            Some(STORAGE_READ_ONLY_TITLE)
         } else if self.storage_fault_sessions.contains(id) {
             Some("终端存储异常，请先恢复或结束当前会话")
         } else if self.recovery_blocked(id)
@@ -5704,8 +6217,9 @@ impl Workspace {
             {
                 None
             }
+            (_, ConnectionPhase::ReadOnly { .. }) => Some(STORAGE_READ_ONLY_TITLE),
             (_, ConnectionPhase::Blocked(block)) if block.kind == StartupBlockKind::ReadOnly => {
-                Some("数据库处于只读恢复模式")
+                Some(STORAGE_READ_ONLY_TITLE)
             }
             _ => Some("当前连接不可用"),
         }
@@ -5744,7 +6258,9 @@ impl Workspace {
     }
 
     fn card_mutation_blocked_reason(&self, id: &str, node: &Value) -> Option<&'static str> {
-        if !self.active_path_valid() {
+        if self.read_only.is_some() {
+            Some(STORAGE_READ_ONLY_TITLE)
+        } else if !self.active_path_valid() {
             Some(WORKSPACE_PATH_UNAVAILABLE)
         } else if self.storage_fault_sessions.contains(id) {
             Some("终端存储异常，请先恢复或结束当前会话")
@@ -5771,8 +6287,9 @@ impl Workspace {
 
     fn fork_connection_blocked_reason(&self) -> Option<&'static str> {
         match self.commands.connection() {
+            (_, ConnectionPhase::ReadOnly { .. }) => Some(STORAGE_READ_ONLY_TITLE),
             (_, ConnectionPhase::Blocked(block)) if block.kind == StartupBlockKind::ReadOnly => {
-                Some("数据库处于只读恢复模式")
+                Some(STORAGE_READ_ONLY_TITLE)
             }
             (generation, ConnectionPhase::Ready)
                 if generation == self.runtime_generation
@@ -6557,8 +7074,9 @@ impl Workspace {
 
     fn launch_action_blocked_reason(&self, id: &str, node: &Value) -> Option<&'static str> {
         match self.commands.connection() {
+            (_, ConnectionPhase::ReadOnly { .. }) => Some(STORAGE_READ_ONLY_TITLE),
             (_, ConnectionPhase::Blocked(block)) if block.kind == StartupBlockKind::ReadOnly => {
-                Some("数据库处于只读恢复模式")
+                Some(STORAGE_READ_ONLY_TITLE)
             }
             (generation, ConnectionPhase::Ready)
                 if generation == self.runtime_generation
@@ -6806,6 +7324,9 @@ impl Workspace {
     }
 
     fn request_close_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only.is_some() {
+            return;
+        }
         if self.dialog.is_some()
             || self.pending_close.is_some()
             || self.pending_card_action.is_some()
@@ -7201,6 +7722,9 @@ impl Workspace {
     }
 
     fn move_scene(&mut self, offset: isize, cx: &mut Context<Self>) {
+        if self.read_only.is_some() {
+            return;
+        }
         let Some(index) = self
             .scenes
             .iter()
@@ -7592,6 +8116,75 @@ impl Workspace {
             }))
     }
 
+    fn read_only_disabled<E: StatefulInteractiveElement + Styled>(&self, element: E) -> E {
+        element
+            .opacity(0.55)
+            .cursor(CursorStyle::OperationNotAllowed)
+            .tooltip(|_, cx| {
+                cx.new(|_| CardTooltip(STORAGE_READ_ONLY_TITLE.into()))
+                    .into()
+            })
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+    }
+
+    fn mutation_button<E: StatefulInteractiveElement + ParentElement + Styled>(
+        &self,
+        element: E,
+        focus: &FocusHandle,
+        activate: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> E {
+        if self.read_only.is_some() {
+            self.read_only_disabled(element)
+        } else {
+            self.button(element, focus, activate, cx)
+        }
+    }
+
+    fn read_only_banner(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let state = self.read_only.as_ref()?;
+        let phase = self.commands.connection();
+        let available = phase.0 == self.runtime_generation
+            && matches!(phase.1, ConnectionPhase::ReadOnly { .. });
+        let feedback_path = state.export_feedback.as_ref().and_then(|feedback| {
+            feedback
+                .as_ref()
+                .ok()?
+                .as_ref()
+                .map(|path| path.display().to_string())
+        });
+        let feedback = state
+            .export_feedback
+            .as_ref()
+            .map(|feedback| match feedback {
+                Ok(_) => Ok(feedback_path.as_deref()),
+                Err(error) => Err(error.as_str()),
+            });
+        let theme = Theme::default();
+        Some(
+            div()
+                .flex_none()
+                .child(database_recovery_page::render_read_only_banner(
+                    theme.background,
+                    theme.foreground,
+                    state.pending_export.is_some(),
+                    feedback,
+                    self.focused.is_some() && available,
+                    available,
+                    cx.listener(|this, _: &ClickEvent, window, cx| this.open_search(window, cx)),
+                    cx.listener(|this, _: &ClickEvent, _, cx| this.export_read_only_database(cx)),
+                ))
+                .children(state.projection_error.as_ref().map(|error| {
+                    div()
+                        .px(px(14.))
+                        .py(px(6.))
+                        .text_size(px(12.))
+                        .text_color(rgb(0xb42318))
+                        .child(error.clone())
+                })),
+        )
+    }
+
     fn topbar(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let active_id = self
             .hierarchy
@@ -7663,14 +8256,14 @@ impl Workspace {
                             MouseButton::Left,
                             cx.listener(move |this, e: &MouseDownEvent, window, cx| {
                                 window.focus(&double_click_focus);
-                                if e.click_count == 2 {
+                                if e.click_count == 2 && this.read_only.is_none() {
                                     this.open_rename(rename_id.clone(), window, cx);
                                 }
                                 cx.stop_propagation();
                             }),
                         ),
                     )
-                    .child(self.button(
+                    .child(self.mutation_button(
                         tabs_ui::tab_close(
                             SharedString::from(format!("tab-close-{}", scene.id)),
                             active
@@ -7701,7 +8294,7 @@ impl Workspace {
             path_valid,
         );
         let add = if path_valid {
-            self.button(
+            self.mutation_button(
                 add_btn,
                 &self.control_focus["add-tab"],
                 |this, _, cx| this.create_canvas(cx),
@@ -7798,7 +8391,7 @@ impl Workspace {
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .into_any_element()
                 } else {
-                    self.button(
+                    self.mutation_button(
                         split_btn.cursor_pointer(),
                         &self.control_focus["split"],
                         |this, _, cx| this.split_horizontal(cx),
@@ -9665,7 +10258,7 @@ impl Workspace {
                 }))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
             if show_relink {
-                menu = menu.child(self.button(
+                menu = menu.child(self.mutation_button(
                     text_item("workspace-menu-relink", "重新关联工作空间目录"),
                     &controls[next_focus],
                     move |this, _, cx| {
@@ -9678,7 +10271,7 @@ impl Workspace {
             }
             menu = menu
                 .child(
-                    self.button(
+                    self.mutation_button(
                         div()
                             .id("workspace-menu-pin")
                             .flex()
@@ -9733,7 +10326,7 @@ impl Workspace {
                 ));
             if show_remove {
                 menu = menu.child(
-                    self.button(
+                    self.mutation_button(
                         div()
                             .id("workspace-menu-remove")
                             .mt(px(4.))
@@ -9807,7 +10400,7 @@ impl Workspace {
                         cx.notify();
                     }))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(self.button(
+                    .child(self.mutation_button(
                         menu_item("task-pin", if pinned { "取消置顶" } else { "置顶" }, "pin"),
                         &controls[0],
                         move |this, _, cx| {
@@ -9822,7 +10415,7 @@ impl Workspace {
                         },
                         cx,
                     ))
-                    .child(self.button(
+                    .child(self.mutation_button(
                         menu_item("task-rename", "重命名", "pencil"),
                         &controls[1],
                         move |this, window, cx| {
@@ -9831,7 +10424,7 @@ impl Workspace {
                         cx,
                     ))
                     .child(
-                        self.button(
+                        self.mutation_button(
                             menu_item("task-delete", "删除", "trash-2")
                                 .mt(px(4.))
                                 .border_t_1()
@@ -9857,7 +10450,7 @@ impl Workspace {
                         this.tab_menu = None;
                         cx.notify();
                     }))
-                    .child(self.button(
+                    .child(self.mutation_button(
                         tabs_ui::menu_item("tab-rename-menu", "重命名页签"),
                         focus,
                         move |this, window, cx| this.open_rename(id.clone(), window, cx),
@@ -10342,6 +10935,7 @@ impl Render for Workspace {
             .into_any_element();
         }
         if self.hierarchy.is_none()
+            && self.read_only.is_none()
             && matches!(
                 self.commands.connection().1,
                 ConnectionPhase::Starting
@@ -10577,7 +11171,8 @@ impl Render for Workspace {
             }));
         let path_valid = self.active_path_valid();
         #[cfg(target_os = "macos")]
-        let recovery_water_available = self.recovery_water_available(window);
+        let recovery_water_available =
+            self.read_only.is_none() && self.recovery_water_available(window);
         let carousel_left =
             f64::from(-f32::from(self.carousel_scroll.offset().x)).clamp(0., max_scroll);
         #[cfg(target_os = "macos")]
@@ -10637,7 +11232,7 @@ impl Render for Workspace {
                         this.hover_card(Some(hover_id.clone()), cx);
                     }
                 }));
-            let compact = narrow && !selected;
+            let compact = (narrow || self.read_only.is_some()) && !selected;
             let title = node
                 .and_then(|node| node["title"].as_str())
                 .unwrap_or("Shell");
@@ -10814,7 +11409,8 @@ impl Render for Workspace {
                         this.hover_follow_until = None;
                         this.capture_geometry(Some(session_id.clone()), false, window, cx);
                         #[cfg(target_os = "macos")]
-                        if this.recovery_water.contains_key(&session_id)
+                        if this.read_only.is_none()
+                            && this.recovery_water.contains_key(&session_id)
                             && (!this.domain_ready
                                 || !this.transport_connected
                                 || this.commands.connection()
@@ -10846,11 +11442,18 @@ impl Render for Workspace {
                     }),
                 );
             let fork_failure = node
-                .filter(|_| !compact)
+                .filter(|_| !compact && self.read_only.is_none())
                 .and_then(|node| self.render_fork_failure(id, node, cx));
-            let fork_progress = node.and_then(fork_progress_copy);
+            let fork_progress = node
+                .filter(|_| self.read_only.is_none())
+                .and_then(fork_progress_copy);
             let provider_banner = node
-                .filter(|_| !compact && fork_failure.is_none() && fork_progress.is_none())
+                .filter(|_| {
+                    self.read_only.is_none()
+                        && !compact
+                        && fork_failure.is_none()
+                        && fork_progress.is_none()
+                })
                 .and_then(|node| self.provider_restore_banner(id, node));
             let card = if !compact
                 && fork_failure.is_none()
@@ -10986,7 +11589,7 @@ impl Render for Workspace {
                     self.render_provider_restore_banner(id, banner, Theme::default(), cx)
                 }))
                 .children(
-                    (fork_failure.is_none() && fork_progress.is_none())
+                    (self.read_only.is_none() && fork_failure.is_none() && fork_progress.is_none())
                         .then(|| {
                             node.and_then(|node| self.start_failure_card(id, node))
                                 .map(|card| self.render_start_failure_card(id, card, width, cx))
@@ -11001,18 +11604,19 @@ impl Render for Workspace {
                         .min_h_0()
                         .relative()
                         .child(terminal.clone())
-                        .when(
-                            self.history_request
+                        .children(
+                            self.history_view
                                 .as_ref()
-                                .is_some_and(|request| request.session_id == *id),
-                            |body| {
-                                body.child(
-                                    div()
-                                        .absolute()
-                                        .inset_0()
-                                        .child(self.history_view.as_ref().unwrap().clone()),
-                                )
-                            },
+                                .filter(|_| {
+                                    if self.read_only.is_some() {
+                                        self.focused.as_ref() == Some(id)
+                                    } else {
+                                        self.history_request
+                                            .as_ref()
+                                            .is_some_and(|request| request.session_id == *id)
+                                    }
+                                })
+                                .map(|view| div().absolute().inset_0().child(view.clone())),
                         )
                         .children(self.archive_summary(id))
                         .children(fork_progress.map(|progress| fork_progress_body(progress, now)))
@@ -11236,6 +11840,7 @@ impl Render for Workspace {
                                 stage
                             })
                             .child(self.topbar(window, cx))
+                            .children(self.read_only_banner(cx))
                             .child(carousel)
                             .children(self.search_bar(cx))
                             .child(self.footer(window, cx)),
@@ -11854,7 +12459,7 @@ impl Workspace {
             .flex_none()
             .px(px(14.))
             .py(px(12.))
-            .child(self.button(
+            .child(self.mutation_button(
                 sound_toggle,
                 &sound_focus,
                 |this, _, cx| this.toggle_notification_sound(cx),
