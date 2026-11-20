@@ -1319,6 +1319,7 @@ exec /bin/sleep 60
         )?;
         child.send(Command::SetClaudeRoleAssignments {
             request_id: 1,
+            web_search: None,
             assignments: json!({"opus": {
                 "providerId": "assigned-provider", "model": "assigned-model", "effort": "high"
             }}),
@@ -2553,19 +2554,19 @@ fn claude_role_budget_projects_the_actual_fresh_process_environment() -> Result<
             "activeProviderIds": {"claude-code": "source"},
             "providers": {"claude-code": [
                 {"id": "source", "name": "Source API", "model": "main",
-                 "endpoint": "https://source.example.invalid", "apiKey": "fixture",
+                 "endpoint": "http://127.0.0.1:1/source", "apiKey": "fixture",
                  "modelMapping": {"opus": "main", "sonnet": "medium", "haiku": "small"},
                  "modelMetadata": [metadata("main", 300_000, 1_500_000),
                                    metadata("medium", 200_000, 1_200_000),
                                    metadata("small", 600_000, 1_300_000)]},
                 {"id": "assigned", "name": "Assigned API", "model": "chosen",
-                 "endpoint": "https://assigned.example.invalid", "apiKey": "fixture",
+                 "endpoint": "http://127.0.0.1:1/assigned", "apiKey": "fixture",
                  "modelMetadata": [metadata("chosen", 800_000, 1_600_000)]},
                 {"id": "compact", "name": "Compaction API", "model": "summary",
-                 "endpoint": "https://compact.example.invalid", "apiKey": "fixture",
+                 "endpoint": "http://127.0.0.1:1/compact", "apiKey": "fixture",
                  "modelMetadata": [metadata("summary", compact_window.unwrap_or(90_000), 260_000)]},
                 {"id": "search", "name": "Search API", "model": "search-model",
-                 "endpoint": "https://search.example.invalid", "apiKey": "fixture",
+                 "endpoint": "http://127.0.0.1:1/search", "apiKey": "fixture",
                  "modelMetadata": [metadata("search-model", 32_000, 32_000)]}
             ]}
         }).to_string())?;
@@ -2583,12 +2584,14 @@ fn claude_role_budget_projects_the_actual_fresh_process_environment() -> Result<
         } else {
             mode
         };
-        let prefs: Value = json!({
+        let mut prefs: Value = json!({
             "claudeRoleAssignments": assignments,
             "compaction": compaction,
-            "contextWindows": {"source": mode, "assigned": assigned_mode, "compact": mode},
-            "claudeWebSearch": {"providerId": "search", "model": "search-model"}
+            "contextWindows": {"source": mode, "assigned": assigned_mode, "compact": mode}
         });
+        if scenario == "search excluded" {
+            prefs["claudeWebSearch"] = json!({"providerId": "search", "model": "search-model"});
+        }
         let db = Connection::open(seed.data.join("matou.sqlite"))?;
         db.execute(
             "UPDATE sessions SET kind='claude-code' WHERE id=?",
@@ -2672,6 +2675,218 @@ exec /bin/sleep 60
 }
 
 #[test]
+fn web_search_settings_preserve_replace_clear_and_validate_atomically() -> Result<()> {
+    use serde_json::{Value, json};
+
+    let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR"))?;
+    let mut child =
+        RuntimeChild::spawn_configured(root.path(), "", &root.path().join("no-shell"), None)?;
+    child.ready()?;
+    let config = json!({
+        "version": 1,
+        "revision": 1,
+        "activeProviderIds": {"claude-code": "work"},
+        "providers": {
+            "claude-code": [
+                {"id": "work", "name": "工作供应商", "endpoint": "http://127.0.0.1:1/a",
+                 "apiKey": "work-fixture", "model": "work-opus",
+                 "modelMapping": {"opus": "work-opus", "sonnet": "work-sonnet", "haiku": "work-haiku"}},
+                {"id": "search", "name": "搜索供应商", "endpoint": "http://127.0.0.1:1/b",
+                 "apiKey": "search-fixture", "model": "exact",
+                 "modelMetadata": [{"id": "exact", "supportedEfforts": ["high"]}]},
+                {"id": "empty", "name": "空目录", "endpoint": "http://127.0.0.1:1/c",
+                 "apiKey": "empty-fixture", "model": "exact", "modelMetadata": []},
+                {"id": "no-key", "name": "缺少 Key", "endpoint": "http://127.0.0.1:1/d", "model": "exact"}
+            ],
+            "codex": [{"id": "other-cli", "name": "非 Claude", "endpoint": "http://127.0.0.1:1/e",
+                       "apiKey": "other-fixture", "model": "exact"}]
+        }
+    });
+    fs::write(child.data.join("provider-config.json"), config.to_string())?;
+    let db = Connection::open(child.data.join("matou.sqlite"))?;
+    let read_row = || -> Result<Value> {
+        let json: String = db.query_row(
+            "SELECT value_json FROM preferences WHERE key='agent.modelPreferences'",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(serde_json::from_str(&json)?)
+    };
+    let send = |child: &mut RuntimeChild, id, command| -> Result<Value> {
+        child.send(command)?;
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            if let Event::Graph(graph) = child.event(deadline, true)?
+                && let Some(result) = graph.get("claudeRoleAssignmentsResult")
+            {
+                let reply: ClaudeRoleAssignmentsReply = serde_json::from_value(result.clone())?;
+                assert_eq!(reply.request_id, id);
+                assert!(!result.to_string().contains("-fixture"));
+                return Ok(result.clone());
+            }
+        }
+    };
+    let set = |child: &mut RuntimeChild, id, assignments: Value, web_search: Option<Value>| {
+        let mut wire =
+            json!({"SetClaudeRoleAssignments": {"request_id": id, "assignments": assignments}});
+        if let Some(target) = web_search {
+            wire["SetClaudeRoleAssignments"]["webSearch"] = target;
+        }
+        let command: Command = serde_json::from_value(wire.clone())?;
+        assert_eq!(serde_json::to_value(&command)?, wire);
+        send(child, id, command)
+    };
+    let get = |child: &mut RuntimeChild, id| {
+        send(
+            child,
+            id,
+            Command::GetClaudeRoleAssignments { request_id: id },
+        )
+    };
+    assert!(get(&mut child, 1)?.get("webSearch").is_none());
+    let role = json!({"opus": {"providerId": "work", "model": "work-opus"}});
+    let target = json!({"providerId": "search", "model": "exact", "effort": "high"});
+    let reply = set(
+        &mut child,
+        2,
+        role.clone(),
+        Some(json!({"providerId": " search ", "model": " exact ", "effort": "high"})),
+    )?;
+    assert_eq!(reply["assignments"], role);
+    assert_eq!(reply["webSearch"], target);
+    assert_eq!(read_row()?["claudeWebSearch"], target);
+    let old_client_reply = set(&mut child, 3, json!({}), None)?;
+    assert_eq!(old_client_reply["webSearch"], target);
+    assert_eq!(old_client_reply["assignments"], json!({}));
+    assert_eq!(get(&mut child, 4)?["webSearch"], target);
+    let before = read_row()?;
+    for (index, invalid, expected) in [
+        (
+            0,
+            json!({"providerId": "search", "model": "ex act"}),
+            "模型已不可用",
+        ),
+        (
+            1,
+            json!({"providerId": "search", "model": "exact\u{7f}"}),
+            "模型已不可用",
+        ),
+        (
+            2,
+            json!({"providerId": "search", "model": "exact\u{85}"}),
+            "模型已不可用",
+        ),
+        (
+            3,
+            json!({"providerId": "search\t", "model": "exact"}),
+            "模型已不可用",
+        ),
+        (
+            4,
+            json!({"providerId": "x".repeat(257), "model": "exact"}),
+            "模型已不可用",
+        ),
+        (
+            5,
+            json!({"providerId": "search", "model": "𠀀".repeat(121)}),
+            "模型已不可用",
+        ),
+        (
+            6,
+            json!({"providerId": "other-cli", "model": "exact"}),
+            "供应商已不存在",
+        ),
+        (
+            7,
+            json!({"providerId": "no-key", "model": "exact"}),
+            "API Key 未配置",
+        ),
+        (
+            8,
+            json!({"providerId": "search", "model": "EXACT"}),
+            "模型已不可用",
+        ),
+        (
+            9,
+            json!({"providerId": "empty", "model": "exact"}),
+            "模型目录暂不可用",
+        ),
+        (
+            10,
+            json!({"providerId": "search", "model": "exact", "effort": "max"}),
+            "当前模型不支持所选推理强度",
+        ),
+        (
+            11,
+            json!({"providerId": "search", "model": "exact", "effort": null}),
+            "模型已不可用",
+        ),
+    ] {
+        let reply = set(&mut child, 20 + index, role.clone(), Some(invalid))?;
+        assert!(
+            reply["error"]
+                .as_str()
+                .is_some_and(|error| error.starts_with(expected)),
+            "{reply}"
+        );
+        assert!(reply.get("assignments").is_none() && reply.get("webSearch").is_none());
+        assert_eq!(
+            read_row()?,
+            before,
+            "invalid save changed a sibling assignment"
+        );
+    }
+    let manual = json!({"providerId": "work", "model": "𠀀".repeat(120), "effort": "follow"});
+    assert_eq!(
+        set(&mut child, 5, role.clone(), Some(manual.clone()))?["webSearch"],
+        manual
+    );
+    assert_eq!(
+        set(&mut child, 6, role.clone(), Some(target.clone()))?["webSearch"],
+        target
+    );
+
+    child.send(Command::DeleteProvider {
+        request_id: 99,
+        cli: "claude-code".into(),
+        id: "search".into(),
+    })?;
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        if let Event::Graph(graph) = child.event(deadline, true)?
+            && let Some(result) = graph.get("providerSettingsResult")
+        {
+            assert_eq!(result["requestId"], 99);
+            assert!(result.get("error").is_none(), "{result}");
+            break;
+        }
+    }
+    assert_eq!(get(&mut child, 7)?["webSearch"], target);
+    let cleared = set(&mut child, 8, role.clone(), Some(Value::Null))?;
+    assert_eq!(cleared.get("webSearch"), Some(&Value::Null));
+    assert_eq!(
+        serde_json::from_value::<ClaudeRoleAssignmentsReply>(cleared)?.web_search,
+        Some(None)
+    );
+    assert_eq!(get(&mut child, 9)?["assignments"], role);
+    assert!(get(&mut child, 10)?.get("webSearch").is_none());
+    assert!(read_row()?.get("claudeWebSearch").is_none());
+
+    db.execute(
+        "UPDATE preferences SET value_json=json_set(value_json, '$.claudeWebSearch', json(?)) WHERE key='agent.modelPreferences'",
+        [json!({"providerId": "work", "model": false}).to_string()],
+    )?;
+    let corrupted = get(&mut child, 11)?;
+    assert_eq!(corrupted["assignments"], json!({}));
+    assert!(corrupted.get("webSearch").is_none());
+    child.send(Command::Shutdown)?;
+    child.closed()?;
+    let (status, stderr) = child.wait()?;
+    ensure!(status.success(), "{stderr}");
+    Ok(())
+}
+
+#[test]
 fn first_claude_start_and_recovery_without_binding_use_saved_opus_assignment() -> Result<()> {
     use matou_native_core::sessions::{claude_binding, get_session, list_runs};
     use matou_native_runtime::host::RecoveryState;
@@ -2740,6 +2955,7 @@ fn first_claude_start_and_recovery_without_binding_use_saved_opus_assignment() -
             request_id,
             Command::SetClaudeRoleAssignments {
                 request_id,
+                web_search: None,
                 assignments,
             },
         )
@@ -3369,6 +3585,7 @@ exec /bin/sleep 60
         if let Some(assignments) = &save {
             child.send(Command::SetClaudeRoleAssignments {
                 request_id: 1,
+                web_search: None,
                 assignments: assignments.clone(),
             })?;
         }
@@ -4817,6 +5034,7 @@ done
 
     child.send(Command::SetClaudeRoleAssignments {
         request_id: 42,
+        web_search: None,
         assignments: json!({
             "opus": {"providerId": "a", "model": "shared-model"},
             "sonnet": {"providerId": "a", "model": "shared-model"}

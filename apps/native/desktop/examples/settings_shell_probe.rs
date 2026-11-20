@@ -776,6 +776,7 @@ mod probe {
                     view.assignment_reply(
                         ClaudeRoleAssignmentsReply {
                             request_id,
+                            web_search: None,
                             error: assignments.is_none().then(|| "isolated failure".into()),
                             assignments: assignments
                                 .map(|value| serde_json::from_value(value).unwrap()),
@@ -863,6 +864,7 @@ mod probe {
             let Command::SetClaudeRoleAssignments {
                 request_id,
                 assignments,
+                ..
             } = sink.try_recv().unwrap()
             else {
                 panic!("allocation did not issue a save");
@@ -943,6 +945,7 @@ mod probe {
                     view.assignment_reply(
                         ClaudeRoleAssignmentsReply {
                             request_id,
+                            web_search: None,
                             assignments: Some(serde_json::from_value(data).unwrap()),
                             error: None,
                         },
@@ -1165,6 +1168,7 @@ mod probe {
                             view.assignment_reply(
                                 ClaudeRoleAssignmentsReply {
                                     request_id: allocation,
+                                    web_search: None,
                                     assignments: Some(Default::default()),
                                     error: None,
                                 },

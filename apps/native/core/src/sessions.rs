@@ -7,7 +7,8 @@ use serde_json::{Map, Value, json};
 use crate::{
     hierarchy::Session,
     provider_launch::{
-        ClaudeRoleAssignments, EFFORTS, parse_assignment, parse_claude_role_assignments,
+        ClaudeRoleAssignment, ClaudeRoleAssignments, EFFORTS, parse_claude_role_assignments,
+        parse_claude_web_search,
     },
     storage::{CommandMetadata, DomainCommit, DomainEventInput, execute},
 };
@@ -69,7 +70,7 @@ fn validate_model_preferences(
     if let Some(search) = value.get("claudeWebSearch") {
         fields.insert(
             "claudeWebSearch".into(),
-            serde_json::to_value(parse_assignment(search)?)?,
+            serde_json::to_value(parse_claude_web_search(search)?)?,
         );
     }
     let assignments = value
@@ -111,7 +112,8 @@ pub fn read_claude_role_assignments(db: &Connection) -> ClaudeRoleAssignments {
 
 #[derive(Default)]
 pub struct ClaudeRoleLaunchPreferences {
-    pub(crate) assignments: ClaudeRoleAssignments,
+    pub assignments: ClaudeRoleAssignments,
+    pub web_search: Option<ClaudeRoleAssignment>,
     pub(crate) context_windows: Map<String, Value>,
     pub(crate) compaction: Value,
 }
@@ -120,6 +122,9 @@ pub fn read_claude_role_launch_preferences(db: &Connection) -> ClaudeRoleLaunchP
     let (mut fields, assignments) = model_preferences(db);
     ClaudeRoleLaunchPreferences {
         assignments,
+        web_search: fields
+            .remove("claudeWebSearch")
+            .and_then(|value| serde_json::from_value(value).ok()),
         context_windows: fields["contextWindows"]
             .as_object()
             .cloned()
@@ -133,12 +138,37 @@ pub fn save_claude_role_assignments(
     assignments: &ClaudeRoleAssignments,
     updated_at: i64,
 ) -> Result<()> {
+    save_claude_model_assignments(db, assignments, None, updated_at)?;
+    Ok(())
+}
+
+/// The outer option is the patch, and the inner option is the new value.
+pub fn save_claude_model_assignments(
+    db: &mut Connection,
+    assignments: &ClaudeRoleAssignments,
+    web_search: Option<Option<&ClaudeRoleAssignment>>,
+    updated_at: i64,
+) -> Result<Option<ClaudeRoleAssignment>> {
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let (mut preferences, _) = model_preferences(&tx);
     preferences.insert(
         "claudeRoleAssignments".into(),
         serde_json::to_value(assignments)?,
     );
+    match web_search {
+        Some(Some(target)) => {
+            preferences.insert("claudeWebSearch".into(), serde_json::to_value(target)?);
+        }
+        Some(None) => {
+            preferences.remove("claudeWebSearch");
+        }
+        None => {}
+    }
+    let saved_search = preferences
+        .get("claudeWebSearch")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()?;
     tx.execute(
         "INSERT INTO preferences (key, value_json, updated_at) VALUES (?, ?, ?)
          ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json,
@@ -150,7 +180,7 @@ pub fn save_claude_role_assignments(
         ],
     )?;
     tx.commit()?;
-    Ok(())
+    Ok(saved_search)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

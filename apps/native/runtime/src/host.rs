@@ -22,7 +22,7 @@ use crate::{
     owner::{OwnerEvent, ShellOwner},
     protocol::{
         ClaudeModelCatalogReply, ClaudeModelCatalogResult, ClaudeRoleAssignmentsReply,
-        ProviderSettingsReply, ProviderSettingsResult,
+        ProviderSettingsReply, ProviderSettingsResult, deserialize_present,
     },
     provider_catalog,
     provider_hook::HookSetup,
@@ -49,15 +49,14 @@ use matou_native_core::{
     journal::JournalOptions,
     provider_config::{ProviderConfigLocale, ProviderConfigStore},
     provider_launch::{
-        CLAUDE_PERMISSION_MODES, ClaudeLaunch, ClaudeRoleAssignments, prepare_claude_fork,
-        prepare_claude_launch, prepare_claude_permission_restart,
-        prepare_new_claude_launch_with_budget, validate_claude_role_assignments, validate_cwd,
+        CLAUDE_PERMISSION_MODES, ClaudeLaunch, prepare_claude_fork, prepare_claude_launch,
+        prepare_claude_permission_restart, prepare_new_claude_launch_with_budget,
+        validate_claude_role_assignments, validate_claude_web_search, validate_cwd,
     },
     pty::{LaunchProfile, ShellLaunch},
     sessions::{
         ClaudeBinding, ClaudeCatalogLoad, ClaudeRestore, ClaudeRoleLaunchPreferences,
-        read_claude_role_assignments, read_claude_role_launch_preferences,
-        save_claude_role_assignments,
+        read_claude_role_launch_preferences, save_claude_model_assignments,
     },
     startup::{self, BootstrapResult, ReadOnlyReason, RecoveryError, RecoveryRequired},
     storage::{CommandMetadata, configure_connection},
@@ -157,6 +156,13 @@ pub enum Command {
     SetClaudeRoleAssignments {
         request_id: u64,
         assignments: Value,
+        #[serde(
+            rename = "webSearch",
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "deserialize_present"
+        )]
+        web_search: Option<Value>,
     },
     GetProviderSettings {
         request_id: u64,
@@ -822,7 +828,7 @@ struct LaunchRetry {
 
 enum RoleAssignmentsRequest {
     Get(u64),
-    Set(u64, Value),
+    Set(u64, Value, Option<Value>),
     ForLaunch(Sender<ClaudeRoleLaunchPreferences>),
 }
 
@@ -1768,33 +1774,36 @@ fn run_writable(
         .name("claude-role-assignments".into())
         .spawn(move || {
             for request in role_commands {
-                let (request_id, result) = match request {
-                    RoleAssignmentsRequest::Get(id) => {
-                        (id, Ok(load_role_assignments(&role_data_root)))
+                let reply = match request {
+                    RoleAssignmentsRequest::Get(request_id) => {
+                        let preferences = load_role_preferences(&role_data_root);
+                        ClaudeRoleAssignmentsReply {
+                            request_id,
+                            assignments: Some(preferences.assignments),
+                            web_search: preferences.web_search.map(Some),
+                            error: None,
+                        }
                     }
-                    RoleAssignmentsRequest::Set(id, value) => {
-                        (id, save_role_assignments(&role_data_root, &value))
+                    RoleAssignmentsRequest::Set(request_id, value, web_search) => {
+                        save_role_assignments(
+                            &role_data_root,
+                            request_id,
+                            &value,
+                            web_search.as_ref(),
+                        )
+                        .unwrap_or_else(|error| {
+                            ClaudeRoleAssignmentsReply {
+                                request_id,
+                                assignments: None,
+                                web_search: None,
+                                error: Some(format!("{error:#}")),
+                            }
+                        })
                     }
                     RoleAssignmentsRequest::ForLaunch(reply) => {
-                        let preferences =
-                            startup::open_read_only(&role_data_root.join("matou.sqlite"))
-                                .map(|db| read_claude_role_launch_preferences(&db))
-                                .unwrap_or_default();
-                        let _ = reply.send(preferences);
+                        let _ = reply.send(load_role_preferences(&role_data_root));
                         continue;
                     }
-                };
-                let reply = match result {
-                    Ok(assignments) => ClaudeRoleAssignmentsReply {
-                        request_id,
-                        assignments: Some(assignments),
-                        error: None,
-                    },
-                    Err(error) => ClaudeRoleAssignmentsReply {
-                        request_id,
-                        assignments: None,
-                        error: Some(format!("{error:#}")),
-                    },
                 };
                 if role_results.send(reply).is_err() {
                     break;
@@ -2632,8 +2641,13 @@ fn run_writable(
                 Command::SetClaudeRoleAssignments {
                     request_id,
                     assignments,
+                    web_search,
                 } => {
-                    role_requests.send(RoleAssignmentsRequest::Set(request_id, assignments))?;
+                    role_requests.send(RoleAssignmentsRequest::Set(
+                        request_id,
+                        assignments,
+                        web_search,
+                    ))?;
                     continue;
                 }
                 Command::GetProviderSettings { request_id } => {
@@ -4838,17 +4852,56 @@ enum LaunchIntent<'a> {
     },
 }
 
-fn load_role_assignments(data_root: &Path) -> ClaudeRoleAssignments {
+fn load_role_preferences(data_root: &Path) -> ClaudeRoleLaunchPreferences {
     startup::open_read_only(&data_root.join("matou.sqlite"))
-        .map(|db| read_claude_role_assignments(&db))
+        .map(|db| read_claude_role_launch_preferences(&db))
         .unwrap_or_default()
 }
 
-fn save_role_assignments(data_root: &Path, value: &Value) -> Result<ClaudeRoleAssignments> {
+fn native_role_catalog() -> Vec<Value> {
+    claude_model_catalog::models()
+        .into_iter()
+        .filter_map(|model| serde_json::to_value(model).ok())
+        .collect()
+}
+
+fn save_role_assignments(
+    data_root: &Path,
+    request_id: u64,
+    value: &Value,
+    web_search: Option<&Value>,
+) -> Result<ClaudeRoleAssignmentsReply> {
     let assignments = validate_claude_role_assignments(data_root, value)?;
-    let mut connection = open_role_assignments_writer(data_root)?;
-    save_claude_role_assignments(&mut connection, &assignments, now())?;
-    Ok(assignments)
+    let search_patch = web_search
+        .map(|target| {
+            if target.is_null() {
+                Ok(None)
+            } else {
+                validate_claude_web_search(data_root, target, &assignments, &native_role_catalog)
+                    .map(Some)
+            }
+        })
+        .transpose()?;
+    let saved = (|| {
+        let mut connection = open_role_assignments_writer(data_root)?;
+        save_claude_model_assignments(
+            &mut connection,
+            &assignments,
+            search_patch.as_ref().map(Option::as_ref),
+            now(),
+        )
+    })()
+    .context("保存未确认，请重试。原选择已保留。")?;
+    Ok(ClaudeRoleAssignmentsReply {
+        request_id,
+        assignments: Some(assignments),
+        web_search: if web_search.is_some() {
+            Some(saved)
+        } else {
+            saved.map(Some)
+        },
+        error: None,
+    })
 }
 
 fn open_role_assignments_writer(data_root: &Path) -> Result<Connection> {
@@ -4972,7 +5025,7 @@ fn prepare_launch(
                                 &data_root,
                                 cwd,
                                 &metadata,
-                                &preferences,
+                                (&preferences, &native_role_catalog),
                                 environment,
                                 terminal.cols,
                                 terminal.rows,
@@ -4999,7 +5052,7 @@ fn prepare_launch(
                             )
                         }?;
                         if !fresh_launch {
-                            launch.capture_restart_gateway(&preferences)?;
+                            launch.capture_restart_gateway(&preferences, &native_role_catalog)?;
                         }
                         Ok(PreparedLaunch::ClaudeCode {
                             launch,

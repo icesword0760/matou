@@ -900,6 +900,7 @@ fn both_read_only_sources_can_browse_search_and_export_without_changing_source()
                 Some(10),
                 Command::SetClaudeRoleAssignments {
                     request_id: 10,
+                    web_search: None,
                     assignments: Value::Null,
                 },
             ),
