@@ -12,9 +12,7 @@
 use gpui::{prelude::*, *};
 use serde_json::Value;
 
-use super::{
-    CardTooltip, FOOTER_NAME_MAX_WIDTH, card_tooltip_box, footer_bounds_probe, footer_text,
-};
+use super::{CardTooltip, card_tooltip_box, footer_bounds_probe, footer_text};
 use crate::ui_text::ui_text;
 
 /// `.status-priority-8` hides the model at a status content box of 210pt or less.
@@ -190,7 +188,10 @@ impl CodexHud {
     }
 }
 
-/// The existing footer model slot, at its frozen 180pt single-line budget.
+/// The Codex model slot. It takes its intrinsic width from the status row and
+/// only shrinks when the fixed HUD fields have consumed the real remainder, so
+/// a wide footer can reveal the full model label while narrow windows keep the
+/// same tail ellipsis and full-value tooltip.
 pub(super) fn model_slot(label: SharedString) -> Stateful<Div> {
     let tooltip = SharedString::from(format!("当前模型：{label}"));
     div()
@@ -198,7 +199,6 @@ pub(super) fn model_slot(label: SharedString) -> Stateful<Div> {
         .id("footer-name")
         .flex_shrink()
         .min_w_0()
-        .max_w(px(FOOTER_NAME_MAX_WIDTH))
         .overflow_hidden()
         .whitespace_nowrap()
         .text_ellipsis()
