@@ -1,6 +1,7 @@
 use anyhow::Result;
 use matou_native_terminal::{
-    GridPoint, GridSelection, SelectionMode, SelectionState, Terminal, TerminalOptions,
+    GridPoint, GridSelection, SelectionAction, SelectionMode, SelectionState, Terminal,
+    TerminalOptions,
 };
 use serde_json::Value;
 
@@ -44,10 +45,11 @@ fn selection_state_matches_frozen_model_after_each_action() -> Result<()> {
         serde_json::from_str(include_str!("fixtures/selection-state-reference.json"))?;
     for case in data["cases"].as_array().unwrap() {
         let mut terminal = fixture_terminal(case)?;
-        let cols = terminal.screen()?.cols;
+        let screen = terminal.screen()?;
+        let total = usize::try_from(screen.scrollbar.total)?;
         let start = point(&case["point"]);
         let mut selection = SelectionState::default();
-        assert_eq!(selection.range(cols), None);
+        assert_eq!(selection.range(screen.cols, total), None);
         selection.begin(
             &mut terminal,
             mode(&case["mode"]),
@@ -55,7 +57,7 @@ fn selection_state_matches_frozen_model_after_each_action() -> Result<()> {
             start.col as f32,
         )?;
         assert_eq!(
-            selection.range(cols),
+            selection.range(screen.cols, total),
             expected_range(&case["initial"]),
             "{} initial",
             case["name"]
@@ -74,7 +76,7 @@ fn selection_state_matches_frozen_model_after_each_action() -> Result<()> {
                 panic!("Unexpected state action: {step}");
             }
             assert_eq!(
-                selection.range(cols),
+                selection.range(screen.cols, total),
                 expected_range(&step["expected"]),
                 "{}: {step}",
                 case["name"]
@@ -91,7 +93,8 @@ fn selection_state_keeps_all_pointer_probe_ranges_and_text() -> Result<()> {
     ))?;
     for case in data["cases"].as_array().unwrap() {
         let mut terminal = fixture_terminal(case)?;
-        let cols = terminal.screen()?.cols;
+        let screen = terminal.screen()?;
+        let total = usize::try_from(screen.scrollbar.total)?;
         let mut selection = SelectionState::default();
         for probe in case["probes"].as_array().unwrap() {
             let start = point(&probe["point"]);
@@ -104,7 +107,7 @@ fn selection_state_keeps_all_pointer_probe_ranges_and_text() -> Result<()> {
             if let Some(target) = probe.get("target").map(point) {
                 selection.extend(&mut terminal, target.row, target.col as f32)?;
             }
-            let range = selection.range(cols).unwrap();
+            let range = selection.range(screen.cols, total).unwrap();
             assert_eq!(
                 Some(range),
                 expected_range(&probe["expected"]),
@@ -131,7 +134,9 @@ fn live_history_trim_keeps_the_surviving_word_selected() -> Result<()> {
     let mut selection = SelectionState::default();
     selection.begin(&mut terminal, SelectionMode::Word, WORD_ROW, 9.)?;
     selection.extend(&mut terminal, WORD_ROW, 9.)?;
-    let before = selection.range(80).unwrap();
+    let before = selection
+        .range(80, terminal.screen()?.scrollbar.total.try_into()?)
+        .unwrap();
     assert_eq!(before.text(&mut terminal)?, "RETAINED");
     let trimmed_before = terminal.history_trimmed_rows()?;
 
@@ -139,7 +144,9 @@ fn live_history_trim_keeps_the_surviving_word_selected() -> Result<()> {
     let removed = terminal.history_trimmed_rows()? - trimmed_before;
     assert!(removed > 0 && removed < WORD_ROW);
     selection.trim(removed);
-    let after = selection.range(80).unwrap();
+    let after = selection
+        .range(80, terminal.screen()?.scrollbar.total.try_into()?)
+        .unwrap();
     assert_eq!(after.anchor.row, before.anchor.row - removed);
     assert_eq!(after.text(&mut terminal)?, "RETAINED");
     Ok(())
@@ -152,7 +159,7 @@ fn local_scroll_does_not_move_the_selection_rows() -> Result<()> {
     let mut selection = SelectionState::default();
     selection.begin(&mut terminal, SelectionMode::Character, 1, 0.)?;
     selection.extend(&mut terminal, 1, 1.)?;
-    let before = selection.range(10).unwrap();
+    let before = selection.range(10, 4).unwrap();
     assert_eq!(before.text(&mut terminal)?, "B");
     let trimmed_before = terminal.history_trimmed_rows()?;
 
@@ -160,8 +167,56 @@ fn local_scroll_does_not_move_the_selection_rows() -> Result<()> {
     let removed = terminal.history_trimmed_rows()? - trimmed_before;
     assert_eq!(removed, 0);
     selection.trim(removed);
-    assert_eq!(selection.range(10), Some(before));
+    assert_eq!(selection.range(10, 4), Some(before));
     assert_eq!(before.text(&mut terminal)?, "C");
+    Ok(())
+}
+
+#[test]
+fn select_all_tracks_column_resize_until_replaced() -> Result<()> {
+    let mut terminal = Terminal::new(TerminalOptions::new(8, 3, 8, 16))?;
+    terminal.feed(b"first\r\nsecond");
+    terminal.selection_action(SelectionAction::SelectAll)?;
+    terminal.resize(10, 3, 8, 16)?;
+    assert_eq!(
+        terminal.selection_range()?,
+        Some(GridSelection {
+            anchor: GridPoint { row: 0, col: 0 },
+            end: GridPoint { row: 2, col: 10 },
+            column: false,
+        })
+    );
+
+    terminal.selection_action(SelectionAction::IncrementalClick { row: 1, x: 2. })?;
+    assert_eq!(terminal.selection_range()?, None);
+    terminal.selection_action(SelectionAction::SelectAll)?;
+    terminal.selection_action(SelectionAction::Select {
+        row: 1,
+        col: 0,
+        length: 3,
+    })?;
+    assert_eq!(terminal.selected_text()?, "sec");
+    Ok(())
+}
+
+#[test]
+fn row_resize_clears_select_all_and_keeps_column_mode_until_buffer_reset() -> Result<()> {
+    let mut terminal = Terminal::new(TerminalOptions::new(8, 3, 8, 16))?;
+    terminal.selection_action(SelectionAction::Begin {
+        mode: SelectionMode::Column,
+        row: 0,
+        x: 1.,
+    })?;
+    terminal.selection_action(SelectionAction::SelectAll)?;
+    terminal.resize(8, 4, 8, 16)?;
+    assert_eq!(terminal.selection_range()?, None);
+    terminal.selection_action(SelectionAction::SelectAll)?;
+    assert!(terminal.selection_range()?.unwrap().column);
+
+    terminal.feed(b"\x1b[?1049h");
+    assert_eq!(terminal.selection_range()?, None);
+    terminal.selection_action(SelectionAction::SelectAll)?;
+    assert!(!terminal.selection_range()?.unwrap().column);
     Ok(())
 }
 
@@ -169,7 +224,6 @@ fn local_scroll_does_not_move_the_selection_rows() -> Result<()> {
 #[test]
 #[ignore = "writes the terminal selection gate evidence"]
 fn capture_terminal_selection_gate() -> Result<()> {
-    use matou_native_terminal::SelectionAction;
     use serde_json::json;
     use std::{env, fs};
 
@@ -198,7 +252,6 @@ fn capture_terminal_selection_gate() -> Result<()> {
             .chain(case["steps"].as_array().unwrap())
             .enumerate()
         {
-            let mut operation_error = None;
             match step[0].as_str().unwrap() {
                 "initial" => {}
                 "down" => {
@@ -244,7 +297,7 @@ fn capture_terminal_selection_gate() -> Result<()> {
                     })?;
                 }
                 "clearSelection" => terminal.selection_action(SelectionAction::Clear)?,
-                "selectAll" => operation_error = Some("no native selectAll entry point"),
+                "selectAll" => terminal.selection_action(SelectionAction::SelectAll)?,
                 "scroll" => terminal.scroll(i32::try_from(step[1].as_i64().unwrap())?)?,
                 "tick" => terminal.selection_action(SelectionAction::Scroll {
                     lines: i32::try_from(step[1].as_i64().unwrap())?,
@@ -277,7 +330,6 @@ fn capture_terminal_selection_gate() -> Result<()> {
                 "offset": screen.scrollbar.offset,
                 "buffer": if screen.alternate { "alternate" } else { "normal" },
                 "grid": [screen.cols, screen.rows],
-                "operationError": operation_error,
             }));
         }
         observations.push(json!({ "id": case["id"], "results": results }));

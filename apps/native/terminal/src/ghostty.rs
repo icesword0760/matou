@@ -156,6 +156,7 @@ pub struct Terminal {
     effects: NonNull<Effects>,
     pending_utf8: [u8; 4],
     pending_utf8_len: usize,
+    rows: u16,
     selection: SelectionState,
     last_selection_epoch: usize,
     last_history_trim: usize,
@@ -196,6 +197,7 @@ impl Terminal {
             effects,
             pending_utf8: [0; 4],
             pending_utf8_len: 0,
+            rows: options.rows,
             selection: SelectionState::default(),
             last_selection_epoch: 0,
             last_history_trim: 0,
@@ -277,6 +279,10 @@ impl Terminal {
             },
             "resize",
         )?;
+        if rows != self.rows {
+            self.rows = rows;
+            self.selection.clear();
+        }
         self.reconcile_selection()
     }
 
@@ -470,13 +476,17 @@ impl Terminal {
                 self.selection.clear();
                 Ok(())
             }
+            SelectionAction::SelectAll => {
+                self.selection.select_all();
+                Ok(())
+            }
         }
     }
 
     pub fn selection_range(&mut self) -> Result<Option<GridSelection>> {
         self.reconcile_selection()?;
-        let cols = self.screen()?.cols;
-        Ok(self.selection.range(cols))
+        let (cols, total) = crate::selection::grid_size(self)?;
+        Ok(self.selection.range(cols, total))
     }
 
     pub fn selected_text(&mut self) -> Result<String> {
@@ -500,7 +510,7 @@ impl Terminal {
         let epoch = self.selection_epoch()?;
         let trimmed = self.history_trimmed_rows()?;
         if epoch != self.last_selection_epoch {
-            self.selection.clear();
+            self.selection.reset();
         } else if trimmed > self.last_history_trim {
             self.selection.trim(trimmed - self.last_history_trim);
         }

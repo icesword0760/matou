@@ -136,6 +136,7 @@ pub enum SelectionAction {
     },
     SetEnd(GridPoint),
     Clear,
+    SelectAll,
 }
 
 #[derive(Clone, Copy)]
@@ -233,6 +234,7 @@ pub struct SelectionState {
     start: Option<GridPoint>,
     start_length: isize,
     end: Option<GridPoint>,
+    select_all: bool,
 }
 
 impl Default for SelectionState {
@@ -242,6 +244,7 @@ impl Default for SelectionState {
             start: None,
             start_length: 0,
             end: None,
+            select_all: false,
         }
     }
 }
@@ -250,10 +253,15 @@ impl SelectionState {
     pub fn select(&mut self, row: usize, col: isize, length: isize) -> Result<()> {
         col.checked_add(length)
             .context("programmatic selection column overflow")?;
+        self.clear();
         self.start = Some(GridPoint { row, col });
         self.start_length = length;
-        self.end = None;
         Ok(())
+    }
+
+    pub fn select_all(&mut self) {
+        self.clear();
+        self.select_all = true;
     }
 
     pub fn begin(
@@ -271,6 +279,7 @@ impl SelectionState {
             start: Some(anchor),
             start_length: ((end.row - anchor.row) * cols) as isize + end.col - anchor.col,
             end: None,
+            select_all: false,
         };
         Ok(())
     }
@@ -287,6 +296,7 @@ impl SelectionState {
     }
 
     pub fn incremental_click(&mut self, terminal: &mut Terminal, row: usize, x: f32) -> Result<()> {
+        self.select_all = false;
         if self.start.is_some() {
             let (cols, total) = grid_size(terminal)?;
             self.set_end(selection_cell(row.min(total - 1), x, cols));
@@ -341,8 +351,18 @@ impl SelectionState {
         self.end = Some(end);
     }
 
-    pub fn range(&self, cols: usize) -> Option<GridSelection> {
+    pub fn range(&self, cols: usize, total: usize) -> Option<GridSelection> {
         let cols = cols as isize;
+        if self.select_all {
+            return Some(GridSelection {
+                anchor: GridPoint { row: 0, col: 0 },
+                end: GridPoint {
+                    row: total.checked_sub(1)?,
+                    col: cols,
+                },
+                column: self.mode == SelectionMode::Column,
+            });
+        }
         let start = self.start?;
         let (anchor, forward_end) = match self.end {
             Some(end) if end < start => (end, None),
@@ -379,7 +399,7 @@ impl SelectionState {
 
     pub fn trim(&mut self, amount: usize) {
         if self.end.is_some_and(|end| end.row < amount) {
-            self.clear();
+            self.reset();
             return;
         }
         if let Some(start) = &mut self.start {
@@ -391,6 +411,13 @@ impl SelectionState {
     }
 
     pub fn clear(&mut self) {
+        *self = Self {
+            mode: self.mode,
+            ..Self::default()
+        };
+    }
+
+    pub(crate) fn reset(&mut self) {
         *self = Self::default();
     }
 }
@@ -430,7 +457,7 @@ fn selection_cell(row: usize, x: f32, cols: usize) -> GridPoint {
     GridPoint { row, col }
 }
 
-fn grid_size(terminal: &mut Terminal) -> Result<(usize, usize)> {
+pub(crate) fn grid_size(terminal: &mut Terminal) -> Result<(usize, usize)> {
     let screen = terminal.screen()?;
     Ok((screen.cols, screen.scrollbar.total.try_into()?))
 }
