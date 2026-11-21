@@ -5360,12 +5360,6 @@ fn run_writable(
             permission_results.push(permission_result(&id, &change.mode, error));
             graph_dirty = true;
         }
-        if shutdown_requested.get().is_none()
-            && let Some(control) = &control
-        {
-            // Process worker exits and disposal before revalidating queued requests.
-            control.poll(&owner);
-        }
         let released: Vec<_> = provider_starting
             .keys()
             .filter(|id| !owner.waiting_for_provider_restore(id))
@@ -5490,6 +5484,78 @@ fn run_writable(
                 send_sidebar(&owner, window_id, send)?;
             }
             send.send_blocking(event)?;
+        }
+        #[cfg(unix)]
+        if shutdown_requested.get().is_none()
+            && navigation_publications.is_empty()
+            && let Some(control) = &control
+            && let Some(navigation) = control.poll(&owner)
+        {
+            // The owner has processed worker exits and older navigation publications.
+            // Commit exactly one resolved path before resolving another control request.
+            navigation.complete(window_id, |path| {
+                owner.focus_session(
+                    window_id,
+                    &path.scene_id,
+                    &path.session_id,
+                    self::now(),
+                    "会话不在当前画布中",
+                )?;
+                let hierarchy = owner.hierarchy(window_id)?;
+                let next_workspace = hierarchy.workspace.as_ref().map(|item| item.id.clone());
+                let next_scene = hierarchy.scene.as_ref().map(|item| item.id.clone());
+                let target_changed = active_workspace != next_workspace || scene_id != next_scene;
+                if active_workspace != next_workspace {
+                    active_path_invalid =
+                        workspace_is_invalid(&projected_paths, next_workspace.as_deref());
+                }
+                active_workspace = next_workspace;
+                active_task = hierarchy.task.as_ref().map(|item| item.id.clone());
+                scene_id = next_scene;
+                let graph =
+                    active_graph(&owner, scene_id.as_deref(), window_id, &startup_deferred)?;
+                if !target_changed
+                    && focused_session.as_deref() != Some(path.session_id.as_str())
+                    && let Some(pending) = focused_session
+                        .as_ref()
+                        .and_then(|id| shell_submissions.get_mut(id))
+                {
+                    pending.defer_ordering = false;
+                }
+                focused_session = graph["focusedSessionId"].as_str().map(str::to_owned);
+                pending_launch = unstarted_sessions(&owner, &graph, &sessions)?;
+                pending_launch.retain(|id| {
+                    !startup_deferred.contains(id)
+                        && !failed_launches.contains_key(id)
+                        && !launch_retries.contains_key(id)
+                        && !catalog_loads.contains_key(id)
+                        && !permission_changes.contains_key(id)
+                        && !shell_promotions.contains_key(id)
+                });
+                foreground_sessions = launchable_ids(&graph).map(str::to_owned).collect();
+                if (target_changed || !pending_launch.is_empty())
+                    && let Some(workspace_id) = &active_workspace
+                {
+                    checks.request(&owner, workspace_id)?;
+                    launch_validated = false;
+                    next_active_check = Instant::now() + ACTIVE_PATH_INTERVAL;
+                }
+                let scenes = active_task
+                    .as_deref()
+                    .map(|id| owner.scenes(id))
+                    .transpose()?
+                    .unwrap_or_default();
+                send_sidebar(&owner, window_id, send)?;
+                send.send_blocking(Event::Navigation {
+                    hierarchy,
+                    scenes,
+                    graph: graph.clone(),
+                    geometry: owner.geometry(&path.scene_id)?,
+                })?;
+                send.send_blocking(Event::Graph(graph))?;
+                dirty.extend(sessions.iter().cloned());
+                Ok(())
+            });
         }
         graph_dirty |= owner.poll_codex_hud();
         if (graph_dirty
