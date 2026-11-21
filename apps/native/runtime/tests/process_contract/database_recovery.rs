@@ -372,6 +372,9 @@ fn seed_read_only(data: &Path, newer: bool) -> Result<()> {
              INSERT INTO schema_migrations (version, name, checksum, applied_at)
              VALUES (999, 'newer', 'newer', 5);",
         )?;
+    }
+    matou_native_core::sessions::save_claude_time_zone(&db, "Asia/Tokyo", 6)?;
+    if newer {
         for name in [DB, "matou.sqlite-wal", "matou.sqlite-shm"] {
             fs::copy(scratch.path().join(name), data.join(name))?;
         }
@@ -760,6 +763,18 @@ fn both_read_only_sources_can_browse_search_and_export_without_changing_source()
             bail!("expected read-only ready")
         };
         ensure!(actual == reason);
+        child.send(Command::GetTimeZoneSettings { request_id: 21 })?;
+        let event = next(&mut child, |event| {
+            matches!(event, Event::TimeZoneSettings(_))
+        })?;
+        let Event::TimeZoneSettings(reply) = event else {
+            unreachable!()
+        };
+        ensure!(reply.request_id == 21);
+        let zone = reply
+            .result
+            .map_err(|error| anyhow::anyhow!("read-only time zone: {error:?}"))?;
+        ensure!(zone.time_zone == "Asia/Tokyo");
         let projection = projection.map_err(anyhow::Error::msg)?;
         ensure!(projection.workspaces.len() == 2 && projection.tasks.len() == 2);
         ensure!(
@@ -902,6 +917,13 @@ fn both_read_only_sources_can_browse_search_and_export_without_changing_source()
                     request_id: 10,
                     web_search: None,
                     assignments: Value::Null,
+                },
+            ),
+            (
+                Some(22),
+                Command::SetTimeZoneSettings {
+                    request_id: 22,
+                    time_zone: serde_json::json!("UTC"),
                 },
             ),
         ];

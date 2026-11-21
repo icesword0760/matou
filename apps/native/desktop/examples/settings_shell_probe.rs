@@ -78,6 +78,17 @@ mod workspace {
             );
         }
 
+        pub(super) fn time_zone_read_only(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+            self.apply(
+                BridgeEvent::Connection {
+                    generation: 1,
+                    phase: ConnectionPhase::ReadOnly { pending: None },
+                },
+                window,
+                cx,
+            );
+        }
+
         pub(super) fn model_catalog_reply(
             &mut self,
             reply: Value,
@@ -1195,9 +1206,31 @@ mod probe {
         );
     }
 
-    async fn verify_language_zone_window(cx: &mut AsyncApp, width: f32) {
+    async fn wait_for_language_frame(
+        window: WindowHandle<Workspace>,
+        cx: &mut AsyncApp,
+        expected: &str,
+    ) {
         use std::time::{Duration, Instant};
 
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let frame = probe_language_zone(|| draw(window, cx));
+            if frame.labels.iter().any(|label| label == expected) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "missing {expected:?}: {:?}",
+                frame.labels
+            );
+            cx.background_executor()
+                .timer(Duration::from_millis(5))
+                .await;
+        }
+    }
+
+    async fn verify_language_zone_window(cx: &mut AsyncApp, width: f32) {
         let root = std::env::temp_dir().join(format!("timezone-probe-{}", uuid::Uuid::new_v4()));
         let (window, sink) = cx.update(|cx| open_window_at(None, width, cx)).unwrap();
         window
@@ -1299,6 +1332,23 @@ mod probe {
             zone_bounds.right() <= px(width + 2.),
             "{width}: {zone_bounds:?}"
         );
+        if width == 720. {
+            let title_y = f32::from(zone_bounds.top()) + 18.;
+            assert!(
+                (title_y - 307.).abs() <= 8.,
+                "720pt time zone title y={title_y}"
+            );
+        }
+        for label in ["保存", "取消", "恢复默认"] {
+            assert_eq!(
+                ready
+                    .labels
+                    .iter()
+                    .filter(|copy| copy.as_str() == label)
+                    .count(),
+                1
+            );
+        }
         activate(cx, "zone");
         let menu = frame(cx);
         for label in ["跟随系统 (Asia/Shanghai)", "UTC", "Europe/London"] {
@@ -1338,32 +1388,23 @@ mod probe {
         reply(cx, reset, Ok(snapshot("auto")));
 
         frame(cx);
+        activate(cx, "zone");
+        press(window, "down", cx);
+        press(window, "down", cx);
+        press(window, "enter", cx);
+        has(&frame(cx).labels, "UTC");
         activate(cx, "english");
-        let before_save = frame(cx);
-        has(&before_save.labels, "语言与时区");
-        assert!(before_save.enabled["settings-language-save"]);
-        activate(cx, "language-cancel");
-        assert!(!frame(cx).enabled["settings-language-save"]);
-        activate(cx, "english");
-        frame(cx);
-        activate(cx, "language-save");
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while window.update(cx, |view, _, _| view.probe_locale()).unwrap()
-            != InterfaceLocale::English
-        {
-            assert!(
-                Instant::now() < deadline,
-                "language was not applied to the existing workspace"
-            );
-            cx.background_executor()
-                .timer(Duration::from_millis(5))
-                .await;
-        }
+        wait_for_language_frame(window, cx, "Language & time zone").await;
         assert_eq!(read_locale_preference(&root), LocalePreference::English);
         assert!(
             sink.try_recv().is_err(),
             "language save must send no runtime command"
         );
+        let english = frame(cx);
+        assert_eq!(english.selected_language, "en");
+        has(&english.labels, "UTC");
+        assert!(english.enabled["settings-time-zone-save"]);
+        activate(cx, "zone-cancel");
         let english = frame(cx);
         for label in [
             "Language & time zone",
@@ -1384,16 +1425,64 @@ mod probe {
                 .any(|label| label.starts_with("Current time：")
                     && label.ends_with("Asia/Singapore"))
         );
-        activate(cx, "language-reset");
-        assert!(frame(cx).enabled["settings-language-save"]);
+        let locale_file = root.join("locale.json");
+        let saved_bytes = std::fs::read(&locale_file).unwrap();
+        let preserved = root.join("locale-preserved.json");
+        std::fs::rename(&locale_file, &preserved).unwrap();
+        std::fs::create_dir(&locale_file).unwrap();
+        activate(cx, "chinese");
+        wait_for_language_frame(window, cx, "Save was not confirmed. Please retry.").await;
+        assert!(locale_file.is_dir());
+        assert_eq!(std::fs::read(&preserved).unwrap(), saved_bytes);
+        let failed = frame(cx);
+        has(&failed.labels, "Language & time zone");
+        assert_eq!(failed.selected_language, "en");
+        assert_eq!(
+            window.update(cx, |view, _, _| view.probe_locale()).unwrap(),
+            InterfaceLocale::English
+        );
+        std::fs::remove_dir(&locale_file).unwrap();
+        std::fs::rename(&preserved, &locale_file).unwrap();
+        assert_eq!(read_locale_preference(&root), LocalePreference::English);
+        activate(cx, "chinese");
+        wait_for_language_frame(window, cx, "语言与时区").await;
+        assert_eq!(read_locale_preference(&root), LocalePreference::Chinese);
+
+        if width == 720. {
+            sink.read_only_mode(1);
+            window
+                .update(cx, |view, window, cx| view.time_zone_read_only(window, cx))
+                .unwrap();
+            reply(cx, get(), Ok(snapshot("Asia/Tokyo")));
+            let read_only = frame(cx);
+            has(&read_only.labels, "Asia/Tokyo");
+            has(&read_only.labels, "数据库只读");
+            for control in [
+                "settings-time-zone-trigger",
+                "settings-time-zone-save",
+                "settings-time-zone-cancel",
+                "settings-time-zone-reset",
+            ] {
+                assert!(!read_only.enabled[control]);
+            }
+            activate(cx, "english");
+            wait_for_language_frame(window, cx, "The database is read-only.").await;
+            let read_only = frame(cx);
+            has(&read_only.labels, "Asia/Tokyo");
+            assert!(sink.try_recv().is_err());
+            println!(
+                "Hidden GPUI 720pt: read-only time zone value and disabled controls, bilingual reason, locale still saves"
+            );
+        }
+
         println!(
-            "Hidden GPUI SET-08 {width}pt: language and time-zone options, preview/copy, save/cancel/defaults, invalid/retry, disabled states, instant English and zone width {}pt",
+            "Hidden GPUI SET-08 {width}pt: immediate English and Chinese, failed language write keeps English, time zone draft survives language switch, and time zone width {}pt",
             f32::from(zone_bounds.size.width)
         );
         window
             .update(cx, |_, window, _| window.remove_window())
             .unwrap();
-        std::fs::remove_file(root.join("locale.json")).unwrap();
+        std::fs::remove_file(locale_file).unwrap();
         std::fs::remove_dir(root).unwrap();
     }
 

@@ -521,7 +521,12 @@ impl StoragePhase {
                 false
             }
             (Self::Writable, _) | (Self::Recovery, Command::DatabaseRecovery { .. }) => true,
-            (Self::ReadOnly, Command::ReadOnlyQuery { .. } | Command::History(_)) => true,
+            (
+                Self::ReadOnly,
+                Command::ReadOnlyQuery { .. }
+                | Command::History(_)
+                | Command::GetTimeZoneSettings { .. },
+            ) => true,
             (
                 Self::ReadOnly,
                 Command::DatabaseRecovery {
@@ -1432,6 +1437,15 @@ fn run_read_only(
                 continue;
             }
             match command {
+                Command::GetTimeZoneSettings { request_id } => {
+                    let result = read_claude_time_zone(&connection)
+                        .map(time_zone_snapshot)
+                        .map_err(|_| TimeZoneSettingsError::Storage);
+                    send.send_blocking(Event::TimeZoneSettings(TimeZoneSettingsReply {
+                        request_id,
+                        result,
+                    }))?;
+                }
                 Command::ReadOnlyQuery { request_id, query } => {
                     let result = match &workspace {
                         Ok(workspace) => workspace
@@ -5616,6 +5630,10 @@ fn time_zone_settings(
             .and_then(|db| read_claude_time_zone(&db))
             .map_err(|_| TimeZoneSettingsError::Storage)?
     };
+    Ok(time_zone_snapshot(time_zone))
+}
+
+fn time_zone_snapshot(time_zone: String) -> TimeZoneSettingsSnapshot {
     let system_time_zone = system_time_zone();
     let auto_time_zone = automatic_time_zone(&system_time_zone, None).map(str::to_owned);
     static ZONES: LazyLock<Vec<String>> = LazyLock::new(available_time_zones);
@@ -5623,12 +5641,12 @@ fn time_zone_settings(
     if !matches!(time_zone.as_str(), "auto" | "system") && !zones.contains(&time_zone) {
         zones.push(time_zone.clone());
     }
-    Ok(TimeZoneSettingsSnapshot {
+    TimeZoneSettingsSnapshot {
         time_zone,
         system_time_zone,
         auto_time_zone,
         zones,
-    })
+    }
 }
 
 pub(crate) fn native_role_catalog() -> Vec<Value> {

@@ -1103,18 +1103,25 @@ pub fn render_read_only_banner(
         .text_color(foreground.opacity(0.78))
         .whitespace_normal()
         .child(ui_text(locale.text(READ_ONLY_EXPLANATION, "Existing workspaces, tasks and sessions can still be browsed, searched and copied. Anything that would change data is paused.")));
-    let message = div()
-        .id("read-only-recovery-banner-message")
-        .debug_selector(|| "read-only-recovery-banner-message".to_owned())
-        .flex_1()
-        .min_w_0()
-        .flex()
-        .flex_wrap()
-        .items_center()
-        .gap_y(px(4.))
-        .gap_x(px(10.))
-        .child(title)
-        .child(explanation);
+    // Keep the headline and explanation in their own text column. The frozen
+    // banner stacks them (headline, then wrapped explanation) instead of laying
+    // them out as inline siblings, which is what collapsed the English copy to
+    // one character per line in a narrow window.
+    let message = probe_children(
+        div()
+            .flex_1()
+            .flex_basis(px(280.))
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .items_start()
+            .gap_y(px(2.))
+            .child(title)
+            .child(explanation),
+        "read-only-message",
+    )
+    .id("read-only-recovery-banner-message")
+    .debug_selector(|| "read-only-recovery-banner-message".to_owned());
 
     let search_label = div()
         .id("read-only-recovery-banner-search-label")
@@ -1180,22 +1187,30 @@ pub fn render_read_only_banner(
         .debug_selector(|| "read-only-recovery-banner-actions".to_owned())
         .flex_none()
         .flex()
-        .flex_nowrap()
+        .flex_wrap()
         .items_center()
         .justify_end()
         .gap(px(10.))
         .child(search)
         .child(export);
-    let row = div()
-        .id("read-only-recovery-banner-row")
-        .debug_selector(|| "read-only-recovery-banner-row".to_owned())
-        .w_full()
-        .min_w_0()
-        .flex()
-        .items_center()
-        .gap_x(px(14.))
-        .child(message)
-        .child(actions);
+    // A narrow window moves the two actions to their own row and gives the
+    // message the full banner width; a wide window keeps the frozen one-row
+    // arrangement with the actions right-aligned.
+    let row = probe_children(
+        div()
+            .w_full()
+            .min_w_0()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap_x(px(14.))
+            .gap_y(px(6.))
+            .child(message)
+            .child(actions),
+        "read-only-row",
+    )
+    .id("read-only-recovery-banner-row")
+    .debug_selector(|| "read-only-recovery-banner-row".to_owned());
 
     let mut banner = div()
         .id("read-only-recovery-banner")
