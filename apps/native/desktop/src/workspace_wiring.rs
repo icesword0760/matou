@@ -14,9 +14,9 @@ use matou_native_desktop::{
     },
     egress_panel::{
         EgressAction, EgressBannerState, EgressCheck, EgressCheckKind, EgressCheckResult,
-        EgressExit, EgressFamily, EgressFamilyStatus, EgressPanelState, EgressState, EgressStatus,
-        EgressTransition, EgressViolation, render_egress_banner, render_egress_chip_with_label,
-        render_egress_panel,
+        EgressExit, EgressFamily, EgressFamilyStatus, EgressPanelState, EgressRule, EgressState,
+        EgressStatus, EgressTransition, EgressViolation, render_egress_banner,
+        render_egress_chip_with_label, render_egress_panel,
     },
     shortcut_panel::{
         ShortcutLocale, ShortcutPanelAction, ShortcutPanelClose, ShortcutPanelEffect,
@@ -34,7 +34,7 @@ use matou_native_desktop::{
     workspace_board::{WorkspaceBoard, render_workspace_board_with_sessions},
 };
 use matou_native_runtime::{
-    egress_probe::Family,
+    egress_probe::{Family, RuleMode},
     update_download::{self, UpdatePhase},
 };
 
@@ -162,6 +162,9 @@ enum EgressRequest {
     Status,
     Recheck,
     Exempt(EgressFamily),
+    SetRule(EgressRule),
+    SetProtection(bool),
+    AcceptBaseline(EgressFamily),
 }
 
 struct PendingSplit {
@@ -1428,16 +1431,6 @@ impl Workspace {
                             .text("暂无出口检测结果", "No exit check results")
                             .into();
                     }
-                    // The runtime currently exposes status, sampling and IP exemption.
-                    view.rules
-                        .iter_mut()
-                        .for_each(|button| button.enabled = false);
-                    view.protection.enabled = false;
-                    for group in &mut view.groups {
-                        if let Some(button) = &mut group.accept_current {
-                            button.enabled = false;
-                        }
-                    }
                 }
                 Some(
                     anchored()
@@ -2054,6 +2047,15 @@ impl Workspace {
                 self.open_external_link(reference.url(), LinkSource::External, window, cx);
             }
             EgressAction::Recheck => self.request_egress(EgressRequest::Recheck, cx),
+            EgressAction::SetRule(rule) if rule != self.wiring.egress_status.rule_mode => {
+                self.request_egress(EgressRequest::SetRule(rule), cx)
+            }
+            EgressAction::SetProtection(enabled) => {
+                self.request_egress(EgressRequest::SetProtection(enabled), cx)
+            }
+            EgressAction::AcceptCurrent(family) => {
+                self.request_egress(EgressRequest::AcceptBaseline(family), cx)
+            }
             _ => {}
         }
         cx.notify();
@@ -2110,6 +2112,30 @@ impl Workspace {
             EgressRequest::Exempt(family) => (
                 "egressExemptionResult",
                 Command::SetEgressExemption {
+                    request_id,
+                    family: runtime_family(family),
+                },
+            ),
+            EgressRequest::SetRule(rule) => (
+                "egressRuleModeResult",
+                Command::SetEgressRuleMode {
+                    request_id,
+                    mode: match rule {
+                        EgressRule::Country => RuleMode::Country,
+                        EgressRule::Ip => RuleMode::Ip,
+                    },
+                },
+            ),
+            EgressRequest::SetProtection(enabled) => (
+                "egressProtectionEnabledResult",
+                Command::SetEgressProtectionEnabled {
+                    request_id,
+                    enabled,
+                },
+            ),
+            EgressRequest::AcceptBaseline(family) => (
+                "egressBaselineResult",
+                Command::AcceptEgressBaseline {
                     request_id,
                     family: runtime_family(family),
                 },
@@ -2611,9 +2637,9 @@ fn project_egress(value: &Value) -> Option<EgressStatus> {
         families,
         checks,
         rule_mode: if value["ruleMode"] == "ip" {
-            matou_native_desktop::egress_panel::EgressRule::Ip
+            EgressRule::Ip
         } else {
-            matou_native_desktop::egress_panel::EgressRule::Country
+            EgressRule::Country
         },
         protection_enabled: value["protectionEnabled"] == true,
         session_families: HashMap::new(),

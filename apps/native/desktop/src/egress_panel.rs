@@ -447,6 +447,7 @@ pub struct EgressPanelView {
 #[derive(Clone, Debug, Default)]
 pub struct EgressPanelState {
     pub open: bool,
+    /// One recheck or protection change is in flight.
     pub rechecking: bool,
     copied_until: Option<Duration>,
 }
@@ -503,8 +504,9 @@ impl EgressPanelState {
                     checks,
                     accept_current: entry
                         .is_some_and(|entry| entry.violation == Some(EgressViolation::Rule))
-                        .then(|| {
-                            EgressButton::new(
+                        .then(|| EgressButton {
+                            enabled: !self.rechecking,
+                            ..EgressButton::new(
                                 locale.text("以当前出口为准", "Use current exit"),
                                 EgressAction::AcceptCurrent(family),
                             )
@@ -532,12 +534,18 @@ impl EgressPanelState {
             recheck: EgressButton { enabled: !self.rechecking, ..recheck(locale) },
             groups,
             rule_title: rule_title(locale),
-            rules: [EgressRule::Country, EgressRule::Ip].map(|rule| EgressButton::new(rule.label(locale), EgressAction::SetRule(rule))),
+            rules: [EgressRule::Country, EgressRule::Ip].map(|rule| EgressButton {
+                enabled: !self.rechecking,
+                ..EgressButton::new(rule.label(locale), EgressAction::SetRule(rule))
+            }),
             rule_mode: status.rule_mode,
-            protection: EgressButton::new(locale.text(
-                "出口保护：出口异常时暂停 Claude / Codex / Antigravity 会话",
-                "Exit protection: pause Claude / Codex / Antigravity sessions when the exit is wrong",
-            ), EgressAction::SetProtection(!status.protection_enabled)),
+            protection: EgressButton {
+                enabled: !self.rechecking,
+                ..EgressButton::new(locale.text(
+                    "出口保护：出口异常时暂停 Claude / Codex / Antigravity 会话",
+                    "Exit protection: pause Claude / Codex / Antigravity sessions when the exit is wrong",
+                ), EgressAction::SetProtection(!status.protection_enabled))
+            },
             protection_enabled: status.protection_enabled,
             reference_title: locale.text("参考检查（不影响状态）", "Reference checks (do not affect status)"),
             reference_links: [
@@ -2729,6 +2737,7 @@ mod tests {
                 headings
             );
             let claude = view.groups[0].accept_current.as_ref().unwrap();
+            assert!(claude.enabled);
             assert_eq!(
                 (claude.label, &claude.action),
                 (accept, &EgressAction::AcceptCurrent(Anthropic))
@@ -2786,6 +2795,8 @@ mod tests {
             let view = state.view(Some(&status), locale, NOW).unwrap();
             assert_eq!((&*view.checked, view.recheck.label), (checked, recheck));
             assert!(!view.recheck.enabled);
+            assert!(view.rules.iter().all(|button| !button.enabled));
+            assert!(!view.protection.enabled);
             assert_eq!(view.rules.each_ref().map(|button| button.label), rules);
             assert_eq!(
                 view.rules.each_ref().map(|button| &button.action),

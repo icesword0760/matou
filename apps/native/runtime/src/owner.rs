@@ -49,7 +49,7 @@ use crate::{
     dsh_events::{DshEventOutcome, DshEvents, DshWorkStatus},
     dsh_launch::{self, DshLaunchInput, DshLaunchPlan},
     dsh_resume::{BeginOutcome, DshResume, ResumeFailure},
-    egress_probe::{self, EgressMonitor, EgressSample, Family, SessionEffect},
+    egress_probe::{self, EgressMonitor, EgressSample, Family, RuleMode, SessionEffect},
     fork_worktree::{ForkIdentity, ForkLease, ForkStage, NewWorktree, WorktreeBinding},
     host_control::{RunControl, clear_control_environment},
     provider_hook::{
@@ -588,6 +588,24 @@ impl ShellOwner {
         let effects = self
             .egress
             .override_family(family, now() as u64)
+            .map_err(anyhow::Error::msg)?;
+        self.apply_egress_effects(effects)
+    }
+
+    pub(crate) fn set_egress_rule_mode(&mut self, mode: RuleMode) -> Result<()> {
+        let effects = self.egress.set_rule_mode(mode, now() as u64);
+        self.apply_egress_effects(effects)
+    }
+
+    pub(crate) fn set_egress_protection(&mut self, enabled: bool) -> Result<()> {
+        let effects = self.egress.set_protection(enabled, now() as u64);
+        self.apply_egress_effects(effects)
+    }
+
+    pub(crate) fn accept_egress_baseline(&mut self, family: Family) -> Result<()> {
+        let effects = self
+            .egress
+            .accept_current(family, now() as u64)
             .map_err(anyhow::Error::msg)?;
         self.apply_egress_effects(effects)
     }

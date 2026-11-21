@@ -24,7 +24,8 @@ use matou_native_core::sessions::{
 use matou_native_core::workspace_paths::WorkspacePathState;
 use matou_native_desktop::split_tree::{SplitDirection, SplitRect};
 use matou_native_desktop::theme_tokens::{
-    ThemePalette, ThemePreference, ThemeState, read_theme_preference, write_theme_preference,
+    AppTheme, ThemePalette, ThemePreference, ThemeState, read_theme_preference,
+    write_theme_preference,
 };
 use matou_native_runtime::history::{
     HistoryCursor, HistoryLine, HistoryPage as OfflineHistoryPage, HistorySearchOptions,
@@ -9805,6 +9806,13 @@ impl Workspace {
             return false;
         }
         match (stroke.key.as_str(), mods.shift) {
+            ("i", false) if !mods.function && !(if mac { mods.control } else { mods.platform }) => {
+                let preference = match self.theme.effective() {
+                    AppTheme::Light => ThemePreference::Dark,
+                    AppTheme::Dark => ThemePreference::Light,
+                };
+                self.save_theme(preference, cx);
+            }
             ("d", false) => self.split_horizontal(cx),
             ("d", true) => {}
             ("t", false) => self.create_canvas(cx),

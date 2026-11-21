@@ -1,6 +1,9 @@
 use super::*;
 use crate::runtime_bridge::{ProbeReceiver, probe_channel};
-use matou_native_desktop::{egress_panel::EgressAction, update_popover::UpdateAction};
+use matou_native_desktop::{
+    egress_panel::{EgressAction, EgressRule},
+    update_popover::UpdateAction,
+};
 use matou_native_runtime::{
     dsh_catalog::encode_project_path,
     egress_probe::{EgressSample, Family, HostPair, HostSample},
@@ -50,6 +53,7 @@ struct Fixture {
     commands: ProbeReceiver,
     replies: Vec<Value>,
     identities: Vec<Value>,
+    frame_sequences: HashMap<String, u64>,
 }
 
 impl Fixture {
@@ -162,10 +166,14 @@ run="$AGY_FIXTURE_RUNS/$MATOU_PROVIDER_HOOK_TOKEN"
 mkdir "$run"
 printf '%s\n' "$@" > "$run/args"
 printf '%s' "$MATOU_PROVIDER_HOOK_URL" > "$run/url"
+/bin/stty -echo
 touch "$run/ready"
 while IFS= read -r line; do
     printf '%s\n' "$line" >> "$run/input"
     [ "$line" != /exit ] || exit 17
+    if { [ "$line" = /fork ] && [ -f "$run/emit-fork-output" ]; } || [ "$line" = /output ]; then
+        printf 'ANTIGRAVITY FIXTURE OUTPUT\n'
+    fi
 done
 "#,
         );
@@ -237,8 +245,11 @@ done
             shell_home,
             shell: "/bin/zsh".into(),
         };
-        let mut samples =
-            VecDeque::from([sample("203.0.113.1", "US"), sample("203.0.113.2", "CN")]);
+        let mut samples = VecDeque::from([
+            sample("203.0.113.1", "US"),
+            sample("203.0.113.2", "US"),
+            sample("203.0.113.3", "CN"),
+        ]);
         let host = RuntimeHost::start_with_offline_fixtures(
             options.clone(),
             OfflineFixtures {
@@ -288,6 +299,7 @@ done
             commands,
             replies: Vec::new(),
             identities: Vec::new(),
+            frame_sequences: HashMap::new(),
         }
     }
 
@@ -343,7 +355,19 @@ done
                     }
                 }
                 if let Event::Diagnostic(message) = &event {
+                    assert!(
+                        !message.contains("acknowledgement exceeds latest sent sequence"),
+                        "Offline Runtime diagnostic: {message}"
+                    );
                     eprintln!("Offline Runtime diagnostic: {message}");
+                }
+                if let Event::Frame {
+                    session_id,
+                    sequence,
+                    ..
+                } = &event
+                {
+                    self.frame_sequences.insert(session_id.clone(), *sequence);
                 }
                 assert!(
                     !matches!(event, Event::Closed),
@@ -651,16 +675,89 @@ pub(super) async fn verify(cx: &mut AsyncApp, root: PathBuf) {
             view.egress_for_probe().checked_at.map(|_| ())
         })
         .await;
+    let panel_action = |fixture: &Fixture, cx: &mut AsyncApp, action| {
+        fixture.update(cx, |view, window, cx| {
+            view.egress_action_for_probe(None, action, window, cx)
+        });
+    };
+    panel_action(&fixture, cx, EgressAction::Recheck);
+    fixture
+        .state(cx, "different IP in the original country", |view, _| {
+            view.egress_for_probe()
+                .families
+                .iter()
+                .find(|row| row.family == EgressFamily::OpenAi)?
+                .exit
+                .as_ref()
+                .filter(|exit| exit.ip == "203.0.113.2")
+                .map(|_| ())
+        })
+        .await;
+    panel_action(&fixture, cx, EgressAction::SetRule(EgressRule::Ip));
+    panel_action(&fixture, cx, EgressAction::SetRule(EgressRule::Ip));
+    let strict = fixture.reply(cx, "egressRuleModeResult").await;
+    assert_eq!(strict["result"]["ruleMode"], "ip");
+    fixture.update(cx, |view, _, _| assert!(view.egress_frozen(&source)));
+    panel_action(&fixture, cx, EgressAction::SetProtection(false));
+    fixture
+        .state(cx, "protection off and card thawed", |view, _| {
+            (!view.egress_for_probe().protection_enabled && !view.egress_frozen(&source))
+                .then_some(())
+        })
+        .await;
+    panel_action(&fixture, cx, EgressAction::SetProtection(true));
+    fixture
+        .state(cx, "protection on and card frozen", |view, _| {
+            (view.egress_for_probe().protection_enabled && view.egress_frozen(&source))
+                .then_some(())
+        })
+        .await;
+    panel_action(
+        &fixture,
+        cx,
+        EgressAction::AcceptCurrent(EgressFamily::OpenAi),
+    );
+    let accepted = fixture.reply(cx, "egressBaselineResult").await;
+    assert_eq!(
+        accepted["result"]["families"][0]["baseline"]["ip"],
+        "203.0.113.2"
+    );
+    fixture.update(cx, |view, _, _| assert!(!view.egress_frozen(&source)));
+
     fixture.update(cx, |view, window, cx| {
         view.egress_action_for_probe(None, EgressAction::Recheck, window, cx)
     });
     fixture
-        .state(cx, "entry frozen by second sample", |view, _| {
+        .state(cx, "entry frozen by mainland sample", |view, _| {
             view.egress_frozen(&source).then_some(())
         })
         .await;
     let real_recheck = fixture.reply(cx, "egressRecheckResult").await;
     assert!(draw(fixture.window.into(), cx).contains_key(&format!("egress-banner-{source}")));
+    assert_eq!(
+        fixture
+            .replies
+            .iter()
+            .filter(|reply| reply["type"] == "egressRuleModeResult")
+            .count(),
+        1
+    );
+    // A click already queued when a new sample arrives can target a now-invalid exit.
+    panel_action(
+        &fixture,
+        cx,
+        EgressAction::AcceptCurrent(EgressFamily::OpenAi),
+    );
+    fixture
+        .state(cx, "baseline validation message from Runtime", |view, _| {
+            (view.egress_frozen(&source)
+                && view
+                    .task_toast
+                    .as_deref()
+                    .is_some_and(|message| message.contains("mainland check")))
+            .then_some(())
+        })
+        .await;
     fixture.update(cx, |view, window, cx| {
         let old_graph = view.graph.clone();
         let mut late = real_recheck.clone();
@@ -700,7 +797,7 @@ pub(super) async fn verify(cx: &mut AsyncApp, root: PathBuf) {
     );
     press(fixture.window, cx, "escape");
     println!(
-        "live egress: status, two samples, frozen banner, stale reply isolation and current-IP exemption"
+        "live egress: rule switch, duplicate guard, protection off/on, accepted baseline, Runtime validation error, frozen banner, stale reply isolation and current-IP exemption"
     );
 
     let update = trigger_point_after_draw(fixture.window, cx, false);
@@ -1225,10 +1322,20 @@ async fn verify_antigravity(
         .await;
     let run = fixture.agy_run(cx, 3).await;
     assert_eq!(run.resume_arg(), Some(SOURCE));
+    fs::write(run.path.join("emit-fork-output"), "").unwrap();
     run.status(SOURCE);
     fixture
         .wait(cx, "Antigravity fork input", |_, _| {
             run.received_fork().then_some(())
+        })
+        .await;
+    let previous_sequence = fixture
+        .wait(cx, "output frame from the first fork run", |fixture, _| {
+            fixture
+                .frame_sequences
+                .get(&forked)
+                .copied()
+                .filter(|&seq| seq > 0)
         })
         .await;
     fixture.input(&forked, b"/exit\r");
@@ -1246,6 +1353,17 @@ async fn verify_antigravity(
     let retry = fixture.agy_run(cx, 4).await;
     assert_ne!(retry.url, run.url);
     assert_eq!(retry.resume_arg(), Some(SOURCE));
+    fixture
+        .wait(
+            cx,
+            "zero-credit layout frame from the quiet retry",
+            |fixture, _| (fixture.frame_sequences.get(&forked) == Some(&0)).then_some(()),
+        )
+        .await;
+    fixture.send(Command::Applied {
+        session_id: forked.clone(),
+        sequence: previous_sequence,
+    });
     retry.status(SOURCE);
     fixture
         .wait(cx, "Antigravity retry fork input", |_, _| {
@@ -1266,8 +1384,18 @@ async fn verify_antigravity(
             && event["providerSessionId"] == AGY_FORK
             && event["result"] == "confirmed"
     }));
+    fixture.input(&forked, b"/output\r");
+    fixture
+        .wait(
+            cx,
+            "new output credit after rejecting the old frame acknowledgement",
+            |fixture, _| {
+                (fixture.frame_sequences.get(&forked).copied()? > previous_sequence).then_some(())
+            },
+        )
+        .await;
     println!(
-        "live Antigravity menu: current-worktree fork, controlled failure, right-click retry and confirmed child identity"
+        "live Antigravity menu: current-worktree fork, controlled failure, right-click retry, confirmed child identity and old acknowledgement rejected"
     );
 
     fixture.update(cx, |view, window, cx| {

@@ -22,7 +22,7 @@ use anyhow::{Context, Result, bail, ensure};
 use matou_native_core::link_routing::BROWSER_RELEASES_URL;
 use matou_native_runtime::{
     dsh_catalog::encode_project_path,
-    egress_probe::{EgressSample, Family, HostPair, HostSample},
+    egress_probe::{EgressSample, Family, HostPair, HostSample, RuleMode},
     host::{
         Command, Event, ForkPlacement, ForkWorktreeMode, LaunchOptions, OfflineFixtures,
         OfflineRetention, OfflineUpdate, RuntimeHost,
@@ -481,6 +481,27 @@ fn offline_queries_update_retention_and_storage_gate() -> Result<()> {
                 provider_session_id: "any".into(),
             },
         ),
+        (
+            18,
+            Command::SetEgressRuleMode {
+                request_id: 18,
+                mode: RuleMode::Ip,
+            },
+        ),
+        (
+            19,
+            Command::SetEgressProtectionEnabled {
+                request_id: 19,
+                enabled: false,
+            },
+        ),
+        (
+            20,
+            Command::AcceptEgressBaseline {
+                request_id: 20,
+                family: Family::OpenAi,
+            },
+        ),
     ] {
         send(&readonly, command)?;
         let code = next(&readonly, |event| match event {
@@ -826,6 +847,21 @@ fn egress_freezes_the_live_pty_and_exemption_is_scoped_to_the_exit_ip() -> Resul
         Event::Diagnostic(message) if message.contains("frozen") => Some(()),
         _ => None,
     })?;
+    let rejected = reply(
+        &host,
+        Command::AcceptEgressBaseline {
+            request_id: 5,
+            family: Family::OpenAi,
+        },
+        5,
+        "egressBaselineResult",
+    )?;
+    assert!(
+        rejected["error"]
+            .as_str()
+            .unwrap()
+            .contains("mainland check")
+    );
     let thawed = result(
         &host,
         Command::SetEgressExemption {
@@ -843,6 +879,99 @@ fn egress_freezes_the_live_pty_and_exemption_is_scoped_to_the_exit_ip() -> Resul
     })?;
     assert!(!actual.contains("blocked"));
     assert_eq!(recheck(4)?["frozenSessionIds"], json!([id]));
+    host.shutdown()
+}
+
+#[test]
+fn egress_rule_protection_and_baseline_apply_to_the_live_pty() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let fixture = CodexFixture::new(root.path())?;
+    let mut samples = VecDeque::from([egress("8.8.8.8", "US"), egress("8.8.4.4", "US")]);
+    let mut host = fixture.start(OfflineFixtures {
+        egress_sample: Some(Box::new(move || {
+            samples.pop_front().context("sample fixture exhausted")
+        })),
+        ..Default::default()
+    })?;
+    let (_, id, _, _) = fixture.source(&host)?;
+    for request_id in 1..=2 {
+        let status = result(
+            &host,
+            Command::RecheckEgress { request_id },
+            request_id,
+            "egressRecheckResult",
+        )?;
+        assert_eq!(status["state"], "ok");
+        assert_eq!(status["families"][0]["baseline"]["ip"], "8.8.8.8");
+    }
+
+    let set_rule = |request_id, mode| {
+        result(
+            &host,
+            Command::SetEgressRuleMode { request_id, mode },
+            request_id,
+            "egressRuleModeResult",
+        )
+    };
+    let set_protection = |request_id, enabled| {
+        result(
+            &host,
+            Command::SetEgressProtectionEnabled {
+                request_id,
+                enabled,
+            },
+            request_id,
+            "egressProtectionEnabledResult",
+        )
+    };
+    let assert_blocked = |text: &[u8]| -> Result<()> {
+        input(&host, &id, text)?;
+        next(&host, |event| match event {
+            Event::Diagnostic(message) if message.contains("frozen") => Some(()),
+            _ => None,
+        })
+    };
+    let assert_delivered = |text: &str| -> Result<()> {
+        input(&host, &id, format!("{text}\r").as_bytes())?;
+        let actual = marker(&fixture.home.join("source-input"), |value| {
+            value.contains(text)
+        })?;
+        assert!(!actual.contains("blocked"));
+        Ok(())
+    };
+
+    let strict = set_rule(3, RuleMode::Ip)?;
+    assert_eq!(strict["ruleMode"], "ip");
+    assert_eq!(strict["frozenSessionIds"], json!([id]));
+    assert_blocked(b"blocked by stricter rule\r")?;
+    assert_eq!(
+        set_rule(4, RuleMode::Country)?["frozenSessionIds"],
+        json!([])
+    );
+    assert_delivered("resumed by country rule")?;
+    assert_eq!(set_rule(5, RuleMode::Ip)?["frozenSessionIds"], json!([id]));
+
+    let disabled = set_protection(6, false)?;
+    assert_eq!(disabled["protectionEnabled"], false);
+    assert_eq!(disabled["frozenSessionIds"], json!([]));
+    assert_delivered("resumed with protection off")?;
+    let enabled = set_protection(7, true)?;
+    assert_eq!(enabled["protectionEnabled"], true);
+    assert_eq!(enabled["frozenSessionIds"], json!([id]));
+    assert_blocked(b"blocked by re-enabled protection\r")?;
+
+    let accepted = result(
+        &host,
+        Command::AcceptEgressBaseline {
+            request_id: 8,
+            family: Family::OpenAi,
+        },
+        8,
+        "egressBaselineResult",
+    )?;
+    assert_eq!(accepted["families"][0]["baseline"]["ip"], "8.8.4.4");
+    assert_eq!(accepted["frozenSessionIds"], json!([]));
+    assert_delivered("resumed by baseline update")?;
     host.shutdown()
 }
 
