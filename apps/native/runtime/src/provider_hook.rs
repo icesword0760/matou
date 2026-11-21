@@ -335,6 +335,7 @@ pub(crate) fn transcript_uuid(path: &str) -> Option<&str> {
 pub(crate) enum HookMessage {
     Observed(Scope, Observation, Instant),
     DshObserved(Scope, Value, Instant),
+    AntigravityObserved(Scope, crate::antigravity_events::Source, Value, Instant),
     Retired(Scope),
 }
 
@@ -409,6 +410,19 @@ impl Registration {
         write_private(&path, patch.as_bytes(), 0o600)?;
         self.dsh_assets = Some(assets);
         Ok(path)
+    }
+
+    pub fn antigravity_environment(
+        &self,
+    ) -> std::collections::BTreeMap<std::ffi::OsString, std::ffi::OsString> {
+        [
+            ("MATOU_PROVIDER_HOOK_URL".into(), self.url.clone().into()),
+            (
+                "MATOU_PROVIDER_HOOK_TOKEN".into(),
+                self.token.clone().into(),
+            ),
+        ]
+        .into()
     }
 
     pub fn attach_codex(&self, launch: &mut ShellLaunch) -> Result<()> {
@@ -512,6 +526,19 @@ impl ProviderHookServer {
         };
         let script = if scope.profile == LaunchProfile::Dsh {
             String::new()
+        } else if scope.profile == LaunchProfile::Antigravity {
+            let settings = json!({"statusLine": {
+                "type": "command", "command": script_command(&files.script)?, "stack_with_default": true,
+            }});
+            write_private(
+                &files.temporary,
+                &serde_json::to_vec_pretty(&settings)?,
+                0o600,
+            )?;
+            fs::rename(&files.temporary, &files.settings)?;
+            format!(
+                "#!/bin/sh\npayload=$(cat)\n(printf '%s' \"$payload\" | /usr/bin/curl --noproxy '*' --silent --max-time 2 --request POST --header 'content-type: application/json' --data-binary @- '{url}?kind=statusline') </dev/null >/dev/null 2>&1 &\n"
+            )
         } else if scope.profile == LaunchProfile::Codex {
             format!(
                 "#!/bin/sh\n/usr/bin/curl --noproxy '*' --silent --show-error --max-time 2 --request POST --header 'content-type: application/json' --data-binary @- '{url}' >/dev/null 2>&1 || true\n"
@@ -794,9 +821,12 @@ fn read_request(
         .next()
         .and_then(|path| path.strip_prefix("/hooks/"))
         .ok_or(NOT_FOUND)?;
-    let (token, statusline) = path
-        .strip_suffix("?kind=statusline")
-        .map_or((path, false), |token| (token, true));
+    let (token, kind) = path.split_once('?').unwrap_or((path, ""));
+    let statusline = kind == "kind=statusline";
+    let pre_tool_use = kind == "kind=pre-tool-use";
+    if !kind.is_empty() && !statusline && !pre_tool_use {
+        return Err(NOT_FOUND);
+    }
     if !matches!(fields.next(), Some("HTTP/1.0" | "HTTP/1.1")) || fields.next().is_some() {
         return Err(BAD_REQUEST);
     }
@@ -863,7 +893,23 @@ fn read_request(
         return Ok(());
     }
     let received_at = Instant::now();
-    let message = if record.scope.profile == LaunchProfile::Dsh {
+    if pre_tool_use && record.scope.profile != LaunchProfile::Antigravity {
+        return Err(NOT_FOUND);
+    }
+    let message = if record.scope.profile == LaunchProfile::Antigravity {
+        use crate::antigravity_events::Source;
+        let source = if statusline {
+            Source::Statusline
+        } else {
+            Source::Hook
+        };
+        HookMessage::AntigravityObserved(
+            record.scope.clone(),
+            source,
+            Value::Object(payload),
+            received_at,
+        )
+    } else if record.scope.profile == LaunchProfile::Dsh {
         if statusline {
             return Err(BAD_REQUEST);
         }
