@@ -1689,3 +1689,17 @@ On 2026-11-16 the user explicitly chose `保持原样` after the concrete scenar
   5. `G-mt-read` (`5328fb46`): `mt read`/`history`/`commands` and `terminal.read-*` over real isolated Unix socket + real PTY (15 control tests + 6 CLI/PTY tests, zero-write snapshots). Note: `terminal_commands` table has no production writer yet, so new cards return `[]`.
   6. `G-dsh-launch`/`G-dsh-events` (`1d6c050a`): `dsh_launch.rs` + `dsh_events.rs` (12 tests including replaying all 6 frozen DSH event scenarios / 30 steps).
 - Post-merge full serial regression on `codex/native-parity`: **core 200 / runtime 239 / desktop 59 passed, 0 failed** (498 total), `cargo fmt --all --check`, `cargo check --offline --locked --all-targets`, `pnpm check:identifiers` and `git diff --check` all green. Remaining for these modules: thin wiring into `host.rs`/`workspace.rs`/`settings_shell.rs`, real desktop acceptance, real provider logins/network/signing and Windows.
+
+### Parallel batch P2 merged — 7 more isolated modules green (2026-11-21)
+
+- Merged seven more verified worktree branches into `codex/native-parity` and removed their temporary worktrees/branches:
+  1. `G-storage-retention` / `link_routing` / `browser_integration` (`bd68a29d`): 16 tests (2 GiB / 256 MiB checkpoint cleanup keeping raw/compressed logs, HTTPS/sign-in link policy, browser install diagnostics).
+  2. `G-shortcut-help` / `G-split-tree` (`cfa2e028`): 10 tests (8 platform/theme/locale shortcut combinations, mixed split-tree 10%–90% drag & directional focus).
+  3. `G-provider-hook-team` / `G-team-summary` (`b446cf7b`): 18 tests (replaying all 29 frozen provider-hook cases / 84 steps; read-only 42 pt team summary card).
+  4. `G-fork-worktree` / `G-codex-fork` (`734fac9e`): 12 tests in isolated real Git repos (branch reservation, lease-checked binding, dirty/advanced rollback protection, Codex fork modes and retry dedupe).
+  5. `G-kanban` / `G-update-ui` / `G-egress-ui` (`b7feadb6`): 17 tests (`workspace_board`, `update_popover`, `egress_panel` + freeze banner).
+  6. `G-mac-bundle` (`a9e47671`): `tooling/native-parity/package-native-mac.mjs` + 7 tests (offline native `.app` bundler with `com.matou.desktop`/`public.folder`, `/Applications` refusal, `--require-release-signature` guarding against ad-hoc).
+  7. `G-detach-window` / `G-card-menu` (`50470297`): 17 tests (multi-card detach registry/placeholder, 8-state card context menu).
+  8. `G-theme` / `G-provider-editor` (`587cf784`): 13 tests (`theme.json` light/dark/system palette tokens, provider context-window editor & default badge).
+  9. `G-dag-navigation` (`dag_canvas.rs`): 19 tests passing all 16 `dag-reference.json` cases (up to 10,000 nodes + 160,000-node failure, search 12 visible / 13th selectable, aggregation, zoom/pan/culling, reconnect).
+- All merged modules pass their unit/contract suites, identifier checks and whitespace checks; wiring into `settings_shell.rs`/`workspace.rs`/`host.rs` starts now (Wave 1: settings shell). Real desktop rendering, real logins/signing and Windows remain unverified.
