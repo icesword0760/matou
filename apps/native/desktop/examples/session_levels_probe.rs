@@ -432,12 +432,14 @@ mod workspace {
             self.control_focus[control].is_focused(window)
         }
 
-        pub(super) fn instructions_ready(&self) -> bool {
-            self.project_instructions_request.is_none()
+        pub(super) fn instructions_ready(&self, window: &Window) -> bool {
+            self.project_instructions
+                .get(&window.window_handle())
+                .is_none_or(|state| state.task.is_none())
         }
 
         pub(super) fn assert_instructions_entry_style() {
-            let mut entry = project_instructions::entry(ui_text("AGENTS.md"));
+            let mut entry = project_instructions::entry(ui_text("AGENTS.md"), false);
             let style = entry.style();
             assert_eq!(style.background, Some(rgba(0x00000014).into()));
             let text = style.text.as_ref().unwrap();
@@ -448,22 +450,22 @@ mod workspace {
         pub(super) fn assert_instructions_preview(
             &self,
             path: &std::path::Path,
-            expected: Result<Option<&str>, &str>,
-        ) -> ScrollHandle {
-            let (_, target) = self.project_instructions_target.as_ref().unwrap();
-            assert_eq!(target, path);
-            let preview = self.project_instructions_preview.as_ref().unwrap();
-            match (preview.result.as_ref(), expected) {
-                (Some(ProjectInstructionsRead::Missing), Ok(None)) => {}
-                (Some(ProjectInstructionsRead::Content(text)), Ok(Some(expected))) => {
-                    assert_eq!(text.as_ref(), expected)
-                }
-                (Some(ProjectInstructionsRead::Failed(error)), Err(expected)) => {
-                    assert!(error.starts_with(expected), "{error}")
-                }
-                _ => panic!("unexpected instruction preview state"),
+            expected: Result<&str, &str>,
+            window: &Window,
+        ) -> Option<Entity<RenameInput>> {
+            let state = &self.project_instructions[&window.window_handle()];
+            assert_eq!(state.path.as_deref(), Some(path));
+            let preview = state.preview.as_ref().unwrap();
+            match expected {
+                Ok(text) => assert_eq!(preview.original.as_deref(), Some(text)),
+                Err(prefix) => assert!(
+                    preview
+                        .error
+                        .as_deref()
+                        .is_some_and(|error| error.starts_with(prefix))
+                ),
             }
-            preview.scroll.clone()
+            preview.input.clone()
         }
 
         pub(super) fn assert_painted_footer_text(
@@ -2590,7 +2592,7 @@ mod probe {
 
     fn attempt_chinese_preedit(window: WindowHandle<Workspace>, cx: &mut AsyncApp, commit: bool) {
         use cocoa::{
-            base::{BOOL, NO, nil},
+            base::{BOOL, NO, YES, nil},
             foundation::{NSNotFound, NSRange, NSString},
         };
         use objc::{msg_send, sel, sel_impl};
@@ -2603,12 +2605,16 @@ mod probe {
             let replacement = NSRange::new(NSNotFound as _, 0);
             let _: () = msg_send![view, setMarkedText: text selectedRange: selected replacementRange: replacement];
             let marked: BOOL = msg_send![view, hasMarkedText];
-            assert_eq!(marked, NO, "read-only preview accepted marked text");
+            assert_eq!(marked, YES, "editor did not provide an IME marked range");
             if commit {
                 let _: () = msg_send![view, insertText: text replacementRange: replacement];
             } else {
-                let _: () = msg_send![view, unmarkText];
+                let empty = NSString::alloc(nil).init_str("");
+                let _: () = msg_send![view, setMarkedText: empty selectedRange: NSRange::new(0, 0) replacementRange: replacement];
+                let _: () = msg_send![empty, release];
             }
+            let marked: BOOL = msg_send![view, hasMarkedText];
+            assert_eq!(marked, NO);
             let _: () = msg_send![text, release];
         }
     }
@@ -5935,13 +5941,13 @@ mod probe {
                     .unwrap();
                 assert!(footer_bounds(window, cx, "name").is_none());
                 assert!(footer_bounds(window, cx, "cwd").is_none());
-                assert!(footer_bounds(window, cx, "account").is_some());
+                assert!(footer_bounds(window, cx, "account").is_none());
                 assert_footer_text(window, cx, "git", "Git 不可用", false);
                 let git = footer_bounds(window, cx, "git").unwrap().center();
                 click(window, cx, git);
                 assert!(fixture.process(window, cx, &sink).is_empty());
                 println!(
-                    "footer {width} | Codex with no model and root-only cwd: both omitted, Git 不可用 inert, account available"
+                    "footer {width} | Codex with no model and root-only cwd: both omitted, Git 不可用 inert, account hidden"
                 );
             }
 
@@ -6078,7 +6084,7 @@ mod probe {
                 ("context", show_context),
                 ("tools", true),
                 ("egress", true),
-                ("account", true),
+                ("account", false),
             ] {
                 if !active {
                     continue;
@@ -6097,8 +6103,9 @@ mod probe {
                 "todos",
                 "team",
                 "agents",
-                "mcp",
+                "mcps",
                 "hooks",
+                "account",
                 "instructions",
             ] {
                 assert!(
@@ -6200,7 +6207,7 @@ mod probe {
         loop {
             draw(window, cx);
             let ready = window
-                .update(cx, |view, _, _| view.instructions_ready())
+                .update(cx, |view, window, _| view.instructions_ready(window))
                 .unwrap();
             if ready {
                 return;
@@ -6432,9 +6439,13 @@ mod probe {
             click(window, cx, entry.center());
             wait_for_instructions(window, cx).await;
             let body = window
-                .update(cx, |view, _, _| {
-                    view.assert_instructions_preview(&root_file, Ok(Some(&contents)))
-                        .bounds()
+                .update(cx, |view, window, cx| {
+                    view.assert_instructions_preview(&root_file, Ok(&contents), window)
+                        .unwrap()
+                        .read(cx)
+                        .document_viewport()
+                        .unwrap()
+                        .0
                         .center()
                 })
                 .unwrap();
@@ -6452,7 +6463,7 @@ mod probe {
                         "instructions | {width} pt | after AppKit a: preview focused={focused}"
                     );
                     assert!(focused);
-                    view.assert_instructions_preview(&root_file, Ok(Some(&contents)));
+                    view.assert_instructions_preview(&root_file, Ok(&contents), window);
                 })
                 .unwrap();
             assert_esc_to_entry(cx, "plain a");
@@ -6462,9 +6473,16 @@ mod probe {
                 wait_for_instructions(window, cx).await;
                 attempt_chinese_preedit(window, cx, commit);
                 window
-                    .update(cx, |view, window, _| {
+                    .update(cx, |view, window, cx| {
                         assert!(view.instructions_focus("project-instructions-preview", window));
-                        view.assert_instructions_preview(&root_file, Ok(Some(&contents)));
+                        let input = view
+                            .assert_instructions_preview(&root_file, Ok(&contents), window)
+                            .unwrap();
+                        if commit {
+                            assert!(input.read(cx).text.starts_with("你好"));
+                        } else {
+                            assert_eq!(input.read(cx).text, contents);
+                        }
                     })
                     .unwrap();
                 assert_esc_to_entry(cx, scenario);
@@ -6488,7 +6506,8 @@ mod probe {
             let scroll = window
                 .update(cx, |view, window, _| {
                     assert!(view.instructions_focus("project-instructions-preview", window));
-                    view.assert_instructions_preview(&root_file, Ok(Some(&contents)))
+                    view.assert_instructions_preview(&root_file, Ok(&contents), window)
+                        .unwrap()
                 })
                 .unwrap();
             println!(
@@ -6497,27 +6516,27 @@ mod probe {
                 f32::from(panel_height),
             );
 
-            assert!(scroll.max_offset().height > px(500.));
-            assert_eq!(scroll.max_offset().width, px(0.));
-            assert_eq!(scroll.offset().y, px(0.));
+            let document = |cx: &mut AsyncApp| {
+                cx.read_entity(&scroll, |input, _| input.document_viewport().unwrap())
+                    .unwrap()
+            };
+            let (bounds, offset, max_offset) = document(cx);
+            assert!(max_offset > px(500.));
+            assert_eq!(offset, px(0.));
             let carousel_before = window.update(cx, |view, _, _| view.scroll_left()).unwrap();
-            mouse(
-                window,
-                cx,
-                scroll.bounds().center(),
-                NSEventType::NSScrollWheel,
-            );
+            mouse(window, cx, bounds.center(), NSEventType::NSScrollWheel);
             draw(window, cx);
-            assert_eq!(scroll.offset().y, px(-130.));
+            assert!(document(cx).1 > px(0.));
             assert_eq!(
                 window.update(cx, |view, _, _| view.scroll_left()).unwrap(),
                 carousel_before
             );
-            press(window, cx, "end");
+            press(window, cx, "cmd-down");
             draw(window, cx);
-            assert_eq!(scroll.offset().y, -scroll.max_offset().height);
+            let (_, end, max) = document(cx);
+            assert!((end - max).abs() <= px(0.5));
             println!(
-                "instructions | {width} pt | long preview: wheel moved 130 pt without moving cards, End reached the final line"
+                "instructions | {width} pt | wheel stays in the editor and Command+Down reaches the end"
             );
 
             let assert_control_focus = |cx: &mut AsyncApp, control: &str| {
@@ -6580,35 +6599,41 @@ mod probe {
                 deliver(window, cx, fixture.graph_event());
                 wait_for_instructions(window, cx).await;
                 window
-                    .update(cx, |view, _, _| {
-                        view.assert_instructions_preview(&root_file, Ok(Some(&contents)))
+                    .update(cx, |view, window, _| {
+                        view.assert_instructions_preview(&root_file, Ok(&contents), window)
                     })
                     .unwrap();
                 set_context(&fixture, &changed_cwd);
                 deliver(window, cx, fixture.graph_event());
                 wait_for_instructions(window, cx).await;
-                let new_scroll = window
-                    .update(cx, |view, _, _| {
-                        view.assert_instructions_preview(&changed_file, Ok(Some("# Updated cwd\n")))
+                assert!(footer_bounds(window, cx, "instructions-dialog").is_none());
+                let changed_entry = footer_bounds(window, cx, "instructions").unwrap().center();
+                click(window, cx, changed_entry);
+                wait_for_instructions(window, cx).await;
+                window
+                    .update(cx, |view, window, cx| {
+                        let input = view
+                            .assert_instructions_preview(
+                                &changed_file,
+                                Ok("# Updated cwd\n"),
+                                window,
+                            )
+                            .unwrap();
+                        assert_eq!(input.read(cx).document_viewport().unwrap().1, px(0.));
                     })
                     .unwrap();
-                assert_eq!(new_scroll.offset().y, px(0.));
-                println!(
-                    "instructions | {width} pt | terminal cd preserves outer path; context change reloads and resets scroll"
-                );
 
                 set_context(&fixture, &unreadable_cwd);
                 deliver(window, cx, fixture.graph_event());
                 wait_for_instructions(window, cx).await;
+                let denied_entry = footer_bounds(window, cx, "instructions").unwrap().center();
+                click(window, cx, denied_entry);
+                wait_for_instructions(window, cx).await;
                 window
-                    .update(cx, |view, _, _| {
-                        view.assert_instructions_preview(&denied_file, Err("读取失败："));
+                    .update(cx, |view, window, _| {
+                        view.assert_instructions_preview(&denied_file, Err("读取失败："), window);
                     })
                     .unwrap();
-                assert!(footer_bounds(window, cx, "instructions").is_some());
-                println!(
-                    "instructions | {width} pt | unreadable mode 000: existing entry retained, 读取失败, old text cleared"
-                );
                 assert_esc_to_entry(cx, "unreadable file");
 
                 click(window, cx, entry.center());
@@ -6618,15 +6643,7 @@ mod probe {
                 set_context(&fixture, &absent_cwd);
                 deliver(window, cx, fixture.graph_event());
                 wait_for_instructions(window, cx).await;
-                window
-                    .update(cx, |view, _, _| {
-                        view.assert_instructions_preview(&missing_file, Ok(None));
-                    })
-                    .unwrap();
                 assert!(footer_bounds(window, cx, "instructions").is_none());
-                assert!(footer_bounds(window, cx, "instructions-dialog").is_some());
-                press_native_escape(window, cx);
-                draw(window, cx);
                 assert!(footer_bounds(window, cx, "instructions-dialog").is_none());
                 window
                     .update(cx, |view, window, cx| {
@@ -6686,10 +6703,11 @@ mod probe {
             click(window, cx, child_entry);
             wait_for_instructions(window, cx).await;
             window
-                .update(cx, |view, _, _| {
+                .update(cx, |view, window, _| {
                     view.assert_instructions_preview(
                         &child_file,
-                        Ok(Some("# Child instructions\n")),
+                        Ok("# Child instructions\n"),
+                        window,
                     );
                 })
                 .unwrap();

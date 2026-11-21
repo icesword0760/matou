@@ -1,4 +1,4 @@
-//! Single-line native editor for the frozen RenameDialog input.
+//! Native text editing shared by the single-line inputs and instruction files.
 //! GPUI's EntityInputHandler supplies platform text composition and selection.
 use gpui::{prelude::*, *};
 use std::ops::Range;
@@ -22,6 +22,59 @@ struct EditState {
     reversed: bool,
 }
 
+const EDITOR_LINE_HEIGHT: Pixels = px(20.8);
+pub const INSTRUCTIONS_MAX_BYTES: usize = 2 * 1024 * 1024;
+
+struct DocumentLayout {
+    lines: Vec<WrappedLine>,
+    height: Pixels,
+}
+
+impl DocumentLayout {
+    fn position(&self, index: usize) -> Point<Pixels> {
+        let mut offset = 0;
+        let mut y = px(0.);
+        for line in &self.lines {
+            if index <= offset + line.len() {
+                return line
+                    .position_for_index(index - offset, EDITOR_LINE_HEIGHT)
+                    .unwrap_or_default()
+                    + point(px(0.), y);
+            }
+            offset += line.len() + 1;
+            y += line.size(EDITOR_LINE_HEIGHT).height;
+        }
+        point(px(0.), y)
+    }
+
+    fn index(&self, position: Point<Pixels>, len: usize) -> usize {
+        let mut offset = 0;
+        let mut y = px(0.);
+        for line in &self.lines {
+            let height = line.size(EDITOR_LINE_HEIGHT).height;
+            if position.y < y + height {
+                let index = line
+                    .closest_index_for_position(
+                        point(position.x, (position.y - y).max(px(0.))),
+                        EDITOR_LINE_HEIGHT,
+                    )
+                    .unwrap_or_else(|index| index);
+                return (offset + index).min(len);
+            }
+            offset += line.len() + 1;
+            y += height;
+        }
+        len
+    }
+}
+
+struct DocumentEditor {
+    layout: Option<DocumentLayout>,
+    scroll: Pixels,
+    follow_cursor: bool,
+    read_only: bool,
+}
+
 pub struct RenameInput {
     pub focus: FocusHandle,
     pub text: String,
@@ -43,6 +96,7 @@ pub struct RenameInput {
     bounds: Option<Bounds<Pixels>>,
     scroll: Pixels,
     selecting: bool,
+    document: Option<DocumentEditor>,
 }
 impl EventEmitter<RenameInputEvent> for RenameInput {}
 impl RenameInput {
@@ -67,6 +121,52 @@ impl RenameInput {
             bounds: None,
             scroll: px(0.),
             selecting: false,
+            document: None,
+        }
+    }
+
+    pub fn instructions(text: String, focus: FocusHandle, cx: &mut Context<Self>) -> Self {
+        let mut input = Self::new(text, cx);
+        input.focus = focus;
+        input.placeholder.clear();
+        input.selection = 0..0;
+        input.document = Some(DocumentEditor {
+            layout: None,
+            scroll: px(0.),
+            follow_cursor: true,
+            read_only: false,
+        });
+        input
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn document_viewport(&self) -> Option<(Bounds<Pixels>, Pixels, Pixels)> {
+        let bounds = self.bounds?;
+        let document = self.document.as_ref()?;
+        let height = document.layout.as_ref()?.height;
+        Some((
+            bounds,
+            document.scroll,
+            (height - bounds.size.height).max(px(0.)),
+        ))
+    }
+
+    pub fn set_document_read_only(&mut self, read_only: bool, cx: &mut Context<Self>) {
+        if let Some(document) = &mut self.document {
+            document.read_only = read_only;
+            cx.notify();
+        }
+    }
+
+    fn document_read_only(&self) -> bool {
+        self.document
+            .as_ref()
+            .is_some_and(|document| document.read_only)
+    }
+
+    fn follow_document_cursor(&mut self) {
+        if let Some(document) = &mut self.document {
+            document.follow_cursor = true;
         }
     }
 
@@ -117,11 +217,15 @@ impl RenameInput {
         self.selection = state.selection;
         self.reversed = state.reversed;
         self.marked = None;
+        self.follow_document_cursor();
         cx.emit(RenameInputEvent::Changed);
         cx.notify();
     }
 
     fn restore_history(&mut self, redo: bool, cx: &mut Context<Self>) {
+        if self.document_read_only() {
+            return;
+        }
         self.typing = false;
         let state = if redo {
             self.redo.pop()
@@ -140,24 +244,35 @@ impl RenameInput {
     }
 
     fn replace(&mut self, range: Range<usize>, text: &str, typing: bool, cx: &mut Context<Self>) {
-        let remaining = (if self.search_style {
-            usize::MAX
+        if self.document_read_only() {
+            return;
+        }
+        let insert: String = if self.document.is_some() {
+            let available = INSTRUCTIONS_MAX_BYTES.saturating_sub(self.text.len() - range.len());
+            let mut end = text.len().min(available);
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            text[..end].to_owned()
         } else {
-            20usize
-        })
-        .saturating_sub(
-            self.text[..range.start].encode_utf16().count()
-                + self.text[range.end..].encode_utf16().count(),
-        );
-        let mut units = 0;
-        let insert: String = text
-            .chars()
-            .filter(|c| *c != '\n' && *c != '\r')
-            .take_while(|c| {
-                units += c.len_utf16();
-                units <= remaining
+            let remaining = (if self.search_style {
+                usize::MAX
+            } else {
+                20usize
             })
-            .collect();
+            .saturating_sub(
+                self.text[..range.start].encode_utf16().count()
+                    + self.text[range.end..].encode_utf16().count(),
+            );
+            let mut units = 0;
+            text.chars()
+                .filter(|c| *c != '\n' && *c != '\r')
+                .take_while(|c| {
+                    units += c.len_utf16();
+                    units <= remaining
+                })
+                .collect()
+        };
         let composition = self.before_composition.take();
         let typing = typing
             && composition.is_none()
@@ -178,6 +293,7 @@ impl RenameInput {
         } else if !typing {
             self.typing = false;
         }
+        self.follow_document_cursor();
         cx.emit(RenameInputEvent::Changed);
         cx.notify();
     }
@@ -196,6 +312,7 @@ impl RenameInput {
             self.reversed = false;
             self.selection = offset..offset;
         }
+        self.follow_document_cursor();
         cx.notify();
     }
     fn previous(&self, offset: usize) -> usize {
@@ -228,6 +345,17 @@ impl RenameInput {
             .unwrap_or(self.text.len())
     }
     fn hit(&self, position: Point<Pixels>) -> usize {
+        if let Some(document) = &self.document {
+            return self
+                .bounds
+                .zip(document.layout.as_ref())
+                .map_or(0, |(bounds, layout)| {
+                    layout.index(
+                        position - bounds.origin + point(px(0.), document.scroll),
+                        self.text.len(),
+                    )
+                });
+        }
         self.bounds
             .zip(self.layout.as_ref())
             .map(|(b, l)| {
@@ -255,7 +383,42 @@ impl RenameInput {
         }
         match key.as_str() {
             "escape" => cx.emit(RenameInputEvent::Cancel),
+            "enter" if self.document.is_some() && !shortcut => {
+                let newline = if self.text.contains("\r\n") {
+                    "\r\n"
+                } else {
+                    "\n"
+                };
+                self.replace(self.selection.clone(), newline, false, cx);
+            }
             "enter" => cx.emit(RenameInputEvent::Confirm),
+            "up" | "down" | "pageup" | "pagedown" if self.document.is_some() => {
+                if let Some(layout) = self
+                    .document
+                    .as_ref()
+                    .and_then(|document| document.layout.as_ref())
+                {
+                    let page = self.bounds.map_or(EDITOR_LINE_HEIGHT, |bounds| {
+                        bounds.size.height - EDITOR_LINE_HEIGHT
+                    });
+                    let delta = match key.as_str() {
+                        "up" => -EDITOR_LINE_HEIGHT,
+                        "down" => EDITOR_LINE_HEIGHT,
+                        "pageup" => -page,
+                        _ => page,
+                    };
+                    let position = layout.position(self.cursor())
+                        + point(px(0.), delta + EDITOR_LINE_HEIGHT / 2.);
+                    let offset = if shortcut && key == "up" {
+                        0
+                    } else if shortcut && key == "down" {
+                        self.text.len()
+                    } else {
+                        layout.index(position, self.text.len())
+                    };
+                    self.move_to(offset, m.shift, cx);
+                }
+            }
             "z" if shortcut => self.restore_history(m.shift, cx),
             "y" if !cfg!(target_os = "macos") && shortcut => self.restore_history(true, cx),
             "a" if shortcut => {
@@ -283,7 +446,20 @@ impl RenameInput {
                 let end = key == "right" || key == "end";
                 let cursor = self.cursor();
                 let offset = if key == "home" || key == "end" || line {
-                    if end { self.text.len() } else { 0 }
+                    if self.document.is_some()
+                        && !m.control
+                        && !(m.platform && matches!(key.as_str(), "home" | "end"))
+                    {
+                        if end {
+                            self.line_end(cursor)
+                        } else {
+                            self.line_start(cursor)
+                        }
+                    } else if end {
+                        self.text.len()
+                    } else {
+                        0
+                    }
                 } else if !m.shift && !self.selection.is_empty() {
                     if end {
                         self.selection.end
@@ -307,7 +483,11 @@ impl RenameInput {
                     let cursor = self.cursor();
                     if key == "backspace" {
                         range.start = if line {
-                            0
+                            if self.document.is_some() {
+                                self.line_start(cursor)
+                            } else {
+                                0
+                            }
                         } else if word {
                             self.previous_word(cursor)
                         } else {
@@ -315,7 +495,11 @@ impl RenameInput {
                         };
                     } else {
                         range.end = if line {
-                            self.text.len()
+                            if self.document.is_some() {
+                                self.line_end(cursor)
+                            } else {
+                                self.text.len()
+                            }
                         } else if word {
                             self.next_word(cursor, false)
                         } else {
@@ -331,6 +515,118 @@ impl RenameInput {
         cx.stop_propagation();
         cx.notify();
     }
+    fn line_start(&self, index: usize) -> usize {
+        self.text[..index]
+            .rfind('\n')
+            .map_or(0, |position| position + 1)
+    }
+
+    fn line_end(&self, index: usize) -> usize {
+        self.text[index..]
+            .find('\n')
+            .map_or(self.text.len(), |position| {
+                let end = index + position;
+                if end > index && self.text.as_bytes()[end - 1] == b'\r' {
+                    end - 1
+                } else {
+                    end
+                }
+            })
+    }
+
+    fn paint_document(
+        &mut self,
+        entity: Entity<Self>,
+        bounds: Bounds<Pixels>,
+        color: Rgba,
+        runs: &[TextRun],
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let cursor = self.cursor();
+        let text = SharedString::from(self.text.clone());
+        let Ok(lines) = window.text_system().shape_text(
+            text,
+            px(13.),
+            runs,
+            Some(bounds.size.width.max(px(1.))),
+            None,
+        ) else {
+            return;
+        };
+        let height = lines.iter().fold(px(0.), |height, line| {
+            height + line.size(EDITOR_LINE_HEIGHT).height
+        });
+        let layout = DocumentLayout {
+            lines: lines.into_vec(),
+            height,
+        };
+        let cursor = layout.position(cursor);
+        let document = self.document.as_mut().unwrap();
+        if document.follow_cursor {
+            if cursor.y < document.scroll {
+                document.scroll = cursor.y;
+            } else if cursor.y + EDITOR_LINE_HEIGHT > document.scroll + bounds.size.height {
+                document.scroll = cursor.y + EDITOR_LINE_HEIGHT - bounds.size.height;
+            }
+            document.follow_cursor = false;
+        }
+        document.scroll = document
+            .scroll
+            .clamp(px(0.), (height - bounds.size.height).max(px(0.)));
+        let origin = bounds.origin - point(px(0.), document.scroll);
+        let start = layout.position(self.selection.start);
+        let end = layout.position(self.selection.end);
+        window.handle_input(&self.focus, ElementInputHandler::new(bounds, entity), cx);
+        window.with_content_mask(Some(ContentMask { bounds }), |window| {
+            if !self.selection.is_empty() {
+                let mut y = start.y.max(document.scroll - EDITOR_LINE_HEIGHT);
+                y = (y / EDITOR_LINE_HEIGHT).floor() * EDITOR_LINE_HEIGHT;
+                while y <= end.y && origin.y + y < bounds.bottom() {
+                    let x = if y == start.y { start.x } else { px(0.) };
+                    let right = if y == end.y { end.x } else { bounds.size.width };
+                    window.paint_quad(fill(
+                        Bounds::new(
+                            origin + point(x, y),
+                            size((right - x).max(px(0.)), EDITOR_LINE_HEIGHT),
+                        ),
+                        rgba(0x347fd64d),
+                    ));
+                    y += EDITOR_LINE_HEIGHT;
+                }
+            }
+            let mut y = origin.y;
+            for line in &layout.lines {
+                let height = line.size(EDITOR_LINE_HEIGHT).height;
+                if y >= bounds.bottom() {
+                    break;
+                }
+                if y + height > bounds.top() {
+                    let _ = line.paint(
+                        point(origin.x, y),
+                        EDITOR_LINE_HEIGHT,
+                        TextAlign::Left,
+                        None,
+                        window,
+                        cx,
+                    );
+                }
+                y += height;
+            }
+            if self.selection.is_empty() && self.focus.is_focused(window) {
+                window.paint_quad(fill(
+                    Bounds::new(
+                        origin + cursor + point(px(0.), px(2.)),
+                        size(px(1.), EDITOR_LINE_HEIGHT - px(4.)),
+                    ),
+                    color,
+                ));
+            }
+        });
+        document.layout = Some(layout);
+        self.bounds = Some(bounds);
+    }
+
     fn paint(
         &mut self,
         entity: Entity<Self>,
@@ -360,7 +656,9 @@ impl RenameInput {
         } else {
             0x000000d9
         });
-        let color = if self.text.is_empty() {
+        let color = if self.document.is_some() {
+            window.text_style().color.into()
+        } else if self.text.is_empty() {
             self.placeholder_color.unwrap_or(default_color)
         } else {
             self.text_color.unwrap_or(default_color)
@@ -395,6 +693,10 @@ impl RenameInput {
         } else {
             vec![run]
         };
+        if self.document.is_some() {
+            self.paint_document(entity, bounds, color, &runs, window, cx);
+            return;
+        }
         let line = window.text_system().shape_line(
             display,
             px(if self.session_loader_search_style {
@@ -515,6 +817,9 @@ impl EntityInputHandler for RenameInput {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.document_read_only() {
+            return;
+        }
         if text.is_empty() {
             if let Some(previous) = self.before_composition.take() {
                 self.restore_edit_state(previous, cx);
@@ -529,7 +834,13 @@ impl EntityInputHandler for RenameInput {
             .map(|r| self.bytes(r))
             .or_else(|| self.marked.clone())
             .unwrap_or_else(|| self.selection.clone());
+        if self.document.is_some()
+            && self.text.len() - range.len() + text.len() > INSTRUCTIONS_MAX_BYTES
+        {
+            return;
+        }
         self.text.replace_range(range.clone(), text);
+        self.follow_document_cursor();
         self.marked = Some(range.start..range.start + text.len());
         self.selection = selected
             .map(|r| {
@@ -549,6 +860,23 @@ impl EntityInputHandler for RenameInput {
     ) -> Option<Bounds<Pixels>> {
         let range = self.bytes(range);
         let b = self.bounds?;
+        if let Some(document) = &self.document {
+            let layout = document.layout.as_ref()?;
+            let origin = b.origin - point(px(0.), document.scroll);
+            let start = layout.position(range.start);
+            let end = layout.position(range.end);
+            return Some(Bounds::new(
+                origin + start,
+                size(
+                    if end.y == start.y {
+                        (end.x - start.x).max(px(1.))
+                    } else {
+                        px(1.)
+                    },
+                    EDITOR_LINE_HEIGHT,
+                ),
+            ));
+        }
         let l = self.layout.as_ref()?;
         Some(Bounds::from_corners(
             point(b.left() + l.x_for_index(range.start) - self.scroll, b.top()),
@@ -568,24 +896,57 @@ impl EntityInputHandler for RenameInput {
     }
 }
 impl Render for RenameInput {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity();
+        let document = self.document.is_some();
+        let focused = self.focus.is_focused(window);
         div()
-            .id("rename-native-input")
+            .id(if document {
+                "instructions-native-input"
+            } else {
+                "rename-native-input"
+            })
             .track_focus(&self.focus)
-            .h(px(if self.search_style { 28. } else { 32. }))
+            .when(!document, |el| {
+                el.h(px(if self.search_style { 28. } else { 32. }))
+            })
+            .when(document, |el| {
+                el.flex_1().min_h_0().p(px(18.)).overflow_hidden()
+            })
             .w_full()
             .relative()
             .rounded(px(8.))
-            .bg(rgba(if self.search_style {
-                0x00000000
-            } else {
-                0x0000000a
-            }))
-            .pl(px(if self.search_style { 0. } else { 14. }))
-            .pr(px(if self.search_style { 0. } else { 50. }))
+            .when(!document, |el| {
+                el.bg(rgba(if self.search_style {
+                    0x00000000
+                } else {
+                    0x0000000a
+                }))
+                .pl(px(if self.search_style { 0. } else { 14. }))
+                .pr(px(if self.search_style { 0. } else { 50. }))
+            })
+            .when(document && focused, |el| {
+                el.border_1().border_color(rgba(0x58a6ff6b))
+            })
             .cursor(CursorStyle::IBeam)
             .on_key_down(cx.listener(Self::key))
+            .when(document, |el| {
+                el.on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
+                    if let Some(document) = &mut this.document {
+                        let delta = event.delta.pixel_delta(EDITOR_LINE_HEIGHT);
+                        let height = document
+                            .layout
+                            .as_ref()
+                            .map_or(px(0.), |layout| layout.height);
+                        let viewport = this.bounds.map_or(px(0.), |bounds| bounds.size.height);
+                        document.scroll = (document.scroll - delta.y)
+                            .clamp(px(0.), (height - viewport).max(px(0.)));
+                        document.follow_cursor = false;
+                        cx.stop_propagation();
+                        cx.notify();
+                    }
+                }))
+            })
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, e: &MouseDownEvent, window, cx| {
@@ -634,10 +995,13 @@ impl Render for RenameInput {
                     },
                 )
                 .w_full()
-                .h(px(20.))
-                .mt(px(if self.search_style { 4. } else { 6. })),
+                .when(document, |el| el.size_full())
+                .when(!document, |el| {
+                    el.h(px(20.))
+                        .mt(px(if self.search_style { 4. } else { 6. }))
+                }),
             )
-            .when(!self.search_style, |el| {
+            .when(!document && !self.search_style, |el| {
                 el.child(
                     div()
                         .absolute()
