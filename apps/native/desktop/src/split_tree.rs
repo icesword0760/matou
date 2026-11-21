@@ -634,6 +634,27 @@ mod tests {
     }
 
     #[test]
+    fn horizontal_divider_tracks_every_step_after_layout_in_both_directions() {
+        let mut tree = SplitTree::from_snapshot(&snapshot()).unwrap();
+        let start = tree.layout(VIEW).dividers[0].position;
+        let mut previous = start;
+
+        for (origin, sign) in [(start, 1.0), (start + 180.0, -1.0)] {
+            for step in 1..=35 {
+                let x = origin + sign * 180.0 * f64::from(step) / 35.0;
+                let change = tree.layout(VIEW).dividers[0].drag_to(x, VIEW.y).unwrap();
+                assert!(tree.apply_ratio(change, 0).is_some());
+                let divider = &tree.layout(VIEW).dividers[0];
+                assert_eq!(divider.parent_bounds, VIEW);
+                assert!((divider.position - x).abs() < 1e-9);
+                assert!((divider.position - previous) * sign > 0.0);
+                previous = divider.position;
+            }
+        }
+        assert_eq!(previous, start);
+    }
+
+    #[test]
     fn persisted_geometry_round_trips_without_losing_tree_or_ancestor_ratio() {
         let mut legacy = snapshot();
         let mut tree = SplitTree::from_snapshot(&legacy).unwrap();
@@ -780,6 +801,11 @@ mod tests {
 mod ui {
     use std::{cell::Cell, rc::Rc};
 
+    #[cfg(target_os = "macos")]
+    use core_graphics::{
+        event::{CGEventType, CGMouseButton},
+        event_source::CGEventSourceStateID,
+    };
     use gpui::{prelude::*, *};
 
     use super::*;
@@ -790,22 +816,134 @@ mod ui {
     const DIVIDER_HIT_INSET: f32 = 3.;
     const DIVIDER_HIT_SIZE: f32 = DIVIDER_LINE + DIVIDER_HIT_INSET * 2.;
 
+    #[cfg(target_os = "macos")]
+    unsafe extern "C" {
+        fn CGEventSourceButtonState(source: CGEventSourceStateID, button: CGMouseButton) -> bool;
+        fn CGEventSourceCounterForEventType(
+            source: CGEventSourceStateID,
+            event: CGEventType,
+        ) -> u32;
+    }
+
+    #[cfg(all(target_os = "macos", debug_assertions))]
+    thread_local! {
+        static PROBE_LEFT_BUTTON: Cell<Option<Option<u32>>> = const { Cell::new(None) };
+    }
+
+    /// Supply a left-button state for input injected into a hidden window.
+    #[cfg(all(target_os = "macos", debug_assertions))]
+    pub fn with_split_drag_button_for_probe<R>(
+        held_since_release_count: Option<u32>,
+        dispatch: impl FnOnce() -> R,
+    ) -> R {
+        struct Restore(Option<Option<u32>>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                PROBE_LEFT_BUTTON.set(self.0);
+            }
+        }
+
+        let _restore = Restore(PROBE_LEFT_BUTTON.replace(Some(held_since_release_count)));
+        dispatch()
+    }
+
+    fn held_left_release_count() -> Option<u32> {
+        #[cfg(all(target_os = "macos", debug_assertions))]
+        if let Some(state) = PROBE_LEFT_BUTTON.get() {
+            return state;
+        }
+        #[cfg(target_os = "macos")]
+        unsafe {
+            let source = CGEventSourceStateID::CombinedSessionState;
+            CGEventSourceButtonState(source, CGMouseButton::Left)
+                .then(|| CGEventSourceCounterForEventType(source, CGEventType::LeftMouseUp))
+        }
+        #[cfg(not(target_os = "macos"))]
+        None
+    }
+
+    #[derive(Clone, Copy)]
+    struct DividerDrag {
+        left_release_count: Option<u32>,
+    }
+
+    impl DividerDrag {
+        fn begin() -> Self {
+            Self {
+                left_release_count: held_left_release_count(),
+            }
+        }
+
+        fn left_button_still_held(self) -> bool {
+            // A new physical press cannot revive a drag after an unobserved release.
+            self.left_release_count
+                .is_some_and(|start| held_left_release_count() == Some(start))
+        }
+
+        fn is_buttonless_drag_noise(self, button: Option<MouseButton>) -> bool {
+            button.is_none() && self.left_button_still_held()
+        }
+
+        fn ended_by(self, button: MouseButton) -> bool {
+            // macOS can report Ctrl+left release to GPUI as a right-button up.
+            button == MouseButton::Left
+                || (self.left_release_count.is_some() && !self.left_button_still_held())
+        }
+    }
+
+    #[cfg(all(test, target_os = "macos", debug_assertions))]
+    mod tests {
+        use gpui::MouseButton;
+
+        use super::{DividerDrag, with_split_drag_button_for_probe};
+
+        #[test]
+        fn the_original_physical_press_survives_a_buttonless_move() {
+            let drag = with_split_drag_button_for_probe(Some(42), DividerDrag::begin);
+            with_split_drag_button_for_probe(Some(42), || {
+                assert!(drag.is_buttonless_drag_noise(None));
+                assert!(!drag.is_buttonless_drag_noise(Some(MouseButton::Right)));
+                assert!(drag.ended_by(MouseButton::Left));
+                assert!(!drag.ended_by(MouseButton::Right));
+            });
+            for state in [None, Some(43)] {
+                with_split_drag_button_for_probe(state, || {
+                    assert!(!drag.is_buttonless_drag_noise(None));
+                    assert!(drag.ended_by(MouseButton::Right));
+                });
+            }
+        }
+
+        #[test]
+        fn a_synthetic_press_does_not_absorb_a_buttonless_move() {
+            let drag = with_split_drag_button_for_probe(None, DividerDrag::begin);
+            with_split_drag_button_for_probe(Some(42), || {
+                assert!(!drag.is_buttonless_drag_noise(None));
+                assert!(!drag.ended_by(MouseButton::Right));
+                assert!(drag.ended_by(MouseButton::Left));
+            });
+        }
+    }
+
     #[derive(IntoElement)]
-    struct SplitDividers {
+    struct SplitPanes {
         key: SharedString,
         node_id: String,
         direction: SplitDirection,
+        panes: Vec<Div>,
         positions: Vec<f32>,
         current_ratio: f64,
         color: Hsla,
         on_ratio: Rc<RatioHandler>,
     }
 
-    impl RenderOnce for SplitDividers {
+    impl RenderOnce for SplitPanes {
         fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
             // Keep the press across repaints as changing ratios move the hit targets.
             let pressed = window
-                .use_keyed_state(self.key.clone(), cx, |_, _| Rc::new(Cell::new(false)))
+                .use_keyed_state(self.key.clone(), cx, |_, _| {
+                    Rc::new(Cell::new(None::<DividerDrag>))
+                })
                 .read(cx)
                 .clone();
             let capture = pressed.clone();
@@ -815,15 +953,17 @@ mod ui {
                     let reset = capture.clone();
                     window.on_mouse_event(move |event: &MouseDownEvent, phase, _, _| {
                         if phase.capture() && event.button == MouseButton::Left {
-                            reset.set(false);
+                            reset.set(None);
                         }
                     });
                     let release = capture.clone();
                     window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
                         if phase.capture()
-                            && event.button == MouseButton::Left
-                            && release.replace(false)
+                            && release
+                                .get()
+                                .is_some_and(|drag| drag.ended_by(event.button))
                         {
+                            release.set(None);
                             cx.stop_propagation();
                         }
                     });
@@ -836,11 +976,19 @@ mod ui {
                     let previous = Cell::new(self.current_ratio);
                     // Capture also sees movement outside this split and its divider.
                     window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
-                        if !phase.capture() || !capture.get() {
+                        if !phase.capture() {
                             return;
                         }
+                        let Some(drag) = capture.get() else {
+                            return;
+                        };
                         if event.pressed_button != Some(MouseButton::Left) {
-                            capture.set(false);
+                            if drag.is_buttonless_drag_noise(event.pressed_button) {
+                                // A mouseMoved during layout can carry no button while dragging.
+                                cx.stop_propagation();
+                            } else {
+                                capture.set(None);
+                            }
                             return;
                         }
                         cx.stop_propagation();
@@ -866,10 +1014,16 @@ mod ui {
 
             let horizontal = self.direction == SplitDirection::Horizontal;
             div()
-                .absolute()
-                .inset_0()
+                .relative()
+                .flex()
                 .size_full()
+                .min_w_0()
+                .min_h_0()
+                .overflow_hidden()
+                .when(!horizontal, |container| container.flex_col())
+                // Capture runs in paint order. Divider hitboxes remain on top for clicks.
                 .child(listeners)
+                .children(self.panes)
                 .children(
                     self.positions
                         .into_iter()
@@ -887,7 +1041,7 @@ mod ui {
                                     CursorStyle::ResizeRow
                                 })
                                 .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                                    pressed.set(true);
+                                    pressed.set(Some(DividerDrag::begin()));
                                     window.prevent_default();
                                     cx.stop_propagation();
                                 });
@@ -952,16 +1106,8 @@ mod ui {
                 children,
             } => {
                 let horizontal = *direction == SplitDirection::Horizontal;
-                let mut container = div()
-                    .relative()
-                    .flex()
-                    .size_full()
-                    .min_w_0()
-                    .min_h_0()
-                    .overflow_hidden()
-                    .when(!horizontal, |container| container.flex_col());
-
                 let count = children.len();
+                let mut panes = Vec::with_capacity(count);
                 let mut positions = Vec::with_capacity(count - 1);
                 let mut offset = 0.0;
                 for (index, child_node) in children.iter().enumerate() {
@@ -972,7 +1118,7 @@ mod ui {
                     } else {
                         child.h(relative(share as f32)).w_full()
                     };
-                    container = container.child(child.child(render_node(
+                    panes.push(child.child(render_node(
                         tree,
                         child_node,
                         instance,
@@ -986,17 +1132,17 @@ mod ui {
                     }
                 }
 
-                container
-                    .child(SplitDividers {
-                        key: format!("split-dividers:{instance}:{id}").into(),
-                        node_id: id.clone(),
-                        direction: *direction,
-                        positions,
-                        current_ratio: tree.child_share(id, 0, count),
-                        color: divider_color,
-                        on_ratio: on_ratio.clone(),
-                    })
-                    .into_any_element()
+                SplitPanes {
+                    key: format!("split-dividers:{instance}:{id}").into(),
+                    node_id: id.clone(),
+                    direction: *direction,
+                    panes,
+                    positions,
+                    current_ratio: tree.child_share(id, 0, count),
+                    color: divider_color,
+                    on_ratio: on_ratio.clone(),
+                }
+                .into_any_element()
             }
         }
     }
@@ -1023,3 +1169,5 @@ mod ui {
 }
 
 pub use ui::split_tree_view;
+#[cfg(all(target_os = "macos", debug_assertions))]
+pub use ui::with_split_drag_button_for_probe;
