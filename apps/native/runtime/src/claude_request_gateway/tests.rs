@@ -14,7 +14,7 @@ use matou_native_core::sessions::read_claude_role_launch_preferences;
 
 use super::*;
 
-const TIMEOUT: Duration = Duration::from_secs(8);
+pub(crate) const TIMEOUT: Duration = Duration::from_secs(8);
 const MESSAGES: &str = "/v1/messages";
 const COUNT: &str = "/v1/messages/count_tokens";
 const GZIP: &[u8] = &[
@@ -25,7 +25,7 @@ fn within_workspace() -> Result<tempfile::TempDir> {
     Ok(tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR"))?)
 }
 
-fn projection(source: SocketAddr, other: SocketAddr) -> Result<ClaudeGatewayProjection> {
+pub(crate) fn projection(source: SocketAddr, other: SocketAddr) -> Result<ClaudeGatewayProjection> {
     let temp = within_workspace()?;
     let config = json!({
         "version": 1,
@@ -111,7 +111,7 @@ fn search_projection(
     .context("missing search gateway projection")
 }
 
-fn listener() -> io::Result<StdListener> {
+pub(crate) fn listener() -> io::Result<StdListener> {
     StdListener::bind((Ipv4Addr::LOCALHOST, 0))
 }
 
@@ -130,7 +130,7 @@ fn gateway_address(gateway: &Gateway) -> Result<(SocketAddr, String)> {
     ))
 }
 
-fn head(stream: &mut impl BufRead) -> Result<(String, HeaderMap)> {
+pub(crate) fn head(stream: &mut impl BufRead) -> Result<(String, HeaderMap)> {
     let mut first = String::new();
     ensure!(stream.read_line(&mut first)? > 0, "missing HTTP start line");
     let mut headers = HeaderMap::new();
@@ -149,7 +149,7 @@ fn head(stream: &mut impl BufRead) -> Result<(String, HeaderMap)> {
     Ok((first, headers))
 }
 
-fn length(headers: &HeaderMap) -> Result<usize> {
+pub(crate) fn length(headers: &HeaderMap) -> Result<usize> {
     Ok(headers
         .get(header::CONTENT_LENGTH)
         .context("no content-length")?
@@ -157,7 +157,12 @@ fn length(headers: &HeaderMap) -> Result<usize> {
         .parse()?)
 }
 
-fn open_request(gateway: &Gateway, path: &str, body: &[u8], headers: &str) -> Result<TcpStream> {
+pub(crate) fn open_request(
+    gateway: &Gateway,
+    path: &str,
+    body: &[u8],
+    headers: &str,
+) -> Result<TcpStream> {
     open_request_method(gateway, "POST", path, body, headers)
 }
 
@@ -179,7 +184,7 @@ fn open_request_method(
     Ok(stream)
 }
 
-fn exchange(
+pub(crate) fn exchange(
     gateway: &Gateway,
     path: &str,
     body: &[u8],
@@ -207,7 +212,7 @@ fn exchange_method(
     Ok((status, headers, bytes))
 }
 
-fn upstream(
+pub(crate) fn upstream(
     listener: StdListener,
     handler: impl FnOnce(BufReader<TcpStream>, String, HeaderMap) -> Result<()> + Send + 'static,
 ) -> JoinHandle<Result<()>> {
@@ -246,7 +251,7 @@ fn reply(io: &mut TcpStream, status: &str, headers: &str, bytes: &[u8]) -> Resul
     Ok(())
 }
 
-fn record(
+pub(crate) fn record(
     listener: StdListener,
     count: usize,
     status: &'static str,
@@ -782,13 +787,13 @@ fn gateway_merges_target_beta_and_never_follows_or_replays() -> Result<()> {
     Ok(())
 }
 
-fn write_chunk(stream: &mut TcpStream, bytes: &[u8]) -> io::Result<()> {
+pub(crate) fn write_chunk(stream: &mut TcpStream, bytes: &[u8]) -> io::Result<()> {
     write!(stream, "{:x}\r\n", bytes.len())?;
     stream.write_all(bytes)?;
     stream.write_all(b"\r\n")
 }
 
-fn read_chunk(stream: &mut BufReader<TcpStream>, output: &mut Vec<u8>) -> Result<usize> {
+pub(crate) fn read_chunk(stream: &mut BufReader<TcpStream>, output: &mut Vec<u8>) -> Result<usize> {
     let mut length = String::new();
     stream.read_line(&mut length)?;
     let length = usize::from_str_radix(length.trim(), 16)?;
