@@ -1266,12 +1266,13 @@ mod workspace {
     }
 
     pub(super) fn run() {
-        Application::new().with_assets(NativeAssets).run(|cx| {
+        let fixture_root = live_wiring::prepare();
+        Application::new().with_assets(NativeAssets).run(move |cx| {
             cx.spawn(async move |cx| {
                 verify(cx).await;
                 verify_splits(cx);
                 verify_links(cx).await;
-                live_wiring::verify(cx).await;
+                live_wiring::verify(cx, fixture_root).await;
                 cx.update(|cx| cx.quit()).unwrap();
             })
             .detach();

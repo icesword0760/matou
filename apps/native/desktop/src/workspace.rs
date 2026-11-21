@@ -426,9 +426,11 @@ fn fork_failure_copy(node: &Value) -> Option<(&'static str, Option<&str>)> {
     }) {
         Some((
             "父会话已失效",
-            Some(
-                "原 Claude Code 对话身份已失效，本次分支没有创建成功。请返回父会话继续，或移除此失败节点后新建空会话。",
-            ),
+            Some(if node["currentMode"] == "antigravity" {
+                "原 Antigravity 对话身份已失效，本次分支没有创建成功。请返回父会话继续，或移除此失败节点后新建空会话。"
+            } else {
+                "原 Claude Code 对话身份已失效，本次分支没有创建成功。请返回父会话继续，或移除此失败节点后新建空会话。"
+            }),
         ))
     } else {
         Some(("分支创建失败", error))
@@ -504,7 +506,11 @@ impl LoaderSession {
                 .or_else(|| value["eventCount"].as_u64())?
                 .try_into()
                 .ok()?,
-            updated_at: value["updatedAt"].as_i64()?,
+            updated_at: value["updatedAt"].as_i64().or_else(|| {
+                value["updatedAt"]
+                    .as_f64()
+                    .map(|timestamp| timestamp.round() as i64)
+            })?,
             loaded_by: if loaded_by.is_null() {
                 None
             } else {
@@ -560,6 +566,7 @@ struct LoaderRemembered {
     claude: Option<String>,
     codex: Option<String>,
     dsh: Option<String>,
+    antigravity: Option<String>,
     focus: LoaderFocus,
 }
 
@@ -577,6 +584,7 @@ impl LoaderRemembered {
         match provider {
             "codex" => self.codex.clone(),
             "dsh" => self.dsh.clone(),
+            "antigravity" => self.antigravity.clone(),
             _ => self.claude.clone(),
         }
     }
@@ -585,6 +593,7 @@ impl LoaderRemembered {
         match provider {
             "codex" => self.codex = selection,
             "dsh" => self.dsh = selection,
+            "antigravity" => self.antigravity = selection,
             _ => self.claude = selection,
         }
     }
@@ -667,7 +676,7 @@ struct SessionLoader {
 
 impl SessionLoader {
     fn remote_catalog(&self) -> bool {
-        matches!(self.provider, "codex" | "dsh")
+        matches!(self.provider, "codex" | "dsh" | "antigravity")
     }
 
     fn visible_sessions<'a>(
@@ -4082,7 +4091,7 @@ impl Workspace {
                     // Runtime can attach a scene projection to a command reply. Only
                     // navigation and standalone snapshots may replace the active graph.
                     self.receive_wiring_reply(kind, request_id, &graph, window, cx);
-                    self.receive_dsh_loader_reply(kind, request_id, &graph, window, cx);
+                    self.receive_provider_loader_reply(kind, request_id, &graph, window, cx);
                     if let Some((settings, _)) = &self.settings {
                         settings.update(cx, |settings, cx| {
                             settings.receive_runtime_diagnostic(kind, request_id, &graph, cx);
@@ -7283,6 +7292,9 @@ impl Workspace {
         let label = match node["currentMode"].as_str() {
             Some("codex") => self.locale.text("载入 Codex 会话", "Load a Codex session"),
             Some("dsh") => self.locale.text("载入 DSH 会话", "Load a DSH session"),
+            Some("antigravity") => self
+                .locale
+                .text("载入 Antigravity 会话", "Load an Antigravity session"),
             _ => self
                 .locale
                 .text(SESSION_LOADER_TITLE, "Load a Claude Code session"),
@@ -7328,8 +7340,11 @@ impl Workspace {
             }
             None
         } else {
-            if !matches!(node["currentMode"].as_str(), Some("claude-code" | "codex")) {
-                return None;
+            match node["currentMode"].as_str() {
+                Some("claude-code" | "codex") => {}
+                Some("antigravity")
+                    if placement == ForkPlacement::Peer && fork_failure_copy(node).is_none() => {}
+                _ => return None,
             }
             (node["canFork"] != true).then(|| {
                 if matches!(
@@ -7342,6 +7357,11 @@ impl Workspace {
                         self.locale.text(
                             "在当前会话输入一次，并等待 Codex 完成回复后，即可创建分支",
                             "Send a message and wait for Codex to finish replying before forking.",
+                        )
+                    } else if node["currentMode"] == "antigravity" {
+                        self.locale.text(
+                            "在当前会话输入一次，并等待 Antigravity 完成回复后，即可创建分支",
+                            "Send a message and wait for Antigravity to finish replying before forking.",
                         )
                     } else {
                         "在当前会话输入一次，并等待 Claude Code 完成回复后，即可创建分支"
@@ -7709,6 +7729,7 @@ impl Workspace {
         let initial_provider = match node["currentMode"].as_str() {
             Some("codex") => "codex",
             Some("dsh") => "dsh",
+            Some("antigravity") => "antigravity",
             _ => "claude-code",
         };
         let provider = if history {
@@ -7742,7 +7763,7 @@ impl Workspace {
                     this.loader_search_changed(cx);
                 }
             });
-        self.dialog_controls = (0..9).map(|_| cx.focus_handle().tab_stop(true)).collect();
+        self.dialog_controls = (0..10).map(|_| cx.focus_handle().tab_stop(true)).collect();
         let list_focus = cx.focus_handle().tab_stop(true);
         let focus_subscriptions = [
             (input.read(cx).focus.clone(), LoaderFocus::Filter),
@@ -7751,6 +7772,7 @@ impl Workspace {
             (self.dialog_controls[4].clone(), LoaderFocus::Control(4)),
             (self.dialog_controls[5].clone(), LoaderFocus::Control(5)),
             (self.dialog_controls[8].clone(), LoaderFocus::Control(8)),
+            (self.dialog_controls[9].clone(), LoaderFocus::Control(9)),
         ]
         .into_iter()
         .map(|(handle, saved)| {
@@ -7766,10 +7788,12 @@ impl Workspace {
         } else {
             match remembered.focus {
                 LoaderFocus::List => list_focus.clone(),
-                LoaderFocus::Content if matches!(provider, "codex" | "dsh") => {
+                LoaderFocus::Content if matches!(provider, "codex" | "dsh" | "antigravity") => {
                     content_input.read(cx).focus.clone()
                 }
-                LoaderFocus::Control(index @ (4 | 5)) => self.dialog_controls[index].clone(),
+                LoaderFocus::Control(index @ (4 | 5 | 8 | 9)) => {
+                    self.dialog_controls[index].clone()
+                }
                 _ => input.read(cx).focus.clone(),
             }
         };
@@ -7913,24 +7937,31 @@ impl Workspace {
             } else {
                 50
             });
-            if state.provider == "dsh" {
-                Command::ListDshSessions {
+            match state.provider {
+                "dsh" => Command::ListDshSessions {
                     request_id,
                     cwd,
                     query,
                     full_text: false,
                     offset,
                     limit,
-                }
-            } else {
-                Command::ListCodexSessions {
+                },
+                "antigravity" => Command::ListAntigravitySessions {
                     request_id,
                     cwd,
                     query,
                     full_text: false,
                     offset,
                     limit,
-                }
+                },
+                _ => Command::ListCodexSessions {
+                    request_id,
+                    cwd,
+                    query,
+                    full_text: false,
+                    offset,
+                    limit,
+                },
             }
         } else {
             Command::ListProviderSessions {
@@ -8107,24 +8138,31 @@ impl Workspace {
         };
         let limit = page.map(|(_, limit)| limit);
         let command = if let Some(request_id) = request_id {
-            if state.provider == "dsh" {
-                Command::GetDshSession {
+            match state.provider {
+                "dsh" => Command::GetDshSession {
                     request_id,
                     cwd: state.cwd.clone(),
                     provider_session_id: id.clone(),
                     before_event_index: page.map(|(start, count)| start + count),
                     around_event_index: around,
                     limit,
-                }
-            } else {
-                Command::GetCodexSession {
+                },
+                "antigravity" => Command::GetAntigravitySession {
+                    request_id,
+                    cwd: state.cwd.clone(),
+                    provider_session_id: id.clone(),
+                    before_event_index: page.map(|(start, count)| start + count),
+                    around_event_index: around,
+                    limit,
+                },
+                _ => Command::GetCodexSession {
                     request_id,
                     cwd: state.cwd.clone(),
                     provider_session_id: id.clone(),
                     start_event_index: start,
                     around_event_index: around,
                     limit,
-                }
+                },
             }
         } else {
             Command::GetProviderSession {
@@ -8189,24 +8227,31 @@ impl Workspace {
         let provider_session_id = id.clone();
         let query = state.search_query.clone();
         let offset = Some(offset as i64);
-        let command = if state.provider == "dsh" {
-            Command::SearchDshSession {
+        let command = match state.provider {
+            "dsh" => Command::SearchDshSession {
                 request_id,
                 cwd,
                 provider_session_id,
                 query,
                 offset,
                 limit: None,
-            }
-        } else {
-            Command::SearchCodexSession {
+            },
+            "antigravity" => Command::SearchAntigravitySession {
                 request_id,
                 cwd,
                 provider_session_id,
                 query,
                 offset,
                 limit: None,
-            }
+            },
+            _ => Command::SearchCodexSession {
+                request_id,
+                cwd,
+                provider_session_id,
+                query,
+                offset,
+                limit: None,
+            },
         };
         match self.commands.send_at(self.runtime_generation, command) {
             Ok(()) => state.pending_search = Some((request_id, state.search_query.clone())),
@@ -8241,10 +8286,11 @@ impl Workspace {
         let Some((id, query)) = &state.pending_search else {
             return;
         };
-        let Some(result) = results
-            .iter()
-            .find(|result| result["search"] == true && result["requestId"] == *id)
-        else {
+        let Some(result) = results.iter().find(|result| {
+            result["provider"] == state.provider
+                && result["search"] == true
+                && result["requestId"] == *id
+        }) else {
             return;
         };
         let stale = query != &state.search_query;
@@ -8312,7 +8358,7 @@ impl Workspace {
             .graph_node(&session_id)
             .and_then(|node| node["providerSpawnRevision"].as_u64())
             .unwrap_or(0);
-        let request_id = (state.provider == "dsh").then(|| {
+        let request_id = matches!(state.provider, "dsh" | "antigravity").then(|| {
             self.loader_request_id += 1;
             self.loader_request_id
         });
@@ -8323,22 +8369,25 @@ impl Workspace {
             previous_revision,
             request_id,
         };
-        let command = if let Some(request_id) = request_id {
-            Command::LoadDshSession {
+        let command = match (state.provider, request_id) {
+            ("dsh", Some(request_id)) => Command::LoadDshSession {
                 request_id,
                 session_id: session_id.clone(),
                 provider_session_id: load.id.clone(),
-            }
-        } else if state.provider == "codex" {
-            Command::LoadCodexSession {
+            },
+            ("antigravity", Some(request_id)) => Command::LoadAntigravitySession {
+                request_id,
                 session_id: session_id.clone(),
                 provider_session_id: load.id.clone(),
-            }
-        } else {
-            Command::LoadProviderSession {
+            },
+            ("codex", _) => Command::LoadCodexSession {
                 session_id: session_id.clone(),
                 provider_session_id: load.id.clone(),
-            }
+            },
+            _ => Command::LoadProviderSession {
+                session_id: session_id.clone(),
+                provider_session_id: load.id.clone(),
+            },
         };
         let result = self.commands.send_at(self.runtime_generation, command);
         if let Some(TabDialog::SessionLoader(state)) = &mut self.dialog {
@@ -8488,7 +8537,7 @@ impl Workspace {
         cx.notify();
     }
 
-    fn receive_dsh_loader_reply(
+    fn receive_provider_loader_reply(
         &mut self,
         kind: &str,
         request_id: u64,
@@ -8496,48 +8545,53 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if kind == "dshSessionLoadResult" {
-            // Queue acknowledgement is not a committed provider identity.
+        let (provider, kind) = if let Some(kind) = kind.strip_prefix("dshSession") {
+            ("dsh", kind)
+        } else if let Some(kind) = kind.strip_prefix("antigravitySession") {
+            ("antigravity", kind)
+        } else {
+            return;
+        };
+        if kind == "LoadResult" {
+            // The receipt only acknowledges the request. The standalone graph tracks recovery.
             if let Some(error) = reply["error"].as_str()
-                && let Some((session_id, load)) = self
-                    .pending_loader_loads
-                    .iter()
-                    .find(|(_, load)| load.request_id == Some(request_id))
+                && let Some((session_id, load)) =
+                    self.pending_loader_loads.iter().find(|(_, load)| {
+                        load.provider == provider && load.request_id == Some(request_id)
+                    })
             {
                 let errors = [serde_json::json!({
-                    "sessionId": session_id, "providerSessionId": load.id, "error": error,
+                    "sessionId": session_id, "providerSessionId": load.id, "requestId": request_id,
+                    "error": error,
                 })];
                 self.finish_session_loader(&errors, window, cx);
                 cx.notify();
             }
             return;
         }
-        if !matches!(
-            kind,
-            "dshSessionListResult" | "dshSessionDetailResult" | "dshSessionSearchResult"
-        ) || !matches!(&self.dialog, Some(TabDialog::SessionLoader(state)) if state.provider == "dsh")
-        {
-            return;
-        }
         let Some(TabDialog::SessionLoader(state)) = &self.dialog else {
             return;
         };
-        // Translate the DSH envelope into the session loader's existing projections.
+        if state.provider != provider {
+            return;
+        }
+        // Translate the typed envelope into the session loader's existing projections.
         let mut row = reply["result"].as_object().cloned().unwrap_or_default();
-        row.insert("provider".into(), "dsh".into());
+        row.insert("provider".into(), provider.into());
         row.insert("requestId".into(), request_id.into());
         row.insert("cwd".into(), state.cwd.clone().into());
         if let Some(error) = reply.get("error") {
             row.insert("error".into(), error.clone());
         }
-        if kind == "dshSessionSearchResult" {
+        if kind == "SearchResult" {
             row.insert("search".into(), true.into());
         }
         let rows = [Value::Object(row)];
         match kind {
-            "dshSessionListResult" => self.loader_catalog_result(&rows, cx),
-            "dshSessionDetailResult" => self.loader_detail_result(&rows, cx),
-            _ => self.loader_search_result(&rows, cx),
+            "ListResult" => self.loader_catalog_result(&rows, cx),
+            "DetailResult" => self.loader_detail_result(&rows, cx),
+            "SearchResult" => self.loader_search_result(&rows, cx),
+            _ => return,
         }
         cx.notify();
     }
@@ -8559,6 +8613,9 @@ impl Workspace {
         self.pending_loader_loads.retain(|session_id, load| {
             let error = errors.iter().find_map(|result| {
                 (result["sessionId"] == *session_id
+                    // Antigravity already returned a typed receipt for the catalog error.
+                    && (load.provider != "antigravity"
+                        || result["requestId"].as_u64() == load.request_id)
                     && (result["providerSessionId"].is_null()
                         || result["providerSessionId"] == load.id))
                     .then(|| result["error"].as_str())
@@ -8665,7 +8722,10 @@ impl Workspace {
     }
 
     fn provider_restore_state(node: &Value) -> Option<&str> {
-        if !matches!(node["currentMode"].as_str(), Some("claude-code" | "codex")) {
+        if !matches!(
+            node["currentMode"].as_str(),
+            Some("claude-code" | "codex" | "antigravity")
+        ) {
             return None;
         }
         node["providerRestoreState"]
@@ -8682,9 +8742,15 @@ impl Workspace {
             return None;
         }
         let codex = node["currentMode"] == "codex";
+        let antigravity = node["currentMode"] == "antigravity";
         if Self::provider_restore_state(node)? == "restoring" {
             return Some(ProviderRestoreBanner::Restoring {
-                title: if codex {
+                title: if antigravity {
+                    self.locale.text(
+                        "正在恢复 Antigravity 会话…",
+                        "Restoring Antigravity session…",
+                    )
+                } else if codex {
                     "正在恢复 Codex 会话…"
                 } else {
                     "正在恢复 Claude Code 会话…"
@@ -8695,7 +8761,7 @@ impl Workspace {
             Some("provider session running in background") if codex => {
                 "此会话仍在 Codex 后台运行。请先停止对应后台会话，再重试恢复；聊天记录会保留。"
             }
-            Some("provider session running in background") => {
+            Some("provider session running in background") if !antigravity => {
                 "此会话仍在 Claude 后台运行。请先停止对应后台会话，再重试恢复；聊天记录会保留。"
             }
             None | Some("") => "终端进程未能启动",
@@ -8711,7 +8777,10 @@ impl Workspace {
             .then_some("当前终端仍在恢复")
         });
         Some(ProviderRestoreBanner::Failed {
-            title: if codex {
+            title: if antigravity {
+                self.locale
+                    .text("Antigravity 恢复失败", "Antigravity restore failed")
+            } else if codex {
                 "Codex 恢复失败"
             } else {
                 "Claude Code 恢复失败"
@@ -8722,7 +8791,10 @@ impl Workspace {
             } else {
                 "重试恢复"
             },
-            fresh: if codex {
+            fresh: if antigravity {
+                self.locale
+                    .text("新开 Antigravity", "Start a new Antigravity session")
+            } else if codex {
                 "新开 Codex"
             } else {
                 "新开 Claude Code"
@@ -9858,14 +9930,14 @@ impl Workspace {
                 let input = state.input.read(cx);
                 let mut controls = vec![&self.dialog_controls[0]];
                 if !state.history {
-                    controls.extend([&self.dialog_controls[4], &self.dialog_controls[5]]);
+                    controls.extend([4, 5, 8, 9].map(|index| &self.dialog_controls[index]));
                 }
                 controls.push(&input.focus);
                 if !input.text.is_empty() {
                     controls.push(&self.dialog_controls[3]);
                 }
                 controls.push(&state.list_focus);
-                if state.provider == "codex" {
+                if state.remote_catalog() {
                     if state.has_more_sessions && !state.loading_list {
                         controls.push(&self.dialog_controls[6]);
                     }
@@ -11264,6 +11336,7 @@ impl Workspace {
         let provider_name = match state.provider {
             "codex" => "Codex",
             "dsh" => "DSH",
+            "antigravity" => "Antigravity",
             _ => "Claude Code",
         };
         let mut rows = Vec::with_capacity(sessions.len());
@@ -11460,7 +11533,12 @@ impl Workspace {
                     .text_size(px(11.))
                     .text_color(rgb(0x77818e))
                     .child(ui_text(if filter_empty {
-                        if state.provider == "dsh" {
+                        if state.provider == "antigravity" {
+                            self.locale.text(
+                                "当前工作空间内没有 Antigravity 会话",
+                                "No Antigravity sessions in this workspace",
+                            )
+                        } else if state.provider == "dsh" {
                             self.locale.text(
                                 "当前工作空间内没有 DSH 会话",
                                 "No DSH sessions in this workspace",
@@ -12108,6 +12186,12 @@ impl Workspace {
                 ))
                 .child(provider_tab("codex", "Codex", &self.dialog_controls[5], cx))
                 .child(provider_tab("dsh", "DSH", &self.dialog_controls[8], cx))
+                .child(provider_tab(
+                    "antigravity",
+                    "Antigravity",
+                    &self.dialog_controls[9],
+                    cx,
+                ))
         });
 
         let header = div()
@@ -12139,6 +12223,9 @@ impl Workspace {
                             .child(
                                 ui_text(if state.history {
                                     self.locale.text("会话历史", "Session history")
+                                } else if state.provider == "antigravity" {
+                                    self.locale
+                                        .text("载入 Antigravity 会话", "Load Antigravity session")
                                 } else if state.provider == "dsh" {
                                     self.locale.text("载入 DSH 会话", "Load DSH session")
                                 } else if is_codex {

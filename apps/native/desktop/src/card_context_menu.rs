@@ -11,6 +11,7 @@ pub enum CardMenuAction {
     RestoreAutoTitle,
     Fork,
     ForkWorktree,
+    RetryFork,
     SplitHorizontal,
     SplitVertical,
     ClosePane,

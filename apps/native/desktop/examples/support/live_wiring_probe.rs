@@ -21,11 +21,31 @@ const SOURCE: &str = "01a1ddc1-88fd-7fc1-8c66-ab8d38719da8";
 const FORK: &str = "01a1ddc1-e832-7cf2-83b7-5adb2f12224b";
 const CANARY: &str = "wave4a-fake-access-token";
 const SAVED: &str = "dsh-saved";
+const AGY_OTHER: &str = "agy-other";
+const AGY_FORK: &str = "agy-fork";
+const AGY_TITLE: &str = "Antigravity fixture title";
+const AGY_MESSAGE: &str = "unique transcript needle";
+
+pub(super) fn prepare() -> PathBuf {
+    // Keep the absolute socket path under macOS's sockaddr_un length limit.
+    let target = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../target")
+        .canonicalize()
+        .unwrap();
+    let id = uuid::Uuid::new_v4().simple().to_string();
+    let root = target.join(&id[..5]);
+    fs::create_dir(&root).unwrap();
+    // The Claude catalog reads the process environment. Set it before starting
+    // GPUI or Runtime so that neither opens the user's own Claude catalog.
+    unsafe { std::env::set_var("CLAUDE_CONFIG_DIR", root.join("home/claude")) };
+    root
+}
 
 struct Fixture {
     root: PathBuf,
     host: RuntimeHost,
     options: LaunchOptions,
+    environment: BTreeMap<OsString, OsString>,
     window: Handle,
     commands: ProbeReceiver,
     replies: Vec<Value>,
@@ -33,27 +53,21 @@ struct Fixture {
 }
 
 impl Fixture {
-    fn new(cx: &mut AsyncApp) -> Self {
-        // Keep the absolute socket path under macOS's sockaddr_un length limit.
-        let target = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../target")
-            .canonicalize()
-            .unwrap();
-        let id = uuid::Uuid::new_v4().simple().to_string();
-        let root = target.join(&id[..5]);
-        fs::create_dir(&root).unwrap();
+    fn new(cx: &mut AsyncApp, root: PathBuf) -> Self {
         let workspace = root.join("workspace");
         let shell_home = root.join("home");
         let data_root = root.clone();
         let codex_home = shell_home.join("codex");
         let claude_config = shell_home.join("claude");
         let dsh_history = root.join("dsh-history");
+        let agy_runs = root.join("agy-runs");
         for path in [
             &workspace,
             &shell_home,
             &data_root,
             &codex_home.join("sessions"),
             &claude_config.join("projects/fixture"),
+            &agy_runs,
         ] {
             fs::create_dir_all(path).unwrap();
         }
@@ -139,6 +153,70 @@ exec /bin/cat
             json!({"type":"user/message","seq":1,"surfaceOp":"append","data":{"content":[{"text":"needle conversation"}]}}),
         )).unwrap();
 
+        let agy = root.join("agy-fixture");
+        executable(
+            &agy,
+            r#"#!/bin/sh
+set -eu
+run="$AGY_FIXTURE_RUNS/$MATOU_PROVIDER_HOOK_TOKEN"
+mkdir "$run"
+printf '%s\n' "$@" > "$run/args"
+printf '%s' "$MATOU_PROVIDER_HOOK_URL" > "$run/url"
+touch "$run/ready"
+while IFS= read -r line; do
+    printf '%s\n' "$line" >> "$run/input"
+    [ "$line" != /exit ] || exit 17
+done
+"#,
+        );
+        let agy_history = root.join("antigravity-home/.gemini/antigravity-cli");
+        fs::create_dir_all(agy_history.join("cache")).unwrap();
+        fs::write(
+            agy_history.join("cache/conversation_metadata.json"),
+            json!({"conversations": {
+                SOURCE: {"last_modified_time": 200.5, "summary": {
+                    "AppDataDir": "antigravity-cli", "WorkspaceURIs": [&workspace],
+                    "Title": AGY_TITLE, "NumSteps": 2,
+                }},
+                AGY_OTHER: {"last_modified_time": 100, "summary": {
+                    "AppDataDir": "antigravity-cli", "WorkspaceURIs": [&workspace],
+                    "Title": "Another saved conversation",
+                }},
+            }})
+            .to_string(),
+        )
+        .unwrap();
+        let transcript = agy_history.join(format!("brain/{SOURCE}/.system_generated/logs"));
+        fs::create_dir_all(&transcript).unwrap();
+        fs::write(
+            transcript.join("transcript.jsonl"),
+            format!(
+                "{}\n{}\n",
+                json!({"source":"USER_EXPLICIT","content":AGY_MESSAGE}),
+                json!({"type":"PLANNER_RESPONSE","content":"Antigravity reply"}),
+            ),
+        )
+        .unwrap();
+        // The catalog uses a path-encoded bucket. Keep the same provider ID
+        // across fixtures to catch replies routed by ID alone.
+        let claude_bucket: String = workspace
+            .to_str()
+            .unwrap()
+            .chars()
+            .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+            .collect();
+        let claude_bucket = claude_config.join("projects").join(claude_bucket);
+        fs::create_dir_all(&claude_bucket).unwrap();
+        fs::write(
+            claude_bucket.join(format!("{SOURCE}.jsonl")),
+            format!(
+                "{}\n",
+                json!({"cwd":workspace,"timestamp":300,"type":"user",
+                    "message":{"role":"user","content":"Claude catalog fixture"}}),
+            ),
+        )
+        .unwrap();
+
         let environment: BTreeMap<OsString, OsString> = [
             ("PATH", "/usr/bin:/bin".into()),
             ("HOME", shell_home.clone().into_os_string()),
@@ -147,6 +225,8 @@ exec /bin/cat
             ("CLAUDE_CONFIG_DIR", claude_config.into_os_string()),
             ("MATOU_CLAUDE_COMMAND", claude.into_os_string()),
             ("MATOU_DSH_COMMAND", dsh.into_os_string()),
+            ("MATOU_ANTIGRAVITY_COMMAND", agy.into_os_string()),
+            ("AGY_FIXTURE_RUNS", agy_runs.into_os_string()),
         ]
         .into_iter()
         .map(|(key, value)| (key.into(), value))
@@ -162,7 +242,7 @@ exec /bin/cat
         let host = RuntimeHost::start_with_offline_fixtures(
             options.clone(),
             OfflineFixtures {
-                provider_environment: Some(environment),
+                provider_environment: Some(environment.clone()),
                 dsh_session_root: Some(dsh_history),
                 browser_executable: Some(browser),
                 egress_sample: Some(Box::new(move || {
@@ -203,6 +283,7 @@ exec /bin/cat
             root,
             host,
             options,
+            environment,
             window,
             commands,
             replies: Vec::new(),
@@ -351,6 +432,29 @@ exec /bin/cat
         .await
     }
 
+    async fn agy_run(&mut self, cx: &mut AsyncApp, count: usize) -> AgyRun {
+        let runs = self.root.join("agy-runs");
+        self.wait(cx, &format!("Antigravity run {count}"), |_, _| {
+            let mut ready: Vec<_> = fs::read_dir(&runs)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .filter(|run| run.join("ready").is_file())
+                .collect();
+            if ready.len() < count {
+                return None;
+            }
+            assert_eq!(ready.len(), count);
+            ready.sort_by_key(|run| fs::metadata(run.join("ready")).unwrap().modified().unwrap());
+            let path = ready.pop().unwrap();
+            Some(AgyRun {
+                url: fs::read_to_string(path.join("url")).unwrap(),
+                argv: fs::read_to_string(path.join("args")).unwrap(),
+                path,
+            })
+        })
+        .await
+    }
+
     async fn new_shell(&mut self, cx: &mut AsyncApp, source: &str) -> String {
         let scene = self
             .window
@@ -369,6 +473,38 @@ exec /bin/cat
             .then(|| id.to_owned())
         })
         .await
+    }
+}
+
+struct AgyRun {
+    url: String,
+    argv: String,
+    path: PathBuf,
+}
+
+impl AgyRun {
+    fn status(&self, id: &str) {
+        post(
+            &format!("{}?kind=statusline", self.url),
+            json!({"conversation_id":id,"agent_state":"idle","cycle_mode":"plan"}),
+        );
+    }
+
+    fn hook(&self, event: &str, id: &str) {
+        post(
+            &self.url,
+            json!({"hookEventName":event,"conversationId":id,"lastAssistantMessage":"Probe reply"}),
+        );
+    }
+
+    fn resume_arg(&self) -> Option<&str> {
+        let (_, args) = self.argv.split_once("--conversation\n")?;
+        args.lines().next()
+    }
+
+    fn received_fork(&self) -> bool {
+        fs::read_to_string(self.path.join("input"))
+            .is_ok_and(|text| text.lines().any(|line| line == "/fork"))
     }
 }
 
@@ -464,8 +600,8 @@ fn submit_fork(fixture: &Fixture, cx: &mut AsyncApp, id: &str, action: CardMenuA
     });
 }
 
-pub(super) async fn verify(cx: &mut AsyncApp) {
-    let mut fixture = Fixture::new(cx);
+pub(super) async fn verify(cx: &mut AsyncApp, root: PathBuf) {
+    let mut fixture = Fixture::new(cx, root);
     let source = fixture
         .state(cx, "ready shell and startup exit status", |view, _| {
             let id = view.level_focus()?;
@@ -802,6 +938,8 @@ pub(super) async fn verify(cx: &mut AsyncApp) {
     );
     println!("live team HUD: context meter, running tool and painted read-only teammate card");
 
+    let agy = verify_antigravity(&mut fixture, cx, [&source, &shell, &lead]).await;
+
     fixture.update(cx, |view, window, cx| {
         view.toggle_settings(window, cx);
         let (settings, _) = view.settings.as_ref().unwrap();
@@ -859,10 +997,412 @@ pub(super) async fn verify(cx: &mut AsyncApp) {
                 .contains("read-only")
         );
     });
+    verify_antigravity_read_only(&mut fixture, cx, &agy).await;
     draw(fixture.window.into(), cx);
     fixture.update(cx, |_, window, _| window.remove_window());
     println!(
         "live settings: account canary redacted, Git and browser diagnostics, retention error and read-only guard"
+    );
+}
+
+async fn verify_antigravity(
+    fixture: &mut Fixture,
+    cx: &mut AsyncApp,
+    siblings: [&str; 3],
+) -> String {
+    let target = fixture.new_shell(cx, siblings[2]).await;
+    fixture.update(cx, |view, window, cx| {
+        view.open_session_loader(&target, window, cx)
+    });
+    for (provider, id, preview) in [
+        ("claude-code", SOURCE, Some("Claude catalog fixture")),
+        ("codex", SOURCE, None),
+        ("dsh", SAVED, Some("needle conversation")),
+    ] {
+        fixture.update(cx, |view, _, cx| view.switch_loader_provider(provider, cx));
+        fixture
+            .state(cx, provider, |view, _| {
+                let Some(TabDialog::SessionLoader(loader)) = &view.dialog else {
+                    return None;
+                };
+                // Codex has multiple rows after forking. Check membership and
+                // require the initial preview to finish before switching.
+                (loader.provider == provider
+                    && !loader.loading_list
+                    && !loader.loading_detail
+                    && loader.sessions.iter().any(|row| row.id == id)
+                    && preview
+                        .is_none_or(|text| loader.events.iter().any(|event| event.text == text))
+                    && loader.events.iter().all(|event| event.text != AGY_MESSAGE))
+                .then_some(())
+            })
+            .await;
+    }
+    fixture.update(cx, |view, window, cx| {
+        view.switch_loader_provider("antigravity", cx);
+        let Some(TabDialog::SessionLoader(loader)) = &view.dialog else {
+            panic!("Antigravity loader");
+        };
+        let request_id = loader.pending_list.as_ref().unwrap().id;
+        let graph = view.graph.clone();
+        for (generation, kind, id) in [
+            (1, "antigravitySessionListResult", request_id - 1),
+            (1, "antigravitySessionDetailResult", request_id),
+            (1, "dshSessionListResult", request_id),
+            (0, "antigravitySessionListResult", request_id),
+        ] {
+            view.apply(
+                BridgeEvent::Runtime {
+                    generation,
+                    event: Event::Graph(json!({
+                        "type":kind,"requestId":id,"error":"stale fixture reply","nodes":[],
+                    })),
+                },
+                window,
+                cx,
+            );
+        }
+        let Some(TabDialog::SessionLoader(loader)) = &view.dialog else {
+            panic!("A stale receipt closed the modal");
+        };
+        assert_eq!(loader.pending_list.as_ref().unwrap().id, request_id);
+        assert!(loader.error.is_none());
+        assert_eq!(view.graph, graph);
+    });
+    fixture
+        .state(cx, "Antigravity catalog and preview", |view, _| {
+            let Some(TabDialog::SessionLoader(loader)) = &view.dialog else {
+                return None;
+            };
+            (loader.sessions.len() == 2
+                && loader.selected.as_deref() == Some(SOURCE)
+                && loader.events.iter().any(|event| event.text == AGY_MESSAGE))
+            .then_some(())
+        })
+        .await;
+    fixture.update(cx, |view, window, cx| {
+        let Some(TabDialog::SessionLoader(loader)) = &view.dialog else {
+            panic!("Antigravity loader");
+        };
+        loader.input.update(cx, |input, cx| {
+            input.replace_text_in_range(None, "FIXTURE TITLE", window, cx)
+        });
+        view.loader_filter_changed(cx);
+    });
+    fixture
+        .state(cx, "Antigravity title filter", |view, _| {
+            let Some(TabDialog::SessionLoader(loader)) = &view.dialog else {
+                return None;
+            };
+            (loader.sessions.len() == 1 && loader.sessions[0].title == AGY_TITLE).then_some(())
+        })
+        .await;
+    fixture.update(cx, |view, window, cx| {
+        let Some(TabDialog::SessionLoader(loader)) = &view.dialog else {
+            panic!("Antigravity loader");
+        };
+        loader.content_input.update(cx, |input, cx| {
+            input.replace_text_in_range(None, "TRANSCRIPT NEEDLE", window, cx)
+        });
+        view.loader_search_changed(cx);
+    });
+    let hit = fixture
+        .state(cx, "Antigravity content search", |view, _| {
+            let Some(TabDialog::SessionLoader(loader)) = &view.dialog else {
+                return None;
+            };
+            let [hit] = loader.search_hits.as_slice() else {
+                return None;
+            };
+            assert!(hit.excerpt.contains("transcript needle"));
+            Some(hit.index)
+        })
+        .await;
+    fixture.update(cx, |view, _, cx| view.select_loader_hit(hit, cx));
+    fixture
+        .state(cx, "Antigravity search result preview", |view, _| {
+            let Some(TabDialog::SessionLoader(loader)) = &view.dialog else {
+                return None;
+            };
+            (loader.pending_detail.is_none()
+                && loader
+                    .events
+                    .iter()
+                    .any(|event| event.index as i64 == hit && event.text == AGY_MESSAGE))
+            .then_some(())
+        })
+        .await;
+    fixture.update(cx, |view, _, cx| view.submit_session_loader(cx));
+    let receipt = fixture.reply(cx, "antigravitySessionLoadResult").await;
+    assert_eq!(receipt["result"]["status"], "restoring", "{receipt}");
+    assert_eq!(receipt["result"]["sessionId"], target);
+
+    let first = fixture.agy_run(cx, 1).await;
+    assert_eq!(first.resume_arg(), Some(SOURCE));
+    fixture
+        .state(cx, "Antigravity restoring banner", |view, _| {
+            let node = view.graph_node(&target)?;
+            matches!(
+                view.provider_restore_banner(&target, node),
+                Some(ProviderRestoreBanner::Restoring { .. })
+            )
+            .then_some(())
+        })
+        .await;
+    assert!(
+        !fixture
+            .identities
+            .iter()
+            .any(|event| { event["sessionId"] == target && event["result"] == "confirmed" })
+    );
+    first.status(AGY_OTHER);
+    restore_from_failed_card(fixture, cx, &target, false).await;
+    let recovered = fixture.agy_run(cx, 2).await;
+    assert_eq!(recovered.resume_arg(), Some(SOURCE));
+    recovered.status(SOURCE);
+    recovered.hook("PreInvocation", SOURCE);
+    recovered.hook("Stop", SOURCE);
+    fixture
+        .state(cx, "Antigravity confirmed and ready to fork", |view, _| {
+            let node = view.graph_node(&target)?;
+            (view.dialog.is_none()
+                && node["canFork"] == true
+                && view.provider_restore_banner(&target, node).is_none()
+                && !view.recovery_blocked(&target))
+            .then_some(())
+        })
+        .await;
+    for (id, provider, provider_id) in [
+        (siblings[0], "codex", SOURCE),
+        (siblings[1], "dsh", SAVED),
+        (siblings[2], "claude-code", SOURCE),
+        (&target, "antigravity", SOURCE),
+    ] {
+        fixture.update(cx, |view, _, _| {
+            assert_eq!(view.graph_node(id).unwrap()["currentMode"], provider)
+        });
+        assert!(
+            fixture.identities.iter().any(|event| {
+                event["sessionId"] == id
+                    && event["provider"] == provider
+                    && event["providerSessionId"] == provider_id
+                    && event["result"] == "confirmed"
+            }),
+            "Missing confirmed {provider} identity"
+        );
+    }
+    println!(
+        "live Antigravity loader: four-provider isolation, stale reply guards, title filter, content search, preview, restoring receipt and confirmed retry"
+    );
+
+    fixture.update(cx, |view, _, _| {
+        let menu = view.wiring_card_menu(&target);
+        assert!(
+            menu.items
+                .iter()
+                .any(|item| item.action == CardMenuAction::ForkWorktree
+                    && item.disabled_reason.is_some())
+        );
+    });
+    submit_fork(
+        fixture,
+        cx,
+        &target,
+        CardMenuAction::Fork,
+        "Antigravity probe fork",
+    );
+    let cwd = fixture.options.workspace.to_str().unwrap().to_owned();
+    let forked = fixture
+        .state(cx, "Antigravity fork receipt", |view, _| {
+            let child = session_levels::nodes(&view.graph)
+                .iter()
+                .find(|node| node["title"] == "Antigravity probe fork")?;
+            assert_eq!(child["cwd"], cwd);
+            view.dialog
+                .is_none()
+                .then(|| child["sessionId"].as_str().unwrap().to_owned())
+        })
+        .await;
+    let run = fixture.agy_run(cx, 3).await;
+    assert_eq!(run.resume_arg(), Some(SOURCE));
+    run.status(SOURCE);
+    fixture
+        .wait(cx, "Antigravity fork input", |_, _| {
+            run.received_fork().then_some(())
+        })
+        .await;
+    fixture.input(&forked, b"/exit\r");
+    fixture
+        .state(cx, "Antigravity fork failure menu", |view, _| {
+            let menu = view.wiring_card_menu(&forked);
+            (menu.can_open()
+                && menu.items.iter().any(|item| {
+                    item.action == CardMenuAction::RetryFork && item.disabled_reason.is_none()
+                }))
+            .then_some(())
+        })
+        .await;
+    card_action(fixture.window, cx, &forked, CardMenuAction::RetryFork);
+    let retry = fixture.agy_run(cx, 4).await;
+    assert_ne!(retry.url, run.url);
+    assert_eq!(retry.resume_arg(), Some(SOURCE));
+    retry.status(SOURCE);
+    fixture
+        .wait(cx, "Antigravity retry fork input", |_, _| {
+            retry.received_fork().then_some(())
+        })
+        .await;
+    retry.status(AGY_FORK);
+    fixture
+        .state(cx, "Antigravity fork retry confirmed", |view, _| {
+            let child = view.graph_node(&forked)?;
+            (child["forkProgress"]["stage"] == "succeeded"
+                && !view.fork_retries.contains_key(&forked))
+            .then_some(())
+        })
+        .await;
+    assert!(fixture.identities.iter().any(|event| {
+        event["sessionId"] == forked
+            && event["providerSessionId"] == AGY_FORK
+            && event["result"] == "confirmed"
+    }));
+    println!(
+        "live Antigravity menu: current-worktree fork, controlled failure, right-click retry and confirmed child identity"
+    );
+
+    fixture.update(cx, |view, window, cx| {
+        view.open_session_loader(&target, window, cx)
+    });
+    fixture
+        .state(cx, "Antigravity loader reopen", |view, _| {
+            let Some(TabDialog::SessionLoader(loader)) = &view.dialog else {
+                return None;
+            };
+            (loader.provider == "antigravity" && loader.selected.as_deref() == Some(SOURCE))
+                .then_some(())
+        })
+        .await;
+    fixture.update(cx, |view, _, cx| {
+        view.submit_session_loader(cx);
+        if matches!(&view.dialog, Some(TabDialog::SessionLoader(loader)) if loader.confirm_running)
+        {
+            view.submit_session_loader(cx);
+        }
+    });
+    fixture.agy_run(cx, 5).await.status(AGY_OTHER);
+    restore_from_failed_card(fixture, cx, &target, true).await;
+    let fresh = fixture.agy_run(cx, 6).await;
+    assert_eq!(fresh.resume_arg(), None);
+    fresh.status(AGY_OTHER);
+    fixture
+        .wait(cx, "Antigravity fresh identity", |fixture, _| {
+            fixture
+                .identities
+                .iter()
+                .any(|event| {
+                    event["sessionId"] == target
+                        && event["providerSessionId"] == AGY_OTHER
+                        && event["result"] == "confirmed"
+                })
+                .then_some(())
+        })
+        .await;
+    println!(
+        "live Antigravity recovery: failed restore can start a new conversation on the same card"
+    );
+    target
+}
+
+async fn restore_from_failed_card(
+    fixture: &mut Fixture,
+    cx: &mut AsyncApp,
+    target: &str,
+    fresh: bool,
+) {
+    fixture
+        .state(cx, "Antigravity failed restore actions", |view, _| {
+            let node = view.graph_node(target)?;
+            matches!(
+                view.provider_restore_banner(target, node),
+                Some(ProviderRestoreBanner::Failed {
+                    pending: false,
+                    retry_blocked: None,
+                    fresh_blocked: None,
+                    ..
+                })
+            )
+            .then_some(())
+        })
+        .await;
+    fixture.update(cx, |view, window, cx| {
+        view.run_provider_restore(target, fresh, window, cx)
+    });
+}
+
+async fn verify_antigravity_read_only(fixture: &mut Fixture, cx: &mut AsyncApp, target: &str) {
+    use matou_native_runtime::host::STORAGE_READ_ONLY;
+
+    fixture.host.shutdown().unwrap();
+    let output = std::process::Command::new("/usr/bin/sqlite3")
+        .env_clear()
+        .arg(fixture.root.join("matou.sqlite"))
+        .arg("PRAGMA wal_checkpoint(TRUNCATE); INSERT INTO schema_migrations (version, name, checksum, applied_at) VALUES (9999, 'probe-newer', 'probe-newer', 5);")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    fixture.host = RuntimeHost::start_with_offline_fixtures(
+        fixture.options.clone(),
+        OfflineFixtures {
+            provider_environment: Some(fixture.environment.clone()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    fixture.replies.clear();
+    fixture
+        .state(cx, "Runtime read-only mode", |view, _| {
+            view.read_only.as_ref().map(|_| ())
+        })
+        .await;
+    let cwd = fixture.options.workspace.to_str().unwrap().to_owned();
+    fixture.send(Command::ListAntigravitySessions {
+        request_id: 101,
+        cwd,
+        query: AGY_TITLE.into(),
+        full_text: false,
+        offset: None,
+        limit: None,
+    });
+    let list = fixture.reply(cx, "antigravitySessionListResult").await;
+    assert_eq!(list["result"]["sessions"][0]["providerSessionId"], SOURCE);
+    let load = || Command::LoadAntigravitySession {
+        request_id: 102,
+        session_id: target.into(),
+        provider_session_id: SOURCE.into(),
+    };
+    fixture.update(cx, |view, window, cx| {
+        assert_eq!(
+            view.commands.send_at(1, load()),
+            Err(crate::runtime_bridge::SendError::StorageReadOnly)
+        );
+        view.open_session_loader(target, window, cx);
+        assert!(view.dialog.is_none());
+        assert!(!view.wiring_card_menu(target).can_open());
+    });
+    fixture.send(load());
+    let rejected = fixture.reply(cx, "antigravitySessionLoadResult").await;
+    assert_eq!(rejected["requestId"], 102);
+    assert_eq!(rejected["code"], STORAGE_READ_ONLY);
+    assert_eq!(
+        fs::read_dir(fixture.root.join("agy-runs")).unwrap().count(),
+        6
+    );
+    println!(
+        "live Antigravity read-only: Runtime can list, Desktop blocks writes and Runtime rejects a direct load without starting a process"
     );
 }
 
