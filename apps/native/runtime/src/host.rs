@@ -4331,7 +4331,7 @@ fn run_writable(
             && let Some(control) = &control
         {
             // Process worker exits and disposal before revalidating queued requests.
-            control.poll();
+            control.poll(&owner);
         }
         let released: Vec<_> = provider_starting
             .keys()

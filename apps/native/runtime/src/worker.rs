@@ -80,6 +80,10 @@ pub enum WorkerCommand {
     Screen {
         reply: Sender<Result<Screen>>,
     },
+    #[cfg(unix)]
+    ReadCurrentScreen {
+        reply: Sender<Result<Screen>>,
+    },
     View {
         reply: Sender<Result<(Screen, InputModes)>>,
     },
@@ -438,6 +442,10 @@ fn run(
                 }
                 WorkerCommand::Screen { reply } => {
                     let _ = reply.send(session.screen());
+                }
+                #[cfg(unix)]
+                WorkerCommand::ReadCurrentScreen { reply } => {
+                    let _ = reply.send(session.read_current_screen());
                 }
                 WorkerCommand::View { reply } => {
                     let _ = reply.send(session.view());
