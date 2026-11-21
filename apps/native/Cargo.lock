@@ -2706,6 +2706,8 @@ dependencies = [
  "base64",
  "crc32fast",
  "flate2",
+ "icu_normalizer",
+ "icu_properties",
  "libc",
  "portable-pty",
  "rusqlite",
