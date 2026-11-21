@@ -243,6 +243,136 @@ fn marker(path: &Path, condition: impl Fn(&str) -> bool) -> Result<String> {
 }
 
 #[test]
+fn account_summary_projects_frozen_subscription_files_without_leaking_secrets() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let options = options(root.path())?;
+    let directory = options.data_root.join("model-router/credentials");
+    fs::create_dir_all(&directory)?;
+    let access = "fixture-subscription-access-canary";
+    let refresh = "fixture-subscription-refresh-canary";
+    let identity = "fixture-subscription-identity-canary";
+    let api_key = "fixture-unrelated-api-key-canary";
+    let auth_index = "fixture-private-auth-index-canary";
+    let active_file = "fixture-private-codex-ref.json";
+    let expired_file = "fixture-private-antigravity-ref.json";
+    let orphan_file = "fixture-unassigned-codex-ref.json";
+    let router_key = "fixture-router-key-canary";
+    let config = json!({
+        "version": 1,
+        "revision": 5,
+        "activeProviderIds": {"claude-code": "codex-subscription", "codex": "openai-official"},
+        "providers": {
+            "claude-code": [
+                {"id": "api-provider", "kind": "api-key", "apiKey": api_key},
+                {
+                    "id": "codex-subscription", "kind": "subscription", "name": access,
+                    "subscription": {
+                        "provider": "codex",
+                        "credentialRef": {"name": active_file, "authIndex": auth_index},
+                        "account": {"status": "ready", "email": "member@example.test", "plan": "Plus"},
+                        "modelMetadata": []
+                    }
+                },
+                {
+                    "id": "google-subscription", "kind": "subscription",
+                    "subscription": {
+                        "provider": "antigravity",
+                        "credentialRef": {"name": expired_file},
+                        "account": {"status": "ready", "plan": api_key, "reason": identity},
+                        "modelMetadata": []
+                    }
+                }
+            ],
+            "codex": []
+        }
+    });
+    let active = json!({
+        "type": "codex", "email": "member@example.test", "auth_index": auth_index,
+        "access_token": access, "refresh_token": refresh, "id_token": identity,
+        "expired": "2099-01-01T00:00:00Z"
+    });
+    let expired = json!({
+        "type": "antigravity", "email": format!("fixture@{refresh}.example.test"),
+        "access_token": access, "expired": "2000-01-01T00:00:00Z"
+    });
+    let unassigned = json!({
+        "type": "codex", "email": "unassigned@example.test", "plan_type": "Free",
+        "access_token": access, "expired": "2099-01-01T00:00:00Z"
+    });
+    let files = [
+        (options.data_root.join("provider-config.json"), config),
+        (
+            options.data_root.join("model-router/config.json"),
+            json!({
+                "config-version": 8, "access": {"api-keys": [router_key]},
+                "oauth": {"auth-dir": directory}
+            }),
+        ),
+        (directory.join(active_file), active),
+        (directory.join(expired_file), expired),
+        (directory.join(orphan_file), unassigned),
+    ];
+    for (path, contents) in &files {
+        fs::write(path, contents.to_string())?;
+    }
+    let legacy_path = options.data_root.join("accounts.json");
+    assert!(!legacy_path.exists());
+
+    let mut host = RuntimeHost::start_with_offline_fixtures(options, OfflineFixtures::default())?;
+    ready(&host)?;
+    let response = reply(
+        &host,
+        Command::GetAccountSummary { request_id: 1 },
+        1,
+        "accountSummaryResult",
+    )?;
+    let wire = response.to_string();
+    for forbidden in [
+        access,
+        refresh,
+        identity,
+        api_key,
+        auth_index,
+        active_file,
+        expired_file,
+        orphan_file,
+        router_key,
+        "access_token",
+        "refresh_token",
+        "id_token",
+        "apiKey",
+        "credentialRef",
+    ] {
+        assert!(
+            !wire.contains(forbidden),
+            "account summary exposed a private field or value"
+        );
+    }
+    ensure!(response.get("error").is_none(), "summary request failed");
+    assert_eq!(response["result"]["loadState"], "loaded");
+    let summary = &response["result"]["accountSummary"];
+    assert_eq!(summary["currentId"], "codex-subscription");
+    let accounts = summary["accounts"].as_array().context("summary accounts")?;
+    assert_eq!(accounts.len(), 3);
+    assert_eq!(accounts[0]["provider"], "codex");
+    assert_eq!(accounts[0]["status"], "active");
+    assert_eq!(accounts[0]["plan"], "Plus");
+    assert_eq!(accounts[0]["email"], "me•••@example.test");
+    assert_eq!(accounts[1]["provider"], "antigravity");
+    assert_eq!(accounts[1]["status"], "expired");
+    assert_eq!(accounts[1]["plan"], "[redacted]");
+    assert_eq!(accounts[1]["email"], "•••");
+    assert_eq!(accounts[2]["provider"], "codex");
+    assert_eq!(accounts[2]["status"], "needs-activation");
+    assert_eq!(accounts[2]["plan"], "Free");
+    assert!(!legacy_path.exists());
+    for (path, contents) in files {
+        assert_eq!(fs::read_to_string(path)?, contents.to_string());
+    }
+    host.shutdown()
+}
+
+#[test]
 fn offline_queries_update_retention_and_storage_gate() -> Result<()> {
     let root = tempfile::tempdir()?;
     let options = options(root.path())?;
