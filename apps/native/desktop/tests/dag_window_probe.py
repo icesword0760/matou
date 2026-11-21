@@ -53,6 +53,8 @@ def run(binary, log_path, root):
         'open-icon', 'repeat', 'live-update', 'main-switch', 'main-switch-back',
         'retarget', 'close-system', 'reopen', 'close-escape', 'close-button',
         'open-failure', 'dismiss-error', 'open-failure-before-retry', 'retry-success',
+        'canvas-zoom', 'canvas-pan', 'canvas-search-refresh', 'canvas-search-output',
+        'canvas-reconnect', 'canvas-search-escape', 'canvas-aggregate', 'canvas-search-enter',
     ], cases
 
 
