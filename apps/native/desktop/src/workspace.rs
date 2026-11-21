@@ -42,6 +42,14 @@ mod deferred_recovery_card {
 #[path = "database_recovery_page.rs"]
 pub mod database_recovery_page;
 
+#[path = "dag_window.rs"]
+mod dag_window;
+use dag_window::DagWindow;
+
+#[cfg(all(target_os = "macos", debug_assertions))]
+#[path = "../tests/support/dag_window_probe.rs"]
+mod dag_window_probe;
+
 mod session_levels {
     include!("session_levels.rs");
 }
@@ -860,6 +868,8 @@ const CONTROLS: &[&str] = &[
     "add-tab",
     "tab-overflow",
     "graph",
+    "dag-open-retry",
+    "dag-open-dismiss",
     "split",
     "update",
     "project-instructions",
@@ -1332,6 +1342,10 @@ pub struct Workspace {
     geometry_sequence: u64,
     geometry_writes: HashMap<String, (u64, u8)>,
     graph: Value,
+    dag_window: Option<WindowHandle<DagWindow>>,
+    dag_open_error: bool,
+    #[cfg(all(target_os = "macos", debug_assertions))]
+    dag_probe: Option<dag_window_probe::OpenProbe>,
     level_parent_by_scene: HashMap<String, Option<String>>,
     carousel_owner: Option<String>,
     hovered_child_badge: Option<String>,
@@ -2361,6 +2375,10 @@ impl Workspace {
             geometry_sequence: 0,
             geometry_writes: HashMap::new(),
             graph: Value::Null,
+            dag_window: None,
+            dag_open_error: false,
+            #[cfg(all(target_os = "macos", debug_assertions))]
+            dag_probe: None,
             level_parent_by_scene: HashMap::new(),
             carousel_owner: None,
             hovered_child_badge: None,
@@ -6563,6 +6581,115 @@ impl Workspace {
             .map(|scene| scene.id.as_str())
     }
 
+    fn open_dag_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(scene) = self.active_scene_id() else {
+            return;
+        };
+        if self.graph["sceneId"].as_str() != Some(scene) {
+            return;
+        }
+        let nodes = session_levels::nodes(&self.graph);
+        let focused = self.focused.as_deref();
+        let target = if nodes.is_empty() {
+            focused
+        } else {
+            focused
+                .filter(|id| session_levels::node(nodes, id).is_some())
+                .or_else(|| {
+                    self.graph["focusedSessionId"]
+                        .as_str()
+                        .filter(|id| session_levels::node(nodes, id).is_some())
+                })
+                .or_else(|| {
+                    session_levels::children_of(nodes, None)
+                        .next()
+                        .or_else(|| nodes.first())
+                        .and_then(|node| node["sessionId"].as_str())
+                })
+        };
+        let Some(target) = target.map(str::to_owned) else {
+            return;
+        };
+        #[cfg(all(target_os = "macos", debug_assertions))]
+        let visible = self.dag_probe.is_none();
+        #[cfg(not(all(target_os = "macos", debug_assertions)))]
+        let visible = true;
+        let opened = if let Some(child) = self.dag_window
+            && child
+                .update(cx, |view, window, cx| {
+                    view.retarget(&self.graph, &target, self.locale, window, cx);
+                    if visible {
+                        window.activate_window();
+                    }
+                })
+                .is_ok()
+        {
+            Ok(child)
+        } else {
+            self.create_dag_window(&target, visible, window, cx)
+        };
+        match opened {
+            Ok(child) => {
+                self.dag_window = Some(child);
+                self.dismiss_dag_open_error(window, cx);
+            }
+            Err(error) => {
+                eprintln!("Open native session graph: {error:#}");
+                self.dag_window = None;
+                self.dag_open_error = true;
+                cx.notify();
+            }
+        }
+    }
+
+    fn create_dag_window(
+        &mut self,
+        target: &str,
+        visible: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<WindowHandle<DagWindow>> {
+        #[cfg(all(target_os = "macos", debug_assertions))]
+        if let Some(probe) = &mut self.dag_probe
+            && std::mem::take(&mut probe.fail_next_open)
+        {
+            anyhow::bail!("Injected DAG window creation failure");
+        }
+        DagWindow::open(&self.graph, target, self.locale, visible, window, cx)
+    }
+
+    fn dismiss_dag_open_error(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if std::mem::take(&mut self.dag_open_error) {
+            if ["dag-open-retry", "dag-open-dismiss"]
+                .iter()
+                .any(|id| self.control_focus[id].is_focused(window))
+            {
+                window.focus(&self.control_focus["graph"]);
+            }
+            cx.notify();
+        }
+    }
+
+    fn dag_open_error_banner(&self, cx: &mut Context<Self>) -> Option<Div> {
+        self.dag_open_error.then(|| {
+            dag_window::render_open_failure(
+                self.locale,
+                self.button(
+                    dag_window::open_failure_retry_button(self.locale),
+                    &self.control_focus["dag-open-retry"],
+                    Self::open_dag_window,
+                    cx,
+                ),
+                self.button(
+                    dag_window::open_failure_dismiss_button(self.locale),
+                    &self.control_focus["dag-open-dismiss"],
+                    Self::dismiss_dag_open_error,
+                    cx,
+                ),
+            )
+        })
+    }
+
     fn permission_blocked_reason(&self, id: &str, node: &Value) -> Option<&'static str> {
         let (generation, phase) = self.commands.connection();
         if self.read_only.is_some()
@@ -7282,6 +7409,13 @@ impl Workspace {
             .and_then(|object| object.remove("providerPermissionModeResults"));
         self.update_notifications(&mut graph);
         self.graph = graph;
+        if let Some(child) = self.dag_window
+            && child
+                .update(cx, |view, _, cx| view.refresh(&self.graph, cx))
+                .is_err()
+        {
+            self.dag_window = None;
+        }
         self.reconcile_permission_modes(
             permission_results
                 .as_ref()
@@ -9903,17 +10037,24 @@ impl Workspace {
             .child(tabs)
             .when(self.tab_overflow, |bar| bar.child(overflow_actions))
             .child(
-                self.control(
+                self.button(
                     div()
+                        .id("graph")
                         .size(px(28.))
                         .flex_none()
                         .flex()
                         .items_center()
                         .justify_center()
+                        .cursor_pointer()
+                        .tooltip({
+                            let title = self.locale.text("打开会话 DAG", "Open session DAG");
+                            move |_, cx| cx.new(|_| CardTooltip(title.into())).into()
+                        })
                         .child(icon("graph-ring", 16., 0x606572)),
-                    "graph",
-                )
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()),
+                    &self.control_focus["graph"],
+                    Self::open_dag_window,
+                    cx,
+                ),
             )
             .child({
                 let split_disabled =
@@ -14174,6 +14315,7 @@ impl Render for Workspace {
                                 stage.style().visibility = Some(Visibility::Hidden);
                                 stage
                             })
+                            .children(self.dag_open_error_banner(cx))
                             .child(self.topbar(window, cx))
                             .children(self.read_only_banner(cx))
                             .child(carousel)

@@ -27,13 +27,23 @@ fn main() -> Result<()> {
         runtime: options,
         paths,
     } = DesktopOptions::from_args(std::env::args_os().skip(1))?;
+    let dag_probe = cfg!(all(target_os = "macos", debug_assertions))
+        && std::env::var("MATOU_DAG_WINDOW_PROBE").as_deref() == Ok("hidden");
+    if dag_probe {
+        anyhow::ensure!(
+            options.data_root.join("dag-window-probe.fixture").is_file(),
+            "DAG probe requires an isolated fixture data root"
+        );
+    }
     let (send, requests) = async_channel::bounded(128);
     let Instance::Primary(instance) =
         instance_open::claim(&options.data_root, &paths, send.clone())?
     else {
         return Ok(());
     };
-    let probe = if cfg!(debug_assertions) {
+    let probe = if dag_probe {
+        Some(Probe::DagWindow)
+    } else if cfg!(debug_assertions) {
         match std::env::var("MATOU_WINDOW_REGISTRY_PROBE").as_deref() {
             Ok("hidden") => Some(Probe::Hidden),
             Ok("startup") => Some(Probe::Startup),
@@ -136,7 +146,9 @@ fn main() -> Result<()> {
                 cx.windows().len(),
                 desktop.runtime.borrow().runtime_pid()
             );
-            listen_for_probe_quit(cx);
+            if desktop.probe != Some(Probe::DagWindow) {
+                listen_for_probe_quit(cx);
+            }
         }
         cx.spawn(async move |cx| run_requests(desktop, requests, paths, cx).await)
             .detach();
@@ -149,6 +161,7 @@ enum Probe {
     Hidden,
     Startup,
     NoWindow,
+    DagWindow,
 }
 
 struct Desktop {
@@ -187,6 +200,12 @@ impl Desktop {
         match self.open_window(cx) {
             Ok(window) => {
                 self.window.set(Some(window));
+                #[cfg(all(target_os = "macos", debug_assertions))]
+                if self.probe == Some(Probe::DagWindow) {
+                    window
+                        .update(cx, |view, window, cx| view.run_dag_window_probe(window, cx))
+                        .expect("start hidden DAG window probe");
+                }
                 if self.probe.is_some() {
                     #[cfg(target_os = "macos")]
                     {
