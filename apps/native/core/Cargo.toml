@@ -13,7 +13,7 @@ flate2 = "1.1"
 portable-pty = "=0.9.0"
 rusqlite = { version = "=0.42.0", features = ["bundled", "backup", "hooks"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip", "raw_value"] }
 sha2 = "0.10"
 url = "=2.5.8"
 uuid = { version = "=1.29.2", features = ["v4"] }
