@@ -70,7 +70,9 @@ mod codex_hud {
 
 #[path = "footer_controls.rs"]
 mod footer_controls;
-use footer_controls::{FooterGitProjection, FooterGitRequest, FooterMenu, FooterPopover};
+use footer_controls::{
+    EnvironmentActionState, FooterGitProjection, FooterGitRequest, FooterMenu, FooterPopover,
+};
 
 #[path = "project_instructions.rs"]
 mod project_instructions;
@@ -1375,6 +1377,9 @@ pub struct Workspace {
     footer_shell: Option<String>,
     project_instructions: HashMap<AnyWindowHandle, project_instructions::Instructions>,
     footer_popovers: HashMap<AnyWindowHandle, FooterPopover>,
+    environment_actions: HashMap<String, EnvironmentActionState>,
+    #[cfg(debug_assertions)]
+    environment_picker_path: Option<PathBuf>,
     pending_footer_git: HashMap<u64, FooterGitRequest>,
     footer_git_projections: HashMap<String, FooterGitProjection>,
     detached_permission_menus: HashSet<AnyWindowHandle>,
@@ -2432,6 +2437,9 @@ impl Workspace {
                 .map(str::to_owned),
             project_instructions: HashMap::new(),
             footer_popovers: HashMap::new(),
+            environment_actions: HashMap::new(),
+            #[cfg(debug_assertions)]
+            environment_picker_path: None,
             pending_footer_git: HashMap::new(),
             footer_git_projections: HashMap::new(),
             detached_permission_menus: HashSet::new(),
@@ -3147,6 +3155,7 @@ impl Workspace {
         self.permission_identities.clear();
         self.runtime_generation = generation;
         self.retire_wiring_commands(cx);
+        self.environment_actions.clear();
         self.transport_connected = false;
         self.domain_ready = false;
         self.session_frames.clear();
@@ -3629,6 +3638,12 @@ impl Workspace {
             _ => {}
         }
         match event {
+            Event::RestoreSessionEnvironmentResult(reply)
+            | Event::LocateSessionEnvironmentResult(reply)
+            | Event::HandoffSessionEnvironmentResult(reply) => {
+                self.receive_environment_change(reply, window, cx);
+                return;
+            }
             Event::GitStatusDetail(reply)
             | Event::GitCheckout(reply)
             | Event::GitCreateBranch(reply)
@@ -5321,6 +5336,7 @@ impl Workspace {
             let disabled = self.database_recovery.is_some()
                 || self.detached_path_invalid(id).unwrap_or(disabled)
                 || self.read_only.is_some()
+                || self.environment_unavailable(id)
                 || blocked
                 || (self.settings.is_some() && !self.wiring.is_detached(id))
                 || self.egress_frozen(id)
@@ -5508,6 +5524,7 @@ impl Workspace {
     #[cfg(target_os = "macos")]
     fn recovery_water_needed(&self, id: &str, node: &Value) -> bool {
         node["archivedAt"].is_null()
+            && !self.environment_unavailable(id)
             && fork_failure_copy(node).is_none()
             && fork_progress_copy(node).is_none()
             && Self::provider_restore_state(node) != Some("failed")
@@ -7714,9 +7731,10 @@ impl Workspace {
                 "终端存储异常，请先恢复或结束当前会话",
                 "Terminal storage failed. Recover or end the current session first.",
             ))
-        } else if node["environment"]["state"]
-            .as_str()
-            .is_some_and(|state| state != "ready")
+        } else if self.environment_unavailable(id)
+            || node["environment"]["state"]
+                .as_str()
+                .is_some_and(|state| state != "ready")
         {
             Some(self.locale.text(
                 "当前运行环境需要先恢复或交接",
@@ -15045,6 +15063,7 @@ impl Render for Workspace {
                 })
                 .and_then(|node| self.provider_restore_banner(id, node));
             let card = if !compact
+                && !self.environment_unavailable(id)
                 && fork_failure.is_none()
                 && fork_progress.is_none()
                 && provider_banner.is_none()
@@ -15225,6 +15244,9 @@ impl Render for Workspace {
                 .child(if let Some(failure) = fork_failure {
                     failure.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 } else {
+                    let environment_overlay = node
+                        .filter(|_| fork_progress.is_none())
+                        .and_then(|node| self.environment_card_overlay(id, node, window, cx));
                     let body = div()
                         .flex_1()
                         .min_h_0()
@@ -15248,7 +15270,8 @@ impl Render for Workspace {
                         .children(fork_progress.map(|progress| fork_progress_body(progress, now)))
                         .children(self.deferred_card(id).map(|card| {
                             self.render_deferred_recovery_card(id, card, width, window, cx)
-                        }));
+                        }))
+                        .children(environment_overlay);
                     #[cfg(target_os = "macos")]
                     let body = body.when(water.is_some(), |body| body.opacity(0.));
                     body

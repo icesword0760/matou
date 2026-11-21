@@ -2,6 +2,7 @@ pub mod canvas;
 pub mod cards;
 mod model;
 mod navigation;
+pub mod session_environment;
 pub mod tabs;
 pub mod tasks;
 pub mod workspaces;

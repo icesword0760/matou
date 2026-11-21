@@ -67,6 +67,7 @@ pub(crate) struct DshLaunch {
     pub plan: DshLaunchPlan,
     pub config_dump: String,
     pub catalog_root: Option<PathBuf>,
+    pub environment_handoff: bool,
 }
 
 enum DshObservation {
@@ -105,6 +106,7 @@ enum SpecialLaunch {
         config_dump: String,
         catalog_root: Option<PathBuf>,
         binding: Option<ProviderBinding>,
+        environment_handoff: bool,
     },
     CodexFork {
         key: String,
@@ -128,6 +130,7 @@ struct RunningShell {
     exit_error: Option<String>,
     retiring: bool,
     stop_completion: Option<mpsc::Sender<Result<()>>>,
+    environment_stop: bool,
     provider_startup_pending: bool,
     promotion_process_check: Option<Arc<OnceLock<Result<()>>>>,
     cwd_capture: Option<(Instant, bool)>,
@@ -912,6 +915,15 @@ impl ShellOwner {
         let focused = graph["focusedSessionId"].as_str().map(str::to_owned);
         if let Some(nodes) = graph["nodes"].as_array_mut() {
             for node in nodes {
+                if node["environment"]["kind"] == "worktree"
+                    && node["environment"]["state"] == "ready"
+                    && node["environment"]["path"]
+                        .as_str()
+                        .is_some_and(|path| !Path::new(path).is_dir())
+                {
+                    node["environment"]["state"] = json!("missing");
+                    node["environment"]["error"] = json!("path-missing");
+                }
                 if node["sessionId"].as_str() == focused.as_deref() {
                     let cwd = focused
                         .as_ref()
@@ -1595,11 +1607,15 @@ impl ShellOwner {
                                 SELECT id FROM session_runs WHERE session_id = sessions.id
                                 ORDER BY ordinal DESC LIMIT 1
                             )
-                        )) AS automatic
+                        )) AS automatic,
+                    CASE WHEN environment.active_target = 'worktree' THEN owned.worktree_path END
              FROM sessions
              JOIN tasks ON tasks.id = sessions.task_id AND tasks.archived_at IS NULL
              JOIN workspaces ON workspaces.id = tasks.workspace_id AND workspaces.archived_at IS NULL
+             LEFT JOIN session_environment_bindings environment ON environment.session_id = sessions.id
+             LEFT JOIN worktrees owned ON owned.id = environment.managed_worktree_id
              WHERE sessions.kind IN ('shell', 'claude-code', 'codex', 'dsh', 'antigravity') AND sessions.archived_at IS NULL
+               AND COALESCE(environment.state, 'ready') = 'ready'
                AND EXISTS (
                    SELECT 1 FROM session_mounts JOIN scenes ON scenes.id = session_mounts.scene_id
                    WHERE session_mounts.session_id = sessions.id AND scenes.archived_at IS NULL
@@ -1621,11 +1637,18 @@ impl ShellOwner {
                 row.get::<_, String>(3)?,
                 row.get::<_, bool>(4)?,
                 row.get::<_, bool>(5)?,
+                row.get::<_, Option<String>>(6)?,
             ))
         })?;
         let mut candidates = Vec::new();
         for row in rows {
-            let (id, workspace, kind, status, has_run, automatic) = row?;
+            let (id, workspace, kind, status, has_run, automatic, worktree_path) = row?;
+            if worktree_path
+                .as_deref()
+                .is_some_and(|path| !Path::new(path).is_dir())
+            {
+                continue;
+            }
             if kind == "shell" {
                 if has_run {
                     candidates.push((id, workspace, automatic));
@@ -1902,6 +1925,69 @@ impl ShellOwner {
         shell.stop_completion = Some(send);
         self.retire_sessions(&[session_id.to_owned()]);
         Ok(receive)
+    }
+
+    pub(crate) fn environment_worker_active(&self, session_id: &str) -> bool {
+        self.shells
+            .get(session_id)
+            .is_some_and(|shell| !shell.ended && !shell.retiring && !shell.worker.is_finished())
+    }
+
+    pub(crate) fn environment_provider_binding(
+        &self,
+        session_id: &str,
+        profile: &str,
+    ) -> Result<Option<ProviderBinding>> {
+        match profile {
+            "claude-code" => self.claude_binding(session_id),
+            "codex" => self.codex_binding(session_id),
+            "antigravity" => self.antigravity_binding(session_id),
+            "dsh" => self.dsh_binding(session_id),
+            _ => Ok(None),
+        }
+    }
+
+    pub(crate) fn reset_environment_resume(
+        &mut self,
+        session_id: &str,
+        profile: &str,
+        binding_id: &str,
+    ) -> Result<()> {
+        if self
+            .environment_provider_binding(session_id, profile)?
+            .is_some_and(|binding| binding.id == binding_id && binding.restore_state == "failed")
+        {
+            match profile {
+                "claude-code" => self.change_claude_restore(session_id, ClaudeRestore::Retry)?,
+                "codex" => self.change_codex_restore(session_id, ClaudeRestore::Retry)?,
+                "antigravity" => {
+                    self.change_antigravity_restore(session_id, ClaudeRestore::Retry)?
+                }
+                "dsh" => self.change_dsh_restore(session_id, ClaudeRestore::Retry)?,
+                _ => false,
+            };
+        }
+        Ok(())
+    }
+
+    pub(crate) fn environment_storage(&self) -> &Connection {
+        &self.connection
+    }
+
+    pub(crate) fn environment_storage_mut(&mut self) -> &mut Connection {
+        &mut self.connection
+    }
+
+    pub(crate) fn stop_for_environment_transition(
+        &mut self,
+        session_id: &str,
+    ) -> Result<Option<mpsc::Receiver<Result<()>>>> {
+        if !self.has_shell_worker(session_id) {
+            return Ok(None);
+        }
+        let result = self.stop_for_provider_relaunch(session_id)?;
+        self.shells.get_mut(session_id).unwrap().environment_stop = true;
+        Ok(Some(result))
     }
 
     pub(crate) fn tracks_shell_input(&self, session_id: &str) -> bool {
@@ -2476,6 +2562,7 @@ impl ShellOwner {
             plan,
             config_dump,
             catalog_root,
+            environment_handoff,
         } = prepared;
         let binding = if plan.mode.expected_session_id().is_some() {
             self.dsh_binding(session_id)?
@@ -2513,6 +2600,7 @@ impl ShellOwner {
                 config_dump,
                 catalog_root,
                 binding,
+                environment_handoff,
             }),
         )?;
         let shell = self.shells.get_mut(session_id).unwrap();
@@ -2889,6 +2977,7 @@ impl ShellOwner {
                     config_dump,
                     catalog_root,
                     binding,
+                    environment_handoff,
                 }) => {
                     let patch = registration.attach_dsh(&config_dump, &run_id)?;
                     let expected = binding
@@ -2896,14 +2985,16 @@ impl ShellOwner {
                         .map(|binding| binding.provider_session_id.as_str());
                     if let Some(binding) = &binding {
                         let mut resume = DshResume::new(&binding.provider_session_id);
-                        let mut catalog = DshSessionCatalog::new(
-                            catalog_root.context("DSH history directory unavailable")?,
-                        );
+                        let outcome = if environment_handoff {
+                            resume.start_for_environment(&run_id)
+                        } else {
+                            let mut catalog = DshSessionCatalog::new(
+                                catalog_root.context("DSH history directory unavailable")?,
+                            );
+                            resume.start(&run_id, &mut catalog, &options.launch.cwd)
+                        };
                         ensure!(
-                            matches!(
-                                resume.start(&run_id, &mut catalog, &options.launch.cwd),
-                                BeginOutcome::Launch(_)
-                            ),
+                            matches!(outcome, BeginOutcome::Launch(_)),
                             "DSH history could not be restored: {:?}",
                             resume.state()
                         );
@@ -3121,6 +3212,7 @@ impl ShellOwner {
                 exit_error: None,
                 retiring: false,
                 stop_completion: None,
+                environment_stop: false,
                 provider_startup_pending: permission_starting,
                 promotion_process_check: None,
                 cwd_capture: None,
@@ -5442,6 +5534,21 @@ impl ShellOwner {
         let shutdown = disposed && self.closing && !retiring;
         let run = shell.run_id.clone();
         let pid = shell.worker.process_id();
+        if shell.environment_stop {
+            let time = now();
+            let commit = sessions::interrupt_run_for_environment(
+                &mut self.connection,
+                &command(
+                    format!("runtime-environment-transition-{run}"),
+                    "session.environment-run-interrupted",
+                    format!("{run}:{pid}"),
+                ),
+                &run,
+                time,
+            )?;
+            events.push(OwnerEvent::Domain(commit));
+            return Ok(());
+        }
         let startup_failed = !shell.emitted_output
             && !shutdown
             && !retiring
