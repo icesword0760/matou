@@ -27,6 +27,9 @@ impl DesktopOptions {
         let mut runtime = Vec::new();
         let mut args = args.into_iter();
         while let Some(flag) = args.next() {
+            if flag.as_encoded_bytes().starts_with(b"-psn_") {
+                continue;
+            }
             let value = args
                 .next()
                 .context("native launcher requires a path after each flag")?;
@@ -45,6 +48,40 @@ impl DesktopOptions {
             runtime: LaunchOptions::from_args(runtime)?,
             paths,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finder_launch_flag_leaves_workspace_requests_and_runtime_options_intact() -> Result<()> {
+        let fixture = std::env::temp_dir().join("matou-desktop-argument-fixture");
+        let data = fixture.join("data");
+        let workspace = fixture.join("default workspace");
+        let shell_home = fixture.join("shell home");
+        let shell = fixture.join("shell");
+        let requested = fixture.join("requested workspace");
+        let options = DesktopOptions::from_args([
+            "-psn_0_98765".into(),
+            "--open-workspace".into(),
+            requested.clone().into(),
+            "--data-root".into(),
+            data.clone().into(),
+            "--workspace".into(),
+            workspace.clone().into(),
+            "--shell-home".into(),
+            shell_home.clone().into(),
+            "--shell".into(),
+            shell.clone().into(),
+        ])?;
+        assert_eq!(options.paths, [requested.to_string_lossy()]);
+        assert_eq!(options.runtime.data_root, data);
+        assert_eq!(options.runtime.workspace, workspace);
+        assert_eq!(options.runtime.shell_home, shell_home);
+        assert_eq!(options.runtime.shell, shell);
+        Ok(())
     }
 }
 

@@ -111,23 +111,35 @@ pub struct LaunchOptions {
 
 impl LaunchOptions {
     pub fn from_args(args: impl IntoIterator<Item = OsString>) -> Result<Self> {
-        let mut data_root = None;
-        let mut workspace = None;
-        let mut shell_home = None;
-        let mut shell = PathBuf::from(if cfg!(windows) {
-            "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
-        } else {
-            "/bin/zsh"
-        });
-        let mut args = args.into_iter().peekable();
         // The shipped runtime enters here before reading Hello. The private
         // shim mode must finish before normal options or runtime startup.
         #[cfg(unix)]
-        if args.peek().is_some_and(|flag| flag == crate::mt_cli::MODE) {
-            args.next();
-            std::process::exit(crate::mt_cli::run(args));
-        }
+        let args = {
+            let mut args = args.into_iter().peekable();
+            if args.peek().is_some_and(|flag| flag == crate::mt_cli::MODE) {
+                args.next();
+                std::process::exit(crate::mt_cli::run(args));
+            }
+            args
+        };
+        Self::from_args_with_env(
+            args,
+            |key| std::env::var_os(key),
+            || std::env::current_exe().ok(),
+        )
+    }
+
+    fn from_args_with_env(
+        args: impl IntoIterator<Item = OsString>,
+        env: impl Fn(&str) -> Option<OsString>,
+        executable: impl FnOnce() -> Option<PathBuf>,
+    ) -> Result<Self> {
+        let (mut data_root, mut workspace, mut shell_home, mut shell) = (None, None, None, None);
+        let mut args = args.into_iter();
         while let Some(flag) = args.next() {
+            if flag.as_encoded_bytes().starts_with(b"-psn_") {
+                continue;
+            }
             let value = args
                 .next()
                 .context("native acceptance launcher requires a path after each flag")?;
@@ -136,16 +148,59 @@ impl LaunchOptions {
                 Some("--data-root") => data_root = Some(path),
                 Some("--workspace") => workspace = Some(path),
                 Some("--shell-home") => shell_home = Some(path),
-                Some("--shell") => shell = path,
+                Some("--shell") => shell = Some(path),
                 _ => bail!("Unknown native launcher option: {}", flag.to_string_lossy()),
             }
         }
-        let options = LaunchOptions {
-            data_root: data_root
-                .context("Pass --data-root with an isolated native data directory")?,
-            workspace: workspace.context("Pass --workspace with an isolated working directory")?,
-            shell_home: shell_home.context("Pass --shell-home with an isolated Shell home")?,
-            shell,
+        let env_path = |key| {
+            env(key)
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+        };
+        let home = || {
+            let home = env_path("HOME");
+            #[cfg(windows)]
+            let home = home.or_else(|| env_path("USERPROFILE"));
+            home.context("Cannot resolve native launcher defaults: HOME is unset or empty")
+        };
+        let data_override = || {
+            let value = env("MATOU_DATA_DIR")?;
+            if let Some(text) = value.to_str() {
+                let trimmed = text.trim();
+                return (!trimmed.is_empty()).then(|| PathBuf::from(trimmed));
+            }
+            Some(PathBuf::from(value))
+        };
+        let data_root = match data_root.or_else(data_override) {
+            Some(path) => path,
+            None => {
+                let beta = executable().as_deref().is_some_and(is_beta_executable);
+                #[cfg(windows)]
+                let path = env_path("APPDATA")
+                    .context("Cannot resolve native data directory: APPDATA is unset or empty")?
+                    .join(if beta { "MatouBeta" } else { "Matou" });
+                #[cfg(not(windows))]
+                let path = home()?.join(if beta { ".matou-beta" } else { ".matou" });
+                path
+            }
+        };
+        let options = Self {
+            data_root,
+            workspace: workspace.map_or_else(home, Ok)?,
+            shell_home: shell_home.map_or_else(home, Ok)?,
+            shell: shell.unwrap_or_else(|| {
+                #[cfg(windows)]
+                return "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe".into();
+                #[cfg(unix)]
+                return env_path("SHELL")
+                    .filter(|path| {
+                        path.is_absolute()
+                            && matches!(browser_integration::inspect_executable(path), Ok(true))
+                    })
+                    .unwrap_or_else(|| "/bin/zsh".into());
+                #[cfg(not(any(unix, windows)))]
+                PathBuf::from("/bin/zsh")
+            }),
         };
         for path in [
             &options.data_root,
@@ -158,6 +213,220 @@ impl LaunchOptions {
             }
         }
         Ok(options)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn is_beta_executable(executable: &Path) -> bool {
+    let Some(info) = executable
+        .parent()
+        .and_then(Path::parent)
+        .map(|dir| dir.join("Info.plist"))
+    else {
+        return false;
+    };
+    info.is_file()
+        && std::process::Command::new("/usr/bin/plutil")
+            .args([
+                "-extract",
+                "CFBundleIdentifier",
+                "raw",
+                "-expect",
+                "string",
+                "-o",
+                "-",
+                "--",
+            ])
+            .arg(info)
+            .output()
+            .is_ok_and(|output| {
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout)
+                        .trim()
+                        .ends_with(".beta")
+            })
+}
+
+#[cfg(windows)]
+fn is_beta_executable(executable: &Path) -> bool {
+    executable
+        .parent()
+        .and_then(|dir| std::fs::read(dir.join("resources/version.json")).ok())
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .is_some_and(|info| {
+            info["appId"]
+                .as_str()
+                .is_some_and(|id| id.ends_with(".beta"))
+        })
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+fn is_beta_executable(_: &Path) -> bool {
+    false
+}
+
+#[cfg(test)]
+mod launch_options_tests {
+    use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_defaults_follow_the_bundle_identifier() -> Result<()> {
+        let home = tempfile::tempdir()?;
+        let contents = home.path().join("fixture.app/Contents");
+        std::fs::create_dir_all(contents.join("MacOS"))?;
+        let executable = contents.join("MacOS/fixture");
+        let plist = contents.join("Info.plist");
+        let env = |key: &str| match key {
+            "HOME" => Some(home.path().into()),
+            "MATOU_DATA_DIR" => Some(" \t ".into()),
+            _ => None,
+        };
+        for (id, directory) in [
+            (None, ".matou"),
+            (Some("com.matou.desktop"), ".matou"),
+            (Some("com.matou.desktop.beta"), ".matou-beta"),
+        ] {
+            if let Some(id) = id {
+                std::fs::write(
+                    &plist,
+                    format!(
+                        "<plist version=\"1.0\"><dict><key>CFBundleIdentifier</key>\n<string>{id}</string></dict></plist>"
+                    ),
+                )?;
+            }
+            let options = LaunchOptions::from_args_with_env([], env, || Some(executable.clone()))?;
+            assert_eq!(options.data_root, home.path().join(directory));
+            assert_eq!(options.workspace, home.path());
+            assert_eq!(options.shell_home, home.path());
+            assert_eq!(options.shell, Path::new("/bin/zsh"));
+            assert!(!options.data_root.exists());
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_defaults_use_roaming_app_data_and_package_id() -> Result<()> {
+        let home = tempfile::tempdir()?;
+        let appdata = home.path().join("AppData/Roaming");
+        let executable = home.path().join("package/fixture.exe");
+        let resources = home.path().join("package/resources");
+        std::fs::create_dir_all(&resources)?;
+        let env = |key: &str| match key {
+            "USERPROFILE" => Some(home.path().into()),
+            "APPDATA" => Some(appdata.clone().into()),
+            _ => None,
+        };
+        for (id, directory) in [
+            ("com.matou.desktop", "Matou"),
+            ("com.matou.desktop.beta", "MatouBeta"),
+        ] {
+            std::fs::write(
+                resources.join("version.json"),
+                json!({ "appId": id }).to_string(),
+            )?;
+            let options = LaunchOptions::from_args_with_env([], env, || Some(executable.clone()))?;
+            assert_eq!(options.data_root, appdata.join(directory));
+            assert_eq!(options.workspace, home.path());
+            assert_eq!(options.shell_home, home.path());
+            assert!(!options.data_root.exists());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn data_override_is_trimmed_and_finder_flag_leaves_explicit_options_intact() -> Result<()> {
+        let home = tempfile::tempdir()?;
+        let override_root = home.path().join("environment data");
+        let env = |key: &str| match key {
+            "HOME" => Some(home.path().into()),
+            "MATOU_DATA_DIR" => Some(format!(" \t{} \n", override_root.display()).into()),
+            _ => None,
+        };
+        let unused_executable = || panic!("data override should skip bundle identification");
+        let options = LaunchOptions::from_args_with_env([], env, unused_executable)?;
+        assert_eq!(options.data_root, override_root);
+
+        let data = home.path().join("explicit data");
+        let workspace = home.path().join("explicit workspace");
+        let shell_home = home.path().join("explicit home");
+        let shell = home.path().join("explicit shell");
+        let args = [
+            "-psn_0_98765".into(),
+            "--data-root".into(),
+            data.clone().into(),
+            "--workspace".into(),
+            workspace.clone().into(),
+            "--shell-home".into(),
+            shell_home.clone().into(),
+            "--shell".into(),
+            shell.clone().into(),
+        ];
+        let options = LaunchOptions::from_args_with_env(args.clone(), env, unused_executable)?;
+        assert_eq!(options.data_root, data);
+        assert_eq!(options.workspace, workspace);
+        assert_eq!(options.shell_home, shell_home);
+        assert_eq!(options.shell, shell);
+        LaunchOptions::from_args_with_env(args.clone(), |_| None, unused_executable)?;
+        for index in [2, 4, 6, 8] {
+            let mut args = args.clone();
+            args[index] = "relative".into();
+            let error = LaunchOptions::from_args_with_env(args, env, unused_executable)
+                .err()
+                .unwrap();
+            assert!(error.to_string().contains("paths must be absolute"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn missing_home_explains_which_environment_variable_is_needed() {
+        let error = LaunchOptions::from_args_with_env(
+            ["--data-root".into(), std::env::temp_dir().into()],
+            |_| None,
+            || None,
+        )
+        .err()
+        .unwrap();
+        assert!(error.to_string().contains("HOME is unset or empty"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn default_shell_uses_only_an_absolute_executable_file() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let home = tempfile::tempdir()?;
+        let shell = home.path().join("test-shell");
+        let not_executable = home.path().join("not-executable");
+        std::fs::write(&shell, "#!/bin/sh\n")?;
+        std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o700))?;
+        std::fs::write(&not_executable, "#!/bin/sh\n")?;
+        std::fs::set_permissions(&not_executable, std::fs::Permissions::from_mode(0o600))?;
+        for (value, expected) in [
+            (shell.as_path(), shell.as_path()),
+            (not_executable.as_path(), Path::new("/bin/zsh")),
+            (
+                home.path().join("missing-shell").as_path(),
+                Path::new("/bin/zsh"),
+            ),
+            (home.path(), Path::new("/bin/zsh")),
+            (Path::new("relative-shell"), Path::new("/bin/zsh")),
+            (Path::new(""), Path::new("/bin/zsh")),
+        ] {
+            let options = LaunchOptions::from_args_with_env(
+                [],
+                |key| match key {
+                    "HOME" => Some(home.path().into()),
+                    "SHELL" => Some(value.into()),
+                    _ => None,
+                },
+                || None,
+            )?;
+            assert_eq!(options.shell, expected);
+        }
+        Ok(())
     }
 }
 

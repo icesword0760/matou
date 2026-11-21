@@ -20,13 +20,14 @@ const minimumSystemVersion = '12.0'
 const exec = promisify(execFile)
 const usage = `Usage:
   node tooling/native-parity/package-native-mac.mjs --desktop-bin <file> --runtime-bin <file>
-      --out-dir <directory> --version <X.Y.Z> [--bundle-id <id>] [--entitlements <plist>] [--unsigned]
+      --out-dir <directory> --version <X.Y.Z> [--app-name <name>] [--bundle-id <id>]
+      [--entitlements <plist>] [--unsigned]
   node tooling/native-parity/package-native-mac.mjs --verify <path.app>
-      [--bundle-id <id>] [--require-release-signature]
+      [--app-name <name>] [--bundle-id <id>] [--require-release-signature]
 
-The default bundle ID is com.matou.desktop. Assembly copies the binaries as supplied
-and adds no signature. --unsigned explicitly selects that same offline mode.
-The bundled Finder workflow retains the frozen target com.matou.desktop.
+The defaults are 码头 and com.matou.desktop. Assembly copies the binaries as
+supplied and adds no signature. --unsigned explicitly selects that same offline mode.
+The Finder workflow uses the selected app name and bundle ID.
 Use a new output directory or remove an old build before assembling again.
 Verification reads the bundle without launching it.`
 
@@ -151,21 +152,33 @@ async function signatureSummary(path) {
   }
 }
 
-async function requireReleaseSignature(bundle, runtime, signatures, config) {
+async function requireReleaseSignature(bundle, runtime, signatures, config, bundleId) {
   for (const [label, signature] of Object.entries(signatures)) {
     if (signature.status !== 'developer-id' || signature.teamIdentifier !== teamId ||
         signature.authorities[0] !== `Developer ID Application: ${config.build.mac.identity}`) {
       throw new Error(`${label} requires the Matou Developer ID signature (Team ${teamId}); found ${signature.status}`)
     }
   }
-  // Reuse the installation gate for the exact stable app DR, chain and deep seal.
-  await verifyInstallSource(bundle)
   const runtimeRequirement = [
     'anchor apple generic',
     'certificate 1[field.1.2.840.113635.100.6.2.6] exists',
     'certificate leaf[field.1.2.840.113635.100.6.1.13] exists',
     `certificate leaf[subject.OU] = "${teamId}"`
   ].join(' and ')
+  if (bundleId === config.build.appId) {
+    // Preserve the production installation identity and deep seal checks.
+    await verifyInstallSource(bundle)
+  } else {
+    const requirement = `identifier "${bundleId}" and ${runtimeRequirement}`
+    const clauses = value => value?.replaceAll(/\/\*\s*exists\s*\*\//g, 'exists')
+      .replaceAll(/"([\w.-]+)"/g, '$1').trim().split(/\s+and\s+/).sort()
+    if (signatures.app.identifier !== bundleId ||
+        !isDeepStrictEqual(clauses(signatures.app.designatedRequirement), clauses(requirement))) {
+      throw new Error(`App signature requires the designated requirement for ${bundleId}`)
+    }
+    await run('/usr/bin/codesign', ['--verify', '--deep', '--strict', bundle])
+    await run('/usr/bin/codesign', ['--verify', '-R', `=${requirement}`, bundle])
+  }
   await run('/usr/bin/codesign', ['--verify', '--strict', '-R', `=${runtimeRequirement}`, runtime])
 }
 
@@ -175,12 +188,20 @@ function validateVersion(version) {
   }
 }
 
-function manifest(config, bundleId, version) {
+function validateAppName(name) {
+  if (typeof name !== 'string' || !name.trim() || name !== name.trim() ||
+      name === '.' || name === '..' || /[\u0000-\u001f\u007f/\\:]/.test(name) ||
+      name.toLowerCase() === runtimeName) {
+    throw new Error('Invalid --app-name: expected a single name distinct from the runtime executable')
+  }
+}
+
+function manifest(config, bundleId, version, appName, executableName) {
   return {
     CFBundleIdentifier: bundleId,
-    CFBundleExecutable: desktopName,
-    CFBundleName: config.productName,
-    CFBundleDisplayName: config.productName,
+    CFBundleExecutable: executableName,
+    CFBundleName: appName,
+    CFBundleDisplayName: appName,
     CFBundlePackageType: 'APPL',
     CFBundleInfoDictionaryVersion: '6.0',
     CFBundleShortVersionString: version,
@@ -196,21 +217,32 @@ function manifest(config, bundleId, version) {
 
 const workflowFiles = ['Contents/Info.plist', 'Contents/Resources/document.wflow']
 
-async function verifyLayout(bundle, config, bundleId, workflow) {
+function workflowName(appName) {
+  return `进入${appName}`
+}
+
+function workflowPath(resources, workflow, appName) {
+  return join(resources, dirname(workflow.to), `${workflowName(appName)}.workflow`)
+}
+
+async function verifyLayout(bundle, config, bundleId, workflow, requestedAppName) {
   const contents = join(bundle, 'Contents')
   const macos = join(contents, 'MacOS')
   const resources = join(contents, 'Resources')
-  const bundledWorkflow = join(resources, workflow.to)
-  for (const path of [
-    bundle, contents, macos, resources, dirname(bundledWorkflow),
-    bundledWorkflow, join(bundledWorkflow, 'Contents'), join(bundledWorkflow, 'Contents/Resources')
-  ]) await requirePath(path, 'bundle directory', 'directory')
+  for (const path of [bundle, contents, macos, resources]) {
+    await requirePath(path, 'bundle directory', 'directory')
+  }
 
   const infoPath = join(contents, 'Info.plist')
   await requirePath(infoPath, 'Info.plist')
   const info = await readPlist(infoPath)
+  const appName = requestedAppName ?? info.CFBundleName ?? basename(bundle, '.app')
+  validateAppName(appName)
+  const executableName = appName === config.productName && info.CFBundleExecutable === desktopName
+    ? desktopName : appName
   validateVersion(info.CFBundleShortVersionString)
-  for (const [key, expected] of Object.entries(manifest(config, bundleId, info.CFBundleShortVersionString))) {
+  const expectedInfo = manifest(config, bundleId, info.CFBundleShortVersionString, appName, executableName)
+  for (const [key, expected] of Object.entries(expectedInfo)) {
     if (!isDeepStrictEqual(info[key], expected)) {
       throw new Error(`Invalid Info.plist ${key}: expected ${JSON.stringify(expected)}`)
     }
@@ -220,13 +252,25 @@ async function verifyLayout(bundle, config, bundleId, workflow) {
   const entitlements = join(resources, entitlementsName)
   await requirePath(entitlements, 'entitlements resource')
   await readPlist(entitlements)
-  for (const file of workflowFiles) {
+  const bundledWorkflow = workflowPath(resources, workflow, appName)
+  for (const path of [
+    dirname(bundledWorkflow), bundledWorkflow, join(bundledWorkflow, 'Contents'),
+    join(bundledWorkflow, 'Contents/Resources')
+  ]) await requirePath(path, 'bundle directory', 'directory')
+  const [finderInfo, finderDocument] = await Promise.all(workflowFiles.map(async file => {
     const path = join(bundledWorkflow, file)
     await requirePath(path, 'Finder workflow resource')
-    await run('/usr/bin/plutil', ['-lint', '--', path])
+    return readPlist(path)
+  }))
+  const command = finderDocument.actions?.[0]?.action?.ActionParameters?.COMMAND_STRING
+  if (finderInfo.CFBundleIdentifier !== `${bundleId}.finder-open-workspace` ||
+      finderInfo.CFBundleName !== workflowName(appName) ||
+      finderInfo.NSServices?.[0]?.NSMenuItem?.default !== workflowName(appName) ||
+      typeof command !== 'string' || !command.includes(`/usr/bin/open -b ${bundleId} "$target"`)) {
+    throw new Error(`Invalid Finder workflow name or bundle ID: ${bundledWorkflow}`)
   }
 
-  const desktop = join(macos, desktopName)
+  const desktop = join(macos, executableName)
   const runtime = join(macos, runtimeName)
   await requireExecutable(desktop, 'desktop binary', true)
   await requireExecutable(runtime, 'runtime binary', true)
@@ -273,8 +317,10 @@ async function assemble(options, config, bundleId, workflow) {
   const output = await canonicalOutput(options['out-dir'])
   requireSafeOutput(resolve(options['out-dir']))
   requireSafeOutput(output)
-  const appName = `${config.productName}.app`
-  const destination = join(output, appName)
+  const appName = options['app-name'] ?? config.productName
+  const executableName = options['app-name'] ?? desktopName
+  const bundleName = `${appName}.app`
+  const destination = join(output, bundleName)
   await requireAbsent(destination)
   validateVersion(options.version)
   const desktop = await sourceFile(options['desktop-bin'], 'desktop binary')
@@ -293,29 +339,39 @@ async function assemble(options, config, bundleId, workflow) {
   requireSafeOutput(await realpath(output))
   const staging = await mkdtemp(join(output, '.matou-native-mac-'))
   try {
-    const bundle = join(staging, appName)
+    const bundle = join(staging, bundleName)
     const contents = join(bundle, 'Contents')
     const macos = join(contents, 'MacOS')
     const resources = join(contents, 'Resources')
     await mkdir(macos, { recursive: true })
     await mkdir(resources)
-    for (const [source, name] of [[desktop, desktopName], [runtime, runtimeName]]) {
+    for (const [source, name] of [[desktop, executableName], [runtime, runtimeName]]) {
       const path = join(macos, name)
       await copyFile(source, path)
       await chmod(path, 0o755)
     }
     await copyFile(icon, join(resources, iconName))
     await copyFile(entitlements, join(resources, entitlementsName))
+    const bundledWorkflow = workflowPath(resources, workflow, appName)
     for (const [index, file] of workflowFiles.entries()) {
-      const path = join(resources, workflow.to, file)
+      const path = join(bundledWorkflow, file)
       await mkdir(dirname(path), { recursive: true })
-      await copyFile(finderFiles[index], path)
+      if (appName === config.productName && bundleId === config.build.appId) {
+        await copyFile(finderFiles[index], path)
+      } else {
+        const displayName = workflowName(appName).replaceAll('&', '&amp;')
+          .replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+        const template = await readFile(finderFiles[index], 'utf8')
+        await writeFile(path, template
+          .replaceAll(config.build.appId, bundleId)
+          .replaceAll(`<string>${workflowName(config.productName)}</string>`, () => `<string>${displayName}</string>`))
+      }
     }
     const infoPath = join(contents, 'Info.plist')
-    await writeFile(infoPath, JSON.stringify(manifest(config, bundleId, options.version)))
+    await writeFile(infoPath, JSON.stringify(manifest(config, bundleId, options.version, appName, executableName)))
     await run('/usr/bin/plutil', ['-convert', 'xml1', '--', infoPath])
 
-    const { architectures } = await verifyLayout(bundle, config, bundleId, workflow)
+    const { architectures } = await verifyLayout(bundle, config, bundleId, workflow, appName)
     await requireAbsent(destination)
     await rename(bundle, destination)
     return { path: destination, bundleId, version: options.version, architectures }
@@ -327,7 +383,7 @@ async function assemble(options, config, bundleId, workflow) {
 async function main() {
   const input = ['desktop-bin', 'runtime-bin', 'out-dir', 'version']
   const { values } = parseArgs({ options: {
-    ...Object.fromEntries([...input, 'bundle-id', 'entitlements', 'verify'].map(name => [name, { type: 'string' }])),
+    ...Object.fromEntries([...input, 'app-name', 'bundle-id', 'entitlements', 'verify'].map(name => [name, { type: 'string' }])),
     unsigned: { type: 'boolean' },
     'require-release-signature': { type: 'boolean' },
     help: { type: 'boolean', short: 'h' }
@@ -336,7 +392,7 @@ async function main() {
   if (process.platform !== 'darwin') throw new Error('This toolkit requires macOS')
   const verifying = values.verify !== undefined
   if (verifying && (!values.verify || [...input, 'entitlements', 'unsigned'].some(name => name in values))) {
-    throw new Error('--verify requires a .app path and accepts only --bundle-id and --require-release-signature')
+    throw new Error('--verify requires a .app path and accepts only --app-name, --bundle-id and --require-release-signature')
   }
   if (!verifying && values['require-release-signature']) {
     throw new Error('--require-release-signature is only available with --verify')
@@ -352,9 +408,7 @@ async function main() {
   if (!workflow) throw new Error('Missing Finder workflow in the frozen desktop package configuration')
   const bundleId = values['bundle-id'] ?? config.build.appId
   if (!/^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/.test(bundleId)) throw new Error('Invalid --bundle-id')
-  if (values['require-release-signature'] && bundleId !== config.build.appId) {
-    throw new Error(`Release signature verification requires bundle ID ${config.build.appId}`)
-  }
+  if (values['app-name'] !== undefined) validateAppName(values['app-name'])
   if (!verifying) {
     console.log(JSON.stringify(await assemble(values, config, bundleId, workflow), null, 2))
     return
@@ -362,10 +416,10 @@ async function main() {
 
   const path = resolve(values.verify)
   if (!path.endsWith('.app')) throw new Error('--verify requires a .app directory')
-  const { info, runtime, architectures } = await verifyLayout(path, config, bundleId, workflow)
+  const { info, runtime, architectures } = await verifyLayout(path, config, bundleId, workflow, values['app-name'])
   const [appSignature, runtimeSignature] = await Promise.all([signatureSummary(path), signatureSummary(runtime)])
   const signatures = { app: appSignature, runtime: runtimeSignature }
-  if (values['require-release-signature']) await requireReleaseSignature(path, runtime, signatures, config)
+  if (values['require-release-signature']) await requireReleaseSignature(path, runtime, signatures, config, bundleId)
   console.log(JSON.stringify({ path, info, architectures, signatures }, null, 2))
 }
 
