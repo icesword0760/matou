@@ -10,6 +10,7 @@ use anyhow::{Context, Result, anyhow, ensure};
 use icu_normalizer::ComposingNormalizer;
 use icu_properties::CodePointMapData;
 use icu_properties::props::{GeneralCategory, GeneralCategoryGroup};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,7 +38,8 @@ pub struct Worktree {
     pub prunable: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LocalBranch {
     pub name: String,
     pub current: bool,
@@ -56,6 +58,409 @@ pub struct ChangeCounts {
     pub staged: usize,
     pub unstaged: usize,
     pub untracked: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitStatusDetail {
+    pub repository_root: PathBuf,
+    pub current_branch: Option<String>,
+    pub detached_head: Option<String>,
+    pub branches: Vec<LocalBranch>,
+    pub dirty: bool,
+    pub dirty_file_count: usize,
+    pub staged_count: usize,
+    pub additions: u64,
+    pub deletions: u64,
+    pub upstream: Option<String>,
+    pub ahead: u64,
+    pub behind: u64,
+    pub has_remote: bool,
+    pub can_push: bool,
+    pub worktrees: Vec<GitWorktreeDetail>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitWorktreeDetail {
+    pub path: PathBuf,
+    pub branch: Option<String>,
+    pub revision: Option<String>,
+    pub current: bool,
+    pub main: bool,
+    pub dirty: bool,
+    pub locked: bool,
+    pub prunable: bool,
+}
+
+#[derive(Debug)]
+pub struct GitActionError(pub &'static str);
+
+impl std::fmt::Display for GitActionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl std::error::Error for GitActionError {}
+
+fn require_repository(cwd: &Path) -> Result<Repository> {
+    Repository::discover(cwd)?.ok_or_else(|| GitActionError("GIT_NOT_REPOSITORY").into())
+}
+
+pub fn git_status_detail(cwd: &Path) -> Result<GitStatusDetail> {
+    let repo = require_repository(cwd)?;
+    let (current_branch, detached_head) = match repo.head()? {
+        Head::Branch(name) => (Some(name), None),
+        Head::Detached(revision) => (None, Some(revision)),
+    };
+    let root = repo.root();
+    let (dirty_file_count, staged_count, _) = detailed_changes(root)?;
+    let head = repo.resolve_commit("HEAD");
+    let base = match &head {
+        Ok(revision) => revision.clone(),
+        Err(_) => String::from_utf8(run(root, &["hash-object", "-t", "tree", "--stdin"])?)?
+            .trim()
+            .to_owned(),
+    };
+    let diff = run(
+        root,
+        &[
+            "diff",
+            "--numstat",
+            "--no-ext-diff",
+            "--no-textconv",
+            &base,
+            "--",
+        ],
+    )?;
+    let (mut additions, mut deletions) = (0, 0);
+    for row in diff.split(|byte| *byte == b'\n') {
+        let mut fields = row.splitn(3, |byte| *byte == b'\t');
+        let count = |field: Option<&[u8]>| {
+            field
+                .and_then(|field| std::str::from_utf8(field).ok())
+                .and_then(|field| field.parse::<u64>().ok())
+                .unwrap_or_default()
+        };
+        additions += count(fields.next());
+        deletions += count(fields.next());
+    }
+    let tracking = upstream_ref(&repo, current_branch.as_deref())?;
+    let tracking_revision = tracking
+        .as_ref()
+        .and_then(|(reference, _, _)| repo.resolve_commit(reference).ok());
+    let (ahead, behind) = if let (Ok(head), Some(revision)) = (&head, &tracking_revision) {
+        let range = format!("{head}...{revision}");
+        let counts = run(root, &["rev-list", "--left-right", "--count", &range])?;
+        let mut counts = std::str::from_utf8(&counts)?.split_whitespace();
+        (
+            counts.next().context("missing Git ahead count")?.parse()?,
+            counts.next().context("missing Git behind count")?.parse()?,
+        )
+    } else {
+        (0, 0)
+    };
+    let has_remote = !run(root, &["remote"])?.is_empty();
+    let can_push = has_remote
+        && head.is_ok()
+        && current_branch.is_some()
+        && (tracking_revision.is_none() || ahead > 0);
+    let entries = repo.worktrees()?;
+    let branches = repo
+        .local_branches_from(&entries, current_branch.as_deref())?
+        .branches;
+    let worktrees = entries
+        .into_iter()
+        .map(|entry| {
+            let current = entry.path == root;
+            let dirty = if current {
+                dirty_file_count > 0
+            } else {
+                !entry.bare && is_dirty(&entry.path).unwrap_or(false)
+            };
+            GitWorktreeDetail {
+                path: entry.path,
+                branch: entry.branch,
+                revision: entry.revision,
+                current,
+                main: entry.main,
+                dirty,
+                locked: entry.locked || entry.bare,
+                prunable: entry.prunable,
+            }
+        })
+        .collect();
+    Ok(GitStatusDetail {
+        repository_root: root.to_owned(),
+        current_branch,
+        detached_head,
+        branches,
+        dirty: dirty_file_count != 0,
+        dirty_file_count,
+        staged_count,
+        additions,
+        deletions,
+        upstream: tracking.map(|(reference, _, _)| reference),
+        ahead,
+        behind,
+        has_remote,
+        can_push,
+        worktrees,
+    })
+}
+
+fn detailed_changes(root: &Path) -> Result<(usize, usize, bool)> {
+    let output = run(
+        root,
+        &["status", "--porcelain=v1", "-z", "--untracked-files=normal"],
+    )?;
+    let (mut files, mut staged, mut unmerged) = (0, 0, false);
+    let mut records = output.split(|byte| *byte == 0);
+    while let Some(record) = records.next().filter(|record| record.len() >= 3) {
+        let xy = &record[..2];
+        files += 1;
+        unmerged |= matches!(xy, b"DD" | b"AU" | b"UD" | b"UA" | b"DU" | b"AA" | b"UU");
+        staged += usize::from(xy[0] != b' ' && xy != b"??");
+        if xy.iter().any(|flag| matches!(flag, b'R' | b'C')) {
+            records.next();
+        }
+    }
+    Ok((files, staged, unmerged))
+}
+
+// Git reports both the local tracking ref and its actual destination on the remote.
+fn upstream_ref(
+    repo: &Repository,
+    branch: Option<&str>,
+) -> Result<Option<(String, String, String)>> {
+    let Some(branch) = branch else {
+        return Ok(None);
+    };
+    let reference = format!("refs/heads/{branch}");
+    let output = run(
+        repo.root(),
+        &[
+            "for-each-ref",
+            "--format=%(refname)%00%(upstream)%00%(upstream:remotename)%00%(upstream:remoteref)",
+            &reference,
+        ],
+    )?;
+    for row in std::str::from_utf8(&output)?.lines() {
+        let mut fields = row.split('\0');
+        if let (Some(name), Some(tracking), Some(remote), Some(destination)) =
+            (fields.next(), fields.next(), fields.next(), fields.next())
+            && name == reference
+            && !tracking.is_empty()
+        {
+            return Ok(Some((tracking.into(), remote.into(), destination.into())));
+        }
+    }
+    Ok(None)
+}
+
+fn checked_branch<'a>(repo: &Repository, input: &'a str) -> Result<&'a str> {
+    let name = match manual_branch_name(input) {
+        Ok(name) => name,
+        Err(ManualBranchError::Empty) => return Err(GitActionError("GIT_BRANCH_REQUIRED").into()),
+        Err(ManualBranchError::LeadingDash) => {
+            return Err(GitActionError("GIT_INVALID_BRANCH").into());
+        }
+    };
+    ensure_branch_format(repo, name)?;
+    Ok(name)
+}
+
+fn ensure_branch_format(repo: &Repository, name: &str) -> Result<()> {
+    let checked = git(repo.root(), &["check-ref-format", "--branch", name])?;
+    if !checked.status.success() || line(&checked.stdout) != name.as_bytes() {
+        return Err(GitActionError("GIT_INVALID_BRANCH").into());
+    }
+    Ok(())
+}
+
+pub fn git_checkout(cwd: &Path, branch: &str) -> Result<GitStatusDetail> {
+    let repo = require_repository(cwd)?;
+    let branch = checked_branch(&repo, branch)?;
+    if repo.head()? != Head::Branch(branch.into()) && !repo.local_branch_exists(branch)? {
+        return Err(GitActionError("GIT_BRANCH_MISSING").into());
+    }
+    git_write(repo.root(), &["checkout", "--no-guess", branch, "--"])?;
+    git_status_detail(repo.root())
+}
+
+pub fn git_create_branch(
+    cwd: &Path,
+    name: &str,
+    start_point: Option<&str>,
+) -> Result<GitStatusDetail> {
+    let repo = require_repository(cwd)?;
+    let name = checked_branch(&repo, name)?;
+    if repo.local_branch_exists(name)? {
+        return Err(GitActionError("GIT_BRANCH_EXISTS").into());
+    }
+    if let Some(start) = start_point.map(trim_js).filter(|value| !value.is_empty()) {
+        let revision = repo
+            .resolve_commit(start)
+            .map_err(|_| GitActionError("GIT_INVALID_START_POINT"))?;
+        git_write(repo.root(), &["checkout", "-b", name, &revision, "--"])?;
+    } else {
+        git_write(repo.root(), &["checkout", "-b", name, "--"])?;
+    }
+    git_status_detail(repo.root())
+}
+
+pub fn git_commit(cwd: &Path, message: &str, stage_all: bool) -> Result<GitStatusDetail> {
+    let message = trim_js(message);
+    if message.is_empty() {
+        return Err(GitActionError("GIT_COMMIT_MESSAGE_REQUIRED").into());
+    }
+    let repo = require_repository(cwd)?;
+    let (files, staged, unmerged) = detailed_changes(repo.root())?;
+    if unmerged {
+        return Err(GitActionError("GIT_UNMERGED").into());
+    }
+    if (stage_all && files == 0) || (!stage_all && staged == 0) {
+        return Err(GitActionError("GIT_NOTHING_TO_COMMIT").into());
+    }
+    if stage_all {
+        git_write(repo.root(), &["add", "-A"])?;
+    }
+    git_write(repo.root(), &["commit", "-m", message])?;
+    git_status_detail(repo.root())
+}
+
+pub fn git_push(cwd: &Path) -> Result<GitStatusDetail> {
+    let repo = require_repository(cwd)?;
+    let Head::Branch(branch) = repo.head()? else {
+        return Err(GitActionError("GIT_DETACHED_HEAD").into());
+    };
+    if !repo.local_branch_exists(&branch)? {
+        return Err(GitActionError("GIT_NOTHING_TO_PUSH").into());
+    }
+    let tracking = upstream_ref(&repo, Some(&branch))?;
+    let reference = format!("refs/heads/{branch}");
+    if let Some((_, remote, destination)) = tracking {
+        if remote.is_empty() || !destination.starts_with("refs/heads/") {
+            return Err(GitActionError("GIT_UPSTREAM_UNAVAILABLE").into());
+        }
+        let refspec = format!("{reference}:{destination}");
+        git_write(repo.root(), &["push", "--", &remote, &refspec])?;
+    } else {
+        let output = run(repo.root(), &["remote"])?;
+        let mut remotes = std::str::from_utf8(&output)?.lines();
+        let first = remotes.next().ok_or(GitActionError("GIT_NO_REMOTE"))?;
+        let remote = if first == "origin" || remotes.any(|name| name == "origin") {
+            "origin"
+        } else {
+            first
+        };
+        let refspec = format!("{reference}:{reference}");
+        git_write(
+            repo.root(),
+            &["push", "--set-upstream", "--", remote, &refspec],
+        )?;
+    }
+    git_status_detail(repo.root())
+}
+
+fn git_write(root: &Path, args: &[&str]) -> Result<()> {
+    let output = git(root, args)?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let error = git_failure(&output);
+    let message = error.to_string();
+    let code = if message.contains("would be overwritten by checkout") {
+        "GIT_CHECKOUT_CONFLICT"
+    } else if message.contains("already checked out")
+        || message.contains("already used by worktree")
+    {
+        "GIT_BRANCH_IN_WORKTREE"
+    } else if message.contains("non-fast-forward") || message.contains("(fetch first)") {
+        "GIT_PUSH_REJECTED"
+    } else if message.contains("has no upstream branch")
+        || message.contains("upstream branch of your current branch")
+    {
+        "GIT_UPSTREAM_UNAVAILABLE"
+    } else if message.contains("resolve your current index") || message.contains("unmerged files") {
+        "GIT_UNMERGED"
+    } else if message.contains("nothing to commit")
+        || message.contains("no changes added to commit")
+    {
+        "GIT_NOTHING_TO_COMMIT"
+    } else {
+        return Err(error);
+    };
+    Err(error.context(GitActionError(code)))
+}
+
+pub fn git_worktree_create(
+    cwd: &Path,
+    branch: &str,
+    path: Option<&Path>,
+) -> Result<GitStatusDetail> {
+    let repo = require_repository(cwd)?;
+    let name = checked_branch(&repo, branch)?;
+    let entries = repo.worktrees()?;
+    let main = entries.first().context("missing main Git worktree")?;
+    let path = match path {
+        Some(path) if path.is_absolute() => path.to_owned(),
+        Some(path) => cwd.join(path),
+        None => main.path.with_file_name(format!(
+            "{}-{}",
+            main.path.file_name().unwrap_or_default().to_string_lossy(),
+            name.replace('/', "-")
+        )),
+    };
+    let branch = if repo.local_branch_exists(name)? {
+        if entries
+            .iter()
+            .any(|entry| entry.branch.as_deref() == Some(name))
+        {
+            return Err(GitActionError("GIT_BRANCH_IN_WORKTREE").into());
+        }
+        WorktreeBranch::Existing(name)
+    } else {
+        WorktreeBranch::New {
+            name,
+            base_ref: "HEAD",
+        }
+    };
+    checkout_scope(&repo, &path)?.create(&path, branch)?;
+    git_status_detail(repo.root())
+}
+
+pub fn git_worktree_remove(cwd: &Path, worktree_path: &Path) -> Result<GitStatusDetail> {
+    let repo = require_repository(cwd)?;
+    let path = if worktree_path.is_absolute() {
+        worktree_path.to_owned()
+    } else {
+        cwd.join(worktree_path)
+    };
+    let target = canonicalize_missing(&path)?;
+    let entries = repo.worktrees()?;
+    let entry = entries
+        .iter()
+        .find(|entry| entry.path == target)
+        .ok_or(GitActionError("GIT_WORKTREE_UNKNOWN"))?;
+    if entry.main || entry.bare || entry.path == repo.root() || entry.locked {
+        return Err(GitActionError("GIT_WORKTREE_PROTECTED").into());
+    }
+    if checkout_scope(&repo, &path)?.remove(&path)? == Removal::RetainedDirty {
+        return Err(GitActionError("GIT_WORKTREE_DIRTY").into());
+    }
+    git_status_detail(repo.root())
+}
+
+fn checkout_scope(repo: &Repository, path: &Path) -> Result<WorktreeScope> {
+    // The Git menu supplies the exact target. Scope checkout and rollback to its
+    // parent, including when the app's Worktree directory is on another volume.
+    let root = canonicalize_missing(path.parent().context("worktree needs a parent directory")?)?;
+    Ok(WorktreeScope {
+        root,
+        repository: repo.clone(),
+    })
 }
 
 impl ChangeCounts {
@@ -254,6 +659,14 @@ impl Repository {
             Head::Branch(branch) => Some(branch),
             Head::Detached(_) => None,
         };
+        self.local_branches_from(&self.worktrees()?, current.as_deref())
+    }
+
+    fn local_branches_from(
+        &self,
+        worktrees: &[Worktree],
+        current: Option<&str>,
+    ) -> Result<LocalBranches> {
         let output = run(
             &self.root,
             &[
@@ -263,21 +676,12 @@ impl Repository {
             ],
         )?;
         let origin_head = symbolic_ref(&self.root, "refs/remotes/origin/HEAD")?;
-        branch_summaries(
-            &output,
-            current.as_deref(),
-            origin_head.as_deref(),
-            &self.worktrees()?,
-        )
+        branch_summaries(&output, current, origin_head.as_deref(), worktrees)
     }
 
     pub fn check_fork_branch(&self, branch: &str) -> Result<(), ForkBranchError> {
         // A successful check must echo the exact input. Git can expand @{-1}.
-        let checked = git(&self.root, &["check-ref-format", "--branch", branch])
-            .map_err(|_| ForkBranchError::Invalid)?;
-        if !checked.status.success() || line(&checked.stdout) != branch.as_bytes() {
-            return Err(ForkBranchError::Invalid);
-        }
+        ensure_branch_format(self, branch).map_err(|_| ForkBranchError::Invalid)?;
         match self.local_branch_exists(branch) {
             Ok(true) => Err(ForkBranchError::LocalConflict),
             Ok(false) => Ok(()),
@@ -447,9 +851,8 @@ pub enum WorktreeBranch<'a> {
     Existing(&'a str),
 }
 
-/// Authorizes writes only to an existing, caller-owned isolation directory.
-/// The repository and its Git metadata must be strictly inside this directory,
-/// and targets must be siblings of, or separate from, all registered worktrees.
+/// Scopes checkout writes to a directory and a verified repository identity.
+/// Targets must be separate from all registered worktrees.
 pub struct WorktreeScope {
     root: PathBuf,
     repository: Repository,
@@ -462,6 +865,8 @@ pub enum Removal {
 }
 
 impl WorktreeScope {
+    /// Authorizes fork operations in a caller-owned directory containing the
+    /// repository, its Git metadata, and all requested targets.
     pub fn new(isolated_root: &Path, repository: &Repository) -> Result<Self> {
         let root = fs::canonicalize(isolated_root)?;
         ensure!(

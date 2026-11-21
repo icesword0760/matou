@@ -2348,50 +2348,283 @@ mod workspace {
         );
         assert!(!draw_hud(window.into(), cx).contains_key("footer-quota-menu"));
 
-        click(window.into(), cx, MouseButton::Left, bounds["git"].center());
-        let git_menu = draw_hud(window.into(), cx);
-        assert!(git_menu["footer-git-menu"].bottom() <= bounds["git"].top());
-        assert_eq!(git_menu["footer-git-menu"].size.width, px(316.));
-        assert!(git_menu.contains_key("hud-menu-git-search"));
-        let git_request = std::iter::from_fn(|| sink.try_recv().ok())
+        use matou_native_runtime::host::{GitFailure, GitReply};
+
+        let locale = window.update(cx, |view, _, _| view.locale).unwrap();
+        let worktree = cwd.with_file_name("isolated-checkout");
+        let git_status = |branch: &str, pending: usize, linked: bool, can_push: bool| {
+            let mut branches = vec![
+                json!({"name":"review/live","current":branch == "review/live","commitTimestamp":1}),
+                json!({"name":"fix/popup","current":branch == "fix/popup","commitTimestamp":0}),
+            ];
+            if !matches!(branch, "review/live" | "fix/popup") {
+                branches.push(json!({"name":branch,"current":true,"commitTimestamp":2}));
+            }
+            let mut worktrees = vec![json!({"path":cwd,"branch":branch,"current":true,
+                "main":true,"dirty":pending > 0,"locked":false,"prunable":false})];
+            if linked {
+                worktrees.push(
+                    json!({"path":worktree,"branch":"w","current":false,"main":false,
+                    "dirty":false,"locked":false,"prunable":false}),
+                );
+            }
+            serde_json::from_value(json!({
+                "repositoryRoot":cwd,"currentBranch":branch,"branches":branches,"dirty":pending > 0,
+                "dirtyFileCount":pending,"stagedCount":0,"additions":3,"deletions":1,"upstream":"origin/review/live",
+                "ahead":1,"behind":0,"hasRemote":true,"canPush":can_push,"worktrees":worktrees,
+            })).unwrap()
+        };
+        let deliver_git = |event: Event, cx: &mut AsyncApp| {
+            window
+                .update(cx, |view, window, cx| {
+                    view.apply(
+                        BridgeEvent::Runtime {
+                            generation: 1,
+                            event,
+                        },
+                        window,
+                        cx,
+                    );
+                })
+                .unwrap();
+        };
+        let reply = |request_id, result| GitReply {
+            request_id,
+            result,
+            worktree_session_counts: Default::default(),
+        };
+        let git_click = |key, cx: &mut AsyncApp| {
+            let menu = draw_hud(window.into(), cx);
+            click(window.into(), cx, MouseButton::Left, menu[key].center());
+        };
+        let open_git = |cx: &mut AsyncApp| {
+            git_click("git", cx);
+            std::iter::from_fn(|| sink.try_recv().ok())
+                .find_map(|command| match command {
+                    Command::GitStatusDetail {
+                        request_id,
+                        cwd: path,
+                    } if path == cwd => Some(request_id),
+                    _ => None,
+                })
+                .expect("Git menu requests detailed status for the current worktree")
+        };
+
+        let inspect = open_git(cx);
+        let loading = draw_hud(window.into(), cx);
+        assert!(loading["footer-git-menu"].bottom() <= bounds["git"].top());
+        assert_eq!(loading["footer-git-menu"].size.width, px(316.));
+        assert!(loading.contains_key("hud-menu-git-search"));
+        deliver_git(
+            Event::GitStatusDetail(reply(
+                inspect,
+                Ok(git_status("review/live", 1, false, true)),
+            )),
+            cx,
+        );
+        let menu = draw_hud(window.into(), cx);
+        for id in [
+            "hud-menu-git-create-branch",
+            "hud-menu-git-worktrees",
+            "hud-menu-git-commit-view",
+        ] {
+            assert!(menu.contains_key(id), "missing original action {id}");
+        }
+        press(window, cx, "f");
+        assert_eq!(
+            hud_text(window.into(), cx, "git-menu-other").as_deref(),
+            Some("fix/popup")
+        );
+        assert!(hud_text(window.into(), cx, "git-menu-current").is_none());
+        git_click("hud-menu-git-branch-other", cx);
+        let checkout = std::iter::from_fn(|| sink.try_recv().ok())
             .find_map(|command| match command {
-                Command::CheckGitRepo {
+                Command::GitCheckout {
+                    request_id,
+                    cwd: path,
+                    branch,
+                } if path == cwd && branch == "fix/popup" => Some(request_id),
+                _ => None,
+            })
+            .expect("clicking a branch switches the existing checkout");
+        deliver_git(
+            Event::GitCheckout(reply(checkout, Ok(git_status("fix/popup", 1, false, true)))),
+            cx,
+        );
+        assert!(!draw_hud(window.into(), cx).contains_key("footer-git-menu"));
+        assert_eq!(
+            hud_text(window.into(), cx, "git").as_deref(),
+            Some("fix/popup*")
+        );
+
+        let inspect = open_git(cx);
+        deliver_git(
+            Event::GitStatusDetail(reply(inspect, Ok(git_status("fix/popup", 1, false, true)))),
+            cx,
+        );
+        git_click("hud-menu-git-create-branch", cx);
+        assert!(draw_hud(window.into(), cx).contains_key("hud-menu-git-name"));
+        press(window, cx, "x");
+        git_click("hud-menu-git-base", cx);
+        assert!(draw_hud(window.into(), cx).contains_key("hud-menu-git-base-input"));
+        for key in ["m", "a", "i", "n"] {
+            press(window, cx, key);
+        }
+        git_click("hud-menu-git-create", cx);
+        let create = std::iter::from_fn(|| sink.try_recv().ok())
+            .find_map(|command| match command {
+                Command::GitCreateBranch {
+                    request_id,
+                    cwd: path,
+                    name,
+                    start_point,
+                } if path == cwd && name == "x" && start_point.as_deref() == Some("main") => {
+                    Some(request_id)
+                }
+                _ => None,
+            })
+            .expect("branch form sends its name and optional start point");
+        deliver_git(
+            Event::GitCreateBranch(reply(create, Ok(git_status("x", 1, false, true)))),
+            cx,
+        );
+        assert_eq!(hud_text(window.into(), cx, "git").as_deref(), Some("x*"));
+
+        let inspect = open_git(cx);
+        deliver_git(
+            Event::GitStatusDetail(reply(inspect, Ok(git_status("x", 1, false, true)))),
+            cx,
+        );
+        git_click("hud-menu-git-worktrees", cx);
+        assert!(draw_hud(window.into(), cx).contains_key("hud-menu-git-worktree-more-current"));
+        git_click("hud-menu-git-worktree-more-current", cx);
+        let item = draw_hud(window.into(), cx);
+        assert!(item.contains_key("hud-menu-git-reveal-worktree"));
+        assert!(!item.contains_key("hud-menu-git-remove-worktree"));
+        press(window, cx, "escape");
+        git_click("hud-menu-git-create-worktree", cx);
+        assert!(draw_hud(window.into(), cx).contains_key("hud-menu-git-name"));
+        press(window, cx, "escape");
+        assert!(draw_hud(window.into(), cx).contains_key("hud-menu-git-create-worktree"));
+        git_click("hud-menu-git-create-worktree", cx);
+        press(window, cx, "w");
+        press(window, cx, "enter");
+        let create_tree = std::iter::from_fn(|| sink.try_recv().ok())
+            .find_map(|command| match command {
+                Command::GitWorktreeCreate {
+                    request_id,
+                    cwd: path,
+                    branch,
+                    path: None,
+                } if path == cwd && branch == "w" => Some(request_id),
+                _ => None,
+            })
+            .expect("worktree form sends a create command");
+        deliver_git(
+            Event::GitWorktreeCreate(reply(create_tree, Ok(git_status("x", 1, true, true)))),
+            cx,
+        );
+        git_click("hud-menu-git-worktree-more-other", cx);
+        git_click("hud-menu-git-remove-worktree", cx);
+        let remove = std::iter::from_fn(|| sink.try_recv().ok())
+            .find_map(|command| match command {
+                Command::GitWorktreeRemove {
+                    request_id,
+                    cwd: path,
+                    worktree_path,
+                } if path == cwd && worktree_path == worktree => Some(request_id),
+                _ => None,
+            })
+            .expect("worktree menu removes the selected idle checkout");
+        deliver_git(
+            Event::GitWorktreeRemove(reply(remove, Ok(git_status("x", 1, false, true)))),
+            cx,
+        );
+        assert!(!draw_hud(window.into(), cx).contains_key("hud-menu-git-worktree-more-other"));
+        press(window, cx, "escape");
+        assert!(draw_hud(window.into(), cx).contains_key("hud-menu-git-search"));
+
+        git_click("hud-menu-git-commit-view", cx);
+        let view = draw_hud(window.into(), cx);
+        for id in [
+            "hud-menu-git-message",
+            "hud-menu-git-commit",
+            "hud-menu-git-commit-push",
+            "hud-menu-git-push",
+        ] {
+            assert!(view.contains_key(id), "missing commit control {id}");
+        }
+        assert_eq!(
+            hud_text(window.into(), cx, "git-menu-commit-count").as_deref(),
+            Some(locale.text("未提交：1 个文件", "1 uncommitted file"))
+        );
+        press(window, cx, "o");
+        press(window, cx, "k");
+        git_click("hud-menu-git-commit-push", cx);
+        let commit = std::iter::from_fn(|| sink.try_recv().ok())
+            .find_map(|command| match command {
+                Command::GitCommit {
+                    request_id,
+                    cwd: path,
+                    message,
+                    stage_all: true,
+                } if path == cwd && message == "ok" => Some(request_id),
+                _ => None,
+            })
+            .expect("commit and push first commits the entered message and staged scope");
+        git_click("hud-menu-git-push", cx);
+        assert!(
+            !std::iter::from_fn(|| sink.try_recv().ok())
+                .any(|command| matches!(command, Command::GitPush { .. }))
+        );
+        deliver_git(
+            Event::GitCommit(reply(commit, Ok(git_status("x", 0, false, true)))),
+            cx,
+        );
+        assert_eq!(hud_text(window.into(), cx, "git").as_deref(), Some("x"));
+        let push = std::iter::from_fn(|| sink.try_recv().ok())
+            .find_map(|command| match command {
+                Command::GitPush {
                     request_id,
                     cwd: path,
                 } if path == cwd => Some(request_id),
                 _ => None,
             })
-            .expect("Git menu asks Runtime to inspect the current worktree");
-        window
-            .update(cx, |view, window, cx| {
-                view.receive_wiring_reply(
-                    "gitRepoResult",
-                    git_request,
-                    &json!({"result":{"isRepository":true,"root":cwd,"branches":[
-                        {"name":"review/live","current":true},
-                        {"name":"fix/popup","current":false}
-                    ]}}),
-                    window,
-                    cx,
-                )
-            })
-            .unwrap();
-        assert!(draw_hud(window.into(), cx).contains_key("hud-menu-open-root"));
-        let inspect = std::iter::from_fn(|| sink.try_recv().ok())
+            .expect("push follows successful commit");
+        deliver_git(
+            Event::GitPush(reply(
+                push,
+                Err(GitFailure {
+                    code: "GIT_PUSH_REJECTED".into(),
+                    message: "non-fast-forward".into(),
+                }),
+            )),
+            cx,
+        );
+        assert!(
+            hud_text(window.into(), cx, "git-menu-feedback")
+                .unwrap()
+                .starts_with(locale.text("已提交。推送失败。", "Commit complete. Push failed."))
+        );
+        git_click("hud-menu-git-push", cx);
+        let push = std::iter::from_fn(|| sink.try_recv().ok())
             .find_map(|command| match command {
-                Command::GetEnvironmentDiagnostics {
+                Command::GitPush {
                     request_id,
                     cwd: path,
-                    repair: None,
                 } if path == cwd => Some(request_id),
                 _ => None,
             })
-            .expect("Git refresh also reads branch status");
-        window.update(cx, |view, window, cx| view.receive_wiring_reply(
-            "environmentDiagnosticsResult", inspect,
-            &json!({"result":{"state":"ready","cwd":cwd,"git":{"root":cwd,"head":{"branch":"review/live"},"changes":{"staged":1}}}}),
-            window, cx
-        )).unwrap();
+            .expect("standalone push works after a failed combined push");
+        deliver_git(
+            Event::GitPush(reply(push, Ok(git_status("x", 0, false, false)))),
+            cx,
+        );
+        assert_eq!(
+            hud_text(window.into(), cx, "git-menu-feedback").as_deref(),
+            Some(locale.text("推送已完成", "Push complete"))
+        );
+        press(window, cx, "escape");
         press(window, cx, "f");
         assert_eq!(
             hud_text(window.into(), cx, "git-menu-other").as_deref(),
@@ -2402,7 +2635,7 @@ mod workspace {
         assert!(!draw_hud(window.into(), cx).contains_key("footer-git-menu"));
         window
             .update(cx, |view, window, _| {
-                assert!(view.control_focus["footer-git"].is_focused(window))
+                assert!(view.control_focus["footer-git"].is_focused(window));
             })
             .unwrap();
 

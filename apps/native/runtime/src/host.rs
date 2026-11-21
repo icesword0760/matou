@@ -51,7 +51,7 @@ use matou_native_core::{
     account_store::AccountStore,
     backup::{BackupReason, BackupService, DEFAULT_MAX_BACKUPS},
     database_recovery::{OpeningAction, RECOVERY_ID_CHANGED, RecoveryActionError, RecoveryActions},
-    git_repo::{Head, Repository, WorktreeScope},
+    git_repo::{self, GitActionError, GitStatusDetail, Head, Repository, WorktreeScope},
     hierarchy::{
         self, BootstrapWindowInput, HierarchyIds, HierarchyResult, Scene, Task, WindowNavigation,
         Workspace,
@@ -690,6 +690,42 @@ pub enum Command {
         request_id: u64,
         cwd: PathBuf,
     },
+    GitStatusDetail {
+        request_id: u64,
+        cwd: PathBuf,
+    },
+    GitCheckout {
+        request_id: u64,
+        cwd: PathBuf,
+        branch: String,
+    },
+    GitCreateBranch {
+        request_id: u64,
+        cwd: PathBuf,
+        name: String,
+        start_point: Option<String>,
+    },
+    GitCommit {
+        request_id: u64,
+        cwd: PathBuf,
+        message: String,
+        stage_all: bool,
+    },
+    GitPush {
+        request_id: u64,
+        cwd: PathBuf,
+    },
+    GitWorktreeCreate {
+        request_id: u64,
+        cwd: PathBuf,
+        branch: String,
+        path: Option<PathBuf>,
+    },
+    GitWorktreeRemove {
+        request_id: u64,
+        cwd: PathBuf,
+        worktree_path: PathBuf,
+    },
     GetEgressStatus {
         request_id: u64,
     },
@@ -951,6 +987,7 @@ impl StoragePhase {
                 | Command::SearchAntigravitySession { .. }
                 | Command::GetEnvironmentDiagnostics { .. }
                 | Command::CheckGitRepo { .. }
+                | Command::GitStatusDetail { .. }
                 | Command::GetEgressStatus { .. }
                 | Command::GetBrowserDiagnostics { .. }
                 | Command::EvaluateExternalLink { .. }
@@ -1145,6 +1182,19 @@ impl DatabaseRecoveryResult {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GitFailure {
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GitReply {
+    pub request_id: u64,
+    pub result: Result<GitStatusDetail, GitFailure>,
+    pub worktree_session_counts: BTreeMap<PathBuf, usize>,
+}
+
 #[derive(Serialize, Deserialize)]
 pub enum Event {
     StartupBlocked(StartupBlock),
@@ -1155,6 +1205,13 @@ pub enum Event {
         code: String,
         message: String,
     },
+    GitStatusDetail(GitReply),
+    GitCheckout(GitReply),
+    GitCreateBranch(GitReply),
+    GitCommit(GitReply),
+    GitPush(GitReply),
+    GitWorktreeCreate(GitReply),
+    GitWorktreeRemove(GitReply),
     ReadOnlyReady {
         reason: ReadOnlyReason,
         projection: Result<ReadOnlyProjection, String>,
@@ -1433,6 +1490,134 @@ fn wiring_result(kind: &str, request_id: u64, result: Result<Value>) -> Event {
     })
 }
 
+fn git_reply_event(command: &Command) -> Option<(u64, fn(GitReply) -> Event)> {
+    Some(match command {
+        Command::GitStatusDetail { request_id, .. } => (*request_id, Event::GitStatusDetail),
+        Command::GitCheckout { request_id, .. } => (*request_id, Event::GitCheckout),
+        Command::GitCreateBranch { request_id, .. } => (*request_id, Event::GitCreateBranch),
+        Command::GitCommit { request_id, .. } => (*request_id, Event::GitCommit),
+        Command::GitPush { request_id, .. } => (*request_id, Event::GitPush),
+        Command::GitWorktreeCreate { request_id, .. } => (*request_id, Event::GitWorktreeCreate),
+        Command::GitWorktreeRemove { request_id, .. } => (*request_id, Event::GitWorktreeRemove),
+        _ => return None,
+    })
+}
+
+fn git_session_directories(data_root: &Path) -> Result<Vec<Vec<PathBuf>>> {
+    let connection = startup::open_read_only(&data_root.join("matou.sqlite"))?;
+    let mut statement = connection.prepare(
+        "SELECT session.cwd, context.cwd
+         FROM sessions AS session
+         LEFT JOIN execution_contexts AS context ON context.id = session.execution_context_id
+         WHERE session.archived_at IS NULL",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok([row.get::<_, Option<String>>(0)?, row.get(1)?])
+    })?;
+    rows.map(|row| {
+        Ok(row?
+            .into_iter()
+            .flatten()
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .map(|path| path.canonicalize().unwrap_or(path))
+            .collect())
+    })
+    .collect()
+}
+
+fn git_session_count(directories: &[Vec<PathBuf>], worktree: &Path) -> usize {
+    directories
+        .iter()
+        .filter(|session| session.iter().any(|cwd| cwd.starts_with(worktree)))
+        .count()
+}
+
+fn run_git_command(command: &Command, data_root: &Path) -> Option<Event> {
+    let (request_id, event) = git_reply_event(command)?;
+    let result = (|| {
+        let status = match command {
+            Command::GitStatusDetail { cwd, .. } => git_repo::git_status_detail(cwd),
+            Command::GitCheckout { cwd, branch, .. } => git_repo::git_checkout(cwd, branch),
+            Command::GitCreateBranch {
+                cwd,
+                name,
+                start_point,
+                ..
+            } => git_repo::git_create_branch(cwd, name, start_point.as_deref()),
+            Command::GitCommit {
+                cwd,
+                message,
+                stage_all,
+                ..
+            } => git_repo::git_commit(cwd, message, *stage_all),
+            Command::GitPush { cwd, .. } => git_repo::git_push(cwd),
+            Command::GitWorktreeCreate {
+                cwd, branch, path, ..
+            } => {
+                let default_path;
+                let path = if let Some(path) = path {
+                    path
+                } else {
+                    let root = data_root.join("worktrees");
+                    std::fs::create_dir_all(&root)?;
+                    ensure!(
+                        !root.symlink_metadata()?.is_symlink(),
+                        "Worktree directory is a symlink"
+                    );
+                    default_path = root.join(id());
+                    &default_path
+                };
+                git_repo::git_worktree_create(cwd, branch, Some(path))
+            }
+            Command::GitWorktreeRemove {
+                cwd, worktree_path, ..
+            } => {
+                let path = cwd.join(worktree_path);
+                let target = path.canonicalize().unwrap_or(path);
+                if git_session_count(&git_session_directories(data_root)?, &target) > 0 {
+                    return Err(GitActionError("GIT_WORKTREE_IN_USE").into());
+                }
+                git_repo::git_worktree_remove(cwd, worktree_path)
+            }
+            _ => unreachable!("not a Git command"),
+        }?;
+        Ok(status)
+    })();
+    let worktree_session_counts = result
+        .as_ref()
+        .ok()
+        .and_then(|status| {
+            let directories = git_session_directories(data_root).ok()?;
+            Some(
+                status
+                    .worktrees
+                    .iter()
+                    .map(|worktree| {
+                        (
+                            worktree.path.clone(),
+                            git_session_count(&directories, &worktree.path),
+                        )
+                    })
+                    .collect(),
+            )
+        })
+        .unwrap_or_default();
+    Some(event(GitReply {
+        request_id,
+        result: result.map_err(|error: anyhow::Error| {
+            let code = error
+                .downcast_ref::<GitActionError>()
+                .map_or("GIT_OPERATION_FAILED", |error| error.0);
+            GitFailure {
+                code: code.into(),
+                message: format!("{error:#}"),
+            }
+        }),
+        worktree_session_counts,
+    }))
+}
+
 // Desktop treats any Graph event as a replacement for its active scene.
 fn with_graph_projection(reply: Event, mut projection: Value) -> Event {
     match reply {
@@ -1547,6 +1732,9 @@ impl RuntimeWiring {
         data_root: &Path,
         owner: Option<&mut ShellOwner>,
     ) -> Option<Event> {
+        if let Some(reply) = run_git_command(command, data_root) {
+            return Some(reply);
+        }
         let (kind, request_id, result) = match command {
             Command::ListDshSessions {
                 request_id,
@@ -2291,6 +2479,16 @@ fn recovery_result(
 }
 
 pub fn storage_command_rejected(command: Command, code: &str, message: &str) -> Event {
+    if let Some((request_id, event)) = git_reply_event(&command) {
+        return event(GitReply {
+            request_id,
+            result: Err(GitFailure {
+                code: code.into(),
+                message: message.into(),
+            }),
+            worktree_session_counts: BTreeMap::new(),
+        });
+    }
     if let Command::DatabaseRecovery { request_id, .. } = command {
         let mut result = DatabaseRecoveryResult::failed(request_id, code, message);
         if code == STORAGE_READ_ONLY {
@@ -3882,6 +4080,16 @@ fn run_writable(
             {
                 continue;
             }
+            if matches!(command, Command::GitPush { .. }) {
+                let send = send.clone();
+                let data_root = data_root.clone();
+                thread::spawn(move || {
+                    if let Some(reply) = run_git_command(&command, &data_root) {
+                        let _ = send.send_blocking(reply);
+                    }
+                });
+                continue;
+            }
             if let Some(reply) = wiring.handle(&command, &data_root, Some(&mut owner)) {
                 let projection =
                     active_graph(&owner, scene_id.as_deref(), window_id, &startup_deferred)?;
@@ -5352,6 +5560,13 @@ fn run_writable(
                 | Command::SearchAntigravitySession { .. }
                 | Command::GetEnvironmentDiagnostics { .. }
                 | Command::CheckGitRepo { .. }
+                | Command::GitStatusDetail { .. }
+                | Command::GitCheckout { .. }
+                | Command::GitCreateBranch { .. }
+                | Command::GitCommit { .. }
+                | Command::GitPush { .. }
+                | Command::GitWorktreeCreate { .. }
+                | Command::GitWorktreeRemove { .. }
                 | Command::GetEgressStatus { .. }
                 | Command::RecheckEgress { .. }
                 | Command::SetEgressExemption { .. }
@@ -8591,6 +8806,259 @@ fn now() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64
+}
+
+#[cfg(test)]
+mod git_command_tests {
+    use super::*;
+
+    #[test]
+    fn git_menu_protocol_returns_updated_status_and_protects_attached_worktrees() -> Result<()> {
+        let fixture = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR"))?;
+        let cwd = fixture.path().join("repository");
+        std::fs::create_dir(&cwd)?;
+        let git = |args: &[&str]| -> Result<()> {
+            let result = std::process::Command::new("git")
+                .current_dir(&cwd)
+                .env("GIT_CONFIG_GLOBAL", fixture.path().join("no-git-config"))
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .args(args)
+                .output()?;
+            ensure!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            Ok(())
+        };
+        git(&["init", "--initial-branch=main"])?;
+        git(&["config", "user.name", "Fixture"])?;
+        git(&["config", "user.email", "fixture@example.invalid"])?;
+        git(&["config", "commit.gpgsign", "false"])?;
+        let hooks = fixture.path().join("no-hooks");
+        git(&["config", "core.hooksPath", hooks.to_str().unwrap()])?;
+        git(&["commit", "--allow-empty", "-m", "initial"])?;
+        let db = Connection::open(fixture.path().join("matou.sqlite"))?;
+        db.execute_batch(
+            "CREATE TABLE sessions (cwd TEXT, execution_context_id TEXT, archived_at INTEGER);
+             CREATE TABLE execution_contexts (id TEXT, cwd TEXT);",
+        )?;
+        let reply = |command: Command, variant: &str, id| -> Result<GitReply> {
+            let command = serde_json::from_value(serde_json::to_value(command)?)?;
+            let event = run_git_command(&command, fixture.path()).context("missing Git reply")?;
+            let payload = serde_json::to_value(event)?;
+            let reply: GitReply = serde_json::from_value(payload[variant].clone())?;
+            assert_eq!(reply.request_id, id);
+            Ok(reply)
+        };
+        assert_eq!(
+            reply(
+                Command::GitStatusDetail {
+                    request_id: 1,
+                    cwd: cwd.clone()
+                },
+                "GitStatusDetail",
+                1
+            )?
+            .result
+            .unwrap()
+            .current_branch
+            .as_deref(),
+            Some("main")
+        );
+        assert_eq!(
+            reply(
+                Command::GitCreateBranch {
+                    request_id: 2,
+                    cwd: cwd.clone(),
+                    name: "test/branch".into(),
+                    start_point: Some("main".into()),
+                },
+                "GitCreateBranch",
+                2
+            )?
+            .result
+            .unwrap()
+            .current_branch
+            .as_deref(),
+            Some("test/branch")
+        );
+        assert_eq!(
+            reply(
+                Command::GitCheckout {
+                    request_id: 3,
+                    cwd: cwd.clone(),
+                    branch: "main".into(),
+                },
+                "GitCheckout",
+                3
+            )?
+            .result
+            .unwrap()
+            .current_branch
+            .as_deref(),
+            Some("main")
+        );
+
+        std::fs::write(cwd.join("tracked.txt"), "changed\n")?;
+        assert!(
+            !reply(
+                Command::GitCommit {
+                    request_id: 4,
+                    cwd: cwd.clone(),
+                    message: "test commit".into(),
+                    stage_all: true,
+                },
+                "GitCommit",
+                4
+            )?
+            .result
+            .unwrap()
+            .dirty
+        );
+        git(&["checkout", "--detach", "HEAD"])?;
+        assert_eq!(
+            reply(
+                Command::GitPush {
+                    request_id: 5,
+                    cwd: cwd.clone()
+                },
+                "GitPush",
+                5
+            )?
+            .result
+            .unwrap_err()
+            .code,
+            "GIT_DETACHED_HEAD"
+        );
+        git(&["checkout", "main"])?;
+
+        let created = reply(
+            Command::GitWorktreeCreate {
+                request_id: 6,
+                cwd: cwd.clone(),
+                branch: "feature/wt".into(),
+                path: None,
+            },
+            "GitWorktreeCreate",
+            6,
+        )?
+        .result
+        .unwrap();
+        let target = created.worktrees[1].path.clone();
+        assert!(target.starts_with(fixture.path().join("worktrees").canonicalize()?));
+        db.execute(
+            "INSERT INTO execution_contexts VALUES ('wt', ?1)",
+            [target.to_str().unwrap()],
+        )?;
+        db.execute(
+            "INSERT INTO sessions VALUES (?1, 'wt', NULL)",
+            [target.to_str().unwrap()],
+        )?;
+        let snapshot = reply(
+            Command::GitStatusDetail {
+                request_id: 7,
+                cwd: cwd.clone(),
+            },
+            "GitStatusDetail",
+            7,
+        )?;
+        assert_eq!(snapshot.worktree_session_counts[&target], 1);
+        assert_eq!(
+            reply(
+                Command::GitWorktreeRemove {
+                    request_id: 8,
+                    cwd: cwd.clone(),
+                    worktree_path: target.clone(),
+                },
+                "GitWorktreeRemove",
+                8
+            )?
+            .result
+            .unwrap_err()
+            .code,
+            "GIT_WORKTREE_IN_USE"
+        );
+        assert!(target.is_dir());
+        db.execute("UPDATE sessions SET archived_at = 1", [])?;
+        let removed = reply(
+            Command::GitWorktreeRemove {
+                request_id: 9,
+                cwd,
+                worktree_path: target.clone(),
+            },
+            "GitWorktreeRemove",
+            9,
+        )?
+        .result
+        .unwrap();
+        assert_eq!(removed.worktrees.len(), 1);
+        assert!(!target.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_modes_reject_every_git_write_with_correlated_replies() {
+        let cwd = PathBuf::from("/unused");
+        assert!(StoragePhase::ReadOnly.accepts(&Command::GitStatusDetail {
+            request_id: 1,
+            cwd: cwd.clone(),
+        }));
+        let commands = [
+            Command::GitCheckout {
+                request_id: 2,
+                cwd: cwd.clone(),
+                branch: "any".into(),
+            },
+            Command::GitCreateBranch {
+                request_id: 3,
+                cwd: cwd.clone(),
+                name: "any".into(),
+                start_point: None,
+            },
+            Command::GitCommit {
+                request_id: 4,
+                cwd: cwd.clone(),
+                message: "example".into(),
+                stage_all: true,
+            },
+            Command::GitPush {
+                request_id: 5,
+                cwd: cwd.clone(),
+            },
+            Command::GitWorktreeCreate {
+                request_id: 6,
+                cwd: cwd.clone(),
+                branch: "any".into(),
+                path: None,
+            },
+            Command::GitWorktreeRemove {
+                request_id: 7,
+                cwd,
+                worktree_path: "/unused-wt".into(),
+            },
+        ];
+        for (index, command) in commands.into_iter().enumerate() {
+            assert!(StoragePhase::Writable.accepts(&command));
+            assert!(!StoragePhase::ReadOnly.accepts(&command));
+            assert!(!StoragePhase::Recovery.accepts(&command));
+            let reply = match storage_command_rejected(
+                command,
+                STORAGE_READ_ONLY,
+                STORAGE_READ_ONLY_MESSAGE,
+            ) {
+                Event::GitCheckout(reply)
+                | Event::GitCreateBranch(reply)
+                | Event::GitCommit(reply)
+                | Event::GitPush(reply)
+                | Event::GitWorktreeCreate(reply)
+                | Event::GitWorktreeRemove(reply) => reply,
+                _ => panic!("expected the rejected Git request's normal reply variant"),
+            };
+            assert_eq!(reply.request_id, (index + 2) as u64);
+            assert_eq!(reply.result.unwrap_err().code, STORAGE_READ_ONLY);
+        }
+    }
 }
 
 #[cfg(all(test, target_os = "macos"))]
