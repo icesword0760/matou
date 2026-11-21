@@ -13,8 +13,10 @@ use matou_native_desktop::{
         detached_placeholder, detached_window_header,
     },
     egress_panel::{
-        EgressAction, EgressBannerState, EgressPanelState, EgressState, EgressStatus,
-        render_egress_banner, render_egress_chip_with_label, render_egress_panel,
+        EgressAction, EgressBannerState, EgressCheck, EgressCheckKind, EgressCheckResult,
+        EgressExit, EgressFamily, EgressFamilyStatus, EgressPanelState, EgressState, EgressStatus,
+        EgressTransition, EgressViolation, render_egress_banner, render_egress_chip_with_label,
+        render_egress_panel,
     },
     shortcut_panel::{
         ShortcutLocale, ShortcutPanelAction, ShortcutPanelClose, ShortcutPanelEffect,
@@ -25,10 +27,15 @@ use matou_native_desktop::{
         TeamMemberActions, TeamMemberCardModel, TeamMemberWorkStatus, team_member_card,
     },
     update_popover::{
-        UpdateAction, UpdateControl, UpdateEffect, UpdateErrorStage, UpdateState, UpdateStatus,
+        UpdateAction, UpdateControl, UpdateEffect, UpdateErrorStage, UpdateInstallMode,
+        UpdateProgress, UpdateRelease, UpdateState, UpdateStatus, UpdateView,
         render_update_popover, render_update_trigger,
     },
     workspace_board::{WorkspaceBoard, render_workspace_board_with_sessions},
+};
+use matou_native_runtime::{
+    egress_probe::Family,
+    update_download::{self, UpdatePhase},
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -131,14 +138,30 @@ pub(super) struct WorkspaceWiring {
     next_child: u64,
     visible: bool,
     update: UpdateControl,
-    update_ticket: u64,
+    request_sequence: u64,
+    update_request: Option<(u64, &'static str, UpdateErrorStage)>,
+    update_release: Option<UpdateRelease>,
+    update_error: Option<String>,
     update_bounds: TriggerBounds,
     egress: EgressPanelState,
     egress_status: EgressStatus,
+    egress_request: Option<(u64, &'static str)>,
+    egress_refresh_scheduled: bool,
+    egress_error: Option<String>,
+    hud_request: Option<(u64, String)>,
+    hud: Option<(String, Value)>,
+    hud_refresh_at: Option<Duration>,
     egress_bounds: TriggerBounds,
     banners: HashMap<String, EgressBannerState>,
     confirmation_focus: FocusHandle,
     _window_closed: Subscription,
+}
+
+#[derive(Clone, Copy)]
+enum EgressRequest {
+    Status,
+    Recheck,
+    Exempt(EgressFamily),
 }
 
 struct PendingSplit {
@@ -197,7 +220,10 @@ impl WorkspaceWiring {
                 None,
                 Duration::ZERO,
             ),
-            update_ticket: 0,
+            request_sequence: 0,
+            update_request: None,
+            update_release: None,
+            update_error: None,
             update_bounds: Rc::default(),
             egress: EgressPanelState::default(),
             egress_status: EgressStatus {
@@ -211,6 +237,12 @@ impl WorkspaceWiring {
                 checked_at: None,
                 last_transition: None,
             },
+            egress_request: None,
+            egress_refresh_scheduled: false,
+            egress_error: None,
+            hud_request: None,
+            hud: None,
+            hud_refresh_at: None,
             egress_bounds: Rc::default(),
             banners: HashMap::new(),
             confirmation_focus: cx.focus_handle().tab_stop(true),
@@ -909,6 +941,7 @@ impl Workspace {
         }) {
             self.dismiss_wiring_overlay(window, cx);
         }
+        self.refresh_live_wiring(cx);
     }
 
     pub(super) fn forget_board_scene(&mut self, scene_id: &str) {
@@ -1065,7 +1098,9 @@ impl Workspace {
                     && node["titleSource"] == "manual"
                     && trimmed_graph_text(&node["providerTitle"]).is_some(),
                 fork,
-                git_available: !node["git"].is_null(),
+                // For Codex, Runtime validates both the repository and the
+                // trusted isolation root when the New worktree action is sent.
+                git_available: kind == "codex" || !node["git"].is_null(),
                 can_detach: can_mutate && self.terminals.contains_key(id),
                 can_view_history: can_mutate
                     && kind == "claude-code"
@@ -1082,11 +1117,11 @@ impl Workspace {
             },
             self.locale,
         );
-        // The current Runtime explicitly rejects creating a fork in a new worktree.
-        if let Some(item) = menu
-            .items
-            .iter_mut()
-            .find(|item| item.action == CardMenuAction::ForkWorktree)
+        if kind != "codex"
+            && let Some(item) = menu
+                .items
+                .iter_mut()
+                .find(|item| item.action == CardMenuAction::ForkWorktree)
             && item.disabled_reason.is_none()
         {
             item.disabled_reason = Some(
@@ -1214,7 +1249,13 @@ impl Workspace {
                         cx,
                     ),
                     CardMenuAction::Fork => self.open_fork(id, ForkPlacement::Peer, window, cx),
-                    CardMenuAction::ForkWorktree => {}
+                    CardMenuAction::ForkWorktree => self.open_fork_with_worktree(
+                        id,
+                        ForkPlacement::Peer,
+                        ForkWorktreeMode::New,
+                        window,
+                        cx,
+                    ),
                     CardMenuAction::SplitHorizontal => {
                         self.split_pane(id, SplitDirection::Horizontal, cx)
                     }
@@ -1329,10 +1370,7 @@ impl Workspace {
                         .position(position)
                         .snap_to_window()
                         .child(render_update_popover(
-                            &self
-                                .wiring
-                                .update
-                                .view(self.locale, self.motion_clock.elapsed()),
+                            &self.runtime_update_view(),
                             dark,
                             bounds,
                             focus,
@@ -1355,13 +1393,27 @@ impl Workspace {
                     self.locale,
                     self.motion_clock.elapsed(),
                 );
-                if let Some(view) = &mut view
-                    && self.wiring.egress_status.state == EgressState::Unknown
-                {
-                    view.checked = self
-                        .locale
-                        .text("暂无出口检测结果", "No exit check results")
-                        .into();
+                if let Some(view) = &mut view {
+                    if let Some(error) = &self.wiring.egress_error {
+                        view.checked = error.clone();
+                    } else if self.wiring.egress_status.state == EgressState::Unknown
+                        && self.wiring.egress_request.is_none()
+                    {
+                        view.checked = self
+                            .locale
+                            .text("暂无出口检测结果", "No exit check results")
+                            .into();
+                    }
+                    // The runtime currently exposes status, sampling and IP exemption.
+                    view.rules
+                        .iter_mut()
+                        .for_each(|button| button.enabled = false);
+                    view.protection.enabled = false;
+                    for group in &mut view.groups {
+                        if let Some(button) = &mut group.accept_current {
+                            button.enabled = false;
+                        }
+                    }
                 }
                 Some(
                     anchored()
@@ -1673,10 +1725,7 @@ impl Workspace {
             .flex_none()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(render_update_trigger(
-                &self
-                    .wiring
-                    .update
-                    .view(self.locale, self.motion_clock.elapsed()),
+                &self.runtime_update_view(),
                 self.wiring_dark(),
                 self.update_handler(cx),
             ))
@@ -1708,8 +1757,13 @@ impl Workspace {
         }
         if action == UpdateAction::TogglePopover {
             self.open_wiring_overlay(Overlay::Update, window, cx);
+            self.wiring.update.dispatch(action);
+            if self.wiring.update_request.is_none() {
+                self.request_update("updateStatusResult", UpdateErrorStage::Check, cx);
+            }
+            return;
         }
-        let stage = match self.wiring.update.dispatch(action) {
+        match self.wiring.update.dispatch(action) {
             Some(UpdateEffect::Check) => {
                 self.accept_update_status(
                     UpdateStatus::Checking {
@@ -1718,42 +1772,103 @@ impl Workspace {
                     },
                     cx,
                 );
-                UpdateErrorStage::Check
+                self.request_update("updateCheckResult", UpdateErrorStage::Check, cx);
             }
-            Some(UpdateEffect::Download) => UpdateErrorStage::Download,
-            Some(UpdateEffect::Install) => UpdateErrorStage::Install,
-            None => return,
-        };
-        let ticket = self.wiring.update_ticket;
-        cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(Duration::from_millis(300))
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                if this.wiring.update_ticket == ticket {
-                    this.accept_update_status(
-                        UpdateStatus::Error {
-                            stage,
-                            message: "offline".into(),
-                            manual_download_available: false,
-                        },
+            Some(UpdateEffect::Download) => {
+                if let Some(release) = self.wiring.update_release.clone() {
+                    self.accept_update_status(
+                        UpdateStatus::Downloading(
+                            release,
+                            UpdateProgress {
+                                percent: 0.,
+                                transferred_bytes: 0,
+                                total_bytes: 0,
+                                bytes_per_second: 0,
+                                remaining_seconds: None,
+                            },
+                        ),
                         cx,
                     );
                 }
-            });
-        })
-        .detach();
+                self.request_update("updateDownloadResult", UpdateErrorStage::Download, cx);
+            }
+            Some(UpdateEffect::Install) => {
+                let message = self.locale.text(
+                    "当前运行时尚未提供安装操作。",
+                    "Installation is unavailable in the current runtime.",
+                );
+                self.update_failed(UpdateErrorStage::Install, message.into(), cx);
+            }
+            None => {}
+        }
+    }
+
+    fn request_update(
+        &mut self,
+        kind: &'static str,
+        stage: UpdateErrorStage,
+        cx: &mut Context<Self>,
+    ) {
+        let request_id = self.next_wiring_request();
+        let command = match kind {
+            "updateCheckResult" => Command::CheckForUpdate { request_id },
+            "updateDownloadResult" => Command::DownloadUpdate { request_id },
+            _ => Command::GetUpdateStatus { request_id },
+        };
+        self.wiring.update_request = None;
+        match self.commands.send_at(self.runtime_generation, command) {
+            Ok(()) => self.wiring.update_request = Some((request_id, kind, stage)),
+            Err(error) => self.update_failed(stage, self.wiring_send_error(&error), cx),
+        }
+    }
+
+    fn runtime_update_view(&self) -> UpdateView {
+        let mut view = self
+            .wiring
+            .update
+            .view(self.locale, self.motion_clock.elapsed());
+        if let Some(error) = &self.wiring.update_error {
+            view.message = Some(error.clone());
+        }
+        view
+    }
+
+    fn update_failed(&mut self, stage: UpdateErrorStage, message: String, cx: &mut Context<Self>) {
+        self.accept_update_status(
+            UpdateStatus::Error {
+                stage,
+                message: message.clone(),
+                manual_download_available: false,
+            },
+            cx,
+        );
+        self.wiring.update_error = Some(message);
     }
 
     pub fn accept_update_status(&mut self, status: UpdateStatus, cx: &mut Context<Self>) {
-        self.wiring.update_ticket += 1;
-        self.wiring.update.accept(
+        self.accept_update_state(
             UpdateState {
                 current_version: self.wiring.update.current_version().to_owned(),
                 status,
             },
-            self.motion_clock.elapsed(),
+            cx,
         );
+    }
+
+    fn accept_update_state(&mut self, state: UpdateState, cx: &mut Context<Self>) {
+        self.wiring.update_error = None;
+        match &state.status {
+            UpdateStatus::Available(release)
+            | UpdateStatus::Downloading(release, _)
+            | UpdateStatus::Downloaded(release) => {
+                self.wiring.update_release = Some(release.clone())
+            }
+            UpdateStatus::Idle | UpdateStatus::NotAvailable => self.wiring.update_release = None,
+            _ => {}
+        }
+        self.wiring
+            .update
+            .accept(state, self.motion_clock.elapsed());
         if self.wiring.overlay != Some(Overlay::Update) {
             self.wiring.update.dispatch(UpdateAction::Dismiss);
         }
@@ -1785,11 +1900,9 @@ impl Workspace {
     }
 
     pub(super) fn egress_frozen(&self, id: &str) -> bool {
-        self.wiring
-            .egress_status
-            .families
-            .iter()
-            .any(|family| family.frozen_session_ids.iter().any(|frozen| frozen == id))
+        self.wiring.egress_status.families.iter().any(|family| {
+            !family.overridden && family.frozen_session_ids.iter().any(|frozen| frozen == id)
+        })
     }
 
     pub(super) fn egress_trigger(&self, cx: &Context<Self>) -> Stateful<Div> {
@@ -1878,11 +1991,12 @@ impl Workspace {
             }
             if let Some(effect) = effect {
                 match effect {
-                    EgressAction::Recheck => banner.recheck_finished(),
-                    EgressAction::ConfirmOverride(_) => banner.override_finished(),
+                    EgressAction::Recheck => self.request_egress(EgressRequest::Recheck, cx),
+                    EgressAction::ConfirmOverride(family) => {
+                        self.request_egress(EgressRequest::Exempt(family), cx)
+                    }
                     _ => {}
                 }
-                self.egress_offline_feedback(cx);
             }
             cx.notify();
             return;
@@ -1894,6 +2008,7 @@ impl Workspace {
             EgressAction::TogglePanel if self.wiring_available() => {
                 self.open_wiring_overlay(Overlay::Egress, window, cx);
                 self.wiring.egress.open = true;
+                self.request_egress(EgressRequest::Status, cx);
             }
             EgressAction::DismissPanel if self.wiring.overlay == Some(Overlay::Egress) => {
                 self.dismiss_wiring_overlay(window, cx)
@@ -1914,23 +2029,315 @@ impl Workspace {
             EgressAction::OpenReference(reference) => {
                 self.open_external_link(reference.url(), LinkSource::External, window, cx);
             }
-            EgressAction::Recheck
-            | EgressAction::SetRule(_)
-            | EgressAction::SetProtection(_)
-            | EgressAction::AcceptCurrent(_) => self.egress_offline_feedback(cx),
+            EgressAction::Recheck => self.request_egress(EgressRequest::Recheck, cx),
             _ => {}
         }
         cx.notify();
     }
 
-    fn egress_offline_feedback(&mut self, cx: &mut Context<Self>) {
-        self.show_toast(
-            self.locale.text(
-                "出口检测服务当前不可用",
-                "Exit checking is currently unavailable",
+    fn next_wiring_request(&mut self) -> u64 {
+        self.wiring.request_sequence += 1;
+        self.wiring.request_sequence
+    }
+
+    fn wiring_send_error(&self, error: &crate::runtime_bridge::SendError) -> String {
+        if matches!(error, crate::runtime_bridge::SendError::StorageReadOnly) {
+            self.locale
+                .text(
+                    STORAGE_READ_ONLY_TITLE,
+                    "The database is in read-only recovery mode",
+                )
+                .into()
+        } else {
+            error.to_string()
+        }
+    }
+
+    fn wiring_reply_error(&self, reply: &Value) -> Option<String> {
+        reply["error"].as_str().map(|error| {
+            if reply["code"] == "STORAGE_READ_ONLY" {
+                self.locale
+                    .text(
+                        STORAGE_READ_ONLY_TITLE,
+                        "The database is in read-only recovery mode",
+                    )
+                    .into()
+            } else {
+                error.to_owned()
+            }
+        })
+    }
+
+    fn request_egress(&mut self, action: EgressRequest, cx: &mut Context<Self>) {
+        if self.wiring.egress_request.is_some_and(|(_, kind)| {
+            matches!(action, EgressRequest::Status) || kind != "egressStatusResult"
+        }) {
+            return;
+        }
+        let request_id = self.next_wiring_request();
+        let (kind, command) = match action {
+            EgressRequest::Status => (
+                "egressStatusResult",
+                Command::GetEgressStatus { request_id },
             ),
-            cx,
-        );
+            EgressRequest::Recheck => {
+                ("egressRecheckResult", Command::RecheckEgress { request_id })
+            }
+            EgressRequest::Exempt(family) => (
+                "egressExemptionResult",
+                Command::SetEgressExemption {
+                    request_id,
+                    family: runtime_family(family),
+                },
+            ),
+        };
+        self.wiring.egress_request = None;
+        self.wiring.egress_error = None;
+        match self.commands.send_at(self.runtime_generation, command) {
+            Ok(()) => {
+                self.wiring.egress_request = Some((request_id, kind));
+                self.wiring.egress.rechecking = !matches!(action, EgressRequest::Status);
+            }
+            Err(error) => self.finish_egress_request(Some(self.wiring_send_error(&error)), cx),
+        }
+    }
+
+    fn finish_egress_request(&mut self, error: Option<String>, cx: &mut Context<Self>) {
+        self.wiring.egress_request = None;
+        self.wiring.egress.rechecking = false;
+        for banner in self.wiring.banners.values_mut() {
+            banner.recheck_finished();
+            banner.override_finished();
+        }
+        if let Some(error) = &error {
+            self.show_toast(error.clone(), cx);
+        }
+        self.wiring.egress_error = error;
+        cx.notify();
+    }
+
+    pub(super) fn retire_wiring_commands(&mut self) {
+        self.wiring.egress_request = None;
+        self.wiring.egress_refresh_scheduled = false;
+        self.wiring.egress.rechecking = false;
+        for banner in self.wiring.banners.values_mut() {
+            banner.recheck_finished();
+            banner.override_finished();
+        }
+        if let Some((_, _, stage)) = self.wiring.update_request.take() {
+            self.wiring.update.accept(
+                UpdateState {
+                    current_version: self.wiring.update.current_version().to_owned(),
+                    status: UpdateStatus::Error {
+                        stage,
+                        message: crate::runtime_bridge::SendError::NotReady.to_string(),
+                        manual_download_available: false,
+                    },
+                },
+                self.motion_clock.elapsed(),
+            );
+        }
+        self.wiring.hud_request = None;
+        self.wiring.hud = None;
+        self.wiring.hud_refresh_at = None;
+    }
+
+    fn refresh_frozen_egress(&mut self, cx: &mut Context<Self>) {
+        if self.wiring.egress_refresh_scheduled
+            || !self
+                .wiring
+                .egress_status
+                .families
+                .iter()
+                .any(|family| !family.overridden && !family.frozen_session_ids.is_empty())
+        {
+            return;
+        }
+        self.wiring.egress_refresh_scheduled = true;
+        let generation = self.runtime_generation;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_secs(2)).await;
+            let _ =
+                this.update(cx, |this, cx| {
+                    if this.runtime_generation == generation && this.wiring.egress_refresh_scheduled
+                    {
+                        this.wiring.egress_refresh_scheduled = false;
+                        if this.wiring.egress_status.families.iter().any(|family| {
+                            !family.overridden && !family.frozen_session_ids.is_empty()
+                        }) {
+                            this.refresh_egress_status(cx);
+                        }
+                    }
+                });
+        })
+        .detach();
+    }
+
+    pub(super) fn refresh_egress_status(&mut self, cx: &mut Context<Self>) {
+        self.request_egress(EgressRequest::Status, cx);
+    }
+
+    pub(super) fn refresh_live_wiring(&mut self, cx: &mut Context<Self>) {
+        let (generation, phase) = self.commands.connection();
+        if generation != self.runtime_generation {
+            return;
+        }
+        if phase == ConnectionPhase::Ready && self.domain_ready {
+            self.refresh_agent_hud(cx);
+        }
+    }
+
+    fn agent_hud_target(&self) -> Option<&str> {
+        let id = self.level_focus()?;
+        let node = self.graph_node(id)?;
+        if Self::team_member_node(node) {
+            return session_levels::parent_id(node);
+        }
+        matches!(
+            node["currentMode"].as_str(),
+            Some("claude-code" | "codex" | "dsh" | "antigravity")
+        )
+        .then_some(id)
+    }
+
+    fn refresh_agent_hud(&mut self, cx: &mut Context<Self>) {
+        let Some(session_id) = self.agent_hud_target().map(str::to_owned) else {
+            self.wiring.hud_request = None;
+            self.wiring.hud = None;
+            self.wiring.hud_refresh_at = None;
+            return;
+        };
+        let same_target = self
+            .wiring
+            .hud
+            .as_ref()
+            .is_some_and(|(id, _)| id == &session_id);
+        if self
+            .wiring
+            .hud_request
+            .as_ref()
+            .is_some_and(|(_, id)| id == &session_id)
+            || same_target
+                && self
+                    .wiring
+                    .hud_refresh_at
+                    .is_some_and(|at| self.motion_clock.elapsed() < at)
+        {
+            return;
+        }
+        if !same_target {
+            self.wiring.hud = None;
+        }
+        let request_id = self.next_wiring_request();
+        if self
+            .commands
+            .send_at(
+                self.runtime_generation,
+                Command::GetAgentHud {
+                    request_id,
+                    session_id: session_id.clone(),
+                },
+            )
+            .is_ok()
+        {
+            self.wiring.hud_request = Some((request_id, session_id));
+            cx.notify();
+        }
+    }
+
+    pub(super) fn live_agent_hud(&self, id: &str) -> Option<&Value> {
+        self.wiring
+            .hud
+            .as_ref()
+            .filter(|(session, _)| session == id)
+            .map(|(_, result)| &result["hud"])
+            .filter(|hud| hud.is_object())
+    }
+
+    pub(super) fn receive_wiring_reply(
+        &mut self,
+        kind: &str,
+        request_id: u64,
+        reply: &Value,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.wiring.egress_request == Some((request_id, kind)) {
+            let error = self.wiring_reply_error(reply);
+            self.finish_egress_request(error.clone(), cx);
+            if error.is_none()
+                && let Some(status) = project_egress(&reply["result"])
+            {
+                self.set_egress_status(status, window, cx);
+                self.refresh_frozen_egress(cx);
+            }
+        }
+        if let Some((pending, expected, stage)) = self.wiring.update_request
+            && pending == request_id
+            && expected == kind
+        {
+            self.wiring.update_request = None;
+            match self.wiring_reply_error(reply) {
+                Some(error) => self.update_failed(stage, error, cx),
+                None => match serde_json::from_value::<update_download::UpdateState>(
+                    reply["result"].clone(),
+                ) {
+                    Ok(status) => self.accept_update_state(project_update(status), cx),
+                    Err(error) => self.update_failed(stage, error.to_string(), cx),
+                },
+            }
+        }
+        if kind == "agentHudResult"
+            && let Some((pending, target)) = self.wiring.hud_request.as_ref()
+            && *pending == request_id
+            && self.agent_hud_target() == Some(target.as_str())
+        {
+            let (_, target) = self.wiring.hud_request.take().unwrap();
+            self.wiring.hud = Some((target.clone(), reply["result"].clone()));
+            let interval = Duration::from_secs(2);
+            let refresh_at = self.motion_clock.elapsed() + interval;
+            self.wiring.hud_refresh_at = Some(refresh_at);
+            let generation = self.runtime_generation;
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(interval).await;
+                let _ = this.update(cx, |this, cx| {
+                    if this.runtime_generation == generation
+                        && this.wiring.hud_refresh_at == Some(refresh_at)
+                        && this.agent_hud_target() == Some(target.as_str())
+                    {
+                        this.wiring.hud_refresh_at = None;
+                        this.refresh_live_wiring(cx);
+                    }
+                });
+            })
+            .detach();
+            cx.notify();
+        }
+    }
+
+    pub(super) fn render_live_teammates(&self, id: &str) -> Option<Stateful<Div>> {
+        let (_, result) = self.wiring.hud.as_ref().filter(|(lead, _)| lead == id)?;
+        let teammates = result["teammates"]
+            .as_array()
+            .filter(|members| !members.is_empty())?;
+        Some(
+            div()
+                .id(SharedString::from(format!("team-members-{id}")))
+                .w_full()
+                .flex_none()
+                .flex()
+                .gap(px(6.))
+                .overflow_x_scroll()
+                .children(teammates.iter().filter_map(|member| {
+                    let member_id = member["teammateId"].as_str()?;
+                    Some(
+                        div()
+                            .flex_none()
+                            .w(px(280.))
+                            .child(self.render_team_member(&format!("{id}-{member_id}"), member)),
+                    )
+                })),
+        )
     }
 
     pub(super) fn render_team_member(&self, id: &str, node: &Value) -> AnyElement {
@@ -1954,6 +2361,7 @@ impl Workspace {
             .filter_map(Value::as_str);
         let title = summary["title"]
             .as_str()
+            .or_else(|| summary["name"].as_str())
             .or_else(|| node["title"].as_str())
             .unwrap_or_default();
         team_member_card(
@@ -2050,9 +2458,7 @@ impl Workspace {
     }
 
     pub(super) fn update_view_for_probe(&self) -> matou_native_desktop::update_popover::UpdateView {
-        self.wiring
-            .update
-            .view(self.locale, self.motion_clock.elapsed())
+        self.runtime_update_view()
     }
 
     pub(super) fn trigger_for_probe(&self, egress: bool) -> Bounds<Pixels> {
@@ -2064,12 +2470,224 @@ impl Workspace {
         .expect("trigger painted")
     }
 
-    pub(super) fn request_offline_update_check_for_probe(
+    pub(super) fn egress_for_probe(&self) -> &EgressStatus {
+        &self.wiring.egress_status
+    }
+
+    pub(super) fn egress_action_for_probe(
         &mut self,
+        id: Option<&str>,
+        action: EgressAction,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.update_action(UpdateAction::Check, window, cx);
+        self.egress_action(id, action, window, cx);
+    }
+
+    pub(super) fn request_update_action_for_probe(
+        &mut self,
+        action: UpdateAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.update_action(action, window, cx);
+    }
+}
+
+fn runtime_family(family: EgressFamily) -> Family {
+    match family {
+        EgressFamily::Anthropic => Family::Anthropic,
+        EgressFamily::OpenAi => Family::OpenAi,
+        EgressFamily::ChatGptSubscription => Family::ChatgptSubscription,
+        EgressFamily::Google => Family::Google,
+    }
+}
+
+fn desktop_family(value: &Value) -> Option<EgressFamily> {
+    EgressFamily::ALL
+        .into_iter()
+        .find(|family| value == runtime_family(*family).name())
+}
+
+fn project_egress(value: &Value) -> Option<EgressStatus> {
+    fn state(value: &Value) -> EgressState {
+        match value.as_str() {
+            Some("checking") => EgressState::Checking,
+            Some("ok") => EgressState::Ok,
+            Some("warning") => EgressState::Warning,
+            Some("abnormal") => EgressState::Abnormal,
+            _ => EgressState::Unknown,
+        }
+    }
+    fn exit(value: &Value) -> Option<EgressExit> {
+        Some(EgressExit {
+            ip: value["ip"].as_str()?.to_owned(),
+            country: value["country"].as_str()?.to_owned(),
+        })
+    }
+    let families = value["families"]
+        .as_array()?
+        .iter()
+        .filter_map(|row| {
+            Some(EgressFamilyStatus {
+                family: desktop_family(&row["family"])?,
+                state: state(&row["state"]),
+                exit: exit(&row["exit"]),
+                baseline: exit(&row["baseline"]),
+                violation: match row["violation"].as_str() {
+                    Some("mainland") => Some(EgressViolation::Mainland),
+                    Some("rule") => Some(EgressViolation::Rule),
+                    _ => None,
+                },
+                overridden: row["overridden"] == true,
+                frozen_session_ids: row["frozenSessionIds"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect(),
+            })
+        })
+        .collect();
+    let checks = value["checks"]
+        .as_array()?
+        .iter()
+        .filter_map(|row| {
+            Some(EgressCheck {
+                kind: match row["id"].as_str()? {
+                    "mainland" => EgressCheckKind::Mainland,
+                    "exit-rule" => EgressCheckKind::ExitRule,
+                    "login-api-match" => EgressCheckKind::LoginApiMatch,
+                    "agent-proxy-path" => EgressCheckKind::AgentProxyPath,
+                    "browser-path" => EgressCheckKind::BrowserPath,
+                    "time-zone" => EgressCheckKind::TimeZone,
+                    "ipv6" => EgressCheckKind::Ipv6,
+                    _ => return None,
+                },
+                family: desktop_family(&row["family"]),
+                result: match row["result"].as_str() {
+                    Some("pass") => EgressCheckResult::Pass,
+                    Some("warn") => EgressCheckResult::Warn,
+                    Some("fail") => EgressCheckResult::Fail,
+                    _ => EgressCheckResult::Unknown,
+                },
+                facts: row["facts"]
+                    .as_object()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|(key, value)| Some((key.clone(), value.as_str()?.to_owned())))
+                    .collect(),
+            })
+        })
+        .collect();
+    let transition = &value["lastTransition"];
+    Some(EgressStatus {
+        state: state(&value["state"]),
+        families,
+        checks,
+        rule_mode: if value["ruleMode"] == "ip" {
+            matou_native_desktop::egress_panel::EgressRule::Ip
+        } else {
+            matou_native_desktop::egress_panel::EgressRule::Country
+        },
+        protection_enabled: value["protectionEnabled"] == true,
+        session_families: HashMap::new(),
+        session_family_sets: value["sessionFamilies"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter_map(|(session, families)| {
+                Some((
+                    session.clone(),
+                    families
+                        .as_array()?
+                        .iter()
+                        .filter_map(desktop_family)
+                        .collect(),
+                ))
+            })
+            .collect(),
+        checked_at: value["checkedAt"].as_u64().and_then(|at| {
+            let clock = notification_time(at);
+            let (hour, minute) = clock.split_once(':')?;
+            Some((hour.parse().ok()?, minute.parse().ok()?))
+        }),
+        last_transition: (|| {
+            let id = transition["id"].as_str()?.to_owned();
+            let family = desktop_family(&transition["family"])?;
+            match transition["kind"].as_str()? {
+                "frozen" => Some(EgressTransition::Frozen),
+                "resumed" => Some(EgressTransition::Resumed { id, family }),
+                _ => None,
+            }
+        })(),
+    })
+}
+
+fn project_update(value: update_download::UpdateState) -> UpdateState {
+    use matou_native_core::update_policy::{ErrorStage, InstallMode};
+    fn release(value: update_download::Release) -> UpdateRelease {
+        let release_day = value.release_date.as_deref().and_then(|date| {
+            let (_, day) = date.split_once('-')?;
+            let (month, day) = day.get(..5)?.split_once('-')?;
+            Some((month.parse().ok()?, day.parse().ok()?))
+        });
+        UpdateRelease {
+            version: value.version,
+            install_mode: match value.install_mode {
+                InstallMode::Automatic => UpdateInstallMode::Automatic,
+                InstallMode::Manual => UpdateInstallMode::Manual,
+            },
+            size_bytes: value.size_bytes,
+            release_day,
+            notes: value.release_notes,
+        }
+    }
+    let status = match value.phase {
+        UpdatePhase::Idle => UpdateStatus::Idle,
+        UpdatePhase::NotAvailable => UpdateStatus::NotAvailable,
+        UpdatePhase::Checking {
+            retry_attempt,
+            max_retry_attempts,
+        } => UpdateStatus::Checking {
+            retry_attempt: retry_attempt.unwrap_or_default() as u32,
+            max_retry_attempts: max_retry_attempts.map(|attempts| attempts as u32),
+        },
+        UpdatePhase::Available { release: item } => UpdateStatus::Available(release(item)),
+        UpdatePhase::Downloading {
+            release: item,
+            progress,
+        } => UpdateStatus::Downloading(
+            release(item),
+            UpdateProgress {
+                percent: progress.percent,
+                transferred_bytes: progress.transferred_bytes,
+                total_bytes: progress.total_bytes,
+                bytes_per_second: progress.bytes_per_second,
+                remaining_seconds: progress.remaining_seconds,
+            },
+        ),
+        UpdatePhase::Downloaded { release: item } => UpdateStatus::Downloaded(release(item)),
+        UpdatePhase::Error {
+            error_message,
+            error_stage,
+            manual_download_url,
+            ..
+        } => UpdateStatus::Error {
+            stage: match error_stage {
+                ErrorStage::Check => UpdateErrorStage::Check,
+                ErrorStage::Download => UpdateErrorStage::Download,
+                ErrorStage::Verify => UpdateErrorStage::Verify,
+                ErrorStage::Install => UpdateErrorStage::Install,
+            },
+            message: error_message,
+            manual_download_available: manual_download_url.is_some(),
+        },
+    };
+    UpdateState {
+        current_version: value.current_version,
+        status,
     }
 }
 

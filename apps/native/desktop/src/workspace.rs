@@ -353,6 +353,7 @@ struct BranchDialog {
     session_id: String,
     source_title: String,
     placement: ForkPlacement,
+    worktree_mode: ForkWorktreeMode,
     input: Entity<RenameInput>,
     submission_key: String,
     submitting: bool,
@@ -390,6 +391,17 @@ struct ForkAccess {
 enum ForkRetry {
     Pending,
     Rejected(String),
+}
+
+fn fork_error_text(error: &str, locale: InterfaceLocale) -> &str {
+    if error.contains("An isolated worktree root is required") {
+        locale.text(
+            "未配置受信任的隔离目录，无法创建新工作树。可从原工作树创建分支。",
+            "A trusted isolation root is required to create a new worktree. You can fork in the current worktree.",
+        )
+    } else {
+        error
+    }
 }
 
 fn fork_failure_copy(node: &Value) -> Option<(&'static str, Option<&str>)> {
@@ -487,7 +499,11 @@ impl LoaderSession {
             title: value["title"].as_str()?.into(),
             model: value["model"].as_str().map(str::to_owned),
             permission_mode: value["permissionMode"].as_str()?.into(),
-            message_count: value["messageCount"].as_u64()?.try_into().ok()?,
+            message_count: value["messageCount"]
+                .as_u64()
+                .or_else(|| value["eventCount"].as_u64())?
+                .try_into()
+                .ok()?,
             updated_at: value["updatedAt"].as_i64()?,
             loaded_by: if loaded_by.is_null() {
                 None
@@ -543,6 +559,7 @@ struct LoaderRemembered {
     provider: Option<&'static str>,
     claude: Option<String>,
     codex: Option<String>,
+    dsh: Option<String>,
     focus: LoaderFocus,
 }
 
@@ -557,18 +574,18 @@ enum LoaderFocus {
 
 impl LoaderRemembered {
     fn selected(&self, provider: &str) -> Option<String> {
-        if provider == "codex" {
-            self.codex.clone()
-        } else {
-            self.claude.clone()
+        match provider {
+            "codex" => self.codex.clone(),
+            "dsh" => self.dsh.clone(),
+            _ => self.claude.clone(),
         }
     }
 
     fn set_selected(&mut self, provider: &str, selection: Option<String>) {
-        if provider == "codex" {
-            self.codex = selection;
-        } else {
-            self.claude = selection;
+        match provider {
+            "codex" => self.codex = selection,
+            "dsh" => self.dsh = selection,
+            _ => self.claude = selection,
         }
     }
 }
@@ -578,6 +595,7 @@ struct LoaderLoad {
     id: String,
     title: String,
     previous_revision: u64,
+    request_id: Option<u64>,
 }
 
 struct DeferredRecoveryCard {
@@ -648,11 +666,15 @@ struct SessionLoader {
 }
 
 impl SessionLoader {
+    fn remote_catalog(&self) -> bool {
+        matches!(self.provider, "codex" | "dsh")
+    }
+
     fn visible_sessions<'a>(
         &'a self,
         cx: &App,
     ) -> impl Iterator<Item = &'a LoaderSession> + use<'a> {
-        let query = if self.provider == "codex" {
+        let query = if self.remote_catalog() {
             String::new()
         } else {
             self.input.read(cx).text.trim().to_lowercase()
@@ -2484,6 +2506,19 @@ impl Workspace {
         self.dismiss_wiring_overlay(window, cx);
         self.permission_menu = None;
         let commands = self.commands.clone();
+        let diagnostics_cwd = self
+            .focused
+            .as_deref()
+            .and_then(|id| self.graph_node(id))
+            .and_then(|node| trimmed_graph_text(&node["cwd"]))
+            .or_else(|| {
+                self.hierarchy
+                    .as_ref()?
+                    .workspace
+                    .as_ref()
+                    .map(|workspace| workspace.root_directory.as_str())
+            })
+            .map(std::path::PathBuf::from);
         let settings = cx.new(|cx| {
             let mut settings = SettingsShell::new(commands, window, cx);
             settings.configure_locale(
@@ -2492,6 +2527,7 @@ impl Workspace {
                 self.locale_save_pending,
             );
             settings.configure_theme(self.theme);
+            settings.configure_diagnostics_cwd(diagnostics_cwd);
             settings
         });
         let subscription =
@@ -3013,6 +3049,7 @@ impl Workspace {
         self.fail_pending_permission_modes(&reason, cx);
         self.permission_identities.clear();
         self.runtime_generation = generation;
+        self.retire_wiring_commands();
         self.transport_connected = false;
         self.domain_ready = false;
         self.session_frames.clear();
@@ -3295,6 +3332,7 @@ impl Workspace {
                 self.fail_pending_permission_modes(&message, cx);
                 self.reconcile_permission_overlay(window, cx);
                 self.fail_pending_loader_commands(message.clone());
+                self.retire_wiring_commands();
                 self.transport_fault = Some((generation, message));
                 cx.notify();
                 return;
@@ -3344,6 +3382,7 @@ impl Workspace {
                 }
                 self.transport_connected = matches!(phase, ConnectionPhase::Ready);
                 if !self.transport_connected {
+                    self.retire_wiring_commands();
                     let message = match &phase {
                         ConnectionPhase::Blocked(block) => block.message.clone(),
                         _ => crate::runtime_bridge::SendError::NotReady.to_string(),
@@ -3777,6 +3816,9 @@ impl Workspace {
                 self.replace_fork_graph(graph, window, cx);
                 self.refresh_terminals(window, cx);
                 self.sync_wiring_graph(window, cx);
+                if fresh_ready || fresh_read_only {
+                    self.refresh_egress_status(cx);
+                }
                 if fresh_ready {
                     self.clear_pending_split();
                 } else {
@@ -4034,6 +4076,20 @@ impl Workspace {
                 self.fault = Some(message);
             }
             Event::Graph(mut graph) => {
+                if let (Some(kind), Some(request_id)) =
+                    (graph["type"].as_str(), graph["requestId"].as_u64())
+                {
+                    // Runtime can attach a scene projection to a command reply. Only
+                    // navigation and standalone snapshots may replace the active graph.
+                    self.receive_wiring_reply(kind, request_id, &graph, window, cx);
+                    self.receive_dsh_loader_reply(kind, request_id, &graph, window, cx);
+                    if let Some((settings, _)) = &self.settings {
+                        settings.update(cx, |settings, cx| {
+                            settings.receive_runtime_diagnostic(kind, request_id, &graph, cx);
+                        });
+                    }
+                    return;
+                }
                 if let Some(reply) = graph
                     .as_object_mut()
                     .and_then(|graph| graph.remove("claudeModelCatalogResult"))
@@ -7224,11 +7280,12 @@ impl Workspace {
         if let Some(reason) = self.session_loader_blocked_reason(id, node) {
             return (reason, false);
         }
-        let label = if node["currentMode"] == "codex" {
-            self.locale.text("载入 Codex 会话", "Load a Codex session")
-        } else {
-            self.locale
-                .text(SESSION_LOADER_TITLE, "Load a Claude Code session")
+        let label = match node["currentMode"].as_str() {
+            Some("codex") => self.locale.text("载入 Codex 会话", "Load a Codex session"),
+            Some("dsh") => self.locale.text("载入 DSH 会话", "Load a DSH session"),
+            _ => self
+                .locale
+                .text(SESSION_LOADER_TITLE, "Load a Claude Code session"),
         };
         (label, true)
     }
@@ -7271,7 +7328,7 @@ impl Workspace {
             }
             None
         } else {
-            if node["currentMode"] != "claude-code" {
+            if !matches!(node["currentMode"].as_str(), Some("claude-code" | "codex")) {
                 return None;
             }
             (node["canFork"] != true).then(|| {
@@ -7281,7 +7338,14 @@ impl Workspace {
                 ) {
                     "当前回复完成后即可 Fork"
                 } else {
-                    "在当前会话输入一次，并等待 Claude Code 完成回复后，即可创建分支"
+                    if node["currentMode"] == "codex" {
+                        self.locale.text(
+                            "在当前会话输入一次，并等待 Codex 完成回复后，即可创建分支",
+                            "Send a message and wait for Codex to finish replying before forking.",
+                        )
+                    } else {
+                        "在当前会话输入一次，并等待 Claude Code 完成回复后，即可创建分支"
+                    }
                 }
             })
         };
@@ -7333,6 +7397,17 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.open_fork_with_worktree(id, placement, ForkWorktreeMode::Current, window, cx);
+    }
+
+    fn open_fork_with_worktree(
+        &mut self,
+        id: &str,
+        placement: ForkPlacement,
+        worktree_mode: ForkWorktreeMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.dismiss_wiring_overlay(window, cx);
         cx.notify();
         if self.dialog.is_some() {
@@ -7363,6 +7438,7 @@ impl Workspace {
             session_id: id.into(),
             source_title: source["title"].as_str().unwrap_or_default().into(),
             placement,
+            worktree_mode,
             input: cx.new(|cx| RenameInput::session_loader_search("例如：修复登录流程", cx)),
             submission_key: fork_submission_key(),
             submitting: false,
@@ -7433,7 +7509,7 @@ impl Workspace {
                         source_session_id: state.session_id.clone(),
                         placement: state.placement,
                         name: name.to_owned(),
-                        worktree_mode: ForkWorktreeMode::Current,
+                        worktree_mode: state.worktree_mode,
                         submission_key: state.submission_key.clone(),
                     },
                 )
@@ -7527,7 +7603,7 @@ impl Workspace {
                 && result["submissionKey"] == state.submission_key
             {
                 if let Some(error) = error {
-                    state.error = Some(error.into());
+                    state.error = Some(fork_error_text(error, self.locale).into());
                     state.submitting = false;
                     window.focus(&state.input.read(cx).focus);
                 } else if result["sessionId"].is_string() {
@@ -7548,8 +7624,10 @@ impl Workspace {
             {
                 if let Some(error) = error {
                     if self.graph_node(id).and_then(fork_failure_copy).is_some() {
-                        self.fork_retries
-                            .insert(id.into(), ForkRetry::Rejected(error.into()));
+                        self.fork_retries.insert(
+                            id.into(),
+                            ForkRetry::Rejected(fork_error_text(error, self.locale).into()),
+                        );
                     } else {
                         self.show_toast(error, cx);
                     }
@@ -7628,10 +7706,10 @@ impl Workspace {
             return;
         };
         let remembered = self.loader_remembered.get(id).cloned().unwrap_or_default();
-        let initial_provider = if node["currentMode"] == "codex" {
-            "codex"
-        } else {
-            "claude-code"
+        let initial_provider = match node["currentMode"].as_str() {
+            Some("codex") => "codex",
+            Some("dsh") => "dsh",
+            _ => "claude-code",
         };
         let provider = if history {
             history_provider.expect("history provider validated")
@@ -7664,7 +7742,7 @@ impl Workspace {
                     this.loader_search_changed(cx);
                 }
             });
-        self.dialog_controls = (0..8).map(|_| cx.focus_handle().tab_stop(true)).collect();
+        self.dialog_controls = (0..9).map(|_| cx.focus_handle().tab_stop(true)).collect();
         let list_focus = cx.focus_handle().tab_stop(true);
         let focus_subscriptions = [
             (input.read(cx).focus.clone(), LoaderFocus::Filter),
@@ -7672,6 +7750,7 @@ impl Workspace {
             (content_input.read(cx).focus.clone(), LoaderFocus::Content),
             (self.dialog_controls[4].clone(), LoaderFocus::Control(4)),
             (self.dialog_controls[5].clone(), LoaderFocus::Control(5)),
+            (self.dialog_controls[8].clone(), LoaderFocus::Control(8)),
         ]
         .into_iter()
         .map(|(handle, saved)| {
@@ -7687,7 +7766,9 @@ impl Workspace {
         } else {
             match remembered.focus {
                 LoaderFocus::List => list_focus.clone(),
-                LoaderFocus::Content if provider == "codex" => content_input.read(cx).focus.clone(),
+                LoaderFocus::Content if matches!(provider, "codex" | "dsh") => {
+                    content_input.read(cx).focus.clone()
+                }
                 LoaderFocus::Control(index @ (4 | 5)) => self.dialog_controls[index].clone(),
                 _ => input.read(cx).focus.clone(),
             }
@@ -7762,7 +7843,7 @@ impl Workspace {
         let Some(TabDialog::SessionLoader(state)) = &mut self.dialog else {
             return;
         };
-        if state.provider != "codex" {
+        if !state.remote_catalog() {
             self.refresh_loader_selection(true, cx);
             return;
         }
@@ -7821,19 +7902,35 @@ impl Workspace {
         if state.pending_list.is_some() || state.history {
             return;
         }
-        let command = if state.provider == "codex" {
+        let command = if state.remote_catalog() {
             self.loader_request_id += 1;
-            Command::ListCodexSessions {
-                request_id: self.loader_request_id,
-                cwd: state.cwd.clone(),
-                query: state.list_query.clone(),
-                full_text: false,
-                offset: Some(from as i64),
-                limit: Some(if refresh {
-                    state.sessions.len().clamp(50, 200) as i64
-                } else {
-                    50
-                }),
+            let request_id = self.loader_request_id;
+            let cwd = state.cwd.clone();
+            let query = state.list_query.clone();
+            let offset = Some(from as i64);
+            let limit = Some(if refresh {
+                state.sessions.len().clamp(50, 200) as i64
+            } else {
+                50
+            });
+            if state.provider == "dsh" {
+                Command::ListDshSessions {
+                    request_id,
+                    cwd,
+                    query,
+                    full_text: false,
+                    offset,
+                    limit,
+                }
+            } else {
+                Command::ListCodexSessions {
+                    request_id,
+                    cwd,
+                    query,
+                    full_text: false,
+                    offset,
+                    limit,
+                }
             }
         } else {
             Command::ListProviderSessions {
@@ -7963,7 +8060,7 @@ impl Workspace {
         state.confirm_running = false;
         state.detail_model = None;
         state.detail_permission = None;
-        if state.provider == "codex" {
+        if state.remote_catalog() {
             state.pending_detail = None;
             state.pending_search = None;
             state.search_hits.clear();
@@ -8002,7 +8099,7 @@ impl Workspace {
             return;
         };
         let start = page.map(|(start, _)| start);
-        let request_id = if state.provider == "codex" {
+        let request_id = if state.remote_catalog() {
             self.loader_request_id += 1;
             Some(self.loader_request_id)
         } else {
@@ -8010,13 +8107,24 @@ impl Workspace {
         };
         let limit = page.map(|(_, limit)| limit);
         let command = if let Some(request_id) = request_id {
-            Command::GetCodexSession {
-                request_id,
-                cwd: state.cwd.clone(),
-                provider_session_id: id.clone(),
-                start_event_index: start,
-                around_event_index: around,
-                limit,
+            if state.provider == "dsh" {
+                Command::GetDshSession {
+                    request_id,
+                    cwd: state.cwd.clone(),
+                    provider_session_id: id.clone(),
+                    before_event_index: page.map(|(start, count)| start + count),
+                    around_event_index: around,
+                    limit,
+                }
+            } else {
+                Command::GetCodexSession {
+                    request_id,
+                    cwd: state.cwd.clone(),
+                    provider_session_id: id.clone(),
+                    start_event_index: start,
+                    around_event_index: around,
+                    limit,
+                }
             }
         } else {
             Command::GetProviderSession {
@@ -8049,7 +8157,7 @@ impl Workspace {
         let Some(TabDialog::SessionLoader(state)) = &mut self.dialog else {
             return;
         };
-        if state.provider != "codex" {
+        if !state.remote_catalog() {
             return;
         }
         let query = state.content_input.read(cx).text.trim().to_owned();
@@ -8069,7 +8177,7 @@ impl Workspace {
             return;
         };
         let Some(id) = state.selected.as_ref().filter(|_| {
-            state.provider == "codex"
+            state.remote_catalog()
                 && !state.search_query.is_empty()
                 && state.pending_search.is_none()
         }) else {
@@ -8077,17 +8185,30 @@ impl Workspace {
         };
         self.loader_request_id += 1;
         let request_id = self.loader_request_id;
-        match self.commands.send_at(
-            self.runtime_generation,
+        let cwd = state.cwd.clone();
+        let provider_session_id = id.clone();
+        let query = state.search_query.clone();
+        let offset = Some(offset as i64);
+        let command = if state.provider == "dsh" {
+            Command::SearchDshSession {
+                request_id,
+                cwd,
+                provider_session_id,
+                query,
+                offset,
+                limit: None,
+            }
+        } else {
             Command::SearchCodexSession {
                 request_id,
-                cwd: state.cwd.clone(),
-                provider_session_id: id.clone(),
-                query: state.search_query.clone(),
-                offset: Some(offset as i64),
+                cwd,
+                provider_session_id,
+                query,
+                offset,
                 limit: None,
-            },
-        ) {
+            }
+        };
+        match self.commands.send_at(self.runtime_generation, command) {
             Ok(()) => state.pending_search = Some((request_id, state.search_query.clone())),
             Err(error) => state.error = Some(error.to_string()),
         }
@@ -8169,7 +8290,7 @@ impl Workspace {
         if !self.session_loader_can_submit(state) {
             return;
         }
-        if state.provider == "codex"
+        if state.remote_catalog()
             && !state.confirm_running
             && self.session_loader_running(&state.session_id)
         {
@@ -8191,13 +8312,24 @@ impl Workspace {
             .graph_node(&session_id)
             .and_then(|node| node["providerSpawnRevision"].as_u64())
             .unwrap_or(0);
+        let request_id = (state.provider == "dsh").then(|| {
+            self.loader_request_id += 1;
+            self.loader_request_id
+        });
         let load = LoaderLoad {
             provider: state.provider,
             id: session.id.clone(),
             title: session.title.clone(),
             previous_revision,
+            request_id,
         };
-        let command = if state.provider == "codex" {
+        let command = if let Some(request_id) = request_id {
+            Command::LoadDshSession {
+                request_id,
+                session_id: session_id.clone(),
+                provider_session_id: load.id.clone(),
+            }
+        } else if state.provider == "codex" {
             Command::LoadCodexSession {
                 session_id: session_id.clone(),
                 provider_session_id: load.id.clone(),
@@ -8227,8 +8359,8 @@ impl Workspace {
         };
         let Some(result) = results.iter().find(|result| {
             result["cwd"] == state.cwd
-                && if state.provider == "codex" {
-                    result["provider"] == "codex" && result["requestId"] == request.id
+                && if state.remote_catalog() {
+                    result["provider"] == state.provider && result["requestId"] == request.id
                 } else {
                     result["provider"].is_null()
                 }
@@ -8237,7 +8369,7 @@ impl Workspace {
         };
         let request = state.pending_list.take().unwrap();
         state.loading_list = false;
-        if state.provider == "codex" && request.query != state.list_query {
+        if state.remote_catalog() && request.query != state.list_query {
             self.request_loader_list(0, false);
             return;
         }
@@ -8291,7 +8423,7 @@ impl Workspace {
         };
         let Some(result) = results.iter().find(|result| {
             if let Some(request_id) = request.request_id {
-                return result["provider"] == "codex"
+                return result["provider"] == state.provider
                     && result["requestId"] == request_id
                     && result["search"] != true;
             }
@@ -8352,6 +8484,60 @@ impl Workspace {
                     state.preview_scroll.scroll_to_bottom();
                 }
             }
+        }
+        cx.notify();
+    }
+
+    fn receive_dsh_loader_reply(
+        &mut self,
+        kind: &str,
+        request_id: u64,
+        reply: &Value,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if kind == "dshSessionLoadResult" {
+            // Queue acknowledgement is not a committed provider identity.
+            if let Some(error) = reply["error"].as_str()
+                && let Some((session_id, load)) = self
+                    .pending_loader_loads
+                    .iter()
+                    .find(|(_, load)| load.request_id == Some(request_id))
+            {
+                let errors = [serde_json::json!({
+                    "sessionId": session_id, "providerSessionId": load.id, "error": error,
+                })];
+                self.finish_session_loader(&errors, window, cx);
+                cx.notify();
+            }
+            return;
+        }
+        if !matches!(
+            kind,
+            "dshSessionListResult" | "dshSessionDetailResult" | "dshSessionSearchResult"
+        ) || !matches!(&self.dialog, Some(TabDialog::SessionLoader(state)) if state.provider == "dsh")
+        {
+            return;
+        }
+        let Some(TabDialog::SessionLoader(state)) = &self.dialog else {
+            return;
+        };
+        // Translate the DSH envelope into the session loader's existing projections.
+        let mut row = reply["result"].as_object().cloned().unwrap_or_default();
+        row.insert("provider".into(), "dsh".into());
+        row.insert("requestId".into(), request_id.into());
+        row.insert("cwd".into(), state.cwd.clone().into());
+        if let Some(error) = reply.get("error") {
+            row.insert("error".into(), error.clone());
+        }
+        if kind == "dshSessionSearchResult" {
+            row.insert("search".into(), true.into());
+        }
+        let rows = [Value::Object(row)];
+        match kind {
+            "dshSessionListResult" => self.loader_catalog_result(&rows, cx),
+            "dshSessionDetailResult" => self.loader_detail_result(&rows, cx),
+            _ => self.loader_search_result(&rows, cx),
         }
         cx.notify();
     }
@@ -9296,13 +9482,20 @@ impl Workspace {
     }
 
     fn footer_fields(&self) -> Option<FooterFields<'_>> {
-        let node = self.graph_node(self.level_focus()?)?;
+        let id = self.level_focus()?;
+        let node = self.graph_node(id)?;
         let mode = node["currentMode"].as_str()?;
         let codex = (mode == "codex").then(|| codex_hud::CodexHud::from_node(node));
+        let hud = self
+            .live_agent_hud(id)
+            .map(|hud| codex_hud::CodexHud::from_node(&serde_json::json!({"codexHud": hud})));
         let name = if mode == "shell" {
             self.footer_shell.clone()
         } else if let Some(codex) = codex.as_ref() {
-            codex.model_label().map(|label| label.to_string())
+            hud.as_ref()
+                .and_then(|hud| hud.model_label())
+                .or_else(|| codex.model_label())
+                .map(|label| label.to_string())
         } else {
             trimmed_graph_text(&node["model"]).map(|model| {
                 let model = if mode == "claude-code"
@@ -9333,6 +9526,7 @@ impl Workspace {
             environment,
             account: !matches!(mode, "codex" | "dsh" | "antigravity"),
             codex,
+            live_hud: hud,
         })
     }
 
@@ -10947,6 +11141,7 @@ impl Workspace {
         let filter_empty = input.text.is_empty();
         let filter_focused = input.focus.is_focused(window);
         let is_codex = state.provider == "codex";
+        let remote_catalog = state.remote_catalog();
         let content_input = state.content_input.read(cx);
         let content_empty = content_input.text.is_empty();
         let content_focused = content_input.focus.is_focused(window);
@@ -10962,7 +11157,7 @@ impl Workspace {
         let running = !state.history && self.session_loader_running(&state.session_id);
         // Claude keeps the always-on running warning; Codex only reveals the
         // same warning after the first press moves the button into confirm mode.
-        let confirm_warning = if is_codex {
+        let confirm_warning = if remote_catalog {
             state.confirm_running
         } else {
             running
@@ -11066,7 +11261,11 @@ impl Workspace {
                 ),
         );
 
-        let provider_name = if is_codex { "Codex" } else { "Claude Code" };
+        let provider_name = match state.provider {
+            "codex" => "Codex",
+            "dsh" => "DSH",
+            _ => "Claude Code",
+        };
         let mut rows = Vec::with_capacity(sessions.len());
         for session in &sessions {
             let is_selected = state.selected.as_deref() == Some(session.id.as_str());
@@ -11194,7 +11393,7 @@ impl Workspace {
             .track_scroll(&state.list_scroll)
             .track_focus(&state.list_focus)
             .when(
-                is_codex && state.has_more_sessions && !state.loading_list,
+                remote_catalog && state.has_more_sessions && !state.loading_list,
                 |list| {
                     list.on_scroll_wheel(cx.listener(
                         |this, event: &ScrollWheelEvent, window, cx| {
@@ -11261,7 +11460,12 @@ impl Workspace {
                     .text_size(px(11.))
                     .text_color(rgb(0x77818e))
                     .child(ui_text(if filter_empty {
-                        if is_codex {
+                        if state.provider == "dsh" {
+                            self.locale.text(
+                                "当前工作空间内没有 DSH 会话",
+                                "No DSH sessions in this workspace",
+                            )
+                        } else if is_codex {
                             self.locale.text(
                                 "当前工作空间内没有 Codex 会话",
                                 "No Codex sessions in this workspace",
@@ -11441,7 +11645,7 @@ impl Workspace {
                             .child(ui_text(meta).normal_line_height())
                     })),
             )
-            .when(is_codex, |header| header.child(content_search));
+            .when(remote_catalog, |header| header.child(content_search));
 
         let mut events = div()
             .id("session-loader-events")
@@ -11508,7 +11712,11 @@ impl Workspace {
                 "user" => (0x343b46, 0x252b32),
                 _ => (0x343b46, 0x20242a),
             };
-            let assistant = if is_codex { "Codex" } else { "Claude" };
+            let assistant = if remote_catalog {
+                provider_name
+            } else {
+                "Claude"
+            };
             let label = loader_event_label(
                 &event.kind,
                 event.tool_name.as_deref(),
@@ -11683,7 +11891,7 @@ impl Workspace {
                     )
                 },
             );
-        let hits_panel = (is_codex && !content_empty).then_some(hits_panel);
+        let hits_panel = (remote_catalog && !content_empty).then_some(hits_panel);
 
         let preview = div()
             .id("session-loader-preview")
@@ -11710,7 +11918,7 @@ impl Workspace {
             self.locale
                 .text(SESSION_LOADER_LOADING, "Loading…")
                 .to_owned()
-        } else if is_codex && state.confirm_running {
+        } else if remote_catalog && state.confirm_running {
             self.locale
                 .text("结束当前进程并载入", "End the current run and load")
                 .to_owned()
@@ -11846,8 +12054,6 @@ impl Workspace {
                 )
             }));
 
-        // Frozen provider switch: Claude Code then Codex, between the title
-        // block and the close button. Only indices 4/5 are claimed here.
         let provider_tab = |provider: &'static str,
                             label: &'static str,
                             focus: &FocusHandle,
@@ -11901,6 +12107,7 @@ impl Workspace {
                     cx,
                 ))
                 .child(provider_tab("codex", "Codex", &self.dialog_controls[5], cx))
+                .child(provider_tab("dsh", "DSH", &self.dialog_controls[8], cx))
         });
 
         let header = div()
@@ -11932,6 +12139,8 @@ impl Workspace {
                             .child(
                                 ui_text(if state.history {
                                     self.locale.text("会话历史", "Session history")
+                                } else if state.provider == "dsh" {
+                                    self.locale.text("载入 DSH 会话", "Load DSH session")
                                 } else if is_codex {
                                     self.locale.text("载入 Codex 会话", "Load Codex session")
                                 } else {
@@ -12028,8 +12237,11 @@ impl Workspace {
         placement: ForkPlacement,
         cx: &mut Context<Self>,
     ) -> Option<Stateful<Div>> {
-        let access = self.fork_access(id, placement)?;
         let sibling = placement == ForkPlacement::Sibling;
+        if !sibling && self.graph_node(id)?["currentMode"] == "codex" {
+            return None;
+        }
+        let access = self.fork_access(id, placement)?;
         let (role, title) = if sibling {
             ("sibling", "从共同父会话 Fork 兄弟分支")
         } else {
@@ -12061,6 +12273,7 @@ impl Workspace {
 
     fn render_fork_failure(&self, id: &str, node: &Value, cx: &mut Context<Self>) -> Option<Div> {
         let (title, reason) = fork_failure_copy(node)?;
+        let reason = reason.map(|error| fork_error_text(error, self.locale));
         let retry = self.fork_retries.get(id);
         let pending = matches!(retry, Some(ForkRetry::Pending));
         let error = match retry {
@@ -12165,6 +12378,7 @@ impl Workspace {
             title,
             &description,
             hint,
+            state.worktree_mode == ForkWorktreeMode::New,
             count,
             state.submitting,
             state.error.as_deref(),
@@ -12973,7 +13187,7 @@ impl Workspace {
             .and_then(|fields| fields.codex.as_ref())
             .is_some();
         let show_model = !codex_selected || status_content_width > codex_hud::MODEL_HIDE_BELOW;
-        let show_context = codex_selected && status_content_width > codex_hud::CONTEXT_HIDE_BELOW;
+        let show_context = status_content_width > codex_hud::CONTEXT_HIDE_BELOW;
         let status_gap = if status_content_width < FOOTER_COMPACT_STATUS_WIDTH {
             FOOTER_GAP / 2.
         } else {
@@ -13280,13 +13494,22 @@ impl Workspace {
                         status.child(codex_hud::model_slot(SharedString::from(name.to_owned())));
                 }
             }
-            if let Some(codex) = fields.codex.as_ref() {
-                if show_context && let Some(percent) = codex.context_percent() {
-                    status = status.child(codex_hud::context_ring(percent));
-                }
-                if let Some(tools) = codex.tools_slot() {
-                    status = status.child(tools);
-                }
+            if show_context
+                && let Some(percent) = fields
+                    .live_hud
+                    .as_ref()
+                    .and_then(|hud| hud.context_percent())
+                    .or_else(|| fields.codex.as_ref().and_then(|hud| hud.context_percent()))
+            {
+                status = status.child(codex_hud::context_ring(percent));
+            }
+            if let Some(tools) = fields
+                .live_hud
+                .as_ref()
+                .and_then(|hud| hud.tools_slot())
+                .or_else(|| fields.codex.as_ref().and_then(|hud| hud.tools_slot()))
+            {
+                status = status.child(tools);
             }
             status = status.child(optional).child(fixed);
         } else {
@@ -14196,6 +14419,7 @@ impl Render for Workspace {
                     )
                 })
                 .children(self.render_card_egress(id, cx))
+                .children(self.render_live_teammates(id))
                 .children(provider_banner.map(|banner| {
                     self.render_provider_restore_banner(id, banner, palette.terminal, cx)
                 }))
@@ -15840,6 +16064,7 @@ struct FooterFields<'a> {
     environment: Option<FooterEnvironment>,
     account: bool,
     codex: Option<codex_hud::CodexHud>,
+    live_hud: Option<codex_hud::CodexHud>,
 }
 
 struct FooterGit {
@@ -16066,8 +16291,8 @@ const FORK_USE_CURRENT_WORKTREE: &str = "使用当前工作树";
 const FORK_USE_NEW_WORKTREE: &str = "从新工作树创建";
 /// `sessionCanvas.branchDialog.newWorktreeHint`.
 const FORK_NEW_WORKTREE_HINT: &str = "创建隔离的 Git worktree，适合多个功能并行开发";
-/// `sessionCanvas.branchDialog.needsGitRepository`.
 const FORK_NEEDS_GIT_REPOSITORY: &str = "需要 Git 仓库";
+/// `sessionCanvas.branchDialog.needsGitRepository`.
 /// `sessionCanvas.branchDialog.name`.
 const FORK_DIALOG_NAME: &str = "分支名称";
 /// `sessionCanvas.branchDialog.creating`.
@@ -16213,15 +16438,14 @@ fn fork_worktree_card(
 
 /// `.branch-dialog` panel, excluding the overlay/backdrop owned by the host.
 /// `so` is `(close, input, cancel, confirm)`; the input must be the existing
-/// `RenameInput` entity. The two worktree cards are frozen presentation: the
-/// current worktree is selected and the new-worktree card is always disabled
-/// this round, with its "需要 Git 仓库" note.
+/// `RenameInput` entity. The menu entry determines the selected worktree.
 #[allow(clippy::too_many_arguments)]
 fn fork_dialog_panel(
     viewport_width: Pixels,
     title: &str,
     description: &str,
     current_hint: &str,
+    new_worktree: bool,
     count: usize,
     submitting: bool,
     error: Option<&str>,
@@ -16285,18 +16509,18 @@ fn fork_dialog_panel(
                 .child(FORK_WORKTREE_SECTION),
         )
         .child(fork_worktree_card(
-            true,
-            false,
+            !new_worktree,
+            new_worktree,
             FORK_USE_CURRENT_WORKTREE,
             current_hint,
             None,
         ))
         .child(fork_worktree_card(
-            false,
-            true,
+            new_worktree,
+            !new_worktree,
             FORK_USE_NEW_WORKTREE,
             FORK_NEW_WORKTREE_HINT,
-            Some(FORK_NEEDS_GIT_REPOSITORY),
+            (!new_worktree).then_some(FORK_NEEDS_GIT_REPOSITORY),
         ));
     let mut panel = div()
         .flex()
