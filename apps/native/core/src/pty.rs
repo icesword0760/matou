@@ -160,22 +160,58 @@ fn write_zsh_integration(directory: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(windows)]
 fn matches_key(left: &OsStr, right: &OsStr) -> bool {
-    #[cfg(windows)]
     if let (Some(left), Some(right)) = (left.to_str(), right.to_str()) {
         return left.eq_ignore_ascii_case(right);
     }
     left == right
 }
 
-pub(crate) fn get_var<'a>(
+/// Look up a variable using the target platform's environment key semantics.
+pub fn get_var<'a>(environment: &'a BTreeMap<OsString, OsString>, key: &str) -> Option<&'a OsStr> {
+    get_var_for_platform(environment, key, cfg!(windows))
+}
+
+fn get_var_for_platform<'a>(
     environment: &'a BTreeMap<OsString, OsString>,
     key: &str,
+    windows: bool,
 ) -> Option<&'a OsStr> {
-    environment
-        .iter()
-        .find(|(name, _)| matches_key(name, OsStr::new(key)))
-        .map(|(_, value)| value.as_os_str())
+    if windows {
+        return environment
+            .iter()
+            .find(|(name, _)| {
+                name.to_str()
+                    .is_some_and(|name| name.eq_ignore_ascii_case(key))
+            })
+            .map(|(_, value)| value.as_os_str());
+    }
+    environment.get(OsStr::new(key)).map(OsString::as_os_str)
+}
+
+#[test]
+fn windows_environment_lookup_accepts_mixed_case_keys() {
+    let environment = BTreeMap::from([
+        ("Path".into(), "cli directory".into()),
+        ("Codex_Home".into(), "config directory".into()),
+        ("UserProfile".into(), "user directory".into()),
+        ("Home".into(), "home directory".into()),
+        ("Antigravity_Home".into(), "provider directory".into()),
+    ]);
+    for (key, value) in [
+        ("PATH", "cli directory"),
+        ("CODEX_HOME", "config directory"),
+        ("USERPROFILE", "user directory"),
+        ("HOME", "home directory"),
+        ("ANTIGRAVITY_HOME", "provider directory"),
+    ] {
+        assert_eq!(
+            get_var_for_platform(&environment, key, true),
+            Some(OsStr::new(value))
+        );
+        assert_eq!(get_var_for_platform(&environment, key, false), None);
+    }
 }
 
 #[cfg(unix)]
@@ -213,11 +249,8 @@ pub(crate) fn remove_var(environment: &mut BTreeMap<OsString, OsString>, key: &O
     environment.remove(key);
 }
 
-pub(crate) fn set_var(
-    environment: &mut BTreeMap<OsString, OsString>,
-    key: OsString,
-    value: OsString,
-) {
+/// Set a variable, replacing case variants on Windows.
+pub fn set_var(environment: &mut BTreeMap<OsString, OsString>, key: OsString, value: OsString) {
     #[cfg(windows)]
     remove_var(environment, &key);
     environment.insert(key, value);
@@ -385,7 +418,7 @@ impl PtyProcess {
         );
 
         let mut command = CommandBuilder::new(&launch.executable);
-        let mut environment = match launch.profile {
+        let environment = match launch.profile {
             LaunchProfile::Shell => {
                 let environment = prepare_shell_environment(launch)?;
                 #[cfg(unix)]
@@ -431,7 +464,11 @@ impl PtyProcess {
             }
         };
         #[cfg(unix)]
-        ensure_utf8_locale(&mut environment);
+        let environment = {
+            let mut environment = environment;
+            ensure_utf8_locale(&mut environment);
+            environment
+        };
         command.args(&launch.argv);
         command.cwd(&launch.cwd);
         command.env_clear();

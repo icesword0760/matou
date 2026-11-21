@@ -1,4 +1,4 @@
-import { copyFile, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises'
+import { copyFile, cp, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { basename, isAbsolute, join, parse, relative, resolve, sep, win32 } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -16,6 +16,7 @@ const updateConfigFilename = 'app-update.yml'
 const resourcesDirectory = 'resources'
 const manifestFilename = 'manifest.json'
 const versionFilename = 'version.json'
+const claudePluginSource = fileURLToPath(new URL('../../apps/runtime/control-assets/providers/claude-plugin/', import.meta.url))
 const machines = { x64: 0x8664, arm64: 0xaa64 }
 const versionPattern = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/
 
@@ -370,6 +371,27 @@ async function requireEntries(directory, expected, label) {
   }
 }
 
+async function verifyClaudePlugin(resources) {
+  const assets = join(resources, 'control-assets')
+  const providers = join(assets, 'providers')
+  const plugin = join(providers, 'claude-plugin')
+  await requireEntries(assets, ['providers'], 'control assets')
+  await requireEntries(providers, ['claude-plugin'], 'control asset providers')
+  await requirePath(plugin, 'Claude plugin', true)
+  const sourceEntries = await readdir(claudePluginSource, { recursive: true, withFileTypes: true })
+  for (const entry of sourceEntries) {
+    const source = join(entry.parentPath, entry.name)
+    const destination = join(plugin, relative(claudePluginSource, source))
+    await requirePath(destination, 'Claude plugin asset', entry.isDirectory())
+    if (entry.isFile() && !(await readFile(destination)).equals(await readFile(source))) {
+      throw new Error(`Claude plugin asset differs from source: ${destination}`)
+    }
+  }
+  if ((await readdir(plugin, { recursive: true })).length !== sourceEntries.length) {
+    throw new Error(`Unexpected Claude plugin assets at ${plugin}`)
+  }
+}
+
 export async function verifyWindowsDirPackage(path, options) {
   const plan = planWindowsPackage(options)
   if (basename(resolve(path)) !== plan.unpackedDirectoryName) {
@@ -377,7 +399,8 @@ export async function verifyWindowsDirPackage(path, options) {
   }
   const resources = join(path, plan.resourcesDirectory)
   await requireEntries(path, [plan.applicationExecutable, plan.runtimeExecutable, plan.resourcesDirectory], 'unpacked package')
-  await requireEntries(resources, [plan.manifestFilename, plan.versionFilename], 'resources')
+  await requireEntries(resources, [plan.manifestFilename, plan.versionFilename, 'control-assets'], 'resources')
+  await verifyClaudePlugin(resources)
   const { manifest, version } = packageMetadata(plan)
   for (const [filename, expected] of [[plan.manifestFilename, manifest], [plan.versionFilename, version]]) {
     const metadata = join(resources, filename)
@@ -481,6 +504,7 @@ export async function assembleWindowsDirPackage({ desktopBin, runtimeBin, outDir
     await mkdir(resources, { recursive: true })
     await copyFile(desktopBin, join(directory, plan.applicationExecutable))
     await copyFile(runtimeBin, join(directory, plan.runtimeExecutable))
+    await cp(claudePluginSource, join(resources, 'control-assets', 'providers', 'claude-plugin'), { recursive: true })
     const { manifest, version } = packageMetadata(plan)
     await writeFile(join(resources, plan.manifestFilename), pretty(manifest) + '\n')
     await writeFile(join(resources, plan.versionFilename), pretty(version) + '\n')

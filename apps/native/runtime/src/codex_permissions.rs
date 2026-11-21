@@ -6,9 +6,10 @@ use std::{
     path::Path,
 };
 
+use matou_native_core::pty::get_var;
 use serde_json::Value;
 
-use crate::shell_input::CODEX_BYPASS;
+use crate::{codex_launch, shell_input::CODEX_BYPASS};
 
 pub(crate) const MODES: [&str; 4] = ["default", "acceptEdits", "plan", "bypassPermissions"];
 const DEFAULT_PERMISSIONS: (&str, &str) = ("on-request", "workspace-write");
@@ -64,18 +65,9 @@ fn default_permissions(
     cwd: &Path,
     environment: &BTreeMap<OsString, OsString>,
 ) -> ((&'static str, &'static str), bool) {
-    let get = |key| {
-        environment
-            .get(OsStr::new(key))
-            .filter(|path| !path.is_empty())
-    };
-    let home_key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
-    let root = get("CODEX_HOME").map(|path| cwd.join(path)).or_else(|| {
-        get(home_key)
-            .map(|home| cwd.join(home))
-            .or_else(std::env::home_dir)
-            .map(|home| home.join(".codex"))
-    });
+    let root = codex_launch::config_root(|key| get_var(environment, key))
+        .map(|root| cwd.join(root))
+        .or_else(|| std::env::home_dir().map(|home| home.join(".codex")));
     let Some(root) = root else {
         return (DEFAULT_PERMISSIONS, false);
     };

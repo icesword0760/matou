@@ -1,17 +1,27 @@
 use crate::flow::Utf8Decoder;
 use matou_native_core::pty::LaunchProfile;
 
-#[cfg(unix)]
+#[cfg(windows)]
+use std::os::windows::{io::AsRawHandle, process::CommandExt};
+#[cfg(any(unix, windows))]
 use std::{
-    collections::{BTreeMap, HashMap},
-    ffi::{OsStr, OsString},
-    io::{ErrorKind, Read},
-    os::{fd::AsRawFd, unix::process::CommandExt},
-    path::{Path, PathBuf},
+    collections::BTreeMap,
+    ffi::OsString,
+    io::Read,
+    path::PathBuf,
     process::{Command, Stdio},
-    sync::{Arc, LazyLock, Mutex, OnceLock},
+    sync::{Arc, OnceLock},
     thread,
     time::{Duration, Instant},
+};
+#[cfg(unix)]
+use std::{
+    collections::HashMap,
+    ffi::OsStr,
+    io::ErrorKind,
+    os::{fd::AsRawFd, unix::process::CommandExt},
+    path::Path,
+    sync::{LazyLock, Mutex},
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -24,16 +34,16 @@ pub(crate) struct InteractiveLaunch {
 pub(crate) struct ShellInput {
     line: Vec<u16>,
     decoder: Utf8Decoder,
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     cc_alias: Option<Arc<ShellAliasEnvironment>>,
 }
 
 impl ShellInput {
     pub(crate) fn observe(&mut self, bytes: &[u8]) -> Option<InteractiveLaunch> {
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         let cc_alias = self.cc_alias.clone();
         self.observe_with_cc(bytes, || {
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             if let Some(environment) = cc_alias {
                 return *environment.preheat_cc().wait();
             }
@@ -41,32 +51,49 @@ impl ShellInput {
         })
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     pub(crate) fn with_shell_environment(launch: &matou_native_core::pty::ShellLaunch) -> Self {
-        let mut env = launch.inherited_env.clone();
-        env.extend(launch.env.clone());
+        #[cfg(unix)]
+        let env = {
+            let mut env = launch.inherited_env.clone();
+            env.extend(launch.env.clone());
+            env
+        };
+        #[cfg(windows)]
+        let env = {
+            if !is_powershell(&launch.executable) {
+                return Self::default();
+            }
+            let Ok(env) = matou_native_core::pty::prepare_shell_environment(launch) else {
+                return Self::default();
+            };
+            env
+        };
         Self {
             cc_alias: Some(Arc::new(ShellAliasEnvironment {
                 env,
                 cwd: launch.cwd.clone(),
+                #[cfg(windows)]
+                executable: launch.executable.clone(),
                 probe: OnceLock::new(),
             })),
             ..Self::default()
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     pub(crate) fn preheat_cc(&self) {
-        if let Some(environment) = &self.cc_alias
-            && matches!(
+        if let Some(environment) = &self.cc_alias {
+            #[cfg(unix)]
+            if !matches!(
                 Path::new(environment.shell())
                     .file_name()
                     .and_then(OsStr::to_str),
                 Some("zsh" | "bash" | "sh" | "dash" | "ash" | "ksh" | "mksh")
-            )
-        {
-            // A configured PTY executable may be an application or a wrapper.
-            // Launch those only if the user actually submits the alias.
+            ) {
+                // Launch an unrecognized Unix shell or wrapper only on submission.
+                return;
+            }
             environment.preheat_cc();
         }
     }
@@ -140,6 +167,9 @@ fn interactive_launch_with_cc(
             (LaunchProfile::ClaudeCode, "bypassPermissions")
         }
         (Some("cc"), None, None) => return resolve_cc(),
+        (Some(alias), None, None) if cfg!(windows) && alias.eq_ignore_ascii_case("cc") => {
+            return resolve_cc();
+        }
         (Some("codex"), None, None) => (LaunchProfile::Codex, "default"),
         (Some("codex"), Some(CODEX_BYPASS), None) => (LaunchProfile::Codex, "bypassPermissions"),
         _ => return None,
@@ -147,25 +177,28 @@ fn interactive_launch_with_cc(
     Some(InteractiveLaunch { profile, mode })
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 struct ShellAliasEnvironment {
     env: BTreeMap<OsString, OsString>,
     cwd: PathBuf,
+    #[cfg(windows)]
+    executable: PathBuf,
     probe: OnceLock<AliasProbe>,
 }
 
 #[cfg(unix)]
 type AliasKey = [Option<OsString>; 3];
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 type AliasProbe = Arc<OnceLock<Option<InteractiveLaunch>>>;
 
 #[cfg(unix)]
 static CC_LAUNCHES: LazyLock<Mutex<HashMap<AliasKey, AliasProbe>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 impl ShellAliasEnvironment {
+    #[cfg(unix)]
     fn shell(&self) -> &OsStr {
         self.env
             .get(OsStr::new("SHELL"))
@@ -176,6 +209,7 @@ impl ShellAliasEnvironment {
         self.probe.get_or_init(|| self.start_cc_probe())
     }
 
+    #[cfg(unix)]
     fn start_cc_probe(self: &Arc<Self>) -> AliasProbe {
         let key = ["SHELL", "HOME", "ZDOTDIR"].map(|name| self.env.get(OsStr::new(name)).cloned());
         let mut cache = CC_LAUNCHES.lock().expect("configured alias cache");
@@ -211,6 +245,7 @@ impl ShellAliasEnvironment {
         probe
     }
 
+    #[cfg(unix)]
     fn probe(&self, shell: &OsStr) -> Option<String> {
         // The alias must be resolved using the session's shell configuration.
         if self.env.get(OsStr::new("HOME"))?.is_empty() {
@@ -266,6 +301,134 @@ impl ShellAliasEnvironment {
         }
         output
     }
+
+    #[cfg(windows)]
+    fn start_cc_probe(self: &Arc<Self>) -> AliasProbe {
+        let probe = AliasProbe::default();
+        let pending = probe.clone();
+        let environment = self.clone();
+        if thread::Builder::new()
+            .name("matou-cc-alias".into())
+            .spawn(move || {
+                let _ = pending.set(environment.probe_powershell());
+            })
+            .is_err()
+        {
+            let _ = probe.set(None);
+        }
+        probe
+    }
+
+    #[cfg(windows)]
+    fn probe_powershell(&self) -> Option<InteractiveLaunch> {
+        const QUERY: &str = r#"
+            $alias = Get-Alias -Name cc -ErrorAction SilentlyContinue
+            if ($alias) {
+                $definition = $alias.Definition
+                if ($alias.ResolvedCommand -is [System.Management.Automation.FunctionInfo]) {
+                    $definition = $alias.ResolvedCommand.Definition.Trim()
+                    $definition = $definition -creplace '\s+@args$', ''
+                }
+                if ($definition.Contains([char]10) -or $definition.Contains([char]13)) { exit 1 }
+                [Console]::WriteLine()
+                [Console]::WriteLine('MATOU_CC_ALIAS=' + $definition)
+            }
+        "#;
+        let mut child = Command::new(&self.executable)
+            .args(["-NoLogo", "-NonInteractive", "-Command", QUERY])
+            .current_dir(&self.cwd)
+            .env_clear()
+            .envs(&self.env)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW
+            .spawn()
+            .ok()?;
+        let output = (|| {
+            let mut stdout = child.stdout.take()?;
+            let deadline = Instant::now() + Duration::from_secs(15);
+            let mut bytes = Vec::new();
+            let mut chunk = [0; 4096];
+            while Instant::now() < deadline && bytes.len() <= 64 * 1024 {
+                let available = pipe_bytes_available(&stdout)?.min(chunk.len());
+                if available > 0 {
+                    let count = stdout.read(&mut chunk[..available]).ok()?;
+                    bytes.extend_from_slice(&chunk[..count]);
+                } else if let Some(status) = child.try_wait().ok()? {
+                    // Check again after observing exit to include its final write.
+                    if pipe_bytes_available(&stdout)? == 0 {
+                        return status.success().then_some(bytes);
+                    }
+                } else {
+                    thread::sleep(Duration::from_millis(5));
+                }
+            }
+            None
+        })();
+        if output.is_none() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        parse_powershell_cc_alias(std::str::from_utf8(&output?).ok()?)
+    }
+}
+
+#[cfg(any(windows, test))]
+fn is_powershell(executable: &std::path::Path) -> bool {
+    executable
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|name| {
+            ["powershell.exe", "pwsh.exe", "powershell", "pwsh"]
+                .iter()
+                .any(|shell| name.eq_ignore_ascii_case(shell))
+        })
+}
+
+#[cfg(windows)]
+fn pipe_bytes_available(pipe: &std::process::ChildStdout) -> Option<usize> {
+    use std::{ffi::c_void, ptr::null_mut};
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn PeekNamedPipe(
+            pipe: *mut c_void,
+            buffer: *mut c_void,
+            buffer_size: u32,
+            bytes_read: *mut u32,
+            total_bytes_available: *mut u32,
+            bytes_left: *mut u32,
+        ) -> i32;
+    }
+
+    let mut available = 0;
+    // With a null buffer this queries the pipe without consuming or waiting for data.
+    let ok = unsafe {
+        PeekNamedPipe(
+            pipe.as_raw_handle(),
+            null_mut(),
+            0,
+            null_mut(),
+            &mut available,
+            null_mut(),
+        )
+    };
+    const ERROR_BROKEN_PIPE: i32 = 109;
+    if ok == 0 && std::io::Error::last_os_error().raw_os_error() != Some(ERROR_BROKEN_PIPE) {
+        return None;
+    }
+    Some(available as usize)
+}
+
+#[cfg(any(windows, test))]
+fn parse_powershell_cc_alias(output: &str) -> Option<InteractiveLaunch> {
+    let definition = output
+        .lines()
+        .rev()
+        .find_map(|line| line.strip_prefix("MATOU_CC_ALIAS="))?;
+    interactive_launch_with_cc(definition, || None)
+        .filter(|launch| launch.profile == LaunchProfile::ClaudeCode)
 }
 
 #[cfg(any(unix, test))]
@@ -294,6 +457,34 @@ fn parse_cc_alias(output: &str) -> Option<InteractiveLaunch> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn powershell_cc_maps_only_recognized_alias_definitions() {
+        assert!(is_powershell(std::path::Path::new(
+            "shell with spaces/PwSh.EXE"
+        )));
+        assert!(!is_powershell(std::path::Path::new("cmd.exe")));
+        for (definition, mode) in [
+            ("claude", Some("default")),
+            (
+                "claude --dangerously-skip-permissions",
+                Some("bypassPermissions"),
+            ),
+            ("claude -p", None),
+            ("claude; another-command", None),
+            ("codex", None),
+            ("cc", None),
+        ] {
+            let output = format!("Profile banner\r\nMATOU_CC_ALIAS={definition}\r\n");
+            assert_eq!(
+                ShellInput::default()
+                    .observe_with_cc(b"cc\r", || parse_powershell_cc_alias(&output))
+                    .map(|launch| launch.mode),
+                mode,
+            );
+        }
+        assert!(parse_powershell_cc_alias("Profile banner\n").is_none());
+    }
 
     #[test]
     fn cc_only_promotes_recognized_claude_aliases() {

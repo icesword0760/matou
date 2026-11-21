@@ -214,7 +214,7 @@ impl ExternalAgents {
         &mut self,
         directory: &Path,
         now: f64,
-        alive: impl Fn(u32) -> bool,
+        alive: impl Fn(u32) -> Option<bool>,
     ) -> Vec<AgentActivity> {
         if self
             .refreshed
@@ -306,7 +306,7 @@ impl ExternalStatus {
         })
     }
 
-    fn project(&mut self, now: f64, alive: &impl Fn(u32) -> bool) -> Option<AgentActivity> {
+    fn project(&mut self, now: f64, alive: &impl Fn(u32) -> Option<bool>) -> Option<AgentActivity> {
         let age = now - self.updated_at;
         if matches!(self.state.as_str(), "completed" | "stopped")
             || self.state == "error" && age >= 300_000.
@@ -314,7 +314,7 @@ impl ExternalStatus {
             return None;
         }
         let mut activity = self.activity.clone();
-        if self.state != "error" && self.pid.is_some_and(|pid| !alive(pid)) {
+        if self.state != "error" && self.pid.and_then(alive) == Some(false) {
             let interrupted = *self.interrupted_at.get_or_insert(now);
             if now - interrupted >= 300_000. {
                 return None;
@@ -332,21 +332,66 @@ impl ExternalStatus {
     }
 }
 
-fn process_alive(pid: u32) -> bool {
-    #[cfg(unix)]
-    {
-        let Ok(pid) = libc::pid_t::try_from(pid) else {
-            return false;
-        };
-        // Signal zero only checks whether the process exists.
+#[cfg(unix)]
+fn process_alive(pid: u32) -> Option<bool> {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return Some(false);
+    };
+    // Signal zero only checks whether the process exists.
+    Some(
         (unsafe { libc::kill(pid, 0) }) == 0
-            || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+            || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM),
+    )
+}
+
+#[cfg(windows)]
+fn process_alive(pid: u32) -> Option<bool> {
+    use std::{
+        ffi::c_void,
+        os::windows::io::{FromRawHandle, OwnedHandle},
+    };
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut c_void;
+        fn GetExitCodeProcess(process: *mut c_void, exit_code: *mut u32) -> i32;
+        fn WaitForSingleObject(handle: *mut c_void, milliseconds: u32) -> u32;
     }
-    #[cfg(not(unix))]
-    {
-        let _ = pid;
-        true
+
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    const SYNCHRONIZE: u32 = 0x0010_0000;
+    const ERROR_INVALID_PARAMETER: i32 = 87;
+    const STILL_ACTIVE: u32 = 259;
+    const WAIT_OBJECT_0: u32 = 0;
+    const WAIT_TIMEOUT: u32 = 258;
+
+    let raw = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, 0, pid) };
+    if raw.is_null() {
+        return match std::io::Error::last_os_error().raw_os_error() {
+            Some(ERROR_INVALID_PARAMETER) => Some(false),
+            _ => None,
+        };
     }
+    // Own the handle returned by OpenProcess so every path closes it.
+    let _process = unsafe { OwnedHandle::from_raw_handle(raw) };
+    let mut exit_code = 0;
+    if unsafe { GetExitCodeProcess(raw, &mut exit_code) } == 0 {
+        return None;
+    }
+    if exit_code != STILL_ACTIVE {
+        return Some(false);
+    }
+    // A process can exit with code 259. A signalled process handle resolves that ambiguity.
+    match unsafe { WaitForSingleObject(raw, 0) } {
+        WAIT_OBJECT_0 => Some(false),
+        WAIT_TIMEOUT => Some(true),
+        _ => None,
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn process_alive(_pid: u32) -> Option<bool> {
+    None
 }
 
 #[cfg(test)]
@@ -435,24 +480,28 @@ skip = true
         )?;
         let mut reader = ExternalAgents::default();
         let now = timestamp_ms(&json!("2026-11-21T12:00:00Z")).unwrap();
-        let running = reader.read_with(root.path(), now, |_| true);
+        let running = reader.read_with(root.path(), now, |_| Some(true));
         assert_eq!(running[0].id, "external:worker");
         assert_eq!(running[0].state, AgentState::Running);
         assert_eq!(
-            reader.read_with(root.path(), now + 61_000., |_| true)[0]
+            reader.read_with(root.path(), now + 61_000., |_| None)[0]
                 .detail
                 .as_deref(),
             Some("状态已停止更新")
         );
         assert_eq!(
-            reader.read_with(root.path(), now, |_| false)[0]
+            reader.read_with(root.path(), now, |_| Some(false))[0]
                 .detail
                 .as_deref(),
             Some("监工进程已退出，任务中断")
         );
         fs::remove_file(status)?;
         reader.refreshed = None;
-        assert!(reader.read_with(root.path(), now, |_| false).is_empty());
+        assert!(
+            reader
+                .read_with(root.path(), now, |_| Some(false))
+                .is_empty()
+        );
         Ok(())
     }
 }
