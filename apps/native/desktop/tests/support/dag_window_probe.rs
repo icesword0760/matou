@@ -228,6 +228,32 @@ async fn run(main: WindowHandle<Workspace>, cx: &mut AsyncApp) {
         "child Close button click, main-focus=graph",
     );
 
+    click_graph(main, cx);
+    let child = child_window(main, cx);
+    key(child.into(), cx, "ctrl-f");
+    child
+        .update(cx, |view, window, cx| {
+            assert!(view.probe_canvas().1.read(cx).search_focused(window, cx));
+        })
+        .unwrap();
+    assert!(!dispatch_key(child.into(), cx, "cmd-shift-w"));
+    report(
+        cx,
+        "keep-open-cmd-shift-w",
+        main,
+        Some(child),
+        "Cmd+Shift+W unhandled with DAG search focused",
+    );
+    key(child.into(), cx, "cmd-w");
+    assert_closed(main, child, cx);
+    report(
+        cx,
+        "close-cmd-w",
+        main,
+        None,
+        "Cmd+W closed only the DAG, main-focus=graph",
+    );
+
     fail_next_open(main, cx);
     click_graph(main, cx);
     assert_failure(main, cx, "open-failure");
@@ -741,17 +767,17 @@ fn pointer(handle: AnyWindowHandle, cx: &mut AsyncApp, from: (f64, f64), to: Opt
 }
 
 fn key(handle: AnyWindowHandle, cx: &mut AsyncApp, key: &str) {
+    assert!(dispatch_key(handle, cx, key), "{key} was not handled");
+}
+
+fn dispatch_key(handle: AnyWindowHandle, cx: &mut AsyncApp, key: &str) -> bool {
     handle
         .update(cx, |_, window, cx| {
             window.refresh();
             window.draw(cx).clear();
-            let keystroke = Keystroke::parse(key).unwrap();
-            assert!(
-                window.dispatch_keystroke(keystroke, cx),
-                "{key} was not handled"
-            );
+            window.dispatch_keystroke(Keystroke::parse(key).unwrap(), cx)
         })
-        .unwrap();
+        .unwrap()
 }
 
 fn activate_control(main: WindowHandle<Workspace>, cx: &mut AsyncApp, control: &str) {

@@ -629,10 +629,44 @@ pub(super) async fn verify(cx: &mut AsyncApp, root: PathBuf) {
     let source = fixture
         .state(cx, "ready shell and startup exit status", |view, _| {
             let id = view.level_focus()?;
-            (view.session_frames.contains(id) && !view.egress_for_probe().families.is_empty())
+            (view.session_frames.contains(id)
+                && !view.recovery_blocked(id)
+                && !view.egress_for_probe().families.is_empty())
                 .then(|| id.to_owned())
         })
         .await;
+    card_action(fixture.window, cx, &source, CardMenuAction::OpenDetached);
+    let child = fixture
+        .window
+        .read_with(cx, |view, _| view.wiring_child_for_probe(&source).unwrap())
+        .unwrap();
+    draw(child, cx);
+    assert!(dispatch_key(child, cx, "cmd-w"));
+    assert!(child.update(cx, |_, _, _| ()).is_err());
+    draw(fixture.window.into(), cx);
+    fixture.update(cx, |view, window, cx| {
+        assert!(view.wiring_child_for_probe(&source).is_none());
+        assert!(view.terminals[&source].read(cx).focus.is_focused(window));
+    });
+    const DETACHED_OUTPUT: &str = "detachedcmdwok";
+    for key in ["e", "c", "h", "o", "space"] {
+        assert!(dispatch_key(fixture.window.into(), cx, key));
+    }
+    for character in DETACHED_OUTPUT.chars() {
+        assert!(dispatch_key(fixture.window.into(), cx, &character.to_string()));
+    }
+    assert!(dispatch_key(fixture.window.into(), cx, "enter"));
+    fixture
+        .state(cx, "shell output after Cmd+W return", |view, _| {
+            view.graph_node(&source)?["latestLines"]
+                .as_array()?
+                .iter()
+                .any(|line| line.as_str().is_some_and(|line| line.trim() == DETACHED_OUTPUT))
+                .then_some(())
+        })
+        .await;
+    println!("detached Cmd+W: original offline shell executed typed input ({DETACHED_OUTPUT})");
+
     fixture.input(&source, b"codex\r");
     let hook = fixture.codex_hook(cx, "source").await;
     let rollout = fixture.codex_rollout(SOURCE);

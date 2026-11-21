@@ -7,7 +7,7 @@ use matou_native_desktop::dag_canvas::{
 };
 use serde_json::Value;
 
-use super::{Command, Workspace, shadow};
+use super::{Command, Workspace, is_child_window_close_shortcut, shadow};
 use crate::ui_text::ui_text;
 
 const DAG_FAILURE_TEXT: u32 = 0x9b342f;
@@ -283,6 +283,12 @@ impl Render for DagWindow {
             .size_full()
             .relative()
             .track_focus(&self.content_focus)
+            .capture_key_down(|event, window, cx| {
+                if is_child_window_close_shortcut(&event.keystroke) {
+                    cx.stop_propagation();
+                    window.remove_window();
+                }
+            })
             .on_key_down(|event: &KeyDownEvent, window, cx| {
                 let modifiers = event.keystroke.modifiers;
                 match event.keystroke.key.as_str() {

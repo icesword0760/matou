@@ -829,6 +829,31 @@ mod workspace {
                 && mounts.contains_key("detached-mount-shell-b")
         );
         assert_terminal_input(window, &sink, cx, A);
+
+        card_action(window, cx, A, CardMenuAction::OpenDetached);
+        let reopened = window
+            .update(cx, |view, window, _| {
+                window.focus(&view.control_focus["graph"]);
+                view.wiring_child_for_probe(A).unwrap()
+            })
+            .unwrap();
+        assert_ne!(first.window_id(), reopened.window_id());
+        draw(reopened, cx);
+        for key in ["cmd-shift-w", "cmd-alt-w", "cmd-ctrl-w"] {
+            assert!(!dispatch_key(reopened, cx, key), "{key} was intercepted");
+        }
+        assert!(reopened.update(cx, |_, _, _| ()).is_ok());
+        assert!(dispatch_key(reopened, cx, "cmd-w"));
+        assert!(reopened.update(cx, |_, _, _| ()).is_err());
+        assert!(second.update(cx, |_, _, _| ()).is_ok());
+        let mounts = draw(window.into(), cx);
+        assert!(!mounts.contains_key("detached-mount-shell-a"));
+        assert!(mounts.contains_key("detached-mount-shell-b"));
+        assert_terminal_input(window, &sink, cx, A);
+        println!(
+            "detached Cmd+W: target child closed, sibling stayed open, original terminal remounted and received only typed input; Cmd+Shift+W, Cmd+Alt+W and Cmd+Ctrl+W unhandled"
+        );
+
         window
             .update(cx, |view, window, _| {
                 window.focus(&view.control_focus["graph"])

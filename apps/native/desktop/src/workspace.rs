@@ -89,6 +89,16 @@ use crate::{
     workspace_drag::{self, WorkspaceDragSnapshot, WorkspaceDragTask},
 };
 
+fn is_child_window_close_shortcut(stroke: &Keystroke) -> bool {
+    cfg!(target_os = "macos")
+        && stroke.key == "w"
+        && stroke.modifiers
+            == (Modifiers {
+                platform: true,
+                ..Default::default()
+            })
+}
+
 #[cfg(debug_assertions)]
 type MotionTrace = std::rc::Rc<std::cell::RefCell<std::fs::File>>;
 

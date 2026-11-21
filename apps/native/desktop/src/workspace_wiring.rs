@@ -1612,9 +1612,13 @@ impl Workspace {
                     let child_window = window.window_handle();
                     let shortcut_owner = owner.clone();
                     let keyboard = cx.intercept_keystrokes(move |event, window, cx| {
-                        if window.window_handle() == child_window
-                            && Workspace::is_theme_shortcut(&event.keystroke)
-                        {
+                        if window.window_handle() != child_window {
+                            return;
+                        }
+                        if is_child_window_close_shortcut(&event.keystroke) {
+                            cx.stop_propagation();
+                            window.remove_window();
+                        } else if Workspace::is_theme_shortcut(&event.keystroke) {
                             cx.stop_propagation();
                             let _ = shortcut_owner.update(cx, Workspace::toggle_theme_shortcut);
                         }
