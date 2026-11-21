@@ -1914,6 +1914,25 @@ impl ShellOwner {
         Ok(registration)
     }
 
+    #[cfg(unix)]
+    pub(crate) fn read_current_screen(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<mpsc::Receiver<Result<matou_native_terminal::Screen>>>> {
+        let Some(shell) = self
+            .shells
+            .get(session_id)
+            .filter(|shell| !shell.retiring && !shell.ended && !shell.worker.is_finished())
+        else {
+            return Ok(None);
+        };
+        let (reply, result) = mpsc::channel();
+        shell
+            .worker
+            .send(WorkerCommand::ReadCurrentScreen { reply })?;
+        Ok(Some(result))
+    }
+
     pub fn send(&self, session_id: &str, command: WorkerCommand) -> Result<()> {
         self.shells
             .get(session_id)
