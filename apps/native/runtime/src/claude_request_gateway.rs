@@ -7,7 +7,7 @@ use std::{
     net::Ipv4Addr,
     pin::Pin,
     sync::{
-        Arc, OnceLock,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
@@ -46,6 +46,11 @@ use tokio::{
 };
 use tower_service::Service;
 
+#[path = "claude_request_gateway/deepseek_token_usage.rs"]
+mod deepseek_token_usage;
+#[path = "claude_request_gateway/gemini_sse_keepalive.rs"]
+mod gemini_sse_keepalive;
+
 const MAX_REQUEST_BYTES: usize = 64 * 1024 * 1024;
 const PATH_ERROR: &str = "Claude request gateway route was not found.";
 const LIMIT_ERROR: &str = "Claude request exceeds the gateway size limit.";
@@ -75,6 +80,19 @@ impl Gateway {
         projection: Arc<ClaudeGatewayProjection>,
         #[cfg(test)] loopback: Option<std::net::SocketAddr>,
     ) -> Result<Self> {
+        Self::start_with_interval(
+            projection,
+            gemini_sse_keepalive::INTERVAL,
+            #[cfg(test)]
+            loopback,
+        )
+    }
+
+    pub(crate) fn start_with_interval(
+        projection: Arc<ClaudeGatewayProjection>,
+        keep_alive_interval: Duration,
+        #[cfg(test)] loopback: Option<std::net::SocketAddr>,
+    ) -> Result<Self> {
         let mut random = [0u8; 32];
         getrandom::fill(&mut random).map_err(|_| anyhow!("Generate Claude gateway credential"))?;
         let mut prefix = String::with_capacity(65);
@@ -88,6 +106,8 @@ impl Gateway {
             projection,
             lazy_compaction: OnceCell::new(),
             stopped: Arc::clone(&stopped),
+            token_usage: Arc::default(),
+            keep_alive_interval,
             #[cfg(test)]
             loopback,
         });
@@ -156,8 +176,16 @@ struct State {
     projection: Arc<ClaudeGatewayProjection>,
     lazy_compaction: OnceCell<ClaudeGatewayRole>,
     stopped: Arc<AtomicBool>,
+    token_usage: Arc<Mutex<deepseek_token_usage::Tracker>>,
+    keep_alive_interval: Duration,
     #[cfg(test)]
     loopback: Option<std::net::SocketAddr>,
+}
+
+#[derive(Default)]
+struct MessageResponse {
+    track_usage: bool,
+    gemini_stream: bool,
 }
 
 async fn serve(listener: TcpListener, state: Arc<State>) {
@@ -206,39 +234,54 @@ impl State {
         let is_message = parts.method == Method::POST && path == "/v1/messages";
         let is_count = parts.method == Method::POST && path == "/v1/messages/count_tokens";
         let limited = Limited::new(incoming, MAX_REQUEST_BYTES);
-        let (body, length, connection, destination, rewritten) = if is_message || is_count {
-            let bytes = limited
-                .collect()
-                .await
-                .map_err(|error| Fault::request_body(error.as_ref()))?
-                .to_bytes();
-            let (bytes, connection, destination, rewritten) = self
-                .rewrite_json(bytes, path, query, &parts.headers)
-                .await?;
-            let length = bytes.len() as u64;
-            let body = Full::new(bytes)
-                .map_err(|never| match never {})
-                .boxed_unsync();
-            (body, Some(length), connection, destination, rewritten)
-        } else {
-            let connection = self
-                .projection
-                .source
-                .as_ref()
-                .ok_or(Fault::bad_gateway(SOURCE_ERROR))?;
-            let body = limited
-                .map_frame(|frame| {
-                    if frame.is_trailers() {
-                        Frame::data(Bytes::new())
-                    } else {
-                        frame
-                    }
-                })
-                .boxed_unsync();
-            let destination =
-                destination(connection, path, query).ok_or(Fault::bad_gateway(CONNECTION_ERROR))?;
-            (body, size, connection, destination, false)
-        };
+        let (body, length, connection, destination, rewritten, message_response) =
+            if is_message || is_count {
+                let bytes = limited
+                    .collect()
+                    .await
+                    .map_err(|error| Fault::request_body(error.as_ref()))?
+                    .to_bytes();
+                let (bytes, connection, destination, rewritten, message_response) = self
+                    .rewrite_json(bytes, path, query, &parts.headers)
+                    .await?;
+                let length = bytes.len() as u64;
+                let body = Full::new(bytes)
+                    .map_err(|never| match never {})
+                    .boxed_unsync();
+                (
+                    body,
+                    Some(length),
+                    connection,
+                    destination,
+                    rewritten,
+                    message_response,
+                )
+            } else {
+                let connection = self
+                    .projection
+                    .source
+                    .as_ref()
+                    .ok_or(Fault::bad_gateway(SOURCE_ERROR))?;
+                let body = limited
+                    .map_frame(|frame| {
+                        if frame.is_trailers() {
+                            Frame::data(Bytes::new())
+                        } else {
+                            frame
+                        }
+                    })
+                    .boxed_unsync();
+                let destination = destination(connection, path, query)
+                    .ok_or(Fault::bad_gateway(CONNECTION_ERROR))?;
+                (
+                    body,
+                    size,
+                    connection,
+                    destination,
+                    false,
+                    MessageResponse::default(),
+                )
+            };
         let mut key = HeaderValue::from_str(&connection.api_key)
             .map_err(|_| Fault::bad_gateway("Claude model target credential is unavailable."))?;
         key.set_sensitive(true);
@@ -300,7 +343,27 @@ impl State {
                 .expect("local fixture destination"),
             None => destination,
         };
-        send_once(destination, Request::from_parts(parts, body)).await
+        let (mut response, mut body) =
+            send_once(destination, Request::from_parts(parts, body)).await?;
+        if (message_response.track_usage || message_response.gemini_stream)
+            && response.status.is_success()
+            && let Some(media) = observable_media(&response.headers)
+        {
+            if message_response.track_usage {
+                body.usage = Some(deepseek_token_usage::Observer::new(
+                    media,
+                    Arc::clone(&self.token_usage),
+                ));
+            }
+            if message_response.gemini_stream && media == ObservableMedia::Sse {
+                response.headers.remove(header::CONTENT_LENGTH);
+                body.keep_alive = Some(gemini_sse_keepalive::KeepAlive::new(
+                    self.keep_alive_interval,
+                ));
+            }
+        }
+        filter_hop_by_hop(&mut response.headers);
+        Ok(Response::from_parts(response, body.boxed_unsync()))
     }
 
     async fn rewrite_json(
@@ -309,7 +372,7 @@ impl State {
         path: &str,
         query: Option<&str>,
         headers: &HeaderMap,
-    ) -> Result<(Bytes, &ClaudeGatewayConnection, Uri, bool), Fault> {
+    ) -> Result<(Bytes, &ClaudeGatewayConnection, Uri, bool, MessageResponse), Fault> {
         let is_message = path == "/v1/messages";
         let mut message = serde_json::from_slice::<Map<String, Value>>(&body).ok();
         let model = message
@@ -321,6 +384,9 @@ impl State {
             return Err(Fault::bad_gateway("Unknown Claude model role."));
         }
         let marked = compaction_marked(headers);
+        if is_message && marked && model.is_some() {
+            self.token_usage.lock().unwrap().note_compaction();
+        }
         let role_target = role.and_then(|index| self.projection.roles[index].as_ref());
         let compaction = self
             .projection
@@ -430,7 +496,27 @@ impl State {
         {
             rewritten |= deepseek_tools::convert(message)
                 .map_err(|message| Fault::new(StatusCode::BAD_REQUEST, message))?;
+            if is_message && !marked {
+                // The native launch projection does not yet provide HUD usage
+                // or the selected context window to this gateway.
+                rewritten |= self
+                    .token_usage
+                    .lock()
+                    .unwrap()
+                    .attach(message, deepseek_token_usage::ContextUsage::default());
+            }
         }
+        let message_response = MessageResponse {
+            track_usage: is_message && !marked,
+            gemini_stream: is_message
+                && message.as_ref().is_some_and(|message| {
+                    message.get("stream").and_then(Value::as_bool) == Some(true)
+                        && message
+                            .get("model")
+                            .and_then(Value::as_str)
+                            .is_some_and(gemini_sse_keepalive::is_gemini_model)
+                }),
+        };
         if rewritten {
             body = serde_json::to_vec(&message)
                 .map_err(|_| Fault::bad_gateway(CONNECTION_ERROR))?
@@ -439,7 +525,7 @@ impl State {
                 return Err(Fault::too_large());
             }
         }
-        Ok((body, connection, destination, rewritten))
+        Ok((body, connection, destination, rewritten, message_response))
     }
 
     fn route<'a>(&self, uri: &'a Uri) -> Option<(&'a str, Option<&'a str>)> {
@@ -645,10 +731,42 @@ fn http_connector() -> HttpConnector {
     connector
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ObservableMedia {
+    Sse,
+    Json,
+}
+
+fn observable_media(headers: &HeaderMap) -> Option<ObservableMedia> {
+    let mut encodings = headers.get_all(header::CONTENT_ENCODING).iter();
+    if let Some(encoding) = encodings.next() {
+        let encoding = encoding.as_bytes().trim_ascii();
+        if !(encoding.is_empty() || encoding.eq_ignore_ascii_case(b"identity"))
+            || encodings.next().is_some()
+        {
+            return None;
+        }
+    }
+    let mut json = false;
+    for value in headers.get_all(header::CONTENT_TYPE) {
+        let contains = |needle: &[u8]| {
+            value
+                .as_bytes()
+                .windows(needle.len())
+                .any(|part| part.eq_ignore_ascii_case(needle))
+        };
+        if contains(b"text/event-stream") {
+            return Some(ObservableMedia::Sse);
+        }
+        json |= contains(b"application/json");
+    }
+    json.then_some(ObservableMedia::Json)
+}
+
 async fn send_once(
     destination: Uri,
     request: Request<GatewayBody>,
-) -> Result<Response<GatewayBody>, Fault> {
+) -> Result<(hyper::http::response::Parts, UpstreamBody), Fault> {
     // The low-level HTTP/1 connection has no redirect, decompression, retry,
     // or pooling layer. Keep the driver owned by this downstream exchange.
     let failure = || Fault::bad_gateway(CONNECTION_ERROR);
@@ -689,23 +807,35 @@ async fn send_once(
             failure()
         }
     })?;
-    let (mut parts, incoming) = response.into_parts();
+    let (parts, incoming) = response.into_parts();
     if parts.status.is_redirection() && parts.headers.contains_key(header::LOCATION) {
         return Err(Fault::bad_gateway(
             "Claude request gateway cannot forward an upstream redirect.",
         ));
     }
-    filter_hop_by_hop(&mut parts.headers);
     let body = UpstreamBody {
         incoming,
         _connection: task,
+        usage: None,
+        keep_alive: None,
     };
-    Ok(Response::from_parts(parts, body.boxed_unsync()))
+    Ok((parts, body))
 }
 
 struct UpstreamBody {
     incoming: Incoming,
     _connection: AbortOnDrop,
+    usage: Option<deepseek_token_usage::Observer>,
+    keep_alive: Option<gemini_sse_keepalive::KeepAlive>,
+}
+
+impl UpstreamBody {
+    fn finish(&mut self) {
+        self.keep_alive = None;
+        if let Some(usage) = self.usage.take() {
+            usage.finish();
+        }
+    }
 }
 
 impl Body for UpstreamBody {
@@ -717,16 +847,53 @@ impl Body for UpstreamBody {
         cx: &mut TaskContext<'_>,
     ) -> Poll<Option<Result<Frame<Bytes>, BodyError>>> {
         loop {
-            match std::task::ready!(Pin::new(&mut self.incoming).poll_frame(cx)) {
-                Some(Ok(frame)) if frame.is_trailers() => continue,
-                Some(result) => return Poll::Ready(Some(result.map_err(Into::into))),
-                None => return Poll::Ready(None),
+            match Pin::new(&mut self.incoming).poll_frame(cx) {
+                Poll::Ready(Some(Ok(frame))) => {
+                    let Some(data) = frame.data_ref() else {
+                        continue;
+                    };
+                    if self.usage.as_mut().is_some_and(|usage| !usage.push(data)) {
+                        self.usage = None;
+                    }
+                    if let Some(keep_alive) = self.keep_alive.as_mut() {
+                        keep_alive.observe(data);
+                    }
+                    // A fixed-length response can complete on its final data
+                    // frame without another poll from the downstream writer.
+                    if self.incoming.is_end_stream() {
+                        self.finish();
+                    }
+                    return Poll::Ready(Some(Ok(frame)));
+                }
+                Poll::Ready(Some(Err(error))) => {
+                    self.keep_alive = None;
+                    self.usage = None;
+                    return Poll::Ready(Some(Err(error.into())));
+                }
+                Poll::Ready(None) => {
+                    self.finish();
+                    return Poll::Ready(None);
+                }
+                Poll::Pending => {
+                    if let Some(keep_alive) = self.keep_alive.as_mut()
+                        && keep_alive.poll_ping(cx).is_ready()
+                    {
+                        return Poll::Ready(Some(Ok(Frame::data(Bytes::from_static(
+                            gemini_sse_keepalive::PING,
+                        )))));
+                    }
+                    return Poll::Pending;
+                }
             }
         }
     }
 
     fn size_hint(&self) -> SizeHint {
-        self.incoming.size_hint()
+        if self.keep_alive.is_some() {
+            SizeHint::default()
+        } else {
+            self.incoming.size_hint()
+        }
     }
 }
 
@@ -1228,4 +1395,5 @@ mod deepseek_tools {
 }
 
 #[cfg(test)]
-mod tests;
+#[path = "claude_request_gateway/tests.rs"]
+pub(crate) mod tests;
