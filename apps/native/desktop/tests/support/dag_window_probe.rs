@@ -260,13 +260,14 @@ async fn run(main: WindowHandle<Workspace>, cx: &mut AsyncApp) {
     key(child.into(), cx, "escape");
     assert_closed(main, child, cx);
 
-    exercise_canvas(main, cx, &scene_a, &root).await;
+    exercise_canvas(main, cx, &scene_a, &scene_b, &root).await;
 }
 
 async fn exercise_canvas(
     main: WindowHandle<Workspace>,
     cx: &mut AsyncApp,
     scene: &str,
+    other_scene: &str,
     root: &str,
 ) {
     navigate(
@@ -569,14 +570,55 @@ async fn exercise_canvas(
     });
     key(child.into(), cx, "up");
     read_canvas(child, cx, |canvas| assert_eq!(canvas.search.selected, 12));
+    navigate(
+        main,
+        cx,
+        Command::SelectScene {
+            scene_id: other_scene.to_owned(),
+        },
+    );
+    wait_graph(main, cx, |view| {
+        (view.active_scene_id() == Some(other_scene)).then_some(())
+    })
+    .await;
+    assert_main_focus(main, cx, "graph");
     key(child.into(), cx, "enter");
     frame(child, cx);
-    assert_closed(main, child, cx);
+    assert_child_closed(child, cx);
     wait_graph(main, cx, |view| {
-        (view.focused.as_deref() == Some(branch.as_str())
+        (view.active_scene_id() == Some(scene)
+            && view.focused.as_deref() == Some(branch.as_str())
             && view.level_focus() == Some(branch.as_str())
             && view.level_parent() == Some(root))
         .then_some(())
+    })
+    .await;
+    draw_main(main, cx);
+    wait_graph(main, cx, |view| {
+        (!view.recovery_blocked(&branch)).then_some(())
+    })
+    .await;
+    draw_main(main, cx);
+    main.update(cx, |view, window, cx| {
+        assert!(view.terminals[&branch].read(cx).focus.is_focused(window));
+        assert!(!view.control_focus["graph"].is_focused(window));
+        assert!(!crate::macos::is_window_visible(window).unwrap());
+    })
+    .unwrap();
+    const OUTPUT: &str = "dagreturnfocusok";
+    for key_name in ["e", "c", "h", "o", "space"] {
+        key(main.into(), cx, key_name);
+    }
+    for character in OUTPUT.chars() {
+        key(main.into(), cx, &character.to_string());
+    }
+    key(main.into(), cx, "enter");
+    wait_graph(main, cx, |view| {
+        view.graph_node(&branch)?["latestLines"]
+            .as_array()?
+            .iter()
+            .any(|line| line.as_str().is_some_and(|line| line.trim() == OUTPUT))
+            .then_some(())
     })
     .await;
     report(
@@ -584,7 +626,7 @@ async fn exercise_canvas(
         "canvas-search-enter",
         main,
         None,
-        "the unrendered thirteenth match is selected in the main carousel",
+        "the unrendered thirteenth match returns to its scene, gains terminal focus and runs typed input",
     );
 }
 
@@ -621,6 +663,15 @@ fn frame(child: WindowHandle<DagWindow>, cx: &mut AsyncApp) {
     unsafe {
         let _: () = msg_send![view, displayLayer: nil];
     }
+}
+
+fn draw_main(main: WindowHandle<Workspace>, cx: &mut AsyncApp) {
+    AnyWindowHandle::from(main)
+        .update(cx, |_, window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        })
+        .unwrap();
 }
 
 async fn wait_graph<T>(
@@ -809,11 +860,15 @@ fn appkit_view(window: &Window) -> id {
 }
 
 fn assert_closed(main: WindowHandle<Workspace>, child: WindowHandle<DagWindow>, cx: &mut AsyncApp) {
+    assert_child_closed(child, cx);
+    assert_main_focus(main, cx, "graph");
+}
+
+fn assert_child_closed(child: WindowHandle<DagWindow>, cx: &mut AsyncApp) {
     assert!(
         !cx.update(|cx| cx.windows().contains(&child.into()))
             .unwrap()
     );
-    assert_main_focus(main, cx, "graph");
 }
 
 fn fail_next_open(main: WindowHandle<Workspace>, cx: &mut AsyncApp) {

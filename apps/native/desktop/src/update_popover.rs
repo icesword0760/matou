@@ -376,7 +376,8 @@ impl UpdateControl {
             }),
         };
         match &self.state.status {
-            UpdateStatus::Idle => view.message = Some(current),
+            // The subtitle already shows `当前版本 …`; Idle must not repeat it.
+            UpdateStatus::Idle => view.message = None,
             UpdateStatus::NotAvailable => {
                 view.title = locale
                     .text("Matou 已是最新版本", "Matou is up to date")
@@ -748,7 +749,7 @@ mod update_ui {
                     trigger_active_bg: rgba(0x3a8ef11c),
                     dot: rgb(0x3d98ff),
                     dot_border: rgb(0x151515),
-                    popover_bg: rgba(0x1f232ae6),
+                    popover_bg: rgb(0x1f232a),
                     popover_border: rgba(0xffffff1a),
                     text: rgb(0xe3e7ee),
                     subtitle: rgb(0x878f9e),
@@ -776,7 +777,7 @@ mod update_ui {
                     error_hint: rgb(0xbd8b87),
                     error_bg: rgba(0xe34b3f1a),
                     waiting: rgb(0x69adff),
-                    toast_bg: rgba(0x1f232ae6),
+                    toast_bg: rgb(0x1f232a),
                     toast_border: rgba(0xffffff1a),
                     toast_muted: rgb(0x8d96a5),
                     toast_check: rgb(0x2ca56d),
@@ -790,7 +791,7 @@ mod update_ui {
                     trigger_active_bg: rgba(0x2b89f71a),
                     dot: rgb(0x3d98ff),
                     dot_border: rgb(0xffffff),
-                    popover_bg: rgba(0xfcfdffe0),
+                    popover_bg: rgb(0xfcfdff),
                     popover_border: rgba(0xffffffe6),
                     text: rgb(0x283142),
                     subtitle: rgb(0x778196),
@@ -818,13 +819,20 @@ mod update_ui {
                     error_hint: rgb(0x9d6d68),
                     error_bg: rgba(0xdf4b3f17),
                     waiting: rgb(0x2686f6),
-                    toast_bg: rgba(0xfcfdffe6),
+                    toast_bg: rgb(0xfcfdff),
                     toast_border: rgba(0xffffffe6),
                     toast_muted: rgb(0x8790a0),
                     toast_check: rgb(0x2ca56d),
                 }
             }
         }
+    }
+
+    /// Test-only mirror of the two opaque surfaces used by the popover/toast.
+    #[cfg(test)]
+    pub(super) fn background_alpha_for_test(dark: bool) -> (f32, f32) {
+        let palette = UpdatePalette::new(dark);
+        (palette.popover_bg.a, palette.toast_bg.a)
     }
 
     fn update_shadow(color: u32, alpha: f32, y: f32, blur: f32) -> BoxShadow {
@@ -1536,6 +1544,15 @@ mod tests {
     }
 
     #[test]
+    fn popover_and_toast_backgrounds_are_opaque_in_both_themes() {
+        for dark in [false, true] {
+            let (popover, toast) = super::update_ui::background_alpha_for_test(dark);
+            assert_eq!(popover, 1.0, "popover dark={dark}");
+            assert_eq!(toast, 1.0, "toast dark={dark}");
+        }
+    }
+
+    #[test]
     fn idle_up_to_date_and_checking_use_frozen_copy_and_actions() {
         let mut idle = control(UpdateStatus::Idle);
         for (locale, label, title, version, button, close) in [
@@ -1566,7 +1583,8 @@ mod tests {
                 ),
                 (label, title, version, close)
             );
-            assert_eq!(view.message.as_deref(), Some(version));
+            // Idle keeps the version only on the subtitle (single occurrence).
+            assert_eq!(view.message.as_deref(), None);
             assert_eq!(labels(&view), [button]);
             assert!(!view.open && !view.highlight && !view.dot && view.buttons[0].enabled);
         }

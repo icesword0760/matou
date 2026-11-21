@@ -224,6 +224,31 @@ pub struct SidebarPalette {
     pub task_hover: u32,
     pub badge_text: u32,
     pub badge_background: u32,
+    /// Sidebar surface painted above the AppKit sidebar material. Light keeps
+    /// the frozen translucent overlay; dark replaces the material with an
+    /// opaque token because the native material does not follow the theme.
+    pub background: u32,
+    /// Shared translucent action hover for the new-workspace row and bell.
+    pub action_hover: u32,
+    /// Neutral hover used by workspace add/more rows.
+    pub control_hover: u32,
+    /// Default workspace/task glyph color.
+    pub icon: u32,
+    /// Dimmer add/more/pin glyph color.
+    pub icon_muted: u32,
+    pub chevron: u32,
+    /// Folder glyph for the active workspace.
+    pub accent_icon: u32,
+    pub toolbar_text: u32,
+    pub relink_text: u32,
+    pub relink_background: u32,
+    pub relink_line: u32,
+    pub relink_hover: u32,
+    pub invalid_text: u32,
+    pub invalid_background: u32,
+    pub bell: u32,
+    /// Border of the notification count over the sidebar surface.
+    pub bell_badge_border: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -255,6 +280,14 @@ pub struct CardPalette {
     pub fork_text: u32,
     pub edge_intent: u32,
     pub edge_intent_progress: u32,
+    pub action_text: u32,
+    pub action_text_hover: u32,
+    pub action_hover: u32,
+    pub remove_hover: u32,
+    pub stopped_background: u32,
+    pub stopped_text: u32,
+    pub stopped_header: u32,
+    pub stopped_remove_text: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -266,10 +299,12 @@ pub struct FooterPalette {
     pub breadcrumb: u32,
     pub breadcrumb_count: u32,
     pub breadcrumb_hover: u32,
+    pub breadcrumb_hover_text: u32,
     pub model: u32,
     pub session_name: u32,
     pub usage: u32,
     pub usage_accent: u32,
+    pub account: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -299,6 +334,15 @@ pub struct SettingsPalette {
     pub input_background: u32,
     pub input_focus_line: u32,
     pub input_focus_ring: u32,
+    /// Language radio outline when it is not selected.
+    pub language_radio_border: u32,
+    pub language_error: u32,
+    pub language_button_hover: u32,
+    pub language_primary: u32,
+    pub language_primary_hover: u32,
+    pub language_menu_text: u32,
+    pub language_menu_background: u32,
+    pub language_menu_active_background: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -377,6 +421,23 @@ pub const LIGHT: ThemePalette = ThemePalette {
         task_hover: 0x57657f12,
         badge_text: 0x91949eff,
         badge_background: 0xeceef3ff,
+        // Frozen native overlay over the AppKit sidebar material.
+        background: 0xfbfdff17,
+        action_hover: 0x2f35470f,
+        control_hover: 0x00000014,
+        icon: 0x656d76ff,
+        icon_muted: 0x81848dff,
+        chevron: 0x777777ff,
+        accent_icon: 0x4078f2ff,
+        toolbar_text: 0x989da7ff,
+        relink_text: 0x9a6818ff,
+        relink_background: 0xfff8e8ff,
+        relink_line: 0x9a681840,
+        relink_hover: 0xd99d3c26,
+        invalid_text: 0xd99d3cff,
+        invalid_background: 0xd99d3c1a,
+        bell: 0x8d96a3ff,
+        bell_badge_border: 0xf4f5f7ff,
     },
     tabs: TabPalette {
         bar: 0xffffffff,
@@ -405,6 +466,14 @@ pub const LIGHT: ThemePalette = ThemePalette {
         // The existing native edge indicator uses the shared blue.
         edge_intent: 0x6faaf024,
         edge_intent_progress: 0x6faaf0ff,
+        action_text: 0x00000085,
+        action_text_hover: 0x000000d1,
+        action_hover: 0x0000000f,
+        remove_hover: 0xfff0efff,
+        stopped_background: 0xf8f9fbff,
+        stopped_text: 0x687180ff,
+        stopped_header: 0xffffffff,
+        stopped_remove_text: 0x6a7380ff,
     },
     footer: FooterPalette {
         background: 0xffffffff,
@@ -414,10 +483,12 @@ pub const LIGHT: ThemePalette = ThemePalette {
         breadcrumb: 0x000000ad,
         breadcrumb_count: 0x00000061,
         breadcrumb_hover: 0x00000014,
+        breadcrumb_hover_text: 0x2f3547ff,
         model: 0x79c0ffff,
         session_name: 0x8b949eff,
         usage: 0x7f8a99ff,
         usage_accent: 0x58a6ffff,
+        account: 0x647e9fff,
     },
     settings: SettingsPalette {
         nav: 0xfbfcfdff,
@@ -446,6 +517,14 @@ pub const LIGHT: ThemePalette = ThemePalette {
         input_background: 0xffffffff,
         input_focus_line: 0x5c9cedff,
         input_focus_ring: 0xe8f1ffff,
+        language_radio_border: 0x9aa3aeff,
+        language_error: 0xb34d47ff,
+        language_button_hover: 0xf7faffff,
+        language_primary: 0x347fd6ff,
+        language_primary_hover: 0x2f79dfff,
+        language_menu_text: 0x2679d8ff,
+        language_menu_background: 0xe4efffff,
+        language_menu_active_background: 0xeef5ffff,
     },
     recovery_water: RecoveryWaterPalette {
         base: 0xfafcffff,
@@ -517,6 +596,22 @@ pub const DARK: ThemePalette = ThemePalette {
         task_hover: 0x1d1d1dff,
         badge_text: 0x858585ff,
         badge_background: 0xffffff0f,
+        background: 0x1b1f26ff,
+        action_hover: 0xffffff12,
+        control_hover: 0xffffff1a,
+        icon: 0x898989ff,
+        icon_muted: 0x858585ff,
+        chevron: 0x777777ff,
+        accent_icon: 0x8db8e8ff,
+        toolbar_text: 0x989da7ff,
+        relink_text: 0xd99d3cff,
+        relink_background: 0x2a1e17ff,
+        relink_line: 0xd99d3c40,
+        relink_hover: 0xd99d3c26,
+        invalid_text: 0xd99d3cff,
+        invalid_background: 0xd99d3c1a,
+        bell: 0x8d96a3ff,
+        bell_badge_border: 0x23262bff,
     },
     tabs: TabPalette {
         bar: 0x151515ff,
@@ -544,6 +639,14 @@ pub const DARK: ThemePalette = ThemePalette {
         fork_text: 0x97b9e0b8,
         edge_intent: 0x6faaf024,
         edge_intent_progress: 0x6faaf0ff,
+        action_text: 0xffffffbf,
+        action_text_hover: 0xffffffff,
+        action_hover: 0xffffff1f,
+        remove_hover: 0x3a1f1fff,
+        stopped_background: 0x15181dff,
+        stopped_text: 0x8b93a1ff,
+        stopped_header: 0x1d2025ff,
+        stopped_remove_text: 0x9aa3aeff,
     },
     footer: FooterPalette {
         background: 0x151515ff,
@@ -553,6 +656,8 @@ pub const DARK: ThemePalette = ThemePalette {
         breadcrumb: 0xffffffb8,
         breadcrumb_count: 0xffffff66,
         breadcrumb_hover: 0xffffff14,
+        breadcrumb_hover_text: 0xffffffff,
+        account: 0x8b949eff,
         ..LIGHT.footer
     },
     settings: SettingsPalette {
@@ -580,6 +685,14 @@ pub const DARK: ThemePalette = ThemePalette {
         input_background: 0xffffff0b,
         input_focus_line: 0x5b9eeb47,
         input_focus_ring: 0x4a91e224,
+        language_radio_border: 0x6e7782ff,
+        language_error: 0xbd8b87ff,
+        language_button_hover: 0x4a91e224,
+        language_primary: 0x2f79dfff,
+        language_primary_hover: 0x2274dfff,
+        language_menu_text: 0x67a6efff,
+        language_menu_background: 0x2c496b38,
+        language_menu_active_background: 0xffffff09,
     },
     recovery_water: RecoveryWaterPalette {
         base: 0x1b1b1bff,
@@ -1056,10 +1169,10 @@ mod tests {
             ],
             HIERARCHY,
         );
-        assert!(NATIVE_WORKSPACE.contains(&format!("else {{ 0x{:06x} }}", s.task_text >> 8)));
-        assert!(
-            NATIVE_WORKSPACE.contains(&format!(".hover(|s| s.bg(rgba(0x{:08x})))", s.task_hover))
-        );
+        // The native task row now reads the shared palette instead of frozen
+        // literals; the light value still matches the CSS token asserted above.
+        assert!(NATIVE_WORKSPACE.contains("sidebar_palette.task_text"));
+        assert!(NATIVE_WORKSPACE.contains("rgba(sidebar_palette.task_hover)"));
 
         let s = DARK.sidebar;
         assert_colors(

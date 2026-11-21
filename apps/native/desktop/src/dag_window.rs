@@ -220,9 +220,14 @@ impl DagWindow {
                         if archived {
                             if active {
                                 workspace.refresh_level(cx);
-                                workspace.hover_card(Some(session_id), cx);
+                                workspace.hover_card(Some(session_id.clone()), cx);
                             } else {
-                                workspace.send(Command::SelectScene { scene_id: scene }, cx);
+                                workspace.send(
+                                    Command::SelectScene {
+                                        scene_id: scene.clone(),
+                                    },
+                                    cx,
+                                );
                             }
                         } else {
                             workspace.send_card_focus(&scene, &session_id, cx);
@@ -232,6 +237,9 @@ impl DagWindow {
                         }
                         if visible {
                             window.activate_window();
+                        }
+                        if !archived {
+                            workspace.return_terminal_focus(scene, session_id, window, cx);
                         }
                         cx.notify();
                     });

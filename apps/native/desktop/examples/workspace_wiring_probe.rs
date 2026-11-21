@@ -49,6 +49,7 @@ mod workspace {
     use matou_native_core::link_routing::ControlledBrowserFailure;
     use matou_native_desktop::{
         card_context_menu::CardMenuAction,
+        detach_window::probe_detached_header_left,
         egress_panel::{
             EgressFamily, EgressFamilyStatus, EgressState, EgressStatus, EgressTransition,
             EgressViolation,
@@ -244,6 +245,36 @@ mod workspace {
             .unwrap();
     }
 
+    fn assert_terminal_input(
+        window: Handle,
+        sink: &crate::runtime_bridge::ProbeReceiver,
+        cx: &mut AsyncApp,
+        id: &str,
+    ) {
+        draw(window.into(), cx);
+        window
+            .update(cx, |view, window, cx| {
+                assert!(view.terminals[id].read(cx).focus.is_focused(window), "{id}");
+                assert!(!view.control_focus["graph"].is_focused(window));
+            })
+            .unwrap();
+        press(window, cx, "x");
+        press(window, cx, "enter");
+        let input: Vec<_> = std::iter::from_fn(|| sink.try_recv().ok())
+            .filter_map(|command| match command {
+                Command::Input {
+                    session_id, bytes, ..
+                } => {
+                    assert_eq!(session_id, id);
+                    Some(bytes)
+                }
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert_eq!(input, b"x\r");
+    }
+
     fn card_bounds(window: Handle, cx: &mut AsyncApp, id: &str) -> Bounds<Pixels> {
         window
             .update(cx, |view, _, _| {
@@ -353,7 +384,46 @@ mod workspace {
             (ThemePreference::Light, AppTheme::Light),
         ] {
             press(window, cx, "cmd-i");
-            draw(window.into(), cx);
+            let chrome = crate::settings_shell::probe_language_zone(|| {
+                draw(window.into(), cx);
+            })
+            .workspace_surfaces;
+            let colors = [
+                chrome.sidebar.expect("sidebar rendered"),
+                chrome.topbar.expect("topbar rendered"),
+                chrome.footer.expect("footer rendered"),
+                chrome.card.expect("card rendered"),
+                chrome.card_header.expect("card header rendered"),
+            ];
+            if expected == AppTheme::Light {
+                assert_eq!(
+                    colors,
+                    [
+                        rgba(0xfbfdff17), // Over the original AppKit sidebar material.
+                        rgb(0xffffff),
+                        rgb(0xffffff),
+                        rgb(0xfcfcfd),
+                        rgb(0xffffff),
+                    ],
+                );
+            } else {
+                let palette = expected.palette();
+                assert_eq!(
+                    colors,
+                    [
+                        rgba(palette.sidebar.background),
+                        rgba(palette.tabs.bar),
+                        rgba(palette.footer.background),
+                        rgba(palette.cards.background),
+                        rgba(palette.cards.header),
+                    ],
+                );
+                for color in colors {
+                    assert_eq!(color.a, 1.);
+                    assert_ne!(color, rgb(0xffffff));
+                    assert_ne!(color, rgb(0xeae9e4));
+                }
+            }
             window
                 .update(cx, |view, window, cx| {
                     assert_eq!(view.theme.effective(), expected);
@@ -380,7 +450,7 @@ mod workspace {
             .update(cx, |view, _, _| view.data_root = None)
             .unwrap();
         println!(
-            "theme shortcut: four Cmd+I toggles preserve terminal focus and persist theme.json"
+            "theme shortcut: four Cmd+I toggles verify shell colors, preserve terminal focus and persist theme.json"
         );
     }
 
@@ -410,6 +480,22 @@ mod workspace {
         press(window, cx, "/");
         overlay(window, cx, None);
         verify_theme_shortcut(window, &sink, cx, &fixture_root.join("theme-shortcut"));
+        let help = draw(window.into(), cx)["shortcut-help"].center();
+        for via_mouse in [true, false] {
+            if via_mouse {
+                click(window.into(), cx, MouseButton::Left, help);
+            } else {
+                press(window, cx, "cmd-/");
+            }
+            overlay(window, cx, Some("shortcuts"));
+            draw(window.into(), cx);
+            press(window, cx, "escape");
+            overlay(window, cx, None);
+            assert_terminal_input(window, &sink, cx, A);
+        }
+        println!(
+            "shortcuts: mouse help and Cmd+/ return Esc focus and typing to the original shell"
+        );
         window
             .update(cx, |view, window, _| {
                 window.focus(&view.control_focus["shortcut-help"])
@@ -426,6 +512,11 @@ mod workspace {
             point(px(14.), px(80.)),
         );
         overlay(window, cx, None);
+        window
+            .update(cx, |view, window, _| {
+                window.focus(&view.control_focus["shortcut-help"])
+            })
+            .unwrap();
         draw(window.into(), cx);
         press(window, cx, "enter");
         overlay(window, cx, Some("shortcuts"));
@@ -563,7 +654,11 @@ mod workspace {
             })
             .unwrap();
         assert_ne!(first.window_id(), second.window_id());
-        draw(first, cx);
+        let left = probe_detached_header_left(|| {
+            draw(first, cx);
+        })
+        .expect("detached title region rendered");
+        assert!(left >= px(76.), "{left:?}");
         draw(second, cx);
         let mounts = draw(window.into(), cx);
         assert!(
@@ -576,12 +671,23 @@ mod workspace {
             MouseButton::Left,
             mounts["detached-mount-shell-a"].center() - point(px(0.), px(35.)),
         );
+        window
+            .update(cx, |view, window, _| {
+                window.focus(&view.control_focus["graph"])
+            })
+            .unwrap();
         close_native(first, cx);
         let mounts = draw(window.into(), cx);
         assert!(
             !mounts.contains_key("detached-mount-shell-a")
                 && mounts.contains_key("detached-mount-shell-b")
         );
+        assert_terminal_input(window, &sink, cx, A);
+        window
+            .update(cx, |view, window, _| {
+                window.focus(&view.control_focus["graph"])
+            })
+            .unwrap();
         let return_at = second
             .update(cx, |_, window, _| {
                 point(window.viewport_size().width - px(70.), px(21.))
@@ -591,8 +697,10 @@ mod workspace {
         let mounts = draw(window.into(), cx);
         assert!(!mounts.contains_key("detached-mount-shell-b"));
         assert!(second.update(cx, |_, _, _| ()).is_err());
+        assert_terminal_input(window, &sink, cx, B);
         println!(
-            "detached: two hidden child windows, original canvas mounts, placeholder focus route, child removal and return button"
+            "detached: title inset {}pt; native close and return button remount each shell and route typing to it",
+            f32::from(left),
         );
 
         let release = UpdateRelease {
@@ -608,12 +716,17 @@ mod workspace {
         draw(window.into(), cx);
         window
             .update(cx, |view, window, cx| {
-                assert!(
-                    view.update_view_for_probe()
-                        .buttons
-                        .iter()
-                        .any(|button| button.enabled)
+                let idle = view.update_view_for_probe();
+                assert_eq!(
+                    idle.subtitle,
+                    format!(
+                        "{} {}",
+                        view.locale.text("当前版本", "Current version"),
+                        env!("CARGO_PKG_VERSION"),
+                    )
                 );
+                assert_eq!(idle.message, None);
+                assert!(idle.buttons.iter().any(|button| button.enabled));
                 view.request_update_action_for_probe(UpdateAction::Check, window, cx);
                 assert!(!view.update_view_for_probe().error);
             })
@@ -665,8 +778,9 @@ mod workspace {
                 assert!(view.update_view_for_probe().progress.is_some())
             })
             .unwrap();
-        click(window.into(), cx, MouseButton::Left, update);
+        press(window, cx, "escape");
         overlay(window, cx, None);
+        assert_terminal_input(window, &sink, cx, B);
         println!(
             "update: trigger toggle, idle/checking/error and retry, controlled release and 40% download"
         );
@@ -687,6 +801,7 @@ mod workspace {
         draw(window.into(), cx);
         click(window.into(), cx, MouseButton::Left, egress);
         overlay(window, cx, None);
+        assert_terminal_input(window, &sink, cx, B);
         println!("egress and team: trigger toggle, frozen session banner, drawn team summary");
 
         window

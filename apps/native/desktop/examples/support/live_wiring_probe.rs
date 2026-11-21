@@ -1013,10 +1013,28 @@ pub(super) async fn verify(cx: &mut AsyncApp, root: PathBuf) {
         url,
         json!({"hook_event_name":"SessionStart","session_id":SOURCE,"transcript_path":roll,"cwd":fixture.options.workspace}),
     );
+    // A hook response acknowledges receipt. Wait for the start event to be
+    // applied before sending observations that need the active run.
+    fixture
+        .state(
+            cx,
+            "Claude HUD and teammate after session start",
+            |view, _| {
+                (view.live_agent_hud(&lead).is_some()
+                    && view.render_live_teammates(&lead).is_some())
+                .then_some(())
+            },
+        )
+        .await;
     post(
         &format!("{url}?kind=statusline"),
         json!({"session_id":SOURCE,"context_window":{"used_percentage":21,"context_window_size":1000}}),
     );
+    fixture
+        .state(cx, "Claude context meter", |view, _| {
+            (view.live_agent_hud(&lead)?["contextPercent"].as_f64() == Some(21.)).then_some(())
+        })
+        .await;
     post(
         url,
         json!({"hook_event_name":"PreToolUse","session_id":SOURCE,"transcript_path":roll,"tool_name":"Read","tool_use_id":"probe-tool"}),

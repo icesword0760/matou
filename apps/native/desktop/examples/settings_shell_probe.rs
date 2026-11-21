@@ -636,6 +636,24 @@ mod probe {
             let canvas = Some(rgba(expected.palette().workspace.canvas));
             assert_eq!(frame.settings_canvas, canvas);
             assert_eq!(frame.workspace_canvas, canvas);
+            let surface = frame
+                .language_zone_surface
+                .expect("language/time-zone surface");
+            let card = frame.language_zone_card.expect("language options card");
+            match expected {
+                AppTheme::Light => {
+                    assert_eq!(surface, rgb(0xf7f8fa));
+                    assert_eq!(card, rgb(0xfbfcfd));
+                }
+                AppTheme::Dark => {
+                    assert_eq!(surface, rgba(expected.palette().workspace.canvas));
+                    assert_eq!(card, rgba(expected.palette().settings.language_list));
+                    for color in [surface, card] {
+                        assert_ne!(color, rgb(0xffffff));
+                        assert_ne!(color, rgb(0xeae9e4));
+                    }
+                }
+            }
         };
         let choose = |option: usize, cx: &mut AsyncApp| {
             // The time-zone read is still pending, so the theme radio list
@@ -671,7 +689,7 @@ mod probe {
             .unwrap();
         std::fs::remove_dir_all(root).unwrap();
         println!(
-            "Hidden GPUI theme: Light → Dark → System, theme.json persisted, dark settings/workspace palettes and terminal theme command"
+            "Hidden GPUI theme: Light → Dark → System, language/time-zone surfaces, theme.json and terminal theme command"
         );
     }
 
