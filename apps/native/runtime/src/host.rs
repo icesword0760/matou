@@ -1505,7 +1505,7 @@ fn browser_diagnostics(data_root: &Path, executable: Option<&Path>) -> Value {
 }
 
 fn account_summary(data_root: &Path) -> Result<Value> {
-    let (accounts, state) = AccountStore::load(&data_root.join("accounts.json"))
+    let (accounts, state) = AccountStore::project_data_root(data_root, now() as u64)
         .map_err(|_| anyhow!("Could not read the account snapshot"))?;
     #[cfg(target_os = "macos")]
     let macos_major = std::process::Command::new("/usr/bin/sw_vers")
@@ -1518,7 +1518,7 @@ fn account_summary(data_root: &Path) -> Result<Value> {
     #[cfg(not(target_os = "macos"))]
     let macos_major = None;
     Ok(json!({
-        "accountSummary": accounts.project(now() as u64),
+        "accountSummary": accounts,
         "loadState": match state {
             matou_native_core::account_store::LoadState::Loaded => "loaded",
             matou_native_core::account_store::LoadState::Missing => "missing",
