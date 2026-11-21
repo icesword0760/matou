@@ -7,6 +7,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use matou_native_core::{
+    provider_config::{ProviderConfigLocale, ProviderConfigStore},
     provider_launch::{
         attach_claude_settings, parse_claude_role_assignments, prepare_claude_fork,
         prepare_claude_launch, prepare_claude_permission_restart, prepare_new_claude_launch,
@@ -43,6 +44,97 @@ fn config(providers: Value, active: &str) -> Value {
         "providers": {"claude-code": providers},
         "activeProviderIds": {"claude-code": active}
     })
+}
+
+#[test]
+fn provider_context_patch_preserves_config_and_reaches_claude_launch() -> Result<()> {
+    let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR"))?;
+    let root = root.path();
+    let path = root.join("provider-config.json");
+    let config = config(
+        json!([
+            {"id": "source", "name": "Source", "endpoint": "https://source.example.invalid",
+             "model": "opus", "apiKey": "fixture-key", "unknown": {"keep": true},
+             "modelMapping": {"opus": "opus", "sonnet": "sonnet", "haiku": "haiku"},
+             "modelMetadata": [{"id": "haiku", "contextWindow": 300_000},
+                               {"id": "opus", "contextWindow": 300_000},
+                               {"id": "sonnet", "contextWindow": 300_000}]},
+            {"id": "target", "name": "Target", "endpoint": "https://target.example.invalid",
+             "model": "other", "apiKey": "target-fixture-key",
+             "modelMetadata": [{"id": "other", "contextWindow": 200_000}]}
+        ]),
+        "source",
+    );
+    fs::write(&path, config.to_string())?;
+    let store = ProviderConfigStore::new(root, ProviderConfigLocale::En);
+    let patch = |id: &str, value: Value| {
+        store.upsert(&json!({"cli": "claude-code", "id": id, "contextWindow": value}))
+    };
+    assert!(patch("source", json!(99_999)).is_err());
+    assert!(patch("source", json!(100_000.5)).is_err());
+    assert!(patch("source", json!(9_007_199_254_740_992_u64)).is_err());
+    assert!(patch("missing", json!(100_000)).is_err());
+    assert_eq!(fs::read_to_string(&path)?, config.to_string());
+    let saved = patch("source", json!(700_000))?;
+    assert_eq!(saved["contextWindow"], 700_000);
+    assert!(saved.get("apiKey").is_none());
+    let persisted: Value = serde_json::from_slice(&fs::read(&path)?)?;
+    let mut persisted_source = persisted["providers"]["claude-code"][0].clone();
+    persisted_source
+        .as_object_mut()
+        .unwrap()
+        .remove("contextWindow");
+    assert_eq!(persisted_source, config["providers"]["claude-code"][0]);
+    assert_eq!(persisted["activeProviderIds"]["claude-code"], "source");
+    assert!(!root.join("provider-config.json.tmp").exists());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(fs::metadata(&path)?.permissions().mode() & 0o777, 0o600);
+    }
+
+    let key = "CLAUDE_CODE_MAX_CONTEXT_TOKENS";
+    assert_env(&prepare(root, Value::Null, &[])?, key, "700000");
+    patch("target", json!(600_000))?;
+    let mut db = Connection::open_in_memory()?;
+    migrate(&mut db, 1)?;
+    db.execute(
+        "INSERT INTO preferences VALUES ('agent.modelPreferences', ?, 1)",
+        [json!({
+            "claudeRoleAssignments": {"opus": {"providerId": "target", "model": "other"}},
+            "compaction": {"mode": "follow"},
+            "contextWindows": {"source": "512k", "target": "default"}
+        })
+        .to_string()],
+    )?;
+    let preferences = read_claude_role_launch_preferences(&db);
+    let launch = prepare_new_claude_launch_with_budget(
+        root,
+        root,
+        &Value::Null,
+        (&preferences, &Vec::new),
+        BTreeMap::from([(
+            "MATOU_CLAUDE_COMMAND".into(),
+            std::env::current_exe()?.into_os_string(),
+        )]),
+        80,
+        24,
+    )?;
+    assert_env(&launch.launch, key, "600000");
+
+    assert!(patch("source", Value::Null)?.get("contextWindow").is_none());
+    let reopened = ProviderConfigStore::new(root, ProviderConfigLocale::En).snapshot()?;
+    assert!(
+        reopened["providers"]["claude-code"][0]
+            .get("contextWindow")
+            .is_none()
+    );
+    assert!(
+        !prepare(root, Value::Null, &[])?
+            .env
+            .contains_key(OsStr::new(key))
+    );
+    Ok(())
 }
 
 #[test]

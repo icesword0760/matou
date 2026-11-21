@@ -8,13 +8,14 @@ use std::{
 
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::{
     claude_role_budget::{
         CLAUDE_ROLES as ROLES, ClaudeBudgetCompaction, ClaudeBudgetTarget, ClaudeRoleBudget,
         MAXIMUM_CONTEXT, claude_role_budget,
     },
+    provider_config::custom_context_window,
     pty::{CALLER_SESSION_MARKERS, LaunchProfile, ShellLaunch, get_var, remove_var, set_var},
     sessions::{ClaudeRoleLaunchPreferences, read_claude_role_launch_preferences},
     startup,
@@ -1030,6 +1031,10 @@ fn prepare_claude(
         // Keep a complete direct launch for targets outside the gateway scope.
         project_assigned_role(provider, role, model, &mut environment);
     }
+    let context_window = context_window.or_else(|| {
+        provider_entry(&config, &provider.id)
+            .and_then(|entry| custom_context_window(&entry["contextWindow"]))
+    });
     project_context_window(&mut environment, context_window);
     #[cfg(unix)]
     set_var(&mut environment, "PWD".into(), cwd.as_os_str().into());
@@ -1303,7 +1308,7 @@ fn independent_gateway_projection(
     } = claude_role_budget(
         std::array::from_fn(|index| projection.roles[index].as_ref().unwrap().budget_target()),
         compaction,
-        &preferences.context_windows,
+        &context_windows(config, preferences),
     )?;
     projection.unknown_compaction_context = unknown_compaction_context;
     Ok((projection, context_window))
@@ -1343,6 +1348,21 @@ fn provider_entry<'a>(config: &'a Value, id: &str) -> Option<&'a Value> {
     provider_entries(config)?
         .iter()
         .find(|entry| entry["id"].as_str() == Some(id))
+}
+
+fn context_windows(
+    config: &Value,
+    preferences: &ClaudeRoleLaunchPreferences,
+) -> Map<String, Value> {
+    let mut windows = preferences.context_windows.clone();
+    for provider in provider_entries(config).unwrap_or_default() {
+        if let Some(id) = provider["id"].as_str()
+            && let Some(tokens) = custom_context_window(&provider["contextWindow"])
+        {
+            windows.insert(id.to_owned(), json!(tokens));
+        }
+    }
+    windows
 }
 
 fn uses_native_catalog(entry: &Value) -> bool {
@@ -1747,7 +1767,7 @@ fn new_assigned_context_window(
     Ok(claude_role_budget(
         roles,
         ClaudeBudgetCompaction::Follow,
-        &preferences.context_windows,
+        &context_windows(config, preferences),
     )?
     .context_window)
 }

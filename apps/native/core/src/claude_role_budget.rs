@@ -57,13 +57,12 @@ fn target_window(
     target: ClaudeBudgetTarget<'_>,
     context_windows: &Map<String, Value>,
 ) -> Result<Option<u64>> {
-    let mode = context_windows
-        .get(target.provider_id)
-        .and_then(Value::as_str);
-    let cap = match mode {
+    let preference = context_windows.get(target.provider_id);
+    let mode = preference.and_then(Value::as_str);
+    let cap = preference.and_then(Value::as_u64).or(match mode {
         Some("maximum") => target.max_context_window.or(target.context_window),
         _ => target.context_window,
-    };
+    });
     let Some(cap) = cap else {
         return Ok(None);
     };

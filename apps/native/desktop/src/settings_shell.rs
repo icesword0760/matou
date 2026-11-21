@@ -11,8 +11,7 @@
 //! - model discovery / refresh (`provider-config.models` and subscription
 //!   `models-refresh`) is left for the next level;
 //! - subscription sign-in/refresh and subscription interaction;
-//! - context-window writing (the runtime has no write path yet);
-//! - the compaction and dispatch blocks below the Claude model assignments.
+//! - the compaction block below the Claude model assignments.
 //!
 //! GPUI has no ARIA surface; keyboard-operable buttons and the selected/pressed
 //! visual state stand in for `aria-pressed` / `aria-current` and this limitation
@@ -27,7 +26,19 @@ use std::{
 };
 
 use gpui::{prelude::*, *};
+use matou_native_core::dispatch_config::{
+    DispatchConfig,
+    form::{DispatchForm, LOAD_FAILED, RETRY_LABEL},
+};
 use matou_native_core::sessions::{InterfaceLocale, LocalePreference};
+use matou_native_desktop::dispatch_settings::DispatchSettingsPanel;
+use matou_native_desktop::provider_context_editor::{
+    PROVIDER_BOTTOM_EDGE_WIDTH, ProviderContextEditorRow, active_provider_bottom_edge,
+    provider_context_window_badge, provider_switch_impact_row,
+};
+use matou_native_desktop::theme_tokens::{
+    self, AppTheme, ThemePreference, ThemeState, theme_preference_picker,
+};
 use matou_native_runtime::protocol::{
     ClaudeModelCatalogReply, ClaudeRoleAssignmentsReply, TimeZoneSettingsReply,
     TimeZoneSettingsSnapshot,
@@ -48,7 +59,6 @@ use self::claude_role_assignments::AssignmentPanel;
 use self::claude_role_assignments::{AssignmentAction, AssignmentView, ClaudeAssignments};
 
 // Frozen light palette (`hierarchy.css` / `provider-setup.css`).
-const CANVAS: u32 = 0xf7f8fa;
 pub(super) const PANEL: u32 = 0xffffff;
 pub(super) const PANEL_MUTED: u32 = 0xfbfcfd;
 pub(super) const TEXT: u32 = 0x303744;
@@ -59,7 +69,6 @@ const ACCENT_SOFT: u32 = 0x347fd61c; // rgba(52,127,214,.11)
 const ACCENT_LINE: u32 = 0x347fd647; // rgba(52,127,214,.28)
 pub(super) const LINE: u32 = 0x424b581a; // rgba(66,75,88,.1)
 pub(super) const LINE_STRONG: u32 = 0x424b5829; // rgba(66,75,88,.16)
-const NAV_TEXT: u32 = 0x5f6976;
 pub(super) const DANGER_TEXT: u32 = 0xa13d39;
 pub(super) const DANGER_BG: u32 = 0xfff2f1;
 const DANGER_LINE: u32 = 0xf4d4d1;
@@ -776,6 +785,7 @@ fn preset_by_endpoint(endpoint: &str) -> Option<&'static ProviderPreset> {
 pub(crate) enum SettingsPage {
     ClaudeCode,
     Language,
+    Dispatch,
 }
 
 impl SettingsPage {
@@ -783,6 +793,7 @@ impl SettingsPage {
         match self {
             Self::ClaudeCode => "Claude Code",
             Self::Language => locale.text("语言与时区", "Language & time zone"),
+            Self::Dispatch => locale.text("派活", "Dispatch"),
         }
     }
 
@@ -790,6 +801,12 @@ impl SettingsPage {
         match self {
             Self::ClaudeCode => locale.text("配置 Claude Code 的服务供应商、各通道上下文窗口与对话压缩模型。", "Configure Claude Code providers, context windows and compaction model."),
             Self::Language => locale.text("选择界面语言，并设置码头启动 CLI 进程的运行环境时区。", "Choose the interface language and the time zone for CLI processes launched by Matou."),
+            // The dispatch panel already renders its own heading and copy; this
+            // subtitle is only a fallback for non-rendered metadata.
+            Self::Dispatch => locale.text(
+                "设置新派任务的全局默认执行者、模型、时限与重试次数。",
+                "Set the global defaults for new dispatched tasks: executor, model, time limits and retries.",
+            ),
         }
     }
 
@@ -797,6 +814,7 @@ impl SettingsPage {
         match self {
             Self::ClaudeCode => 0,
             Self::Language => 1,
+            Self::Dispatch => 2,
         }
     }
 }
@@ -1307,6 +1325,7 @@ fn model_label(model: &str) -> &str {
 pub enum SettingsShellEvent {
     Close,
     SaveLocale(LocalePreference),
+    SaveTheme(ThemePreference),
 }
 
 impl EventEmitter<SettingsShellEvent> for SettingsShell {}
@@ -1331,15 +1350,21 @@ pub struct SettingsShell {
     _assignment_subscriptions: [Subscription; 2],
     page: SettingsPage,
     editor: Option<Editor>,
+    dispatch_config: Option<Rc<DispatchConfig>>,
+    dispatch_panel: Option<Result<Entity<DispatchSettingsPanel>, String>>,
+    theme: ThemeState,
+    theme_error: Option<String>,
     keyboard_focus: bool,
     scroll: ScrollHandle,
-    nav_focus: [FocusHandle; 2],
+    nav_focus: [FocusHandle; 3],
     close_focus: FocusHandle,
     notice_close_focus: FocusHandle,
     notice_retry_focus: FocusHandle,
     load_retry_focus: FocusHandle,
+    dispatch_retry_focus: FocusHandle,
     new_provider_focus: FocusHandle,
     card_controls: HashMap<String, [FocusHandle; 2]>,
+    provider_context_rows: HashMap<String, Entity<ProviderContextEditorRow>>,
 }
 
 impl SettingsShell {
@@ -1374,6 +1399,11 @@ impl SettingsShell {
             _assignment_subscriptions: [assignment_actions, assignment_updates],
             page: SettingsPage::ClaudeCode,
             editor: None,
+            dispatch_config: std::env::home_dir()
+                .map(|home| Rc::new(DispatchConfig::for_home(home))),
+            dispatch_panel: None,
+            theme: ThemeState::new(ThemePreference::Light, window.appearance()),
+            theme_error: None,
             keyboard_focus: false,
             scroll: ScrollHandle::new(),
             nav_focus: std::array::from_fn(|_| cx.focus_handle().tab_stop(true)),
@@ -1381,8 +1411,10 @@ impl SettingsShell {
             notice_close_focus: cx.focus_handle().tab_stop(true),
             notice_retry_focus: cx.focus_handle().tab_stop(true),
             load_retry_focus: cx.focus_handle().tab_stop(true),
+            dispatch_retry_focus: cx.focus_handle().tab_stop(true),
             new_provider_focus: cx.focus_handle().tab_stop(true),
             card_controls: HashMap::new(),
+            provider_context_rows: HashMap::new(),
         };
         shell.load_assignments(cx);
         shell
@@ -1390,6 +1422,55 @@ impl SettingsShell {
 
     pub fn can_close(&self) -> bool {
         self.editor.is_none() && self.providers.switching().is_none()
+    }
+
+    fn load_dispatch(&mut self, cx: &mut Context<Self>) {
+        self.dispatch_panel = Some(
+            self.dispatch_config
+                .clone()
+                .ok_or_else(|| LOAD_FAILED.to_owned())
+                .and_then(|config| {
+                    let snapshot = config.snapshot().map_err(|error| {
+                        eprintln!("Read dispatch defaults: {error}");
+                        LOAD_FAILED.to_owned()
+                    })?;
+                    let form = DispatchForm::new(snapshot).map_err(str::to_owned)?;
+                    Ok(cx.new(|cx| {
+                        DispatchSettingsPanel::new(
+                            form,
+                            move |defaults| {
+                                config
+                                    .save_defaults(defaults)
+                                    .map_err(|error| error.to_string())
+                            },
+                            cx,
+                        )
+                    }))
+                }),
+        );
+        cx.notify();
+    }
+
+    pub(crate) fn configure_theme(&mut self, theme: ThemeState) {
+        self.theme = theme;
+    }
+
+    pub(crate) fn theme_saved(&mut self, theme: ThemeState, cx: &mut Context<Self>) {
+        self.configure_theme(theme);
+        self.theme_error = None;
+        cx.notify();
+    }
+
+    pub(crate) fn theme_save_failed(&mut self, cx: &mut Context<Self>) {
+        self.theme_error = Some(
+            self.locale
+                .text(
+                    "主题保存失败，请重试。",
+                    "The theme couldn’t be saved. Try again.",
+                )
+                .into(),
+        );
+        cx.notify();
     }
 
     pub(crate) fn configure_locale(
@@ -1803,6 +1884,12 @@ impl SettingsShell {
             }
             ProviderUpdate::Deleted => {
                 self.editor = None;
+                let providers = self.providers.providers();
+                self.provider_context_rows.retain(|id, _| {
+                    providers
+                        .iter()
+                        .any(|provider| provider["id"] == id.as_str())
+                });
                 self.keyboard_focus = false;
                 window.focus(&self.new_provider_focus);
             }
@@ -1832,6 +1919,11 @@ impl SettingsShell {
                     editor.body_scroll.scroll_to_bottom();
                     let focus = editor.focus.error.clone();
                     window.focus(&focus);
+                }
+            }
+            ProviderUpdate::ContextWindow { id, result } => {
+                if let Some(row) = self.provider_context_rows.get(&id) {
+                    row.update(cx, |row, cx| row.complete_save(result, cx));
                 }
             }
         }
@@ -2050,20 +2142,36 @@ impl SettingsShell {
             // and the loaded provider projection; returning reads it again.
             self.editor = None;
             self.card_controls.clear();
+            self.provider_context_rows.clear();
             self.keyboard_focus = false;
             self.providers.reset_for_page();
             self.assignments.reset();
             self.assignment_view
                 .update(cx, |view, cx| view.close_menu(window, cx));
         }
+        if self.page == SettingsPage::Dispatch {
+            // The panel owns an unsaved draft; leaving the page drops it so a
+            // return reads the persisted defaults again.
+            self.dispatch_panel = None;
+        }
         self.page = page;
         self.scroll.set_offset(point(px(0.), px(0.)));
-        if page == SettingsPage::ClaudeCode {
-            self.time_zone_menu_open = false;
-            self.providers.load();
-            self.load_assignments(cx);
-        } else if self.time_zone_request.is_none() {
-            self.request_time_zone(false, cx);
+        self.time_zone_menu_open = false;
+        match page {
+            SettingsPage::ClaudeCode => {
+                self.providers.load();
+                self.load_assignments(cx);
+            }
+            SettingsPage::Language => {
+                if self.time_zone_request.is_none() {
+                    self.request_time_zone(false, cx);
+                }
+            }
+            SettingsPage::Dispatch => {
+                if self.dispatch_panel.is_none() {
+                    self.load_dispatch(cx);
+                }
+            }
         }
         let focus = self.nav_focus[page.index()].clone();
         window.focus(&focus);
@@ -2107,6 +2215,36 @@ impl SettingsShell {
     #[allow(dead_code)]
     pub(crate) fn probe_language_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.select_page(SettingsPage::Language, window, cx);
+    }
+
+    #[cfg(debug_assertions)]
+    #[allow(dead_code)]
+    pub(crate) fn probe_dispatch_config(&mut self, config: DispatchConfig) {
+        self.dispatch_config = Some(Rc::new(config));
+    }
+
+    #[cfg(debug_assertions)]
+    #[allow(dead_code)]
+    pub(crate) fn probe_dispatch_load_failed(&self) -> bool {
+        matches!(self.dispatch_panel, Some(Err(_)))
+    }
+
+    #[cfg(debug_assertions)]
+    #[allow(dead_code)]
+    pub(crate) fn probe_dispatch_retry_focus(&self, window: &mut Window) {
+        window.focus(&self.dispatch_retry_focus);
+    }
+
+    #[cfg(debug_assertions)]
+    #[allow(dead_code)]
+    pub(crate) fn probe_settings_nav_focus(&self, page: SettingsPage, window: &mut Window) {
+        window.focus(&self.nav_focus[page.index()]);
+    }
+
+    #[cfg(debug_assertions)]
+    #[allow(dead_code)]
+    pub(crate) fn probe_provider_context(&self, id: &str) -> &Entity<ProviderContextEditorRow> {
+        &self.provider_context_rows[id]
     }
 
     #[cfg(debug_assertions)]
@@ -2411,7 +2549,7 @@ fn preset_matches(preset: &ProviderPreset, query: &str) -> bool {
 // `.model-settings__section-label`: 9/700, `letter-spacing: .08em`).
 // GPUI has no CSS letter-spacing, so this tiny label is split into glyphs and
 // each glyph gets 0.72pt tracking; spaces keep their normal glyph width.
-fn nav_section_label(text: &'static str) -> Div {
+fn nav_section_label(text: &'static str, color: u32) -> Div {
     let glyphs: Vec<char> = text.chars().collect();
     let mut label = div()
         .flex()
@@ -2421,7 +2559,7 @@ fn nav_section_label(text: &'static str) -> Div {
         .mb(px(7.))
         .text_size(px(9.))
         .font_weight(FontWeight(700.))
-        .text_color(rgb(MUTED));
+        .text_color(rgba(color));
     for (index, glyph) in glyphs.iter().enumerate() {
         // Keep the word gap measurable when the label is split into flex cells;
         // the no-break space has the normal space advance.
@@ -2443,6 +2581,8 @@ impl SettingsShell {
     fn render_nav(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         let _ = window;
         let switching = self.providers.switching().is_some();
+        let palette = *self.theme.effective().palette();
+        let dark = self.theme.effective() == AppTheme::Dark;
         let mut nav = div()
             .flex_none()
             .h_full()
@@ -2451,18 +2591,27 @@ impl SettingsShell {
             .px(px(10.))
             .py(px(22.))
             .border_r_1()
-            .border_color(rgba(LINE))
-            .bg(rgb(PANEL_MUTED));
+            .border_color(rgba(palette.workspace.line))
+            .bg(rgba(palette.settings.nav));
 
         nav = nav.child(nav_section_label(
             self.locale.text("AI 服务", "AI services"),
+            palette.workspace.muted,
         ));
-        for (index, page) in [SettingsPage::ClaudeCode, SettingsPage::Language]
-            .into_iter()
-            .enumerate()
-        {
+        // Dispatch sits in the AI services group right after Claude Code; the
+        // language entry keeps its original ID and stays under General.
+        for page in [
+            SettingsPage::ClaudeCode,
+            SettingsPage::Dispatch,
+            SettingsPage::Language,
+        ] {
             let active = self.page == page;
-            let focus = self.nav_focus[index].clone();
+            let focus = self.nav_focus[page.index()].clone();
+            let icon_color = if active {
+                palette.workspace.accent >> 8
+            } else {
+                palette.settings.nav_text
+            };
             let mut row = div()
                 .id(SharedString::from(format!("settings-nav-{}", page.index())))
                 .w_full()
@@ -2474,14 +2623,19 @@ impl SettingsShell {
                 .rounded(px(7.))
                 .text_size(px(11.))
                 .font_weight(FontWeight(650.))
-                .text_color(rgb(if active { ACCENT } else { NAV_TEXT }))
+                .text_color(rgb(icon_color))
                 .bg(if active {
-                    rgba(ACCENT_SOFT)
+                    rgba(palette.workspace.accent_soft)
                 } else {
                     rgba(0x00000000)
                 });
             if !active {
-                row = row.hover(|style| style.bg(rgba(0x5a67780a)));
+                let hover = if dark {
+                    palette.workspace.line
+                } else {
+                    0x5a67780a
+                };
+                row = row.hover(move |style| style.bg(rgba(hover)));
             }
             if !switching {
                 row = wire_button(
@@ -2497,30 +2651,30 @@ impl SettingsShell {
             }
             let row = match page {
                 SettingsPage::ClaudeCode => row
-                    .child(icon(
-                        "settings-2",
-                        15.,
-                        if active { ACCENT } else { NAV_TEXT },
-                    ))
+                    .child(icon("settings-2", 15., icon_color))
                     .child("Claude Code"),
-                SettingsPage::Language => row
-                    .child(globe_icon(15., if active { ACCENT } else { NAV_TEXT }))
-                    .child(
-                        // At 720 the frozen English label wraps onto two lines
-                        // inside the same 33pt row; the Chinese label stays on
-                        // one. Let the text column shrink and wrap instead of
-                        // pushing past the nav edge.
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .line_height(px(14.))
-                            .whitespace_normal()
-                            .child(language_zone_label(page.title(self.locale))),
-                    ),
+                SettingsPage::Dispatch => row
+                    .child(icon("task", 15., icon_color))
+                    .child(self.locale.text("派活", "Dispatch")),
+                SettingsPage::Language => row.child(globe_icon(15., icon_color)).child(
+                    // At 720 the frozen English label wraps onto two lines
+                    // inside the same 33pt row; the Chinese label stays on
+                    // one. Let the text column shrink and wrap instead of
+                    // pushing past the nav edge.
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .line_height(px(14.))
+                        .whitespace_normal()
+                        .child(language_zone_label(page.title(self.locale))),
+                ),
             };
             nav = nav.child(row);
-            if page == SettingsPage::ClaudeCode {
-                nav = nav.child(nav_section_label(self.locale.text("通用", "General")));
+            if page == SettingsPage::Dispatch {
+                nav = nav.child(nav_section_label(
+                    self.locale.text("通用", "General"),
+                    palette.workspace.muted,
+                ));
             }
         }
         // Frozen DOM places the Claude note after the navigation entries.
@@ -2531,7 +2685,7 @@ impl SettingsShell {
                     .mx(px(9.))
                     .text_size(px(9.))
                     .line_height(px(14.))
-                    .text_color(rgb(MUTED))
+                    .text_color(rgba(palette.workspace.muted))
                     .child(self.locale.text(
                         "供应商与上下文配置将同步影响所有 码头 窗口。",
                         "Provider and context settings apply to every Matou window.",
@@ -2542,6 +2696,8 @@ impl SettingsShell {
     }
 
     fn page_header(&self, page: SettingsPage, cx: &mut Context<Self>) -> Div {
+        let palette = *self.theme.effective().palette();
+        let dark = self.theme.effective() == AppTheme::Dark;
         let switching = self.providers.switching().is_some();
         let mut close = div()
             .id("settings-close")
@@ -2553,13 +2709,19 @@ impl SettingsShell {
             .rounded(px(7.))
             .text_size(px(16.))
             .line_height(relative(1.))
-            .text_color(rgb(MUTED))
-            .bg(rgba(0x5a67780e))
+            .text_color(rgba(palette.workspace.muted))
+            .bg(rgba(if dark {
+                palette.workspace.line
+            } else {
+                0x5a67780e
+            }))
             .child("×");
         if switching {
             close = close.opacity(0.55);
         } else {
-            close = close.hover(|style| style.text_color(rgb(TEXT)).bg(rgba(0x5a67781a)));
+            let hover_text = palette.workspace.text;
+            let hover_bg = palette.workspace.line_strong;
+            close = close.hover(move |style| style.text_color(rgba(hover_text)).bg(rgba(hover_bg)));
             close = wire_button(
                 close,
                 &self.close_focus,
@@ -2573,12 +2735,22 @@ impl SettingsShell {
                 cx,
             );
         }
+        // The dispatch panel already renders its own title and heading; keep
+        // only the close control so the page never shows the same title twice.
+        if page == SettingsPage::Dispatch {
+            return div()
+                .flex()
+                .items_start()
+                .justify_end()
+                .w_full()
+                .child(close);
+        }
         let mut heading = div().flex().flex_col().min_w_0().child(
             div()
                 .text_size(px(19.))
                 .line_height(px(23.))
                 .font_weight(FontWeight(680.))
-                .text_color(rgb(TEXT))
+                .text_color(rgba(palette.workspace.text))
                 .child(language_zone_label(page.title(self.locale))),
         );
         heading = heading.child(
@@ -2586,7 +2758,7 @@ impl SettingsShell {
                 .mt(px(4.))
                 .text_size(px(10.))
                 .line_height(px(13.5))
-                .text_color(rgb(MUTED))
+                .text_color(rgba(palette.workspace.muted))
                 .child(language_zone_label(page.subtitle(self.locale))),
         );
         div()
@@ -2605,12 +2777,162 @@ impl SettingsShell {
         cx: &mut Context<Self>,
     ) -> Div {
         let header = self.page_header(page, cx);
-        let body = if page == SettingsPage::ClaudeCode {
-            self.claude_content(window, cx)
-        } else {
-            self.render_language_zone(window, cx)
-        };
+        let mut body = div().flex().flex_col().w_full();
+        match page {
+            SettingsPage::ClaudeCode => {
+                let content = self.claude_content(window, cx);
+                body = body.child(self.legacy_surface(content));
+            }
+            SettingsPage::Language => {
+                let content = self.render_language_zone(window, cx);
+                body = body
+                    .child(self.legacy_surface(content))
+                    .child(self.render_theme_section(cx));
+            }
+            SettingsPage::Dispatch => {
+                let content = self.dispatch_content(cx);
+                body = body.child(self.legacy_surface(content));
+            }
+        }
         div().flex().flex_col().w_full().child(header).child(body)
+    }
+
+    fn is_dark(&self) -> bool {
+        self.theme.effective() == AppTheme::Dark
+    }
+
+    /// Older sections still use the frozen light palette. In dark mode they
+    /// keep their exact light colors inside one clearly bounded light surface;
+    /// light mode returns the section untouched so its geometry is unchanged.
+    fn legacy_surface(&self, content: Div) -> Div {
+        if self.is_dark() {
+            div()
+                .mt(px(14.))
+                .w_full()
+                .rounded(px(12.))
+                .border_1()
+                .border_color(rgba(theme_tokens::LIGHT.workspace.line_strong))
+                .bg(rgba(theme_tokens::LIGHT.workspace.canvas))
+                .text_color(rgb(TEXT))
+                .p(px(18.))
+                .child(content)
+        } else {
+            content
+        }
+    }
+
+    fn dispatch_content(&mut self, cx: &mut Context<Self>) -> Div {
+        let state = self.dispatch_panel.clone();
+        let content = div().flex().flex_col().w_full();
+        match state {
+            None => content.child(
+                div()
+                    .mt(px(22.))
+                    .p(px(14.))
+                    .rounded(px(9.))
+                    .border_1()
+                    .border_color(rgba(LINE))
+                    .bg(rgb(PANEL))
+                    .text_size(px(10.))
+                    .text_color(rgb(MUTED))
+                    .child(
+                        self.locale
+                            .text("正在载入派活默认值…", "Loading dispatch defaults…"),
+                    ),
+            ),
+            Some(Ok(panel)) => content.child(panel),
+            Some(Err(_)) => content.child(self.dispatch_error_block(cx)),
+        }
+    }
+
+    fn dispatch_error_block(&self, cx: &mut Context<Self>) -> Div {
+        let retry = wire_button(
+            div()
+                .id("settings-dispatch-retry")
+                .h(px(24.))
+                .flex()
+                .items_center()
+                .px(px(8.))
+                .rounded(px(6.))
+                .border_1()
+                .border_color(rgba(0xa34a4433))
+                .bg(rgb(0xffffff))
+                .text_size(px(10.))
+                .font_weight(FontWeight(600.))
+                .text_color(rgb(DANGER_TEXT))
+                .hover(|style| style.bg(rgb(0xfff7f6)))
+                .child(RETRY_LABEL),
+            &self.dispatch_retry_focus,
+            6.,
+            true,
+            |this, _, cx| this.load_dispatch(cx),
+            cx,
+        );
+        div()
+            .mt(px(22.))
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .p(px(12.))
+            .rounded(px(8.))
+            .border_1()
+            .border_color(rgb(DANGER_LINE))
+            .bg(rgb(DANGER_BG))
+            .text_size(px(11.))
+            .line_height(px(17.6))
+            .text_color(rgb(DANGER_TEXT))
+            .child(div().flex_1().whitespace_normal().child(LOAD_FAILED))
+            .child(retry)
+    }
+
+    fn render_theme_section(&self, cx: &mut Context<Self>) -> Div {
+        let palette = *self.theme.effective().palette();
+        let dark = self.theme.effective() == AppTheme::Dark;
+        let weak = cx.weak_entity();
+        let picker = theme_preference_picker(
+            "settings-theme-picker",
+            self.theme.preference(),
+            &palette,
+            self.locale,
+            move |preference, _window, cx| {
+                let _ = weak.update(cx, |_shell, cx| {
+                    cx.emit(SettingsShellEvent::SaveTheme(preference));
+                    cx.notify();
+                });
+            },
+        );
+        let mut section = div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .mt(px(24.))
+            .pt(px(18.))
+            .border_t_1()
+            .border_color(rgba(palette.workspace.line))
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .font_weight(FontWeight(650.))
+                    .text_color(rgba(palette.workspace.text))
+                    .child(self.locale.text("主题", "Theme")),
+            )
+            .child(div().mt(px(10.)).w_full().child(picker));
+        if let Some(error) = self
+            .theme_error
+            .as_deref()
+            .filter(|error| !error.is_empty())
+        {
+            section = section.child(
+                div()
+                    .mt(px(9.))
+                    .text_size(px(11.))
+                    .line_height(relative(1.7))
+                    .text_color(rgb(if dark { 0xff9b94 } else { DANGER_TEXT }))
+                    .whitespace_normal()
+                    .child(error.to_owned()),
+            );
+        }
+        section
     }
 
     fn claude_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
@@ -2654,29 +2976,20 @@ impl SettingsShell {
         }
 
         content = content.child(self.provider_cards(window, cx));
-        content = content.child(
-            div()
-                .mt(px(11.))
-                .mx(px(2.))
-                .flex()
-                .items_start()
-                .gap(px(5.))
-                .text_size(px(11.))
-                .line_height(px(18.7))
-                .text_color(rgb(MUTED))
-                .child(div().flex_none().child("ⓘ"))
-                .child(
-                    div().flex_1().child(
-                        div()
-                            .font_weight(FontWeight(650.))
-                            .text_color(rgb(0x6a7481))
-                            .child(self.locale.text(
-                                "切换会影响所有 码头 窗口。",
-                                "Switching affects every Matou window.",
-                            )),
-                    ),
-                ),
-        );
+        // Reuse the verified provider-switch note once, below the card list;
+        // repeating it in every card would duplicate the same global warning.
+        let app_name = self.locale.text("码头", "Matou");
+        #[cfg(debug_assertions)]
+        LANGUAGE_ZONE_PROBE.with_borrow_mut(|probe| {
+            if let Some(probe) = probe {
+                let impact = matou_native_desktop::provider_context_editor::provider_switch_impact(
+                    self.locale,
+                    app_name,
+                );
+                probe.labels.extend([impact.title, impact.body.to_owned()]);
+            }
+        });
+        content = content.child(provider_switch_impact_row(self.locale, app_name, false));
         content.child(assignments)
     }
 
@@ -2891,7 +3204,8 @@ impl SettingsShell {
         };
         let container_width = (shell_width - pad_x * 2.).max(0.);
         let mut list = div().flex().flex_col().gap(px(12.)).w_full();
-        for provider in providers {
+        let card_count = providers.len();
+        for (index, provider) in providers.into_iter().enumerate() {
             let id = provider["id"].as_str().unwrap_or_default().to_owned();
             let controls = self
                 .card_controls
@@ -2899,18 +3213,21 @@ impl SettingsShell {
                 .or_insert_with(|| std::array::from_fn(|_| cx.focus_handle().tab_stop(true)))
                 .clone();
             let current = active.as_deref() == Some(id.as_str());
+            let is_last = index + 1 == card_count;
             let card = if provider["kind"] == "subscription" && provider["subscription"].is_object()
             {
-                self.subscription_card(&provider, current, viewport_width)
+                self.subscription_card(&provider, current, is_last, viewport_width)
             } else {
                 self.api_card(
                     &provider,
                     current,
+                    is_last,
                     switching.as_deref(),
                     busy,
                     &controls,
                     container_width,
                     viewport_width,
+                    window,
                     cx,
                 )
             };
@@ -2919,15 +3236,63 @@ impl SettingsShell {
         list
     }
 
+    fn provider_context_row(
+        &mut self,
+        provider: &Value,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<ProviderContextEditorRow>> {
+        let id = provider["id"].as_str().filter(|id| !id.is_empty())?;
+        let saved = provider["contextWindow"].as_u64();
+        let locale = self.locale;
+        if let Some(row) = self.provider_context_rows.get(id)
+            && row.read(cx).saved() == saved
+        {
+            row.update(cx, |row, cx| row.set_locale(locale, cx));
+            return Some(row.clone());
+        }
+
+        let shell = cx.weak_entity();
+        let provider_id = id.to_owned();
+        let row = cx.new(|cx| {
+            ProviderContextEditorRow::new(
+                saved,
+                false,
+                locale,
+                move |tokens, _, cx| {
+                    shell
+                        .update(cx, |shell, cx| {
+                            shell.providers.save_context_window(&provider_id, tokens)?;
+                            cx.notify();
+                            Ok(())
+                        })
+                        .unwrap_or_else(|_| {
+                            Err(locale
+                                .text("供应商设置已关闭。", "Provider settings are closed.")
+                                .into())
+                        })
+                },
+                window,
+                cx,
+            )
+            .with_runtime_confirmation()
+        });
+        self.provider_context_rows
+            .insert(id.to_owned(), row.clone());
+        Some(row)
+    }
+
     fn api_card(
-        &self,
+        &mut self,
         provider: &Value,
         current: bool,
+        is_last: bool,
         switching: Option<&str>,
         busy: bool,
         controls: &[FocusHandle; 2],
         container_width: f32,
         viewport_width: f32,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let name = provider["name"].as_str().unwrap_or_default();
@@ -3058,6 +3423,13 @@ impl SettingsShell {
             );
         }
 
+        // The host owns reading the saved custom window. When it declines to
+        // build an editor (None), the card still shows the module badge so the
+        // read-only state is never blank.
+        let context_row = self.provider_context_row(provider, window, cx);
+        let show_context_badge = context_row.is_none();
+        let context_tokens = provider["contextWindow"].as_u64();
+
         let mut card = div()
             .id(SharedString::from(format!(
                 "provider-card-{}",
@@ -3065,14 +3437,13 @@ impl SettingsShell {
             )))
             .relative()
             .flex()
-            .items_center()
+            .flex_col()
             .w_full()
             .min_h(px(if current {
                 ACTIVE_API_CARD_MIN_OUTER_HEIGHT
             } else {
                 80.
             }))
-            .gap(px(11.))
             .p(px(14.))
             .rounded(px(11.))
             .overflow_hidden()
@@ -3102,7 +3473,8 @@ impl SettingsShell {
                     .bg(rgb(ACCENT)),
             );
         }
-        card = card.child(
+        let mut header = div().flex().items_center().w_full().gap(px(11.));
+        header = header.child(
             div()
                 .size(px(32.))
                 .flex_none()
@@ -3146,6 +3518,9 @@ impl SettingsShell {
                                 .bg(rgba(ACCENT_SOFT))
                                 .child(self.locale.text("使用中", "In use")),
                         )
+                    })
+                    .when(show_context_badge, |row| {
+                        row.child(provider_context_window_badge(context_tokens, self.locale))
                     }),
             )
             .child(
@@ -3186,28 +3561,46 @@ impl SettingsShell {
         let stacked = container_width <= 640.;
         let hide_model = viewport_width <= 940. && !stacked;
         if stacked {
-            card = card.child(name_column.flex_1().min_w_0().child(model_block));
+            header = header.child(name_column.flex_1().min_w_0().child(model_block));
         } else {
-            card = card.child(name_column);
+            header = header.child(name_column);
             if !hide_model {
-                card = card.child(model_block);
+                header = header.child(model_block);
             }
         }
-        card.child(
+        header = header.child(
             div()
                 .flex()
                 .flex_none()
                 .gap(px(5.))
                 .child(edit)
                 .child(switch),
-        )
-        .into_any_element()
+        );
+        card = card.child(header);
+        if let Some(row) = context_row {
+            card = card.child(div().mt(px(12.)).w_full().child(row));
+        }
+        if let Some(edge) = active_provider_bottom_edge(current, is_last) {
+            // Overlay the existing 1pt divider inside the card border instead
+            // of adding a second line or changing the card's size.
+            card = card.child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .bottom_0()
+                    .h(px(PROVIDER_BOTTOM_EDGE_WIDTH))
+                    .bg(rgb(edge)),
+            );
+        }
+        card.into_any_element()
     }
 
     fn subscription_card(
         &self,
         provider: &Value,
         current: bool,
+        is_last: bool,
         viewport_width: f32,
     ) -> AnyElement {
         let subscription = &provider["subscription"];
@@ -3295,6 +3688,12 @@ impl SettingsShell {
                     .child(status_label),
             );
         }
+        // Subscription cards stay read-only; the verified badge is the whole
+        // context-window surface here.
+        name_row = name_row.child(provider_context_window_badge(
+            provider["contextWindow"].as_u64(),
+            self.locale,
+        ));
         let mut details = div()
             .flex()
             .flex_col()
@@ -3414,6 +3813,19 @@ impl SettingsShell {
                                 if missing_opus { " · 不可用" } else { "" }
                             )),
                     ),
+            );
+        }
+        if let Some(edge) = active_provider_bottom_edge(current, is_last) {
+            // Same rule as API cards: paint over the existing bottom divider
+            // inside the border without adding a second row of height.
+            card = card.child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .bottom_0()
+                    .h(px(PROVIDER_BOTTOM_EDGE_WIDTH))
+                    .bg(rgb(edge)),
             );
         }
         card.into_any_element()
@@ -4974,6 +5386,14 @@ fn confirm_button(
 impl Render for SettingsShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let viewport_width = f32::from(window.viewport_size().width);
+        let palette = self.theme.effective().palette();
+        let background = rgba(palette.workspace.canvas);
+        #[cfg(debug_assertions)]
+        LANGUAGE_ZONE_PROBE.with_borrow_mut(|probe| {
+            if let Some(probe) = probe {
+                probe.settings_canvas = Some(background);
+            }
+        });
         let hide_nav = viewport_width <= 680.;
         let (nav_width, pad_top, pad_x) = if hide_nav {
             (0., 18., 14.)
@@ -4999,7 +5419,7 @@ impl Render for SettingsShell {
             .overflow_y_scroll()
             .track_scroll(&self.scroll)
             .child(page);
-        let mut surface = div().relative().w_full().h_full().flex().bg(rgb(CANVAS));
+        let mut surface = div().relative().w_full().h_full().flex().bg(background);
         if let Some(nav) = nav {
             surface = surface.child(nav);
         }
@@ -5023,8 +5443,8 @@ impl Render for SettingsShell {
             .flex()
             .flex_col()
             .font_family(".AppleSystemUIFont")
-            .text_color(rgb(TEXT))
-            .bg(rgb(CANVAS))
+            .text_color(rgba(palette.workspace.text))
+            .bg(background)
             .capture_any_mouse_down(cx.listener(|this, _, _, cx| {
                 if this.keyboard_focus {
                     this.keyboard_focus = false;
@@ -5289,6 +5709,8 @@ pub(crate) struct LanguageZoneProbe {
     pub bounds: Vec<Bounds<Pixels>>,
     pub enabled: HashMap<&'static str, bool>,
     pub selected_language: String,
+    pub settings_canvas: Option<Rgba>,
+    pub workspace_canvas: Option<Rgba>,
 }
 
 #[cfg(debug_assertions)]
@@ -5302,6 +5724,15 @@ pub(crate) fn probe_language_zone(draw: impl FnOnce()) -> LanguageZoneProbe {
     LANGUAGE_ZONE_PROBE.set(Some(LanguageZoneProbe::default()));
     draw();
     LANGUAGE_ZONE_PROBE.take().unwrap()
+}
+
+#[cfg(debug_assertions)]
+pub(crate) fn probe_workspace_canvas(background: Rgba) {
+    LANGUAGE_ZONE_PROBE.with_borrow_mut(|probe| {
+        if let Some(probe) = probe {
+            probe.workspace_canvas = Some(background);
+        }
+    });
 }
 
 fn language_zone_label<T: AsRef<str>>(text: T) -> T {
