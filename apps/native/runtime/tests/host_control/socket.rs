@@ -193,16 +193,19 @@ impl Harness {
         )?;
         let owner = ShellOwner::new(connection, ownership, || uuid::Uuid::new_v4().to_string())?;
         let server = ControlServer::listen(root.path(), generation, reader, clock, idle)?;
-        let mut journal =
-            SegmentJournal::open(root.path(), &first.session_id, JournalOptions::default())?;
-        journal.append(&Record {
-            timestamp: NOW,
-            frame: Frame::Output {
-                sequence: 1,
-                data: b"previous terminal output".to_vec(),
-            },
-        })?;
-        journal.close()?;
+        seed_screen(root.path(), 8, "previous terminal output")?;
+        if discovery {
+            seed_screen(root.path(), 16, "peer terminal output")?;
+            seed_screen(
+                root.path(),
+                25,
+                frozen_case("terminal-child-default")["request"]["stub_output"]
+                    .as_str().unwrap(),
+            )?;
+        }
+        if secondary_workspace {
+            seed_screen(root.path(), 46, "remote workspace output")?;
+        }
         Ok(Self {
             server,
             owner,
@@ -266,12 +269,32 @@ impl Harness {
         thread::scope(|scope| {
             let worker = scope.spawn(client_task);
             while !worker.is_finished() {
-                self.server.poll();
+                self.server.poll(&self.owner);
                 thread::sleep(Duration::from_millis(1));
             }
             worker.join().unwrap()
         })
     }
+}
+
+fn screen_params(target: Value) -> Value {
+    json!({ "target": target, "maxLines": 1, "maxBytes": 100 })
+}
+
+fn seed_screen(root: &Path, session: u64, text: &str) -> Result<()> {
+    seed_journal(root, session, [Frame::Output {
+        sequence: 1,
+        data: text.as_bytes().to_vec(),
+    }])
+}
+
+fn seed_journal(root: &Path, session: u64, frames: impl IntoIterator<Item = Frame>) -> Result<()> {
+    let mut journal =
+        SegmentJournal::open(root, &fixture_id(session), JournalOptions::default())?;
+    for frame in frames {
+        journal.append(&Record { timestamp: NOW, frame })?;
+    }
+    journal.close()
 }
 
 #[derive(Debug, PartialEq)]
@@ -437,8 +460,8 @@ fn wire_rejections_precede_topology_and_match_public_envelope() -> Result<()> {
             "CAPABILITY_DENIED",
         ),
         (
-            "production-terminal-disabled",
-            READ,
+            "production-terminal-write-disabled",
+            "terminal.send-text",
             token.as_str(),
             "CAPABILITY_DENIED",
         ),
@@ -645,13 +668,21 @@ fn selects_targets_with_a_single_owner_snapshot() -> Result<()> {
     ] {
         let response = harness.verify(
             id,
-            request(id, READ, &token, json!({ "target": target })),
+            request(id, READ, &token, screen_params(target)),
             id,
             None,
             1,
             1,
         )?;
-        assert_eq!(response["result"]["sessionId"], expected);
+        assert_eq!(
+            response["result"]["text"],
+            match expected.as_str() {
+                id if id == fixture_id(8) => "previous terminal output",
+                id if id == fixture_id(16) => "peer terminal output",
+                id if id == fixture_id(25) => "fixture child output",
+                _ => "remote workspace output",
+            },
+        );
     }
     let child = harness
         .server
@@ -664,14 +695,14 @@ fn selects_targets_with_a_single_owner_snapshot() -> Result<()> {
             "parent",
             READ,
             &child,
-            json!({"target":{"kind":"relation","relation":"parent"}}),
+            screen_params(json!({"kind":"relation","relation":"parent"})),
         ),
         "parent",
         None,
         1,
         1,
     )?;
-    assert_eq!(parent["result"]["sessionId"], fixture_id(8));
+    assert_eq!(parent["result"]["text"], "previous terminal output");
     for (id, params) in [
         ("missing-target", json!({})),
         (
@@ -780,7 +811,7 @@ fn selects_targets_with_a_single_owner_snapshot() -> Result<()> {
     ] {
         harness.verify(
             id,
-            request(id, READ, &token, json!({ "target": target })),
+            request(id, READ, &token, screen_params(target)),
             id,
             Some(error),
             reads,
@@ -802,9 +833,9 @@ fn selects_targets_with_a_single_owner_snapshot() -> Result<()> {
         1,
         0,
     )?;
-    let ambiguous = harness.verify("ambiguous-ref", request("ambiguous", READ, &token, json!({
-        "target": {"kind":"ref","ref":"legacy:shared","projectionRevision":alias_list["result"]["projectionRevision"]}
-    })), "ambiguous", Some("AMBIGUOUS_TARGET"), 1, 0)?;
+    let ambiguous = harness.verify("ambiguous-ref", request("ambiguous", READ, &token, screen_params(json!({
+        "kind":"ref","ref":"legacy:shared","projectionRevision":alias_list["result"]["projectionRevision"]
+    }))), "ambiguous", Some("AMBIGUOUS_TARGET"), 1, 0)?;
     let fixture = frozen_case("selector-legacy-ref-ambiguity");
     assert_eq!(
         ambiguous["error"]["details"],
@@ -1097,7 +1128,7 @@ fn bounded_queue_rechecks_revocation_and_deadline_on_owner() -> Result<()> {
     check_reply(&receive(&mut overflow)?, "overflow", Some(TIMEOUT));
     harness.server.runs().revoke(RUN);
     for _ in 0..OWNER_QUEUE_CAPACITY.div_ceil(OWNER_BATCH) {
-        harness.server.poll();
+        harness.server.poll(&harness.owner);
     }
     for (mut socket, id) in clients {
         check_reply(&receive(&mut socket)?, &id, Some("CAPABILITY_DENIED"));
@@ -1117,7 +1148,7 @@ fn bounded_queue_rechecks_revocation_and_deadline_on_owner() -> Result<()> {
         .unwrap()
         .recv_timeout(Duration::from_secs(2))?;
     QUEUE_CLOCK.store(NOW + 101, Ordering::SeqCst);
-    let result = harness.server.dispatch(&pending);
+    let result = harness.server.dispatch(&pending, &harness.owner);
     assert_eq!(result.as_ref().err().unwrap().code, TIMEOUT);
     let _ = pending.reply.send(result);
     check_reply(
@@ -1252,6 +1283,21 @@ exit 0
         reply["result"]["caller"],
         json!({"sessionId":session_id, "runId":run_id})
     );
+    assert_eq!(snapshot(&observe, &data)?, before);
+
+    for (method, params) in [
+        (READ, screen_params(json!({"kind":"self"}))),
+        ("terminal.read-history", screen_params(json!({"kind":"self"}))),
+        ("terminal.read-commands", json!({"target":{"kind":"self"},"limit":1})),
+        ("terminal.send-text", json!({"target":{"kind":"self"},"text":"should never arrive"})),
+    ] {
+        let mut input = request("managed-read", method, token, params);
+        input["deadlineAt"] = json!(now_ms() + 3_000);
+        socket.write_all(&frame(&serde_json::to_vec(&input)?))?;
+        let reply = receive(&mut socket)?;
+        let expected = if method == "terminal.send-text" { Some("CAPABILITY_DENIED") } else { None };
+        check_reply(&reply, "managed-read", expected);
+    }
     assert_eq!(snapshot(&observe, &data)?, before);
 
     fs::write(home.join("exit"), b"")?;
@@ -1401,5 +1447,110 @@ fn readonly_and_in_process_recovery_never_bind() -> Result<()> {
     println!(
         "PASS runtime-readonly-no-endpoint, runtime-recovery-waiting-no-endpoint, same-startup-recovery-retry-no-endpoint"
     );
+    Ok(())
+}
+
+#[test]
+fn read_only_terminal_wire_contract() -> Result<()> {
+    let mut harness = Harness::new(true, true, GENERATION, fixed_now, IDLE_TIMEOUT)?;
+    let token = harness.token(RUN, MANAGED_SCOPES, NOW)?;
+    for name in ["terminal-child-default", "stale-terminal-sibling"] {
+        let case = frozen_case(name);
+        let mut envelope = case["request"]["calls"][0]["envelope"].clone();
+        envelope["token"] = json!(token);
+        let expected = &case["expected_response"]["frames"][0];
+        let id = envelope["requestId"].as_str().unwrap().to_owned();
+        let code = expected["error"]["code"].as_str();
+        let mut reply = harness.verify(name, envelope, &id, code, 1, usize::from(code.is_none()))?;
+        if code.is_none() {
+            // The frozen fixture stubs the backend's result down to { text }.
+            let result = reply["result"].as_object_mut().unwrap();
+            assert_eq!(result.remove("cols"), Some(json!(80)));
+            assert_eq!(result.remove("rows"), Some(json!(24)));
+            assert_eq!(result.remove("truncated"), Some(json!(false)));
+            assert_eq!(result.remove("source"), Some(json!("screen")));
+        }
+        assert_eq!(&reply, expected);
+    }
+
+    let session = 46;
+    seed_journal(
+        harness.root.path(), session, [
+            Frame::Resize { sequence: 2, cols: 40, rows: 8 },
+            Frame::Reset { sequence: 3, screen_epoch: 1 },
+            Frame::Output { sequence: 4, data: b"first\r\n".to_vec() },
+            Frame::Output { sequence: 5, data: b"terminal\r\n".to_vec() },
+            Frame::Output { sequence: 6, data: b"\x1b[31m".to_vec() },
+            Frame::Output { sequence: 7, data: "尾🙂".as_bytes()[..2].to_vec() },
+            Frame::Output { sequence: 8, data: "尾🙂".as_bytes()[2..].to_vec() },
+        ],
+    )?;
+    let index = harness.root.path().join("journal").join(fixture_id(session)).join("range-index.json");
+    if index.exists() {
+        fs::remove_file(&index)?;
+    }
+    let write = Connection::open(harness.root.path().join("matou.sqlite"))?;
+    write.execute(
+        "INSERT INTO terminal_commands VALUES
+         ('earlier',?1,4,5,NULL,NULL,NULL,NULL,10,11),
+         ('latest',?1,7,7,8,'printf tail','/project',0,12,13),
+         ('other',?2,100,NULL,NULL,NULL,NULL,NULL,14,14)",
+        [fixture_id(session), fixture_id(8)],
+    )?;
+    drop(write);
+    let target = json!({"sessionId":fixture_id(session)});
+    let last = json!({
+        "commandId":"latest", "sessionId":fixture_id(session),
+        "startedSequence":7,"executedSequence":7,"endedSequence":8,
+        "commandText":"printf tail","cwd":"/project","exitCode":0,
+        "createdAt":12,"updatedAt":13
+    });
+    for (id, method, params, expected) in [
+        ("grid-and-line-tail", READ,
+         json!({"maxLines":2,"maxBytes":100}),
+         json!({"text":"terminal\n尾🙂","cols":40,"rows":8,"truncated":true,"source":"screen"})),
+        ("grid-multibyte-tail", READ,
+         json!({"maxLines":5000,"maxBytes":6}),
+         json!({"text":"🙂","cols":40,"rows":8,"truncated":true,"source":"screen"})),
+        ("history-range", "terminal.read-history",
+         json!({"fromSequence":5,"throughSequence":8,"maxLines":2,"maxBytes":12}),
+         json!({"text":"\x1b[31m尾🙂","truncated":true,"firstSequence":5,"lastSequence":8,"source":"journal"})),
+        ("history-non-output-cursors", "terminal.read-history",
+         json!({"fromSequence":2,"throughSequence":3,"maxLines":1,"maxBytes":1}),
+         json!({"text":"","truncated":false,"firstSequence":2,"lastSequence":3,"source":"journal"})),
+        ("history-empty-range", "terminal.read-history",
+         json!({"fromSequence":9,"maxLines":50,"maxBytes":100}),
+         json!({"text":"","truncated":false,"firstSequence":0,"lastSequence":0,"source":"journal"})),
+        ("history-line-limit", "terminal.read-history",
+         json!({"fromSequence":4,"throughSequence":5,"maxLines":1,"maxBytes":100}),
+         json!({"text":"","truncated":true,"firstSequence":4,"lastSequence":5,"source":"journal"})),
+        ("commands-omit-unavailable-fields", "terminal.read-commands",
+         json!({"limit":1000}),
+         json!([{"commandId":"earlier","sessionId":fixture_id(session),
+                  "startedSequence":4,"executedSequence":5,"createdAt":10,"updatedAt":11}, last])),
+        ("commands-newest", "terminal.read-commands", json!({"limit":1}), json!([last])),
+    ] {
+        let mut params = params;
+        params["target"] = target.clone();
+        let reply = harness.verify(id, request(id, method, &token, params), id, None, 1, 1)?;
+        assert_eq!(reply["result"], expected, "{id}");
+    }
+    assert!(!index.exists());
+
+    for (id, method, params, message) in [
+        ("read-required-lines", READ, json!({"maxBytes":1}), "maxLines must be between 1 and 5000"),
+        ("read-zero-lines", READ, json!({"maxLines":0,"maxBytes":1}), "maxLines must be between 1 and 5000"),
+        ("read-too-many-bytes", READ, json!({"maxLines":1,"maxBytes":1_048_577}), "maxBytes must be between 1 and 1048576"),
+        ("history-fraction", "terminal.read-history", json!({"maxLines":0.5,"maxBytes":1}), "maxLines must be between 1 and 5000"),
+        ("history-non-numeric", "terminal.read-history", json!({"maxLines":1,"maxBytes":"10"}), "maxBytes must be between 1 and 1048576"),
+        ("history-bad-sequence", "terminal.read-history", json!({"maxLines":1,"maxBytes":1,"fromSequence":-1}), "fromSequence must be a non-negative integer"),
+        ("history-reversed-range", "terminal.read-history", json!({"maxLines":1,"maxBytes":1,"fromSequence":5,"throughSequence":4}), "throughSequence must be at least fromSequence"),
+        ("commands-limit", "terminal.read-commands", json!({"limit":1001}), "limit must be between 1 and 1000"),
+    ] {
+        let mut params = params;
+        params["target"] = target.clone();
+        let reply = harness.verify(id, request(id, method, &token, params), id, Some(INVALID), 1, 0)?;
+        assert_eq!(reply["error"], json!({"code":"INVALID_REQUEST","message":message}));
+    }
     Ok(())
 }

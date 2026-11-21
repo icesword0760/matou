@@ -175,21 +175,21 @@ fn real_control_round_trips_encoded_selectors_and_public_errors() -> Result<()> 
         graph.drive(|| {
             let client = Client::new(endpoint, token).unwrap();
             let selector = client.terminal_selector(target).unwrap();
-            Ok(client.request(READ, json!({"target": selector})))
+            Ok(client.request(READ, screen_params(selector)))
         })
     };
     for (token, input, expected) in [
-        (&main, "self", 8),
-        (&main, "right", 16),
-        (&peer, "left", 8),
-        (&child, "parent", 8),
-        (&main, "child", 25),
-        (&main, "child:1", 25),
-        (&main, "sibling:2", 16),
-        (&main, &fixture_id(25), 25),
+        (&main, "self", "previous terminal output"),
+        (&main, "right", "peer terminal output"),
+        (&peer, "left", "previous terminal output"),
+        (&child, "parent", "previous terminal output"),
+        (&main, "child", "fixture child output"),
+        (&main, "child:1", "fixture child output"),
+        (&main, "sibling:2", "peer terminal output"),
+        (&main, &fixture_id(25), "fixture child output"),
     ] {
         let result = resolve(token, input)?.unwrap().unwrap();
-        assert_eq!(result["sessionId"], fixture_id(expected));
+        assert_eq!(result["text"], expected);
         println!("PASS cli-selector-{input}");
     }
     let missing = frozen_case("selector-missing-id-name-position");
@@ -218,7 +218,7 @@ fn real_control_round_trips_encoded_selectors_and_public_errors() -> Result<()> 
             .unwrap();
         selector["projectionRevision"] = json!("older-revision");
         Ok(client
-            .request(READ, json!({"target": selector}))
+            .request(READ, screen_params(selector))
             .unwrap_err())
     })?;
     assert_eq!(stale.exit_code(), 3);
@@ -239,7 +239,7 @@ fn real_control_round_trips_encoded_selectors_and_public_errors() -> Result<()> 
         let client = Client::new(endpoint, &main).unwrap();
         let selector = client.terminal_selector("legacy:shared").unwrap();
         Ok(client
-            .request(READ, json!({"target": selector}))
+            .request(READ, screen_params(selector))
             .unwrap_err())
     })?;
     let fixture = frozen_case("selector-legacy-ref-ambiguity");

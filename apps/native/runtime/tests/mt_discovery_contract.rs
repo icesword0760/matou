@@ -428,6 +428,104 @@ fn request_limit_and_interrupted_connection() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn terminal_cli_requests_formats_and_exit_codes() -> Result<()> {
+    for (args, method, params, result, stdout) in [
+        (
+            vec!["read", "self", "--lines", "1", "--bytes", "1048576"],
+            "terminal.read-current",
+            json!({"target":{"kind":"self"}, "maxLines":1,"maxBytes":1_048_576}),
+            json!({"text":"尾🙂","cols":80,"rows":24,"truncated":true,"source":"screen"}),
+            "尾🙂\n".into(),
+        ),
+        (
+            vec!["history", "left", "--json"],
+            "terminal.read-history",
+            json!({"target":{"kind":"relative","direction":"left"}, "maxLines":1000,"maxBytes":65_536}),
+            json!({"text":"saved", "truncated":false,"firstSequence":3,"lastSequence":8,"source":"journal"}),
+            line(
+                &json!({"text":"saved", "truncated":false,"firstSequence":3,"lastSequence":8,"source":"journal"}),
+            ),
+        ),
+        (
+            vec!["commands", "parent", "--limit", "5"],
+            "terminal.read-commands",
+            json!({"target":{"kind":"relation","relation":"parent"}, "limit":5}),
+            json!(["pwd", {"command":"date"}, {"commandText":"ls"}]),
+            "1. pwd\n2. date\n3. {\"commandText\":\"ls\"}\n".into(),
+        ),
+    ] {
+        let output = with_peer(&args, method, params, move |socket, request| {
+            write_body(
+                socket,
+                &serde_json::to_vec(&json!({
+                    "version":1,"requestId":request["requestId"],"ok":true,"result":result
+                }))?,
+            )
+        })?;
+        compare(output, 0, &stdout, "", method);
+    }
+
+    let root = root()?;
+    let endpoint = root.path().join("s");
+    let listener = UnixListener::bind(&endpoint)?;
+    for (args, message) in [
+        (vec!["read", "--json"], "read 需要目标"),
+        (
+            vec!["read", "self", "--lines", "0", "--json"],
+            "--lines 需要正整数",
+        ),
+        (
+            vec!["history", "self", "--bytes", "1048577", "--json"],
+            "--bytes 需要 1-1048576 的整数",
+        ),
+        (
+            vec!["commands", "self", "--limit", "1001", "--json"],
+            "--limit 需要 1-1000 的整数",
+        ),
+        (
+            vec!["commands", "self", "--lines", "1", "--json"],
+            "未知选项：--lines",
+        ),
+    ] {
+        compare(
+            invoke(&args, Some(&endpoint), Some("test-token"))?,
+            2,
+            "",
+            &line(&json!({"code":"INVALID_REQUEST","message":message})),
+            message,
+        );
+    }
+    no_connection(&listener)?;
+
+    for (code, exit) in [
+        ("TARGET_NOT_FOUND", 3),
+        ("STALE_PROJECTION", 3),
+        ("AMBIGUOUS_TARGET", 3),
+        ("CAPABILITY_DENIED", 4),
+        ("TIMEOUT", 5),
+        ("INTERNAL_ERROR", 1),
+    ] {
+        let error = json!({"code":code, "message":"public failure"});
+        let expected = line(&error);
+        let output = with_peer(
+            &["commands", "self", "--json"],
+            "terminal.read-commands",
+            json!({"target":{"kind":"self"}, "limit":100}),
+            move |socket, request| {
+                write_body(
+                    socket,
+                    &serde_json::to_vec(&json!({
+                        "version":1,"requestId":request["requestId"],"ok":false,"error":error
+                    }))?,
+                )
+            },
+        )?;
+        compare(output, exit, "", &expected, code);
+    }
+    Ok(())
+}
+
 struct Running(Child);
 
 impl Drop for Running {
@@ -448,7 +546,16 @@ fn managed_launch(root: &Path, runtime: &Path, restart: bool) -> Result<PathBuf>
         &shell,
         r#"#!/bin/sh
 command -v mt > "$HOME/mt-path"
-mt identify --json > "$HOME/mt-result.tmp" 2> "$HOME/mt-error" && mv "$HOME/mt-result.tmp" "$HOME/mt-result"
+mt identify --json > "$HOME/mt-result.tmp" 2> "$HOME/mt-error" || exit
+printf '\033[31mmanaged-screen\033[0m'
+for attempt in 1 2 3 4 5; do
+  mt read self --json > "$HOME/screen.json" 2>> "$HOME/mt-error" || exit
+  grep -q managed-screen "$HOME/screen.json" && break
+  sleep 0.05
+done
+mt history self --json > "$HOME/history.json" 2>> "$HOME/mt-error" || exit
+mt commands self --json > "$HOME/commands.json" 2>> "$HOME/mt-error" || exit
+mv "$HOME/mt-result.tmp" "$HOME/mt-result"
 "#,
     )?;
     fs::set_permissions(&shell, fs::Permissions::from_mode(0o700))?;
@@ -516,6 +623,24 @@ mt identify --json > "$HOME/mt-result.tmp" 2> "$HOME/mt-error" && mv "$HOME/mt-r
     let result: Value = serde_json::from_slice(&fs::read(home.join("mt-result"))?)?;
     assert_eq!(result["caller"]["sessionId"], result["target"]["sessionId"]);
     assert_eq!(result["target"]["profile"], "shell");
+    let screen: Value = serde_json::from_slice(&fs::read(home.join("screen.json"))?)?;
+    let history: Value = serde_json::from_slice(&fs::read(home.join("history.json"))?)?;
+    let commands: Value = serde_json::from_slice(&fs::read(home.join("commands.json"))?)?;
+    assert_eq!(screen["text"], "managed-screen");
+    assert_eq!(screen["source"], "screen");
+    assert_eq!(screen["truncated"], false);
+    assert!(screen["cols"].as_u64().is_some_and(|n| n > 0));
+    assert!(screen["rows"].as_u64().is_some_and(|n| n > 0));
+    assert!(
+        history["text"]
+            .as_str()
+            .unwrap()
+            .ends_with("\x1b[31mmanaged-screen\x1b[0m")
+    );
+    assert_eq!(history["source"], "journal");
+    assert!(history["firstSequence"].as_u64().is_some_and(|n| n > 0));
+    assert!(history["lastSequence"].as_u64() >= history["firstSequence"].as_u64());
+    assert_eq!(commands, json!([]));
     write_message(&mut input, &ClientMessage::Command(Command::Shutdown))?;
     drop(input);
     let until = Instant::now() + Duration::from_secs(8);

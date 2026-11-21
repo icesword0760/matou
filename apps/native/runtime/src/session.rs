@@ -601,6 +601,13 @@ impl Session {
         Ok(self.visible_screen.clone())
     }
 
+    #[cfg(unix)]
+    pub(crate) fn read_current_screen(&mut self) -> Result<Screen> {
+        // The protocol buffer follows the live bottom independently of the UI
+        // viewport. Capturing it must not expire sync or send PTY replies.
+        self.protocol_terminal.screen()
+    }
+
     pub fn view(&mut self) -> Result<(Screen, InputModes)> {
         Ok((self.screen()?, self.display_terminal.input_modes()?))
     }
