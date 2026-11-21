@@ -2228,8 +2228,11 @@ impl Workspace {
                 let _ = view.update(cx, |this, cx| this.tab_key(&event.keystroke, window, cx));
             }
         });
-        let launch_options =
-            crate::runtime_bridge::LaunchOptions::from_args(std::env::args_os().skip(1)).ok();
+        let launch_options = matou_native_desktop::instance_open::DesktopOptions::from_args(
+            std::env::args_os().skip(1),
+        )
+        .ok()
+        .map(|options| options.runtime);
         let locale_data_root = launch_options
             .as_ref()
             .map(|options| options.data_root.clone());

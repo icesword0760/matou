@@ -1,30 +1,87 @@
-#[cfg(target_os = "macos")]
-use std::cell::Cell;
-use std::{cell::RefCell, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    io,
+    rc::Rc,
+    time::Duration,
+};
 
 use anyhow::Result;
 use gpui::*;
 use matou_native_core::sessions::{
     InterfaceLocale, current_interface_locale, read_locale_preference,
 };
-#[cfg(target_os = "macos")]
-use matou_native_desktop::macos;
 use matou_native_desktop::{
     assets::NativeAssets,
-    runtime_bridge::{LaunchOptions, RuntimeBridge},
+    instance_open::{self, DesktopOptions, Instance, InstanceOwner, OpenRequest},
+    runtime_bridge::{Command, ConnectionPhase, RuntimeBridge},
+    window_registry::WindowRegistry,
     workspace::Workspace,
 };
+#[cfg(target_os = "macos")]
+use matou_native_desktop::{macos, window_registry::file_url_path};
 
 actions!(matou_native, [Quit]);
 
 fn main() -> Result<()> {
-    let options = options()?;
+    let DesktopOptions {
+        runtime: options,
+        paths,
+    } = DesktopOptions::from_args(std::env::args_os().skip(1))?;
+    let (send, requests) = async_channel::bounded(128);
+    let Instance::Primary(instance) =
+        instance_open::claim(&options.data_root, &paths, send.clone())?
+    else {
+        return Ok(());
+    };
+    let probe = if cfg!(debug_assertions) {
+        match std::env::var("MATOU_WINDOW_REGISTRY_PROBE").as_deref() {
+            Ok("hidden") => Some(Probe::Hidden),
+            Ok("startup") => Some(Probe::Startup),
+            Ok("no-window") => Some(Probe::NoWindow),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    if let Some(probe) = probe {
+        eprintln!("[instance-probe] owner pid={}", std::process::id());
+        if probe == Probe::Startup {
+            io::stdin().read_line(&mut String::new())?;
+        }
+    }
     let locale = current_interface_locale(read_locale_preference(&options.data_root));
     let runtime = Rc::new(RefCell::new(RuntimeBridge::start(options)?));
-    let commands = runtime.borrow().commands.clone();
-    let events = runtime.borrow().events.clone();
-    let quit_runtime = runtime.clone();
+    let desktop = Rc::new(Desktop {
+        instance: RefCell::new(Some(instance)),
+        runtime: runtime.clone(),
+        quitting: Cell::new(false),
+        window: Cell::new(None),
+        probe,
+    });
     let application = Application::new().with_assets(NativeAssets);
+    #[cfg(target_os = "macos")]
+    {
+        let open = send.clone();
+        application.on_open_urls(move |urls| {
+            let paths = urls
+                .iter()
+                .filter_map(|url| file_url_path(url))
+                .collect::<Vec<_>>();
+            if !paths.is_empty()
+                && let Err(error) = open.try_send(OpenRequest::Directories(paths))
+            {
+                eprintln!("Queue native file open request: {error}");
+            }
+        });
+        application.on_reopen({
+            let send = send.clone();
+            move |_| {
+                if let Err(error) = send.try_send(OpenRequest::Reopen) {
+                    eprintln!("Queue native reopen request: {error}");
+                }
+            }
+        });
+    }
     #[cfg(target_os = "macos")]
     let termination_hook = match macos::install_termination_hook() {
         Ok(()) => true,
@@ -33,45 +90,15 @@ fn main() -> Result<()> {
             false
         }
     };
-    #[cfg(target_os = "macos")]
-    let quitting = Rc::new(Cell::new(false));
-    #[cfg(target_os = "macos")]
-    let main_window = Rc::new(Cell::new(None::<WindowHandle<Workspace>>));
-    #[cfg(target_os = "macos")]
-    application.on_reopen({
-        let main_window = main_window.clone();
-        let quitting = quitting.clone();
-        move |cx| {
-            if quitting.get() {
-                return;
-            }
-            if let Some(window) = main_window.get() {
-                cx.activate(true);
-                if let Err(error) = window.update(cx, |_, window, _| window.activate_window()) {
-                    eprintln!("Reactivate native window: {error:#}");
-                }
-            }
-        }
-    });
     application.run(move |cx| {
         #[cfg(target_os = "macos")]
         {
-            let window = main_window.clone();
-            let quitting = quitting.clone();
-            let runtime = quit_runtime.clone();
+            let desktop = desktop.clone();
             let mut cx = cx.to_async();
             if termination_hook
                 && let Err(error) = macos::defer_termination(move || {
-                    quitting.set(true);
-                    if let Some(window) = window.get()
-                        && let Err(error) = window.update(&mut cx, |view, _, cx| {
-                            // Queue the last geometry write while the runtime still accepts commands.
-                            view.flush_geometry(cx);
-                        })
-                    {
-                        eprintln!("Flush native window geometry before quitting: {error:#}");
-                    }
-                    runtime.borrow_mut().shutdown_async()
+                    desktop.begin_quit(&mut cx);
+                    desktop.runtime.borrow_mut().shutdown_async()
                 })
             {
                 eprintln!("Defer native termination: {error:#}");
@@ -80,6 +107,116 @@ fn main() -> Result<()> {
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
         set_app_menu(locale, cx);
+        cx.on_app_quit({
+            let desktop = desktop.clone();
+            move |cx| {
+                desktop.begin_quit(cx);
+                if let Err(error) = desktop.runtime.borrow_mut().shutdown() {
+                    eprintln!("Close native runtime: {error:#}");
+                }
+                // AppKit can exit the process without unwinding main. Release the
+                // channel here, after the Runtime stopped accepting work.
+                desktop.instance.borrow_mut().take();
+                async {}
+            }
+        })
+        .detach();
+        if desktop.probe != Some(Probe::NoWindow) {
+            if !desktop.ensure_window(cx) {
+                cx.quit();
+                return;
+            }
+            if desktop.probe.is_none() {
+                cx.activate(true);
+            }
+        }
+        if desktop.probe.is_some() {
+            eprintln!(
+                "[instance-probe] initial windows={} runtime={}",
+                cx.windows().len(),
+                desktop.runtime.borrow().runtime_pid()
+            );
+            listen_for_probe_quit(cx);
+        }
+        cx.spawn(async move |cx| run_requests(desktop, requests, paths, cx).await)
+            .detach();
+    });
+    runtime.borrow_mut().shutdown()
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Probe {
+    Hidden,
+    Startup,
+    NoWindow,
+}
+
+struct Desktop {
+    instance: RefCell<Option<InstanceOwner>>,
+    runtime: Rc<RefCell<RuntimeBridge>>,
+    quitting: Cell<bool>,
+    window: Cell<Option<WindowHandle<Workspace>>>,
+    probe: Option<Probe>,
+}
+
+impl Desktop {
+    fn begin_quit(&self, cx: &mut impl AppContext) {
+        if self.quitting.replace(true) {
+            return;
+        }
+        if let Some(instance) = self.instance.borrow().as_ref() {
+            instance.stop_forwarding();
+        }
+        if let Some(window) = self.window.get()
+            && let Err(error) = window.update(cx, |view, _, cx| view.flush_geometry(cx))
+        {
+            eprintln!("Flush native window geometry before quitting: {error:#}");
+        }
+    }
+
+    fn live_window(&self, cx: &App) -> Option<WindowHandle<Workspace>> {
+        self.window
+            .get()
+            .filter(|window| cx.windows().contains(&AnyWindowHandle::from(*window)))
+    }
+
+    fn ensure_window(self: &Rc<Self>, cx: &mut App) -> bool {
+        if self.live_window(cx).is_some() {
+            return true;
+        }
+        match self.open_window(cx) {
+            Ok(window) => {
+                self.window.set(Some(window));
+                if self.probe.is_some() {
+                    #[cfg(target_os = "macos")]
+                    {
+                        let visible =
+                            window.update(cx, |_, window, _| macos::is_window_visible(window));
+                        match visible {
+                            Ok(Ok(visible)) => {
+                                eprintln!("[instance-probe] native visible={visible}")
+                            }
+                            failure => eprintln!(
+                                "[instance-probe] native visibility unavailable: {failure:?}"
+                            ),
+                        }
+                    }
+                    eprintln!(
+                        "[instance-probe] window opened windows={} id={:?}",
+                        cx.windows().len(),
+                        window.window_id()
+                    );
+                }
+                true
+            }
+            Err(error) => {
+                eprintln!("Open native window: {error:#}");
+                false
+            }
+        }
+    }
+
+    fn open_window(self: &Rc<Self>, cx: &mut App) -> Result<WindowHandle<Workspace>> {
         let bounds = Bounds::centered(None, size(px(1200.), px(780.)), cx);
         #[cfg(all(target_os = "macos", debug_assertions))]
         let window_diag = match std::env::var("MATOU_WINDOW_DIAG").as_deref() {
@@ -88,11 +225,13 @@ fn main() -> Result<()> {
             _ => None,
         };
         #[cfg(all(target_os = "macos", debug_assertions))]
-        if window_diag.is_some() {
+        if self.probe.is_none() && window_diag.is_some() {
             eprintln!("[window-diag] open_window begin");
         }
-        match cx.open_window(
+        cx.open_window(
             WindowOptions {
+                show: self.probe.is_none(),
+                focus: self.probe.is_none(),
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 window_min_size: Some(size(px(720.), px(480.))),
                 titlebar: Some(TitlebarOptions {
@@ -109,6 +248,9 @@ fn main() -> Result<()> {
                 if let Err(error) = macos::apply_sidebar_material(window) {
                     eprintln!("Apply native sidebar material: {error:#}");
                 }
+                let runtime = self.runtime.borrow();
+                let commands = runtime.commands.clone();
+                let events = runtime.events.clone();
                 let workspace = cx.new(|cx| Workspace::new(commands, events, window, cx));
                 cx.subscribe(&workspace, |_, locale: &InterfaceLocale, cx| {
                     set_app_menu(*locale, cx)
@@ -117,9 +259,9 @@ fn main() -> Result<()> {
                 #[cfg(target_os = "macos")]
                 {
                     let workspace = workspace.downgrade();
-                    let quitting = quitting.clone();
+                    let desktop = self.clone();
                     window.on_window_should_close(cx, move |window, cx| {
-                        if quitting.get() {
+                        if desktop.quitting.get() {
                             return !macos::termination_pending();
                         }
                         if let Err(error) = workspace.update(cx, |view, cx| view.flush_geometry(cx))
@@ -134,49 +276,139 @@ fn main() -> Result<()> {
                     });
                 }
                 #[cfg(all(target_os = "macos", debug_assertions))]
-                if let Some(visibility_probe) = window_diag {
+                if self.probe.is_none()
+                    && let Some(visibility_probe) = window_diag
+                {
                     macos::window_diag::window_created(window, cx, visibility_probe);
                 }
                 workspace
             },
-        ) {
-            Ok(window) => {
-                #[cfg(target_os = "macos")]
-                main_window.set(Some(window));
-                #[cfg(not(target_os = "macos"))]
-                cx.on_app_quit(move |cx| {
-                    if let Err(error) = window.update(cx, |view, _, cx| view.flush_geometry(cx)) {
-                        eprintln!("Flush native window geometry before quitting: {error:#}");
-                    }
-                    if let Err(error) = quit_runtime.borrow_mut().shutdown() {
-                        eprintln!("Close native runtime: {error:#}");
-                    }
-                    async {}
-                })
-                .detach();
-                cx.activate(true);
+        )
+    }
+
+    fn focus(&self, window: WindowHandle<Workspace>, cx: &mut App) {
+        if self.probe.is_some() {
+            eprintln!(
+                "[instance-probe] focus windows={} id={:?}",
+                cx.windows().len(),
+                window.window_id()
+            );
+            return;
+        }
+        cx.activate(true);
+        if let Err(error) = window.update(cx, |_, window, _| window.activate_window()) {
+            eprintln!("Reactivate native window: {error:#}");
+        }
+    }
+
+    fn dispatch(self: &Rc<Self>, requests: &mut WindowRegistry, cx: &mut App) -> bool {
+        if self.quitting.get() || !requests.has_requests() {
+            return false;
+        }
+        let commands = self.runtime.borrow().commands.clone();
+        let (generation, phase) = commands.connection();
+        if generation == 0 || matches!(phase, ConnectionPhase::Starting) {
+            return true;
+        }
+        let ready = phase == ConnectionPhase::Ready;
+        if requests.open_window(ready) && !self.ensure_window(cx) {
+            // Let a later user request retry a failed native window creation.
+            return false;
+        }
+        let focus = requests.take_focus();
+        let Some(window) = self.live_window(cx) else {
+            if self.probe.is_some() && focus {
+                eprintln!("[instance-probe] no focus windows=0");
             }
-            Err(error) => {
-                eprintln!("Open native window: {error:#}");
-                cx.quit();
+            return requests.next_path().is_some();
+        };
+        if focus {
+            self.focus(window, cx);
+        }
+        if ready {
+            while let Some(path) = requests.next_path() {
+                if commands
+                    .send_at(
+                        generation,
+                        Command::CreateWorkspace {
+                            root_directory: path.to_owned(),
+                        },
+                    )
+                    .is_err()
+                {
+                    // The Runtime changed generation after the snapshot. Retry on Ready.
+                    break;
+                }
+                if self.probe.is_some() {
+                    eprintln!(
+                        "[instance-probe] dispatch ready generation={generation} path={path}"
+                    );
+                }
+                requests.path_dispatched();
             }
         }
-        #[cfg(target_os = "macos")]
-        cx.on_app_quit(move |cx| {
-            if !quitting.replace(true)
-                && let Some(window) = main_window.get()
-                && let Err(error) = window.update(cx, |view, _, cx| view.flush_geometry(cx))
-            {
-                eprintln!("Flush native window geometry before quitting: {error:#}");
+        requests.next_path().is_some()
+    }
+}
+
+async fn run_requests(
+    desktop: Rc<Desktop>,
+    inbox: async_channel::Receiver<OpenRequest>,
+    paths: Vec<String>,
+    cx: &mut AsyncApp,
+) {
+    let mut registry = WindowRegistry::default();
+    let mut batch = vec![OpenRequest::Directories(paths)];
+    while !desktop.quitting.get() {
+        while let Ok(request) = inbox.try_recv() {
+            batch.push(request);
+        }
+        if !batch.is_empty() {
+            // Checking a directory may touch a mounted volume. Keep it off the UI thread.
+            let requests = std::mem::take(&mut batch);
+            let validated = cx
+                .background_executor()
+                .spawn(async move {
+                    requests
+                        .into_iter()
+                        .map(OpenRequest::existing_directories)
+                        .collect::<Vec<_>>()
+                })
+                .await;
+            for request in validated {
+                registry.enqueue(request);
             }
-            if let Err(error) = quit_runtime.borrow_mut().shutdown() {
-                eprintln!("Close native runtime: {error:#}");
+        }
+        match cx.update(|cx| desktop.dispatch(&mut registry, cx)) {
+            Ok(true) => {
+                // Sleep only while a request is waiting for the Runtime to become writable.
+                cx.background_executor()
+                    .timer(Duration::from_millis(40))
+                    .await;
             }
-            async {}
-        })
-        .detach();
+            Ok(false) => {
+                let Ok(request) = inbox.recv().await else {
+                    break;
+                };
+                batch.push(request);
+            }
+            Err(_) => break,
+        }
+    }
+}
+
+fn listen_for_probe_quit(cx: &App) {
+    let (send, wait) = async_channel::bounded(1);
+    std::thread::spawn(move || {
+        let _ = io::stdin().read_line(&mut String::new());
+        let _ = send.try_send(());
     });
-    runtime.borrow_mut().shutdown()
+    cx.spawn(async move |cx| {
+        if wait.recv().await.is_ok() {
+            let _ = cx.update(|cx| cx.quit());
+        }
+    })
+    .detach();
 }
 
 fn set_app_menu(locale: InterfaceLocale, cx: &mut App) {
@@ -187,8 +419,4 @@ fn set_app_menu(locale: InterfaceLocale, cx: &mut App) {
             Quit,
         )],
     }]);
-}
-
-fn options() -> Result<LaunchOptions> {
-    LaunchOptions::from_args(std::env::args_os().skip(1))
 }
