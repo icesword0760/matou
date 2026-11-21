@@ -579,7 +579,8 @@ fn offline_queries_update_retention_and_storage_gate() -> Result<()> {
          VALUES (9999, 'fixture-newer', 'fixture-newer', 5);",
     )?;
     drop(database);
-    let mut readonly = RuntimeHost::start(options)?;
+    let mut readonly =
+        RuntimeHost::start_with_offline_fixtures(options, OfflineFixtures::default())?;
     next(&readonly, |event| {
         matches!(event, Event::ReadOnlyReady { .. }).then_some(())
     })?;

@@ -9,7 +9,9 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use matou_native_core::{sessions::list_runs, startup::open_read_only};
-use matou_native_runtime::host::{Command, Event, LaunchOptions, RecoveryState, RuntimeHost};
+use matou_native_runtime::host::{
+    Command, Event, LaunchOptions, OfflineFixtures, RecoveryState, RuntimeHost,
+};
 
 #[test]
 fn shell_launch_failure_restarts_in_place_and_rebuild_failure_stays_recovery() -> Result<()> {
@@ -25,7 +27,8 @@ fn shell_launch_failure_restarts_in_place_and_rebuild_failure_stays_recovery() -
         options.shell_home.join(".zshrc"),
         "printf 'STARTUP_RETRY_PTY\n'\n",
     )?;
-    let mut runtime = RuntimeHost::start(options.clone())?;
+    let mut runtime =
+        RuntimeHost::start_with_offline_fixtures(options.clone(), OfflineFixtures::default())?;
     let (scene_id, session_id) = ready(&runtime)?;
     let restart = || Command::RestartSession {
         session_id: session_id.clone(),
@@ -95,7 +98,8 @@ fn shell_launch_failure_restarts_in_place_and_rebuild_failure_stays_recovery() -
     runtime.shutdown()?;
 
     fs::remove_file(&options.shell)?;
-    let mut runtime = RuntimeHost::start(options.clone())?;
+    let mut runtime =
+        RuntimeHost::start_with_offline_fixtures(options.clone(), OfflineFixtures::default())?;
     assert_eq!(ready(&runtime)?, (scene_id.clone(), session_id.clone()));
     let recovery_error = failed_launch(&runtime, &session_id, true)?;
     assert!(recovery_error.contains(&format!("start Shell {}", options.shell.display())));

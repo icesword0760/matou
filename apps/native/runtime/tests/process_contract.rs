@@ -89,6 +89,7 @@ impl RuntimeChild {
         fs::write(home.join(".zshrc"), zshrc)?;
         let mut command = ProcessCommand::new(env!("CARGO_BIN_EXE_matou-native-runtime"));
         command
+            .env("MATOU_DISABLE_LIVE_EGRESS", "1")
             .arg("--data-root")
             .arg(&data)
             .arg("--workspace")

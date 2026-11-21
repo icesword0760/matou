@@ -1,11 +1,15 @@
-//! Offline egress classification and protection. The host supplies samples and
-//! applies the returned session effects, using the recovery deadline to schedule checks.
+//! Egress sampling, classification and protection. The owner applies completed
+//! samples and their session effects.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
     future::Future,
+    io::{self, Read},
     net::{IpAddr, Ipv6Addr},
-    sync::LazyLock,
+    process::{Child, Command, ExitStatus, Stdio},
+    sync::{LazyLock, mpsc},
+    thread::{self, JoinHandle},
+    time::{Duration, Instant},
 };
 
 use matou_native_core::provider_launch::{
@@ -21,6 +25,7 @@ pub const SLOW_THRESHOLD_MS: u64 = 5_000;
 pub const DEFAULT_TIMEOUT_MS: u64 = 10_000;
 pub const FROZEN_RECHECK_MS: u64 = 15_000;
 pub const RECOVERY_CONFIRM_MS: u64 = 5_000;
+pub(crate) const LIVE_RECHECK_INTERVAL: Duration = Duration::from_secs(60);
 const MAX_TRACE_BYTES: usize = 4096;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -533,6 +538,387 @@ impl SamplingPlan {
         }
         EgressSample::new(hosts)
     }
+}
+
+const HTTPS_PROXY_KEYS: [&str; 2] = ["https_proxy", "HTTPS_PROXY"];
+const HTTP_PROXY_KEYS: [&str; 2] = ["http_proxy", "HTTP_PROXY"];
+const ALL_PROXY_KEYS: [&str; 2] = ["all_proxy", "ALL_PROXY"];
+const NO_PROXY_KEYS: [&str; 2] = ["no_proxy", "NO_PROXY"];
+const PROXY_KEYS: [[&str; 2]; 4] = [
+    HTTPS_PROXY_KEYS,
+    HTTP_PROXY_KEYS,
+    ALL_PROXY_KEYS,
+    NO_PROXY_KEYS,
+];
+const TRACE_PATH: &str = "/cdn-cgi/trace";
+const TRACE_STATUS_BYTES: usize = 4; // Newline and three HTTP status digits.
+
+type ProxyEnvironment = BTreeMap<&'static str, String>;
+
+fn proxy_for_trace<'a>(env: &'a ProxyEnvironment, url: &Url) -> Option<&'a str> {
+    let host = url
+        .host_str()?
+        .trim_matches(['[', ']'])
+        .trim_end_matches('.');
+    let port = url.port_or_known_default()?;
+    if env
+        .get("no_proxy")
+        .or_else(|| env.get("NO_PROXY"))
+        .is_some_and(|rules| {
+            rules
+                .split(',')
+                .any(|rule| matches_no_proxy(rule, host, port))
+        })
+    {
+        return None;
+    }
+    let keys = if url.scheme() == "https" {
+        HTTPS_PROXY_KEYS
+    } else {
+        HTTP_PROXY_KEYS
+    };
+    keys.into_iter().chain(ALL_PROXY_KEYS).find_map(|key| {
+        let value = env.get(key)?.trim();
+        (!value.is_empty()).then_some(value)
+    })
+}
+
+fn matches_no_proxy(rule: &str, host: &str, port: u16) -> bool {
+    let rule = rule.trim();
+    if rule == "*" {
+        return true;
+    }
+    let (domain, rule_port) = if let Some(bracketed) = rule.strip_prefix('[') {
+        let Some((domain, rest)) = bracketed.split_once(']') else {
+            return false;
+        };
+        (domain, rest.strip_prefix(':'))
+    } else if rule.bytes().filter(|byte| *byte == b':').count() == 1 {
+        let (domain, port) = rule.split_once(':').expect("one colon");
+        (domain, Some(port))
+    } else {
+        (rule, None)
+    };
+    if rule_port.is_some_and(|rule_port| rule_port != port.to_string()) {
+        return false;
+    }
+    let domain = domain.trim_end_matches('.').to_ascii_lowercase();
+    if let Some(suffix) = domain.strip_prefix('*') {
+        return suffix.starts_with('.') && host.ends_with(suffix);
+    }
+    let domain = domain.trim_start_matches('.');
+    !domain.is_empty()
+        && (host == domain
+            || host
+                .strip_suffix(domain)
+                .is_some_and(|prefix| prefix.ends_with('.')))
+}
+
+fn proxy_environment() -> ProxyEnvironment {
+    PROXY_KEYS
+        .into_iter()
+        .flatten()
+        .filter_map(|key| std::env::var(key).ok().map(|value| (key, value)))
+        .collect()
+}
+
+fn anthropic_proxy_environment(mut env: ProxyEnvironment) -> ProxyEnvironment {
+    let Some(home) = std::env::home_dir() else {
+        return env;
+    };
+    let settings = std::fs::File::open(home.join(".claude").join("settings.json"))
+        .ok()
+        .and_then(|file| {
+            serde_json::from_reader::<_, serde_json::Value>(io::BufReader::new(file)).ok()
+        });
+    if let Some(settings) = settings {
+        for key in PROXY_KEYS.into_iter().flatten() {
+            if let Some(value) = settings["env"][key].as_str() {
+                env.insert(key, value.to_owned());
+            }
+        }
+    }
+    env
+}
+
+/// Owns the worker and its HTTP children. Only completed samples cross back
+/// to the domain owner. Dropping the request sender cancels a running batch.
+pub(crate) struct LiveEgressSampler {
+    requests: Option<mpsc::Sender<()>>,
+    pub(crate) samples: mpsc::Receiver<EgressSample>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl LiveEgressSampler {
+    pub(crate) fn start() -> anyhow::Result<Option<Self>> {
+        if std::env::var_os("MATOU_DISABLE_LIVE_EGRESS").is_some_and(|value| value == "1") {
+            return Ok(None);
+        }
+        let base = std::env::var("MATOU_EGRESS_TRACE_BASE_URL")
+            .ok()
+            .map(|value| {
+                let url = Url::parse(&value)?;
+                anyhow::ensure!(
+                    matches!(
+                        (url.scheme(), url.host_str()),
+                        ("http", Some("127.0.0.1" | "[::1]"))
+                    ) && url.username().is_empty()
+                        && url.password().is_none(),
+                    "MATOU_EGRESS_TRACE_BASE_URL must be an HTTP loopback address",
+                );
+                Ok(url)
+            })
+            .transpose()?;
+        let (requests, incoming) = mpsc::channel();
+        let (completed, samples) = mpsc::channel();
+        let worker = thread::Builder::new()
+            .name("matou-egress-probe".into())
+            .spawn(move || {
+                while incoming.recv().is_ok() {
+                    let Some(sample) = sample_trace_batch(base.as_ref(), &incoming) else {
+                        break;
+                    };
+                    if completed.send(sample).is_err() {
+                        break;
+                    }
+                }
+            })?;
+        Ok(Some(Self {
+            requests: Some(requests),
+            samples,
+            worker: Some(worker),
+        }))
+    }
+
+    pub(crate) fn request(&self) -> anyhow::Result<()> {
+        self.requests
+            .as_ref()
+            .expect("worker still owned")
+            .send(())
+            .map_err(|_| anyhow::anyhow!("Egress sampling worker stopped"))
+    }
+}
+
+impl Drop for LiveEgressSampler {
+    fn drop(&mut self) {
+        drop(self.requests.take());
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+fn sample_trace_batch(base: Option<&Url>, incoming: &mpsc::Receiver<()>) -> Option<EgressSample> {
+    let env = proxy_environment();
+    let anthropic = anthropic_proxy_environment(env.clone());
+    let plan = SamplingPlan {
+        subscription: SubscriptionRoute::Disabled,
+    };
+    let mut samples = BTreeMap::new();
+    let mut pending = BTreeMap::new();
+    for target in plan.full_targets() {
+        if incoming.try_recv() == Err(mpsc::TryRecvError::Disconnected) {
+            return None;
+        }
+        let url = match base {
+            Some(url) => url.join(TRACE_PATH).expect("loopback trace URL"),
+            None => Url::parse(&format!("https://{}{TRACE_PATH}", target.host))
+                .expect("official trace URL"),
+        };
+        let env = if target.family == Family::Anthropic {
+            &anthropic
+        } else {
+            &env
+        };
+        match CurlTrace::start(&url, proxy_for_trace(env, &url)) {
+            Ok(child) => {
+                pending.insert(target, child);
+            }
+            Err(error) => {
+                samples.insert(target, HostSample::failed(target.host, error));
+            }
+        }
+    }
+    while !pending.is_empty() {
+        pending.retain(|target, child| {
+            if let Some(sample) = child.poll(target.host) {
+                samples.insert(*target, sample);
+                false
+            } else {
+                true
+            }
+        });
+        if !pending.is_empty()
+            && incoming.recv_timeout(Duration::from_millis(10))
+                == Err(mpsc::RecvTimeoutError::Disconnected)
+        {
+            return None;
+        }
+    }
+    let mut sample = plan.collect_full(samples);
+    sample.agent_has_proxy_env = [HTTPS_PROXY_KEYS, HTTP_PROXY_KEYS, ALL_PROXY_KEYS]
+        .into_iter()
+        .flatten()
+        .any(|key| {
+            anthropic
+                .get(key)
+                .is_some_and(|value| !value.trim().is_empty())
+        });
+    Some(sample)
+}
+
+struct CurlTrace {
+    child: Child,
+    output: Option<JoinHandle<io::Result<(u64, Vec<u8>)>>>,
+}
+
+impl CurlTrace {
+    fn start(url: &Url, proxy: Option<&str>) -> Result<Self, HostError> {
+        // Curl is already used by the native runtime hooks. The current
+        // Runtime crate cannot link the desktop's HTTP client under --locked.
+        #[cfg(windows)]
+        let mut request = {
+            use std::os::windows::process::CommandExt;
+            let mut request = Command::new("curl.exe");
+            request.creation_flags(0x08000000); // CREATE_NO_WINDOW
+            request
+        };
+        #[cfg(not(windows))]
+        let mut request = Command::new("/usr/bin/curl");
+        let timeout = Duration::from_millis(DEFAULT_TIMEOUT_MS)
+            .as_secs_f64()
+            .to_string();
+        request
+            .args([
+                "--disable",
+                "--silent",
+                "--fail",
+                "--globoff",
+                "--proto",
+                "=http,https",
+                "--max-time",
+                &timeout,
+                "--max-filesize",
+                &MAX_TRACE_BYTES.to_string(),
+                "--write-out",
+                "\n%{http_code}",
+                "--noproxy",
+                if proxy.is_some() { "" } else { "*" },
+                "--url",
+                url.as_str(),
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        for key in PROXY_KEYS.into_iter().flatten() {
+            request.env_remove(key);
+        }
+        if let Some(proxy) = proxy {
+            let normalized = if let Some(address) = proxy.strip_prefix("socks://") {
+                format!("socks5h://{address}")
+            } else if proxy.contains("://") {
+                proxy.to_owned()
+            } else {
+                format!("http://{proxy}")
+            };
+            let url = Url::parse(&normalized).map_err(|_| HostError::Invalid)?;
+            if !matches!(
+                url.scheme(),
+                "http" | "https" | "socks4" | "socks4a" | "socks5" | "socks5h"
+            ) {
+                return Err(HostError::Invalid);
+            }
+            // Keep credentials out of the process arguments and diagnostics.
+            request.env("all_proxy", normalized);
+        }
+        let started = Instant::now();
+        let mut child = request.spawn().map_err(|_| HostError::Unreachable)?;
+        let stdout = child.stdout.take().expect("piped curl response");
+        let mut trace = Self {
+            child,
+            output: None,
+        };
+        trace.output = Some(
+            thread::Builder::new()
+                .name("matou-egress-response".into())
+                .spawn(move || {
+                    let mut bytes = Vec::new();
+                    stdout
+                        .take((MAX_TRACE_BYTES + TRACE_STATUS_BYTES + 1) as u64)
+                        .read_to_end(&mut bytes)?;
+                    Ok((started.elapsed().as_millis() as u64, bytes))
+                })
+                .map_err(|_| HostError::Unreachable)?,
+        );
+        Ok(trace)
+    }
+
+    fn poll(&mut self, host: &str) -> Option<HostSample> {
+        let status = match self.child.try_wait() {
+            Ok(None) => return None,
+            Ok(Some(status)) => status,
+            Err(_) => return Some(HostSample::failed(host, HostError::Unreachable)),
+        };
+        let output = self.output.take()?.join().ok().and_then(Result::ok);
+        Some(classify_curl_trace(host, status, output))
+    }
+}
+
+impl Drop for CurlTrace {
+    fn drop(&mut self) {
+        if self.child.try_wait().ok().flatten().is_none() {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+        if let Some(output) = self.output.take() {
+            let _ = output.join();
+        }
+    }
+}
+
+fn classify_curl_trace(
+    host: &str,
+    status: ExitStatus,
+    output: Option<(u64, Vec<u8>)>,
+) -> HostSample {
+    if output
+        .as_ref()
+        .is_some_and(|(_, bytes)| bytes.len() > MAX_TRACE_BYTES + TRACE_STATUS_BYTES)
+    {
+        return HostSample::failed(host, HostError::Invalid);
+    }
+    if !status.success() {
+        return HostSample::failed(
+            host,
+            match status.code() {
+                Some(28) => HostError::Timeout,
+                Some(1 | 3 | 4 | 22 | 63) => HostError::Invalid,
+                _ => HostError::Unreachable,
+            },
+        );
+    }
+    let Some((elapsed, bytes)) = output else {
+        return HostSample::failed(host, HostError::Unreachable);
+    };
+    let Some(split) = bytes.len().checked_sub(TRACE_STATUS_BYTES) else {
+        return HostSample::failed(host, HostError::Invalid);
+    };
+    let Some(status) = std::str::from_utf8(&bytes[split + 1..])
+        .ok()
+        .and_then(|status| status.parse().ok())
+    else {
+        return HostSample::failed(host, HostError::Invalid);
+    };
+    TraceProbe::new(host, None)
+        .observe(
+            elapsed,
+            TraceEvent::Response {
+                status,
+                body: &bytes[..split],
+            },
+        )
+        .sample
+        .clone()
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1797,6 +2183,30 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_trace_proxy_matches_frozen_precedence_and_bypass() {
+        let https = Url::parse("https://api.anthropic.com/cdn-cgi/trace").unwrap();
+        let http = Url::parse("http://api.anthropic.com/cdn-cgi/trace").unwrap();
+        let mut env = BTreeMap::from([
+            ("HTTPS_PROXY", "secure:443".into()),
+            ("https_proxy", " preferred:443 ".into()),
+            ("HTTP_PROXY", "plain:80".into()),
+            ("ALL_PROXY", "socks5h://fallback:1080".into()),
+            ("NO_PROXY", "*.anthropic.com:443".into()),
+        ]);
+        assert_eq!(proxy_for_trace(&env, &https), None);
+        assert_eq!(proxy_for_trace(&env, &http), Some("plain:80"));
+        env.insert("no_proxy", String::new());
+        assert_eq!(proxy_for_trace(&env, &https), Some("preferred:443"));
+        env.remove("https_proxy");
+        assert_eq!(proxy_for_trace(&env, &https), Some("secure:443"));
+        env.remove("HTTPS_PROXY");
+        assert_eq!(
+            proxy_for_trace(&env, &https),
+            Some("socks5h://fallback:1080")
+        );
+    }
 
     #[test]
     fn egress_probe_ignores_events_after_settlement() {

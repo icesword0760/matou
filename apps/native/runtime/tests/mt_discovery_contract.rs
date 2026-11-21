@@ -563,6 +563,7 @@ mv "$HOME/mt-result.tmp" "$HOME/mt-result"
     let mut running = Running(
         Process::new(runtime)
             .env_clear()
+            .env("MATOU_DISABLE_LIVE_EGRESS", "1")
             .env("HOME", &home)
             .env("PATH", "/usr/bin:/bin")
             .arg("--data-root")

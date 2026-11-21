@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result, bail, ensure};
 use matou_native_runtime::{
-    host::{Event, LaunchOptions, RuntimeHost},
+    host::{Event, LaunchOptions, OfflineFixtures, RuntimeHost},
     mt_cli::Client,
 };
 use rusqlite::{Connection, OpenFlags};
@@ -57,12 +57,15 @@ done
 "#,
         )?;
         fs::set_permissions(&shell, fs::Permissions::from_mode(0o700))?;
-        let host = RuntimeHost::start(LaunchOptions {
-            data_root: data.clone(),
-            workspace,
-            shell_home: home.clone(),
-            shell,
-        })?;
+        let host = RuntimeHost::start_with_offline_fixtures(
+            LaunchOptions {
+                data_root: data.clone(),
+                workspace,
+                shell_home: home.clone(),
+                shell,
+            },
+            OfflineFixtures::default(),
+        )?;
         let session = wait(|| {
             while let Ok(event) = host.events.try_recv() {
                 match event {
