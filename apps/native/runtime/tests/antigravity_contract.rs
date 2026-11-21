@@ -670,6 +670,23 @@ fn transcript(root: &Path, id: &str) -> PathBuf {
         .join(".system_generated/logs/transcript.jsonl")
 }
 
+fn create_summaries(root: &Path) -> Result<rusqlite::Connection> {
+    let database = rusqlite::Connection::open(root.join("conversation_summaries.db"))?;
+    database.execute_batch(
+        "CREATE TABLE conversation_summaries (
+            conversation_id TEXT PRIMARY KEY,
+            title TEXT NOT NULL DEFAULT '',
+            step_count INTEGER NOT NULL DEFAULT 0,
+            last_modified_time DATETIME NOT NULL,
+            workspace_uris TEXT NOT NULL,
+            app_data_dir TEXT NOT NULL DEFAULT '',
+            parent_conversation_id TEXT NOT NULL DEFAULT '',
+            nesting_depth INTEGER NOT NULL DEFAULT 0
+        );",
+    )?;
+    Ok(database)
+}
+
 #[test]
 fn antigravity_catalog_replays_provider_history_fixture() -> Result<()> {
     let fixture: Value = serde_json::from_str(include_str!(
@@ -692,6 +709,201 @@ fn antigravity_catalog_replays_provider_history_fixture() -> Result<()> {
     let mut catalog = Catalog::new(temp.path());
     let actual = catalog.list(Path::new("/__fixture__/workspace"), ListOptions::default())?;
     assert_eq!(serde_json::to_value(actual)?, *expected);
+    Ok(())
+}
+
+#[test]
+fn antigravity_catalog_reads_and_recovers_sqlite_only_history() -> Result<()> {
+    let temp = sandbox()?;
+    let root = temp.path();
+    let cwd = root.join("中文 workspace");
+    let uri = Url::from_file_path(&cwd).unwrap();
+    let id = "agy-sqlite-only";
+    let database = create_summaries(root)?;
+    database.execute(
+        "INSERT INTO conversation_summaries VALUES
+            (?1, '  SQLite title  ', 7, '2026-11-12T10:00:02Z', ?2, 'antigravity-cli', '', 0),
+            ('untitled', ' ', -1, 1794477601000, ?3, '', '', 0),
+            ('internal-parent', 'Private child', 1, 100, ?2, '', ?1, 0),
+            ('internal-depth', 'Private nested', 1, 100, ?2, '', '', 1),
+            ('wrong-app', 'Another application', 1, 100, ?2, 'other', '', 0),
+            ('../invalid', 'Invalid id', 1, 100, ?2, '', '', 0),
+            (NULL, 'Missing id', 1, 100, ?2, '', '', 0)",
+        rusqlite::params![id, json!([uri.as_str()]).to_string(), uri.as_str()],
+    )?;
+    drop(database);
+
+    let path = transcript(root, id);
+    fs::create_dir_all(path.parent().unwrap())?;
+    fs::write(
+        path,
+        concat!(
+            "{\"type\":\"USER_INPUT\",\"content\":\"Fixture question\"}\n",
+            "{\"type\":\"PLANNER_RESPONSE\",\"content\":\"Fixture SQLite answer\"}\n",
+        ),
+    )?;
+    let mut catalog = Catalog::new(root);
+    let list = catalog.list(&cwd, ListOptions::default())?;
+    assert_eq!(list.page.total, 2);
+    assert_eq!(list.sessions[0].provider_session_id, id);
+    assert_eq!(list.sessions[0].title, "SQLite title");
+    assert_eq!(list.sessions[0].event_count, 7);
+    assert_eq!(list.sessions[0].updated_at.as_i64(), Some(1794477602000));
+    assert_eq!(list.sessions[1].provider_session_id, "untitled");
+    assert_eq!(list.sessions[1].title, "未命名 Antigravity 会话");
+    assert_eq!(list.sessions[1].event_count, 0);
+    assert_eq!(list.sessions[1].updated_at.as_i64(), Some(1794477601000));
+    let english = Catalog::new(root)
+        .with_english_titles()
+        .list(&cwd, ListOptions::default())?;
+    assert_eq!(english.sessions[1].title, "Untitled Antigravity session");
+    let detail = catalog.detail(&cwd, id, DetailOptions::default())?;
+    assert_eq!(detail.page.total, 2);
+    assert_eq!(detail.events[0].kind, EventKind::User);
+    assert_eq!(detail.events[1].kind, EventKind::Assistant);
+    assert_eq!(detail.events[1].text, "Fixture SQLite answer");
+    let search = catalog.search(&cwd, id, "SQLITE ANSWER", 0, None)?;
+    assert_eq!(search.page.total, 1);
+    assert_eq!(search.hits[0].event_index, 2);
+    assert_eq!(
+        catalog.recovery_candidate(&cwd, id)?,
+        RecoveryCandidate::AwaitingIdentity(LaunchMode::Resume(id.into()))
+    );
+    assert_eq!(
+        catalog.auto_title(&cwd, id)?.as_deref(),
+        Some("SQLite title")
+    );
+    assert_eq!(
+        catalog.latest_auto_title(id)?.as_deref(),
+        Some("SQLite title")
+    );
+    assert_eq!(catalog.latest_auto_title("untitled")?, None);
+    for hidden in ["internal-parent", "internal-depth", "wrong-app"] {
+        assert_eq!(
+            catalog.recovery_candidate(&cwd, hidden)?,
+            RecoveryCandidate::Unavailable
+        );
+        assert_eq!(catalog.latest_auto_title(hidden)?, None);
+    }
+    assert_eq!(
+        catalog.recovery_candidate(&cwd.join("nested"), id)?,
+        RecoveryCandidate::Unavailable
+    );
+    Ok(())
+}
+
+#[test]
+fn antigravity_catalog_refreshes_sqlite_wal_alongside_legacy_metadata() -> Result<()> {
+    let temp = sandbox()?;
+    let root = temp.path();
+    let uri = Url::from_file_path(root).unwrap();
+    write_metadata(
+        root,
+        &json!({"conversations": {
+            "legacy": {"summary":{"AppDataDir":"antigravity-cli","WorkspaceURIs":[uri.as_str()],
+                "Title":"Legacy title","NumSteps":5}},
+            "legacy-internal": {"summary":{"AppDataDir":"antigravity-cli","WorkspaceURIs":[uri.as_str()],
+                "Internal":true}}
+        }}),
+    )?;
+    let mut catalog = Catalog::new(root);
+    assert_eq!(catalog.list(root, ListOptions::default())?.page.total, 1);
+    let database = create_summaries(root)?;
+    let workspace = json!(uri.as_str()).to_string();
+    database.execute(
+        "INSERT INTO conversation_summaries
+           (conversation_id, title, step_count, last_modified_time, workspace_uris)
+         VALUES ('legacy', 'SQLite duplicate', 1, 200, ?1),
+                ('legacy-internal', 'Hidden', 1, 150, ?1),
+                ('sqlite-first', 'First SQLite session', 1, 100, ?1)",
+        [&workspace],
+    )?;
+    database.execute_batch("PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0;")?;
+    database.execute(
+        "UPDATE conversation_summaries SET title = 'First WAL title'
+         WHERE conversation_id = 'sqlite-first'",
+        [],
+    )?;
+    let db_path = root.join("conversation_summaries.db");
+    let wal_path = root.join("conversation_summaries.db-wal");
+    let original = fs::read(&db_path)?;
+    let original_version = fs::metadata(&db_path)?.modified()?;
+    let original_wal_size = fs::metadata(&wal_path)?.len();
+    let before = catalog.list(root, ListOptions::default())?;
+    assert_eq!(before.page.total, 2);
+    assert_eq!(before.sessions[0].provider_session_id, "sqlite-first");
+    assert_eq!(before.sessions[0].title, "First WAL title");
+    assert_eq!(before.sessions[1].title, "Legacy title");
+    assert_eq!(before.sessions[1].event_count, 5);
+
+    database.execute(
+        "INSERT INTO conversation_summaries
+           (conversation_id, title, last_modified_time, workspace_uris)
+         VALUES ('sqlite-new', 'WAL title', 300, ?1)",
+        [&workspace],
+    )?;
+    assert_eq!(fs::metadata(&db_path)?.modified()?, original_version);
+    assert_eq!(fs::read(db_path)?, original);
+    assert!(fs::metadata(wal_path)?.len() > original_wal_size);
+    let after = catalog.list(root, ListOptions::default())?;
+    assert_eq!(after.page.total, 3);
+    assert_eq!(after.sessions[0].provider_session_id, "sqlite-new");
+    assert_eq!(
+        catalog.latest_auto_title("sqlite-new")?.as_deref(),
+        Some("WAL title")
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn antigravity_catalog_rejects_symlinked_summary_files() -> Result<()> {
+    use std::os::unix::fs::symlink;
+
+    let temp = sandbox()?;
+    let root = temp.path().join("provider");
+    fs::create_dir(&root)?;
+    let database = create_summaries(temp.path())?;
+    database.execute(
+        "INSERT INTO conversation_summaries
+            (conversation_id, title, last_modified_time, workspace_uris)
+         VALUES ('outside', 'Outside title', 100, ?1)",
+        [json!([temp.path()]).to_string()],
+    )?;
+    drop(database);
+    let outside = temp.path().join("conversation_summaries.db");
+    let db_path = root.join("conversation_summaries.db");
+    let mut catalog = Catalog::new(&root);
+    symlink(&outside, &db_path)?;
+    assert_eq!(
+        catalog
+            .list(temp.path(), ListOptions::default())?
+            .page
+            .total,
+        0
+    );
+    assert_eq!(catalog.latest_auto_title("outside")?, None);
+
+    fs::remove_file(&db_path)?;
+    fs::copy(&outside, &db_path)?;
+    let wal = root.join("conversation_summaries.db-wal");
+    symlink(&outside, &wal)?;
+    assert_eq!(
+        catalog
+            .list(temp.path(), ListOptions::default())?
+            .page
+            .total,
+        0
+    );
+    assert_eq!(catalog.latest_auto_title("outside")?, None);
+    fs::remove_file(wal)?;
+    assert_eq!(
+        catalog
+            .list(temp.path(), ListOptions::default())?
+            .page
+            .total,
+        1
+    );
     Ok(())
 }
 

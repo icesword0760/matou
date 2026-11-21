@@ -7,11 +7,11 @@ use std::{
     io::{self, BufRead, BufReader, Read, Seek, SeekFrom},
     ops::Range,
     path::{Component, Path, PathBuf},
-    time::SystemTime,
+    time::{Duration, SystemTime},
 };
 
 use anyhow::{Context, Result, ensure};
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, types::Value as SqlValue};
 use serde::Serialize;
 use serde_json::Value;
 use url::Url;
@@ -25,6 +25,7 @@ use crate::{
 const MAX_LINE: u64 = 8 * 1024 * 1024;
 const METADATA: &str = "cache/conversation_metadata.json";
 const SUMMARIES: &str = "conversation_summaries.db";
+const SUMMARIES_WAL: &str = "conversation_summaries.db-wal";
 const NOT_FOUND: &str = "Antigravity 会话不存在或不属于当前工作空间";
 const INVALID_ID: &str = "Antigravity 会话标识格式错误";
 const INDEX_CACHE_LIMIT: usize = 16;
@@ -201,6 +202,18 @@ impl FileVersion {
     }
 }
 
+#[derive(PartialEq, Eq)]
+struct SummariesVersion {
+    database: FileVersion,
+    wal: Option<FileVersion>,
+}
+
+#[derive(PartialEq, Eq)]
+struct CatalogVersion {
+    legacy: Option<FileVersion>,
+    summaries: Option<SummariesVersion>,
+}
+
 struct EventRef {
     offset: u64,
     length: usize,
@@ -213,7 +226,8 @@ struct Index {
 
 pub struct Catalog {
     root: PathBuf,
-    metadata: Option<(FileVersion, Vec<Conversation>)>,
+    metadata: Vec<Conversation>,
+    metadata_version: Option<CatalogVersion>,
     indexes: HashMap<String, Index>,
     english: bool,
 }
@@ -232,7 +246,8 @@ impl Catalog {
         let root = root.into();
         Self {
             root: std::path::absolute(&root).unwrap_or(root),
-            metadata: None,
+            metadata: Vec::new(),
+            metadata_version: None,
             indexes: HashMap::new(),
             english: false,
         }
@@ -240,7 +255,7 @@ impl Catalog {
 
     pub fn with_english_titles(mut self) -> Self {
         self.english = true;
-        self.metadata = None;
+        self.metadata_version = None;
         self
     }
 
@@ -408,10 +423,9 @@ impl Catalog {
         if is_internal(entry) {
             return Ok(None);
         }
-        let database = safe_file_path(&self.root, Path::new(SUMMARIES))?;
+        let database = summaries_file(&self.root).ok().flatten();
         Ok(database
-            .as_deref()
-            .and_then(|path| database_title(path, id))
+            .and_then(|(path, _)| database_title(&path, id))
             .or_else(|| string(&entry["summary"]["Title"]).map(str::to_owned)))
     }
 
@@ -443,36 +457,43 @@ impl Catalog {
     }
 
     fn metadata(&mut self) -> Result<&[Conversation]> {
-        let Some((file, version)) = open_contained(&self.root, Path::new(METADATA))? else {
-            self.metadata = None;
-            return Ok(&[]);
+        let legacy = open_contained(&self.root, Path::new(METADATA))?;
+        let (legacy_file, legacy_version) = legacy.unzip();
+        let (summaries_path, summaries_version) = summaries_file(&self.root).ok().flatten().unzip();
+        let version = CatalogVersion {
+            legacy: legacy_version,
+            summaries: summaries_version,
         };
-        if !self
-            .metadata
-            .as_ref()
-            .is_some_and(|(cached, _)| cached == &version)
-        {
-            let Ok(json) = serde_json::from_reader::<_, Value>(BufReader::new(file)) else {
-                return Ok(&[]);
-            };
+        if self.metadata_version.as_ref() != Some(&version) {
+            let legacy = legacy_file
+                .and_then(|file| serde_json::from_reader::<_, Value>(BufReader::new(file)).ok())
+                .unwrap_or(Value::Null);
+            let legacy = legacy["conversations"].as_object();
             let dates = Connection::open_in_memory()?;
             let fallback = if self.english {
                 "Untitled Antigravity session"
             } else {
                 "未命名 Antigravity 会话"
             };
-            let entries = json["conversations"]
-                .as_object()
+            let mut entries: Vec<_> = legacy
                 .into_iter()
                 .flat_map(|conversations| conversations.iter())
                 .filter_map(|(id, entry)| conversation(&dates, id, entry, fallback))
                 .collect();
-            self.metadata = Some((version, entries));
+            let mut cached_version = Some(version);
+            if let Some(path) = summaries_path {
+                match database_conversations(&path, &dates, fallback) {
+                    Ok(summaries) => entries.extend(summaries.into_iter().filter(|entry| {
+                        !legacy.is_some_and(|legacy| legacy.contains_key(&entry.id))
+                    })),
+                    // A busy or partly written database must be retried on the next lookup.
+                    Err(_) => cached_version = None,
+                }
+            }
+            self.metadata_version = cached_version;
+            self.metadata = entries;
         }
-        Ok(self
-            .metadata
-            .as_ref()
-            .map_or(&[], |(_, entries)| entries.as_slice()))
+        Ok(&self.metadata)
     }
 
     fn transcript(&mut self, id: &str) -> Result<Option<(File, &Index)>> {
@@ -663,18 +684,124 @@ fn open_contained(root: &Path, relative: &Path) -> io::Result<Option<(File, File
     Ok(Some((file, FileVersion::read(&metadata))))
 }
 
+fn summaries_file(root: &Path) -> io::Result<Option<(PathBuf, SummariesVersion)>> {
+    let Some(path) = safe_file_path(root, Path::new(SUMMARIES))? else {
+        return Ok(None);
+    };
+    let database = match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.is_file() => FileVersion::read(&metadata),
+        Ok(_) => return Ok(None),
+        Err(error) if missing(&error) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let mut wal = None;
+    for name in [
+        SUMMARIES_WAL,
+        "conversation_summaries.db-shm",
+        "conversation_summaries.db-journal",
+    ] {
+        match fs::symlink_metadata(path.with_file_name(name)) {
+            Ok(metadata) if !metadata.is_file() => return Ok(None),
+            Ok(metadata) if name == SUMMARIES_WAL => wal = Some(FileVersion::read(&metadata)),
+            Ok(_) => {}
+            Err(error) if missing(&error) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(Some((path, SummariesVersion { database, wal })))
+}
+
+fn open_summaries(path: &Path) -> rusqlite::Result<Connection> {
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW;
+    let connection = Connection::open_with_flags(path, flags)?;
+    connection.busy_timeout(Duration::ZERO)?;
+    connection.execute_batch("PRAGMA query_only = ON")?;
+    Ok(connection)
+}
+
+fn database_conversations(
+    path: &Path,
+    dates: &Connection,
+    fallback: &str,
+) -> rusqlite::Result<Vec<Conversation>> {
+    let connection = open_summaries(path)?;
+    let mut statement = connection.prepare(
+        "SELECT conversation_id, title, step_count, last_modified_time, workspace_uris
+         FROM conversation_summaries
+         WHERE (app_data_dir = '' OR app_data_dir = 'antigravity-cli')
+           AND parent_conversation_id = '' AND nesting_depth <= 0",
+    )?;
+    let mut rows = statement.query([])?;
+    let mut entries = Vec::new();
+    while let Some(row) = rows.next()? {
+        let Ok(id) = row.get::<_, String>(0) else {
+            continue;
+        };
+        if !valid_conversation_id(&id) {
+            continue;
+        }
+        let title: String = row.get(1)?;
+        let title = title.trim_matches(js_whitespace);
+        let raw_title = (!title.is_empty()).then_some(title);
+        let step_count = position(row.get(2)?, usize::MAX);
+        let modified = match row.get(3)? {
+            SqlValue::Integer(value) => Value::from(value),
+            SqlValue::Real(value) => Value::from(value),
+            SqlValue::Text(value) => Value::String(value),
+            _ => Value::Null,
+        };
+        let uris: String = row.get(4)?;
+        let uris = serde_json::from_str(&uris).unwrap_or(Value::String(uris));
+        let workspace_uris = match uris {
+            Value::Array(values) => values
+                .iter()
+                .filter_map(|value| value.as_str().map(str::to_owned))
+                .collect(),
+            Value::String(uri) => vec![uri],
+            _ => Vec::new(),
+        };
+        entries.push(Conversation {
+            id,
+            title: compact(raw_title.unwrap_or(fallback), 72),
+            auto_title: raw_title.map(str::to_owned),
+            updated_at: timestamp(dates, &modified).unwrap_or(0.into()),
+            step_count,
+            workspace_uris,
+        });
+    }
+    Ok(entries)
+}
+
 fn database_title(path: &Path, id: &str) -> Option<String> {
-    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI;
-    let connection = Connection::open_with_flags(path, flags).ok()?;
-    connection.execute_batch("PRAGMA query_only = ON").ok()?;
-    let title: String = connection
-        .query_row(
-            "SELECT title FROM conversation_summaries WHERE conversation_id = ?1
-         AND (app_data_dir = '' OR app_data_dir = 'antigravity-cli') LIMIT 1",
-            [id],
-            |row| row.get(0),
-        )
-        .ok()?;
+    let connection = open_summaries(path).ok()?;
+    let mut statement = match connection.prepare(
+        "SELECT title FROM conversation_summaries WHERE conversation_id = ?1
+         AND (app_data_dir = '' OR app_data_dir = 'antigravity-cli')
+         AND parent_conversation_id = '' AND nesting_depth <= 0 LIMIT 1",
+    ) {
+        Ok(statement) => statement,
+        Err(_) => {
+            // Older title-only schemas have neither relationship column.
+            let relationship_columns: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('conversation_summaries')
+                 WHERE name IN ('parent_conversation_id', 'nesting_depth')",
+                    [],
+                    |row| row.get(0),
+                )
+                .ok()?;
+            if relationship_columns != 0 {
+                return None;
+            }
+            connection
+                .prepare(
+                    "SELECT title FROM conversation_summaries WHERE conversation_id = ?1
+                 AND (app_data_dir = '' OR app_data_dir = 'antigravity-cli') LIMIT 1",
+                )
+                .ok()?
+        }
+    };
+    let title: String = statement.query_row([id], |row| row.get(0)).ok()?;
     let title = title.trim_matches(js_whitespace);
     (!title.is_empty()).then(|| title.to_owned())
 }
