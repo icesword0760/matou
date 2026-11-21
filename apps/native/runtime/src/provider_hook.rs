@@ -641,6 +641,91 @@ fn script_command(script: &Path) -> Result<String> {
     Ok(command)
 }
 
+pub(crate) fn bundled_claude_plugin(executable: &Path) -> Option<PathBuf> {
+    let macos = executable.parent()?;
+    let contents = macos.parent()?;
+    if macos.file_name()?.to_str()? != "MacOS" || contents.file_name()?.to_str()? != "Contents" {
+        return None;
+    }
+    let plugin = contents.join("Resources/control-assets/providers/claude-plugin");
+    plugin
+        .join(".claude-plugin/plugin.json")
+        .is_file()
+        .then_some(plugin)
+}
+
+pub(crate) fn claude_config_counts(cwd: &Path, config: &Path) -> Value {
+    use std::collections::BTreeSet;
+    let project = cwd.join(".claude");
+    let project_instruction = cwd.join("CLAUDE.md");
+    let instruction_files = [
+        config.join("CLAUDE.md"),
+        project_instruction.clone(),
+        cwd.join("CLAUDE.local.md"),
+        project.join("CLAUDE.md"),
+        project.join("CLAUDE.local.md"),
+    ]
+    .iter()
+    .filter(|path| path.is_file())
+    .count();
+    let mut hooks = BTreeSet::new();
+    let read = |path: PathBuf| -> Value {
+        fs::metadata(&path)
+            .ok()
+            .filter(|metadata| metadata.is_file() && metadata.len() <= 1024 * 1024)
+            .and_then(|_| fs::read(path).ok())
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default()
+    };
+    let mut user_mcp = BTreeSet::new();
+    let mut project_mcp = BTreeSet::new();
+    let mut add_config =
+        |mcp: &mut BTreeSet<String>, settings: Value, disabled: &str, include_hooks: bool| {
+            if let Some(servers) = settings["mcpServers"].as_object() {
+                mcp.extend(servers.keys().cloned());
+            }
+            for name in settings[disabled]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+            {
+                mcp.remove(name);
+            }
+            if include_hooks && let Some(names) = settings["hooks"].as_object() {
+                hooks.extend(names.keys().cloned());
+            }
+        };
+    for name in ["settings.json", "settings.local.json"] {
+        add_config(&mut user_mcp, read(config.join(name)), "", true);
+    }
+    if let Some(parent) = config.parent() {
+        add_config(
+            &mut user_mcp,
+            read(parent.join(".claude.json")),
+            "disabledMcpServers",
+            false,
+        );
+    }
+    add_config(&mut project_mcp, read(cwd.join(".mcp.json")), "", false);
+    for name in ["settings.json", "settings.local.json"] {
+        add_config(
+            &mut project_mcp,
+            read(project.join(name)),
+            "disabledMcpjsonServers",
+            true,
+        );
+    }
+    json!({
+        "instructionFiles": instruction_files,
+        "projectInstructionFileExists": project_instruction.is_file(),
+        "mcpServers": user_mcp.len() + project_mcp.len(),
+        "mcpServerNames": user_mcp.into_iter().chain(project_mcp).collect::<Vec<_>>(),
+        "hooks": hooks.len(),
+        "hookNames": hooks,
+    })
+}
+
 fn settings(url: &str, script: &Path, permission_respawn: bool) -> Result<Value> {
     let command = script_command(script)?;
     let mut hooks: Map<String, Value> = EVENTS
