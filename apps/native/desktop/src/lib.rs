@@ -9,6 +9,7 @@ pub mod dispatch_settings;
 pub mod instance_open;
 #[cfg(target_os = "macos")]
 pub mod macos;
+pub mod provider_context_editor;
 mod provider_settings;
 pub mod runtime_bridge;
 mod settings_shell;
@@ -17,6 +18,7 @@ pub mod team_member_card;
 pub mod terminal_input;
 mod terminal_scrollbar;
 pub mod terminal_surface;
+pub mod theme_tokens;
 pub mod window_registry;
 pub mod workspace;
 pub use workspace::database_recovery_page;
