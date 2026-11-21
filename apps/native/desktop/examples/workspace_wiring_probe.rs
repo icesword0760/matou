@@ -29,9 +29,29 @@ mod terminal_input;
 #[path = "../src/terminal_scrollbar.rs"]
 mod terminal_scrollbar;
 #[cfg(all(target_os = "macos", debug_assertions))]
-#[path = "../src/terminal_surface.rs"]
 #[allow(dead_code)]
-mod terminal_surface;
+mod terminal_surface {
+    include!("../src/terminal_surface.rs");
+
+    impl TerminalSurface {
+        pub(crate) fn scrollbar_track_center_for_split_probe(&self) -> Point<Pixels> {
+            let bounds = self.scrollbar_bounds.expect("painted terminal scrollport");
+            point(bounds.right() - px(2.5), bounds.center().y)
+        }
+
+        pub(crate) fn scrollport_hovered_for_split_probe(&self) -> bool {
+            self.scrollport_hovered
+        }
+
+        pub(crate) fn assert_no_terminal_drag_for_split_probe(&self) {
+            assert!(!self.selecting, "divider started a terminal selection");
+            assert!(
+                self.scrollbar_drag.is_none(),
+                "divider started a scrollbar drag"
+            );
+        }
+    }
+}
 #[cfg(all(target_os = "macos", debug_assertions))]
 #[path = "../src/ui_text.rs"]
 mod ui_text;
@@ -1057,20 +1077,21 @@ mod workspace {
             PlatformInput::MouseUp(event) => {
                 (NSEventType::NSLeftMouseUp, event.position, event.modifiers)
             }
-            PlatformInput::MouseMove(event) => (
-                NSEventType::NSLeftMouseDragged,
-                event.position,
-                event.modifiers,
-            ),
+            PlatformInput::MouseMove(event) => {
+                let kind = match event.pressed_button {
+                    Some(MouseButton::Left) => NSEventType::NSLeftMouseDragged,
+                    None => NSEventType::NSMouseMoved,
+                    _ => unreachable!(),
+                };
+                (kind, event.position, event.modifiers)
+            }
             _ => unreachable!(),
         };
         let (view, size) = native_view(window.into(), cx);
         let location = NSPoint::new(f64::from(position.x), f64::from(size.height - position.y));
-        let flags = if modifiers.platform {
-            NSEventModifierFlags::NSCommandKeyMask
-        } else {
-            NSEventModifierFlags::empty()
-        };
+        let mut flags = NSEventModifierFlags::empty();
+        flags.set(NSEventModifierFlags::NSCommandKeyMask, modifiers.platform);
+        flags.set(NSEventModifierFlags::NSControlKeyMask, modifiers.control);
         unsafe {
             let native: id = msg_send![view, window];
             let number: NSInteger = msg_send![native, windowNumber];
@@ -1086,6 +1107,9 @@ mod workspace {
                 }
                 NSEventType::NSLeftMouseDragged => {
                     let _: () = msg_send![view, mouseDragged: event];
+                }
+                NSEventType::NSMouseMoved => {
+                    let _: () = msg_send![view, mouseMoved: event];
                 }
                 _ => unreachable!(),
             }
@@ -1140,6 +1164,182 @@ mod workspace {
                 );
             })
             .unwrap();
+    }
+
+    fn verify_horizontal_divider_drag(cx: &mut AsyncApp) {
+        use matou_native_desktop::split_tree::with_split_drag_button_for_probe;
+        use matou_native_terminal::{Terminal, TerminalOptions};
+
+        const RIGHT: &str = "drag-right";
+        const LEFT_PANE: &str = "split-pane-shell-a";
+        const RIGHT_PANE: &str = "split-pane-drag-right";
+        const RELEASE_COUNT: u32 = 42;
+        let (window, sink) = open_probe_at(cx, 1200.);
+        card_action(window, cx, A, CardMenuAction::SplitHorizontal);
+        publish_shell(window, cx, RIGHT);
+        draw(window.into(), cx);
+        window
+            .update(cx, |view, _, cx| {
+                for id in [A, RIGHT] {
+                    view.terminals[id].update(cx, |surface, cx| {
+                        let (cols, rows, cell_width, cell_height) =
+                            surface.target_dimensions().unwrap();
+                        let mut terminal = Terminal::new(TerminalOptions::new(
+                            cols,
+                            rows,
+                            cell_width,
+                            cell_height,
+                        ))
+                        .unwrap();
+                        for row in 0..180 {
+                            terminal.feed(format!("history row {row:03}\r\n").as_bytes());
+                        }
+                        terminal.scroll(6).unwrap();
+                        let screen = terminal.screen().unwrap();
+                        assert!(screen.scrollbar.offset > 0);
+                        assert!(screen.scrollbar.total > u64::from(rows));
+                        surface.set_screen(screen, terminal.input_modes().unwrap(), None, 0, cx);
+                    });
+                }
+            })
+            .unwrap();
+        let bounds = draw(window.into(), cx);
+        let canvas = bounds["split-canvas"];
+        let initial = bounds[LEFT_PANE].right();
+        let track = window
+            .update(cx, |view, _, cx| {
+                view.terminals[A]
+                    .read(cx)
+                    .scrollbar_track_center_for_split_probe()
+            })
+            .unwrap();
+        let move_at = |cx: &mut AsyncApp, position, pressed_button| {
+            dispatch_mouse(
+                window,
+                cx,
+                MouseMoveEvent {
+                    position,
+                    pressed_button,
+                    ..Default::default()
+                },
+            );
+        };
+        move_at(cx, track, None);
+        draw(window.into(), cx);
+        window
+            .update(cx, |view, _, cx| {
+                assert!(view.terminals[A].read(cx).scrollbar_hit(track));
+            })
+            .unwrap();
+
+        let assert_terminal_isolated = |cx: &mut AsyncApp| {
+            window
+                .update(cx, |view, _, cx| {
+                    for (id, hovered) in [(A, true), (RIGHT, false)] {
+                        let surface = view.terminals[id].read(cx);
+                        surface.assert_no_terminal_drag_for_split_probe();
+                        // A terminal receiving the drag in capture would update its hover.
+                        assert_eq!(surface.scrollport_hovered_for_split_probe(), hovered);
+                    }
+                })
+                .unwrap();
+        };
+        let assert_divider_at = |cx: &mut AsyncApp, expected: Pixels| {
+            let painted = draw(window.into(), cx);
+            assert_eq!(painted["split-canvas"], canvas);
+            let actual = painted[LEFT_PANE].right();
+            assert_eq!(actual, painted[RIGHT_PANE].left());
+            assert!(
+                (actual - expected).abs() <= px(1.),
+                "divider was at {actual:?}, expected {expected:?}"
+            );
+            actual
+        };
+        let start_drag = |cx: &mut AsyncApp, x, button_state| {
+            with_split_drag_button_for_probe(button_state, || {
+                dispatch_mouse(
+                    window,
+                    cx,
+                    mouse_down(point(x - px(1.), track.y), Modifiers::default()),
+                );
+            });
+        };
+        let y = track.y;
+        let left = Some(MouseButton::Left);
+        while sink.try_recv().is_ok() {}
+        for (origin, sign) in [(initial, 1.), (initial + px(180.), -1.)] {
+            start_drag(cx, origin, Some(RELEASE_COUNT));
+            let mut previous = origin;
+            for step in 1..=35 {
+                let x = origin + px(sign * 180. * step as f32 / 35.);
+                move_at(cx, point(x, y), left);
+                let actual = assert_divider_at(cx, x);
+                assert!(
+                    (actual - previous) * sign > px(0.),
+                    "stalled at step {step}"
+                );
+                assert_terminal_isolated(cx);
+                previous = actual;
+
+                if sign < 0. && step == 13 {
+                    with_split_drag_button_for_probe(Some(RELEASE_COUNT), || {
+                        move_at(cx, point(x + px(17.), y), None);
+                    });
+                    assert_eq!(assert_divider_at(cx, x), actual);
+                    assert_terminal_isolated(cx);
+                }
+            }
+            dispatch_mouse(window, cx, mouse_up(point(previous, y)));
+            move_at(cx, point(previous + px(30.), y), left);
+            assert_eq!(assert_divider_at(cx, previous), previous);
+            // Restore the pre-gesture hover using an ordinary move.
+            let track = window
+                .update(cx, |view, _, cx| {
+                    view.terminals[A]
+                        .read(cx)
+                        .scrollbar_track_center_for_split_probe()
+                })
+                .unwrap();
+            move_at(cx, track, None);
+            assert_terminal_isolated(cx);
+        }
+
+        for (at_down, at_move) in [
+            (None, None),
+            (Some(RELEASE_COUNT), None),
+            (Some(RELEASE_COUNT), Some(RELEASE_COUNT + 1)),
+        ] {
+            start_drag(cx, initial, at_down);
+            with_split_drag_button_for_probe(at_move, || move_at(cx, point(initial, y), None));
+            move_at(cx, point(initial + px(30.), y), left);
+            assert_divider_at(cx, initial);
+        }
+
+        start_drag(cx, initial, Some(RELEASE_COUNT));
+        with_split_drag_button_for_probe(None, || {
+            let mut release = mouse_up(point(initial, y));
+            release.modifiers.control = true;
+            dispatch_mouse(window, cx, release);
+        });
+        move_at(cx, point(initial + px(30.), y), left);
+        assert_divider_at(cx, initial);
+
+        assert!(
+            !std::iter::from_fn(|| sink.try_recv().ok()).any(|command| matches!(
+                command,
+                Command::Select { .. }
+                    | Command::Scroll { .. }
+                    | Command::ScrollTo { .. }
+                    | Command::ScrollSelection { .. }
+            )),
+            "divider gesture generated terminal selection or scrolling"
+        );
+        window
+            .update(cx, |_, window, _| window.remove_window())
+            .unwrap();
+        println!(
+            "horizontal divider: 35 painted steps each way (±180 pt), scrollback terminals bypassed in capture, buttonless move recovered after repaint, releases ended the drag"
+        );
     }
 
     fn verify_splits(cx: &mut AsyncApp) {
@@ -1611,6 +1811,7 @@ mod workspace {
         Application::new().with_assets(NativeAssets).run(move |cx| {
             cx.spawn(async move |cx| {
                 verify(cx, &fixture_root).await;
+                verify_horizontal_divider_drag(cx);
                 verify_splits(cx);
                 verify_links(cx).await;
                 live_wiring::verify(cx, fixture_root).await;
