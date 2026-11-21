@@ -70,7 +70,7 @@ mod codex_hud {
 
 #[path = "footer_controls.rs"]
 mod footer_controls;
-use footer_controls::{FooterMenu, FooterPopover};
+use footer_controls::{FooterGitProjection, FooterGitRequest, FooterMenu, FooterPopover};
 
 #[path = "project_instructions.rs"]
 mod project_instructions;
@@ -1360,6 +1360,8 @@ pub struct Workspace {
     footer_shell: Option<String>,
     project_instructions: HashMap<AnyWindowHandle, project_instructions::Instructions>,
     footer_popovers: HashMap<AnyWindowHandle, FooterPopover>,
+    pending_footer_git: HashMap<u64, FooterGitRequest>,
+    footer_git_projections: HashMap<String, FooterGitProjection>,
     detached_permission_menus: HashSet<AnyWindowHandle>,
     detached_permission_confirmations: HashMap<AnyWindowHandle, PermissionConfirmation>,
     permission_changes: HashMap<String, PermissionChange>,
@@ -2414,6 +2416,8 @@ impl Workspace {
                 .map(str::to_owned),
             project_instructions: HashMap::new(),
             footer_popovers: HashMap::new(),
+            pending_footer_git: HashMap::new(),
+            footer_git_projections: HashMap::new(),
             detached_permission_menus: HashSet::new(),
             detached_permission_confirmations: HashMap::new(),
             permission_changes: HashMap::new(),
@@ -3608,6 +3612,16 @@ impl Workspace {
             _ => {}
         }
         match event {
+            Event::GitStatusDetail(reply)
+            | Event::GitCheckout(reply)
+            | Event::GitCreateBranch(reply)
+            | Event::GitCommit(reply)
+            | Event::GitPush(reply)
+            | Event::GitWorktreeCreate(reply)
+            | Event::GitWorktreeRemove(reply) => {
+                self.receive_footer_git(reply, window, cx);
+                return;
+            }
             Event::TimeZoneSettings(reply) => {
                 if let Some((settings, _)) = &self.settings {
                     settings.update(cx, |settings, cx| settings.receive_time_zone(reply, cx));
@@ -9740,7 +9754,9 @@ impl Workspace {
                 let tail = path.rsplit(['/', '\\']).find(|part| !part.is_empty())?;
                 Some((path, format!("~/{}", tail.replace(['\r', '\n', '\t'], " "))))
             });
-        let git = FooterGit::projected(node, live, self.locale);
+        let git = self
+            .footer_git_projection(id)
+            .or_else(|| FooterGit::projected(node, live, self.locale));
         let environment = FooterEnvironment::from_node(&node["environment"])
             .or_else(|| live.and_then(|hud| FooterEnvironment::from_node(&hud["environment"])));
         Some(FooterFields {
@@ -16713,6 +16729,7 @@ fn permission_provider(node: &Value) -> &'static str {
     }
 }
 
+#[derive(Clone)]
 struct FooterGit {
     label: String,
     title: String,
