@@ -9,8 +9,9 @@ use std::{
 
 use std::{path::Path, time::Duration};
 
-pub(crate) const MODE: &str = "--internal-mt";
+pub(crate) const MODE: &str = "--mt";
 
+#[cfg(unix)]
 pub(crate) fn install_shim(data_root: &Path) -> anyhow::Result<std::path::PathBuf> {
     use std::{
         fs::{self, DirBuilder, Permissions},
@@ -54,6 +55,34 @@ pub(crate) fn install_shim(data_root: &Path) -> anyhow::Result<std::path::PathBu
         .set_permissions(Permissions::from_mode(0o700))?;
     shim.persist(dir.join("mt"))?;
     Ok(dir)
+}
+
+#[cfg(windows)]
+pub(crate) fn install_shim(data_root: &Path) -> anyhow::Result<std::path::PathBuf> {
+    let dir = data_root.join("control/bin");
+    std::fs::create_dir_all(&dir)?;
+    let mut shim = tempfile::NamedTempFile::new_in(&dir)?;
+    write!(
+        shim,
+        "@echo off\r\nsetlocal DisableDelayedExpansion\r\n\"%MATOU_CONTROL_RUNTIME%\" {MODE} %*\r\n"
+    )?;
+    shim.persist(dir.join("mt.cmd"))?;
+    Ok(dir)
+}
+
+#[cfg(unix)]
+type ControlStream = tokio::net::UnixStream;
+#[cfg(windows)]
+type ControlStream = tokio::net::windows::named_pipe::NamedPipeClient;
+
+#[cfg(unix)]
+async fn connect(endpoint: &Path) -> io::Result<ControlStream> {
+    ControlStream::connect(endpoint).await
+}
+
+#[cfg(windows)]
+async fn connect(endpoint: &Path) -> io::Result<ControlStream> {
+    crate::host_control::connect_pipe(endpoint).await
 }
 
 const MISSING_IDENTITY: &str = "`mt` 仅在 Matou 托管终端中可用；当前进程缺少会话控制身份";
@@ -1154,7 +1183,7 @@ impl<'a> Client<'a> {
 
     async fn exchange(&self, method: &str, params: Value) -> Result<Option<Value>, CliError> {
         use crate::host_control::{MAX_FRAME_BYTES, VERSION, now_ms};
-        use tokio::{net::UnixStream, time::timeout};
+        use tokio::time::timeout;
 
         let response_budget = response_budget(method, &params);
         let request_id = uuid::Uuid::new_v4().to_string();
@@ -1173,7 +1202,7 @@ impl<'a> Client<'a> {
                 "Host Control 请求超过大小限制",
             ));
         }
-        let socket = timeout(BUDGET, UnixStream::connect(self.endpoint))
+        let socket = timeout(BUDGET, connect(self.endpoint))
             .await
             .map_err(|_| {
                 CliError::new(
@@ -1372,10 +1401,7 @@ fn connection_lost(_: io::Error) -> CliError {
     )
 }
 
-async fn read_exact(
-    socket: &tokio::net::UnixStream,
-    mut remaining: &mut [u8],
-) -> Result<(), CliError> {
+async fn read_exact(socket: &ControlStream, mut remaining: &mut [u8]) -> Result<(), CliError> {
     while !remaining.is_empty() {
         socket.readable().await.map_err(connection_lost)?;
         match socket.try_read(remaining) {
@@ -1392,7 +1418,7 @@ async fn read_exact(
     Ok(())
 }
 
-async fn write_all(socket: &tokio::net::UnixStream, mut remaining: &[u8]) -> Result<(), CliError> {
+async fn write_all(socket: &ControlStream, mut remaining: &[u8]) -> Result<(), CliError> {
     while !remaining.is_empty() {
         socket.writable().await.map_err(connection_lost)?;
         match socket.try_write(remaining) {

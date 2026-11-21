@@ -362,7 +362,6 @@ impl ShellOwner {
         crate::codex_launch::config_root(|key| get_var(env, key))
     }
 
-    #[cfg(unix)]
     pub(crate) fn prepare_control_fork_worktree(&mut self, session_id: &str) -> Result<()> {
         let pending: Option<(String, String, String, String, String)> = self
             .connection
@@ -3266,7 +3265,6 @@ impl ShellOwner {
         Ok(registration)
     }
 
-    #[cfg(unix)]
     pub(crate) fn read_current_screen(
         &self,
         session_id: &str,
@@ -3285,7 +3283,6 @@ impl ShellOwner {
         Ok(Some(result))
     }
 
-    #[cfg(unix)]
     pub(crate) fn control_terminal(&self, session_id: &str) -> Option<(&str, Option<Instant>)> {
         self.shells
             .get(session_id)
@@ -3299,12 +3296,10 @@ impl ShellOwner {
             .map(|shell| (shell.run_id.as_str(), shell.last_output))
     }
 
-    #[cfg(unix)]
     pub(crate) fn control_storage(&mut self) -> &mut Connection {
         &mut self.connection
     }
 
-    #[cfg(unix)]
     pub(crate) fn control_is_read_only(&self) -> Result<bool> {
         Ok(self.connection.is_readonly("main")?
             || self

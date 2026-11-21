@@ -601,7 +601,6 @@ impl Session {
         Ok(self.visible_screen.clone())
     }
 
-    #[cfg(unix)]
     pub(crate) fn read_current_screen(&mut self) -> Result<Screen> {
         // The protocol buffer follows the live bottom independently of the UI
         // viewport. Capturing it must not expire sync or send PTY replies.
@@ -891,6 +890,16 @@ impl Session {
             })?;
             if self.child_exit.is_some() {
                 self.child_exit_observed_at = Some(Instant::now());
+                #[cfg(windows)]
+                {
+                    // ConPTY keeps the output pipe open after its child exits.
+                    // Close it while the reader drains the last output and emits EOF.
+                    let process = self.process.take();
+                    thread::Builder::new()
+                        .name("matou-conpty-close".into())
+                        .spawn(move || drop(process))
+                        .context("close exited Shell pseudoconsole")?;
+                }
             }
         }
         Ok(())

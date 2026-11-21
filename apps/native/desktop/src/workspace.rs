@@ -96,11 +96,11 @@ use crate::{
 };
 
 fn is_child_window_close_shortcut(stroke: &Keystroke) -> bool {
-    cfg!(target_os = "macos")
-        && stroke.key == "w"
+    stroke.key.eq_ignore_ascii_case("w")
         && stroke.modifiers
             == (Modifiers {
-                platform: true,
+                platform: cfg!(target_os = "macos"),
+                control: cfg!(target_os = "windows"),
                 ..Default::default()
             })
 }
@@ -1320,6 +1320,8 @@ fn read_only_navigation(active: ReadOnlyNavigation) -> Event {
 }
 
 pub struct Workspace {
+    #[cfg(target_os = "windows")]
+    main_theme_window: AnyWindowHandle,
     locale: InterfaceLocale,
     locale_preference: LocalePreference,
     data_root: Option<PathBuf>,
@@ -2380,6 +2382,8 @@ impl Workspace {
             shortcut_alt_down: false,
             last_shortcut_alt: None,
             locale_save_pending: false,
+            #[cfg(target_os = "windows")]
+            main_theme_window: workspace_window,
             theme: ThemeState::new(theme, window.appearance()),
             history_view: None,
             history_request: None,
@@ -2675,7 +2679,27 @@ impl Workspace {
         }
     }
 
+    #[cfg(target_os = "windows")]
+    pub fn uses_dark_theme(&self) -> bool {
+        self.theme.effective() == AppTheme::Dark
+    }
+
     fn apply_theme_palette(&self, cx: &mut Context<Self>) {
+        #[cfg(target_os = "windows")]
+        {
+            let handle = self.main_theme_window;
+            // The theme shortcut may be handled by any of the three windows.
+            cx.defer(move |cx| {
+                let _ = handle.update(cx, |view, window, cx| {
+                    if let Ok(workspace) = view.downcast::<Workspace>() {
+                        matou_native_desktop::windows_theme::set_dark(
+                            window,
+                            workspace.read(cx).uses_dark_theme(),
+                        );
+                    }
+                });
+            });
+        }
         let theme = self.theme_palette().terminal;
         for (session_id, terminal) in &self.terminals {
             terminal.update(cx, |terminal, cx| terminal.set_theme(theme, cx));
@@ -4054,6 +4078,9 @@ impl Workspace {
                 }
             }
             Event::ScenesDisposed(ids) => {
+                // The replacement graph may arrive on a later frame. Drop these
+                // cards from the layout before removing their view state.
+                self.order.retain(|id| !ids.contains(id));
                 for id in &ids {
                     self.forget_board_scene(id);
                 }
@@ -10080,6 +10107,13 @@ impl Workspace {
             },
             cx,
         );
+    }
+
+    #[cfg(target_os = "windows")]
+    fn restore_dag_terminal_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((scene, session)) = self.active_scene_id().zip(self.active_level_focus()) {
+            self.return_terminal_focus(scene.to_owned(), session.to_owned(), window, cx);
+        }
     }
 
     fn is_theme_shortcut(stroke: &Keystroke) -> bool {

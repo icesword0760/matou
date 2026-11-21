@@ -3,17 +3,10 @@
 
 use std::{ffi::OsStr, path::Path};
 
-#[cfg(unix)]
 use std::{
     borrow::Cow,
     collections::{HashMap, VecDeque},
-    fs::{self, DirBuilder, Metadata, Permissions},
     io::{self, Read, Write},
-    net::Shutdown,
-    os::unix::{
-        fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt},
-        net::{SocketAddr, UnixListener, UnixStream},
-    },
     path::PathBuf,
     sync::{
         Arc, Mutex,
@@ -24,10 +17,20 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::Result;
 #[cfg(unix)]
+use std::{
+    fs::{self, DirBuilder, Metadata, Permissions},
+    net::Shutdown,
+    os::unix::{
+        fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt},
+        net::{SocketAddr, UnixListener, UnixStream},
+    },
+};
+
+use anyhow::{Context, Result};
+#[cfg(any(unix, test))]
+use anyhow::{bail, ensure};
 use {
-    anyhow::{Context, bail, ensure},
     base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD},
     rusqlite::{Connection, OptionalExtension, params},
     serde::Serialize,
@@ -38,20 +41,24 @@ use {
 
 use matou_native_core::pty::ShellLaunch;
 
-#[cfg(unix)]
 #[path = "host_control/terminal.rs"]
 mod terminal;
-#[cfg(unix)]
 use crate::owner::ShellOwner;
-#[cfg(unix)]
 use matou_native_core::{
     hierarchy::{self, canvas, cards, tabs, tasks, workspaces},
     storage::{CommandMetadata, CommandReplayConflictError},
 };
-#[cfg(unix)]
 use terminal::{ReadKind, Reply};
 
-const CONTROL_ENV: [&str; 9] = [
+#[cfg(windows)]
+#[path = "host_control/windows.rs"]
+mod windows;
+#[cfg(windows)]
+pub(crate) use windows::connect as connect_pipe;
+#[cfg(windows)]
+use windows::{Endpoint, accept_connections};
+
+const CONTROL_ENV: [&str; 10] = [
     "MATOU_CONTROL_ENDPOINT",
     "MATOU_CONTROL_TOKEN",
     "MATOU_CONTROL_PROTOCOL",
@@ -61,6 +68,7 @@ const CONTROL_ENV: [&str; 9] = [
     "MATOU_CONTROL_NODE_EXECUTABLE",
     "MATOU_CONTROL_ASSET_ROOT",
     "DSH_MATOU_CONTROL_TOKEN",
+    "MATOU_CONTROL_RUNTIME",
 ];
 
 pub(crate) fn clear_control_environment(launch: &mut ShellLaunch) {
@@ -79,20 +87,22 @@ pub(crate) fn clear_control_environment(launch: &mut ShellLaunch) {
 }
 
 pub(crate) struct RunControl {
-    #[cfg(unix)]
     endpoint: PathBuf,
-    #[cfg(unix)]
     tokens: Arc<Tokens>,
 }
 
 impl RunControl {
-    #[cfg(unix)]
     pub(crate) fn inject(
         &self,
         launch: &mut ShellLaunch,
         session_id: &str,
         run_id: &str,
     ) -> Result<()> {
+        #[cfg(windows)]
+        launch.env.insert(
+            "MATOU_CONTROL_RUNTIME".into(),
+            std::env::current_exe()?.into_os_string(),
+        );
         let token = self
             .tokens
             .issue(run_id, session_id, MANAGED_SCOPES, i64::MAX)?;
@@ -111,40 +121,23 @@ impl RunControl {
         Ok(())
     }
 
-    #[cfg(not(unix))]
-    pub(crate) fn inject(&self, _: &mut ShellLaunch, _: &str, _: &str) -> Result<()> {
-        // No endpoint or capability is published until named pipe access is implemented.
-        Ok(())
-    }
-
     pub(crate) fn revoke(&self, run_id: &str) {
-        #[cfg(unix)]
         self.tokens
             .records
             .lock()
             .unwrap()
             .retain(|record| record.run_id != run_id);
-        #[cfg(not(unix))]
-        let _ = run_id;
     }
 }
 
-#[cfg(unix)]
 pub(crate) const VERSION: u8 = 1;
-#[cfg(unix)]
 pub(crate) const MAX_FRAME_BYTES: usize = 2 * 1024 * 1024;
-#[cfg(unix)]
 const MAX_CONNECTIONS: usize = 16;
-#[cfg(unix)]
 const OWNER_QUEUE_CAPACITY: usize = 8;
-#[cfg(unix)]
 const OWNER_BATCH: usize = 4;
-#[cfg(unix)]
 const IO_POLL: Duration = Duration::from_millis(20);
-#[cfg(unix)]
 const IDLE_TIMEOUT: Duration = Duration::from_secs(5);
 
-#[cfg(unix)]
 const MANAGED_SCOPES: &[&str] = &[
     "host.identify",
     "host.list",
@@ -169,7 +162,6 @@ const MANAGED_SCOPES: &[&str] = &[
     "structure.canvas-close.preview",
     "structure.canvas-close.commit",
 ];
-#[cfg(unix)]
 const OTHER_METHODS: &[&str] = &[
     "task.status.write",
     "task.progress.write",
@@ -177,7 +169,6 @@ const OTHER_METHODS: &[&str] = &[
     "task.move-to-window",
 ];
 
-#[cfg(unix)]
 struct Capability {
     digest: [u8; 32],
     run_id: String,
@@ -187,13 +178,11 @@ struct Capability {
     runtime_generation: String,
 }
 
-#[cfg(unix)]
 struct Tokens {
     generation: String,
     records: Mutex<Vec<Capability>>,
 }
 
-#[cfg(unix)]
 #[derive(Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Caller {
@@ -201,7 +190,6 @@ struct Caller {
     session_id: String,
 }
 
-#[cfg(unix)]
 impl Tokens {
     fn issue(
         &self,
@@ -258,7 +246,6 @@ impl Tokens {
     }
 }
 
-#[cfg(unix)]
 #[derive(Serialize)]
 struct Fault {
     code: &'static str,
@@ -267,7 +254,6 @@ struct Fault {
     details: Option<Value>,
 }
 
-#[cfg(unix)]
 impl Fault {
     fn new(code: &'static str, message: impl Into<Cow<'static, str>>) -> Self {
         Self {
@@ -278,43 +264,33 @@ impl Fault {
     }
 }
 
-#[cfg(unix)]
 type WireResult<T> = std::result::Result<T, Fault>;
-#[cfg(unix)]
 const INVALID: &str = "INVALID_REQUEST";
-#[cfg(unix)]
 const TIMEOUT: &str = "TIMEOUT";
-#[cfg(unix)]
 const UNSUPPORTED: &str = "UNSUPPORTED";
 
-#[cfg(unix)]
 fn missing_target(message: impl Into<Cow<'static, str>>) -> Fault {
     Fault::new("TARGET_NOT_FOUND", message)
 }
 
-#[cfg(unix)]
 fn missing_caller() -> Fault {
     missing_target("当前调用会话已不在 Matou 会话图中")
 }
 
-#[cfg(unix)]
 fn deadline_elapsed() -> Fault {
     Fault::new(TIMEOUT, "request deadline elapsed")
 }
 
-#[cfg(unix)]
 fn unsupported_method() -> Fault {
     Fault::new(UNSUPPORTED, "unsupported control method")
 }
 
-#[cfg(unix)]
 fn object(value: &Value) -> WireResult<&Map<String, Value>> {
     value
         .as_object()
         .ok_or(Fault::new(INVALID, "params must be an object"))
 }
 
-#[cfg(unix)]
 fn bounded_text<'a>(
     value: &'a Value,
     max_bytes: usize,
@@ -331,14 +307,12 @@ fn bounded_text<'a>(
         .ok_or(Fault::new(INVALID, message))
 }
 
-#[cfg(unix)]
 fn integer(value: &Value, max: u64) -> Option<u64> {
     // JSON represents both 1 and 1.0 as the same number in the frozen client.
     let number = value.as_f64()?;
     (number >= 1.0 && number <= max as f64 && number.fract() == 0.0).then_some(number as u64)
 }
 
-#[cfg(unix)]
 struct Envelope<'a> {
     id: &'a str,
     method: &'a str,
@@ -347,7 +321,6 @@ struct Envelope<'a> {
     deadline: i64,
 }
 
-#[cfg(unix)]
 impl<'a> Envelope<'a> {
     fn parse(value: &'a Value) -> WireResult<Self> {
         object(value)?;
@@ -382,14 +355,12 @@ impl<'a> Envelope<'a> {
     }
 }
 
-#[cfg(unix)]
 #[derive(Clone, Copy)]
 enum Scope {
     CurrentLevel,
     All,
 }
 
-#[cfg(unix)]
 impl Scope {
     fn name(self) -> &'static str {
         match self {
@@ -399,7 +370,6 @@ impl Scope {
     }
 }
 
-#[cfg(unix)]
 enum Action {
     Identify,
     List(Scope),
@@ -409,7 +379,6 @@ enum Action {
     Write(Value),
 }
 
-#[cfg(unix)]
 impl Action {
     fn parse(method: &str, params: &Value) -> WireResult<Self> {
         let fields = object(params)?;
@@ -454,7 +423,6 @@ impl Action {
     }
 }
 
-#[cfg(unix)]
 fn wire_text<'a>(params: &'a Value, field: &str, max: usize) -> WireResult<&'a str> {
     let message = || {
         Fault::new(
@@ -465,7 +433,6 @@ fn wire_text<'a>(params: &'a Value, field: &str, max: usize) -> WireResult<&'a s
     bounded_text(&params[field], max, "invalid text").map_err(|_| message())
 }
 
-#[cfg(unix)]
 fn optional_bool(params: &Value, field: &str) -> WireResult<bool> {
     params.get(field).map_or(Ok(false), |value| {
         value
@@ -474,7 +441,6 @@ fn optional_bool(params: &Value, field: &str) -> WireResult<bool> {
     })
 }
 
-#[cfg(unix)]
 fn terminal_input_selector(target: &Value) -> WireResult<Selector> {
     let target = object(target)?;
     if let Some(session) = target.get("sessionId").filter(|value| value.is_string()) {
@@ -498,7 +464,6 @@ fn terminal_input_selector(target: &Value) -> WireResult<Selector> {
     Selector::parse(&Value::Object(selector), false)
 }
 
-#[cfg(unix)]
 fn control_key(key: &str) -> Option<&'static [u8]> {
     Some(match key {
         "Enter" => b"\r",
@@ -523,37 +488,31 @@ fn control_key(key: &str) -> Option<&'static [u8]> {
     })
 }
 
-#[cfg(unix)]
 pub(crate) enum ControlUpdate {
     Navigation(PendingNavigation),
     Changed(Vec<String>, Vec<String>),
 }
 
-#[cfg(unix)]
 enum InputStep {
     Body(Vec<u8>),
     Acknowledge(Receiver<Result<()>>, bool),
     Echo(Instant),
 }
 
-#[cfg(unix)]
 struct TerminalWrite {
     run: String,
     submit: bool,
     step: InputStep,
 }
 
-#[cfg(unix)]
 fn read_only_fault() -> Fault {
     Fault::new("STORAGE_READ_ONLY", "Matou storage is read-only")
 }
 
-#[cfg(unix)]
 fn input_not_ready() -> Fault {
     Fault::new("TARGET_NOT_READY", "目标会话没有可写的运行中终端")
 }
 
-#[cfg(unix)]
 fn terminal_write_error(error: anyhow::Error) -> Fault {
     match error.to_string().as_str() {
         "session storage is paused" => read_only_fault(),
@@ -565,7 +524,6 @@ fn terminal_write_error(error: anyhow::Error) -> Fault {
     }
 }
 
-#[cfg(unix)]
 impl TerminalWrite {
     fn advance(
         &mut self,
@@ -644,13 +602,11 @@ impl TerminalWrite {
     }
 }
 
-#[cfg(unix)]
 struct ControlInput {
     request: Pending,
     write: TerminalWrite,
 }
 
-#[cfg(unix)]
 struct Pending {
     digest: [u8; 32],
     method: String,
@@ -661,13 +617,11 @@ struct Pending {
     response_written: Arc<AtomicBool>,
 }
 
-#[cfg(unix)]
 pub(crate) struct PendingNavigation {
     request: Pending,
     path: NavigationPath,
 }
 
-#[cfg(unix)]
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct NavigationPath {
@@ -679,7 +633,6 @@ pub(crate) struct NavigationPath {
     pub(crate) session_id: String,
 }
 
-#[cfg(unix)]
 impl PendingNavigation {
     pub(crate) fn complete(
         self,
@@ -715,10 +668,8 @@ impl PendingNavigation {
     }
 }
 
-#[cfg(unix)]
 type Clock = fn() -> i64;
 
-#[cfg(unix)]
 pub(crate) fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -726,7 +677,6 @@ pub(crate) fn now_ms() -> i64 {
         .as_millis() as i64
 }
 
-#[cfg(unix)]
 struct ServerState {
     stopping: AtomicBool,
     tokens: Arc<Tokens>,
@@ -734,7 +684,6 @@ struct ServerState {
     idle: Duration,
 }
 
-#[cfg(unix)]
 impl ServerState {
     fn authorize(&self, digest: &[u8; 32], method: &str, deadline: i64) -> WireResult<Caller> {
         let now = (self.clock)();
@@ -749,7 +698,6 @@ impl ServerState {
     }
 }
 
-#[cfg(unix)]
 pub(crate) struct ControlServer {
     endpoint: Endpoint,
     listener: Option<JoinHandle<()>>,
@@ -769,7 +717,6 @@ pub(crate) struct ControlServer {
     resolved_reads: std::cell::Cell<usize>,
 }
 
-#[cfg(unix)]
 impl ControlServer {
     pub(crate) fn start(root: &Path, generation: &str) -> Result<Self> {
         let path = root.join("matou.sqlite");
@@ -786,9 +733,8 @@ impl ControlServer {
         clock: Clock,
         idle: Duration,
     ) -> Result<Self> {
-        let path = root.join("control/runtime.sock");
-        let (endpoint, listener) = Endpoint::bind(&path)
-            .with_context(|| format!("start host control at {}", path.display()))?;
+        let (endpoint, listener) = Endpoint::bind(root).context("start host control")?;
+        let path = endpoint.path.clone();
         let (send, pending) = mpsc::sync_channel(OWNER_QUEUE_CAPACITY);
         let state = Arc::new(ServerState {
             stopping: AtomicBool::new(false),
@@ -1246,7 +1192,6 @@ impl ControlServer {
     }
 }
 
-#[cfg(unix)]
 impl Drop for ControlServer {
     fn drop(&mut self) {
         self.state.stopping.store(true, Ordering::Release);
@@ -1268,7 +1213,13 @@ struct Endpoint {
 
 #[cfg(unix)]
 impl Endpoint {
-    fn bind(path: &Path) -> Result<(Self, UnixListener)> {
+    fn bind(root: &Path) -> Result<(Self, UnixListener)> {
+        let path = root.join("control/runtime.sock");
+        Self::bind_socket(&path)
+            .with_context(|| format!("start Unix host control at {}", path.display()))
+    }
+
+    fn bind_socket(path: &Path) -> Result<(Self, UnixListener)> {
         SocketAddr::from_pathname(path).context("invalid or overlong Unix socket path")?;
         let directory = path.parent().context("control directory is missing")?;
         match DirBuilder::new().mode(0o700).create(directory) {
@@ -1397,17 +1348,17 @@ fn accept_connections(
 
 #[cfg(unix)]
 fn serve(mut socket: UnixStream, state: &ServerState, sender: &SyncSender<Pending>) {
-    let _ = serve_frames(&mut socket, state, sender);
+    let _ = socket
+        .set_read_timeout(Some(IO_POLL))
+        .and_then(|()| socket.set_write_timeout(Some(IO_POLL)))
+        .and_then(|()| serve_frames(&mut socket, state, sender));
 }
 
-#[cfg(unix)]
 fn serve_frames(
-    socket: &mut UnixStream,
+    socket: &mut (impl Read + Write),
     state: &ServerState,
     sender: &SyncSender<Pending>,
 ) -> io::Result<()> {
-    socket.set_read_timeout(Some(IO_POLL))?;
-    socket.set_write_timeout(Some(IO_POLL))?;
     while !state.stopping() {
         let until = Instant::now() + state.idle;
         let mut prefix = [0; 4];
@@ -1449,7 +1400,6 @@ fn serve_frames(
     Ok(())
 }
 
-#[cfg(unix)]
 fn transfer(
     mut bytes: &mut [u8],
     until: Instant,
@@ -1476,7 +1426,6 @@ fn transfer(
     Ok(())
 }
 
-#[cfg(unix)]
 fn enqueue(
     request: &Envelope<'_>,
     state: &ServerState,
@@ -1523,7 +1472,6 @@ fn enqueue(
     Err(Fault::new(TIMEOUT, "host control is stopping"))
 }
 
-#[cfg(unix)]
 fn serialize_ok(id: &str, result: impl Serialize) -> WireResult<Vec<u8>> {
     #[derive(Serialize)]
     #[serde(rename_all = "camelCase")]
@@ -1559,9 +1507,8 @@ fn serialize_ok(id: &str, result: impl Serialize) -> WireResult<Vec<u8>> {
     Ok(body.0)
 }
 
-#[cfg(unix)]
 fn write_frame(
-    socket: &mut UnixStream,
+    socket: &mut (impl Read + Write),
     state: &ServerState,
     id: &str,
     result: WireResult<Vec<u8>>,
@@ -1583,7 +1530,6 @@ fn write_frame(
     transfer(&mut body, until, state, |part| socket.write(part))
 }
 
-#[cfg(unix)]
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Target {
@@ -1607,7 +1553,6 @@ struct Target {
     dag: Dag,
 }
 
-#[cfg(unix)]
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Dag {
@@ -1619,7 +1564,6 @@ struct Dag {
     sibling_refs: Arc<Vec<String>>,
 }
 
-#[cfg(unix)]
 fn serialize_siblings<S: serde::Serializer>(
     siblings: &Arc<Vec<String>>,
     serializer: S,
@@ -1627,12 +1571,10 @@ fn serialize_siblings<S: serde::Serializer>(
     siblings.as_slice().serialize(serializer)
 }
 
-#[cfg(unix)]
 fn session_ref(id: &str) -> String {
     format!("session:{id}")
 }
 
-#[cfg(unix)]
 fn read_topology(connection: &Connection) -> rusqlite::Result<Vec<Target>> {
     // One SELECT establishes the read snapshot for both ranks and all selector inputs.
     let mut statement = connection.prepare_cached(
@@ -1789,12 +1731,10 @@ fn read_topology(connection: &Connection) -> rusqlite::Result<Vec<Target>> {
     Ok(targets)
 }
 
-#[cfg(unix)]
 fn ordinal(value: &Value) -> u64 {
     value["ordinal"].as_u64().unwrap_or_default()
 }
 
-#[cfg(unix)]
 fn depth<'a>(
     reference: &'a str,
     parents: &'a HashMap<String, Option<String>>,
@@ -1824,7 +1764,6 @@ fn depth<'a>(
     depths[reference]
 }
 
-#[cfg(unix)]
 fn projection<'a>(
     targets: &'a [Target],
     caller: &Caller,
@@ -1845,7 +1784,6 @@ fn projection<'a>(
     }
 }
 
-#[cfg(unix)]
 fn revision(targets: &[&Target]) -> String {
     // Struct order is part of the frozen hash contract.
     #[derive(Serialize)]
@@ -1877,7 +1815,6 @@ fn revision(targets: &[&Target]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-#[cfg(unix)]
 enum Selector {
     SelfTarget,
     Session(String),
@@ -1896,7 +1833,6 @@ enum Selector {
     Child(usize),
 }
 
-#[cfg(unix)]
 impl Selector {
     fn parse(target: &Value, navigation: bool) -> WireResult<Self> {
         let target = object(target)?;
@@ -2094,7 +2030,6 @@ impl Selector {
     }
 }
 
-#[cfg(unix)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum EntityLevel {
     Workspace,
@@ -2103,7 +2038,6 @@ enum EntityLevel {
     Session,
 }
 
-#[cfg(unix)]
 impl EntityLevel {
     fn parse(value: &str) -> Option<Self> {
         match value {
@@ -2125,13 +2059,11 @@ impl EntityLevel {
     }
 }
 
-#[cfg(unix)]
 enum NavigationSelector {
     Current(EntityLevel),
     Target(Selector, Option<String>),
 }
 
-#[cfg(unix)]
 impl NavigationSelector {
     fn parse(target: &Value) -> WireResult<Self> {
         let fields = object(target)?;
@@ -2261,7 +2193,6 @@ impl NavigationSelector {
     }
 }
 
-#[cfg(unix)]
 fn check_revision(expected: &str, visible: &[&Target]) -> WireResult<()> {
     if revision(visible) != expected {
         return Err(Fault::new(
@@ -2272,7 +2203,6 @@ fn check_revision(expected: &str, visible: &[&Target]) -> WireResult<()> {
     Ok(())
 }
 
-#[cfg(unix)]
 fn entity_path(
     connection: &Connection,
     level: EntityLevel,
@@ -2305,7 +2235,6 @@ fn entity_path(
         .ok_or_else(|| missing_target("导航目标已不在 Matou 会话图中"))
 }
 
-#[cfg(unix)]
 fn switch_anchor(
     connection: &Connection,
     window_id: &str,
@@ -2348,32 +2277,15 @@ fn switch_anchor(
         .ok_or_else(navigation_not_ready)
 }
 
-#[cfg(unix)]
 fn navigation_query_error(_: rusqlite::Error) -> Fault {
     Fault::new("INTERNAL_ERROR", "could not read host navigation state")
 }
 
-#[cfg(unix)]
 fn navigation_not_ready() -> Fault {
     Fault::new("TARGET_NOT_READY", "导航目标暂不可用")
 }
 
-#[cfg(not(unix))]
-pub(crate) struct ControlServer;
-
-#[cfg(not(unix))]
-impl ControlServer {
-    pub(crate) fn start(_: &Path, _: &str) -> Result<Self> {
-        // Windows named pipe transport and ACLs are a separate acceptance gate.
-        Ok(Self)
-    }
-
-    pub(crate) fn runs(&self) -> RunControl {
-        RunControl {}
-    }
-}
-
-#[cfg(all(unix, test))]
+#[cfg(test)]
 mod socket_tests {
     include!("../tests/host_control/socket.rs");
 
@@ -2386,7 +2298,6 @@ mod socket_tests {
     }
 }
 
-#[cfg(unix)]
 fn strict_fields(params: &Value, allowed: &[&str]) -> WireResult<()> {
     if let Some(field) = object(params)?
         .keys()
@@ -2411,7 +2322,6 @@ fn strict_fields(params: &Value, allowed: &[&str]) -> WireResult<()> {
     Ok(())
 }
 
-#[cfg(unix)]
 fn action_text<'a>(params: &'a Value, field: &str, max: usize) -> WireResult<&'a str> {
     let value = params[field]
         .as_str()
@@ -2422,7 +2332,6 @@ fn action_text<'a>(params: &'a Value, field: &str, max: usize) -> WireResult<&'a
     Ok(value)
 }
 
-#[cfg(unix)]
 fn choice<'a>(params: &'a Value, field: &str, choices: &[&str]) -> WireResult<&'a str> {
     params[field]
         .as_str()
@@ -2430,7 +2339,6 @@ fn choice<'a>(params: &'a Value, field: &str, choices: &[&str]) -> WireResult<&'
         .ok_or_else(|| Fault::new(INVALID, format!("{field} is unsupported")))
 }
 
-#[cfg(unix)]
 fn write_error(error: anyhow::Error) -> Fault {
     if error
         .downcast_ref::<rusqlite::Error>()
@@ -2471,12 +2379,10 @@ fn write_error(error: anyhow::Error) -> Fault {
     Fault::new(code, text)
 }
 
-#[cfg(unix)]
 fn sql_error(error: rusqlite::Error) -> Fault {
     write_error(error.into())
 }
 
-#[cfg(unix)]
 fn task_write(
     connection: &mut Connection,
     method: &str,
@@ -2607,7 +2513,6 @@ fn task_write(
     Ok(json!({"written": true}))
 }
 
-#[cfg(unix)]
 #[derive(Clone)]
 struct Confirmation {
     caller: Caller,
@@ -2619,7 +2524,6 @@ struct Confirmation {
     expires_at: i64,
 }
 
-#[cfg(unix)]
 fn confirmation_stale() -> Fault {
     Fault::new(
         "CONFIRMATION_STALE",
@@ -2627,7 +2531,6 @@ fn confirmation_stale() -> Fault {
     )
 }
 
-#[cfg(unix)]
 fn confirmation_required(other_run: bool) -> Fault {
     Fault::new(
         "CONFIRMATION_REQUIRED",
@@ -2639,13 +2542,11 @@ fn confirmation_required(other_run: bool) -> Fault {
     )
 }
 
-#[cfg(unix)]
 struct StructureTarget<'a> {
     level: EntityLevel,
     target: &'a Target,
 }
 
-#[cfg(unix)]
 fn require_level(target: &StructureTarget<'_>, level: EntityLevel) -> WireResult<()> {
     if target.level != level {
         return Err(missing_target(format!("目标必须是 {}", level.kind())));
@@ -2653,7 +2554,6 @@ fn require_level(target: &StructureTarget<'_>, level: EntityLevel) -> WireResult
     Ok(())
 }
 
-#[cfg(unix)]
 impl EntityLevel {
     fn kind(self) -> &'static str {
         match self {
@@ -2673,7 +2573,6 @@ impl EntityLevel {
     }
 }
 
-#[cfg(unix)]
 fn structure_target<'a>(
     targets: &'a [Target],
     caller: &Caller,
@@ -2740,7 +2639,6 @@ fn structure_target<'a>(
     }
 }
 
-#[cfg(unix)]
 fn structural_revision(expected: &str, targets: &[&Target]) -> WireResult<()> {
     if expected != revision(targets) {
         return Err(Fault::new(
@@ -2751,7 +2649,6 @@ fn structural_revision(expected: &str, targets: &[&Target]) -> WireResult<()> {
     Ok(())
 }
 
-#[cfg(unix)]
 fn metadata(caller: &Caller, method: &str, command_id: String, input: &Value) -> CommandMetadata {
     let mut request = input.clone();
     if request.is_object() {
@@ -2770,7 +2667,6 @@ fn metadata(caller: &Caller, method: &str, command_id: String, input: &Value) ->
     }
 }
 
-#[cfg(unix)]
 fn replay(connection: &Connection, command: &CommandMetadata) -> WireResult<Option<Value>> {
     let recorded: Option<(String, String)> = connection
         .query_row(
@@ -2790,7 +2686,6 @@ fn replay(connection: &Connection, command: &CommandMetadata) -> WireResult<Opti
         .transpose()
 }
 
-#[cfg(unix)]
 fn public_path(hierarchy: &Value, window: &str, level: EntityLevel, detached: bool) -> Value {
     let mut result = json!({
         "window": { "ref": format!("window:{window}"), "title": if detached { "独立终端窗口" } else { "主窗口" } }
@@ -2816,14 +2711,12 @@ fn public_path(hierarchy: &Value, window: &str, level: EntityLevel, detached: bo
     result
 }
 
-#[cfg(unix)]
 fn active_path(owner: &ShellOwner, window: &str) -> WireResult<Value> {
     let hierarchy = owner.hierarchy(window).map_err(write_error)?;
     let hierarchy = serde_json::to_value(hierarchy).map_err(|error| write_error(error.into()))?;
     Ok(public_path(&hierarchy, window, EntityLevel::Session, false))
 }
 
-#[cfg(unix)]
 impl StructureTarget<'_> {
     fn id(&self) -> &str {
         self.level.id(self.target)
@@ -3053,7 +2946,6 @@ impl StructureTarget<'_> {
     }
 }
 
-#[cfg(unix)]
 fn create_structure(
     owner: &mut ShellOwner,
     targets: &[Target],
@@ -3263,7 +3155,11 @@ fn readable_directory(path: &Path) -> bool {
     })
 }
 
-#[cfg(unix)]
+#[cfg(windows)]
+fn readable_directory(path: &Path) -> bool {
+    std::fs::read_dir(path).is_ok()
+}
+
 fn action_title<'a>(value: &'a Value, field: &str) -> WireResult<&'a str> {
     value
         .as_str()
@@ -3271,7 +3167,6 @@ fn action_title<'a>(value: &'a Value, field: &str) -> WireResult<&'a str> {
         .ok_or_else(|| Fault::new(INVALID, format!("params.{field} is invalid")))
 }
 
-#[cfg(unix)]
 fn canvas_ids() -> canvas::CanvasIds {
     let id = || uuid::Uuid::new_v4().to_string();
     canvas::CanvasIds {
@@ -3284,7 +3179,6 @@ fn canvas_ids() -> canvas::CanvasIds {
     }
 }
 
-#[cfg(unix)]
 fn canvas_messages() -> canvas::CanvasMessages<'static> {
     canvas::CanvasMessages {
         new_canvas: "新画布",
@@ -3294,14 +3188,12 @@ fn canvas_messages() -> canvas::CanvasMessages<'static> {
     }
 }
 
-#[cfg(unix)]
 fn fingerprint(value: &Value) -> String {
     let mut canonical = value.clone();
     canonical.sort_all_objects();
     format!("{:x}", Sha256::digest(canonical.to_string()))
 }
 
-#[cfg(unix)]
 struct ForkItem<'a> {
     key: &'a str,
     title: &'a str,
@@ -3310,7 +3202,6 @@ struct ForkItem<'a> {
     prompt: Option<&'a str>,
 }
 
-#[cfg(unix)]
 impl<'a> ForkItem<'a> {
     fn parse(key: &'a str, input: &'a Value) -> WireResult<Self> {
         let title = action_title(&input["title"], "title")?;
@@ -3377,7 +3268,6 @@ impl<'a> ForkItem<'a> {
     }
 }
 
-#[cfg(unix)]
 fn fork_source<'a>(
     targets: &'a [Target],
     caller: &Caller,
@@ -3391,7 +3281,6 @@ fn fork_source<'a>(
     Ok(source)
 }
 
-#[cfg(unix)]
 fn preflight_fork_environment(
     owner: &mut ShellOwner,
     source: &StructureTarget<'_>,
@@ -3463,7 +3352,6 @@ fn preflight_fork_environment(
     Ok(())
 }
 
-#[cfg(unix)]
 fn fork_structure(
     owner: &mut ShellOwner,
     targets: &[Target],
@@ -3532,7 +3420,6 @@ fn fork_structure(
     ))
 }
 
-#[cfg(unix)]
 fn create_fork(
     owner: &mut ShellOwner,
     source: &StructureTarget<'_>,
@@ -3571,7 +3458,6 @@ fn create_fork(
     Ok((id.into(), window))
 }
 
-#[cfg(unix)]
 fn read_fork_window(connection: &Connection, session: &str) -> WireResult<String> {
     connection
         .query_row(
@@ -3586,7 +3472,6 @@ fn read_fork_window(connection: &Connection, session: &str) -> WireResult<String
         .ok_or_else(|| missing_target("已提交的分支目标已不存在"))
 }
 
-#[cfg(unix)]
 fn fork_state(
     connection: &Connection,
     session: &str,
@@ -3612,7 +3497,6 @@ fn fork_state(
         .ok_or_else(|| missing_target("已提交的分支目标已不存在"))
 }
 
-#[cfg(unix)]
 pub(crate) struct ForkLaunch {
     session: String,
     spawn: bool,
@@ -3620,7 +3504,6 @@ pub(crate) struct ForkLaunch {
     prompt: Option<String>,
 }
 
-#[cfg(unix)]
 impl ForkLaunch {
     fn new(session: &str, item: &ForkItem<'_>, spawn: bool) -> Self {
         Self {
@@ -3632,7 +3515,6 @@ impl ForkLaunch {
     }
 }
 
-#[cfg(unix)]
 struct BatchRow {
     session: Option<String>,
     state: String,
@@ -3641,7 +3523,6 @@ struct BatchRow {
     failure: i64,
 }
 
-#[cfg(unix)]
 fn fork_batch(
     owner: &mut ShellOwner,
     targets: &[Target],
@@ -3859,7 +3740,6 @@ fn fork_batch(
     Ok((response, launches))
 }
 
-#[cfg(unix)]
 fn batch_row(connection: &Connection, batch: &str, item: &str) -> WireResult<BatchRow> {
     connection.query_row(
         "SELECT session_id, state, start_state, error_message, failure_generation FROM fork_batch_items
@@ -3870,7 +3750,6 @@ fn batch_row(connection: &Connection, batch: &str, item: &str) -> WireResult<Bat
     ).map_err(sql_error)
 }
 
-#[cfg(unix)]
 fn refresh_batch_row(
     connection: &Connection,
     batch: &str,
@@ -3902,14 +3781,12 @@ fn refresh_batch_row(
     Ok(())
 }
 
-#[cfg(unix)]
 struct ForkWait {
     request: Pending,
     result: Value,
     items: Vec<ForkWaitItem>,
 }
 
-#[cfg(unix)]
 struct ForkWaitItem {
     session: String,
     prompt: Option<String>,
@@ -3919,7 +3796,6 @@ struct ForkWaitItem {
     expires: Instant,
 }
 
-#[cfg(unix)]
 impl ForkWait {
     fn new(request: Pending, result: Value, jobs: &[ForkLaunch]) -> Self {
         let items = jobs
@@ -4021,7 +3897,6 @@ impl ForkWait {
     }
 }
 
-#[cfg(unix)]
 impl ForkWaitItem {
     fn advance(
         &mut self,
@@ -4132,7 +4007,6 @@ impl ForkWaitItem {
     }
 }
 
-#[cfg(unix)]
 fn prompt_receipt(connection: &Connection, session: &str) -> WireResult<Option<String>> {
     connection.query_row(
         "SELECT json_extract(response_json, '$') FROM command_deduplication WHERE command_id = ?",
@@ -4140,7 +4014,6 @@ fn prompt_receipt(connection: &Connection, session: &str) -> WireResult<Option<S
     ).optional().map_err(sql_error)
 }
 
-#[cfg(unix)]
 fn mark_prompt_complete(connection: &Connection, session: &str, now: i64) -> WireResult<()> {
     connection.execute(
         "UPDATE command_deduplication SET response_json = ?, committed_at = ? WHERE command_id = ?",

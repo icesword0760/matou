@@ -159,18 +159,25 @@ impl Engine {
             return None;
         }
         let executable = std::env::current_exe().ok()?;
-        let name = if cfg!(windows) {
-            "matou-claude-accounts.exe"
-        } else {
-            "matou-claude-accounts"
-        };
         let bin = executable.parent()?;
+        #[cfg(windows)]
+        {
+            let executable = bin
+                .join("resources/claude-accounts/matou-claude-accounts/matou-claude-accounts.exe");
+            if executable.is_file() {
+                return Some(Self {
+                    executable,
+                    script: None,
+                    resolve_login_path: true,
+                });
+            }
+        }
+        #[cfg(target_os = "macos")]
         if bin.file_name().is_some_and(|name| name == "MacOS") {
             return Some(Self {
                 executable: bin
                     .parent()?
-                    .join("Resources/claude-accounts/matou-claude-accounts")
-                    .join(name),
+                    .join("Resources/claude-accounts/matou-claude-accounts/matou-claude-accounts"),
                 script: None,
                 resolve_login_path: true,
             });
