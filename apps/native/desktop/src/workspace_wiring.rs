@@ -66,6 +66,7 @@ struct DetachedCard {
     window: WindowHandle<DetachedCardView>,
     title: String,
     workspace_id: String,
+    node: Value,
 }
 
 type TriggerBounds = Rc<Cell<Option<Bounds<Pixels>>>>;
@@ -125,6 +126,7 @@ fn launch_link(
 
 pub(super) struct WorkspaceWiring {
     overlay: Option<Overlay>,
+    overlay_window: Option<AnyWindowHandle>,
     overlay_focus: FocusHandle,
     restore_focus: Option<FocusHandle>,
     terminal_return: Option<(String, String)>,
@@ -158,14 +160,20 @@ pub(super) struct WorkspaceWiring {
     egress_error: Option<String>,
     account_request: Option<u64>,
     account_summary: Option<Value>,
-    account_bounds: TriggerBounds,
-    hud_request: Option<(u64, String)>,
-    hud: Option<(String, Value)>,
-    hud_refresh_at: Option<Duration>,
-    egress_bounds: TriggerBounds,
+    #[cfg(debug_assertions)]
+    egress_probe_bounds: TriggerBounds,
+    hud: HashMap<String, LiveHud>,
     banners: HashMap<String, EgressBannerState>,
     confirmation_focus: FocusHandle,
     _window_closed: Subscription,
+}
+
+#[derive(Default)]
+struct LiveHud {
+    mode: Option<&'static str>,
+    request: Option<u64>,
+    result: Value,
+    refresh_at: Option<Duration>,
 }
 
 #[derive(Clone, Copy)]
@@ -208,6 +216,7 @@ impl WorkspaceWiring {
 
         Self {
             overlay: None,
+            overlay_window: None,
             overlay_focus: cx.focus_handle().tab_stop(true),
             restore_focus: None,
             terminal_return: None,
@@ -260,11 +269,9 @@ impl WorkspaceWiring {
             egress_error: None,
             account_request: None,
             account_summary: None,
-            account_bounds: Rc::default(),
-            hud_request: None,
-            hud: None,
-            hud_refresh_at: None,
-            egress_bounds: Rc::default(),
+            #[cfg(debug_assertions)]
+            egress_probe_bounds: TriggerBounds::default(),
+            hud: HashMap::new(),
             banners: HashMap::new(),
             confirmation_focus: cx.focus_handle().tab_stop(true),
             _window_closed: window_closed,
@@ -700,10 +707,29 @@ impl Workspace {
     fn wiring_available(&self) -> bool {
         self.settings.is_none()
             && self.dialog.is_none()
-            && self.project_instructions_preview.is_none()
+            && self
+                .project_instructions
+                .values()
+                .all(|state| state.preview.is_none())
             && self.database_recovery.is_none()
             && !self.invalid_recovery_marker
             && (self.hierarchy.is_some() || self.read_only.is_some())
+    }
+
+    fn hud_wiring_available(&self, window: &Window) -> bool {
+        if self
+            .detached_session_for_window(window.window_handle())
+            .is_some()
+        {
+            self.database_recovery.is_none()
+                && !self.invalid_recovery_marker
+                && !self.project_instructions_open(window)
+                && !self
+                    .detached_permission_confirmations
+                    .contains_key(&window.window_handle())
+        } else {
+            self.wiring_available()
+        }
     }
 
     fn active_terminal_focus(&self, cx: &App) -> Option<FocusHandle> {
@@ -774,14 +800,27 @@ impl Workspace {
     }
 
     fn open_wiring_overlay(&mut self, next: Overlay, window: &mut Window, cx: &mut Context<Self>) {
-        if self.wiring.overlay != Some(next) {
+        let handle = window.window_handle();
+        if self.wiring.overlay != Some(next) || self.wiring.overlay_window != Some(handle) {
+            if let Some(previous) = self
+                .wiring
+                .overlay_window
+                .filter(|previous| *previous != handle)
+            {
+                let focus = self.reset_wiring_overlay();
+                let overlay_focus = self.wiring.overlay_focus.clone();
+                let _ = previous.update(cx, |_, previous_window, cx| {
+                    restore_wiring_focus(previous_window, cx, &overlay_focus, focus);
+                });
+            }
             self.dismiss_wiring_overlay(window, cx);
+            self.dismiss_footer_popover(window, cx);
             self.close_notifications(cx);
             self.workspace_menu = None;
             self.task_menu = None;
             self.tab_menu = None;
             self.hidden_tabs = None;
-            self.permission_menu = None;
+            self.dismiss_permission_menu(window, cx);
             let previous = window.focused(cx);
             self.wiring.restore_focus = if next != Overlay::CardMenu && previous.is_none() {
                 self.active_terminal_focus(cx).or(previous)
@@ -789,12 +828,29 @@ impl Workspace {
                 previous
             };
             self.wiring.overlay = Some(next);
+            self.wiring.overlay_window = Some(handle);
             window.focus(&self.wiring.overlay_focus);
         }
         cx.notify();
     }
 
     pub(super) fn dismiss_wiring_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self
+            .wiring
+            .overlay_window
+            .is_some_and(|handle| handle != window.window_handle())
+        {
+            return;
+        }
+        if self.wiring.overlay.is_some() {
+            let previous = self.reset_wiring_overlay();
+            restore_wiring_focus(window, cx, &self.wiring.overlay_focus, previous);
+            cx.notify();
+        }
+    }
+
+    fn reset_wiring_overlay(&mut self) -> Option<FocusHandle> {
+        self.wiring.overlay_window = None;
         match self.wiring.overlay.take() {
             Some(Overlay::Shortcuts) => {
                 self.wiring
@@ -810,19 +866,9 @@ impl Workspace {
             }
             Some(Overlay::Egress) => self.wiring.egress.open = false,
             Some(Overlay::Accounts) => {}
-            None => return,
+            None => {}
         }
-        let previous = self.wiring.restore_focus.take();
-        if self.wiring.overlay_focus.is_focused(window)
-            || self.wiring.overlay_focus.contains_focused(window, cx)
-        {
-            if let Some(focus) = previous {
-                window.focus(&focus);
-            } else {
-                window.blur();
-            }
-        }
-        cx.notify();
+        self.wiring.restore_focus.take()
     }
 
     pub(super) fn wiring_key(
@@ -831,6 +877,13 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if self
+            .wiring
+            .overlay_window
+            .is_some_and(|handle| handle != window.window_handle())
+        {
+            return false;
+        }
         let mods = stroke.modifiers;
         let mod_key = terminal_surface::terminal_mod(mods, cfg!(target_os = "macos"));
         let shortcut = mod_key
@@ -975,6 +1028,7 @@ impl Workspace {
     }
 
     pub(super) fn sync_wiring_graph(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.dismiss_ineligible_account_overlay(window, cx);
         let graph_scene = self.graph["sceneId"].as_str();
         let active_scene = self.hierarchy.as_ref().and_then(|h| h.scene.as_ref());
         if let Some(scene) = active_scene.filter(|scene| graph_scene == Some(scene.id.as_str())) {
@@ -1052,9 +1106,11 @@ impl Workspace {
             if let Some(child) = node["sessionId"]
                 .as_str()
                 .and_then(|id| self.wiring.children.get_mut(id))
-                && let Some(title) = node["title"].as_str()
             {
-                child.title = title.into();
+                if let Some(title) = node["title"].as_str() {
+                    child.title = title.into();
+                }
+                child.node = node.clone();
             }
         }
         if self.wiring.card_menu.as_ref().is_some_and(|(id, _)| {
@@ -1528,10 +1584,15 @@ impl Workspace {
 
     pub(super) fn render_wiring_overlay(
         &self,
-        window: &Window,
-        cx: &Context<Self>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if !self.wiring_available() {
+        if !self.hud_wiring_available(window)
+            || self
+                .wiring
+                .overlay_window
+                .is_some_and(|handle| handle != window.window_handle())
+        {
             return None;
         }
         let owner = cx.weak_entity();
@@ -1602,7 +1663,7 @@ impl Workspace {
             }
             Overlay::Accounts => Some(self.render_account_panel(window, cx)),
             Overlay::Egress => {
-                let bounds = self.wiring.egress_bounds.get();
+                let bounds = self.egress_anchor(window, cx).get();
                 let position = bounds.map_or(
                     point(
                         window.viewport_size().width - px(8.),
@@ -1667,6 +1728,7 @@ impl Workspace {
             return;
         };
         let title = node["title"].as_str().unwrap_or_default().to_owned();
+        let detached_node = node.clone();
         let mount = DetachedMount {
             main_window_id: hierarchy.navigation.window_id.clone(),
             scene_id: scene.id.clone(),
@@ -1734,6 +1796,13 @@ impl Workspace {
                         if is_child_window_close_shortcut(&event.keystroke) {
                             cx.stop_propagation();
                             window.remove_window();
+                        } else if shortcut_owner
+                            .update(cx, |owner, cx| {
+                                owner.detached_hud_key(&event.keystroke, window, cx)
+                            })
+                            .unwrap_or(false)
+                        {
+                            cx.stop_propagation();
                         } else if Workspace::is_theme_shortcut(&event.keystroke) {
                             cx.stop_propagation();
                             let _ = shortcut_owner.update(cx, Workspace::toggle_theme_shortcut);
@@ -1753,6 +1822,7 @@ impl Workspace {
                         session_id,
                         terminal,
                         presentation,
+                        hud_ready: false,
                         _owner_updates: owner_updates,
                         _keyboard: keyboard,
                     }
@@ -1770,8 +1840,13 @@ impl Workspace {
                         window: child,
                         title,
                         workspace_id,
+                        node: detached_node,
                     },
                 );
+                let _ = child.update(cx, |view, _, cx| {
+                    view.hud_ready = true;
+                    cx.notify();
+                });
                 if self
                     .history_request
                     .as_ref()
@@ -1791,7 +1866,83 @@ impl Workspace {
                 );
             }
         }
+        self.refresh_live_wiring(cx);
         cx.notify();
+    }
+
+    pub(super) fn hud_node(&self, id: &str) -> Option<&Value> {
+        self.graph_node(id)
+            .or_else(|| self.wiring.children.get(id).map(|child| &child.node))
+    }
+
+    pub(super) fn detached_session_for_window(&self, window: AnyWindowHandle) -> Option<&str> {
+        self.wiring
+            .children
+            .iter()
+            .find(|(_, child)| AnyWindowHandle::from(child.window) == window)
+            .map(|(id, _)| id.as_str())
+    }
+
+    pub(super) fn wiring_visible(&self) -> bool {
+        self.wiring.visible
+    }
+
+    pub(super) fn dismiss_hud_wiring_overlay(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.dismiss_wiring_overlay(window, cx);
+    }
+
+    fn detached_hud_key(
+        &mut self,
+        key: &Keystroke,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.project_instructions_open(window) {
+            return self.project_instructions_key(key, window, cx);
+        }
+        if self.footer_popover_key(key, window, cx) {
+            return true;
+        }
+        if self.wiring.overlay_window == Some(window.window_handle())
+            && self.wiring_key(key, window, cx)
+        {
+            return true;
+        }
+        let confirming = self
+            .detached_permission_confirmations
+            .contains_key(&window.window_handle());
+        let menu_open = self.permission_menu_open(window);
+        if key.key == "escape" {
+            if confirming {
+                self.close_detached_permission(window, cx);
+            } else if menu_open {
+                self.dismiss_permission_menu(window, cx);
+            }
+            return confirming || menu_open;
+        }
+        if (confirming || menu_open) && key.key == "tab" && !key.modifiers.modified() {
+            if key.modifiers.shift {
+                window.focus_prev();
+            } else {
+                window.focus_next();
+            }
+            return true;
+        }
+        false
+    }
+
+    fn clear_detached_hud(&mut self, window: AnyWindowHandle) {
+        self.footer_popovers.remove(&window);
+        self.detached_permission_menus.remove(&window);
+        self.detached_permission_confirmations.remove(&window);
+        self.project_instructions.remove(&window);
+        if self.wiring.overlay_window == Some(window) {
+            self.reset_wiring_overlay();
+        }
     }
 
     pub(super) fn detached_path_invalid(&self, id: &str) -> Option<bool> {
@@ -1812,6 +1963,7 @@ impl Workspace {
                 DetachedHeaderStatus::Running
             },
             bg: self.theme_palette().workspace.canvas,
+            footer: self.theme_palette().footer,
         }
     }
 
@@ -1850,6 +2002,7 @@ impl Workspace {
             .retain(|_, tree| !tree.close_session(id) || tree.ordered_sessions().len() > 1);
         self.wiring.detached.discard_session(id);
         if let Some(child) = self.wiring.children.remove(id) {
+            self.clear_detached_hud(child.window.into());
             let _ = child
                 .window
                 .update(cx, |_, window, _| window.remove_window());
@@ -1899,12 +2052,13 @@ impl Workspace {
         } else {
             self.wiring.detached.window_closed(&child_id);
         }
-        if let Some(child) = self.wiring.children.remove(id)
-            && explicit
-        {
-            let _ = child
-                .window
-                .update(cx, |_, window, _| window.remove_window());
+        if let Some(child) = self.wiring.children.remove(id) {
+            self.clear_detached_hud(child.window.into());
+            if explicit {
+                let _ = child
+                    .window
+                    .update(cx, |_, window, _| window.remove_window());
+            }
         }
         if self.wiring_available() && self.read_only.is_none() {
             if self.wiring.visible {
@@ -2184,12 +2338,38 @@ impl Workspace {
         }
     }
 
-    fn toggle_accounts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.wiring.overlay == Some(Overlay::Accounts) {
+    fn account_footer_visible(&self, window: &Window) -> bool {
+        self.footer_session(window)
+            .and_then(|id| self.hud_node(id))
+            .and_then(|node| node["currentMode"].as_str())
+            .is_some_and(footer_shows_account)
+    }
+
+    fn dismiss_ineligible_account_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.wiring.overlay == Some(Overlay::Accounts)
+            && self.wiring.overlay_window == Some(window.window_handle())
+            && !self.account_footer_visible(window)
+        {
             self.dismiss_wiring_overlay(window, cx);
-        } else if self.wiring_available() {
+        }
+    }
+
+    fn toggle_accounts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.wiring.overlay == Some(Overlay::Accounts)
+            && self.wiring.overlay_window == Some(window.window_handle())
+        {
+            self.dismiss_wiring_overlay(window, cx);
+        } else if self.hud_wiring_available(window) && self.account_footer_visible(window) {
             self.open_wiring_overlay(Overlay::Accounts, window, cx);
-            if let Some(focus) = self.active_terminal_focus(cx) {
+            let restore = if let Some(id) = self.detached_session_for_window(window.window_handle())
+            {
+                self.terminals
+                    .get(id)
+                    .map(|terminal| terminal.read(cx).focus.clone())
+            } else {
+                self.active_terminal_focus(cx)
+            };
+            if let Some(focus) = restore {
                 self.wiring.restore_focus = Some(focus);
             }
             self.refresh_accounts(cx);
@@ -2209,9 +2389,15 @@ impl Workspace {
         self.accounts().iter().find(|account| account["id"] == id)
     }
 
-    pub(super) fn footer_account_trigger(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+    pub(super) fn footer_account_trigger(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
         let palette = self.theme_palette().footer;
+        let bounds = self.account_anchor(window, cx);
         let account = self.current_account();
+        let locale = self.locale;
         let label = account.map(account_label).unwrap_or_else(|| {
             self.locale
                 .text(FOOTER_ACCOUNT_LABEL, "Claude accounts")
@@ -2233,7 +2419,17 @@ impl Workspace {
                 .whitespace_nowrap()
                 .cursor_pointer()
                 .hover(|style| style.bg(rgba(0x518ef019)))
-                .child(footer_user_icon(14., palette.account >> 8))
+                .tooltip(move |_, cx| {
+                    cx.new(|_| {
+                        CardTooltip(
+                            locale
+                                .text("本机默认 Claude 账户", "Device default Claude account")
+                                .into(),
+                        )
+                    })
+                    .into()
+                })
+                .child(footer_user_icon(14., rgba(palette.account)))
                 .child(
                     div()
                         .max_w(px(116.))
@@ -2245,22 +2441,53 @@ impl Workspace {
                 .child(ui_text("⌃"))
                 .children(footer_bounds_probe("account"))
                 .children(wiring_probe_bounds("footer-account".into()))
-                .child(measure_trigger(self.wiring.account_bounds.clone())),
+                .child(measure_trigger(bounds)),
             &self.control_focus["accounts"],
             Self::toggle_accounts,
             cx,
         )
     }
 
-    fn render_account_panel(&self, window: &Window, cx: &Context<Self>) -> AnyElement {
+    fn account_anchor(&self, window: &mut Window, cx: &mut Context<Self>) -> TriggerBounds {
+        window
+            .use_keyed_state("footer-account-anchor", cx, |_, _| TriggerBounds::default())
+            .read(cx)
+            .clone()
+    }
+
+    fn open_account_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = self.detached_session_for_window(window.window_handle())
+            && let Some(child) = self.wiring.children.get(id)
+            && let Ok(view) = child.window.read(cx)
+        {
+            let main = view.main;
+            let owner = cx.weak_entity();
+            self.dismiss_wiring_overlay(window, cx);
+            cx.defer(move |cx| {
+                let _ = main.update(cx, |_, window, cx| {
+                    let _ = owner.update(cx, |this, cx| {
+                        if this.settings.is_none() {
+                            this.toggle_settings(window, cx);
+                        }
+                        if this.wiring.visible {
+                            window.activate_window();
+                        }
+                    });
+                });
+            });
+        } else {
+            self.toggle_settings(window, cx);
+        }
+    }
+
+    fn render_account_panel(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let palette = self.theme_palette();
         let locale = self.locale;
         let width = (window.viewport_size().width - px(24.))
             .max(px(0.))
             .min(px(410.));
         let position = self
-            .wiring
-            .account_bounds
+            .account_anchor(window, cx)
             .get()
             .map(|bounds| bounds.top_right() - point(px(0.), px(6.)))
             .unwrap_or_else(|| {
@@ -2322,6 +2549,11 @@ impl Workspace {
                             .child(account_label(account)),
                     )
                     .children(trimmed_graph_text(&account["plan"]).map(str::to_owned))
+                    .children((active == Some(account)).then(|| {
+                        div()
+                            .text_color(rgba(palette.workspace.accent))
+                            .child(locale.text("本机默认", "Default"))
+                    }))
                     .child(
                         div()
                             .text_color(rgba(palette.workspace.muted))
@@ -2381,7 +2613,8 @@ impl Workspace {
                     .tab_index(0)
                     .child(locale.text("前往设置管理", "Manage in Settings"))
                     .on_click(move |_, window, cx| {
-                        let _ = manage.update(cx, |this, cx| this.toggle_settings(window, cx));
+                        let _ =
+                            manage.update(cx, |this, cx| this.open_account_settings(window, cx));
                     }),
             );
         div()
@@ -2401,11 +2634,24 @@ impl Workspace {
             .into_any_element()
     }
 
-    pub(super) fn egress_trigger(&self, cx: &Context<Self>) -> Stateful<Div> {
+    fn egress_anchor(&self, window: &mut Window, cx: &mut Context<Self>) -> TriggerBounds {
+        window
+            .use_keyed_state("footer-egress-anchor", cx, |_, _| TriggerBounds::default())
+            .read(cx)
+            .clone()
+    }
+
+    pub(super) fn egress_trigger_for(
+        &self,
+        session: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let bounds = self.egress_anchor(window, cx);
         let mut view = self.wiring.egress.chip(
             true,
             Some(&self.wiring.egress_status),
-            self.active_level_focus().unwrap_or_default(),
+            session.unwrap_or_default(),
             self.locale,
         );
         if let Some(view) = &mut view
@@ -2429,7 +2675,17 @@ impl Workspace {
                 label,
                 self.egress_handler(None, cx),
             ))
-            .child(measure_trigger(self.wiring.egress_bounds.clone()))
+            .child(measure_trigger(bounds))
+            .children(self.egress_probe())
+    }
+
+    fn egress_probe(&self) -> Option<Canvas<()>> {
+        #[cfg(debug_assertions)]
+        {
+            return Some(measure_trigger(self.wiring.egress_probe_bounds.clone()));
+        }
+        #[cfg(not(debug_assertions))]
+        None
     }
 
     pub(super) fn render_card_egress(&self, id: &str, cx: &Context<Self>) -> Option<AnyElement> {
@@ -2499,10 +2755,13 @@ impl Workspace {
             return;
         }
         match action {
-            EgressAction::TogglePanel if self.wiring.overlay == Some(Overlay::Egress) => {
+            EgressAction::TogglePanel
+                if self.wiring.overlay == Some(Overlay::Egress)
+                    && self.wiring.overlay_window == Some(window.window_handle()) =>
+            {
                 self.dismiss_wiring_overlay(window, cx)
             }
-            EgressAction::TogglePanel if self.wiring_available() => {
+            EgressAction::TogglePanel if self.hud_wiring_available(window) => {
                 self.open_wiring_overlay(Overlay::Egress, window, cx);
                 self.wiring.egress.open = true;
                 self.request_egress(EgressRequest::Status, cx);
@@ -2541,7 +2800,7 @@ impl Workspace {
         cx.notify();
     }
 
-    fn next_wiring_request(&mut self) -> u64 {
+    pub(super) fn next_wiring_request(&mut self) -> u64 {
         self.wiring.request_sequence += 1;
         self.wiring.request_sequence
     }
@@ -2678,9 +2937,7 @@ impl Workspace {
         }
         self.wiring.account_request = None;
         self.wiring.account_summary = None;
-        self.wiring.hud_request = None;
-        self.wiring.hud = None;
-        self.wiring.hud_refresh_at = None;
+        self.wiring.hud.clear();
     }
 
     fn refresh_frozen_egress(&mut self, cx: &mut Context<Self>) {
@@ -2720,82 +2977,91 @@ impl Workspace {
 
     pub(super) fn refresh_live_wiring(&mut self, cx: &mut Context<Self>) {
         let (generation, phase) = self.commands.connection();
-        if generation != self.runtime_generation {
+        if generation != self.runtime_generation
+            || phase != ConnectionPhase::Ready
+            || !self.domain_ready
+        {
             return;
         }
-        if phase == ConnectionPhase::Ready && self.domain_ready {
-            self.refresh_agent_hud(cx);
-            if self.wiring.account_summary.is_none() && self.agent_hud_target().is_some() {
-                self.refresh_accounts(cx);
+        let mut targets = Vec::new();
+        if let Some(id) = self.level_focus().and_then(|id| {
+            let node = self.graph_node(id)?;
+            if Self::team_member_node(node) {
+                session_levels::parent_id(node)
+            } else {
+                agent_hud_mode(node).map(|_| id)
             }
+        }) {
+            targets.push(id.to_owned());
         }
-    }
-
-    fn agent_hud_target(&self) -> Option<&str> {
-        let id = self.level_focus()?;
-        let node = self.graph_node(id)?;
-        if Self::team_member_node(node) {
-            return session_levels::parent_id(node);
-        }
-        matches!(
-            node["currentMode"].as_str(),
-            Some("claude-code" | "codex" | "dsh" | "antigravity")
-        )
-        .then_some(id)
-    }
-
-    fn refresh_agent_hud(&mut self, cx: &mut Context<Self>) {
-        let Some(session_id) = self.agent_hud_target().map(str::to_owned) else {
-            self.wiring.hud_request = None;
-            self.wiring.hud = None;
-            self.wiring.hud_refresh_at = None;
-            return;
-        };
-        let same_target = self
-            .wiring
-            .hud
-            .as_ref()
-            .is_some_and(|(id, _)| id == &session_id);
-        if self
-            .wiring
-            .hud_request
-            .as_ref()
-            .is_some_and(|(_, id)| id == &session_id)
-            || same_target
-                && self
-                    .wiring
-                    .hud_refresh_at
-                    .is_some_and(|at| self.motion_clock.elapsed() < at)
+        targets.extend(
+            self.wiring
+                .children
+                .iter()
+                .filter(|(id, _)| !targets.contains(id))
+                .filter_map(|(id, child)| agent_hud_mode(&child.node).map(|_| id.clone()))
+                .collect::<Vec<_>>(),
+        );
+        self.wiring.hud.retain(|id, _| targets.contains(id));
+        if self.wiring.account_summary.is_none()
+            && targets.iter().any(|id| {
+                self.hud_node(id)
+                    .is_some_and(|node| node["currentMode"] == "claude-code")
+            })
         {
-            return;
+            self.refresh_accounts(cx);
         }
-        if !same_target {
-            self.wiring.hud = None;
-        }
-        let request_id = self.next_wiring_request();
-        if self
-            .commands
-            .send_at(
-                self.runtime_generation,
-                Command::GetAgentHud {
-                    request_id,
-                    session_id: session_id.clone(),
-                },
-            )
-            .is_ok()
-        {
-            self.wiring.hud_request = Some((request_id, session_id));
-            cx.notify();
+        let now = self.motion_clock.elapsed();
+        for session_id in targets {
+            let mode = self.hud_node(&session_id).and_then(agent_hud_mode);
+            let state = self.wiring.hud.entry(session_id.clone()).or_default();
+            if state.mode != mode {
+                *state = LiveHud {
+                    mode,
+                    ..LiveHud::default()
+                };
+            }
+            if state.request.is_some() || state.refresh_at.is_some_and(|at| now < at) {
+                continue;
+            }
+            let request_id = self.next_wiring_request();
+            if self
+                .commands
+                .send_at(
+                    self.runtime_generation,
+                    Command::GetAgentHud {
+                        request_id,
+                        session_id: session_id.clone(),
+                    },
+                )
+                .is_ok()
+            {
+                self.wiring.hud.entry(session_id).or_default().request = Some(request_id);
+            }
         }
     }
 
     pub(super) fn live_agent_hud(&self, id: &str) -> Option<&Value> {
         self.wiring
             .hud
-            .as_ref()
-            .filter(|(session, _)| session == id)
-            .map(|(_, result)| &result["hud"])
+            .get(id)
+            .filter(|state| state.mode == self.hud_node(id).and_then(agent_hud_mode))
+            .map(|state| &state.result["hud"])
             .filter(|hud| hud.is_object())
+    }
+
+    pub(super) fn confirm_live_hud_permission(&mut self, id: &str, mode: &str) {
+        if let Some(state) = self.wiring.hud.get_mut(id) {
+            if state.result["hud"].is_object() {
+                state.result["hud"]["permissionMode"] = mode.into();
+            }
+            // A poll sent before the confirmation can still carry the old mode.
+            state.request = None;
+            state.refresh_at = None;
+        }
+        if let Some(child) = self.wiring.children.get_mut(id) {
+            child.node["permissionMode"] = mode.into();
+        }
     }
 
     pub(super) fn receive_wiring_reply(
@@ -2852,25 +3118,29 @@ impl Workspace {
             self.wiring.account_summary = Some(reply["result"]["accountSummary"].clone());
             cx.notify();
         }
+        self.receive_footer_diagnostics(kind, request_id, reply, cx);
         if kind == "agentHudResult"
-            && let Some((pending, target)) = self.wiring.hud_request.as_ref()
-            && *pending == request_id
-            && self.agent_hud_target() == Some(target.as_str())
+            && let Some((id, state)) = self
+                .wiring
+                .hud
+                .iter_mut()
+                .find(|(_, state)| state.request == Some(request_id))
         {
-            let (_, target) = self.wiring.hud_request.take().unwrap();
-            self.wiring.hud = Some((target.clone(), reply["result"].clone()));
+            state.request = None;
+            state.result = reply["result"].clone();
+            let target = id.clone();
             let interval = Duration::from_secs(2);
             let refresh_at = self.motion_clock.elapsed() + interval;
-            self.wiring.hud_refresh_at = Some(refresh_at);
+            state.refresh_at = Some(refresh_at);
             let generation = self.runtime_generation;
             cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(interval).await;
                 let _ = this.update(cx, |this, cx| {
                     if this.runtime_generation == generation
-                        && this.wiring.hud_refresh_at == Some(refresh_at)
-                        && this.agent_hud_target() == Some(target.as_str())
+                        && let Some(state) = this.wiring.hud.get_mut(&target)
+                        && state.refresh_at == Some(refresh_at)
                     {
-                        this.wiring.hud_refresh_at = None;
+                        state.refresh_at = None;
                         this.refresh_live_wiring(cx);
                     }
                 });
@@ -2881,7 +3151,7 @@ impl Workspace {
     }
 
     pub(super) fn render_live_teammates(&self, id: &str) -> Option<Stateful<Div>> {
-        let (_, result) = self.wiring.hud.as_ref().filter(|(lead, _)| lead == id)?;
+        let result = &self.wiring.hud.get(id)?.result;
         let teammates = result["teammates"]
             .as_array()
             .filter(|members| !members.is_empty())?;
@@ -3039,7 +3309,7 @@ impl Workspace {
 
     pub(super) fn trigger_for_probe(&self, egress: bool) -> Bounds<Pixels> {
         if egress {
-            self.wiring.egress_bounds.get()
+            self.wiring.egress_probe_bounds.get()
         } else {
             self.wiring.update_bounds.get()
         }
@@ -3267,6 +3537,31 @@ fn project_update(value: update_download::UpdateState) -> UpdateState {
     }
 }
 
+fn restore_wiring_focus(
+    window: &mut Window,
+    cx: &App,
+    overlay: &FocusHandle,
+    previous: Option<FocusHandle>,
+) {
+    if overlay.is_focused(window) || overlay.contains_focused(window, cx) {
+        if let Some(focus) = previous {
+            window.focus(&focus);
+        } else {
+            window.blur();
+        }
+    }
+}
+
+fn agent_hud_mode(node: &Value) -> Option<&'static str> {
+    match node["currentMode"].as_str()? {
+        "claude-code" => Some("claude-code"),
+        "antigravity" => Some("antigravity"),
+        "codex" => Some("codex"),
+        "dsh" => Some("dsh"),
+        _ => None,
+    }
+}
+
 fn measure_trigger(bounds: TriggerBounds) -> Canvas<()> {
     canvas(
         move |position, _, _| bounds.set(Some(position)),
@@ -3283,6 +3578,7 @@ struct DetachedCardView {
     session_id: String,
     terminal: Entity<TerminalSurface>,
     presentation: DetachedPresentation,
+    hud_ready: bool,
     _owner_updates: Option<Subscription>,
     _keyboard: Subscription,
 }
@@ -3293,17 +3589,38 @@ struct DetachedPresentation {
     light: bool,
     status: DetachedHeaderStatus,
     bg: u32,
+    footer: matou_native_desktop::theme_tokens::FooterPalette,
 }
 
 impl Render for DetachedCardView {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let presentation = &self.presentation;
+        // open_window paints immediately while its owner is still handling the
+        // detach action. Enable the HUD once the child has been registered.
+        let hud = self
+            .hud_ready
+            .then(|| {
+                self.owner
+                    .update(cx, |owner, cx| {
+                        owner.refresh_project_instructions(window, cx);
+                        owner.dismiss_ineligible_account_overlay(window, cx);
+                        let hud = owner.terminal_hud(Some(&self.session_id), true, window, cx);
+                        let permissions = owner.detached_permission_overlay(window, cx);
+                        let instructions = owner.project_instructions_overlay(window, cx);
+                        let wiring = owner.render_wiring_overlay(window, cx);
+
+                        (hud, permissions, instructions, wiring)
+                    })
+                    .ok()
+            })
+            .flatten();
         let target = self.session_id.clone();
         let owner = self.owner.clone();
         let main = self.main;
-        div()
+        let mut root = div()
             .id("detached-card-window")
             .size_full()
+            .relative()
             .flex()
             .flex_col()
             .bg(rgba(presentation.bg))
@@ -3333,6 +3650,23 @@ impl Render for DetachedCardView {
                     .min_h_0()
                     .relative()
                     .child(self.terminal.clone()),
-            )
+            );
+        if let Some((hud, permissions, instructions, wiring)) = hud {
+            root = root
+                .child(hud)
+                .children(permissions)
+                .children(instructions)
+                .children(wiring);
+        } else {
+            root = root.child(
+                div()
+                    .flex_none()
+                    .h(px(PERMISSION_FOOTER_HEIGHT))
+                    .border_t_1()
+                    .border_color(rgba(presentation.footer.top_line))
+                    .bg(rgba(presentation.footer.background)),
+            );
+        }
+        root
     }
 }

@@ -1998,11 +1998,368 @@ mod workspace {
         panic!("link did not reach pending={pending}");
     }
 
+    fn draw_hud(
+        window: AnyWindowHandle,
+        cx: &mut AsyncApp,
+    ) -> HashMap<&'static str, Bounds<Pixels>> {
+        FOOTER_READINGS.with_borrow_mut(|slot| *slot = Some(FooterReadings::default()));
+        draw(window, cx);
+        FOOTER_READINGS.with_borrow_mut(|slot| {
+            let readings = slot.take().unwrap();
+            std::mem::take(&mut *readings.bounds.borrow_mut())
+        })
+    }
+
+    async fn wait_for_hud_element(
+        window: AnyWindowHandle,
+        cx: &mut AsyncApp,
+        element: &'static str,
+    ) -> Bounds<Pixels> {
+        for _ in 0..100 {
+            if let Some(bounds) = draw_hud(window, cx).get(element) {
+                return *bounds;
+            }
+            cx.background_executor()
+                .timer(Duration::from_millis(10))
+                .await;
+        }
+        panic!("HUD did not render {element}");
+    }
+
+    async fn verify_footer_hud(cx: &mut AsyncApp, root: &std::path::Path) {
+        let cwd = root.join("footer-hud");
+        std::fs::create_dir(&cwd).unwrap();
+        let instruction_file = cwd.join("GEMINI.md");
+        std::fs::write(&instruction_file, "# Project rules\n").unwrap();
+        let (window, sink) = open_probe_at(cx, 1420.);
+        assert!(draw(window.into(), cx).contains_key("remove-session-shell-a"));
+        window
+            .update(cx, |view, _, cx| {
+                view.graph["nodes"].as_array_mut().unwrap().truncate(1);
+                cx.notify();
+            })
+            .unwrap();
+        assert!(!draw(window.into(), cx).contains_key("remove-session-shell-a"));
+        window
+            .update(cx, |view, _, cx| {
+                view.graph = graph();
+                cx.notify();
+            })
+            .unwrap();
+        let live = json!({
+            "model":"Long full model name","contextWindowSize":200000,"permissionMode":"ask","resumable":true,
+            "usageWindows":[{"id":"current","label":"Current model","usedPercent":91,"resetText":"12:00"}],
+            "allUsageWindows":[{"id":"group","label":"All models","usedPercent":77,"resetText":"13:00"}],
+            "runningTools":[{"id":"read","name":"Read","target":"notes.md"}],
+            "toolCounts":[{"name":"Find","count":2}],
+            "agents":[{"name":"Reader","status":"running","detail":"Indexing","startedAt":1700000000000_f64}],
+            "configCounts":{"mcps":2,"hooks":1},"hookNames":["PostToolUse"],"mcpErrors":["server offline"],
+            "todos":[{"content":"Check results","status":"in_progress"}],
+            "gitBranch":"review/live","gitDirty":true
+        });
+        window
+            .update(cx, |view, _, cx| {
+                let node = &mut view.graph["nodes"][0];
+                node["currentMode"] = json!("antigravity");
+                node["cwd"] = json!(cwd);
+                node["environment"] = json!({"kind":"worktree","state":"ready","path":cwd});
+                node["git"] = json!({"state":"ready","branch":"legacy","dirty":false});
+                view.refresh_live_wiring(cx);
+                cx.notify();
+            })
+            .unwrap();
+        let request_id = std::iter::from_fn(|| sink.try_recv().ok())
+            .find_map(|command| match command {
+                Command::GetAgentHud {
+                    request_id,
+                    session_id,
+                } if session_id == A => Some(request_id),
+                _ => None,
+            })
+            .expect("focused agent HUD request");
+        window
+            .update(cx, |view, window, cx| {
+                view.receive_wiring_reply(
+                    "agentHudResult",
+                    request_id,
+                    &json!({"result":{"hud":live}}),
+                    window,
+                    cx,
+                )
+            })
+            .unwrap();
+        wait_for_hud_element(window.into(), cx, "instructions").await;
+        let bounds = draw_hud(window.into(), cx);
+        for key in [
+            "permission",
+            "name",
+            "context",
+            "mcps",
+            "tools",
+            "agents",
+            "hooks",
+            "quota",
+            "mcp-errors",
+            "todos",
+            "git",
+            "environment",
+            "egress",
+        ] {
+            assert!(
+                bounds.contains_key(key),
+                "missing painted footer cell {key}"
+            );
+        }
+        assert!(!bounds.contains_key("account"));
+        window
+            .update(cx, |view, _, _| {
+                assert_eq!(view.permission_chip().unwrap().mode, PermissionMode::Ask);
+                assert_eq!(
+                    view.footer_fields().unwrap().git.unwrap().label,
+                    "review/live*"
+                );
+            })
+            .unwrap();
+
+        click(
+            window.into(),
+            cx,
+            MouseButton::Left,
+            bounds["quota"].center(),
+        );
+        assert!(draw_hud(window.into(), cx).contains_key("footer-quota-menu"));
+        press(window, cx, "escape");
+        assert!(!draw_hud(window.into(), cx).contains_key("footer-quota-menu"));
+        window
+            .update(cx, |view, window, _| {
+                assert!(view.control_focus["footer-quota"].is_focused(window))
+            })
+            .unwrap();
+        click(
+            window.into(),
+            cx,
+            MouseButton::Left,
+            bounds["quota"].center(),
+        );
+        assert!(draw_hud(window.into(), cx).contains_key("footer-quota-menu"));
+        click(
+            window.into(),
+            cx,
+            MouseButton::Left,
+            point(px(20.), px(90.)),
+        );
+        assert!(!draw_hud(window.into(), cx).contains_key("footer-quota-menu"));
+
+        click(window.into(), cx, MouseButton::Left, bounds["git"].center());
+        let git_menu = draw_hud(window.into(), cx);
+        assert!(git_menu["footer-git-menu"].bottom() <= bounds["git"].top());
+        let git_request = std::iter::from_fn(|| sink.try_recv().ok())
+            .find_map(|command| match command {
+                Command::CheckGitRepo {
+                    request_id,
+                    cwd: path,
+                } if path == cwd => Some(request_id),
+                _ => None,
+            })
+            .expect("Git menu asks Runtime to inspect the current worktree");
+        window
+            .update(cx, |view, window, cx| {
+                view.receive_wiring_reply(
+                    "gitRepoResult",
+                    git_request,
+                    &json!({"result":{"isRepository":true,"root":cwd}}),
+                    window,
+                    cx,
+                )
+            })
+            .unwrap();
+        assert!(draw_hud(window.into(), cx).contains_key("hud-menu-open-root"));
+        let inspect = std::iter::from_fn(|| sink.try_recv().ok())
+            .find_map(|command| match command {
+                Command::GetEnvironmentDiagnostics {
+                    request_id,
+                    cwd: path,
+                    repair: None,
+                } if path == cwd => Some(request_id),
+                _ => None,
+            })
+            .expect("Git refresh also reads branch status");
+        window.update(cx, |view, window, cx| view.receive_wiring_reply(
+            "environmentDiagnosticsResult", inspect,
+            &json!({"result":{"state":"ready","cwd":cwd,"git":{"root":cwd,"head":{"branch":"review/live"},"changes":{"staged":1}}}}),
+            window, cx
+        )).unwrap();
+        press(window, cx, "escape");
+        assert!(!draw_hud(window.into(), cx).contains_key("footer-git-menu"));
+        window
+            .update(cx, |view, window, _| {
+                assert!(view.control_focus["footer-git"].is_focused(window))
+            })
+            .unwrap();
+
+        click(
+            window.into(),
+            cx,
+            MouseButton::Left,
+            bounds["environment"].center(),
+        );
+        let environment = draw_hud(window.into(), cx);
+        assert!(environment["footer-environment-menu"].bottom() <= bounds["environment"].top());
+        assert!(
+            std::iter::from_fn(|| sink.try_recv().ok()).any(|command| matches!(command,
+            Command::GetEnvironmentDiagnostics { cwd: path, repair: None, .. } if path == cwd))
+        );
+        click(
+            window.into(),
+            cx,
+            MouseButton::Left,
+            environment["hud-menu-terminal"].center(),
+        );
+        assert!(!draw_hud(window.into(), cx).contains_key("footer-environment-menu"));
+
+        click(
+            window.into(),
+            cx,
+            MouseButton::Left,
+            bounds["instructions"].center(),
+        );
+        for _ in 0..100 {
+            draw_hud(window.into(), cx);
+            let loaded = window
+                .update(cx, |view, window, _| {
+                    view.project_instructions
+                        .get(&window.window_handle())
+                        .and_then(|state| state.preview.as_ref())
+                        .is_some_and(|preview| preview.input.is_some())
+                })
+                .unwrap();
+            if loaded {
+                break;
+            }
+            cx.background_executor()
+                .timer(Duration::from_millis(10))
+                .await;
+        }
+        let editor = wait_for_hud_element(window.into(), cx, "instructions-editor").await;
+        click(
+            window.into(),
+            cx,
+            MouseButton::Left,
+            editor.origin + point(px(22.), px(22.)),
+        );
+        press(window, cx, "home");
+        press(window, cx, "a");
+        draw_hud(window.into(), cx);
+        let save = draw_hud(window.into(), cx)["instructions-save"];
+        click(window.into(), cx, MouseButton::Left, save.center());
+        for _ in 0..100 {
+            if !draw_hud(window.into(), cx).contains_key("instructions-dialog") {
+                break;
+            }
+            cx.background_executor()
+                .timer(Duration::from_millis(10))
+                .await;
+        }
+        assert_eq!(
+            std::fs::read_to_string(&instruction_file).unwrap(),
+            "a# Project rules\n"
+        );
+        window
+            .update(cx, |view, window, _| {
+                assert!(view.control_focus["project-instructions"].is_focused(window))
+            })
+            .unwrap();
+
+        click(
+            window.into(),
+            cx,
+            MouseButton::Left,
+            bounds["permission"].center(),
+        );
+        let permission = draw_hud(window.into(), cx);
+        assert!(permission.contains_key("ask"));
+        click(
+            window.into(),
+            cx,
+            MouseButton::Left,
+            permission["bypassPermissions"].center(),
+        );
+        window.update(cx, |view, window, cx| {
+            assert!(matches!(&view.dialog, Some(TabDialog::PermissionMode(state))
+                if state.provider == "Antigravity" && state.from == PermissionMode::Ask && state.target == PermissionMode::Bypass));
+            view.confirm_dialog(window, cx);
+        }).unwrap();
+        assert!(std::iter::from_fn(|| sink.try_recv().ok()).any(|command| matches!(command,
+            Command::SetProviderPermissionMode { session_id, mode } if session_id == A && mode == "bypassPermissions")));
+        window
+            .update(cx, |view, _, cx| {
+                view.graph["nodes"][0]["permissionMode"] = json!("bypassPermissions");
+                view.reconcile_permission_modes(
+                    &[json!({
+                        "sessionId": A, "permissionMode": "bypassPermissions"
+                    })],
+                    cx,
+                );
+                assert_eq!(view.permission_chip().unwrap().mode, PermissionMode::Bypass);
+                cx.notify();
+            })
+            .unwrap();
+        let bypass = draw_hud(window.into(), cx)["permission"];
+        click(window.into(), cx, MouseButton::Left, bypass.center());
+        let ask = draw_hud(window.into(), cx)["ask"];
+        click(window.into(), cx, MouseButton::Left, ask.center());
+        window
+            .update(cx, |view, window, cx| {
+                assert!(
+                    matches!(&view.dialog, Some(TabDialog::PermissionMode(state))
+                if state.from == PermissionMode::Bypass && state.target == PermissionMode::Ask)
+                );
+                view.close_dialog(window, cx);
+            })
+            .unwrap();
+        card_action(window, cx, A, CardMenuAction::OpenDetached);
+        window
+            .update(cx, |view, _, cx| {
+                view.focused = Some(B.into());
+                view.refresh_level(cx);
+            })
+            .unwrap();
+        let child = window
+            .update(cx, |view, _, _| view.wiring_child_for_probe(A).unwrap())
+            .unwrap();
+        assert!(draw_hud(window.into(), cx).contains_key("account"));
+        wait_for_hud_element(child, cx, "permission").await;
+        let detached = draw_hud(child, cx);
+        assert!(detached.contains_key("name"));
+        assert!(detached.contains_key("tools"));
+        assert!(detached.contains_key("git"));
+        assert!(detached.contains_key("environment"));
+        assert!(detached.contains_key("egress"));
+        assert!(!detached.contains_key("account"));
+        click(
+            child,
+            cx,
+            MouseButton::Left,
+            detached["permission"].center(),
+        );
+        assert!(draw_hud(child, cx).contains_key("permission-menu"));
+        dispatch_key(child, cx, "escape");
+        assert!(!draw_hud(child, cx).contains_key("permission-menu"));
+        let _ = child.update(cx, |_, window, _| window.remove_window());
+        window
+            .update(cx, |_, window, _| window.remove_window())
+            .unwrap();
+        println!(
+            "HUD: live projection, Antigravity quota/permission, Git/environment popovers, edit/save and detached footer"
+        );
+    }
+
     pub(super) fn run() {
         let fixture_root = live_wiring::prepare();
         Application::new().with_assets(NativeAssets).run(move |cx| {
             cx.spawn(async move |cx| {
                 verify(cx, &fixture_root).await;
+                verify_footer_hud(cx, &fixture_root).await;
                 verify_horizontal_divider_drag(cx);
                 verify_splits(cx);
                 verify_carousel_and_zoom(cx, &fixture_root.join("font-zoom")).await;

@@ -1,17 +1,10 @@
-//! Frozen light project-instructions entry and read-only preview dialog.
-//!
-//! Render-only: the caller owns the workspace/file lookup, loading and error
-//! states, focus routing and close/outside-click events. This module keeps the
-//! frozen light appearance and the stable element ids the workspace probes.
-//!
-//! Frozen sources:
-//! - apps/desktop/src/renderer/src/hud/TerminalHud.tsx:162-170,418-493
-//! - apps/desktop/src/renderer/src/i18n/messages/hud.ts:66-76
-//! - apps/desktop/src/renderer/src/hierarchy/hierarchy.css:369,384-385,420-455,867-868
-
-use gpui::{prelude::*, *};
-
-use crate::ui_text::ui_text;
+//! Editable project instruction file dialog based on the frozen TerminalHud
+//! InstructionFileDialog and hierarchy.css instruction-file styles.
+use super::*;
+use std::{
+    io::{self, Read as _, Write as _},
+    path::Path,
+};
 
 /// Frozen light entry: the screenshot's neutral dark label on a light gray
 /// pill. The pill is the existing `#00000014` light-theme hover wash and the
@@ -39,29 +32,61 @@ const PANEL_TEXT: u32 = 0x24292f;
 const MUTED_TEXT: u32 = 0x6e7781;
 const SECTION_BORDER: u32 = 0xd8dee4;
 const BODY_BG: u32 = 0xf6f8fa;
-const FOCUS_RING: u32 = 0x58a6ff6b;
 const OVERLAY_BG: u32 = 0x1f23283d;
 const ERROR_TEXT: u32 = 0xffa198;
 const ERROR_BORDER: u32 = 0xf8514940;
 const ERROR_BG: u32 = 0xf8514914;
-const BUTTON_BG: u32 = 0xf6f8fa;
 const BUTTON_HOVER_BG: u32 = 0xeef1f4;
 
-const TITLE: &str = "AGENTS.md";
-const FALLBACK_PATH: &str = "当前项目 / AGENTS.md";
-const LOADING_LABEL: &str = "正在读取…";
-const CANCEL_LABEL: &str = "取消";
 const CLOSE_LABEL: &str = "×";
 const MONO_LINE_HEIGHT: f32 = 1.6;
 const MONO_SIZE: f32 = 13.;
-const MONO_PADDING_X: f32 = 20.;
-const MONO_PADDING_Y: f32 = 18.;
-const TAB_SIZE: usize = 2;
+use crate::rename_input::INSTRUCTIONS_MAX_BYTES as LIMIT;
+
+#[derive(Clone, Copy)]
+struct Colors {
+    panel: Rgba,
+    border: Rgba,
+    text: Rgba,
+    muted: Rgba,
+    section: Rgba,
+    body: Rgba,
+    hover: Rgba,
+}
+
+impl Colors {
+    fn for_theme(dark: bool) -> Self {
+        let (panel, border, text, muted, section, body, hover) = if dark {
+            (
+                0x1c2128, 0x30363d, 0xe6edf3, 0x8b949e, 0x30363d, 0x0d1117, 0x30363d,
+            )
+        } else {
+            (
+                PANEL_BG,
+                PANEL_BORDER,
+                PANEL_TEXT,
+                MUTED_TEXT,
+                SECTION_BORDER,
+                BODY_BG,
+                BUTTON_HOVER_BG,
+            )
+        };
+        Self {
+            panel: rgb(panel),
+            border: rgb(border),
+            text: rgb(text),
+            muted: rgb(muted),
+            section: rgb(section),
+            body: rgb(body),
+            hover: rgb(hover),
+        }
+    }
+}
 
 /// Frozen `.status-field.status-instructions.is-clickable` entry. The caller
 /// supplies the label element and wires `Workspace::button` around it, which
 /// owns the shared focus outline and activation.
-pub(super) fn entry(label: impl IntoElement) -> Stateful<Div> {
+pub(super) fn entry(label: impl IntoElement, dark: bool) -> Stateful<Div> {
     div()
         .id("footer-instructions")
         .flex_none()
@@ -70,21 +95,21 @@ pub(super) fn entry(label: impl IntoElement) -> Stateful<Div> {
         .px(px(ENTRY_PADDING_X))
         .py(px(ENTRY_PADDING_Y))
         .rounded(px(ENTRY_RADIUS))
-        .bg(rgba(ENTRY_BG))
-        .text_color(rgb(ENTRY_COLOR))
+        .bg(rgba(if dark { 0xffffff15 } else { ENTRY_BG }))
+        .text_color(rgb(if dark { 0xc9d1d9 } else { ENTRY_COLOR }))
         .font_weight(FontWeight::SEMIBOLD)
         .whitespace_nowrap()
         .cursor_pointer()
-        .hover(|style| {
+        .hover(move |style| {
             style
-                .text_color(rgb(ENTRY_HOVER_COLOR))
-                .bg(rgba(ENTRY_HOVER_BG))
+                .text_color(rgb(if dark { 0xe6edf3 } else { ENTRY_HOVER_COLOR }))
+                .bg(rgba(if dark { 0xffffff24 } else { ENTRY_HOVER_BG }))
         })
         .child(label)
 }
 
 /// Frozen `.instruction-file-dialog header button` with the light-theme colors.
-pub(super) fn close_button() -> Stateful<Div> {
+fn close_button(colors: Colors) -> Stateful<Div> {
     div()
         .id("project-instructions-close")
         .flex_none()
@@ -94,17 +119,23 @@ pub(super) fn close_button() -> Stateful<Div> {
         .size(px(30.))
         .rounded(px(6.))
         .text_size(px(22.))
-        .text_color(rgb(MUTED_TEXT))
+        .text_color(colors.muted)
         .cursor_pointer()
-        .hover(|style| style.text_color(rgb(PANEL_TEXT)).bg(rgba(0x1f232812)))
+        .hover(move |style| style.text_color(colors.text).bg(colors.hover))
         .child(ui_text(CLOSE_LABEL).normal_line_height())
 }
 
-/// Frozen footer cancel button. The read-only slice intentionally has no save
-/// button and no save-hint copy.
-pub(super) fn cancel_button() -> Stateful<Div> {
+fn action_button(
+    id: &'static str,
+    label: &'static str,
+    primary: bool,
+    disabled: bool,
+    colors: Colors,
+) -> Stateful<Div> {
+    let background = if primary { rgb(0x347fd6) } else { colors.body };
+    let hover = if primary { rgb(0x2f72c1) } else { colors.hover };
     div()
-        .id("project-instructions-cancel")
+        .id(id)
         .flex_none()
         .flex()
         .items_center()
@@ -114,98 +145,82 @@ pub(super) fn cancel_button() -> Stateful<Div> {
         .px(px(12.))
         .rounded(px(6.))
         .border_1()
-        .border_color(rgb(PANEL_BORDER))
+        .border_color(if primary { background } else { colors.border })
         .text_size(px(11.))
-        .text_color(rgb(PANEL_TEXT))
-        .bg(rgb(BUTTON_BG))
-        .cursor_pointer()
-        .hover(|style| style.bg(rgb(BUTTON_HOVER_BG)))
-        .child(ui_text(CANCEL_LABEL).normal_line_height())
+        .text_color(if primary { rgb(0xffffff) } else { colors.text })
+        .bg(background)
+        .when(disabled, |button| {
+            button
+                .opacity(0.55)
+                .cursor(CursorStyle::OperationNotAllowed)
+        })
+        .when(!disabled, |button| {
+            button.cursor_pointer().hover(move |style| style.bg(hover))
+        })
+        .child(ui_text(label).normal_line_height())
 }
 
-/// Frozen read-only textarea replacement: a light monospace surface that keeps
-/// line breaks and spaces, wraps long lines and paints the frozen
-/// blue inset focus ring without changing its geometry.
-pub(super) fn preview(
-    content: SharedString,
+fn editor_surface(
+    input: Option<&Entity<RenameInput>>,
     focus: &FocusHandle,
-    scroll: &ScrollHandle,
-    focused: bool,
+    loading: bool,
+    locale: InterfaceLocale,
+    colors: Colors,
 ) -> Stateful<Div> {
-    div()
+    let surface = div()
         .id("project-instructions-preview")
         .relative()
+        .flex()
+        .flex_col()
         .flex_1()
         .min_w_0()
         .min_h_0()
         .w_full()
-        .track_focus(focus)
-        .bg(rgb(BODY_BG))
-        .text_color(rgb(PANEL_TEXT))
-        .text_size(px(MONO_SIZE))
-        .line_height(relative(MONO_LINE_HEIGHT))
-        .font_family(monospace_family())
-        .child(
-            // The scroll surface is a sibling of the focus ring: an absolute
-            // ring inside the scroller would move out of view with the text.
-            div()
-                .id("project-instructions-scroll")
-                .absolute()
-                .inset_0()
-                .flex()
-                .items_start()
-                .overflow_y_scroll()
-                .track_scroll(scroll)
-                .child(
-                    div()
-                        .flex_none()
-                        .w_full()
-                        .px(px(MONO_PADDING_X))
-                        .py(px(MONO_PADDING_Y))
-                        // The frozen textarea wraps at the viewport width.
-                        // GPUI text keeps the original whitespace when wrapping.
-                        .whitespace_normal()
-                        .child(display_content(content)),
-                ),
-        )
-        .when(focused, |preview| preview.child(focus_ring()))
+        .bg(colors.body)
+        .text_color(colors.text)
+        .children(footer_bounds_probe("instructions-editor"));
+    if let Some(input) = input {
+        surface
+            .font_family(monospace_family())
+            .text_size(px(MONO_SIZE))
+            .line_height(relative(MONO_LINE_HEIGHT))
+            .child(input.clone())
+    } else {
+        surface
+            .track_focus(focus)
+            .items_center()
+            .justify_center()
+            .text_size(px(12.))
+            .children(loading.then(|| ui_text(locale.text("正在读取…", "Loading…"))))
+    }
 }
 
-/// Frozen `.instruction-file-state` light surface. The caller chooses when to
-/// mount it; the dot-dot-dot label is the frozen Chinese copy.
-pub(super) fn loading() -> Stateful<Div> {
-    div()
-        .id("project-instructions-loading")
-        .flex_1()
-        .min_h_0()
-        .w_full()
-        .flex()
-        .items_center()
-        .justify_center()
-        .bg(rgb(BODY_BG))
-        .text_color(rgb(PANEL_TEXT))
-        .text_size(px(12.))
-        .child(ui_text(LOADING_LABEL).normal_line_height())
-}
-
-/// Frozen `.instruction-file-dialog` light panel. `path` is displayed verbatim
-/// and falls back to the frozen "当前项目 / AGENTS.md" line when empty; the body
-/// owns the remaining height, the footer only keeps the right-aligned cancel.
-pub(super) fn panel(
-    viewport: Size<Pixels>,
-    path: SharedString,
-    close: Stateful<Div>,
+struct Dialog {
+    path: PathBuf,
     body: Stateful<Div>,
-    error: Option<&str>,
+    error: Option<String>,
+    close: Stateful<Div>,
     cancel: Stateful<Div>,
-) -> Stateful<Div> {
+    save: Stateful<Div>,
+    colors: Colors,
+}
+
+fn panel(viewport: Size<Pixels>, dialog: Dialog) -> Stateful<Div> {
+    let Dialog {
+        path,
+        body,
+        error,
+        close,
+        cancel,
+        save,
+        colors,
+    } = dialog;
     let width = PANEL_WIDTH.min((f32::from(viewport.width) - VIEWPORT_MARGIN_X).max(0.));
     let height = PANEL_HEIGHT.min((f32::from(viewport.height) - VIEWPORT_MARGIN_Y).max(0.));
-    let path = if path.as_ref().is_empty() {
-        SharedString::from(FALLBACK_PATH)
-    } else {
-        path
-    };
+    let filename = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
 
     let header = div()
         .flex_none()
@@ -216,7 +231,7 @@ pub(super) fn panel(
         .gap(px(12.))
         .px(px(18.))
         .border_b_1()
-        .border_color(rgb(SECTION_BORDER))
+        .border_color(colors.section)
         .child(
             div()
                 .flex()
@@ -229,8 +244,8 @@ pub(super) fn panel(
                         .whitespace_nowrap()
                         .text_size(px(15.))
                         .font_weight(FontWeight::BOLD)
-                        .text_color(rgb(PANEL_TEXT))
-                        .child(ui_text(TITLE).normal_line_height()),
+                        .text_color(colors.text)
+                        .child(ui_text(filename).normal_line_height()),
                 )
                 .child(
                     div()
@@ -240,8 +255,8 @@ pub(super) fn panel(
                         .whitespace_nowrap()
                         .text_ellipsis()
                         .text_size(px(11.))
-                        .text_color(rgb(MUTED_TEXT))
-                        .child(ui_text(path).normal_line_height()),
+                        .text_color(colors.muted)
+                        .child(ui_text(path.display().to_string()).normal_line_height()),
                 ),
         )
         .child(close);
@@ -265,13 +280,15 @@ pub(super) fn panel(
         .flex()
         .items_center()
         .justify_end()
+        .gap(px(8.))
         .pl(px(18.))
         .pr(px(14.))
         .border_t_1()
-        .border_color(rgb(SECTION_BORDER))
-        .text_color(rgb(MUTED_TEXT))
+        .border_color(colors.section)
+        .text_color(colors.muted)
         .text_size(px(11.))
-        .child(cancel);
+        .child(cancel)
+        .child(save);
 
     div()
         .id("project-instructions-dialog")
@@ -282,9 +299,9 @@ pub(super) fn panel(
         .overflow_hidden()
         .rounded(px(PANEL_RADIUS))
         .border_1()
-        .border_color(rgb(PANEL_BORDER))
-        .bg(rgb(PANEL_BG))
-        .text_color(rgb(PANEL_TEXT))
+        .border_color(colors.border)
+        .bg(colors.panel)
+        .text_color(colors.text)
         .shadow(vec![BoxShadow {
             color: rgba(0x1f232842).into(),
             offset: point(px(0.), px(24.)),
@@ -309,7 +326,7 @@ pub(super) fn panel(
 /// Frozen `.instruction-file-overlay` light backdrop. `occlude` keeps the
 /// workspace underneath inert; the caller attaches the outside-click close and
 /// keeps panel events from bubbling here.
-pub(super) fn overlay(panel: Stateful<Div>) -> Stateful<Div> {
+fn overlay(panel: Stateful<Div>) -> Stateful<Div> {
     div()
         .id("project-instructions-overlay")
         .absolute()
@@ -323,20 +340,6 @@ pub(super) fn overlay(panel: Stateful<Div>) -> Stateful<Div> {
         .child(panel)
 }
 
-fn focus_ring() -> impl IntoElement {
-    canvas(
-        |_, _, _| (),
-        |bounds, _, window, _| {
-            window.paint_quad(
-                outline(bounds, rgba(FOCUS_RING), BorderStyle::default()).border_widths(px(2.)),
-            );
-        },
-    )
-    .absolute()
-    .inset_0()
-    .size_full()
-}
-
 fn monospace_family() -> &'static str {
     if cfg!(target_os = "macos") {
         "SF Mono"
@@ -345,40 +348,581 @@ fn monospace_family() -> &'static str {
     }
 }
 
-/// Display-only textarea normalization: CRLF/lone CR become LF (as a browser
-/// textarea value does) and the frozen `tab-size: 2` is expanded to matching
-/// two-column stops. Every other newline, space and glyph is kept verbatim.
-fn display_content(content: SharedString) -> SharedString {
-    let source = content.as_ref();
-    if !source.contains('\t') && !source.contains('\r') {
-        return content;
+#[derive(PartialEq, Eq)]
+struct Target {
+    session: String,
+    cwd: PathBuf,
+    mode: String,
+}
+
+pub(super) struct Instructions {
+    target: Target,
+    pub(super) path: Option<PathBuf>,
+    pub(super) task: Option<gpui::Task<()>>,
+    pub(super) preview: Option<Preview>,
+}
+
+pub(super) struct Preview {
+    pub(super) original: Option<String>,
+    pub(super) input: Option<Entity<RenameInput>>,
+    pub(super) error: Option<String>,
+    saving: bool,
+    _input_events: Option<Subscription>,
+}
+
+impl Instructions {
+    pub(super) fn filename_for(&self, session: Option<&str>) -> Option<String> {
+        (session == Some(self.target.session.as_str())).then_some(())?;
+        Some(
+            self.path
+                .as_ref()?
+                .file_name()?
+                .to_string_lossy()
+                .into_owned(),
+        )
     }
-    let mut expanded = String::with_capacity(source.len());
-    let mut column = 0usize;
-    let mut characters = source.chars().peekable();
-    while let Some(character) = characters.next() {
-        match character {
-            '\r' => {
-                characters.next_if_eq(&'\n');
-                expanded.push('\n');
-                column = 0;
+}
+
+fn filenames(mode: &str) -> &'static [&'static str] {
+    match mode {
+        "claude-code" => &["CLAUDE.md"],
+        "antigravity" => &["AGENTS.md", "GEMINI.md"],
+        "codex" => &["AGENTS.md"],
+        _ => &[],
+    }
+}
+
+fn discover(cwd: &Path, mode: &str) -> Option<PathBuf> {
+    let names = filenames(mode);
+    names
+        .iter()
+        .map(|name| cwd.join(name))
+        .find(|path| match std::fs::metadata(path) {
+            Ok(metadata) => metadata.is_file() || names.len() == 1,
+            Err(error) => error.kind() != io::ErrorKind::NotFound,
+        })
+}
+
+fn read(path: &Path) -> io::Result<String> {
+    let metadata = std::fs::metadata(path)?;
+    if !metadata.is_file() {
+        return Err(io::Error::other("Expected a regular file"));
+    }
+    if metadata.len() > LIMIT as u64 {
+        return Err(io::Error::other("Instruction file exceeds 2 MB"));
+    }
+    let mut text = String::new();
+    std::fs::File::open(path)?
+        .take(LIMIT as u64 + 1)
+        .read_to_string(&mut text)?;
+    if text.len() > LIMIT {
+        return Err(io::Error::other("Instruction file exceeds 2 MB"));
+    }
+    Ok(text)
+}
+
+fn save(path: &Path, original: &str, text: &str) -> io::Result<()> {
+    if text.len() > LIMIT {
+        return Err(io::Error::other("Instruction file exceeds 2 MB"));
+    }
+    let destination = path.canonicalize()?;
+    let permissions = std::fs::metadata(&destination)?.permissions();
+    let temp =
+        destination.with_file_name(format!(".matou-instructions-{}.tmp", fork_submission_key()));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&temp)?;
+    let result = (|| {
+        file.set_permissions(permissions)?;
+        file.write_all(text.as_bytes())?;
+        file.sync_all()?;
+        if destination != path.canonicalize()? || read(&destination)? != original {
+            return Err(io::Error::other(
+                "The instruction file changed on disk. Reopen it before saving.",
+            ));
+        }
+        std::fs::rename(&temp, &destination)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result
+}
+
+impl Workspace {
+    pub(super) fn refresh_project_instructions(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let handle = window.window_handle();
+        let target = self.footer_session(window).and_then(|id| {
+            let mode = self.hud_node(id)?["currentMode"].as_str()?;
+            if filenames(mode).is_empty() || self.is_stopped_session(id) {
+                return None;
             }
-            '\n' => {
-                expanded.push('\n');
-                column = 0;
-            }
-            '\t' => {
-                let spaces = TAB_SIZE - column % TAB_SIZE;
-                for _ in 0..spaces {
-                    expanded.push(' ');
-                }
-                column += spaces;
-            }
-            _ => {
-                expanded.push(character);
-                column += 1;
+            let node = self.hud_node(id)?;
+            let cwd = ["environment", "worktree"]
+                .into_iter()
+                .find_map(|key| trimmed_graph_text(&node[key]["path"]))
+                .or_else(|| {
+                    self.detached_session_for_window(handle)
+                        .is_none()
+                        .then_some(())
+                        .and(self.hierarchy.as_ref())
+                        .and_then(|hierarchy| hierarchy.execution_context.as_ref())
+                        .map(|context| context.cwd.as_str())
+                })
+                .map(PathBuf::from)
+                .filter(|path| path.is_absolute())
+                .or_else(|| self.footer_cwd(id))?;
+            Some(Target {
+                session: id.into(),
+                cwd,
+                mode: mode.into(),
+            })
+        });
+        if self
+            .project_instructions
+            .get(&handle)
+            .map(|state| &state.target)
+            == target.as_ref()
+        {
+            return;
+        }
+        let was_open = self
+            .project_instructions
+            .remove(&handle)
+            .is_some_and(|state| state.preview.is_some());
+        if was_open {
+            if let Some(terminal) = self
+                .footer_session(window)
+                .and_then(|id| self.terminals.get(id))
+            {
+                window.focus(&terminal.read(cx).focus);
+            } else {
+                window.blur();
             }
         }
+        let Some(target) = target else {
+            return;
+        };
+        let cwd = target.cwd.clone();
+        let mode = target.mode.clone();
+        let lookup = cx
+            .background_executor()
+            .spawn(async move { discover(&cwd, &mode) });
+        let task = cx.spawn(async move |this, cx| {
+            let path = lookup.await;
+            let _ = this.update(cx, |this, cx| {
+                if let Some(state) = this.project_instructions.get_mut(&handle) {
+                    state.path = path;
+                    state.task = None;
+                    cx.notify();
+                }
+            });
+        });
+        self.project_instructions.insert(
+            handle,
+            Instructions {
+                target,
+                path: None,
+                task: Some(task),
+                preview: None,
+            },
+        );
     }
-    expanded.into()
+
+    pub(super) fn open_project_instructions(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let handle = window.window_handle();
+        let Some(path) = self
+            .project_instructions
+            .get(&handle)
+            .filter(|state| state.preview.is_none())
+            .and_then(|state| state.path.clone())
+        else {
+            return;
+        };
+        self.dismiss_footer_popover(window, cx);
+        self.dismiss_permission_menu(window, cx);
+        self.dismiss_hud_wiring_overlay(window, cx);
+        window.focus(&self.control_focus["project-instructions-preview"]);
+        let read = cx.background_executor().spawn(async move { read(&path) });
+        let task = cx.spawn(async move |this, cx| {
+            let result = read.await;
+            let _ = this.update(cx, |this, cx| {
+                if !this
+                    .project_instructions
+                    .get(&handle)
+                    .is_some_and(|state| state.preview.is_some())
+                {
+                    return;
+                }
+                let focus = this.control_focus["project-instructions-preview"].clone();
+                let error_prefix = this.locale.text("读取失败", "Could not read file");
+                let state = this.project_instructions.get_mut(&handle).unwrap();
+                let preview = state.preview.as_mut().unwrap();
+                match result {
+                    Ok(content) => {
+                        let original = content.clone();
+                        let input = cx.new(|cx| RenameInput::instructions(content, focus, cx));
+                        let events = cx.subscribe(&input, move |_, _, event, cx| match event {
+                            RenameInputEvent::Changed => cx.notify(),
+                            RenameInputEvent::Confirm | RenameInputEvent::Cancel => {
+                                let owner = cx.weak_entity();
+                                let save = matches!(event, RenameInputEvent::Confirm);
+                                cx.defer(move |cx| {
+                                    let _ = handle.update(cx, |_, window, cx| {
+                                        let _ = owner.update(cx, |this, cx| {
+                                            if save {
+                                                this.save_project_instructions(window, cx);
+                                            } else {
+                                                this.close_project_instructions(window, cx);
+                                            }
+                                        });
+                                    });
+                                });
+                            }
+                        });
+                        preview.original = Some(original);
+                        preview.input = Some(input);
+                        preview._input_events = Some(events);
+                    }
+                    Err(error) => preview.error = Some(format!("{error_prefix}：{error}")),
+                }
+                state.task = None;
+                cx.notify();
+            });
+        });
+        let state = self.project_instructions.get_mut(&handle).unwrap();
+        state.preview = Some(Preview {
+            original: None,
+            input: None,
+            error: None,
+            saving: false,
+            _input_events: None,
+        });
+        state.task = Some(task);
+        cx.notify();
+    }
+
+    fn save_project_instructions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let handle = window.window_handle();
+        if self.read_only.is_some() {
+            return;
+        }
+        let Some(state) = self.project_instructions.get_mut(&handle) else {
+            return;
+        };
+        let Some((path, preview)) = state.path.clone().zip(state.preview.as_mut()) else {
+            return;
+        };
+        let Some((input, original)) = preview.input.as_ref().zip(preview.original.as_ref()) else {
+            return;
+        };
+        let text = input.read(cx).text.clone();
+        if preview.saving || &text == original || input.read(cx).composing() {
+            return;
+        }
+        let original = original.clone();
+        preview.error = None;
+        preview.saving = true;
+        input.update(cx, |input, cx| input.set_document_read_only(true, cx));
+        let save = cx
+            .background_executor()
+            .spawn(async move { save(&path, &original, &text) });
+        state.task = Some(cx.spawn(async move |this, cx| {
+            let result = save.await;
+            let _ = handle.update(cx, |_, window, cx| {
+                let _ = this.update(cx, |this, cx| {
+                    let Some(state) = this.project_instructions.get_mut(&handle) else {
+                        return;
+                    };
+                    state.task = None;
+                    let Some(preview) = state.preview.as_mut() else {
+                        return;
+                    };
+                    preview.saving = false;
+                    if let Err(error) = result {
+                        preview.error = Some(format!(
+                            "{} {error}",
+                            this.locale.text("保存失败。", "Could not save.")
+                        ));
+                        if let Some(input) = &preview.input {
+                            input.update(cx, |input, cx| input.set_document_read_only(false, cx));
+                        }
+                        window.focus(&this.control_focus["project-instructions-preview"]);
+                        cx.notify();
+                    } else {
+                        this.close_project_instructions(window, cx);
+                    }
+                });
+            });
+        }));
+        cx.notify();
+    }
+
+    pub(super) fn close_project_instructions(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(state) = self.project_instructions.get_mut(&window.window_handle()) else {
+            return;
+        };
+        if state.preview.as_ref().is_none_or(|preview| preview.saving) {
+            return;
+        }
+        state.preview = None;
+        state.task = None;
+        if state.path.is_some()
+            && self.footer_session(window)
+                == self
+                    .project_instructions
+                    .get(&window.window_handle())
+                    .map(|s| s.target.session.as_str())
+        {
+            window.focus(&self.control_focus["project-instructions"]);
+        } else if let Some(terminal) = self
+            .footer_session(window)
+            .and_then(|id| self.terminals.get(id))
+        {
+            window.focus(&terminal.read(cx).focus);
+        } else {
+            window.blur();
+        }
+        cx.notify();
+    }
+
+    pub(super) fn project_instructions_open(&self, window: &Window) -> bool {
+        self.project_instructions
+            .get(&window.window_handle())
+            .is_some_and(|state| state.preview.is_some())
+    }
+
+    pub(super) fn project_instructions_overlay(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Stateful<Div>> {
+        let state = self.project_instructions.get(&window.window_handle())?;
+        let preview = state.preview.as_ref()?;
+        let path = state.path.clone()?;
+        let colors = Colors::for_theme(self.theme.effective() == AppTheme::Dark);
+        let locale = self.locale;
+        let body = editor_surface(
+            preview.input.as_ref(),
+            &self.control_focus["project-instructions-preview"],
+            preview.input.is_none() && preview.error.is_none(),
+            locale,
+            colors,
+        );
+        let cancel = action_button(
+            "project-instructions-cancel",
+            locale.text("取消", "Cancel"),
+            false,
+            preview.saving,
+            colors,
+        )
+        .children(footer_bounds_probe("instructions-cancel"));
+        let close = close_button(colors).children(footer_bounds_probe("instructions-close"));
+        let disabled = preview.saving
+            || self.read_only.is_some()
+            || preview
+                .input
+                .as_ref()
+                .zip(preview.original.as_ref())
+                .is_none_or(|(input, original)| &input.read(cx).text == original);
+        let save = action_button(
+            "project-instructions-save",
+            if preview.saving {
+                locale.text("正在保存…", "Saving…")
+            } else {
+                locale.text("保存", "Save")
+            },
+            true,
+            disabled,
+            colors,
+        )
+        .children(footer_bounds_probe("instructions-save"));
+        let close = if preview.saving {
+            close.opacity(0.55)
+        } else {
+            self.button(
+                close,
+                &self.control_focus["project-instructions-close"],
+                Self::close_project_instructions,
+                cx,
+            )
+        };
+        let cancel = if preview.saving {
+            cancel
+        } else {
+            self.button(
+                cancel,
+                &self.control_focus["project-instructions-cancel"],
+                Self::close_project_instructions,
+                cx,
+            )
+        };
+        let save = if disabled {
+            save
+        } else {
+            self.button(
+                save,
+                &self.control_focus["project-instructions-save"],
+                Self::save_project_instructions,
+                cx,
+            )
+        };
+        let panel = panel(
+            window.viewport_size(),
+            Dialog {
+                path,
+                body,
+                error: preview.error.clone(),
+                close,
+                cancel,
+                save,
+                colors,
+            },
+        )
+        .children(footer_bounds_probe("instructions-dialog"))
+        .on_any_mouse_down(|_, _, cx| cx.stop_propagation());
+        Some(
+            overlay(panel).on_any_mouse_down(cx.listener(|this, _, window, cx| {
+                this.close_project_instructions(window, cx);
+                cx.stop_propagation();
+            })),
+        )
+    }
+
+    pub(super) fn project_instructions_key(
+        &mut self,
+        stroke: &Keystroke,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(preview) = self
+            .project_instructions
+            .get(&window.window_handle())
+            .and_then(|state| state.preview.as_ref())
+        else {
+            return false;
+        };
+        let editor = &self.control_focus["project-instructions-preview"];
+        if preview.saving {
+            return true;
+        }
+        if stroke.key == "escape"
+            && preview
+                .input
+                .as_ref()
+                .is_none_or(|input| !input.read(cx).composing())
+        {
+            self.close_project_instructions(window, cx);
+            return true;
+        }
+        if stroke.key == "tab"
+            && !stroke.modifiers.alt
+            && !stroke.modifiers.control
+            && !stroke.modifiers.platform
+        {
+            if preview
+                .input
+                .as_ref()
+                .is_some_and(|input| input.read(cx).composing())
+            {
+                return false;
+            }
+            let mut controls = vec![
+                &self.control_focus["project-instructions-close"],
+                editor,
+                &self.control_focus["project-instructions-cancel"],
+            ];
+            if self.read_only.is_none()
+                && preview
+                    .input
+                    .as_ref()
+                    .zip(preview.original.as_ref())
+                    .is_some_and(|(input, original)| &input.read(cx).text != original)
+            {
+                controls.push(&self.control_focus["project-instructions-save"]);
+            }
+            let current = controls.iter().position(|focus| focus.is_focused(window));
+            let next = match (current, stroke.modifiers.shift) {
+                (Some(i), true) => (i + controls.len() - 1) % controls.len(),
+                (Some(i), false) => (i + 1) % controls.len(),
+                (None, true) => controls.len() - 1,
+                (None, false) => 0,
+            };
+            window.focus(controls[next]);
+            self.keyboard_focus = true;
+            cx.notify();
+            return true;
+        }
+        !editor.is_focused(window) && !matches!(stroke.key.as_str(), "enter" | "space")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[::core::prelude::v1::test]
+    fn provider_discovery_and_file_save_preserve_text_and_reject_stale_edits() {
+        let root =
+            std::env::temp_dir().join(format!("matou-hud-instructions-{}", fork_submission_key()));
+        std::fs::create_dir(&root).unwrap();
+        struct RemoveFixture(PathBuf);
+        impl Drop for RemoveFixture {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _fixture = RemoveFixture(root.clone());
+        let agents = root.join("AGENTS.md");
+        let gemini = root.join("GEMINI.md");
+        let claude = root.join("CLAUDE.md");
+
+        std::fs::write(&gemini, "# Gemini\n").unwrap();
+        assert_eq!(discover(&root, "antigravity"), Some(gemini));
+        assert!(discover(&root, "codex").is_none());
+        std::fs::write(&claude, "# Claude\n").unwrap();
+        std::fs::write(&agents, "# 指令\r\n\t正文\r\n").unwrap();
+        assert_eq!(discover(&root, "claude-code"), Some(claude));
+        assert_eq!(discover(&root, "antigravity"), Some(agents.clone()));
+        assert_eq!(discover(&root, "codex"), Some(agents.clone()));
+        assert!(discover(&root, "shell").is_none());
+        assert!(discover(&root, "dsh").is_none());
+
+        let original = read(&agents).unwrap();
+        assert_eq!(original, "# 指令\r\n\t正文\r\n");
+        let updated = "# 新指令\r\n\t编辑成功\r\n";
+        save(&agents, &original, updated).unwrap();
+        assert_eq!(read(&agents).unwrap(), updated);
+        assert!(save(&agents, &original, "stale save").is_err());
+        assert_eq!(read(&agents).unwrap(), updated);
+        assert_eq!(std::fs::read_dir(root).unwrap().count(), 3);
+    }
+
+    #[::core::prelude::v1::test]
+    fn instruction_dialog_uses_distinct_light_and_dark_surfaces() {
+        let light = Colors::for_theme(false);
+        let dark = Colors::for_theme(true);
+        assert_eq!(light.panel, rgb(0xffffff));
+        assert_eq!(light.body, rgb(0xf6f8fa));
+        assert_eq!(dark.panel, rgb(0x1c2128));
+        assert_eq!(dark.body, rgb(0x0d1117));
+        assert_ne!(dark.text, light.text);
+    }
 }

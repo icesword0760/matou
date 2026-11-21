@@ -68,6 +68,10 @@ mod codex_hud {
     include!("codex_hud.rs");
 }
 
+#[path = "footer_controls.rs"]
+mod footer_controls;
+use footer_controls::{FooterMenu, FooterPopover};
+
 #[path = "project_instructions.rs"]
 mod project_instructions;
 
@@ -190,6 +194,7 @@ struct WorkspaceDragMotion {
 enum PermissionMode {
     Default,
     Auto,
+    Ask,
     AcceptEdits,
     Plan,
     Bypass,
@@ -206,16 +211,29 @@ impl PermissionMode {
 
     const CODEX: [Self; 4] = [Self::Default, Self::AcceptEdits, Self::Plan, Self::Bypass];
 
+    const ANTIGRAVITY: [Self; 6] = [
+        Self::Default,
+        Self::Auto,
+        Self::Ask,
+        Self::AcceptEdits,
+        Self::Plan,
+        Self::Bypass,
+    ];
+
     fn supported(node: &Value) -> Option<&'static [Self]> {
         match node["currentMode"].as_str() {
             Some("claude-code") => Some(&Self::ALL),
             Some("codex") => Some(&Self::CODEX),
+            Some("antigravity") => Some(&Self::ANTIGRAVITY),
             _ => None,
         }
     }
 
     fn from_node(node: &Value) -> Self {
-        let value = node["permissionMode"].as_str();
+        Self::observed(node, node["permissionMode"].as_str())
+    }
+
+    fn observed(node: &Value, value: Option<&str>) -> Self {
         Self::supported(node)
             .unwrap_or_default()
             .iter()
@@ -228,6 +246,7 @@ impl PermissionMode {
         match self {
             Self::Default => "default",
             Self::Auto => "auto",
+            Self::Ask => "ask",
             Self::AcceptEdits => "acceptEdits",
             Self::Plan => "plan",
             Self::Bypass => "bypassPermissions",
@@ -239,6 +258,7 @@ impl PermissionMode {
         match self {
             Self::Default => "Default",
             Self::Auto => "Auto",
+            Self::Ask => "Ask",
             Self::AcceptEdits => "Accept Edits",
             Self::Plan => "Plan Mode",
             Self::Bypass => "Bypass Permissions",
@@ -258,13 +278,13 @@ struct PermissionConfirmation {
     from: PermissionMode,
     target: PermissionMode,
     resumable: bool,
-    codex: bool,
+    provider: &'static str,
 }
 
 impl PermissionConfirmation {
     // Frozen i18n/messages/hud.ts: bypassEnter*, bypassExit*, bypassNotResumable.
     fn copy(&self) -> (&'static str, String, &'static str) {
-        let agent = if self.codex { "Codex" } else { "Claude" };
+        let agent = self.provider;
         let (title, action, confirm) = if self.target == PermissionMode::Bypass {
             ("切换到高权限模式", "切换到", "确认切换")
         } else {
@@ -926,21 +946,17 @@ const CONTROLS: &[&str] = &[
     "project-instructions-close",
     "project-instructions-preview",
     "project-instructions-cancel",
+    "project-instructions-save",
+    "footer-git",
+    "footer-environment",
+    "footer-quota",
     "permission-mode",
+    "detached-permission-close",
+    "detached-permission-cancel",
+    "detached-permission-confirm",
     "accounts",
     "session-return-parent",
 ];
-
-enum ProjectInstructionsRead {
-    Missing,
-    Content(SharedString),
-    Failed(String),
-}
-
-struct ProjectInstructionsPreview {
-    result: Option<ProjectInstructionsRead>,
-    scroll: ScrollHandle,
-}
 
 struct ArchivedMatches {
     query: String,
@@ -1342,10 +1358,10 @@ pub struct Workspace {
     toast_generation: u64,
     permission_menu: Option<String>,
     footer_shell: Option<String>,
-    project_instructions_target: Option<(String, PathBuf)>,
-    project_instructions_available: bool,
-    project_instructions_request: Option<gpui::Task<()>>,
-    project_instructions_preview: Option<ProjectInstructionsPreview>,
+    project_instructions: HashMap<AnyWindowHandle, project_instructions::Instructions>,
+    footer_popovers: HashMap<AnyWindowHandle, FooterPopover>,
+    detached_permission_menus: HashSet<AnyWindowHandle>,
+    detached_permission_confirmations: HashMap<AnyWindowHandle, PermissionConfirmation>,
     permission_changes: HashMap<String, PermissionChange>,
     permission_identities: HashSet<String>,
     permission_toast: Option<String>,
@@ -2396,10 +2412,10 @@ impl Workspace {
                 .as_ref()
                 .and_then(|options| footer_shell_name(options.shell.to_str()?))
                 .map(str::to_owned),
-            project_instructions_target: None,
-            project_instructions_available: false,
-            project_instructions_request: None,
-            project_instructions_preview: None,
+            project_instructions: HashMap::new(),
+            footer_popovers: HashMap::new(),
+            detached_permission_menus: HashSet::new(),
+            detached_permission_confirmations: HashMap::new(),
             permission_changes: HashMap::new(),
             permission_identities: HashSet::new(),
             permission_toast: None,
@@ -7092,56 +7108,121 @@ impl Workspace {
         PermissionMode::supported(node).map(|_| (id, node))
     }
 
-    fn permission_chip(&self) -> Option<PermissionChip> {
-        let (id, node) = self.permission_node()?;
+    fn observed_permission(&self, id: &str, node: &Value) -> PermissionMode {
+        PermissionMode::observed(
+            node,
+            self.live_agent_hud(id)
+                .and_then(|hud| hud["permissionMode"].as_str())
+                .or_else(|| node["permissionMode"].as_str()),
+        )
+    }
+
+    fn permission_chip_for(&self, id: &str) -> Option<PermissionChip> {
+        let node = self.hud_node(id)?;
         let change = self.permission_changes.get(id);
-        let mode = change.map_or_else(|| PermissionMode::from_node(node), |change| change.from);
+        let mode = change.map_or_else(|| self.observed_permission(id, node), |change| change.from);
         let blocked = self.permission_blocked_reason(id, node);
         Some(PermissionChip {
             modes: PermissionMode::supported(node)?,
             mode,
             title: blocked.map_or_else(
-                || format!("当前权限模式：{}，点击切换", mode.label()),
+                || match self.locale {
+                    InterfaceLocale::Chinese => format!("当前权限模式：{}，点击切换", mode.label()),
+                    InterfaceLocale::English => {
+                        format!("Permission mode: {} · Click to switch", mode.label())
+                    }
+                },
                 str::to_owned,
             ),
             disabled: blocked.is_some() || change.is_some() || self.is_stopped_session(id),
         })
     }
 
-    fn toggle_permission_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.permission_menu.is_some() {
-            self.dismiss_permission_menu(window, cx);
-        } else if self.dialog.is_none() && self.permission_chip().is_some_and(|chip| !chip.disabled)
+    fn permission_chip(&self) -> Option<PermissionChip> {
+        self.permission_chip_for(self.level_focus()?)
+    }
+
+    fn footer_session(&self, window: &Window) -> Option<&str> {
+        self.detached_session_for_window(window.window_handle())
+            .or_else(|| self.level_focus())
+    }
+
+    fn permission_menu_open(&self, window: &Window) -> bool {
+        if self
+            .detached_session_for_window(window.window_handle())
+            .is_some()
         {
-            self.permission_menu = self.permission_node().map(|(id, _)| id.to_owned());
+            self.detached_permission_menus
+                .contains(&window.window_handle())
+        } else {
+            self.permission_menu.is_some()
+        }
+    }
+
+    fn toggle_permission_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.permission_menu_open(window) {
+            self.dismiss_permission_menu(window, cx);
+            return;
+        }
+        let Some(id) = self
+            .footer_session(window)
+            .filter(|id| {
+                self.permission_chip_for(id)
+                    .is_some_and(|chip| !chip.disabled)
+            })
+            .map(str::to_owned)
+        else {
+            return;
+        };
+        self.dismiss_footer_popover(window, cx);
+        if self
+            .detached_session_for_window(window.window_handle())
+            .is_some()
+        {
+            self.dismiss_hud_wiring_overlay(window, cx);
+            self.detached_permission_menus
+                .insert(window.window_handle());
+            cx.notify();
+        } else if self.dialog.is_none() {
+            self.dismiss_wiring_overlay(window, cx);
+            self.permission_menu = Some(id);
             self.workspace_menu = None;
             self.task_menu = None;
             self.tab_menu = None;
-            self.dismiss_wiring_overlay(window, cx);
             self.hidden_tabs = None;
             cx.notify();
         }
     }
 
     fn dismiss_permission_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(id) = self.permission_menu.take() else {
-            return;
-        };
-        if self.dialog.is_none()
-            && self.level_focus() == Some(id.as_str())
-            && self.permission_chip().is_some_and(|chip| !chip.disabled)
+        let removed = if self
+            .detached_session_for_window(window.window_handle())
+            .is_some()
         {
-            window.focus(&self.control_focus["permission-mode"]);
+            self.detached_permission_menus
+                .remove(&window.window_handle())
+        } else {
+            self.permission_menu.take().is_some()
+        };
+        if removed {
+            if self
+                .footer_session(window)
+                .and_then(|id| self.permission_chip_for(id))
+                .is_some_and(|chip| !chip.disabled)
+            {
+                window.focus(&self.control_focus["permission-mode"]);
+            }
+            cx.notify();
         }
-        cx.notify();
     }
 
     fn permission_confirmation_valid(&self, state: &PermissionConfirmation) -> bool {
-        self.permission_node().is_some_and(|(id, node)| {
-            id == state.session_id
-                && (node["currentMode"] == "codex") == state.codex
-                && PermissionMode::from_node(node) == state.from
-                && self.permission_chip().is_some_and(|chip| !chip.disabled)
+        self.hud_node(&state.session_id).is_some_and(|node| {
+            permission_provider(node) == state.provider
+                && self.observed_permission(&state.session_id, node) == state.from
+                && self
+                    .permission_chip_for(&state.session_id)
+                    .is_some_and(|chip| !chip.disabled)
         })
     }
 
@@ -7151,52 +7232,136 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(session_id) = self.permission_menu.take() else {
+        if !self.permission_menu_open(window) {
+            return;
+        }
+        self.dismiss_permission_menu(window, cx);
+        let Some(session_id) = self.footer_session(window).map(str::to_owned) else {
             return;
         };
-        cx.notify();
-        let Some((id, node)) = self.permission_node().filter(|(id, _)| *id == session_id) else {
+        let Some(node) = self.hud_node(&session_id) else {
             return;
         };
         let Some(chip) = self
-            .permission_chip()
+            .permission_chip_for(&session_id)
             .filter(|chip| !chip.disabled && chip.modes.contains(&target))
         else {
             return;
         };
         let from = chip.mode;
         if from == target {
-            window.focus(&self.control_focus["permission-mode"]);
             return;
         }
         if from == PermissionMode::Bypass || target == PermissionMode::Bypass {
-            // Older graph nodes omit the provider session ID. A confirmed identity
-            // event or binding-backed fields can still establish resumability.
-            let codex = node["currentMode"] == "codex";
-            let resumable = codex
-                || node["canFork"] == true
-                || self.permission_identities.contains(id)
-                || ["providerSessionId", "model"].into_iter().any(|key| {
-                    node[key]
-                        .as_str()
-                        .is_some_and(|value| !value.trim().is_empty())
-                })
-                || from != PermissionMode::Default;
-            self.open_card_dialog(
-                TabDialog::PermissionMode(PermissionConfirmation {
-                    session_id,
-                    from,
-                    target,
-                    resumable,
-                    codex,
-                }),
-                3,
-                window,
-                cx,
-            );
+            let live = self.live_agent_hud(&session_id);
+            let resumable = live
+                .and_then(|hud| hud["resumable"].as_bool())
+                .unwrap_or_else(|| {
+                    node["currentMode"] == "codex"
+                        || node["canFork"] == true
+                        || self.permission_identities.contains(&session_id)
+                        || ["providerSessionId", "model"]
+                            .into_iter()
+                            .any(|key| trimmed_graph_text(&node[key]).is_some())
+                        || !matches!(from, PermissionMode::Default | PermissionMode::Auto)
+                });
+            let state = PermissionConfirmation {
+                provider: permission_provider(node),
+                session_id,
+                from,
+                target,
+                resumable,
+            };
+            if self
+                .detached_session_for_window(window.window_handle())
+                .is_some()
+            {
+                self.detached_permission_confirmations
+                    .insert(window.window_handle(), state);
+                window.focus(&self.control_focus["detached-permission-cancel"]);
+                cx.notify();
+            } else {
+                self.open_card_dialog(TabDialog::PermissionMode(state), 3, window, cx);
+            }
         } else {
             self.send_permission_mode(session_id, from, target, window, cx);
         }
+    }
+
+    fn close_detached_permission(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.detached_permission_confirmations
+            .remove(&window.window_handle());
+        window.focus(&self.control_focus["permission-mode"]);
+        cx.notify();
+    }
+
+    fn detached_permission_overlay(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Stateful<Div>> {
+        let state = self
+            .detached_permission_confirmations
+            .get(&window.window_handle())?;
+        let (title, body, confirm) = state.copy();
+        let close = self.button(
+            tabs_ui::dialog_close("detached-permission-close"),
+            &self.control_focus["detached-permission-close"],
+            Self::close_detached_permission,
+            cx,
+        );
+        let cancel = self.button(
+            tabs_ui::dialog_button(
+                "detached-permission-cancel",
+                self.locale.text("取消", "Cancel"),
+                false,
+                false,
+            ),
+            &self.control_focus["detached-permission-cancel"],
+            Self::close_detached_permission,
+            cx,
+        );
+        let send = self.button(
+            tabs_ui::dialog_button("detached-permission-confirm", confirm, true, false),
+            &self.control_focus["detached-permission-confirm"],
+            |this, window, cx| {
+                if let Some(state) = this
+                    .detached_permission_confirmations
+                    .remove(&window.window_handle())
+                {
+                    if this.permission_confirmation_valid(&state) {
+                        this.send_permission_mode(
+                            state.session_id,
+                            state.from,
+                            state.target,
+                            window,
+                            cx,
+                        );
+                    } else {
+                        this.close_detached_permission(window, cx);
+                    }
+                    cx.notify();
+                }
+            },
+            cx,
+        );
+        Some(
+            tabs_ui::dialog_overlay("detached-permission-overlay")
+                .on_any_mouse_down(
+                    cx.listener(|this, _, window, cx| this.close_detached_permission(window, cx)),
+                )
+                .child(
+                    tabs_ui::dialog_panel(f32::from(window.viewport_size().width))
+                        .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
+                        .child(
+                            tabs_ui::dialog_header()
+                                .child(tabs_ui::dialog_title(title))
+                                .child(close),
+                        )
+                        .child(tabs_ui::dialog_body().child(ui_text(body).pre_line()))
+                        .child(tabs_ui::dialog_footer().child(cancel).child(send)),
+                ),
+        )
     }
 
     fn send_permission_mode(
@@ -7233,7 +7398,6 @@ impl Workspace {
     }
 
     fn reconcile_permission_modes(&mut self, results: &[Value], cx: &mut Context<Self>) {
-        let nodes = session_levels::nodes(&self.graph);
         for identity in self.graph["providerIdentityEvents"]
             .as_array()
             .into_iter()
@@ -7275,14 +7439,21 @@ impl Workspace {
             } else {
                 PermissionOutcome::Confirmed
             };
+            if change.outcome == PermissionOutcome::Confirmed {
+                let value = change.target.value();
+                self.confirm_live_hud_permission(id, value);
+            }
         }
+        let nodes = session_levels::nodes(&self.graph);
+        let wiring = &self.wiring;
         self.permission_changes.retain(|id, change| {
             let node = session_levels::node(nodes, id);
             match change.outcome {
                 PermissionOutcome::Pending => true,
-                PermissionOutcome::Confirmed => {
-                    node.is_none_or(|node| PermissionMode::from_node(node) != change.target)
-                }
+                PermissionOutcome::Confirmed => node.map_or_else(
+                    || !wiring.is_detached(id),
+                    |node| PermissionMode::from_node(node) != change.target,
+                ),
                 // The existing runtime can park a failed restore and omit its
                 // binding's mode. Keep the pre-switch label while it is parked.
                 PermissionOutcome::Failed => {
@@ -7307,7 +7478,7 @@ impl Workspace {
         }
         if matches!(
             &self.dialog,
-            Some(TabDialog::PermissionMode(state)) if !self.permission_confirmation_valid(state)
+            Some(TabDialog::PermissionMode(state)) if self.level_focus() != Some(state.session_id.as_str()) || !self.permission_confirmation_valid(state)
         ) {
             self.close_dialog(window, cx);
         }
@@ -7428,7 +7599,10 @@ impl Workspace {
                 STORAGE_READ_ONLY_TITLE,
                 "The database is in read-only recovery mode",
             ))
-        } else if !self.active_path_valid() {
+        } else if self
+            .detached_path_invalid(id)
+            .unwrap_or_else(|| !self.active_path_valid())
+        {
             Some(self.workspace_path_unavailable())
         } else if self.storage_fault_sessions.contains(id) {
             Some(self.locale.text(
@@ -9530,233 +9704,13 @@ impl Workspace {
         }
     }
 
-    fn refresh_project_instructions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let target = self.active_level_focus().and_then(|id| {
-            let node = self.graph_node(id)?;
-            if node["currentMode"] != "codex" {
-                return None;
-            }
-            // The terminal can cd without changing its execution context.
-            // The graph carries the active local or worktree context per card.
-            let context_cwd = node["environment"]["path"]
-                .as_str()
-                .or_else(|| node["worktree"]["path"].as_str())
-                .or_else(|| {
-                    self.hierarchy
-                        .as_ref()?
-                        .execution_context
-                        .as_ref()
-                        .map(|context| context.cwd.as_str())
-                })
-                .or_else(|| node["cwd"].as_str())?;
-            let context_cwd = std::path::Path::new(context_cwd);
-            context_cwd
-                .is_absolute()
-                .then(|| (id.to_owned(), context_cwd.join("AGENTS.md")))
-        });
-        if self.project_instructions_target == target {
-            return;
-        }
-        self.project_instructions_target = target;
-        self.project_instructions_available = false;
-        self.project_instructions_request = None;
-        if self.project_instructions_target.is_none() {
-            self.close_project_instructions(window, cx);
-        } else if let Some(preview) = &mut self.project_instructions_preview {
-            preview.result = None;
-            preview.scroll = ScrollHandle::new();
-        }
-        self.request_project_instructions(cx);
-    }
-
-    fn request_project_instructions(&mut self, cx: &mut Context<Self>) {
-        let Some((_, path)) = &self.project_instructions_target else {
-            return;
-        };
-        let path = path.clone();
-        let preview = self.project_instructions_preview.is_some();
-        let read = cx.background_executor().spawn(async move {
-            if preview {
-                let result = read_project_instructions(&path);
-                (
-                    !matches!(result, ProjectInstructionsRead::Missing),
-                    Some(result),
-                )
-            } else {
-                (path.exists(), None)
-            }
-        });
-        // Replacing the foreground task cancels its update, so an earlier
-        // card's read can't commit after a scope change or a new request.
-        self.project_instructions_request = Some(cx.spawn(async move |this, cx| {
-            let (available, result) = read.await;
-            let _ = this.update(cx, |this, cx| {
-                this.project_instructions_request = None;
-                this.project_instructions_available = available;
-                if let Some(preview) = &mut this.project_instructions_preview {
-                    preview.result = result;
-                }
-                cx.notify();
-            });
-        }));
-    }
-
-    fn open_project_instructions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.refresh_project_instructions(window, cx);
-        if !self.project_instructions_available || self.project_instructions_preview.is_some() {
-            return;
-        }
-        self.permission_menu = None;
-        self.project_instructions_preview = Some(ProjectInstructionsPreview {
-            result: None,
-            scroll: ScrollHandle::new(),
-        });
-        window.focus(&self.control_focus["project-instructions-preview"]);
-        self.request_project_instructions(cx);
-        cx.notify();
-    }
-
-    fn close_project_instructions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.project_instructions_preview.take().is_none() {
-            return;
-        }
-        if self.project_instructions_available {
-            window.focus(&self.control_focus["project-instructions"]);
-        } else if self.control_focus["project-instructions-preview"].is_focused(window)
-            || self.control_focus["project-instructions-close"].is_focused(window)
-            || self.control_focus["project-instructions-cancel"].is_focused(window)
-        {
-            if let Some(terminal) = self.level_focus().and_then(|id| self.terminals.get(id)) {
-                window.focus(&terminal.read(cx).focus);
-            } else {
-                window.blur();
-            }
-        }
-        cx.notify();
-    }
-
-    fn project_instructions_overlay(
-        &self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<Stateful<Div>> {
-        let preview = self.project_instructions_preview.as_ref()?;
-        let (_, path) = self.project_instructions_target.as_ref()?;
-        let fallback = || SharedString::from("当前项目 / AGENTS.md");
-        let (path, content, error) = match &preview.result {
-            Some(ProjectInstructionsRead::Content(content)) => (
-                SharedString::from(path.display().to_string()),
-                content.clone(),
-                None,
-            ),
-            Some(ProjectInstructionsRead::Missing) => (
-                SharedString::from(path.display().to_string()),
-                SharedString::default(),
-                None,
-            ),
-            Some(ProjectInstructionsRead::Failed(error)) => {
-                (fallback(), SharedString::default(), Some(error.as_str()))
-            }
-            None => (fallback(), SharedString::default(), None),
-        };
-        let focus = &self.control_focus["project-instructions-preview"];
-        let body = if preview.result.is_some() {
-            let click_focus = focus.clone();
-            project_instructions::preview(content, focus, &preview.scroll, focus.is_focused(window))
-                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                    window.focus(&click_focus);
-                    cx.stop_propagation();
-                })
-        } else {
-            project_instructions::loading().track_focus(focus)
-        };
-        let close = self.button(
-            project_instructions::close_button()
-                .children(footer_bounds_probe("instructions-close")),
-            &self.control_focus["project-instructions-close"],
-            Self::close_project_instructions,
-            cx,
-        );
-        let cancel = self.button(
-            project_instructions::cancel_button()
-                .children(footer_bounds_probe("instructions-cancel")),
-            &self.control_focus["project-instructions-cancel"],
-            Self::close_project_instructions,
-            cx,
-        );
-        let panel =
-            project_instructions::panel(window.viewport_size(), path, close, body, error, cancel)
-                .children(footer_bounds_probe("instructions-dialog"))
-                .on_any_mouse_down(|_, _, cx| cx.stop_propagation());
-        Some(project_instructions::overlay(panel).on_any_mouse_down(
-            cx.listener(|this, _, window, cx| this.close_project_instructions(window, cx)),
-        ))
-    }
-
-    fn project_instructions_key(
-        &mut self,
-        stroke: &Keystroke,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(preview) = &self.project_instructions_preview else {
-            return;
-        };
-        let controls = [
-            &self.control_focus["project-instructions-close"],
-            &self.control_focus["project-instructions-preview"],
-            &self.control_focus["project-instructions-cancel"],
-        ];
-        // Keep unused text keys out of AppKit's input context, which can
-        // otherwise handle the next Esc before it reaches this modal.
-        let activates_button = matches!(stroke.key.as_str(), "enter" | "space")
-            && (controls[0].is_focused(window) || controls[2].is_focused(window));
-        if stroke.key_char.is_some() && !activates_button {
-            cx.stop_propagation();
-        }
-        match stroke.key.as_str() {
-            "escape" => self.close_project_instructions(window, cx),
-            "tab"
-                if !stroke.modifiers.alt
-                    && !stroke.modifiers.control
-                    && !stroke.modifiers.platform =>
-            {
-                let current = controls.iter().position(|focus| focus.is_focused(window));
-                let next = match (current, stroke.modifiers.shift) {
-                    (Some(i), true) => (i + controls.len() - 1) % controls.len(),
-                    (Some(i), false) => (i + 1) % controls.len(),
-                    (None, true) => controls.len() - 1,
-                    (None, false) => 0,
-                };
-                window.focus(controls[next]);
-                self.keyboard_focus = true;
-                cx.notify();
-            }
-            key if controls[1].is_focused(window) && !stroke.modifiers.modified() => {
-                let scroll = &preview.scroll;
-                let mut offset = scroll.offset();
-                let page = scroll.bounds().size.height;
-                offset.y = match key {
-                    "up" => offset.y + px(20.8),
-                    "down" => offset.y - px(20.8),
-                    "pageup" => offset.y + page,
-                    "pagedown" => offset.y - page,
-                    "home" => px(0.),
-                    "end" => -scroll.max_offset().height,
-                    _ => return,
-                }
-                .clamp(-scroll.max_offset().height, px(0.));
-                scroll.set_offset(offset);
-                cx.notify();
-            }
-            _ => return,
-        }
-        cx.stop_propagation();
-    }
-
+    #[allow(dead_code)]
     fn footer_fields(&self) -> Option<FooterFields<'_>> {
-        let id = self.level_focus()?;
-        let node = self.graph_node(id)?;
+        self.footer_fields_for(self.level_focus()?)
+    }
+
+    fn footer_fields_for(&self, id: &str) -> Option<FooterFields<'_>> {
+        let node = self.hud_node(id)?;
         let mode = node["currentMode"].as_str()?;
         let codex = (mode == "codex").then(|| codex_hud::CodexHud::from_node(node));
         let live = self.live_agent_hud(id);
@@ -9783,13 +9737,7 @@ impl Workspace {
                 let tail = path.rsplit(['/', '\\']).find(|part| !part.is_empty())?;
                 Some((path, format!("~/{}", tail.replace(['\r', '\n', '\t'], " "))))
             });
-        let git = FooterGit::from_node(&node["git"], self.locale).or_else(|| {
-            let live = live.unwrap_or(&Value::Null);
-            trimmed_graph_text(&live["gitBranch"]).or_else(|| trimmed_graph_text(&node["gitBranch"]))
-                .and_then(|branch| FooterGit::from_node(&serde_json::json!({
-                    "state": "ready", "branch": branch, "dirty": live["gitDirty"] == true || node["gitDirty"] == true,
-                }), self.locale))
-        });
+        let git = FooterGit::projected(node, live, self.locale);
         let environment = FooterEnvironment::from_node(&node["environment"])
             .or_else(|| live.and_then(|hud| FooterEnvironment::from_node(&hud["environment"])));
         Some(FooterFields {
@@ -10131,13 +10079,19 @@ impl Workspace {
             }
             return;
         }
+        if self.footer_popover_key(stroke, window, cx) {
+            cx.stop_propagation();
+            return;
+        }
         if self.wiring_key(stroke, window, cx) {
             cx.stop_propagation();
             return;
         }
         let mods = stroke.modifiers;
-        if self.project_instructions_preview.is_some() {
-            self.project_instructions_key(stroke, window, cx);
+        if self.project_instructions_open(window) {
+            if self.project_instructions_key(stroke, window, cx) {
+                cx.stop_propagation();
+            }
             return;
         }
         if stroke.key == "escape" && self.notification_open {
@@ -11166,6 +11120,9 @@ impl Workspace {
             .justify_center()
             .rounded(px(5.))
             .child(icon("circle-minus", 14., rgba(palette.fork_text)))
+            .children(workspace_wiring::wiring_probe_bounds(format!(
+                "remove-session-{id}"
+            )))
             .tooltip(move |_, cx| cx.new(|_| tooltip).into());
         if tooltip.blocked_reason.is_none() {
             let session_id = id.to_owned();
@@ -13570,6 +13527,16 @@ impl Workspace {
     }
 
     fn footer(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
+        self.terminal_hud(self.level_focus(), false, window, cx)
+    }
+
+    fn terminal_hud(
+        &self,
+        session: Option<&str>,
+        detached: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let palette = self.theme_palette().footer;
         let background = rgba(palette.background);
         #[cfg(debug_assertions)]
@@ -13593,15 +13560,24 @@ impl Workspace {
             }
         }
 
-        let (label, count) = self.breadcrumb_labels();
+        let (label, count) = if detached {
+            (String::new(), String::new())
+        } else {
+            self.breadcrumb_labels()
+        };
         let label = SharedString::from(label.replace(['\r', '\n', '\t'], " "));
         let count = SharedString::from(count);
         let viewport_width = window.viewport_size().width;
         let width = f32::from(viewport_width);
-        let child_level = self.level_parent().is_some();
+        let child_level = !detached && self.level_parent().is_some();
         let breadcrumb_max = (width * 0.44).min(520.);
-        let footer_room =
-            width - FOOTER_SIDEBAR_WIDTH - 2. * PERMISSION_FOOTER_PADDING_X - FOOTER_GAP;
+        let footer_room = width
+            - 2. * PERMISSION_FOOTER_PADDING_X
+            - if detached {
+                0.
+            } else {
+                FOOTER_SIDEBAR_WIDTH + FOOTER_GAP
+            };
         // Keep enough room for the count, the first title glyph plus ellipsis,
         // and the back arrow on child levels.
         let breadcrumb_chrome = if child_level { 39. } else { 20. };
@@ -13609,8 +13585,11 @@ impl Workspace {
         // The root breadcrumb keeps its whole item and the status bar shrinks
         // into the real remainder. Child titles still ellipsize inside their
         // own capped slot; the count and back arrow stay reserved there.
-        let breadcrumb_width =
-            (footer_text_estimate(&label) + count_width + breadcrumb_chrome).min(breadcrumb_max);
+        let breadcrumb_width = if detached {
+            0.
+        } else {
+            (footer_text_estimate(&label) + count_width + breadcrumb_chrome).min(breadcrumb_max)
+        };
         let status_estimate = (footer_room - breadcrumb_width).max(0.);
         // Child levels keep the old status budget so the HUD's fixed fields
         // survive a long child title; the title itself still shrinks and
@@ -13621,21 +13600,20 @@ impl Workspace {
             0.
         };
         let locale = self.locale;
-        let fields = self.footer_fields();
-        let chip = self.permission_chip();
+        let fields = session.and_then(|id| self.footer_fields_for(id));
+        let chip = session.and_then(|id| self.permission_chip_for(id));
         let menu_open =
-            self.permission_menu.is_some() && chip.as_ref().is_some_and(|chip| !chip.disabled);
+            self.permission_menu_open(window) && chip.as_ref().is_some_and(|chip| !chip.disabled);
+        let dark = self.theme.effective() == AppTheme::Dark;
+        let footer_menu = self
+            .footer_popovers
+            .get(&window.window_handle())
+            .filter(|popup| Some(popup.session.as_str()) == session);
         // The optional cwd/Git slot only gets space the model did not claim. A
         // cwd needs room for both a recognizable prefix and any Git label that
         // shares the slot; below that the field is omitted rather than
         // clipped from the left.
-        let git_reserve = fields
-            .as_ref()
-            .and_then(|fields| fields.git.as_ref())
-            .map_or(0., |git| {
-                FOOTER_GAP + footer_text_estimate(&git.label).min(FOOTER_GIT_MAX_WIDTH)
-            });
-        let cwd_min_slot = FOOTER_CWD_MIN_WIDTH + git_reserve;
+        let cwd_min_slot = FOOTER_CWD_MIN_WIDTH;
         let status_measure = window.use_keyed_state("footer-status-measure", cx, |_, _| {
             None::<FooterStatusMeasure>
         });
@@ -13648,7 +13626,7 @@ impl Workspace {
             let fallback_content = (status_estimate - FOOTER_STATUS_PADDING_LEFT - 1.).max(0.);
             let fallback_show_cwd = fallback_content > FOOTER_CWD_HIDE_BELOW;
             let fallback_optional = if fallback_show_cwd {
-                FOOTER_CWD_MAX_WIDTH + git_reserve
+                FOOTER_CWD_MAX_WIDTH
             } else {
                 0.
             };
@@ -13664,11 +13642,14 @@ impl Workspace {
             );
             (content, show && optional >= cwd_min_slot)
         };
-        let codex_selected = fields
-            .as_ref()
-            .and_then(|fields| fields.codex.as_ref())
-            .is_some();
-        let show_model = !codex_selected || status_content_width > codex_hud::MODEL_HIDE_BELOW;
+        let mode = fields.as_ref().map_or("", |fields| fields.mode);
+        let mode = match mode {
+            "claude-code" => "claude-code",
+            "codex" => "codex",
+            "antigravity" => "antigravity",
+            _ => "",
+        };
+        let show_model = codex_hud::shows_model(mode, status_content_width);
         let show_context = status_content_width > codex_hud::CONTEXT_HIDE_BELOW;
         let status_gap = if status_content_width < FOOTER_COMPACT_STATUS_WIDTH {
             FOOTER_GAP / 2.
@@ -13765,14 +13746,23 @@ impl Workspace {
             .bg(background)
             .text_size(px(10.))
             .text_color(rgba(palette.text))
-            .when(self.graph.is_object(), |footer| footer.child(breadcrumb));
+            .when(!detached && self.graph.is_object(), |footer| {
+                footer.child(breadcrumb)
+            });
         if chip.is_none() && fields.is_none() {
-            return footer.child(div().ml_auto().child(self.egress_trigger(cx)));
+            return footer.child(
+                div()
+                    .ml_auto()
+                    .child(self.egress_trigger_for(session, window, cx)),
+            );
         }
         // The dismiss layer is mounted before the status area so the chip and
         // the deferred menu keep their own input handling above it.
         if menu_open {
             footer = footer.child(self.permission_menu_overlay(window, cx));
+        }
+        if footer_menu.is_some() {
+            footer = footer.child(self.footer_popover_overlay(window, cx));
         }
 
         // Flatten the old primary wrapper into the status row so the model is
@@ -13860,67 +13850,69 @@ impl Workspace {
             }
             if let Some(git) = fields.git.as_ref() {
                 let tooltip: SharedString = git.title.clone().into();
-                optional = optional.child(
-                    div()
-                        .children(footer_bounds_probe("git"))
-                        .id("footer-git")
-                        .flex_shrink()
-                        .min_w_0()
-                        .max_w(px(FOOTER_GIT_MAX_WIDTH))
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_ellipsis()
-                        .text_color(rgb(0xff6b35))
-                        .when(!git.available, |element| element.opacity(0.7))
-                        .child(footer_text("git", git.label.clone()))
-                        .tooltip(move |_, cx| cx.new(|_| CardTooltip(tooltip.clone())).into()),
-                );
+                let git_button = div()
+                    .children(footer_bounds_probe("git"))
+                    .id("footer-git")
+                    .flex_shrink()
+                    .min_w_0()
+                    .max_w(px(FOOTER_GIT_MAX_WIDTH))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_color(rgb(0xff6b35))
+                    .when(!git.available, |element| element.opacity(0.7))
+                    .child(footer_text("git", git.label.clone()))
+                    .tooltip(move |_, cx| cx.new(|_| CardTooltip(tooltip.clone())).into());
+                fixed = fixed.child(if git.available {
+                    self.footer_menu_trigger(git_button, FooterMenu::Git, footer_menu, window, cx)
+                } else {
+                    git_button
+                });
             }
             // The environment moves out of the shrinkable optional slot and
             // into the fixed right group, so a narrow footer can never clip
             // the 22×22 local icon or its label from the left.
             if let Some(environment) = fields.environment.as_ref() {
-                if environment.local_icon {
-                    fixed = fixed.child(
-                        div()
-                            .children(footer_bounds_probe("environment"))
-                            .id("footer-environment")
-                            .flex_none()
-                            .size(px(22.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .text_color(rgba(palette.session_name))
-                            .tooltip(|_, cx| {
-                                cx.new(|_| CardTooltip(SharedString::from("运行环境")))
-                                    .into()
-                            })
-                            .child(footer_monitor_icon(13., palette.session_name >> 8)),
-                    );
+                let environment_button = div()
+                    .children(footer_bounds_probe("environment"))
+                    .id("footer-environment")
+                    .whitespace_nowrap()
+                    .tooltip(move |_, cx| {
+                        cx.new(|_| CardTooltip(locale.text("运行环境", "Environment").into()))
+                            .into()
+                    });
+                let environment_button = if environment.local_icon {
+                    environment_button
+                        .flex_none()
+                        .size(px(22.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_color(rgba(palette.session_name))
+                        .child(footer_monitor_icon(13., rgba(palette.session_name)))
                 } else {
-                    let label = environment.label;
-                    fixed = fixed.child(
-                        div()
-                            .children(footer_bounds_probe("environment"))
-                            .id("footer-environment")
-                            .flex_shrink()
-                            .min_w_0()
-                            .max_w(px(FOOTER_ENVIRONMENT_MAX_WIDTH))
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(environment.color))
-                            .child(footer_text("environment", label))
-                            .tooltip(|_, cx| {
-                                cx.new(|_| CardTooltip(SharedString::from("运行环境")))
-                                    .into()
-                            }),
-                    );
-                }
+                    environment_button
+                        .flex_shrink()
+                        .min_w_0()
+                        .max_w(px(FOOTER_ENVIRONMENT_MAX_WIDTH))
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(environment.color))
+                        .child(footer_text("environment", environment.label))
+                };
+                fixed = fixed.child(self.footer_menu_trigger(
+                    environment_button,
+                    FooterMenu::Environment,
+                    footer_menu,
+                    window,
+                    cx,
+                ));
             }
-            fixed = fixed.child(self.egress_trigger(cx));
-            fixed = fixed.child(self.footer_account_trigger(cx));
+            fixed = fixed.child(self.egress_trigger_for(session, window, cx));
+            if footer_shows_account(fields.mode) {
+                fixed = fixed.child(self.footer_account_trigger(window, cx));
+            }
         }
 
         let measure = status_measure.clone();
@@ -13938,153 +13930,176 @@ impl Workspace {
             .min_w_0()
             .h_full()
             .pl(px(FOOTER_STATUS_PADDING_LEFT))
-            .border_l_1()
-            .border_color(rgba(palette.divider))
+            .when(!detached, |status| {
+                status.border_l_1().border_color(rgba(palette.divider))
+            })
             .flex()
             .items_center()
             .gap(px(status_gap))
             .overflow_hidden()
             .whitespace_nowrap()
             .text_size(px(10.))
-            .text_color(rgba(palette.text))
-            .when(self.project_instructions_available, |status| {
-                status.child(
-                    self.button(
-                        project_instructions::entry(footer_text("instructions", "AGENTS.md"))
+            .text_color(rgba(palette.text));
+        let mut primary = div()
+            .id("footer-primary")
+            .min_w_0()
+            .h_full()
+            .flex()
+            .items_center()
+            .gap(px(status_gap))
+            .flex_shrink()
+            .overflow_x_scroll()
+            .when_some(
+                self.project_instructions
+                    .get(&window.window_handle())
+                    .and_then(|state| state.filename_for(session)),
+                |status, filename| {
+                    status.child(
+                        self.button(
+                            project_instructions::entry(
+                                footer_text("instructions", filename),
+                                dark,
+                            )
                             .children(footer_bounds_probe("instructions")),
-                        &self.control_focus["project-instructions"],
-                        Self::open_project_instructions,
-                        cx,
-                    ),
-                )
-            });
+                            &self.control_focus["project-instructions"],
+                            Self::open_project_instructions,
+                            cx,
+                        ),
+                    )
+                },
+            );
         if let Some(chip) = chip.as_ref() {
-            status = status.child(self.permission_primary(chip, menu_open, window, cx));
+            primary = primary.child(self.permission_primary(chip, menu_open, window, cx));
         }
         if let Some(fields) = fields.as_ref() {
             let live = fields.live.unwrap_or(&Value::Null);
             if chip.is_none() && !fields.is_shell {
                 let permission = if fields.mode == "dsh" {
                     trimmed_graph_text(&live["providerPermissionLabel"])
+                        .or_else(|| trimmed_graph_text(&fields.node["providerPermissionLabel"]))
                 } else {
                     trimmed_graph_text(&live["permissionMode"]).or(fields.projected_permission)
                 };
                 if let Some(permission) = permission {
-                    let (label, color) = match permission {
-                        "bypassPermissions" | "BP" => ("BP", 0xff6b35),
-                        "plan" => ("PM", 0x58a6ff),
-                        "acceptEdits" => ("AE", 0xd29922),
-                        "auto" => ("A", 0x7ee787),
-                        "default" => ("D", 0x8b949e),
-                        label => (label, 0x8b949e),
+                    let (label, color) = if fields.mode == "dsh" {
+                        (permission, 0x8b949e)
+                    } else {
+                        match permission {
+                            "bypassPermissions" | "BP" => ("BP", 0xff6b35),
+                            "plan" => ("PM", 0x58a6ff),
+                            "acceptEdits" => ("AE", 0xd29922),
+                            "auto" => ("A", 0x7ee787),
+                            "default" => ("D", 0x8b949e),
+                            label => (label, 0x8b949e),
+                        }
                     };
-                    status = status.child(
+                    let title = SharedString::from(permission.to_owned());
+                    primary = primary.child(
                         div()
+                            .id("footer-readonly-permission")
                             .flex_none()
                             .px(px(6.))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(rgb(color))
-                            .child(footer_text("permission", label.to_owned())),
+                            .children(footer_bounds_probe("permission"))
+                            .child(footer_text("permission", label.to_owned()))
+                            .tooltip(move |_, cx| cx.new(|_| CardTooltip(title.clone())).into()),
                     );
                 }
             }
-            if let Some(name) = fields
-                .name
-                .as_deref()
-                .map(str::trim)
-                .filter(|name| !name.is_empty())
+            if show_model && let Some(name) = fields.name.as_deref().filter(|name| !name.is_empty())
             {
-                if fields.codex.is_none() {
-                    status = status.child(
-                        div()
-                            .children(footer_bounds_probe("name"))
-                            .id("footer-name")
-                            .flex_shrink()
-                            .min_w_0()
-                            .max_w(px(FOOTER_NAME_MAX_WIDTH))
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .text_color(rgba(if fields.is_shell {
-                                palette.text
-                            } else {
-                                palette.model
-                            }))
-                            .child(footer_text("name", name.to_owned())),
-                    );
-                } else if show_model {
-                    status =
-                        status.child(codex_hud::model_slot(SharedString::from(name.to_owned())));
-                }
-            }
-            if show_context
-                && let Some(percent) = fields
+                let full_label = fields
                     .live_hud
                     .as_ref()
-                    .and_then(|hud| hud.context_percent())
-                    .or_else(|| fields.codex.as_ref().and_then(|hud| hud.context_percent()))
-            {
-                status = status.child(codex_hud::context_ring(percent));
-            }
-            if show_context
-                && fields.mode == "claude-code"
-                && fields
-                    .live_hud
-                    .as_ref()
-                    .is_some_and(|hud| hud.has_context_window() && hud.context_percent().is_none())
-            {
-                status = status.child(footer_text(
-                    "context",
-                    locale.text("等待真实用量", "Awaiting usage"),
+                    .and_then(|hud| hud.full_model_label())
+                    .or_else(|| fields.codex.as_ref().and_then(|hud| hud.full_model_label()))
+                    .or_else(|| {
+                        (!fields.is_shell)
+                            .then(|| trimmed_graph_text(&fields.node["model"]))
+                            .flatten()
+                            .map(|model| model.to_owned().into())
+                    })
+                    .unwrap_or_else(|| name.to_owned().into());
+                primary = primary.child(codex_hud::model_slot(
+                    name.to_owned().into(),
+                    full_label,
+                    locale,
+                    (fields.mode != "codex").then_some(FOOTER_NAME_MAX_WIDTH),
+                    rgba(if fields.is_shell {
+                        palette.text
+                    } else {
+                        palette.model
+                    }),
                 ));
             }
-            if let Some(tools) = fields
-                .live_hud
-                .as_ref()
-                .and_then(|hud| hud.tools_slot())
-                .or_else(|| fields.codex.as_ref().and_then(|hud| hud.tools_slot()))
-            {
-                status = status.child(tools);
-            }
-            if fields.mode != "dsh" {
-                let counts = live
-                    .get("configCounts")
-                    .unwrap_or(&fields.node["configCounts"]);
-                let agents = live["agents"].as_array();
-                let agent_count = agents.map_or_else(
-                    || live["subagentCount"].as_u64().unwrap_or_default(),
-                    |agents| agents.len() as u64,
-                );
-                let configuration_count = |name: &str| counts[name].as_u64().unwrap_or_default();
-                let alert = agents
-                    .into_iter()
-                    .flatten()
-                    .any(|agent| matches!(agent["state"].as_str(), Some("error" | "warning")));
-                for (id, amount, label, color) in [
-                    (
-                        "agents",
-                        agent_count,
-                        if alert { "Agents ⚠" } else { "Agents" },
-                        if alert { 0xd29922 } else { 0x8b949e },
-                    ),
-                    ("hooks", configuration_count("hooks"), "hooks", 0x8b949e),
-                ] {
-                    if amount > 0 {
-                        status = status.child(
-                            div()
-                                .flex_none()
-                                .px(px(3.))
-                                .py(px(1.))
-                                .rounded(px(4.))
-                                .text_color(rgb(color))
-                                .child(footer_text(id, format!("{amount} {label}"))),
-                        );
-                    }
+            if show_context {
+                let context = fields
+                    .live_hud
+                    .as_ref()
+                    .filter(|hud| hud.context_percent().is_some() || hud.has_context_window())
+                    .or(fields.codex.as_ref());
+                if let Some(percent) = context.and_then(|hud| hud.context_percent()) {
+                    primary = primary.child(codex_hud::context_ring(percent));
+                } else if codex_hud::supports_details(fields.mode)
+                    && context.is_some_and(|hud| hud.has_context_window())
+                {
+                    primary = primary.child(
+                        div()
+                            .flex_none()
+                            .children(footer_bounds_probe("context"))
+                            .child(footer_text(
+                                "context",
+                                locale.text("等待真实用量", "Awaiting usage"),
+                            )),
+                    );
                 }
             }
-            status = status.child(optional).child(fixed);
+            if codex_hud::supports_details(fields.mode) {
+                let mut stats = codex_hud::statistics(live, fields.node, locale, dark)
+                    .into_iter()
+                    .peekable();
+                primary = primary.children(
+                    stats
+                        .next_if(|slot| slot.id() == "mcps")
+                        .map(|slot| slot.slot(locale, dark)),
+                );
+                let tools = if live["runningTools"].is_array() || live["toolCounts"].is_array() {
+                    fields.live_hud.as_ref()
+                } else {
+                    fields.codex.as_ref()
+                };
+                primary = primary.children(tools.and_then(|hud| hud.tools_slot(locale, dark)));
+                while let Some(slot) = stats.next_if(|slot| matches!(slot.id(), "agents" | "hooks"))
+                {
+                    primary = primary.child(slot.slot(locale, dark));
+                }
+                if status_content_width > 290. {
+                    primary = primary.children(self.footer_quota(
+                        fields.mode,
+                        live,
+                        footer_menu,
+                        window,
+                        cx,
+                    ));
+                }
+                primary = primary.children(
+                    stats
+                        .filter(|slot| match slot.id() {
+                            "todos" => status_content_width > 380.,
+                            "mcp-errors" => status_content_width > 330.,
+                            _ => true,
+                        })
+                        .map(|slot| slot.slot(locale, dark)),
+                );
+            }
+            status = status.child(primary).child(optional).child(fixed);
         } else {
-            status = status.child(div().ml_auto().child(self.egress_trigger(cx)));
+            status = status.child(
+                div()
+                    .ml_auto()
+                    .child(self.egress_trigger_for(session, window, cx)),
+            );
         }
         status = status.child(
             // Measure the real status and optional boxes after layout. The next
@@ -14096,7 +14111,8 @@ impl Workspace {
                 move |bounds, _, _, cx| {
                     record_footer_bounds("status", bounds);
                     let actual_width = f32::from(bounds.size.width);
-                    let actual_content_width = actual_width - FOOTER_STATUS_PADDING_LEFT - 1.;
+                    let actual_content_width =
+                        actual_width - FOOTER_STATUS_PADDING_LEFT - if detached { 0. } else { 1. };
                     measure.update(cx, |state, cx| {
                         let optional_width = state
                             .as_ref()
@@ -14104,16 +14120,19 @@ impl Workspace {
                             .map_or(0., |measure| measure.optional_width);
                         let actual_show_cwd = actual_content_width > FOOTER_CWD_HIDE_BELOW
                             && optional_width >= cwd_min_slot;
-                        let actual_show_model =
-                            codex_selected && actual_content_width > codex_hud::MODEL_HIDE_BELOW;
+                        let actual_show_model = codex_hud::shows_model(mode, actual_content_width);
                         let actual_show_context =
-                            codex_selected && actual_content_width > codex_hud::CONTEXT_HIDE_BELOW;
+                            actual_content_width > codex_hud::CONTEXT_HIDE_BELOW;
                         let changed = state
                             .as_ref()
                             .is_none_or(|measure| measure.key != measure_key)
                             || actual_show_cwd != show_cwd
                             || actual_show_model != show_model
                             || actual_show_context != show_context
+                            || [290., 330., 380.].into_iter().any(|threshold| {
+                                (actual_content_width > threshold)
+                                    != (status_content_width > threshold)
+                            })
                             || (actual_content_width < FOOTER_COMPACT_STATUS_WIDTH)
                                 != (status_content_width < FOOTER_COMPACT_STATUS_WIDTH);
                         *state = Some(FooterStatusMeasure {
@@ -14180,7 +14199,13 @@ impl Workspace {
             .text_size(px(10.))
             .line_height(px(PERMISSION_CHIP_LINE_HEIGHT))
             .font_weight(FontWeight::SEMIBOLD)
-            .text_color(rgb(permission_mode_color(chip.mode)))
+            .text_color(rgb(
+                if chip.mode == PermissionMode::Auto && chip.modes == PermissionMode::ANTIGRAVITY {
+                    permission_mode_color(PermissionMode::Default)
+                } else {
+                    permission_mode_color(chip.mode)
+                },
+            ))
             .whitespace_nowrap()
             .hover(|style| {
                 style.bg(Rgba {
@@ -14190,7 +14215,11 @@ impl Workspace {
             })
             .tooltip(move |_, cx| cx.new(|_| CardTooltip(tooltip.clone())).into())
             .child(permission_tracked_text(
-                permission_chip_text(chip.mode),
+                if chip.mode == PermissionMode::Auto && chip.modes == PermissionMode::ANTIGRAVITY {
+                    "D".into()
+                } else {
+                    permission_chip_text(chip.mode)
+                },
                 PERMISSION_CHIP_TRACKING,
             ));
         if chip.disabled {
@@ -14251,7 +14280,9 @@ impl Workspace {
                 SharedString::from("permission-menu-item-focus"),
                 cx,
                 |_, cx| {
-                    (0..PermissionMode::ALL.len())
+                    (0..PermissionMode::ALL
+                        .len()
+                        .max(PermissionMode::ANTIGRAVITY.len()))
                         .map(|_| cx.focus_handle().tab_stop(true))
                         .collect::<Vec<_>>()
                 },
@@ -14975,8 +15006,12 @@ impl Render for Workspace {
                                     }),
                             )
                             .children(
-                                node.filter(|node| node["archivedAt"].is_null())
-                                    .map(|node| self.remove_card_button(id, node, cx)),
+                                node.filter(|node| {
+                                    node["archivedAt"].is_null()
+                                        && session_levels::nodes(&self.graph).len()
+                                            > self.removal_branch_impact(node).sessions
+                                })
+                                .map(|node| self.remove_card_button(id, node, cx)),
                             ),
                         &palette,
                     )
@@ -15139,7 +15174,7 @@ impl Render for Workspace {
                     {
                         return;
                     }
-                    let _ = view.update(cx, |this, cx| { if this.dialog.is_none() && this.hidden_tabs.is_none() && this.project_instructions_preview.is_none() { this.scroll_carousel(event, window, cx); } });
+                    let _ = view.update(cx, |this, cx| { if this.dialog.is_none() && this.hidden_tabs.is_none() && !this.project_instructions_open(window) { this.scroll_carousel(event, window, cx); } });
                 });
                 if direction == 0 {
                     return;
@@ -15356,38 +15391,6 @@ impl Render for Workspace {
             .children(self.render_wiring_overlay(window, cx))
             .children(permission_toast);
         workspace_frame(root)
-    }
-}
-
-fn read_project_instructions(path: &std::path::Path) -> ProjectInstructionsRead {
-    use std::io::{self, Read as _};
-
-    const LIMIT: usize = 2 * 1024 * 1024;
-    let too_large = || io::Error::other("instruction file exceeds the 2 MB editor limit");
-    let read = || -> io::Result<SharedString> {
-        // A directory or special file can exist at the expected path, but
-        // only a regular file can supply a preview.
-        let metadata = std::fs::metadata(path)?;
-        if !metadata.is_file() {
-            return Err(io::Error::other("AGENTS.md 不是普通文件"));
-        }
-        if metadata.len() > LIMIT as u64 {
-            return Err(too_large());
-        }
-        let mut bytes = Vec::new();
-        std::fs::File::open(path)?
-            .take(LIMIT as u64 + 1)
-            .read_to_end(&mut bytes)?;
-        let content = String::from_utf8_lossy(&bytes);
-        if content.len() > LIMIT {
-            return Err(too_large());
-        }
-        Ok(content.into_owned().into())
-    };
-    match read() {
-        Ok(content) => ProjectInstructionsRead::Content(content),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => ProjectInstructionsRead::Missing,
-        Err(error) => ProjectInstructionsRead::Failed(format!("读取失败：{error}")),
     }
 }
 
@@ -16436,6 +16439,7 @@ fn permission_mode_color(mode: PermissionMode) -> u32 {
     match mode {
         PermissionMode::Default => 0x8b949e,
         PermissionMode::Auto => 0x7ee787,
+        PermissionMode::Ask => 0xa371f7,
         PermissionMode::AcceptEdits => 0xd29922,
         PermissionMode::Plan => 0x58a6ff,
         PermissionMode::Bypass => 0xff6b35,
@@ -16456,6 +16460,7 @@ fn permission_chip_text(mode: PermissionMode) -> SharedString {
     match mode {
         PermissionMode::Default => "D",
         PermissionMode::Auto => "A",
+        PermissionMode::Ask => "AK",
         PermissionMode::AcceptEdits => "AE",
         PermissionMode::Plan => "PM",
         PermissionMode::Bypass => "BP",
@@ -16467,6 +16472,7 @@ fn permission_mode_slug(mode: PermissionMode) -> &'static str {
     match mode {
         PermissionMode::Default => "default",
         PermissionMode::Auto => "auto",
+        PermissionMode::Ask => "ask",
         PermissionMode::AcceptEdits => "accept-edits",
         PermissionMode::Plan => "plan",
         PermissionMode::Bypass => "bypass-permissions",
@@ -16594,7 +16600,7 @@ fn footer_text_estimate(text: &str) -> f32 {
 
 /// `.status-environment.is-local-icon svg` without adding an asset: the
 /// frozen 16px monitor outline scaled to 13px.
-fn footer_monitor_icon(size: f32, color: u32) -> impl IntoElement {
+fn footer_monitor_icon(size: f32, color: Rgba) -> impl IntoElement {
     canvas(
         |_, _, _| (),
         move |bounds, _, window, _| {
@@ -16611,7 +16617,7 @@ fn footer_monitor_icon(size: f32, color: u32) -> impl IntoElement {
             path.move_to(at(8., 11.));
             path.line_to(at(8., 13.5));
             if let Ok(path) = path.build() {
-                window.paint_path(path, rgb(color));
+                window.paint_path(path, color);
             }
         },
     )
@@ -16620,7 +16626,7 @@ fn footer_monitor_icon(size: f32, color: u32) -> impl IntoElement {
 }
 
 /// 14px line user glyph for the account slot, drawn with GPUI's painter.
-fn footer_user_icon(size: f32, color: u32) -> impl IntoElement {
+fn footer_user_icon(size: f32, color: Rgba) -> impl IntoElement {
     canvas(
         |_, _, _| (),
         move |bounds, _, window, _| {
@@ -16645,7 +16651,7 @@ fn footer_user_icon(size: f32, color: u32) -> impl IntoElement {
             path.move_to(at(2.5, 13.));
             path.cubic_bezier_to(at(13.5, 13.), at(4.5, 8.5), at(11.5, 8.5));
             if let Ok(path) = path.build() {
-                window.paint_path(path, rgb(color));
+                window.paint_path(path, color);
             }
         },
     )
@@ -16667,52 +16673,82 @@ struct FooterFields<'a> {
     projected_permission: Option<&'a str>,
 }
 
+fn footer_shows_account(mode: &str) -> bool {
+    matches!(mode, "claude-code" | "shell")
+}
+
+fn permission_provider(node: &Value) -> &'static str {
+    match node["currentMode"].as_str() {
+        Some("codex") => "Codex",
+        Some("antigravity") => "Antigravity",
+        _ => "Claude",
+    }
+}
+
 struct FooterGit {
     label: String,
     title: String,
     available: bool,
+    branch: Option<String>,
+    root: Option<PathBuf>,
+    dirty: bool,
 }
 
 impl FooterGit {
-    fn from_node(git: &Value, locale: InterfaceLocale) -> Option<Self> {
-        if git["state"] == "unavailable" {
-            return Some(Self {
-                label: locale.text("Git 不可用", "Git unavailable").into(),
-                title: locale
+    fn projected(node: &Value, hud: Option<&Value>, locale: InterfaceLocale) -> Option<Self> {
+        let live = hud.unwrap_or(&Value::Null);
+        let git = &node["git"];
+        let branch = trimmed_graph_text(&live["gitBranch"])
+            .or_else(|| trimmed_graph_text(&git["branch"]))
+            .or_else(|| trimmed_graph_text(&node["gitBranch"]));
+        let dirty = live["gitDirty"]
+            .as_bool()
+            .or_else(|| git["dirty"].as_bool())
+            .or_else(|| node["gitDirty"].as_bool())
+            .unwrap_or(false);
+        let root = trimmed_graph_text(&git["root"])
+            .or_else(|| trimmed_graph_text(&git["repositoryRoot"]))
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute());
+        let (mut label, title, available) = if let Some(branch) = branch {
+            (
+                branch.to_owned(),
+                format!("{}{branch}", locale.text("Git 分支：", "Git branch: ")),
+                true,
+            )
+        } else if let Some(revision) = trimmed_graph_text(&git["detachedHead"]) {
+            (
+                format!("HEAD {}", revision.get(..7).unwrap_or(revision)),
+                format!(
+                    "{}{revision}",
+                    locale.text("Git 游离 HEAD：", "Git detached HEAD: ")
+                ),
+                true,
+            )
+        } else if git["state"] == "unavailable" {
+            (
+                locale.text("Git 不可用", "Git unavailable").into(),
+                locale
                     .text(
                         "当前目录不是可用的 Git 工作区",
                         "This directory is not a Git repository",
                     )
                     .into(),
-                available: false,
-            });
-        }
-        if git["state"] != "ready" {
-            return None;
-        }
-        let (mut label, title) = if let Some(branch) = trimmed_graph_text(&git["branch"]) {
-            (
-                branch.to_owned(),
-                format!("{}{branch}", locale.text("Git 分支：", "Git branch: ")),
+                false,
             )
         } else {
-            let revision = trimmed_graph_text(&git["detachedHead"])?;
-            let short = revision.get(..7).unwrap_or(revision);
-            (
-                format!("HEAD {short}"),
-                format!(
-                    "{}{revision}",
-                    locale.text("Git detached HEAD：", "Git detached HEAD: ")
-                ),
-            )
+            return None;
         };
-        if git["dirty"] == true {
+        if available && dirty {
             label.push('*');
         }
         Some(Self {
             label,
             title,
-            available: true,
+            available,
+            branch: branch.map(str::to_owned),
+            root,
+            dirty,
         })
     }
 }
