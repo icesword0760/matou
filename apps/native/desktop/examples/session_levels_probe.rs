@@ -267,9 +267,14 @@ mod workspace {
             )
         }
 
-        pub(super) fn focus_title_menu_item(&self, restore: bool, window: &mut Window) {
-            let (_, _, rename, restore_auto) = self.fork_menu.as_ref().expect("session title menu");
-            window.focus(if restore { restore_auto } else { rename });
+        pub(super) fn focus_title_menu_item(&mut self, restore: bool, cx: &mut Context<Self>) {
+            use matou_native_desktop::card_context_menu::CardMenuAction;
+            let action = if restore {
+                CardMenuAction::RestoreAutoTitle
+            } else {
+                CardMenuAction::Rename
+            };
+            self.select_card_menu_action_for_probe(action, cx);
         }
 
         pub(super) fn replace_title_input(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -675,12 +680,15 @@ mod workspace {
             window.focus(&self.fork_controls[id][control]);
         }
 
-        pub(super) fn focus_fork_menu(&self, window: &mut Window) {
-            window.focus(&self.fork_menu.as_ref().expect("card context menu").2);
+        pub(super) fn focus_fork_menu(&mut self, cx: &mut Context<Self>) {
+            self.select_card_menu_action_for_probe(
+                matou_native_desktop::card_context_menu::CardMenuAction::Fork,
+                cx,
+            );
         }
 
         pub(super) fn assert_fork_menu_closed(&self) {
-            assert!(self.fork_menu.is_none());
+            assert!(self.wiring_card_menu_target().is_none());
         }
 
         pub(super) fn focus_fork_dialog_control(&self, control: usize, window: &mut Window) {
@@ -707,7 +715,7 @@ mod workspace {
         }
 
         pub(super) fn assert_fork_readiness(&self, message: Option<&str>) {
-            assert_eq!(self.fork_readiness, message);
+            assert_eq!(self.fork_readiness.as_deref(), message);
         }
 
         pub(super) fn fork_readiness_visible(&self) -> bool {
@@ -878,7 +886,7 @@ mod workspace {
             let inset = if matches!(self.recovery.get(PARENT), Some(RecoveryState::Failed(_))) {
                 50.
             } else {
-                83.
+                83. + self.more_action_width(PARENT)
             };
             point(
                 bounds.right() + self.carousel_scroll.offset().x - px(inset),
@@ -1075,7 +1083,19 @@ mod workspace {
                 .into_iter()
                 .filter(|placement| self.fork_access(id, *placement).is_some())
                 .count();
-            self.remove_button_position(id) - point(px(31.5 + 30. * fork_count as f32), px(0.))
+            self.remove_button_position(id)
+                - point(
+                    px(31.5 + 30. * fork_count as f32 + self.more_action_width(id)),
+                    px(0.),
+                )
+        }
+
+        fn more_action_width(&self, id: &str) -> f32 {
+            if self.wiring_card_menu(id).can_open() {
+                26. + 6.
+            } else {
+                0.
+            }
         }
 
         fn loader(&self) -> &SessionLoader {
@@ -2668,7 +2688,7 @@ mod probe {
             fork_click(window, cx, MouseButton::Right, position);
             draw(window, cx);
             window
-                .update(cx, |view, window, _| view.focus_fork_menu(window))
+                .update(cx, |view, _, cx| view.focus_fork_menu(cx))
                 .unwrap();
             press(window, cx, "enter");
             draw(window, cx);
@@ -4654,9 +4674,7 @@ mod probe {
                     fork_click(window, cx, MouseButton::Right, position);
                     draw(window, cx);
                     window
-                        .update(cx, |view, window, _| {
-                            view.focus_title_menu_item(restore, window)
-                        })
+                        .update(cx, |view, _, cx| view.focus_title_menu_item(restore, cx))
                         .unwrap();
                     press(window, cx, "enter");
                     if !restore {
@@ -5765,7 +5783,9 @@ mod probe {
             click(window, cx, egress);
             click(window, cx, account);
             assert!(fixture.process(window, cx, &sink).is_empty());
-            println!("footer {width} | inactive exit & account slots did not dispatch commands");
+            println!(
+                "footer {width} | offline exit and account clicks did not dispatch Runtime commands"
+            );
 
             window
                 .update(cx, |view, window, cx| {

@@ -128,9 +128,25 @@ impl WorkspaceBoard {
         tasks: &[Task],
         sessions: &[Session],
     ) -> Self {
+        Self::from_session_tasks(
+            workspace_id,
+            workspace_name,
+            active_task_id,
+            tasks,
+            sessions.iter().map(|session| session.task_id.as_str()),
+        )
+    }
+
+    pub fn from_session_tasks<'a>(
+        workspace_id: &str,
+        workspace_name: &str,
+        active_task_id: Option<&str>,
+        tasks: &[Task],
+        session_tasks: impl IntoIterator<Item = &'a str>,
+    ) -> Self {
         let mut counts = HashMap::new();
-        for session in sessions {
-            *counts.entry(session.task_id.as_str()).or_insert(0) += 1;
+        for task_id in session_tasks {
+            *counts.entry(task_id).or_insert(0) += 1;
         }
 
         let mut tasks: Vec<_> = tasks
@@ -414,10 +430,30 @@ mod workspace_board_ui {
     }
 
     /// Public board entry point. The caller owns all state and reacts to move requests.
+    type MoveHandler = Rc<dyn Fn(BoardMoveRequest, &mut Window, &mut App)>;
+    type SessionRows = Rc<dyn Fn(&str) -> Vec<AnyElement>>;
+
     pub fn render_workspace_board(
         view: &BoardView,
         dark: bool,
-        on_move: Rc<dyn Fn(BoardMoveRequest, &mut Window, &mut App)>,
+        on_move: MoveHandler,
+    ) -> impl IntoElement {
+        render_board(view, dark, Some(on_move), None)
+    }
+
+    pub fn render_workspace_board_with_sessions(
+        view: &BoardView,
+        dark: bool,
+        session_rows: SessionRows,
+    ) -> impl IntoElement {
+        render_board(view, dark, None, Some(session_rows))
+    }
+
+    fn render_board(
+        view: &BoardView,
+        dark: bool,
+        on_move: Option<MoveHandler>,
+        session_rows: Option<SessionRows>,
     ) -> impl IntoElement {
         let palette = BoardPalette::new(dark);
         let columns = view
@@ -430,6 +466,7 @@ mod workspace_board_ui {
                     dark,
                     view.empty,
                     on_move.clone(),
+                    session_rows.as_ref(),
                 )
                 .into_any_element()
             })
@@ -465,17 +502,19 @@ mod workspace_board_ui {
                             .child(view.task_count.clone()),
                     ),
             )
-            .child(
-                div()
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .text_size(px(11.))
-                    .text_color(palette.muted)
-                    .child(board_guide_icon())
-                    .child(view.drag_hint),
-            );
+            .when(on_move.is_some(), |header| {
+                header.child(
+                    div()
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .text_size(px(11.))
+                        .text_color(palette.muted)
+                        .child(board_guide_icon())
+                        .child(view.drag_hint),
+                )
+            });
 
         let scroll = div()
             .id("workspace-board-scroll")
@@ -582,7 +621,8 @@ mod workspace_board_ui {
         workspace_id: &str,
         dark: bool,
         empty_text: &'static str,
-        on_move: Rc<dyn Fn(BoardMoveRequest, &mut Window, &mut App)>,
+        on_move: Option<MoveHandler>,
+        session_rows: Option<&SessionRows>,
     ) -> impl IntoElement {
         let palette = BoardPalette::new(dark);
         let tone = palette.tone(column.status);
@@ -673,6 +713,7 @@ mod workspace_board_ui {
                 BoardCardComponent {
                     workspace_id: workspace_id.to_owned(),
                     card: card.clone(),
+                    session_rows: session_rows.map_or_else(Vec::new, |rows| rows(&card.id)),
                     status: column_status,
                     dark,
                     on_move: on_move.clone(),
@@ -781,10 +822,11 @@ mod workspace_board_ui {
         drag: &BoardDrag,
         status: BoardStatus,
         before_task_id: Option<String>,
-        on_move: &Rc<dyn Fn(BoardMoveRequest, &mut Window, &mut App)>,
+        on_move: &Option<MoveHandler>,
         window: &mut Window,
         cx: &mut App,
     ) {
+        let Some(on_move) = on_move else { return };
         if drag.workspace_id != workspace_id {
             return;
         }
@@ -810,9 +852,10 @@ mod workspace_board_ui {
     struct BoardCardComponent {
         workspace_id: String,
         card: BoardCard,
+        session_rows: Vec<AnyElement>,
         status: BoardStatus,
         dark: bool,
-        on_move: Rc<dyn Fn(BoardMoveRequest, &mut Window, &mut App)>,
+        on_move: Option<MoveHandler>,
     }
 
     impl RenderOnce for BoardCardComponent {
@@ -848,7 +891,9 @@ mod workspace_board_ui {
                 .border_color(palette.line)
                 .bg(palette.panel)
                 .shadow(vec![board_shadow(0x223244, 0.035, 1., 2.)])
-                .cursor(CursorStyle::OpenHand)
+                .when(self.on_move.is_some(), |card| {
+                    card.cursor(CursorStyle::OpenHand)
+                })
                 .when(self.card.current.is_some(), |card| {
                     card.border_color(palette.accent_line).child(
                         div()
@@ -903,25 +948,28 @@ mod workspace_board_ui {
                             )
                         }),
                 )
-                .on_drag(
-                    BoardDrag {
-                        task_id: self.card.id,
-                        workspace_id: self.workspace_id,
-                        title: drag_title,
-                    },
-                    move |info, _, _, cx| {
-                        let preview = cx.new(|_| BoardDragPreview {
-                            title: info.title.clone(),
-                            dark: drag_dark,
-                        });
-                        cx.set_global(BoardDragState {
-                            workspace_id: info.workspace_id.clone(),
-                            source_task_id: info.task_id.clone(),
-                            preview: preview.downgrade(),
-                        });
-                        preview
-                    },
-                )
+                .children(self.session_rows)
+                .when(self.on_move.is_some(), |card| {
+                    card.on_drag(
+                        BoardDrag {
+                            task_id: self.card.id,
+                            workspace_id: self.workspace_id,
+                            title: drag_title,
+                        },
+                        move |info, _, _, cx| {
+                            let preview = cx.new(|_| BoardDragPreview {
+                                title: info.title.clone(),
+                                dark: drag_dark,
+                            });
+                            cx.set_global(BoardDragState {
+                                workspace_id: info.workspace_id.clone(),
+                                source_task_id: info.task_id.clone(),
+                                preview: preview.downgrade(),
+                            });
+                            preview
+                        },
+                    )
+                })
                 .on_drop(move |drag: &BoardDrag, window, cx| {
                     board_emit_move(
                         &move_workspace,
@@ -949,7 +997,7 @@ mod workspace_board_ui {
     }
 }
 
-pub use workspace_board_ui::render_workspace_board;
+pub use workspace_board_ui::{render_workspace_board, render_workspace_board_with_sessions};
 
 #[cfg(test)]
 mod tests {
