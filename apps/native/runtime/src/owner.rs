@@ -52,6 +52,7 @@ use crate::{
     egress_probe::{self, EgressMonitor, EgressSample, Family, RuleMode, SessionEffect},
     fork_worktree::{ForkIdentity, ForkLease, ForkStage, NewWorktree, WorktreeBinding},
     host_control::{RunControl, clear_control_environment},
+    provider_catalog::LiveTranscript,
     provider_hook::{
         HOOK_QUEUE_CAPACITY, HookMessage, HookSetup, IDENTITY_TIMEOUT, Observation,
         ProviderHookServer, Registration, Scope,
@@ -161,7 +162,35 @@ struct RunHook {
     dsh_status: Option<DshWorkStatus>,
     claude_projects: Option<PathBuf>,
     claude_transcript: Option<PathBuf>,
+    claude_live: LiveTranscript,
+    claude_transcript_poll: Option<Instant>,
+    claude_observed_title: Option<String>,
     permission_identity_error: Option<String>,
+}
+
+impl RunHook {
+    fn remember_claude_transcript(&mut self, payload: &Value) {
+        let identity = self
+            .last_observation
+            .as_ref()
+            .and_then(|last| last.identity.as_deref());
+        let path = ["transcript_path", "transcriptPath"]
+            .iter()
+            .find_map(|key| payload[*key].as_str())
+            .map(Path::new);
+        if let Some((identity, path)) = identity.zip(path)
+            && path.is_absolute()
+            && path.file_name().is_some_and(|name| {
+                name == std::ffi::OsStr::new(&format!("{}.jsonl", identity.trim()))
+            })
+            && self.claude_transcript.as_deref() != Some(path)
+        {
+            self.claude_transcript = Some(path.to_owned());
+            self.claude_live = LiveTranscript::default();
+            self.hud.ingest_live_claude_row(None);
+            self.claude_transcript_poll = Some(Instant::now());
+        }
+    }
 }
 
 const FORK_SOURCE_IDENTITY: &str = "CLI returned the source conversation ID for the fork";
@@ -743,6 +772,20 @@ impl ShellOwner {
             sessions::current_interface_locale(sessions::read_locale_preference(data_root));
         let teammates = project_teammates(&shell.run_id, session_id, &rows, locale);
         let mut hud = json!(hook.hud.snapshot(now() as f64));
+        let cwd = hud["cwd"]
+            .as_str()
+            .filter(|cwd| Path::new(cwd).is_absolute())
+            .unwrap_or(&shell.cwd);
+        let branch = matou_native_core::git_repo::current_branch(Path::new(cwd));
+        let config = hook
+            .claude_projects
+            .as_deref()
+            .and_then(Path::parent)
+            .map(|config| crate::provider_hook::claude_config_counts(Path::new(cwd), config));
+        hud["gitBranch"] = json!(branch);
+        if let Some(config) = config {
+            hud["configCounts"] = config;
+        }
         if let Some(codex) = &hook.codex {
             let transcript =
                 codex.hud_projection(|value| safe_hook_text(value, &hook.secrets).is_some());
@@ -766,8 +809,33 @@ impl ShellOwner {
     }
     pub fn graph(&self, scene_id: &str, window_id: Option<&str>) -> Result<Value> {
         let mut graph = session_graph::project_scene_graph(&self.connection, scene_id, window_id)?;
+        let focused = graph["focusedSessionId"].as_str().map(str::to_owned);
         if let Some(nodes) = graph["nodes"].as_array_mut() {
             for node in nodes {
+                if node["sessionId"].as_str() == focused.as_deref() {
+                    let cwd = focused
+                        .as_ref()
+                        .and_then(|id| self.shells.get(id))
+                        .and_then(|shell| shell.hook.as_ref())
+                        .and_then(|hook| hook.hud.cwd())
+                        .filter(|cwd| Path::new(cwd).is_absolute())
+                        .or_else(|| node["cwd"].as_str());
+                    let branch = cwd.and_then(|cwd| {
+                        matou_native_core::git_repo::current_branch(Path::new(cwd))
+                    });
+                    if let Some(branch) = branch {
+                        if node["git"].is_object() {
+                            node["git"]["branch"] = json!(branch);
+                            node["git"]["state"] = json!("ready");
+                            node["git"].as_object_mut().unwrap().remove("detachedHead");
+                        } else {
+                            node["git"] =
+                                json!({"state": "ready", "branch": branch, "dirty": false});
+                        }
+                    } else if let Some(git) = node["git"].as_object_mut() {
+                        git.remove("branch");
+                    }
+                }
                 if node["currentMode"] == "codex"
                     && node["providerRestoreState"] == "none"
                     && matches!(node["workStatus"].as_str(), Some("error" | "starting"))
@@ -1227,14 +1295,6 @@ impl ShellOwner {
         replacement_ids: &HierarchyIds,
         committed_at: i64,
     ) -> Result<Value> {
-        // The owner serializes writes between the shortcut check and the workflow.
-        if cards::close_shortcut_is_last(&self.connection, &input.scene_id, &input.session_id)? {
-            return Ok(serde_json::json!({
-                "outcome": "hide-window",
-                "disposedSessionIds": [],
-                "rebuildCanvas": false,
-            }));
-        }
         let run_id = self
             .shells
             .get(&input.session_id)
@@ -2683,6 +2743,13 @@ impl ShellOwner {
                         .env
                         .get(std::ffi::OsStr::new("CLAUDE_CONFIG_DIR"))
                         .map(|path| Path::new(path).join("projects"))
+                        .or_else(|| {
+                            options
+                                .launch
+                                .env
+                                .get(std::ffi::OsStr::new("HOME"))
+                                .map(|home| Path::new(home).join(".claude/projects"))
+                        })
                         .or_else(crate::provider_catalog::projects_root)
                 })
                 .flatten();
@@ -2704,6 +2771,9 @@ impl ShellOwner {
                 hud,
                 claude_projects,
                 claude_transcript: None,
+                claude_live: LiveTranscript::default(),
+                claude_transcript_poll: None,
+                claude_observed_title: None,
                 dsh,
                 antigravity,
                 dsh_pending: Vec::new(),
@@ -2739,6 +2809,8 @@ impl ShellOwner {
                 Err(error) => eprintln!("[host-control] {error:#}"),
             }
         }
+        #[cfg(unix)]
+        let alias_input = is_shell.then(|| ShellInput::with_shell_environment(&options.launch));
         let mut worker = match SessionWorker::spawn(options, self.send.clone(), run_id.clone()) {
             Ok(worker) => worker,
             Err(error) => {
@@ -2748,6 +2820,10 @@ impl ShellOwner {
                 return Err(error);
             }
         };
+        #[cfg(unix)]
+        if let Some(input) = alias_input {
+            worker.restore_shell_input(input);
+        }
         let time = now();
         let commit = sessions::start_run(
             &mut self.connection,
@@ -2839,6 +2915,17 @@ impl ShellOwner {
             registration.attach_codex(&mut options.launch)?;
         } else if options.launch.profile == LaunchProfile::ClaudeCode {
             attach_claude_settings(&mut options.launch, &registration.settings_path)?;
+            if let Some(plugin) = std::env::current_exe()
+                .ok()
+                .as_deref()
+                .and_then(crate::provider_hook::bundled_claude_plugin)
+            {
+                let path = plugin.to_str().context("Claude plugin path is not UTF-8")?;
+                options
+                    .launch
+                    .argv
+                    .splice(2..2, ["--plugin-dir".into(), path.to_owned()]);
+            }
         }
         Ok(registration)
     }
@@ -3106,6 +3193,7 @@ impl ShellOwner {
         for (id, run_id, effect) in codex_effects {
             self.apply_codex_effect(&id, &run_id, effect, None, events);
         }
+        self.poll_claude_transcripts(events);
         self.poll_codex_titles(events);
         self.poll_antigravity_titles(events);
         let expired_codex_forks = self
@@ -3679,6 +3767,98 @@ impl ShellOwner {
         self.retire_sessions(&[session_id.to_owned()]);
     }
 
+    fn poll_claude_transcripts(&mut self, events: &mut Vec<OwnerEvent>) {
+        if self.closing {
+            return;
+        }
+        let at = Instant::now();
+        let ready: Vec<_> = self
+            .shells
+            .iter()
+            .filter_map(|(id, shell)| {
+                let hook = shell.hook.as_ref()?;
+                (!shell.ended
+                    && !shell.retiring
+                    && hook.claude_transcript_poll.is_some_and(|due| due <= at))
+                .then(|| id.clone())
+            })
+            .collect();
+        for id in ready {
+            self.observe_claude_transcript(&id, events);
+        }
+    }
+
+    fn observe_claude_transcript(&mut self, session_id: &str, events: &mut Vec<OwnerEvent>) {
+        let Some(shell) = self
+            .shells
+            .get_mut(session_id)
+            .filter(|shell| !shell.ended && !shell.retiring)
+        else {
+            return;
+        };
+        let Some(hook) = &mut shell.hook else {
+            return;
+        };
+        let Some((root, path, identity)) = hook
+            .claude_projects
+            .as_deref()
+            .zip(hook.claude_transcript.as_deref())
+            .zip(
+                hook.last_observation
+                    .as_ref()
+                    .and_then(|last| last.identity.as_deref()),
+            )
+            .map(|((root, path), identity)| (root, path, identity.trim()))
+        else {
+            hook.claude_transcript_poll = None;
+            return;
+        };
+        let backlog = hook
+            .claude_live
+            .poll(root, path, identity, |row| {
+                hook.hud.ingest_live_claude_row(row)
+            })
+            .unwrap_or_default();
+        hook.claude_transcript_poll = Some(
+            Instant::now()
+                + if backlog {
+                    Duration::from_millis(25)
+                } else {
+                    Duration::from_secs(1)
+                },
+        );
+        let Some(title) = hook
+            .claude_live
+            .title()
+            .and_then(|title| safe_hook_text(title, &hook.secrets))
+        else {
+            return;
+        };
+        if hook.claude_observed_title.as_deref() == Some(title) {
+            return;
+        }
+        let id = (self.next_id)();
+        match sessions::observe_provider_title(
+            &mut self.connection,
+            &command(id.clone(), "provider-hook.title", id),
+            session_id,
+            &shell.run_id,
+            &self.generation,
+            "claude-code",
+            identity,
+            title,
+            now(),
+        ) {
+            Ok(commit) => {
+                hook.claude_observed_title = Some(title.to_owned());
+                if let Some(commit) = commit {
+                    events.push(OwnerEvent::Domain(commit));
+                }
+            }
+            Err(error) => diagnostic(events, session_id, format!("{error:#}")),
+        }
+    }
+
     fn apply_hook(
         &mut self,
         scope: Scope,
@@ -3719,6 +3899,7 @@ impl ShellOwner {
                     payload.remove("hook_event_name");
                     payload.remove("hookEventName");
                 }
+                hook.remember_claude_transcript(&payload);
                 hook.hud.ingest_provider(&payload, now() as f64);
             }
             return;
@@ -3814,6 +3995,7 @@ impl ShellOwner {
         };
         observation.cwd = safe(observation.cwd)
             .filter(|cwd| Path::new(cwd).is_absolute() && Path::new(cwd).is_dir());
+        let hook_event = observation.event;
         let hud_payload = observation.hud_payload.take();
         // Hook status is independent of whether the identity metadata changed.
         let notification = observation.notification.take();
@@ -3876,6 +4058,11 @@ impl ShellOwner {
             hook.deadline = None;
             hook.last_observation = Some(observation);
             if confirms {
+                hook.claude_transcript = None;
+                hook.claude_transcript_poll = None;
+                hook.claude_observed_title = None;
+                hook.claude_live = LiveTranscript::default();
+                hook.hud.ingest_live_claude_row(None);
                 let mut payload = commit.result.clone();
                 payload["result"] = json!("confirmed");
                 events.push(OwnerEvent::ProviderIdentity(payload));
@@ -3883,26 +4070,8 @@ impl ShellOwner {
             events.push(OwnerEvent::Domain(commit));
         }
         if let Some(payload) = hud_payload {
-            let identity = hook
-                .last_observation
-                .as_ref()
-                .and_then(|last| last.identity.as_deref());
-            if let Some(identity) = identity {
-                hook.hud.set_resumable(true);
-                let transcript = ["transcript_path", "transcriptPath"]
-                    .iter()
-                    .find_map(|key| payload[*key].as_str());
-                if let Some(path) = transcript.map(Path::new) {
-                    let expected = format!("{identity}.jsonl");
-                    if path.is_absolute()
-                        && path
-                            .file_name()
-                            .is_some_and(|name| name == std::ffi::OsStr::new(&expected))
-                    {
-                        hook.claude_transcript = Some(path.to_owned());
-                    }
-                }
-            }
+            hook.hud.set_resumable(true);
+            hook.remember_claude_transcript(&payload);
             hook.hud.ingest_provider(&payload, now() as f64);
         }
         let permission_confirmed = confirms
@@ -3956,6 +4125,9 @@ impl ShellOwner {
                     format!("persist provider hook work status: {error:#}"),
                 );
             }
+        }
+        if confirms || matches!(hook_event, "UserPromptSubmit" | "Stop") {
+            self.observe_claude_transcript(&scope.session_id, events);
         }
         if permission_confirmed
             && let Err(error) = self.set_work_status(&scope.session_id, events, |_| "idle")
@@ -5989,6 +6161,27 @@ mod provider_tests {
         let root = tempfile::tempdir()?;
         let cwd = root.path().join("workspace");
         fs::create_dir(&cwd)?;
+        ensure!(
+            std::process::Command::new("git")
+                .current_dir(&cwd)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args(["init", "--quiet", "--initial-branch=main"])
+                .status()?
+                .success()
+        );
+        let config_root = root.path().join("claude");
+        let projects = config_root.join("projects/project-bucket");
+        fs::create_dir_all(&projects)?;
+        fs::create_dir(cwd.join(".claude"))?;
+        fs::write(
+            config_root.join("settings.json"),
+            r#"{"hooks":{"Stop":[],"PreToolUse":[]}}"#,
+        )?;
+        fs::write(
+            cwd.join(".claude/settings.local.json"),
+            r#"{"hooks":{"Stop":[],"SessionStart":[]}}"#,
+        )?;
         let BootstrapResult::Writable {
             mut connection,
             ownership,
@@ -6047,7 +6240,11 @@ mod provider_tests {
                 cwd: cwd.clone(),
                 data_root: root.path().to_owned(),
                 inherited_env: Default::default(),
-                env: Default::default(),
+                env: [(
+                    "CLAUDE_CONFIG_DIR".into(),
+                    config_root.clone().into_os_string(),
+                )]
+                .into(),
                 cols: 80,
                 rows: 24,
             },
@@ -6170,8 +6367,89 @@ mod provider_tests {
         );
         owner.apply_output(session, "accepted terminal text", &[], &mut events);
         assert_eq!(owner.summaries[session].raw, "accepted terminal text");
-        assert_provider_work_status(&mut owner, &scope)?;
+        let first_path = projects.join("first-id.jsonl");
+        let append = |row: Value| -> Result<()> {
+            let mut file = fs::OpenOptions::new()
+                .append(true)
+                .create(true)
+                .open(&first_path)?;
+            writeln!(file, "{row}")?;
+            Ok(())
+        };
+        let hook_with_transcript = |event| {
+            let payload = json!({"hook_event_name": event, "session_id":"first-id", "transcript_path":first_path,
+                "cwd":cwd, "tool_use_id":"read", "tool_name":"Read"});
+            let mut observation = Observation::parse(payload.as_object().unwrap());
+            observation.hud_payload = Some(payload);
+            observation
+        };
+        append(
+            json!({"type":"user","sessionId":"first-id","message":{"role":"user",
+            "content":"<system-reminder>internal instructions</system-reminder>"}}),
+        )?;
+        append(
+            json!({"type":"user","sessionId":"different-id","message":{"role":"user","content":"Wrong conversation"}}),
+        )?;
+        append(
+            json!({"type":"user","sessionId":"first-id","message":{"role":"user",
+            "content":[{"type":"text","text":"请接手  Matou 原生迁移"}]}}),
+        )?;
+        owner.apply_hook(
+            scope.clone(),
+            hook_with_transcript("UserPromptSubmit"),
+            &mut events,
+        );
+        assert_eq!(
+            owner.session(session)?.unwrap().title,
+            "请接手 Matou 原生迁移"
+        );
+        let graph = owner.graph("scene", Some("window"))?;
+        assert_eq!(graph["nodes"][0]["title"], "请接手 Matou 原生迁移");
+        assert_eq!(graph["nodes"][0]["git"]["branch"], "main");
+        append(json!({"type":"summary","summary":"Transcript summary"}))?;
+        owner
+            .shells
+            .get_mut(session)
+            .unwrap()
+            .hook
+            .as_mut()
+            .unwrap()
+            .claude_transcript_poll = Some(Instant::now());
+        owner.poll_claude_transcripts(&mut events);
+        assert_eq!(owner.session(session)?.unwrap().title, "Transcript summary");
+        append(json!({"type":"ai-title","aiTitle":"Native migration"}))?;
+        append(json!({"type":"assistant","message":{"content":[
+            {"type":"tool_use","id":"read","name":"Read"},
+            {"type":"tool_use","id":"agent","name":"Agent","input":{"name":"Reviewer"}},
+            {"type":"tool_use","id":"agent-2","name":"Agent","input":{"name":"Verifier"}},
+        ]}}))?;
+        append(
+            json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"read"}]}}),
+        )?;
+        owner.apply_hook(
+            scope.clone(),
+            hook_with_transcript("PostToolUse"),
+            &mut events,
+        );
+        owner.observe_claude_transcript(session, &mut events);
+        assert_eq!(owner.session(session)?.unwrap().title, "Native migration");
+        let hud = owner.agent_hud(session, root.path())?;
+        assert_eq!(hud["hud"]["gitBranch"], "main");
+        assert_eq!(hud["hud"]["toolCounts"], json!([{"name":"Read","count":1}]));
+        assert_eq!(hud["hud"]["subagentCount"], 2);
+        assert_eq!(hud["hud"]["configCounts"]["hooks"], 3);
+        assert_eq!(
+            hud["hud"]["configCounts"]["hookNames"],
+            json!(["PreToolUse", "SessionStart", "Stop"])
+        );
+        owner.set_session_title(session, Some("My card"))?;
+        append(json!({"type":"custom-title","customTitle":"New provider title"}))?;
+        owner.observe_claude_transcript(session, &mut events);
+        let card = owner.session(session)?.unwrap();
+        assert_eq!(card.title, "My card");
+        assert_eq!(card.provider_title.as_deref(), Some("New provider title"));
 
+        assert_provider_work_status(&mut owner, &scope)?;
         owner.retire_sessions(&[session.into()]);
         let deadline = Instant::now() + Duration::from_secs(5);
         while owner.has_shell_worker(session) && Instant::now() < deadline {
@@ -6228,7 +6506,11 @@ mod provider_tests {
         )?;
         assert!(duplicate.replayed);
         assert_eq!(duplicate.first_event_sequence, Some(seq));
-        owner.apply_hook(scope, stop("late-id"), &mut events);
+        append(json!({"type":"custom-title","customTitle":"Retired run title"}))?;
+        owner.apply_hook(scope, hook_with_transcript("Stop"), &mut events);
+        let card = owner.session(session)?.unwrap();
+        assert_eq!(card.title, "My card");
+        assert_eq!(card.provider_title.as_deref(), Some("New provider title"));
         owner.apply_hook(
             Scope {
                 generation: "old-generation".into(),

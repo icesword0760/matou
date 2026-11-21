@@ -3,7 +3,7 @@ use std::{
     borrow::Cow,
     collections::{BTreeSet, HashMap, VecDeque},
     fs::{self, File},
-    io::{self, BufRead, BufReader, Read},
+    io::{self, BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Component, Path, PathBuf},
     sync::LazyLock,
 };
@@ -619,6 +619,104 @@ fn is_preview_space(c: char) -> bool {
     c == '\u{feff}' || (c.is_whitespace() && c != '\u{85}')
 }
 
+/// Read appended rows in bounded slices. Retry a partial final row after it is
+/// committed, and reset the projections if the provider replaces the file.
+#[derive(Default)]
+pub(crate) struct LiveTranscript {
+    file: Option<File>,
+    offset: u64,
+    partial: Vec<u8>,
+    oversized: bool,
+    title: TranscriptTitle,
+}
+
+impl LiveTranscript {
+    pub(crate) fn title(&self) -> Option<&str> {
+        self.title.title()
+    }
+
+    pub(crate) fn poll(
+        &mut self,
+        root: &Path,
+        candidate: &Path,
+        id: &str,
+        mut ingest: impl FnMut(Option<&Value>),
+    ) -> io::Result<bool> {
+        let root = root.canonicalize()?;
+        let Some((mut file, path)) = open_transcript(&root, candidate, &mut Skipped::default())?
+        else {
+            return Ok(false);
+        };
+        if path.file_name() != candidate.file_name() {
+            return Ok(false);
+        }
+        let metadata = file.metadata()?;
+        let mut replaced = metadata.len() < self.offset;
+        if let Some(previous) = &self.file {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                let previous = previous.metadata()?;
+                replaced |= (previous.dev(), previous.ino()) != (metadata.dev(), metadata.ino());
+            }
+            #[cfg(windows)]
+            {
+                replaced |= !matches_windows_file(&path, previous)?;
+            }
+        }
+        if replaced {
+            *self = Self::default();
+            ingest(None);
+        }
+        const READ_BUDGET: u64 = 256 * 1024;
+        file.seek(SeekFrom::Start(self.offset))?;
+        let mut bytes = Vec::new();
+        (&mut file).take(READ_BUDGET).read_to_end(&mut bytes)?;
+        self.offset += bytes.len() as u64;
+        self.file = Some(file);
+        for part in bytes.split_inclusive(|byte| *byte == b'\n') {
+            self.oversized |= self.partial.len() as u64 + part.len() as u64 > MAX_LINE_BYTES;
+            if !self.oversized {
+                self.partial.extend_from_slice(part);
+            }
+            if !part.ends_with(b"\n") {
+                continue;
+            }
+            self.ingest_line(id, &mut ingest);
+            self.oversized = false;
+            self.partial.clear();
+        }
+        let backlog = self.offset < metadata.len();
+        // A transcript may end in a complete JSON value without a final newline.
+        // Keep an incomplete value buffered until Claude appends the rest.
+        if !backlog && !self.partial.is_empty() && self.ingest_line(id, &mut ingest) {
+            self.partial.clear();
+        }
+        Ok(backlog)
+    }
+
+    fn ingest_line(&mut self, id: &str, ingest: &mut impl FnMut(Option<&Value>)) -> bool {
+        if self.oversized {
+            return false;
+        }
+        let Ok(row) = serde_json::from_slice::<Value>(&self.partial) else {
+            return false;
+        };
+        if row.is_object()
+            && row["sessionId"]
+                .as_str()
+                .is_none_or(|session| session == id)
+        {
+            let message = &row["message"];
+            let (has_text, tool) = message_content(&message["content"]);
+            let user = row["type"] == "user" && message["role"] == "user" && has_text && !tool;
+            self.title.observe(&row, user);
+            ingest(Some(&row));
+        }
+        true
+    }
+}
+
 fn open_transcript(
     root: &Path,
     candidate: &Path,
@@ -630,7 +728,14 @@ fn open_transcript(
     if !fs::metadata(&path)?.is_file() {
         return Ok(None);
     }
-    let file = File::open(&path)?;
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options.open(&path)?;
     Ok(recheck_transcript(root, candidate, &path, &file, skipped)?.then_some((file, path)))
 }
 
@@ -935,6 +1040,7 @@ fn message_content(content: &Value) -> (bool, bool) {
 struct TranscriptTitle {
     custom: Option<String>,
     auto: Option<String>,
+    summary: Option<String>,
     prompt: Option<String>,
 }
 
@@ -948,6 +1054,11 @@ impl TranscriptTitle {
         {
             self.auto = Some(auto.into());
         }
+        if row["type"] == "summary"
+            && let Some(summary) = nonempty(&row["summary"])
+        {
+            self.summary = Some(summary.into());
+        }
         if self.prompt.is_none() && user_prompt {
             let title = compact_title(&row["message"]["content"]);
             if !title.is_empty() {
@@ -958,6 +1069,14 @@ impl TranscriptTitle {
 
     fn into_title(self) -> Option<String> {
         self.custom.or(self.auto).or(self.prompt)
+    }
+
+    fn title(&self) -> Option<&str> {
+        self.custom
+            .as_deref()
+            .or(self.auto.as_deref())
+            .or(self.summary.as_deref())
+            .or(self.prompt.as_deref())
     }
 }
 

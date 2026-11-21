@@ -53,17 +53,6 @@ pub struct RemoveSessionBranchInput {
     pub now: i64,
 }
 
-/// The shortcut displays a notice for the workspace's final live card. The
-/// hierarchy close workflow also serves callers that explicitly end that card.
-pub fn close_shortcut_is_last(db: &Connection, scene_id: &str, session_id: &str) -> Result<bool> {
-    let (_, workspace_id, _) = active_session(db, session_id)?;
-    let is_last = workspace_session_count(db, &workspace_id)? == 1;
-    if is_last {
-        close_mount(db, scene_id, session_id)?;
-    }
-    Ok(is_last)
-}
-
 /// Close the mounted session. Only the runtime owner can supply the ID of a
 /// run it can retire after commit. Every other active run blocks archival.
 pub fn close_card(

@@ -1,6 +1,19 @@
 use crate::flow::Utf8Decoder;
 use matou_native_core::pty::LaunchProfile;
 
+#[cfg(unix)]
+use std::{
+    collections::{BTreeMap, HashMap},
+    ffi::{OsStr, OsString},
+    io::{ErrorKind, Read},
+    os::{fd::AsRawFd, unix::process::CommandExt},
+    path::PathBuf,
+    process::{Command, Stdio},
+    sync::{Arc, LazyLock, Mutex},
+    thread,
+    time::{Duration, Instant},
+};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct InteractiveLaunch {
     pub profile: LaunchProfile,
@@ -11,10 +24,41 @@ pub(crate) struct InteractiveLaunch {
 pub(crate) struct ShellInput {
     line: Vec<u16>,
     decoder: Utf8Decoder,
+    #[cfg(unix)]
+    cc_alias: Option<Arc<ShellAliasEnvironment>>,
 }
 
 impl ShellInput {
     pub(crate) fn observe(&mut self, bytes: &[u8]) -> Option<InteractiveLaunch> {
+        #[cfg(unix)]
+        let cc_alias = self.cc_alias.clone();
+        self.observe_with_cc(bytes, || {
+            #[cfg(unix)]
+            if let Some(environment) = cc_alias {
+                return environment.resolve_cc();
+            }
+            None
+        })
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn with_shell_environment(launch: &matou_native_core::pty::ShellLaunch) -> Self {
+        let mut env = launch.inherited_env.clone();
+        env.extend(launch.env.clone());
+        Self {
+            cc_alias: Some(Arc::new(ShellAliasEnvironment {
+                env,
+                cwd: launch.cwd.clone(),
+            })),
+            ..Self::default()
+        }
+    }
+
+    fn observe_with_cc(
+        &mut self,
+        bytes: &[u8],
+        resolve_cc: impl FnOnce() -> Option<InteractiveLaunch>,
+    ) -> Option<InteractiveLaunch> {
         let mut submitted = None;
         for character in self.decoder.feed(bytes).chars() {
             match character {
@@ -36,7 +80,7 @@ impl ShellInput {
         String::from_utf16(&command)
             .ok()
             .as_deref()
-            .and_then(interactive_launch)
+            .and_then(|command| interactive_launch_with_cc(command, resolve_cc))
     }
 
     pub(crate) fn clear(&mut self) {
@@ -46,7 +90,15 @@ impl ShellInput {
 
 pub(crate) const CODEX_BYPASS: &str = "--dangerously-bypass-approvals-and-sandbox";
 
+#[cfg(test)]
 fn interactive_launch(command: &str) -> Option<InteractiveLaunch> {
+    interactive_launch_with_cc(command, || None)
+}
+
+fn interactive_launch_with_cc(
+    command: &str,
+    resolve_cc: impl FnOnce() -> Option<InteractiveLaunch>,
+) -> Option<InteractiveLaunch> {
     if crate::dsh_launch::matches_shell_command(command) {
         return Some(InteractiveLaunch {
             profile: LaunchProfile::Dsh,
@@ -70,6 +122,7 @@ fn interactive_launch(command: &str) -> Option<InteractiveLaunch> {
         (Some("claude"), Some("--dangerously-skip-permissions"), None) => {
             (LaunchProfile::ClaudeCode, "bypassPermissions")
         }
+        (Some("cc"), None, None) => return resolve_cc(),
         (Some("codex"), None, None) => (LaunchProfile::Codex, "default"),
         (Some("codex"), Some(CODEX_BYPASS), None) => (LaunchProfile::Codex, "bypassPermissions"),
         _ => return None,
@@ -77,9 +130,192 @@ fn interactive_launch(command: &str) -> Option<InteractiveLaunch> {
     Some(InteractiveLaunch { profile, mode })
 }
 
+#[cfg(unix)]
+struct ShellAliasEnvironment {
+    env: BTreeMap<OsString, OsString>,
+    cwd: PathBuf,
+}
+
+#[cfg(unix)]
+type AliasKey = [Option<OsString>; 3];
+
+#[cfg(unix)]
+static CC_LAUNCHES: LazyLock<Mutex<HashMap<AliasKey, InteractiveLaunch>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[cfg(unix)]
+impl ShellAliasEnvironment {
+    fn resolve_cc(&self) -> Option<InteractiveLaunch> {
+        let key = ["SHELL", "HOME", "ZDOTDIR"].map(|name| self.env.get(OsStr::new(name)).cloned());
+        if let Some(launch) = CC_LAUNCHES.lock().ok()?.get(&key).copied() {
+            return Some(launch);
+        }
+        // This runs on the Shell input worker. Bound startup time and output so
+        // that a slow or noisy shell configuration cannot stall the runtime.
+        let output = self.probe(key[0].as_deref().unwrap_or("/bin/zsh".as_ref()))?;
+        let launch = parse_cc_alias(&output)?;
+        CC_LAUNCHES.lock().ok()?.insert(key, launch);
+        Some(launch)
+    }
+
+    fn probe(&self, shell: &OsStr) -> Option<String> {
+        // Refuse to invoke a login shell with an implicit home directory.
+        if self.env.get(OsStr::new("HOME"))?.is_empty() {
+            return None;
+        }
+        let mut child = Command::new(shell)
+            .args(["-ilc", "alias cc"])
+            .current_dir(&self.cwd)
+            .env_clear()
+            .envs(&self.env)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn()
+            .ok()?;
+        let mut reaped = false;
+        let output = (|| {
+            let mut stdout = child.stdout.take()?;
+            // SAFETY: the child owns a valid pipe descriptor until stdout is dropped.
+            if unsafe { libc::fcntl(stdout.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) } < 0 {
+                return None;
+            }
+            let deadline = Instant::now() + Duration::from_millis(750);
+            let mut bytes = Vec::new();
+            let mut chunk = [0; 4096];
+            while Instant::now() < deadline && bytes.len() <= 64 * 1024 {
+                match stdout.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(count) => bytes.extend_from_slice(&chunk[..count]),
+                    Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) if error.kind() == ErrorKind::Interrupted => {}
+                    Err(_) => return None,
+                }
+            }
+            while Instant::now() < deadline && bytes.len() <= 64 * 1024 {
+                if let Some(status) = child.try_wait().ok()? {
+                    reaped = true;
+                    return status
+                        .success()
+                        .then(|| String::from_utf8_lossy(&bytes).into_owned());
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+            None
+        })();
+        if !reaped {
+            // SAFETY: process_group(0) put the probe in its own process group.
+            unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+            let _ = child.wait();
+        }
+        output
+    }
+}
+
+#[cfg(any(unix, test))]
+fn parse_cc_alias(output: &str) -> Option<InteractiveLaunch> {
+    let value = output
+        .lines()
+        .find_map(|line| {
+            let line = line.trim();
+            line.strip_prefix("cc=")
+                .or_else(|| line.strip_prefix("alias cc="))
+        })?
+        .trim();
+    let alias = value
+        .strip_prefix('\'')
+        .and_then(|text| text.strip_suffix('\''))
+        .or_else(|| {
+            value
+                .strip_prefix('"')
+                .and_then(|text| text.strip_suffix('"'))
+        })
+        .map_or_else(|| value.replace("\\ ", " "), str::to_owned);
+    interactive_launch_with_cc(&alias, || None)
+        .filter(|launch| launch.profile == LaunchProfile::ClaudeCode)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cc_only_promotes_recognized_claude_aliases() {
+        for (alias, mode) in [
+            ("cc=claude", Some("default")),
+            (
+                "alias cc='claude   --dangerously-skip-permissions'",
+                Some("bypassPermissions"),
+            ),
+            (
+                "cc=claude\\ --dangerously-skip-permissions",
+                Some("bypassPermissions"),
+            ),
+            ("alias cc='claude -p'", None),
+            ("cc=codex", None),
+            ("cc=cc", None),
+            ("cc=gcc", None),
+        ] {
+            assert_eq!(
+                ShellInput::default().observe_with_cc(b"  cc  \r", || parse_cc_alias(alias)),
+                mode.map(|mode| InteractiveLaunch {
+                    profile: LaunchProfile::ClaudeCode,
+                    mode
+                })
+            );
+        }
+        assert!(
+            ShellInput::default()
+                .observe_with_cc(b"cc extra\r", || panic!("not an alias invocation"))
+                .is_none()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn configured_alias_cache_keeps_distinct_zdotdirs() -> anyhow::Result<()> {
+        use std::{fs, os::unix::fs::PermissionsExt};
+        let root = tempfile::tempdir()?;
+        let dot_dir = root.path().join("first");
+        let second_dir = root.path().join("second");
+        fs::create_dir(&dot_dir)?;
+        fs::create_dir(&second_dir)?;
+        let shell = root.path().join("alias-probe");
+        fs::write(&shell, "#!/bin/sh\n/bin/cat \"$ZDOTDIR/alias.stdout\"\n")?;
+        fs::set_permissions(&shell, fs::Permissions::from_mode(0o700))?;
+        fs::write(dot_dir.join("alias.stdout"), "cc=claude\n")?;
+        fs::write(
+            second_dir.join("alias.stdout"),
+            "cc='claude --dangerously-skip-permissions'\n",
+        )?;
+        let input = |zdotdir: &std::path::Path| {
+            ShellInput::with_shell_environment(&matou_native_core::pty::ShellLaunch {
+                profile: LaunchProfile::Shell,
+                executable: shell.clone(),
+                argv: Vec::new(),
+                cwd: root.path().to_owned(),
+                data_root: root.path().to_owned(),
+                inherited_env: BTreeMap::from([
+                    ("HOME".into(), root.path().as_os_str().into()),
+                    ("SHELL".into(), shell.as_os_str().into()),
+                    ("ZDOTDIR".into(), zdotdir.as_os_str().into()),
+                ]),
+                env: BTreeMap::new(),
+                cols: 80,
+                rows: 24,
+            })
+            .observe(b"cc\r")
+            .map(|launch| launch.mode)
+        };
+        assert_eq!(input(&dot_dir), Some("default"));
+        fs::remove_file(dot_dir.join("alias.stdout"))?;
+        assert_eq!(input(&dot_dir), Some("default"));
+        assert_eq!(input(&second_dir), Some("bypassPermissions"));
+        Ok(())
+    }
 
     #[test]
     fn only_the_exact_provider_commands_are_recognized() {

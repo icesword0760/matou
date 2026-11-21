@@ -300,7 +300,7 @@ fn codex_launch_promotes_exact_commands_on_the_same_card() -> Result<()> {
 }
 
 #[test]
-fn codex_launch_leaves_parameterized_commands_and_cc_in_the_shell() -> Result<()> {
+fn codex_launch_leaves_parameterized_commands_in_the_shell() -> Result<()> {
     let root = tempfile::tempdir()?;
     let (mut child, codex_home) = fixture(root.path(), "Codex fixture", None)?;
     let db = Connection::open(child.data.join("matou.sqlite"))?;
@@ -316,7 +316,10 @@ fn codex_launch_leaves_parameterized_commands_and_cc_in_the_shell() -> Result<()
             "SHELL CODEX ARGUMENTS <--dangerously-bypass-approvals-and-sandbox>",
         ),
         ("printf '<%s>\\n' codex", "<codex>"),
-        ("cc", "SHELL CLAUDE <--dangerously-skip-permissions>"),
+        (
+            "cc --print",
+            "SHELL CLAUDE <--dangerously-skip-permissions --print>",
+        ),
     ] {
         child.input(command)?;
         child.frame(|rows, _, _| rows.iter().any(|row| row == output))?;

@@ -796,7 +796,7 @@ fn host_failure_is_not_successful_closed_and_does_not_join_blocked_stdin() -> Re
 #[test]
 fn card_commands_retire_only_the_target_before_publishing_navigation() -> Result<()> {
     use matou_native_core::hierarchy::cards::RemoveScope;
-    use serde_json::{Value, json};
+    use serde_json::json;
 
     for scope in [
         Some(RemoveScope::NodeOnly),
@@ -983,33 +983,67 @@ fn card_commands_retire_only_the_target_before_publishing_navigation() -> Result
             preserve_scene_on_last_session: false,
         })?;
         let deadline = Instant::now() + TIMEOUT;
-        loop {
+        let mut disposed = false;
+        let replacement = loop {
             match child.event(deadline, true)? {
-                Event::Graph(graph) if !graph["sessionCardAction"].is_null() => {
-                    let action: &Value = &graph["sessionCardAction"];
-                    assert_eq!(action["outcome"], "hide-window");
-                    assert_eq!(action["notice"]["confirmLabel"], "我知道了");
-                    assert_eq!(action["disposedSessionIds"], json!([]));
-                    assert_eq!(action["rebuildCanvas"], false);
-                    assert_eq!(graph["focusedSessionId"], survivor);
-                    break;
+                Event::ScenesDisposed(ids) => {
+                    assert_eq!(ids, [survivor.clone()]);
+                    disposed = true;
                 }
-                Event::ScenesDisposed(ids) => bail!("last card disposed {ids:?}"),
+                Event::Navigation {
+                    hierarchy, graph, ..
+                } if !graph["sessionCardAction"].is_null() => {
+                    assert!(disposed, "last card published before disposal");
+                    let action = &graph["sessionCardAction"];
+                    assert_eq!(action["outcome"], "default-task-created");
+                    assert_eq!(action["disposedSessionIds"], json!([survivor]));
+                    assert_eq!(action["rebuildCanvas"], true);
+                    assert_eq!(hierarchy.task.context("replacement task")?.title, "默认");
+                    let scene = hierarchy.scene.context("replacement scene")?;
+                    assert_ne!(scene.id, child.scene);
+                    let replacement = hierarchy.session.context("replacement Shell")?;
+                    assert_eq!(replacement.kind, "shell");
+                    assert_ne!(replacement.id, survivor);
+                    assert_eq!(graph["focusedSessionId"], replacement.id);
+                    break replacement.id;
+                }
                 Event::NavigationFailed { message, .. } | Event::Diagnostic(message) => {
                     bail!("{message}")
                 }
                 _ => {}
             }
+        };
+        loop {
+            match child.event(deadline, true)? {
+                Event::Frame {
+                    session_id, screen, ..
+                } if session_id == replacement && screen_has_line(&screen, PROMPT) => break,
+                Event::Diagnostic(message) => bail!("{message}"),
+                _ => {}
+            }
         }
-        assert_eq!(card_write_count(&db)?, before);
-        assert_eq!(
+        assert_eq!(card_write_count(&db)?, (before.0 + 1, before.1 + 1));
+        assert!(
             db.query_row(
                 "SELECT archived_at FROM sessions WHERE id = ?",
                 [&survivor],
                 |row| row.get::<_, Option<i64>>(0),
-            )?,
-            None
+            )?
+            .is_some()
         );
+        assert!(
+            db.query_row(
+                "SELECT archived_at FROM scenes WHERE id = ?",
+                [&child.scene],
+                |row| row.get::<_, Option<i64>>(0),
+            )?
+            .is_some()
+        );
+        assert!(db.query_row(
+            "SELECT task.archived_at FROM tasks task JOIN scenes scene ON scene.task_id = task.id WHERE scene.id = ?",
+            [&child.scene],
+            |row| row.get::<_, Option<i64>>(0),
+        )?.is_some());
 
         child.send(Command::Shutdown)?;
         assert!(child.closed()?.is_empty());
@@ -1668,6 +1702,70 @@ ls() {{ touch "$HOME/shell-ls"; }}
             })?;
             assert!(!String::from_utf8_lossy(&output).contains("SHOULD_NOT_REACH_OLD_SHELL"));
         }
+    }
+    Ok(())
+}
+
+#[test]
+fn configured_cc_alias_promotes_only_claude_with_its_permission_mode() -> Result<()> {
+    use matou_native_core::sessions::{get_session, list_runs};
+    use serde_json::Value;
+
+    for (alias, bypass) in [
+        ("claude", Some(false)),
+        ("claude --dangerously-skip-permissions", Some(true)),
+        ("printf CC_STAYED_IN_SHELL", None),
+    ] {
+        let root = tempfile::tempdir()?;
+        let stub = root.path().join("cc-cli");
+        fs::write(
+            &stub,
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$0.argv\"\nprintf 'CC_PROMOTED\\n'\nexec /bin/sleep 60\n",
+        )?;
+        fs::set_permissions(&stub, fs::Permissions::from_mode(0o700))?;
+        let rc = format!("PROMPT='{PROMPT} '\nalias cc='{alias}'\n");
+        let mut child =
+            RuntimeChild::spawn_configured(root.path(), &rc, Path::new("/bin/zsh"), Some(&stub))?;
+        child.hello()?;
+        child.input("cc")?;
+        let db = Connection::open(child.data.join("matou.sqlite"))?;
+        db.busy_timeout(TIMEOUT)?;
+        if let Some(bypass) = bypass {
+            child.frame(|_, screen, _| screen_has_line(screen, "CC_PROMOTED"))?;
+            let argv = fs::read_to_string(stub.with_extension("argv"))?;
+            assert_eq!(
+                argv.contains("--dangerously-skip-permissions"),
+                bypass,
+                "{argv}"
+            );
+            let mut args = argv.lines();
+            assert_eq!(args.next(), Some("--settings"));
+            let config: Value =
+                serde_json::from_slice(&fs::read(args.next().context("settings arg")?)?)?;
+            assert_eq!(config["statusLine"]["type"], "command");
+            assert_eq!(config["statusLine"]["padding"], 0);
+            assert_eq!(
+                get_session(&db, &child.session)?
+                    .context("promoted Claude")?
+                    .kind,
+                "claude-code"
+            );
+            assert_eq!(list_runs(&db, &child.session)?.len(), 2);
+        } else {
+            child.frame(|rows, _, _| rows.iter().any(|row| row.contains("CC_STAYED_IN_SHELL")))?;
+            assert!(!stub.with_extension("argv").exists());
+            assert_eq!(
+                get_session(&db, &child.session)?
+                    .context("ordinary Shell")?
+                    .kind,
+                "shell"
+            );
+            assert_eq!(list_runs(&db, &child.session)?.len(), 1);
+        }
+        child.send(Command::Shutdown)?;
+        child.closed()?;
+        let (status, stderr) = child.wait()?;
+        ensure!(status.success(), "cc runtime shutdown: {stderr}");
     }
     Ok(())
 }
@@ -3215,7 +3313,7 @@ exec /bin/sleep 60
         env.lines().collect::<Vec<_>>(),
         [
             "https://target.example.invalid",
-            "target-fixture-key",
+            "",
             "target-fixture-key",
             "assigned-model",
             "target-sonnet",

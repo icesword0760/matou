@@ -178,6 +178,34 @@ pub(crate) fn get_var<'a>(
         .map(|(_, value)| value.as_os_str())
 }
 
+#[cfg(unix)]
+fn ensure_utf8_locale(environment: &mut BTreeMap<OsString, OsString>) {
+    let utf8 = ["LC_ALL", "LC_CTYPE", "LANG"].into_iter().any(|name| {
+        get_var(environment, name).is_some_and(|value| {
+            let locale = value.to_string_lossy().to_ascii_lowercase();
+            locale.contains("utf-8") || locale.contains("utf8")
+        })
+    });
+    if !utf8 {
+        set_var(environment, "LANG".into(), "en_US.UTF-8".into());
+    }
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn pty_locale_defaults_to_utf8_and_preserves_explicit_utf8() {
+    let mut env = BTreeMap::new();
+    ensure_utf8_locale(&mut env);
+    assert_eq!(get_var(&env, "LANG"), Some(OsStr::new("en_US.UTF-8")));
+    env.insert("LANG".into(), "zh_CN.UTF-8".into());
+    ensure_utf8_locale(&mut env);
+    assert_eq!(get_var(&env, "LANG"), Some(OsStr::new("zh_CN.UTF-8")));
+    env.remove(OsStr::new("LANG"));
+    env.insert("LC_CTYPE".into(), "zh_CN.uTf8".into());
+    ensure_utf8_locale(&mut env);
+    assert!(get_var(&env, "LANG").is_none());
+}
+
 pub(crate) fn remove_var(environment: &mut BTreeMap<OsString, OsString>, key: &OsStr) {
     #[cfg(windows)]
     environment.retain(|name, _| !matches_key(name, key));
@@ -357,7 +385,7 @@ impl PtyProcess {
         );
 
         let mut command = CommandBuilder::new(&launch.executable);
-        let environment = match launch.profile {
+        let mut environment = match launch.profile {
             LaunchProfile::Shell => {
                 let environment = prepare_shell_environment(launch)?;
                 #[cfg(unix)]
@@ -392,6 +420,8 @@ impl PtyProcess {
                 environment
             }
         };
+        #[cfg(unix)]
+        ensure_utf8_locale(&mut environment);
         command.args(&launch.argv);
         command.cwd(&launch.cwd);
         command.env_clear();

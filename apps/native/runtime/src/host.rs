@@ -3904,24 +3904,6 @@ fn run_writable(
                             }
                             None => (None, None),
                         };
-                        if let Some(action) = &card_action
-                            && action["outcome"] == "hide-window"
-                        {
-                            let mut graph = active_graph(
-                                &owner,
-                                scene_id.as_deref(),
-                                window_id,
-                                &startup_deferred,
-                            )?;
-                            graph["sessionCardAction"] = action.clone();
-                            let event = Event::Graph(graph);
-                            if navigation_publications.is_empty() {
-                                send.send_blocking(event)?;
-                            } else {
-                                navigation_publications.push_back((Vec::new(), false, event));
-                            }
-                            continue;
-                        }
                         let wait_for_workers = card_action.is_some();
                         let defer_publication =
                             wait_for_workers || !navigation_publications.is_empty();
@@ -8373,7 +8355,7 @@ fn navigate(
                 time,
             )?;
             let disposed = serde_json::from_value(result["disposedSessionIds"].clone())?;
-            let mut action = json!({
+            let action = json!({
                 "action": "close-session-card",
                 "sceneId": input.scene_id,
                 "sessionId": input.session_id,
@@ -8381,12 +8363,6 @@ fn navigate(
                 "rebuildCanvas": result["rebuildCanvas"],
                 "disposedSessionIds": disposed,
             });
-            if action["outcome"] == "hide-window" {
-                action["notice"] = json!({
-                    "body": "当前已是最后一个事项下的最后一个标签，这里点击关闭不会删除该事项。\n\n如需删除该工作区，请在左侧事项面板的下拉菜单中执行删除。",
-                    "confirmLabel": "我知道了",
-                });
-            }
             return Ok((
                 owner.hierarchy(window_id)?,
                 disposed,

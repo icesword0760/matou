@@ -15,6 +15,7 @@ const infoPath = 'Contents/Info.plist'
 const iconPath = 'Contents/Resources/icon.icns'
 const entitlementsPath = 'Contents/Resources/entitlements.mac.plist'
 const workflowPath = 'Contents/Resources/finder-quick-action/进入码头.workflow/Contents/Resources/document.wflow'
+const pluginPath = 'Contents/Resources/control-assets/providers/claude-plugin'
 const skip = process.platform !== 'darwin' && 'macOS bundle verification requires macOS'
 
 let root
@@ -71,6 +72,11 @@ test('assembles and verifies an app with frozen metadata and universal Mach-O pa
   assert.equal(result.bundleId, 'com.matou.desktop')
   assert.equal(result.version, '0.2.24')
   assert.deepEqual(await readdir(out), [appName])
+  const sourcePlugin = fileURLToPath(new URL('../../apps/runtime/control-assets/providers/claude-plugin/', import.meta.url))
+  for (const path of ['.claude-plugin/plugin.json', 'hooks/hooks.json', 'skills/mt-terminal/SKILL.md',
+    'skills/agent-foreman/SKILL.md', 'skills/agent-foreman/scripts/foreman.mjs']) {
+    assert.deepEqual(await readFile(join(app, pluginPath, path)), await readFile(join(sourcePlugin, path)))
+  }
   for (const name of ['matou-native-desktop', 'matou-native-runtime']) {
     assert.equal((await lstat(join(app, 'Contents', 'MacOS', name))).mode & 0o7777, 0o755)
   }
