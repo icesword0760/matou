@@ -16,6 +16,10 @@ use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
 use crate::{
+    agent_hud_projection::{
+        AgentActivity, AgentState, Todo, ToolStatus, agent_tool, new_agent, target_for_tool,
+        timestamp_ms, tool_arguments, update_mcp_error, update_todos,
+    },
     derived::CodexInterruption,
     provider_hook::{nonempty, one_line, transcript_uuid},
 };
@@ -71,9 +75,9 @@ impl Hook {
             transcript: text(&paths).map(PathBuf::from),
             has_transcript_field: paths.iter().any(|key| payload.contains_key(*key)),
             turn,
-            fingerprint,
+            fingerprint: fingerprint.clone(),
             hud_tool: matches!(event, "PreToolUse" | "PostToolUse")
-                .then(|| HookTool::parse(payload))
+                .then(|| HookTool::parse(payload, fingerprint.as_deref()))
                 .flatten(),
         }
     }
@@ -136,6 +140,22 @@ impl Run {
             ended: false,
             interruption: CodexInterruption::default(),
         }
+    }
+
+    pub fn home(&self) -> Option<&Path> {
+        self.home.as_deref()
+    }
+
+    pub fn hud_agents(&self, now_ms: f64) -> Vec<AgentActivity> {
+        if self.ended {
+            return Vec::new();
+        }
+        self.hud
+            .agents
+            .values()
+            .filter(|(_, failed_at)| failed_at.is_none_or(|at| now_ms - at < 300_000.))
+            .map(|(activity, _)| activity.clone())
+            .collect()
     }
 
     pub fn start_rollout(&self, hook: &Hook, identity: Uuid) -> Option<(PathBuf, File)> {
@@ -410,21 +430,27 @@ impl Tool {
 struct HookTool {
     id: String,
     tool: Tool,
+    input: Value,
+    result: Value,
 }
 
 impl HookTool {
-    fn parse(payload: &Map<String, Value>) -> Option<Self> {
+    fn parse(payload: &Map<String, Value>, fingerprint: Option<&str>) -> Option<Self> {
         let text = |keys: &[&str]| {
             keys.iter()
                 .find_map(|key| payload.get(*key).and_then(nonempty))
         };
-        let id = text(&["tool_use_id", "toolUseId"])?.to_owned();
         let call = payload.get("toolCall").unwrap_or(&Value::Null);
         let name = text(&["tool_name", "toolName"]).or_else(|| nonempty(&call["name"]))?;
+        let id = text(&["tool_use_id", "toolUseId"])
+            .or_else(|| nonempty(&call["id"]))
+            .or_else(|| (name == "update_plan").then_some(fingerprint).flatten())?
+            .to_owned();
         let input = ["tool_input", "toolInput"]
             .iter()
-            .find_map(|key| payload.get(*key).filter(|value| value.is_object()))
+            .find_map(|key| payload.get(*key))
             .unwrap_or(&call["args"]);
+        let input = tool_arguments(input);
         let fields: &[_] = match name {
             "Bash" | "run_command" => &["command", "CommandLine"],
             "Glob" | "Grep" | "find_by_name" | "grep_search" => &["pattern", "Pattern", "Query"],
@@ -451,12 +477,19 @@ impl HookTool {
                     .iter()
                     .find_map(|key| nonempty(&input[*key]))
                     .map(str::to_owned),
-                status: if text(&["error"]).is_some() {
+                status: if payload.get("error").is_some_and(|error| !error.is_null()) {
                     "error"
                 } else {
                     "completed"
                 },
             },
+            input,
+            result: payload
+                .get("tool_response")
+                .or_else(|| payload.get("toolResponse"))
+                .or_else(|| payload.get("toolResult"))
+                .cloned()
+                .unwrap_or_default(),
         })
     }
 }
@@ -473,7 +506,13 @@ struct Hud {
     hook_completed: HashSet<String>,
     hook_counts: BTreeMap<String, usize>,
     rollout_completed: HashSet<String>,
-    rollout_only: usize,
+    rollout_only: BTreeMap<String, String>,
+    rollout_calls: BTreeMap<String, Tool>,
+    rollout_todos: Option<Vec<Todo>>,
+    hook_todos: Option<(String, Vec<Todo>)>,
+    agents: BTreeMap<String, (AgentActivity, Option<f64>)>,
+    agent_ids: BTreeMap<String, String>,
+    mcp_errors: Vec<String>,
     last_rollout_tool: Option<Tool>,
     last_hook_tool: Option<Tool>,
     last_is_rollout: bool,
@@ -493,7 +532,13 @@ impl Default for Hud {
             hook_completed: HashSet::new(),
             hook_counts: BTreeMap::new(),
             rollout_completed: HashSet::new(),
-            rollout_only: 0,
+            rollout_only: BTreeMap::new(),
+            rollout_calls: BTreeMap::new(),
+            rollout_todos: None,
+            hook_todos: None,
+            agents: BTreeMap::new(),
+            agent_ids: BTreeMap::new(),
+            mcp_errors: Vec::new(),
             last_rollout_tool: None,
             last_hook_tool: None,
             last_is_rollout: false,
@@ -507,7 +552,35 @@ impl Hud {
         self.running.clear();
     }
 
-    fn observe_hook(&mut self, event: &str, HookTool { id, mut tool }: HookTool) {
+    fn observe_hook(
+        &mut self,
+        event: &str,
+        HookTool {
+            id,
+            mut tool,
+            input,
+            result,
+        }: HookTool,
+    ) {
+        if event == "PreToolUse" && !self.rollout_completed.contains(&id) {
+            if tool.name == "update_plan" && input["plan"].is_array() {
+                let mut todos = Vec::new();
+                update_todos(&mut todos, &tool.name, &input);
+                self.hook_todos = Some((id.clone(), todos));
+            }
+            self.observe_agent_call(&id, &tool.name, &input, None);
+        } else if event == "PostToolUse" {
+            self.observe_agent_result(&id, &result, tool.status == "error", None);
+            update_mcp_error(
+                &mut self.mcp_errors,
+                &tool.name,
+                if tool.status == "error" {
+                    ToolStatus::Error
+                } else {
+                    ToolStatus::Completed
+                },
+            );
+        }
         if event == "PreToolUse" {
             if !self.hook_completed.contains(&id) && !self.rollout_completed.contains(&id) {
                 tool.status = "running";
@@ -522,7 +595,7 @@ impl Hud {
             }
             *self.hook_counts.entry(tool.name.clone()).or_default() += 1;
             if self.rollout_completed.contains(&id) {
-                self.rollout_only -= 1;
+                self.rollout_only.remove(&id);
             } else {
                 self.last_hook_tool = Some(tool);
                 self.last_is_rollout = false;
@@ -545,7 +618,13 @@ impl Hud {
                 | self.context.take().is_some()
                 | self.last_rollout_tool.take().is_some();
             self.rollout_completed.clear();
-            self.rollout_only = 0;
+            self.rollout_only.clear();
+            self.rollout_calls.clear();
+            self.rollout_todos = None;
+            self.agents.clear();
+            self.agent_ids.clear();
+            self.mcp_errors.clear();
+            self.dirty = true;
             self.last_is_rollout = false;
             self.caught_up = false;
         }
@@ -564,14 +643,75 @@ impl Hud {
                     self.dirty |= self.context != context;
                     self.context = context;
                 }
-                HudUpdate::Command { id, tool } => {
-                    if self.rollout_completed.insert(id.clone()) {
-                        self.running.remove(&id);
-                        self.rollout_only += usize::from(!self.hook_completed.contains(&id));
-                        self.last_is_rollout = self.running.is_empty();
-                        self.last_rollout_tool = Some(tool);
-                        self.dirty = true;
+                HudUpdate::Command { id, tool } => self.complete_tool(id, tool),
+                HudUpdate::Call {
+                    id,
+                    name,
+                    input,
+                    time,
+                } => {
+                    if name == "update_plan" && input["plan"].is_array() {
+                        let mut todos = Vec::new();
+                        update_todos(&mut todos, &name, &input);
+                        self.rollout_todos = Some(todos);
+                        if self
+                            .hook_todos
+                            .as_ref()
+                            .is_some_and(|(call, _)| call == &id || call.starts_with("payload:"))
+                        {
+                            self.hook_todos = None;
+                        }
                     }
+                    self.observe_agent_call(&id, &name, &input, time);
+                    if !self.rollout_completed.contains(&id) {
+                        self.rollout_calls.insert(
+                            id,
+                            Tool {
+                                target: target_for_tool(&name, &input),
+                                name,
+                                status: "running",
+                            },
+                        );
+                    }
+                    self.dirty = true;
+                }
+                HudUpdate::Result {
+                    id,
+                    result,
+                    failed,
+                    time,
+                } => {
+                    self.observe_agent_result(&id, &result, failed, time);
+                    if let Some(mut tool) = self.rollout_calls.remove(&id) {
+                        tool.status = if failed { "error" } else { "completed" };
+                        self.complete_tool(id, tool);
+                    }
+                    self.dirty = true;
+                }
+                HudUpdate::AgentStates { statuses, time } => {
+                    for (id, status) in statuses {
+                        match status {
+                            AgentOutcome::Started { call_id, nickname } => {
+                                let key = call_id.unwrap_or_else(|| id.clone());
+                                if let Some((activity, _)) = self.agents.get_mut(&key) {
+                                    if let Some(nickname) = nickname {
+                                        activity.label = nickname
+                                    }
+                                } else if let Some(nickname) = nickname {
+                                    let input = json!({"nickname": nickname});
+                                    self.agents.insert(
+                                        key.clone(),
+                                        (new_agent(&key, &input, 1, time), None),
+                                    );
+                                }
+                                self.agent_ids.insert(id, key);
+                            }
+                            AgentOutcome::Finished { failed } => {
+                                self.finish_agent(&id, failed, time)
+                            }
+                        }
+                    }
+                    self.dirty = true;
                 }
             }
         }
@@ -580,7 +720,77 @@ impl Hud {
             self.dirty |= self.model.is_some()
                 || self.effort.is_some()
                 || self.context.is_some()
-                || self.rollout_only > 0;
+                || !self.rollout_only.is_empty()
+                || self.rollout_todos.is_some();
+        }
+    }
+
+    fn complete_tool(&mut self, id: String, tool: Tool) {
+        if self.rollout_completed.insert(id.clone()) {
+            self.running.remove(&id);
+            if !self.hook_completed.contains(&id) {
+                self.rollout_only.insert(id, tool.name.clone());
+                update_mcp_error(
+                    &mut self.mcp_errors,
+                    &tool.name,
+                    if tool.status == "error" {
+                        ToolStatus::Error
+                    } else {
+                        ToolStatus::Completed
+                    },
+                );
+            }
+            self.last_is_rollout = self.running.is_empty();
+            self.last_rollout_tool = Some(tool);
+            self.dirty = true;
+        }
+    }
+
+    fn observe_agent_call(&mut self, id: &str, name: &str, input: &Value, time: Option<f64>) {
+        if agent_tool(name)
+            && !self.rollout_completed.contains(id)
+            && !self.hook_completed.contains(id)
+            && !self.agents.contains_key(id)
+        {
+            self.agents.insert(
+                id.to_owned(),
+                (new_agent(id, input, self.agents.len() + 1, time), None),
+            );
+        }
+    }
+
+    fn observe_agent_result(&mut self, id: &str, result: &Value, failed: bool, time: Option<f64>) {
+        if !self.agents.contains_key(id) {
+            return;
+        }
+        if failed {
+            self.finish_agent(id, true, time);
+        } else if let Some(child) =
+            nonempty(&result["agent_id"]).or_else(|| nonempty(&result["agentId"]))
+        {
+            self.agent_ids.insert(child.to_owned(), id.to_owned());
+            if let Some(nickname) = nonempty(&result["nickname"])
+                && let Some((agent, _)) = self.agents.get_mut(id)
+            {
+                agent.label = nickname.to_owned();
+            }
+        } else if matches!(
+            result["status"].as_str(),
+            Some("completed" | "shutdown" | "cancelled")
+        ) {
+            self.finish_agent(id, false, time);
+        }
+    }
+
+    fn finish_agent(&mut self, id: &str, failed: bool, time: Option<f64>) {
+        let key = self.agent_ids.get(id).map(String::as_str).unwrap_or(id);
+        if failed {
+            if let Some((agent, failed_at)) = self.agents.get_mut(key) {
+                agent.state = AgentState::Error;
+                *failed_at = time;
+            }
+        } else {
+            self.agents.remove(key);
         }
     }
 
@@ -604,8 +814,25 @@ impl Hud {
             .filter(|(name, _)| safe(name))
             .map(|(name, count)| (name.as_str(), *count))
             .collect();
-        if self.caught_up && self.rollout_only > 0 {
-            *counts.entry("Bash").or_default() += self.rollout_only;
+        if self.caught_up {
+            for name in self.rollout_only.values().filter(|name| safe(name)) {
+                *counts.entry(name.as_str()).or_default() += 1;
+            }
+        }
+        if let Some(todos) = self
+            .hook_todos
+            .as_ref()
+            .map(|(_, todos)| todos)
+            .or_else(|| {
+                self.caught_up
+                    .then_some(self.rollout_todos.as_ref())
+                    .flatten()
+            })
+        {
+            value["todos"] = json!(todos);
+        }
+        if !self.mcp_errors.is_empty() {
+            value["mcpErrors"] = json!(self.mcp_errors);
         }
         value["toolCounts"] = json!(
             counts
@@ -616,6 +843,16 @@ impl Hud {
         value["runningTools"] = json!(
             self.running
                 .values()
+                .chain(
+                    self.rollout_calls
+                        .iter()
+                        .filter(|(id, _)| {
+                            self.caught_up
+                                && !self.running.contains_key(*id)
+                                && !self.hook_completed.contains(*id)
+                        })
+                        .map(|(_, tool)| tool)
+                )
                 .filter_map(|tool| tool.project(&safe))
                 .collect::<Vec<_>>()
         );
@@ -636,7 +873,33 @@ impl Hud {
     }
 }
 
+enum AgentOutcome {
+    Started {
+        call_id: Option<String>,
+        nickname: Option<String>,
+    },
+    Finished {
+        failed: bool,
+    },
+}
+
 enum HudUpdate {
+    Call {
+        id: String,
+        name: String,
+        input: Value,
+        time: Option<f64>,
+    },
+    Result {
+        id: String,
+        result: Value,
+        failed: bool,
+        time: Option<f64>,
+    },
+    AgentStates {
+        statuses: Vec<(String, AgentOutcome)>,
+        time: Option<f64>,
+    },
     Turn {
         model: Option<String>,
         effort: Option<String>,
@@ -651,7 +914,104 @@ enum HudUpdate {
 fn hud_update(line: &[u8]) -> Option<HudUpdate> {
     let row: Value = serde_json::from_slice(line).ok()?;
     let payload = &row["payload"];
+    let time = timestamp_ms(&row["timestamp"]);
+    let text = |key: &str| nonempty(&payload[key]).map(str::to_owned);
     let update = match (row["type"].as_str()?, payload["type"].as_str()) {
+        ("response_item", Some("function_call" | "custom_tool_call")) => {
+            let name = text("name")?;
+            // Shell command completion already comes from item_completed on
+            // supported CLIs, where there is a real exit code.
+            if matches!(
+                name.as_str(),
+                "exec_command" | "local_shell" | "shell_command"
+            ) {
+                return None;
+            }
+            HudUpdate::Call {
+                id: text("call_id")?,
+                name,
+                input: tool_arguments(payload.get("arguments").unwrap_or(&payload["input"])),
+                time,
+            }
+        }
+        ("response_item", Some("function_call_output" | "custom_tool_call_output")) => {
+            let output = &payload["output"];
+            let result = tool_arguments(output);
+            let failed = payload["is_error"] == true
+                || output["success"] == false
+                || !result["error"].is_null()
+                || matches!(result["status"].as_str(), Some("failed" | "error"));
+            HudUpdate::Result {
+                id: text("call_id")?,
+                result,
+                failed,
+                time,
+            }
+        }
+        ("event_msg", Some("collab_spawn_end")) => {
+            let id = text("new_thread_id").or_else(|| text("receiver_thread_id"))?;
+            HudUpdate::AgentStates {
+                statuses: vec![(
+                    id,
+                    AgentOutcome::Started {
+                        call_id: text("call_id"),
+                        nickname: text("new_agent_nickname").or_else(|| text("nickname")),
+                    },
+                )],
+                time,
+            }
+        }
+        ("event_msg", Some("collab_waiting_end" | "collab_close_end" | "agent_status")) => {
+            let finished = |status: &Value| {
+                let label = nonempty(status)
+                    .or_else(|| status.as_object()?.keys().next().map(String::as_str))?;
+                match label.to_ascii_lowercase().as_str() {
+                    "completed" | "shutdown" | "closed" | "cancelled" => {
+                        Some(AgentOutcome::Finished { failed: false })
+                    }
+                    "failed" | "errored" | "error" => Some(AgentOutcome::Finished { failed: true }),
+                    _ => None,
+                }
+            };
+            let mut statuses = Vec::new();
+            if let Some(entries) = payload["statuses"].as_object() {
+                statuses.extend(
+                    entries
+                        .iter()
+                        .filter_map(|(id, status)| Some((id.clone(), finished(status)?))),
+                );
+            }
+            if let Some(id) = text("receiver_thread_id").or_else(|| text("agent_id"))
+                && let Some(status) = finished(&payload["status"]).or_else(|| {
+                    (payload["type"] == "collab_close_end")
+                        .then_some(AgentOutcome::Finished { failed: false })
+                })
+            {
+                statuses.push((id, status));
+            }
+            HudUpdate::AgentStates { statuses, time }
+        }
+        ("event_msg", Some("mcp_tool_call_end")) => {
+            let invocation = &payload["invocation"];
+            let name = format!(
+                "mcp__{}__{}",
+                nonempty(&invocation["server"])?,
+                nonempty(&invocation["tool"])?
+            );
+            let result = &payload["result"];
+            let failed = !result["Err"].is_null()
+                || result["Ok"]["isError"] == true
+                || result["is_error"] == true
+                || result["isError"] == true;
+            HudUpdate::Command {
+                id: text("call_id")?,
+                tool: Tool {
+                    name,
+                    target: None,
+                    status: if failed { "error" } else { "completed" },
+                },
+            }
+        }
         ("turn_context", _) => HudUpdate::Turn {
             model: nonempty(&payload["model"]).map(str::to_owned),
             effort: nonempty(&payload["effort"])
@@ -1168,5 +1528,71 @@ pub(crate) mod title {
             }
         }
         Ok(newest.map(|(_, title)| title))
+    }
+}
+
+#[cfg(test)]
+mod hud_tests {
+    use super::*;
+
+    fn replay(hud: &mut Hud, rows: &[Value]) {
+        let updates = rows
+            .iter()
+            .map(|row| serde_json::to_vec(row).unwrap())
+            .filter_map(|line| hud_update(&line))
+            .collect();
+        hud.accept(HudReply {
+            session: "session".into(),
+            run: "run".into(),
+            cursor: HudCursor::default(),
+            reset: false,
+            more: false,
+            updates,
+        });
+    }
+
+    #[test]
+    fn codex_hud_uses_hook_and_rollout_todos_subagents_and_mcp_outcomes() {
+        let mut hud = Hud::default();
+        let hook = json!({"tool_use_id":"plan","tool_name":"update_plan","tool_input":{"plan":[
+            {"step":"Read history","status":"completed"},{"step":"Recheck","status":"in_progress"}
+        ]}});
+        hud.observe_hook(
+            "PreToolUse",
+            HookTool::parse(hook.as_object().unwrap(), None).unwrap(),
+        );
+        assert_eq!(
+            hud.project(|_| true)["todos"][1],
+            json!({"content":"Recheck","status":"in_progress"})
+        );
+
+        replay(
+            &mut hud,
+            &[
+                json!({"type":"response_item","payload":{"type":"function_call","call_id":"plan","name":"update_plan",
+                "arguments":hook["tool_input"].to_string()}}),
+                json!({"type":"response_item","payload":{"type":"function_call_output","call_id":"plan","output":"Plan updated"}}),
+                json!({"type":"response_item","payload":{"type":"function_call","call_id":"spawn","name":"spawn_agent",
+                "arguments":"{\"agent_type\":\"explorer\"}"}}),
+                json!({"type":"response_item","payload":{"type":"function_call_output","call_id":"spawn",
+                "output":"{\"agent_id\":\"child\",\"nickname\":\"Researcher\"}"}}),
+                json!({"type":"event_msg","payload":{"type":"mcp_tool_call_end","call_id":"mcp",
+                "invocation":{"server":"search","tool":"read"},"result":{"Err":"unavailable"}}}),
+            ],
+        );
+        assert_eq!(hud.project(|_| true)["todos"][0]["content"], "Read history");
+        assert_eq!(hud.project(|_| true)["mcpErrors"], json!(["search"]));
+        assert_eq!(hud.agents["spawn"].0.label, "Researcher");
+        assert_eq!(hud.agents["spawn"].0.state, AgentState::Running);
+        replay(
+            &mut hud,
+            &[
+                json!({"type":"event_msg","payload":{"type":"collab_waiting_end","statuses":{"child":{"completed":"done"}}}}),
+                json!({"type":"event_msg","payload":{"type":"mcp_tool_call_end","call_id":"mcp-retry",
+                "invocation":{"server":"search","tool":"read"},"result":{"Ok":{"isError":false}}}}),
+            ],
+        );
+        assert!(hud.agents.is_empty());
+        assert!(hud.project(|_| true)["mcpErrors"].is_null());
     }
 }

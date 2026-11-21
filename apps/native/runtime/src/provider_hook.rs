@@ -668,6 +668,26 @@ pub(crate) fn claude_config_counts(cwd: &Path, config: &Path) -> Value {
     .iter()
     .filter(|path| path.is_file())
     .count();
+    fn rules(path: &Path) -> usize {
+        let Ok(entries) = fs::read_dir(path) else {
+            return 0;
+        };
+        entries
+            .flatten()
+            .map(|entry| {
+                let Ok(kind) = entry.file_type() else {
+                    return 0;
+                };
+                if kind.is_dir() {
+                    rules(&entry.path())
+                } else {
+                    usize::from(
+                        kind.is_file() && entry.path().extension().is_some_and(|ext| ext == "md"),
+                    )
+                }
+            })
+            .sum()
+    }
     let mut hooks = BTreeSet::new();
     let read = |path: PathBuf| -> Value {
         fs::metadata(&path)
@@ -718,6 +738,9 @@ pub(crate) fn claude_config_counts(cwd: &Path, config: &Path) -> Value {
     }
     json!({
         "instructionFiles": instruction_files,
+        "claudeMd": instruction_files,
+        "rules": rules(&config.join("rules")) + rules(&project.join("rules")),
+        "mcps": user_mcp.union(&project_mcp).count(),
         "projectInstructionFileExists": project_instruction.is_file(),
         "mcpServers": user_mcp.len() + project_mcp.len(),
         "mcpServerNames": user_mcp.into_iter().chain(project_mcp).collect::<Vec<_>>(),

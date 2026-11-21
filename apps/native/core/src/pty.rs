@@ -415,6 +415,16 @@ impl PtyProcess {
                     .into_iter()
                     .chain(CALLER_SESSION_MARKERS)
                 {
+                    if key == "MATOU_AGENT_STATUS_DIR"
+                        && get_var(&environment, key).is_some_and(|value| {
+                            let path = Path::new(value);
+                            path.parent().is_some_and(|parent| {
+                                parent == launch.data_root.join("agent-status")
+                            }) && path.is_dir()
+                        })
+                    {
+                        continue;
+                    }
                     remove_var(&mut environment, OsStr::new(key));
                 }
                 environment

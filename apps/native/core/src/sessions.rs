@@ -952,7 +952,7 @@ pub fn write_provider_permission(
         let session = require_session(tx, session_id)?;
         let provider = session.kind.as_str();
         ensure!(
-            matches!(provider, "claude-code" | "codex" | "dsh"),
+            matches!(provider, "claude-code" | "codex" | "dsh" | "antigravity"),
             "Unsupported permission provider"
         );
         let raw: String = tx.query_row(
