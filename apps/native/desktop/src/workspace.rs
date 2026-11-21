@@ -21,6 +21,9 @@ use matou_native_core::sessions::{
     InterfaceLocale, LocalePreference, current_interface_locale, read_locale_preference,
 };
 use matou_native_core::workspace_paths::WorkspacePathState;
+use matou_native_desktop::theme_tokens::{
+    ThemePalette, ThemePreference, ThemeState, read_theme_preference, write_theme_preference,
+};
 use matou_native_runtime::history::{
     HistoryCursor, HistoryLine, HistoryPage as OfflineHistoryPage, HistorySearchOptions,
 };
@@ -1238,8 +1241,9 @@ fn read_only_navigation(active: ReadOnlyNavigation) -> Event {
 pub struct Workspace {
     locale: InterfaceLocale,
     locale_preference: LocalePreference,
-    locale_data_root: Option<PathBuf>,
+    data_root: Option<PathBuf>,
     locale_save_pending: bool,
+    theme: ThemeState,
     history_view: Option<Entity<HistoryView>>,
     history_request: Option<HistoryContextRequest>,
     search: Option<TerminalSearchState>,
@@ -2247,22 +2251,38 @@ impl Workspace {
         )
         .ok()
         .map(|options| options.runtime);
-        let locale_data_root = launch_options
+        let data_root = launch_options
             .as_ref()
             .map(|options| options.data_root.clone());
-        let locale_preference = locale_data_root
+        let locale_preference = data_root
             .as_deref()
             .map(read_locale_preference)
             .unwrap_or_default();
+        let theme = data_root.as_deref().map_or(ThemePreference::Light, |root| {
+            read_theme_preference(root).unwrap_or_else(|error| {
+                eprintln!("Read theme preference: {error}");
+                ThemePreference::System
+            })
+        });
+        let appearance = cx.observe_window_appearance(window, |this, window, cx| {
+            if this.theme.set_system_appearance(window.appearance()) {
+                this.apply_theme_palette(cx);
+                if let Some((settings, _)) = &this.settings {
+                    settings.update(cx, |settings, cx| {
+                        settings.configure_theme(this.theme);
+                        cx.notify();
+                    });
+                }
+            }
+        });
         Self {
-            locale: locale_data_root
-                .as_ref()
-                .map_or(InterfaceLocale::default(), |_| {
-                    current_interface_locale(locale_preference)
-                }),
+            locale: data_root.as_ref().map_or(InterfaceLocale::default(), |_| {
+                current_interface_locale(locale_preference)
+            }),
             locale_preference,
-            locale_data_root,
+            data_root,
             locale_save_pending: false,
+            theme: ThemeState::new(theme, window.appearance()),
             history_view: None,
             history_request: None,
             search: None,
@@ -2408,7 +2428,7 @@ impl Workspace {
             copy_request_id: 0,
             resize_revisions: HashMap::new(),
             fault: None,
-            subscriptions: vec![keyboard],
+            subscriptions: vec![keyboard, appearance],
         }
     }
 
@@ -2464,6 +2484,7 @@ impl Workspace {
                 self.locale,
                 self.locale_save_pending,
             );
+            settings.configure_theme(self.theme);
             settings
         });
         let subscription =
@@ -2475,11 +2496,63 @@ impl Workspace {
                     SettingsShellEvent::SaveLocale(preference) => {
                         this.save_interface_locale(*preference, window, cx);
                     }
+                    SettingsShellEvent::SaveTheme(preference) => this.save_theme(*preference, cx),
                 },
             );
         self.settings = Some((settings, subscription));
         self.sync_terminal_input(window, cx);
         cx.notify();
+    }
+
+    fn theme_palette(&self) -> &'static ThemePalette {
+        self.theme.effective().palette()
+    }
+
+    fn save_theme(&mut self, preference: ThemePreference, cx: &mut Context<Self>) {
+        if self.theme.preference() == preference {
+            return;
+        }
+        let result = self
+            .data_root
+            .as_deref()
+            .ok_or_else(|| std::io::Error::other("Theme data root is unavailable"))
+            .and_then(|root| write_theme_preference(root, preference));
+        if let Err(error) = result {
+            eprintln!("Save theme preference: {error}");
+            if let Some((settings, _)) = &self.settings {
+                settings.update(cx, |settings, cx| settings.theme_save_failed(cx));
+            }
+            return;
+        }
+        if self.theme.set_preference(preference) {
+            self.apply_theme_palette(cx);
+        }
+        if let Some((settings, _)) = &self.settings {
+            settings.update(cx, |settings, cx| settings.theme_saved(self.theme, cx));
+        }
+    }
+
+    fn apply_theme_palette(&self, cx: &mut Context<Self>) {
+        let theme = self.theme_palette().terminal;
+        for (session_id, terminal) in &self.terminals {
+            terminal.update(cx, |terminal, cx| terminal.set_theme(theme, cx));
+            self.send_terminal_theme(session_id, theme);
+        }
+        #[cfg(target_os = "macos")]
+        for water in self.recovery_water.values() {
+            water.update(cx, |water, cx| water.set_theme(theme, cx));
+        }
+        cx.notify();
+    }
+
+    fn send_terminal_theme(&self, session_id: &str, theme: Theme) {
+        let _ = self.commands.send_at(
+            self.runtime_generation,
+            Command::Theme {
+                session_id: session_id.to_owned(),
+                theme,
+            },
+        );
     }
 
     fn save_interface_locale(
@@ -2492,7 +2565,7 @@ impl Workspace {
             .settings
             .as_ref()
             .map(|(settings, _)| settings.downgrade());
-        let Some(root) = self.locale_data_root.clone() else {
+        let Some(root) = self.data_root.clone() else {
             if let Some(settings) = settings {
                 let _ = settings.update(cx, |settings, cx| settings.locale_save_failed(cx));
             }
@@ -2981,7 +3054,11 @@ impl Workspace {
     fn resend_terminal_sizes(&self, cx: &Context<Self>) {
         // The new owner also needs sizes retained from previously visited tabs.
         // A later Navigation may reuse that surface without a new paint size change.
+        let theme = self.theme_palette().terminal;
         for (id, terminal) in &self.terminals {
+            if theme != Theme::default() {
+                self.send_terminal_theme(id, theme);
+            }
             if let Some((cols, rows, cell_width_px, cell_height_px)) =
                 terminal.read(cx).target_dimensions()
             {
@@ -4282,8 +4359,10 @@ impl Workspace {
                 continue;
             }
             let disabled = !self.active_path_valid();
+            let theme = self.theme_palette().terminal;
             let terminal = cx.new(|cx| {
                 let mut surface = TerminalSurface::new(cx).with_canvas_inset();
+                surface.set_theme(theme, cx);
                 surface.begin_transport_generation(self.runtime_generation, cx);
                 surface.set_input_disabled(disabled || self.recovery_blocked(id), cx);
                 surface
@@ -4298,6 +4377,9 @@ impl Workspace {
             })
             .detach();
             self.terminals.insert(id.to_owned(), terminal);
+            if theme != Theme::default() {
+                self.send_terminal_theme(id, theme);
+            }
         }
         if self
             .history_request
@@ -13443,6 +13525,7 @@ impl EventEmitter<InterfaceLocale> for Workspace {}
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let palette = self.theme_palette();
         if self.invalid_recovery_marker {
             return workspace_frame(database_recovery_page::render_invalid_marker(
                 window.viewport_size().height,
@@ -13482,7 +13565,12 @@ impl Render for Workspace {
             )
         {
             // The bridge can publish Ready before the workspace projection arrives.
-            return workspace_frame(div().id("startup-neutral").size_full().bg(rgb(0xf7f8fa)));
+            return workspace_frame(
+                div()
+                    .id("startup-neutral")
+                    .size_full()
+                    .bg(rgba(palette.workspace.canvas)),
+            );
         }
         let level_focus = self.level_focus().map(str::to_owned);
         self.refresh_project_instructions(window, cx);
@@ -13677,11 +13765,11 @@ impl Render for Workspace {
             .gap(px(12.))
             .p(px(10.))
             .border_t_1()
-            .border_color(rgb(0xe8e8e8))
+            .border_color(rgba(palette.chrome.divider))
             .overflow_x_scroll()
             .track_scroll(&self.carousel_scroll)
             .overflow_y_hidden()
-            .bg(rgb(0xe9edf2))
+            .bg(rgba(palette.cards.canvas))
             .capture_any_mouse_down(cx.listener(|this, _, _, cx| {
                 this.stop_edge_browse(true);
                 cx.notify();
@@ -13847,9 +13935,6 @@ impl Render for Workspace {
                 && node.is_some_and(|node| self.recovery_water_needed(id, node))
             {
                 mounted_water.insert(id.clone());
-                // Native workspace chrome currently has only the light theme.
-                // Terminal screen colors are per-session and may be set by OSC.
-                let workspace_theme = Theme::LIGHT;
                 let entity = self.recovery_water.entry(id.clone()).or_insert_with(|| {
                     #[cfg(debug_assertions)]
                     if let Some(trace) = &self.motion_trace {
@@ -13865,7 +13950,7 @@ impl Render for Workspace {
                     cx.new(|cx| {
                         RecoveryWater::new(
                             self.runtime_generation,
-                            workspace_theme,
+                            palette.terminal,
                             reduced_motion(),
                             cx,
                         )
@@ -14062,7 +14147,7 @@ impl Render for Workspace {
                     )
                 })
                 .children(provider_banner.map(|banner| {
-                    self.render_provider_restore_banner(id, banner, Theme::default(), cx)
+                    self.render_provider_restore_banner(id, banner, palette.terminal, cx)
                 }))
                 .children(
                     (self.read_only.is_none() && fork_failure.is_none() && fork_progress.is_none())
@@ -14133,7 +14218,11 @@ impl Render for Workspace {
                     .items_center()
                     .justify_center()
                     .text_size(px(12.))
-                    .text_color(rgb(0x8a919b))
+                    .text_color(if palette.terminal == Theme::LIGHT {
+                        rgb(0x8a919b)
+                    } else {
+                        rgba(palette.workspace.muted)
+                    })
                     .child("当前画布没有活跃会话"),
             );
         }
@@ -14149,6 +14238,9 @@ impl Render for Workspace {
                     .p(px(16.))
                     .text_size(px(12.))
                     .text_color(rgb(0xb14542))
+                    .when(palette.terminal == Theme::DARK, |error| {
+                        error.bg(rgb(0xfff1f0)).rounded(px(7.))
+                    })
                     .child(fault.clone()),
             );
         }
@@ -14280,6 +14372,9 @@ impl Render for Workspace {
                 )
         });
         let geometry_view = cx.entity().downgrade();
+        let stage_background = rgba(palette.workspace.canvas);
+        #[cfg(debug_assertions)]
+        crate::settings_shell::probe_workspace_canvas(stage_background);
         let root = div()
             .id("workspace-root")
             .relative()
@@ -14305,6 +14400,7 @@ impl Render for Workspace {
                     .relative()
                     .flex()
                     .flex_col()
+                    .bg(stage_background)
                     .child(
                         div()
                             .size_full()

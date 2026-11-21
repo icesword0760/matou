@@ -23,6 +23,7 @@ const ROLES: [&str; 3] = ["opus", "sonnet", "haiku"];
 const RISK_POLICY: &str = "antigravityRiskAcceptedAt";
 const DEFAULT_MODEL_INPUT: &str = "__cli_default__";
 const DEFAULT_MODEL_VIEW: &str = "CLI 默认";
+const CONTEXT_WINDOW: &str = "contextWindow";
 const NOT_FOUND: [&str; 2] = [
     "供应商配置不存在",
     "That provider configuration does not exist",
@@ -112,9 +113,17 @@ impl ProviderConfigStore {
         snapshot(&self.read()?)
     }
 
-    /// Save the API-key input object and return a redacted ProviderConfigView.
+    /// Save an API-key input or a context-window patch and return a redacted view.
     /// The JSON shape allows legacy optional fields to keep their V1 semantics.
     pub fn upsert(&self, input: &Value) -> Result<Value> {
+        if let Some(value) = input.get(CONTEXT_WINDOW) {
+            ensure!(
+                input.as_object().is_some_and(|input| input.len() == 3)
+                    && input["cli"] == "claude-code",
+                "Invalid provider context window update"
+            );
+            return self.set_context_window(input["id"].as_str().unwrap_or_default(), value);
+        }
         ensure!(
             input["kind"] != "subscription",
             "Subscription requires a completed sign-in"
@@ -192,6 +201,34 @@ impl ProviderConfigStore {
             let row = Value::Object(row);
             let public = view(&row)?;
             replace_row(list, row);
+            bump_revision(state);
+            Ok(public)
+        })
+    }
+
+    fn set_context_window(&self, id: &str, value: &Value) -> Result<Value> {
+        let tokens = if value.is_null() {
+            None
+        } else {
+            Some(custom_context_window(value).context(self.locale.text([
+                "上下文窗口必须是至少 100,000 的有效整数。",
+                "The context window must be a valid integer of at least 100,000.",
+            ]))?)
+        };
+        self.mutate(|state| {
+            let row = list_mut(state, "claude-code")
+                .iter_mut()
+                .find(|row| !id.is_empty() && row["id"] == id && row["kind"] != "subscription")
+                .context(self.locale.text(NOT_FOUND))?;
+            let object = row
+                .as_object_mut()
+                .context("Invalid provider configuration row")?;
+            if let Some(tokens) = tokens {
+                object.insert(CONTEXT_WINDOW.into(), json!(tokens));
+            } else {
+                object.shift_remove(CONTEXT_WINDOW);
+            }
+            let public = view(row)?;
             bump_revision(state);
             Ok(public)
         })
@@ -664,6 +701,9 @@ fn view(row: &Value) -> Result<Value> {
         ),
     );
     copy_present(&mut public, row, &["modelMetadata"]);
+    if let Some(tokens) = custom_context_window(&row[CONTEXT_WINDOW]) {
+        public.insert(CONTEXT_WINDOW.into(), json!(tokens));
+    }
     for key in ["modelMapping", "effortMapping"] {
         if truthy(&row[key]) {
             let mut mapping = Map::new();
@@ -705,6 +745,12 @@ fn view(row: &Value) -> Result<Value> {
         public.insert("subscription".into(), Value::Object(public_subscription));
     }
     Ok(Value::Object(public))
+}
+
+pub(crate) fn custom_context_window(value: &Value) -> Option<u64> {
+    value
+        .as_u64()
+        .filter(|tokens| (100_000..=9_007_199_254_740_991).contains(tokens))
 }
 
 fn write_atomic(root: &Path, bytes: &[u8]) -> io::Result<()> {

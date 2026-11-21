@@ -197,6 +197,10 @@ pub(crate) enum ProviderUpdate {
     SaveFailed(String),
     Deleted,
     DeleteFailed,
+    ContextWindow {
+        id: String,
+        result: Result<Option<u64>, String>,
+    },
 }
 
 enum Operation {
@@ -204,6 +208,9 @@ enum Operation {
     Save {
         activate: bool,
         editing: bool,
+    },
+    ContextWindow {
+        id: String,
     },
     Delete,
     Switch {
@@ -305,6 +312,7 @@ impl ProviderSettings {
             matches!(
                 &pending.operation,
                 Operation::Save { .. }
+                    | Operation::ContextWindow { .. }
                     | Operation::Switch {
                         committed: Some(_),
                         ..
@@ -371,6 +379,27 @@ impl ProviderSettings {
             request_id,
             input: draft.input(),
         }) {
+            Ok(())
+        } else {
+            Err(CONNECTING.into())
+        }
+    }
+
+    pub(crate) fn save_context_window(
+        &mut self,
+        id: &str,
+        tokens: Option<u64>,
+    ) -> Result<(), String> {
+        if self.pending.is_some() {
+            return Err(CONNECTING.into());
+        }
+        if self.send(
+            Operation::ContextWindow { id: id.to_owned() },
+            |request_id| Command::SaveProvider {
+                request_id,
+                input: json!({"cli": CLI, "id": id, "contextWindow": tokens}),
+            },
+        ) {
             Ok(())
         } else {
             Err(CONNECTING.into())
@@ -459,6 +488,15 @@ impl ProviderSettings {
                 });
                 ProviderUpdate::Saved
             }
+            (Operation::ContextWindow { id }, ProviderSettingsResult::Provider(provider))
+                if provider["id"] == id =>
+            {
+                self.project_save(&provider);
+                ProviderUpdate::ContextWindow {
+                    id,
+                    result: Ok(provider["contextWindow"].as_u64()),
+                }
+            }
             (Operation::Delete, ProviderSettingsResult::Snapshot(snapshot)) => {
                 if !self.accept_snapshot(snapshot) {
                     return ProviderUpdate::DeleteFailed;
@@ -521,6 +559,10 @@ impl ProviderSettings {
             Operation::Save { .. } => {
                 ProviderUpdate::SaveFailed(message.unwrap_or_else(|| SAVE_FAILED.into()))
             }
+            Operation::ContextWindow { id } => ProviderUpdate::ContextWindow {
+                id,
+                result: Err(message.unwrap_or_else(|| SAVE_FAILED.into())),
+            },
             Operation::Delete => ProviderUpdate::DeleteFailed,
             Operation::Switch { id, committed } => self.switch_failed(
                 id,

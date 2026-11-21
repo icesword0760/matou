@@ -201,6 +201,8 @@ pub struct ProviderContextEditorRow {
     dark: bool,
     locale: InterfaceLocale,
     on_save: Box<dyn FnMut(Option<u64>, &mut Window, &mut App) -> Result<(), String>>,
+    confirm_write: bool,
+    save_pending: bool,
     save_focus: FocusHandle,
     input_focused: bool,
     _subscriptions: Vec<Subscription>,
@@ -259,10 +261,57 @@ impl ProviderContextEditorRow {
             dark,
             locale,
             on_save: Box::new(on_save),
+            confirm_write: false,
+            save_pending: false,
             save_focus,
             input_focused: false,
             _subscriptions: subscriptions,
         }
+    }
+
+    /// Keep the saved badge until the runtime confirms the queued write.
+    pub fn with_runtime_confirmation(mut self) -> Self {
+        self.confirm_write = true;
+        self
+    }
+
+    pub fn saved(&self) -> Option<u64> {
+        self.form.saved()
+    }
+
+    pub fn set_locale(&mut self, locale: InterfaceLocale, cx: &mut Context<Self>) {
+        if self.locale != locale {
+            self.locale = locale;
+            cx.notify();
+        }
+    }
+
+    pub fn complete_save(&mut self, result: Result<Option<u64>, String>, cx: &mut Context<Self>) {
+        if !std::mem::take(&mut self.save_pending) {
+            return;
+        }
+        match result {
+            Ok(tokens) => {
+                self.form.saved = tokens;
+                self.form.error = None;
+            }
+            Err(message) => self.form.error = Some(SaveError::Write(message)),
+        }
+        cx.notify();
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn probe_focus_input(&self, window: &mut Window, cx: &App) {
+        window.focus(&self.input.read(cx).focus);
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn probe_status(&self) -> (String, Option<&str>, bool) {
+        (
+            self.form.badge(self.locale),
+            self.form.error(self.locale),
+            self.save_pending,
+        )
     }
 
     fn changed(&mut self, cx: &mut Context<Self>) {
@@ -274,9 +323,17 @@ impl ProviderContextEditorRow {
     }
 
     fn commit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.save_pending {
+            return;
+        }
         let input_focus = self.input.read(cx).focus.clone();
+        let before = self.form.saved;
         let Self { form, on_save, .. } = self;
         let saved = form.save(|value| on_save(value, window, cx));
+        if self.confirm_write && form.saved != before {
+            form.saved = before;
+            self.save_pending = true;
+        }
         if !saved {
             // Keep the caret in the field so the retained draft is editable.
             window.focus(&input_focus);
@@ -330,6 +387,7 @@ impl Render for ProviderContextEditorRow {
         }
 
         let save_focus = self.save_focus.clone();
+        let save_pending = self.save_pending;
         let save = div()
             .id(("provider-context-save", self.input.entity_id()))
             .flex_none()
@@ -345,7 +403,8 @@ impl Render for ProviderContextEditorRow {
             .text_size(px(10.))
             .font_weight(FontWeight(650.))
             .text_color(rgb(0xffffff))
-            .cursor_pointer()
+            .when(save_pending, |button| button.opacity(0.55))
+            .when(!save_pending, |button| button.cursor_pointer())
             .track_focus(&save_focus)
             .focus(move |style| style.shadow(vec![focus_ring(colors.input_focus_line, 2.)]))
             .hover(move |style| {
@@ -368,7 +427,11 @@ impl Render for ProviderContextEditorRow {
                 }
                 this.commit(window, cx);
             }))
-            .child(crate::ui_text::ui_text(locale.text("保存", "Save")));
+            .child(crate::ui_text::ui_text(if save_pending {
+                locale.text("正在保存…", "Saving…")
+            } else {
+                locale.text("保存", "Save")
+            }));
 
         let mut row = div().flex().flex_col().gap(px(6.)).w_full().child(
             div()

@@ -55,11 +55,24 @@ mod workspace {
         }
 
         pub(super) fn set_locale_data_root(&mut self, path: PathBuf) {
-            self.locale_data_root = Some(path);
+            self.data_root = Some(path);
         }
 
         pub(super) fn probe_locale(&self) -> InterfaceLocale {
             self.locale
+        }
+
+        pub(super) fn load_theme_fixture(&mut self, root: PathBuf, window: &Window) {
+            self.theme =
+                ThemeState::new(read_theme_preference(&root).unwrap(), window.appearance());
+            self.data_root = Some(root);
+        }
+
+        pub(super) fn arm_theme_terminal(&mut self, cx: &mut Context<Self>) {
+            self.terminals.insert(
+                "settings-theme-terminal".into(),
+                cx.new(TerminalSurface::new),
+            );
         }
 
         pub(super) fn time_zone_reply(
@@ -170,8 +183,12 @@ mod workspace {
 #[cfg(all(target_os = "macos", debug_assertions))]
 mod probe {
     use gpui::*;
+    use matou_native_core::dispatch_config::DispatchConfig;
     use matou_native_core::provider_config::{ProviderConfigLocale, ProviderConfigStore};
     use matou_native_core::sessions::{InterfaceLocale, LocalePreference, read_locale_preference};
+    use matou_native_desktop::theme_tokens::{
+        AppTheme, ThemePreference, read_theme_preference, write_theme_preference,
+    };
     use matou_native_runtime::protocol::{
         ClaudeRoleAssignmentsReply, ProviderSettingsReply, ProviderSettingsResult,
         TimeZoneSettingsError, TimeZoneSettingsReply, TimeZoneSettingsSnapshot,
@@ -430,6 +447,13 @@ mod probe {
                 },
             )
             .unwrap();
+        if visible_state.is_none() {
+            window
+                .update(cx, |_, window, _| {
+                    assert!(!crate::macos::is_window_visible(window).unwrap());
+                })
+                .unwrap();
+        }
         (window, sink)
     }
 
@@ -441,6 +465,365 @@ mod probe {
         window
             .update(cx, |view, _, cx| {
                 check(view.settings_entity().unwrap().read(cx), cx)
+            })
+            .unwrap();
+    }
+
+    fn update_shell(
+        window: WindowHandle<Workspace>,
+        cx: &mut AsyncApp,
+        update: impl FnOnce(&mut SettingsShell, &mut Window, &mut Context<SettingsShell>),
+    ) {
+        window
+            .update(cx, |view, window, cx| {
+                view.settings_entity()
+                    .unwrap()
+                    .update(cx, |shell, cx| update(shell, window, cx));
+            })
+            .unwrap();
+    }
+
+    fn probe_root(test: &str) -> std::path::PathBuf {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../target")
+            .join(format!("settings-{test}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn verify_dispatch_window(cx: &mut AsyncApp) {
+        let root = probe_root("dispatch");
+        let config = DispatchConfig::for_home(&root);
+        // A directory at the file path gives a deterministic read failure.
+        std::fs::create_dir_all(config.path()).unwrap();
+        let (window, _sink) = cx.update(|cx| open_window(None, cx)).unwrap();
+        window
+            .update(cx, |view, window, cx| view.open_settings(window, cx))
+            .unwrap();
+        update_shell(window, cx, |shell, _, _| {
+            shell.probe_dispatch_config(DispatchConfig::for_home(&root));
+        });
+        let select_dispatch = |cx: &mut AsyncApp| {
+            draw(window, cx);
+            update_shell(window, cx, |shell, window, _| {
+                shell.probe_settings_nav_focus(SettingsPage::Dispatch, window);
+            });
+            press(window, "enter", cx);
+            draw(window, cx);
+        };
+        select_dispatch(cx);
+        check_shell(window, cx, |shell, _| {
+            assert!(shell.probe_dispatch_load_failed())
+        });
+        std::fs::remove_dir(config.path()).unwrap();
+        update_shell(window, cx, |shell, window, _| {
+            shell.probe_dispatch_retry_focus(window)
+        });
+        press(window, "enter", cx);
+        draw(window, cx);
+        check_shell(window, cx, |shell, _| {
+            assert!(!shell.probe_dispatch_load_failed())
+        });
+
+        // Navigate the actual dispatch panel, including its number-input and
+        // Save handlers, without touching the native desktop or reading HOME.
+        update_shell(window, cx, |shell, window, _| {
+            shell.probe_settings_nav_focus(SettingsPage::Dispatch, window);
+        });
+        for _ in 0..6 {
+            press(window, "tab", cx);
+        }
+        let edit_number = |cx: &mut AsyncApp, digits: &[&str]| {
+            draw(window, cx);
+            press(window, "cmd-a", cx);
+            for digit in digits {
+                press(window, digit, cx);
+            }
+            draw(window, cx);
+        };
+        let save = |cx: &mut AsyncApp| {
+            for _ in 0..5 {
+                press(window, "tab", cx);
+            }
+            press(window, "enter", cx);
+            draw(window, cx);
+        };
+        edit_number(cx, &["0"]);
+        save(cx);
+        assert!(
+            !config.path().exists(),
+            "invalid input wrote the configuration"
+        );
+        edit_number(cx, &["1", "3"]);
+        std::fs::create_dir(config.path()).unwrap();
+        save(cx);
+        assert!(config.path().is_dir(), "failed save replaced the fixture");
+        std::fs::remove_dir(config.path()).unwrap();
+        press(window, "enter", cx);
+        draw(window, cx);
+        assert_eq!(config.snapshot().unwrap().defaults.idle_min, 13.);
+
+        update_shell(window, cx, |shell, window, _| {
+            shell.probe_settings_nav_focus(SettingsPage::Language, window);
+        });
+        press(window, "enter", cx);
+        select_dispatch(cx);
+        // The freshly mounted form should still show 13. Changing a different
+        // number and saving verifies that 13 was restored into the draft.
+        for _ in 0..7 {
+            press(window, "tab", cx);
+        }
+        edit_number(cx, &["4", "9"]);
+        for _ in 0..4 {
+            press(window, "tab", cx);
+        }
+        press(window, "enter", cx);
+        let saved = config.snapshot().unwrap().defaults;
+        assert_eq!((saved.idle_min, saved.max_min), (13., 49.));
+        window
+            .update(cx, |_, window, _| window.remove_window())
+            .unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        println!(
+            "Hidden GPUI dispatch: open, retry read and write failures, invalid number blocked, save, switch pages and re-read"
+        );
+    }
+
+    fn verify_theme_window(cx: &mut AsyncApp) {
+        let root = probe_root("theme");
+        let (window, sink) = cx.update(|cx| open_window(None, cx)).unwrap();
+        write_theme_preference(&root, ThemePreference::Light).unwrap();
+        window
+            .update(cx, |view, window, cx| {
+                view.load_theme_fixture(root.clone(), window);
+                view.arm_theme_terminal(cx);
+                view.open_settings(window, cx);
+            })
+            .unwrap();
+        request_id(&sink);
+        assignment_request_id(&sink);
+        update_shell(window, cx, |shell, window, cx| {
+            shell.probe_language_page(window, cx)
+        });
+        assert!(matches!(
+            sink.try_recv().unwrap(),
+            Command::GetTimeZoneSettings { .. }
+        ));
+        draw(window, cx);
+
+        let verify = |preference, expected: AppTheme, cx: &mut AsyncApp| {
+            assert_eq!(read_theme_preference(&root).unwrap(), preference);
+            let frame = probe_language_zone(|| draw(window, cx));
+            let canvas = Some(rgba(expected.palette().workspace.canvas));
+            assert_eq!(frame.settings_canvas, canvas);
+            assert_eq!(frame.workspace_canvas, canvas);
+        };
+        let choose = |option: usize, cx: &mut AsyncApp| {
+            // The time-zone read is still pending, so the theme radio list
+            // immediately follows the English radio in the tab order.
+            update_shell(window, cx, |shell, window, _| {
+                shell.probe_language_focus("english", window);
+            });
+            for _ in 0..=option {
+                press(window, "tab", cx);
+            }
+            press(window, "enter", cx);
+        };
+        verify(ThemePreference::Light, AppTheme::Light, cx);
+        choose(2, cx);
+        verify(ThemePreference::Dark, AppTheme::Dark, cx);
+        assert!(matches!(
+            sink.try_recv().unwrap(),
+            Command::Theme { session_id, theme }
+                if session_id == "settings-theme-terminal" && theme == AppTheme::Dark.palette().terminal
+        ));
+
+        let appearance = window
+            .update(cx, |_, window, _| window.appearance())
+            .unwrap();
+        choose(0, cx);
+        verify(
+            ThemePreference::System,
+            ThemePreference::System.resolve(appearance),
+            cx,
+        );
+        window
+            .update(cx, |_, window, _| window.remove_window())
+            .unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        println!(
+            "Hidden GPUI theme: Light → Dark → System, theme.json persisted, dark settings/workspace palettes and terminal theme command"
+        );
+    }
+
+    async fn verify_provider_context_window(cx: &mut AsyncApp) {
+        let root = probe_root("provider-context");
+        let store = ProviderConfigStore::new(&root, ProviderConfigLocale::ZhCn);
+        let provider = store
+            .upsert(&json!({
+                "cli": "claude-code", "name": "隔离窗口供应商",
+                "endpoint": "https://context.example.invalid", "apiKey": "fixture-key",
+                "model": "probe-model"
+            }))
+            .unwrap();
+        let id = provider["id"].as_str().unwrap();
+        store.set_active("claude-code", id).unwrap();
+        let (window, sink) = cx.update(|cx| open_window(None, cx)).unwrap();
+        window
+            .update(cx, |view, window, cx| {
+                view.set_locale_data_root(root.clone());
+                view.open_settings(window, cx);
+            })
+            .unwrap();
+
+        let reload = |cx: &mut AsyncApp| {
+            let provider_request = request_id(&sink);
+            let assignments_request = assignment_request_id(&sink);
+            window
+                .update(cx, |view, window, cx| {
+                    view.provider_reply(
+                        result(
+                            provider_request,
+                            ProviderSettingsResult::Snapshot(store.snapshot().unwrap()),
+                        ),
+                        window,
+                        cx,
+                    );
+                    view.assignment_reply(
+                        ClaudeRoleAssignmentsReply {
+                            request_id: assignments_request,
+                            assignments: Some(Default::default()),
+                            web_search: None,
+                            error: None,
+                        },
+                        window,
+                        cx,
+                    );
+                })
+                .unwrap();
+        };
+        let status = |cx: &mut AsyncApp| {
+            window
+                .update(cx, |view, _, cx| {
+                    let shell = view.settings_entity().unwrap();
+                    let row = shell.read(cx).probe_provider_context(id).read(cx);
+                    let (badge, error, pending) = row.probe_status();
+                    (badge, error.map(str::to_owned), pending)
+                })
+                .unwrap()
+        };
+        let edit = |cx: &mut AsyncApp, keys: &[&str]| {
+            check_shell_for_context_input(window, id, cx);
+            draw(window, cx);
+            press(window, "cmd-a", cx);
+            for key in keys {
+                press(window, key, cx);
+            }
+            press(window, "enter", cx);
+        };
+        let write = |tokens: Value| {
+            let Command::SaveProvider { request_id, input } = sink.try_recv().unwrap() else {
+                panic!("expected context-only provider write");
+            };
+            assert_eq!(
+                input,
+                json!({"cli": "claude-code", "id": id, "contextWindow": tokens})
+            );
+            (request_id, input)
+        };
+        let confirm = |cx: &mut AsyncApp, request_id, reply| {
+            window
+                .update(cx, |view, window, cx| {
+                    view.provider_reply(result(request_id, reply), window, cx);
+                })
+                .unwrap();
+            draw(window, cx);
+        };
+        reload(cx);
+        let chinese = probe_language_zone(|| draw(window, cx));
+        assert!(
+            chinese
+                .labels
+                .iter()
+                .any(|label| label.starts_with("所有 Claude Code 会话跟随全局供应商"))
+        );
+        assert_eq!(status(cx).0, "默认窗口");
+        edit(cx, &["9"]);
+        assert!(status(cx).1.unwrap().contains("100,000"));
+        assert!(sink.try_recv().is_err());
+
+        edit(cx, &["3", "2", "0", "0", "0", "0"]);
+        let (request_id, _) = write(json!(320_000));
+        assert_eq!(status(cx), ("默认窗口".into(), None, true));
+        confirm(
+            cx,
+            request_id,
+            ProviderSettingsResult::Error("隔离窗口写入失败".into()),
+        );
+        assert_eq!(
+            status(cx),
+            ("默认窗口".into(), Some("隔离窗口写入失败".into()), false)
+        );
+        press(window, "enter", cx);
+        let (request_id, input) = write(json!(320_000));
+        confirm(
+            cx,
+            request_id,
+            ProviderSettingsResult::Provider(store.upsert(&input).unwrap()),
+        );
+        assert_eq!(status(cx), ("320K 窗口".into(), None, false));
+
+        edit(cx, &["backspace"]);
+        let (request_id, input) = write(Value::Null);
+        assert_eq!(status(cx), ("320K 窗口".into(), None, true));
+        confirm(
+            cx,
+            request_id,
+            ProviderSettingsResult::Provider(store.upsert(&input).unwrap()),
+        );
+        assert_eq!(status(cx), ("默认窗口".into(), None, false));
+
+        update_shell(window, cx, |shell, window, cx| {
+            shell.probe_language_page(window, cx)
+        });
+        assert!(matches!(
+            sink.try_recv().unwrap(),
+            Command::GetTimeZoneSettings { .. }
+        ));
+        draw(window, cx);
+        update_shell(window, cx, |shell, window, _| {
+            shell.probe_language_focus("english", window)
+        });
+        press(window, "enter", cx);
+        wait_for_language_frame(window, cx, "Language & time zone").await;
+        update_shell(window, cx, |shell, window, _| {
+            shell.probe_settings_nav_focus(SettingsPage::ClaudeCode, window)
+        });
+        press(window, "enter", cx);
+        reload(cx);
+        let english = probe_language_zone(|| draw(window, cx));
+        assert!(english.labels.iter().any(|label| {
+            label.starts_with("All Claude Code sessions follow the global provider.")
+        }));
+        assert_eq!(status(cx), ("Default window".into(), None, false));
+        window
+            .update(cx, |_, window, _| window.remove_window())
+            .unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        println!(
+            "Hidden GPUI context window: validation, confirmed save, rejected save and retry, clear to default, Chinese/English impact and re-read"
+        );
+    }
+
+    fn check_shell_for_context_input(window: WindowHandle<Workspace>, id: &str, cx: &mut AsyncApp) {
+        window
+            .update(cx, |view, window, cx| {
+                view.settings_entity()
+                    .unwrap()
+                    .read(cx)
+                    .probe_provider_context(id)
+                    .read(cx)
+                    .probe_focus_input(window, cx);
             })
             .unwrap();
     }
@@ -509,8 +892,8 @@ mod probe {
         window
             .update(cx, |view, window, _| view.arm_settings_entry(window))
             .unwrap();
-        // The group labels never enter the tab order. First tab is Claude
-        // Code, second is Language, and a reverse tab returns to Claude Code.
+        // The navigation tabs run Claude Code, Dispatch, then Language.
+        // Group labels never enter the tab order.
         press(window, "tab", cx);
         press(window, "enter", cx);
         check_shell(window, cx, |shell, _| {
@@ -521,6 +904,7 @@ mod probe {
             Err(std::sync::mpsc::TryRecvError::Empty)
         ));
         press(window, "tab", cx);
+        press(window, "tab", cx);
         press(window, "enter", cx);
         draw(window, cx);
         check_shell(window, cx, |shell, _| {
@@ -530,6 +914,7 @@ mod probe {
             sink.try_recv(),
             Ok(Command::GetTimeZoneSettings { .. })
         ));
+        press(window, "shift-tab", cx);
         press(window, "shift-tab", cx);
         press(window, "enter", cx);
         let reentry = request_id(&sink);
@@ -551,7 +936,7 @@ mod probe {
         window
             .update(cx, |view, window, _| view.arm_settings_entry(window))
             .unwrap();
-        for _ in 0..5 {
+        for _ in 0..6 {
             press(window, "tab", cx);
         }
         press(window, "enter", cx);
@@ -1526,6 +1911,9 @@ mod probe {
             } else {
                 verify_commands();
                 cx.spawn(async |cx| {
+                    verify_dispatch_window(cx);
+                    verify_theme_window(cx);
+                    verify_provider_context_window(cx).await;
                     verify_window(cx);
                     verify_delete_window(cx);
                     verify_assignments_window(cx);
