@@ -137,10 +137,39 @@ pub fn detached_header_status(
     }
 }
 
+/// Header insets shared with probes and the parent wiring. On macOS the title
+/// must clear the red/yellow/green traffic lights; the right edge keeps the
+/// frozen 12pt inset.
+pub const DETACHED_HEADER_LEFT_INSET_MACOS: f32 = 80.;
+pub const DETACHED_HEADER_LEFT_INSET_OTHER: f32 = 12.;
+pub const DETACHED_HEADER_RIGHT_INSET: f32 = 12.;
+
+/// Actual left inset used by the detached header in this build.
+pub const fn detached_header_left_inset() -> f32 {
+    if cfg!(target_os = "macos") {
+        DETACHED_HEADER_LEFT_INSET_MACOS
+    } else {
+        DETACHED_HEADER_LEFT_INSET_OTHER
+    }
+}
+
 mod view {
     use std::rc::Rc;
 
     use gpui::{prelude::*, *};
+
+    #[cfg(debug_assertions)]
+    thread_local! {
+        static HEADER_PROBE: std::cell::Cell<Option<Option<Pixels>>> =
+            const { std::cell::Cell::new(None) };
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn probe_detached_header_left(draw: impl FnOnce()) -> Option<Pixels> {
+        HEADER_PROBE.set(Some(None));
+        draw();
+        HEADER_PROBE.take().flatten()
+    }
 
     use super::*;
     use crate::ui_text::ui_text;
@@ -247,14 +276,22 @@ mod view {
         let button_text = if light { rgb(0x2f3547) } else { rgb(0xcbd8f1) };
         let button_hover = if light { rgb(0xf0f2f5) } else { rgb(0x202b42) };
 
-        div()
+        let header = div();
+        #[cfg(debug_assertions)]
+        let header = header.when(HEADER_PROBE.with(|probe| probe.get().is_some()), |header| {
+            header.on_children_prepainted(|children, _, _| {
+                HEADER_PROBE.set(Some(children.first().map(|bounds| bounds.left())));
+            })
+        });
+        header
             .id("detached-window-header")
             .flex()
             .flex_none()
             .items_center()
             .w_full()
             .h(px(42.))
-            .px(px(12.))
+            .pl(px(detached_header_left_inset()))
+            .pr(px(DETACHED_HEADER_RIGHT_INSET))
             .gap(px(8.))
             .border_b_1()
             .border_color(border)
@@ -322,6 +359,9 @@ mod view {
 }
 
 pub use view::{detached_placeholder, detached_window_header};
+
+#[cfg(debug_assertions)]
+pub use view::probe_detached_header_left;
 
 #[cfg(test)]
 mod tests {

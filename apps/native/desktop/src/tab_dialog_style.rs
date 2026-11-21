@@ -1,3 +1,4 @@
+use crate::theme_tokens::{DARK, LIGHT, TabPalette};
 use crate::ui_text::ui_text;
 use gpui::{prelude::*, *};
 
@@ -5,6 +6,22 @@ fn color_alpha(hex: u32, alpha: f32) -> Rgba {
     let mut color = rgb(hex);
     color.a = alpha;
     color
+}
+
+fn action_hover(palette: &TabPalette) -> Rgba {
+    if palette == &LIGHT.tabs {
+        color_alpha(0x000000, 0.08)
+    } else {
+        rgba(palette.action_hover)
+    }
+}
+
+fn action_text(palette: &TabPalette) -> Rgba {
+    if palette == &DARK.tabs {
+        rgba(DARK.cards.compact_text)
+    } else {
+        rgba(palette.action_text)
+    }
 }
 
 fn panel_shadow() -> Vec<BoxShadow> {
@@ -17,7 +34,7 @@ fn panel_shadow() -> Vec<BoxShadow> {
 }
 
 /// `.hierarchy-shell[data-theme="light"] .tab-item` (+ `.active` / `:hover`).
-pub fn tab(id: impl Into<ElementId>, active: bool) -> Stateful<Div> {
+pub fn tab(id: impl Into<ElementId>, active: bool, palette: &TabPalette) -> Stateful<Div> {
     let base = div()
         .id(id)
         .flex()
@@ -33,11 +50,17 @@ pub fn tab(id: impl Into<ElementId>, active: bool) -> Stateful<Div> {
         .text_size(px(12.))
         .cursor_pointer();
     if active {
-        base.text_color(rgb(0x2f3547)).bg(rgb(0xeceef3))
+        base.text_color(rgba(palette.active_text))
+            .bg(rgba(palette.active_background))
     } else {
-        base.text_color(color_alpha(0x000000, 0.4))
+        let hover_text = if palette == &LIGHT.tabs {
+            color_alpha(0x000000, 0.65)
+        } else {
+            rgba(palette.hover_text)
+        };
+        base.text_color(rgba(palette.inactive_text))
             .bg(rgba(0x00000000))
-            .hover(|style| style.text_color(color_alpha(0x000000, 0.65)))
+            .hover(move |style| style.text_color(hover_text))
     }
 }
 
@@ -55,7 +78,9 @@ pub fn tab_title(title: impl Into<SharedString>) -> Div {
 }
 
 /// `.hierarchy-shell[data-theme="light"] .tab-close` (`visible` controls opacity only).
-pub fn tab_close(id: impl Into<ElementId>, visible: bool) -> Stateful<Div> {
+pub fn tab_close(id: impl Into<ElementId>, visible: bool, palette: &TabPalette) -> Stateful<Div> {
+    let hover = action_hover(palette);
+    let foreground = action_text(palette);
     div()
         .id(id)
         .flex()
@@ -64,19 +89,15 @@ pub fn tab_close(id: impl Into<ElementId>, visible: bool) -> Stateful<Div> {
         .justify_center()
         .size(px(20.))
         .rounded(px(4.))
-        .text_color(rgb(0x606572))
+        .text_color(foreground)
         .bg(rgba(0x00000000))
         .opacity(if visible { 1. } else { 0. })
         .cursor_pointer()
-        .hover(|style| {
-            style
-                .text_color(rgb(0x2f3547))
-                .bg(color_alpha(0x000000, 0.08))
-        })
+        .hover(move |style| style.text_color(rgba(palette.action_hover_text)).bg(hover))
         .child(
             svg()
                 .path("icons/x.svg")
-                .text_color(rgb(0x606572))
+                .text_color(foreground)
                 .size(px(13.))
                 .flex_none(),
         )
@@ -92,7 +113,9 @@ pub fn tab_status_dot() -> Div {
 }
 
 /// `.hierarchy-shell[data-theme="light"] .tab-overflow-btn`.
-pub fn tab_overflow_btn(id: impl Into<ElementId>) -> Stateful<Div> {
+pub fn tab_overflow_btn(id: impl Into<ElementId>, palette: &TabPalette) -> Stateful<Div> {
+    let hover = action_hover(palette);
+    let foreground = action_text(palette);
     div()
         .id(id)
         .flex()
@@ -101,25 +124,23 @@ pub fn tab_overflow_btn(id: impl Into<ElementId>) -> Stateful<Div> {
         .justify_center()
         .size(px(28.))
         .rounded(px(6.))
-        .text_color(rgb(0x606572))
+        .text_color(foreground)
         .bg(rgba(0x00000000))
         .cursor_pointer()
-        .hover(|style| {
-            style
-                .text_color(rgb(0x2f3547))
-                .bg(color_alpha(0x000000, 0.08))
-        })
+        .hover(move |style| style.text_color(rgba(palette.action_hover_text)).bg(hover))
         .child(
             svg()
                 .path("icons/ellipsis.svg")
-                .text_color(rgb(0x606572))
+                .text_color(foreground)
                 .size(px(16.))
                 .flex_none(),
         )
 }
 
 /// `.hierarchy-shell[data-theme="light"] .tab-add-btn`.
-pub fn tab_add(id: impl Into<ElementId>, enabled: bool) -> Stateful<Div> {
+pub fn tab_add(id: impl Into<ElementId>, enabled: bool, palette: &TabPalette) -> Stateful<Div> {
+    let hover = action_hover(palette);
+    let foreground = action_text(palette);
     div()
         .id(id)
         .flex()
@@ -129,19 +150,17 @@ pub fn tab_add(id: impl Into<ElementId>, enabled: bool) -> Stateful<Div> {
         .size(px(24.))
         .ml(px(4.))
         .rounded(px(6.))
-        .text_color(rgb(0x606572))
-        .bg(rgb(0xeff0f4))
-        .when(enabled, |button| {
-            button.cursor_pointer().hover(|style| {
-                style
-                    .text_color(rgb(0x2f3547))
-                    .bg(color_alpha(0x000000, 0.08))
-            })
+        .text_color(foreground)
+        .bg(rgba(palette.add_background))
+        .when(enabled, move |button| {
+            button
+                .cursor_pointer()
+                .hover(move |style| style.text_color(rgba(palette.action_hover_text)).bg(hover))
         })
         .child(
             svg()
                 .path("icons/plus.svg")
-                .text_color(rgb(0x606572))
+                .text_color(foreground)
                 .size(px(15.))
                 .flex_none(),
         )

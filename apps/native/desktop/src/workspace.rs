@@ -5516,6 +5516,8 @@ impl Workspace {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let palette = self.theme_palette();
+        let sidebar_palette = palette.sidebar;
         let active = self
             .hierarchy
             .as_ref()
@@ -5617,12 +5619,16 @@ impl Workspace {
                         "chevron-down"
                     },
                     14. * scale,
-                    0x777777,
+                    sidebar_palette.chevron >> 8,
                 ))
                 .child(icon(
                     "folder",
                     16. * scale,
-                    if active { 0x4078f2 } else { 0x656d76 },
+                    if active {
+                        sidebar_palette.accent_icon >> 8
+                    } else {
+                        sidebar_palette.icon >> 8
+                    },
                 ))
                 .child(
                     div()
@@ -5632,7 +5638,11 @@ impl Workspace {
                         .text_ellipsis()
                         .text_size(px(13. * scale))
                         .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(if active { 0x2f3547 } else { 0x656d76 }))
+                        .text_color(rgba(if active {
+                            sidebar_palette.task_active_text
+                        } else {
+                            sidebar_palette.workspace_name
+                        }))
                         .child(ui_text(workspace.name.clone()).normal_line_height()),
                 )
                 .child(
@@ -5648,8 +5658,8 @@ impl Workspace {
                                     .px(px(5. * scale))
                                     .py(px(1. * scale))
                                     .rounded(px(5. * scale))
-                                    .bg(rgb(0xeceef3))
-                                    .text_color(rgb(0x91949e))
+                                    .bg(rgba(sidebar_palette.badge_background))
+                                    .text_color(rgba(sidebar_palette.badge_text))
                                     .text_size(px(9. * scale))
                                     .line_height(px(12.5 * scale))
                                     .font_weight(FontWeight::SEMIBOLD)
@@ -5657,7 +5667,7 @@ impl Workspace {
                             )
                         })
                         .when(workspace.is_pinned, |status| {
-                            status.child(icon("pin", 13. * scale, 0x81848d))
+                            status.child(icon("pin", 13. * scale, sidebar_palette.icon_muted >> 8))
                         })
                         .when(invalid, |status| {
                             status.child(
@@ -5666,8 +5676,8 @@ impl Workspace {
                                     .px(px(4. * scale))
                                     .py(px(1. * scale))
                                     .rounded(px(4. * scale))
-                                    .bg(rgba(0xd99d3c1a))
-                                    .text_color(rgb(0xd99d3c))
+                                    .bg(rgba(sidebar_palette.invalid_background))
+                                    .text_color(rgba(sidebar_palette.invalid_text))
                                     .text_size(px(9. * scale))
                                     .line_height(px(12.5 * scale))
                                     .child(ui_text(self.locale.text("路径失效", "Invalid path"))),
@@ -5713,10 +5723,11 @@ impl Workspace {
                 0.
             })
             .when(!invalid, |btn| {
-                btn.cursor_pointer().hover(|s| s.bg(rgba(0x00000014)))
+                btn.cursor_pointer()
+                    .hover(|s| s.bg(rgba(sidebar_palette.control_hover)))
             })
             .when(invalid, |btn| btn.cursor(CursorStyle::OperationNotAllowed))
-            .child(icon("plus", 14. * scale, 0x81848d));
+            .child(icon("plus", 14. * scale, sidebar_palette.icon_muted >> 8));
         let add_el = if invalid {
             add_btn.into_any_element()
         } else {
@@ -5749,8 +5760,12 @@ impl Workspace {
                 .rounded(px(6. * scale))
                 .opacity(if actions_visible { 1. } else { 0. })
                 .cursor_pointer()
-                .hover(|s| s.bg(rgba(0x00000014)))
-                .child(icon("ellipsis", 14. * scale, 0x81848d))
+                .hover(|s| s.bg(rgba(sidebar_palette.control_hover)))
+                .child(icon(
+                    "ellipsis",
+                    14. * scale,
+                    sidebar_palette.icon_muted >> 8,
+                ))
                 .child(
                     canvas(
                         |_, _, _| (),
@@ -5776,7 +5791,9 @@ impl Workspace {
             .flex()
             .items_center()
             .rounded(px(8. * scale))
-            .when(!active, |header| header.hover(|s| s.bg(rgba(0x2f35470f))))
+            .when(!active, |header| {
+                header.hover(|s| s.bg(rgba(sidebar_palette.action_hover)))
+            })
             .child(toggle)
             .child(add_el)
             .when(invalid && !workspace.is_default, |header| {
@@ -5790,16 +5807,16 @@ impl Workspace {
                             .px(px(7. * scale))
                             .rounded(px(6. * scale))
                             .border(px(scale))
-                            .border_color(rgba(0x9a681840))
-                            .bg(rgb(0xfff8e8))
-                            .text_color(rgb(0x9a6818))
+                            .border_color(rgba(sidebar_palette.relink_line))
+                            .bg(rgba(sidebar_palette.relink_background))
+                            .text_color(rgba(sidebar_palette.relink_text))
                             .text_size(px(9. * scale))
                             .line_height(px(12.5 * scale))
                             .flex()
                             .items_center()
                             .justify_center()
                             .cursor_pointer()
-                            .hover(|s| s.bg(rgba(0xd99d3c26)))
+                            .hover(|s| s.bg(rgba(sidebar_palette.relink_hover)))
                             .child(ui_text(self.locale.text("恢复目录", "Restore directory"))),
                         &controls[2],
                         move |this, _, cx| {
@@ -5991,6 +6008,11 @@ impl Workspace {
     }
 
     fn sidebar(&self, window: &Window, cx: &mut Context<Self>) -> Div {
+        let palette = self.theme_palette();
+        let sidebar_palette = palette.sidebar;
+        let background = rgba(sidebar_palette.background);
+        #[cfg(debug_assertions)]
+        crate::settings_shell::probe_workspace_surfaces(|probe| probe.sidebar = Some(background));
         // At 720 the English title must stay whole. Reclaim only the button's
         // own padding/gap and a little of the traffic-light reserve on the
         // left; the bell keeps its existing rect and click target.
@@ -6004,14 +6026,15 @@ impl Workspace {
             .pr(px(1.))
             .py(px(7.))
             .rounded(px(7.))
-            .text_color(rgb(0x2f3547))
+            .text_color(rgba(sidebar_palette.new_workspace))
             .text_size(px(14.))
             .font_weight(FontWeight::SEMIBOLD)
             .when(!self.creating_workspace, |btn| {
-                btn.cursor_pointer().hover(|s| s.bg(rgba(0x2f35470f)))
+                btn.cursor_pointer()
+                    .hover(|s| s.bg(rgba(sidebar_palette.action_hover)))
             })
             .when(self.creating_workspace, |btn| btn.opacity(0.6))
-            .child(icon("square-pen", 17., 0x2f3547))
+            .child(icon("square-pen", 17., sidebar_palette.new_workspace >> 8))
             .child(
                 div()
                     .min_w_0()
@@ -6041,8 +6064,11 @@ impl Workspace {
             .flex()
             .flex_col()
             .border_r_1()
-            .border_color(rgba(0x58718b1f))
-            .bg(rgba(0xfbfdff17))
+            .border_color(rgba(sidebar_palette.divider))
+            // Light keeps the frozen translucent overlay over the AppKit
+            // sidebar material; dark paints an opaque token because that
+            // native material does not follow the in-app appearance.
+            .bg(background)
             .child(
                 div()
                     .h(px(NOTIFICATION_UI_SIDEBAR_HEADER_HEIGHT))
@@ -6106,7 +6132,7 @@ impl Workspace {
                     .justify_between()
                     .text_size(px(12.))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgb(0x989da7))
+                    .text_color(rgba(sidebar_palette.toolbar_text))
                     .child(
                         self.button(
                             div()
@@ -6117,7 +6143,7 @@ impl Workspace {
                                 .flex()
                                 .items_center()
                                 .gap(px(7.))
-                                .child(icon("columns-3", 16., 0x989da7))
+                                .child(icon("columns-3", 16., sidebar_palette.toolbar_text >> 8))
                                 .child(if self.wiring.board_open {
                                     self.locale.text("画布", "Canvas")
                                 } else {
@@ -6138,6 +6164,8 @@ impl Workspace {
     }
 
     fn task_row(&self, task: &Task, scale: f32, cx: &mut Context<Self>) -> Stateful<Div> {
+        let palette = self.theme_palette();
+        let sidebar_palette = palette.sidebar;
         let active = self
             .hierarchy
             .as_ref()
@@ -6155,7 +6183,11 @@ impl Workspace {
         let menu_visible = active
             || self.task_hover.as_ref() == Some(&id)
             || self.task_menu.as_ref().is_some_and(|m| m.0 == id);
-        let color = if active { 0x2f3547 } else { 0x6f7683 };
+        let color = if active {
+            sidebar_palette.task_active_text
+        } else {
+            sidebar_palette.task_text
+        };
         let row = self
             .focus_control(
                 div().id(SharedString::from(format!("task:{id}"))),
@@ -6172,13 +6204,13 @@ impl Workspace {
             .gap(px(7. * scale))
             .text_size(px(13. * scale))
             .line_height(px(19.5 * scale))
-            .text_color(rgb(color))
+            .text_color(rgba(color))
             .bg(if active {
-                rgba(0x57657f18)
+                rgba(sidebar_palette.task_active)
             } else {
                 rgba(0x00000000)
             })
-            .hover(|s| s.bg(rgba(0x57657f12)))
+            .hover(|s| s.bg(rgba(sidebar_palette.task_hover)))
             .on_mouse_down(MouseButton::Left, {
                 let focus = focus[0].clone();
                 move |_, window, _| window.focus(&focus)
@@ -6225,7 +6257,7 @@ impl Workspace {
                 };
                 cx.notify();
             }))
-            .child(icon("task", 12. * scale, color))
+            .child(icon("task", 12. * scale, color >> 8))
             .child(
                 div()
                     .relative()
@@ -6270,7 +6302,7 @@ impl Workspace {
                     ),
             )
             .when(task.is_pinned, |row| {
-                row.child(icon("pin", 13. * scale, 0x81848d))
+                row.child(icon("pin", 13. * scale, sidebar_palette.icon_muted >> 8))
             })
             .child(
                 self.button(
@@ -6284,8 +6316,8 @@ impl Workspace {
                         .justify_center()
                         .opacity(if menu_visible { 1. } else { 0. })
                         .cursor_pointer()
-                        .hover(|s| s.bg(rgba(0x0000000f)))
-                        .child(icon("ellipsis", 14. * scale, 0x656d76)),
+                        .hover(|s| s.bg(rgba(sidebar_palette.control_hover)))
+                        .child(icon("ellipsis", 14. * scale, sidebar_palette.icon >> 8)),
                     &focus[1],
                     move |this, _, cx| this.open_task_menu(&menu_id, true, cx),
                     cx,
@@ -10238,6 +10270,10 @@ impl Workspace {
     }
 
     fn topbar(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
+        let palette = self.theme_palette();
+        let background = rgba(palette.tabs.bar);
+        #[cfg(debug_assertions)]
+        crate::settings_shell::probe_workspace_surfaces(|probe| probe.topbar = Some(background));
         let active_id = self
             .hierarchy
             .as_ref()
@@ -10263,77 +10299,82 @@ impl Workspace {
             let [title_focus, close_focus] = &self.tab_controls[&scene.id];
             let double_click_focus = title_focus.clone();
             tabs = tabs.child(
-                tabs_ui::tab(SharedString::from(format!("tab-{}", scene.id)), active)
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_hover(cx.listener(move |this, hover: &bool, _, cx| {
-                        this.tab_hover = hover.then(|| hover_id.clone());
+                tabs_ui::tab(
+                    SharedString::from(format!("tab-{}", scene.id)),
+                    active,
+                    &palette.tabs,
+                )
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_hover(cx.listener(move |this, hover: &bool, _, cx| {
+                    this.tab_hover = hover.then(|| hover_id.clone());
+                    cx.notify();
+                }))
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, e: &MouseDownEvent, window, cx| {
+                        let size = window.viewport_size();
+                        let focus = cx.focus_handle().tab_stop(true);
+                        this.tab_menu = Some((
+                            menu_id.clone(),
+                            point(
+                                e.position.x.clamp(px(8.), size.width - px(136.)),
+                                e.position.y.clamp(px(8.), size.height - px(44.)),
+                            ),
+                            focus,
+                        ));
+                        this.workspace_menu = None;
+                        this.task_menu = None;
+                        this.hidden_tabs = None;
+                        cx.stop_propagation();
                         cx.notify();
-                    }))
-                    .on_mouse_down(
-                        MouseButton::Right,
-                        cx.listener(move |this, e: &MouseDownEvent, window, cx| {
-                            let size = window.viewport_size();
-                            let focus = cx.focus_handle().tab_stop(true);
-                            this.tab_menu = Some((
-                                menu_id.clone(),
-                                point(
-                                    e.position.x.clamp(px(8.), size.width - px(136.)),
-                                    e.position.y.clamp(px(8.), size.height - px(44.)),
-                                ),
-                                focus,
-                            ));
-                            this.workspace_menu = None;
-                            this.task_menu = None;
-                            this.hidden_tabs = None;
-                            cx.stop_propagation();
-                            cx.notify();
-                        }),
-                    )
-                    .child(
-                        self.button(
-                            tabs_ui::tab_title(title)
-                                .id(SharedString::from(format!("tab-title-{}", scene.id))),
-                            title_focus,
-                            move |this, _, cx| {
-                                this.send(
-                                    Command::SelectScene {
-                                        scene_id: select_id.clone(),
-                                    },
-                                    cx,
-                                );
-                            },
-                            cx,
-                        )
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, e: &MouseDownEvent, window, cx| {
-                                window.focus(&double_click_focus);
-                                if e.click_count == 2 && this.read_only.is_none() {
-                                    this.open_rename(rename_id.clone(), window, cx);
-                                }
-                                cx.stop_propagation();
-                            }),
-                        ),
-                    )
-                    .child(self.mutation_button(
-                        tabs_ui::tab_close(
-                            SharedString::from(format!("tab-close-{}", scene.id)),
-                            active
-                                || self.tab_hover.as_ref() == Some(&scene.id)
-                                || close_focus.is_focused(window),
-                        ),
-                        close_focus,
+                    }),
+                )
+                .child(
+                    self.button(
+                        tabs_ui::tab_title(title)
+                            .id(SharedString::from(format!("tab-title-{}", scene.id))),
+                        title_focus,
                         move |this, _, cx| {
-                            this.pending_close = Some(close_id.clone());
                             this.send(
-                                Command::PreviewSceneClose {
-                                    scene_id: close_id.clone(),
+                                Command::SelectScene {
+                                    scene_id: select_id.clone(),
                                 },
                                 cx,
                             );
                         },
                         cx,
-                    )),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, e: &MouseDownEvent, window, cx| {
+                            window.focus(&double_click_focus);
+                            if e.click_count == 2 && this.read_only.is_none() {
+                                this.open_rename(rename_id.clone(), window, cx);
+                            }
+                            cx.stop_propagation();
+                        }),
+                    ),
+                )
+                .child(self.mutation_button(
+                    tabs_ui::tab_close(
+                        SharedString::from(format!("tab-close-{}", scene.id)),
+                        active
+                            || self.tab_hover.as_ref() == Some(&scene.id)
+                            || close_focus.is_focused(window),
+                        &palette.tabs,
+                    ),
+                    close_focus,
+                    move |this, _, cx| {
+                        this.pending_close = Some(close_id.clone());
+                        this.send(
+                            Command::PreviewSceneClose {
+                                scene_id: close_id.clone(),
+                            },
+                            cx,
+                        );
+                    },
+                    cx,
+                )),
             );
         }
         let path_valid = self.active_path_valid();
@@ -10344,6 +10385,7 @@ impl Workspace {
                 "create-canvas"
             },
             path_valid,
+            &palette.tabs,
         );
         let add = if path_valid {
             self.mutation_button(
@@ -10371,7 +10413,7 @@ impl Workspace {
         } else {
             overflow_actions = overflow_actions
                 .child(self.button(
-                    tabs_ui::tab_overflow_btn("tab-overflow"),
+                    tabs_ui::tab_overflow_btn("tab-overflow", &palette.tabs),
                     &self.control_focus["tab-overflow"],
                     |this, _, cx| {
                         if this.hidden_tabs.is_some() {
@@ -10408,7 +10450,7 @@ impl Workspace {
             .px(px(8.))
             .flex()
             .items_center()
-            .bg(rgb(0xffffff))
+            .bg(background)
             .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
             .child(tabs)
             .when(self.tab_overflow, |bar| bar.child(overflow_actions))
@@ -10447,6 +10489,7 @@ impl Workspace {
                 self.button(
                     div()
                         .id("shortcut-help")
+                        .relative()
                         .size(px(28.))
                         .flex_none()
                         .flex()
@@ -10460,7 +10503,10 @@ impl Workspace {
                             let label = self.locale.text("快捷键", "Keyboard shortcuts");
                             move |_, cx| cx.new(|_| CardTooltip(label.into())).into()
                         })
-                        .child("?"),
+                        .child("?")
+                        .children(workspace_wiring::wiring_probe_bounds(
+                            "shortcut-help".into(),
+                        )),
                     &self.control_focus["shortcut-help"],
                     Self::toggle_shortcuts,
                     cx,
@@ -10480,7 +10526,7 @@ impl Workspace {
                             let title = self.locale.text("打开会话 DAG", "Open session DAG");
                             move |_, cx| cx.new(|_| CardTooltip(title.into())).into()
                         })
-                        .child(icon("graph-ring", 16., 0x606572)),
+                        .child(icon("graph-ring", 16., palette.tabs.action_text >> 8)),
                     &self.control_focus["graph"],
                     Self::open_dag_window,
                     cx,
@@ -10496,7 +10542,7 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(icon("panel-right-open", 16., 0x606572));
+                    .child(icon("panel-right-open", 16., palette.tabs.action_text >> 8));
                 if split_disabled {
                     split_btn
                         .opacity(0.5)
@@ -10623,7 +10669,22 @@ impl Workspace {
         )
     }
 
+    /// Backwards-compatible two-argument form used by layout probes; the host
+    /// render path uses `compact_session_summary_themed`.
+    #[allow(dead_code)]
     fn compact_session_summary(node: Option<&Value>, title: &str) -> Div {
+        Self::compact_session_summary_themed(
+            node,
+            title,
+            &matou_native_desktop::theme_tokens::LIGHT,
+        )
+    }
+
+    fn compact_session_summary_themed(
+        node: Option<&Value>,
+        title: &str,
+        palette: &ThemePalette,
+    ) -> Div {
         let status = node
             .and_then(|node| node["workStatus"].as_str())
             .unwrap_or("idle");
@@ -10650,9 +10711,9 @@ impl Workspace {
             .size_full()
             .px(px(12.))
             .py(px(14.))
-            .bg(rgb(0xf2f4f7))
+            .bg(rgba(palette.cards.compact_background))
             .rounded(px(12.))
-            .text_color(rgb(0x6b7482))
+            .text_color(rgba(palette.cards.compact_text))
             .flex()
             .flex_col()
             .gap(px(9.))
@@ -10660,7 +10721,7 @@ impl Workspace {
                 div()
                     .text_size(px(12.))
                     .font_weight(FontWeight::BOLD)
-                    .text_color(rgb(0x364050))
+                    .text_color(rgba(palette.cards.compact_title))
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_ellipsis()
@@ -10708,7 +10769,19 @@ impl Workspace {
             })
     }
 
+    /// Backwards-compatible two-argument form used by layout probes; the
+    /// host render path uses `session_card_header_themed`.
+    #[allow(dead_code)]
     fn session_card_header(title: UiText, actions: Div) -> Div {
+        Self::session_card_header_themed(title, actions, &matou_native_desktop::theme_tokens::LIGHT)
+    }
+
+    fn session_card_header_themed(title: UiText, actions: Div, palette: &ThemePalette) -> Div {
+        let background = rgba(palette.cards.header);
+        #[cfg(debug_assertions)]
+        crate::settings_shell::probe_workspace_surfaces(|probe| {
+            probe.card_header = Some(background)
+        });
         div()
             .h(px(42.))
             .flex_none()
@@ -10716,7 +10789,8 @@ impl Workspace {
             .px(px(12.))
             .flex()
             .items_center()
-            .bg(rgb(0xffffff))
+            .bg(background)
+            .text_color(rgba(palette.cards.title))
             .child(
                 // The percentage resolves against the space left after the actions.
                 div().flex_1().min_w_0().flex().items_center().child(
@@ -10777,6 +10851,7 @@ impl Workspace {
         node: &Value,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let palette = self.theme_palette().cards;
         let title = node["title"].as_str().unwrap_or("Shell");
         let remove = self.stopped_remove_visible(node).then(|| {
             let blocked_reason = self.stopped_remove_blocked_reason();
@@ -10790,7 +10865,7 @@ impl Workspace {
                 .path("icons/circle-minus.svg")
                 .size(px(14.))
                 .flex_none()
-                .text_color(rgb(0x6a7380))
+                .text_color(rgba(palette.stopped_remove_text))
                 .when(blocked_reason.is_none(), |glyph| {
                     glyph.group_hover(button_id.clone(), |style| style.text_color(rgb(0xc5443e)))
                 });
@@ -10809,7 +10884,7 @@ impl Workspace {
             if blocked_reason.is_none() {
                 self.focus_control(button, &self.remove_card_controls[id])
                     .cursor_pointer()
-                    .hover(|style| style.bg(rgb(0xfff0ef)))
+                    .hover(move |style| style.bg(rgba(palette.remove_hover)))
                     .capture_any_mouse_down(|event, window, _| {
                         if event.button == MouseButton::Left {
                             window.prevent_default();
@@ -10836,8 +10911,8 @@ impl Workspace {
             .flex_col()
             .gap(px(14.))
             .pb(px(18.))
-            .bg(rgb(0xf8f9fb))
-            .text_color(rgb(0x687180))
+            .bg(rgba(palette.stopped_background))
+            .text_color(rgba(palette.stopped_text))
             .child(
                 div()
                     .id(SharedString::from(format!("stopped-session-header-{id}")))
@@ -10847,14 +10922,14 @@ impl Workspace {
                     .items_center()
                     .justify_between()
                     .px(px(14.))
-                    .bg(white())
+                    .bg(rgba(palette.stopped_header))
                     .child(
                         div()
                             .id(SharedString::from(format!("stopped-session-title-{id}")))
                             .min_w_0()
                             .max_h(px(42.))
                             .overflow_hidden()
-                            .text_color(rgb(0x303744))
+                            .text_color(rgba(palette.title))
                             .text_size(px(12.))
                             .font_weight(FontWeight::BOLD)
                             .child(ui_text(title.to_owned()).normal_line_height()),
@@ -10887,6 +10962,7 @@ impl Workspace {
     }
 
     fn remove_card_button(&self, id: &str, node: &Value, cx: &mut Context<Self>) -> Stateful<Div> {
+        let palette = self.theme_palette().cards;
         let tooltip = self.remove_node_tooltip(id, node);
         let button = div()
             .id(SharedString::from(format!("remove-session-{id}")))
@@ -10896,14 +10972,14 @@ impl Workspace {
             .items_center()
             .justify_center()
             .rounded(px(5.))
-            .child(icon("circle-minus", 14., 0x5f7898))
+            .child(icon("circle-minus", 14., palette.fork_text >> 8))
             .tooltip(move |_, cx| cx.new(|_| tooltip).into());
         if tooltip.blocked_reason.is_none() {
             let session_id = id.to_owned();
             self.button(
                 button
                     .cursor_pointer()
-                    .hover(|style| style.bg(rgba(0x0000000f))),
+                    .hover(move |style| style.bg(rgba(palette.action_hover))),
                 &self.remove_card_controls[id],
                 move |this, window, cx| this.open_remove_session(&session_id, window, cx),
                 cx,
@@ -10922,15 +10998,16 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let (tooltip, enabled) = self.session_loader_tooltip(id, node);
+        let palette = self.theme_palette().cards;
         let button_id = SharedString::from(format!("session-loader-open-{id}"));
         let glyph = svg()
             .path("icons/folder-input.svg")
             .size(px(16.))
             .flex_none()
-            .text_color(rgba(0x00000085))
+            .text_color(rgba(palette.action_text))
             .when(enabled, |glyph| {
-                glyph.group_hover(button_id.clone(), |style| {
-                    style.text_color(rgba(0x000000d1))
+                glyph.group_hover(button_id.clone(), move |style| {
+                    style.text_color(rgba(palette.action_text_hover))
                 })
             });
         let button = div()
@@ -10949,7 +11026,7 @@ impl Workspace {
             self.button(
                 button
                     .cursor_pointer()
-                    .hover(|style| style.bg(rgba(0x0000000f))),
+                    .hover(move |style| style.bg(rgba(palette.action_hover))),
                 &self.card_controls[id],
                 move |this, window, cx| {
                     this.open_session_loader(&session_id, window, cx);
@@ -13187,6 +13264,10 @@ impl Workspace {
     }
 
     fn footer(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
+        let palette = self.theme_palette().footer;
+        let background = rgba(palette.background);
+        #[cfg(debug_assertions)]
+        crate::settings_shell::probe_workspace_surfaces(|probe| probe.footer = Some(background));
         struct ReturnParentTooltip;
         impl Render for ReturnParentTooltip {
             fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
@@ -13311,7 +13392,7 @@ impl Workspace {
                     .flex_none()
                     .ml(px(4.))
                     .whitespace_nowrap()
-                    .text_color(rgba(0x00000061))
+                    .text_color(rgba(palette.breadcrumb_count))
                     .child(footer_text("count", count.clone())),
             );
         let breadcrumb = div()
@@ -13322,7 +13403,7 @@ impl Workspace {
             .flex()
             .items_center()
             .text_size(px(11.))
-            .text_color(rgba(0x000000ad));
+            .text_color(rgba(palette.breadcrumb));
         let breadcrumb = if child_level {
             breadcrumb.child(
                 self.button(
@@ -13336,7 +13417,11 @@ impl Workspace {
                         .px(px(8.))
                         .rounded(px(6.))
                         .cursor_pointer()
-                        .hover(|style| style.bg(rgba(0x00000014)).text_color(rgb(0x2f3547)))
+                        .hover(move |style| {
+                            style
+                                .bg(rgba(palette.breadcrumb_hover))
+                                .text_color(rgba(palette.breadcrumb_hover_text))
+                        })
                         .child(div().flex_none().mr(px(6.)).text_size(px(13.)).child("←"))
                         .child(content),
                     &self.control_focus["session-return-parent"],
@@ -13370,10 +13455,10 @@ impl Workspace {
             .px(px(PERMISSION_FOOTER_PADDING_X))
             .gap(px(FOOTER_GAP))
             .border_t_1()
-            .border_color(rgb(0xe8e8e8))
-            .bg(rgb(0xffffff))
+            .border_color(rgba(palette.top_line))
+            .bg(background)
             .text_size(px(10.))
-            .text_color(rgb(0x606572))
+            .text_color(rgba(palette.text))
             .when(self.graph.is_object(), |footer| footer.child(breadcrumb));
         if chip.is_none() && fields.is_none() {
             return footer.child(div().ml_auto().child(self.egress_trigger(cx)));
@@ -13490,12 +13575,12 @@ impl Workspace {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .text_color(rgb(0x8b949e))
+                            .text_color(rgba(palette.session_name))
                             .tooltip(|_, cx| {
                                 cx.new(|_| CardTooltip(SharedString::from("运行环境")))
                                     .into()
                             })
-                            .child(footer_monitor_icon(13., 0x8b949e)),
+                            .child(footer_monitor_icon(13., palette.session_name >> 8)),
                     );
                 } else {
                     let label = environment.label;
@@ -13521,7 +13606,7 @@ impl Workspace {
             }
             fixed = fixed.child(self.egress_trigger(cx));
             if fields.account {
-                fixed = fixed.child(footer_account(locale));
+                fixed = fixed.child(footer_account(locale, palette.account));
             }
         }
 
@@ -13541,14 +13626,14 @@ impl Workspace {
             .h_full()
             .pl(px(FOOTER_STATUS_PADDING_LEFT))
             .border_l_1()
-            .border_color(rgb(0xe8e8e8))
+            .border_color(rgba(palette.divider))
             .flex()
             .items_center()
             .gap(px(status_gap))
             .overflow_hidden()
             .whitespace_nowrap()
             .text_size(px(10.))
-            .text_color(rgb(0x606572))
+            .text_color(rgba(palette.text))
             .when(self.project_instructions_available, |status| {
                 status.child(
                     self.button(
@@ -13581,7 +13666,11 @@ impl Workspace {
                             .overflow_hidden()
                             .whitespace_nowrap()
                             .text_ellipsis()
-                            .text_color(rgb(if fields.is_shell { 0x606572 } else { 0x79c0ff }))
+                            .text_color(rgba(if fields.is_shell {
+                                palette.text
+                            } else {
+                                palette.model
+                            }))
                             .child(footer_text("name", name.to_owned())),
                     );
                 } else if show_model {
@@ -13883,6 +13972,7 @@ impl Render for Workspace {
                     .bg(rgba(palette.workspace.canvas)),
             );
         }
+        self.finish_terminal_return(window, cx);
         let level_focus = self.level_focus().map(str::to_owned);
         self.refresh_project_instructions(window, cx);
         let active_level_focus = self.active_level_focus().map(str::to_owned);
@@ -14162,6 +14252,9 @@ impl Render for Workspace {
                 -4. * self.card_motion[id].lift.value(now) as f32
             };
             let hover_id = id.clone();
+            let background = rgba(palette.cards.background);
+            #[cfg(debug_assertions)]
+            crate::settings_shell::probe_workspace_surfaces(|probe| probe.card = Some(background));
             let card = div()
                 .id(SharedString::from(format!("card-{id}")))
                 .when_else(in_split, |card| card.w_full(), |card| card.w(px(width)))
@@ -14171,7 +14264,7 @@ impl Render for Workspace {
                 .top(px(lift))
                 .rounded(CARD_RADIUS)
                 .overflow_hidden()
-                .bg(rgb(0xfcfcfd))
+                .bg(background)
                 .flex()
                 .flex_col()
                 .shadow(if selected {
@@ -14215,7 +14308,11 @@ impl Render for Workspace {
             }
             if let Some(node) = node.filter(|node| !node["archivedAt"].is_null()) {
                 let card = if compact {
-                    card.child(Self::compact_session_summary(Some(node), title))
+                    card.child(Self::compact_session_summary_themed(
+                        Some(node),
+                        title,
+                        &palette,
+                    ))
                 } else {
                     card.child(self.stopped_session_card(id, node, cx))
                 };
@@ -14471,10 +14568,10 @@ impl Render for Workspace {
                         cx.stop_propagation();
                     }),
                 )
-                .child(Self::compact_session_summary(node, title))
+                .child(Self::compact_session_summary_themed(node, title, &palette))
             } else {
                 card.child(
-                    Self::session_card_header(
+                    Self::session_card_header_themed(
                         ui_text(title.replace(['\r', '\n'], " ")),
                         Self::session_card_actions()
                             .children(badge)
@@ -14486,6 +14583,7 @@ impl Render for Workspace {
                                 node.filter(|node| node["archivedAt"].is_null())
                                     .map(|node| self.remove_card_button(id, node, cx)),
                             ),
+                        &palette,
                     )
                     .id(SharedString::from(format!("session-header-{id}")))
                     .on_mouse_down(
@@ -14768,7 +14866,7 @@ impl Render for Workspace {
             .size_full()
             .flex()
             .font_family(".AppleSystemUIFont")
-            .text_color(rgb(0x303744))
+            .text_color(rgba(palette.workspace.text))
             .child(self.sidebar(window, cx))
             .child(
                 div()
@@ -14997,7 +15095,7 @@ fn notification_ui_icon(name: &str, size: f32, color: u32) -> Svg {
         .path(SharedString::from(format!("icons/{name}.svg")))
         .size(px(size))
         .flex_none()
-        .text_color(rgb(color))
+        .text_color(rgba(color))
 }
 
 /// Svg paints from its own computed `text.color`, so a hover colour on the
@@ -15126,6 +15224,7 @@ impl Workspace {
     /// `.flat-sidebar__notify` + the frozen red unread indicator, upgraded from
     /// the frozen 6px dot to the numeric badge required by this round.
     fn notification_bell(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let palette = self.theme_palette().sidebar;
         let unread = self
             .notifications
             .entries
@@ -15146,9 +15245,7 @@ impl Workspace {
                 .justify_center()
                 .rounded(px(8.))
                 .border(px(1.5))
-                // The sidebar is the existing light surface regardless of
-                // window appearance, so the frozen light dot border applies.
-                .border_color(rgb(0xf4f5f7))
+                .border_color(rgba(palette.bell_badge_border))
                 .bg(rgb(0xf24d49))
                 .text_size(px(10.))
                 .line_height(px(12.))
@@ -15165,10 +15262,10 @@ impl Workspace {
             .items_center()
             .justify_center()
             .rounded(px(7.))
-            .text_color(rgb(0x8d96a3))
+            .text_color(rgba(palette.bell))
             .cursor_pointer()
-            .hover(|style| style.bg(rgba(0x2f35470f)))
-            .child(notification_ui_icon("bell", 16., 0x8d96a3).opacity(0.9))
+            .hover(|style| style.bg(rgba(palette.action_hover)))
+            .child(notification_ui_icon("bell", 16., palette.bell >> 8).opacity(0.9))
             .children(badge);
         self.button(
             bell,
@@ -16053,7 +16150,7 @@ fn footer_text_estimate(text: &str) -> f32 {
 /// Frozen `.ca-trigger` without an account name: 14px line user icon, "Claude
 /// 账户", and the upward chevron. Non-interactive until the accounts gate
 /// supplies real state.
-fn footer_account(locale: InterfaceLocale) -> Stateful<Div> {
+fn footer_account(locale: InterfaceLocale, color: u32) -> Stateful<Div> {
     div()
         .children(footer_bounds_probe("account"))
         .id("footer-account")
@@ -16067,9 +16164,9 @@ fn footer_account(locale: InterfaceLocale) -> Stateful<Div> {
                 .px(px(8.))
                 .py(px(5.))
                 .rounded(px(5.))
-                .text_color(rgb(0x647e9f))
+                .text_color(rgba(color))
                 .whitespace_nowrap()
-                .child(footer_user_icon(14., 0x647e9f))
+                .child(footer_user_icon(14., color >> 8))
                 .child(
                     div()
                         .min_w_0()
@@ -16298,7 +16395,7 @@ fn icon(name: &str, size: f32, color: u32) -> Svg {
         .path(SharedString::from(format!("icons/{name}.svg")))
         .size(px(size))
         .flex_none()
-        .text_color(rgb(color))
+        .text_color(rgba(color))
 }
 
 fn shadow(color: u32, alpha: f32, y: f32, blur: f32) -> BoxShadow {

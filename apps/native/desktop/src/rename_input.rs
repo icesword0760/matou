@@ -27,6 +27,10 @@ pub struct RenameInput {
     pub text: String,
     pub placeholder: String,
     pub search_style: bool,
+    /// Optional paint overrides used by themed settings fields. `None` keeps
+    /// the frozen default colors for every other caller.
+    pub text_color: Option<Rgba>,
+    pub placeholder_color: Option<Rgba>,
     session_loader_search_style: bool,
     selection: Range<usize>,
     reversed: bool,
@@ -49,6 +53,8 @@ impl RenameInput {
             text,
             placeholder: "输入标签页名称".into(),
             search_style: false,
+            text_color: None,
+            placeholder_color: None,
             session_loader_search_style: false,
             selection: end..end,
             reversed: false,
@@ -337,29 +343,32 @@ impl RenameInput {
         } else {
             self.text.clone().into()
         };
+        let default_color = rgba(if self.session_loader_search_style {
+            if self.text.is_empty() {
+                0x858e9bff
+            } else {
+                0xe7eaf0ff
+            }
+        } else if self.text.is_empty() {
+            if self.search_style {
+                0x747474ff
+            } else {
+                0x00000066
+            }
+        } else if self.search_style {
+            0x2f3547ff
+        } else {
+            0x000000d9
+        });
+        let color = if self.text.is_empty() {
+            self.placeholder_color.unwrap_or(default_color)
+        } else {
+            self.text_color.unwrap_or(default_color)
+        };
         let mut run = TextRun {
             len: display.len(),
             font: window.text_style().font(),
-            color: rgba(if self.session_loader_search_style {
-                if self.text.is_empty() {
-                    0x858e9bff
-                } else {
-                    0xe7eaf0ff
-                }
-            } else if self.text.is_empty() {
-                if self.search_style {
-                    0x747474ff
-                } else {
-                    0x00000066
-                }
-            } else {
-                if self.search_style {
-                    0x2f3547ff
-                } else {
-                    0x000000d9
-                }
-            })
-            .into(),
+            color: color.into(),
             background_color: None,
             underline: None,
             strikethrough: None,
@@ -436,10 +445,12 @@ impl RenameInput {
                         point(origin.x + cursor, bounds.top() + px(2.)),
                         size(px(1.), bounds.size.height - px(4.)),
                     ),
-                    rgba(if self.session_loader_search_style {
-                        0xe7eaf0ff
-                    } else {
-                        0x000000d9
+                    self.text_color.unwrap_or_else(|| {
+                        rgba(if self.session_loader_search_style {
+                            0xe7eaf0ff
+                        } else {
+                            0x000000d9
+                        })
                     }),
                 ));
             }

@@ -20,9 +20,10 @@ use matou_native_core::sessions::InterfaceLocale;
 
 use super::{
     ACCENT, DANGER_BG, DANGER_TEXT, FocusRingStyle, LINE, LINE_STRONG, MUTED, PANEL, PANEL_MUTED,
-    TEXT, color_alpha, focus_ring_with, icon, shadow,
+    TEXT, focus_ring_with, icon, shadow,
 };
 use crate::rename_input::{RenameInput, RenameInputEvent};
+use matou_native_desktop::theme_tokens::{LIGHT, ThemePalette};
 
 /// Model select value that switches the row to the manual model-id field.
 pub(crate) const MANUAL_MODEL_SENTINEL: &str = "__manual__";
@@ -70,6 +71,98 @@ const VIEW_GRID_GAP: f32 = 14.;
 const VIEW_ROLE_WIDTH: f32 = 76.;
 const VIEW_EFFORT_WIDTH: f32 = 108.;
 const VIEW_NARROW_BREAKPOINT: f32 = 640.;
+
+/// Resolved colors for one assignment panel frame.
+///
+/// Light keeps the frozen CSS literals verbatim (including alpha). Dark maps
+/// the same roles onto the active workspace/settings palette so the inline
+/// card, selects, and dropdown menu no longer paint a light surface.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AssignmentColors {
+    panel: u32,
+    panel_muted: u32,
+    text: u32,
+    muted: u32,
+    line: u32,
+    line_strong: u32,
+    accent: u32,
+    accent_hover: u32,
+    primary_bg: u32,
+    primary_text: u32,
+    primary_hover: u32,
+    link_hover: u32,
+    role_error: u32,
+    view_error: u32,
+    danger_bg: u32,
+    success_text: u32,
+    success_bg: u32,
+    menu_selected_text: u32,
+    menu_selected_bg: u32,
+    menu_active_bg: u32,
+    secondary_hover_bg: u32,
+}
+
+/// Expands a frozen 24-bit CSS color to an opaque packed RGBA value, so every
+/// resolved field can flow through `rgba(..)` without channel shifts.
+const fn packed(hex: u32) -> u32 {
+    (hex << 8) | 0xff
+}
+
+impl AssignmentColors {
+    fn new(palette: &ThemePalette, dark: bool) -> Self {
+        if dark {
+            Self {
+                panel: palette.workspace.panel,
+                panel_muted: palette.workspace.panel_muted,
+                text: palette.workspace.text,
+                muted: palette.workspace.muted,
+                line: palette.workspace.line,
+                line_strong: palette.workspace.line_strong,
+                accent: palette.workspace.accent,
+                accent_hover: palette.settings.language_primary_hover,
+                // The dark accent is a light blue; keep primary buttons on a
+                // readable dark-blue base with white text.
+                primary_bg: 0x2f79dfff,
+                primary_text: 0xffffffff,
+                primary_hover: 0x2274dfff,
+                link_hover: palette.workspace.accent,
+                role_error: palette.settings.language_error,
+                view_error: palette.settings.language_error,
+                danger_bg: palette.cards.remove_hover,
+                success_text: 0x6fd39bff,
+                success_bg: VIEW_SUCCESS_BG,
+                menu_selected_text: palette.settings.language_menu_text,
+                menu_selected_bg: palette.settings.language_menu_background,
+                menu_active_bg: palette.settings.language_menu_active_background,
+                secondary_hover_bg: palette.settings.language_button_hover,
+            }
+        } else {
+            Self {
+                panel: packed(PANEL),
+                panel_muted: packed(PANEL_MUTED),
+                text: packed(TEXT),
+                muted: packed(MUTED),
+                line: LINE,
+                line_strong: LINE_STRONG,
+                accent: packed(ACCENT),
+                accent_hover: packed(0x2f79df),
+                primary_bg: packed(ACCENT),
+                primary_text: 0xffffffff,
+                primary_hover: packed(0x2f79df),
+                link_hover: packed(0x1f6dc4),
+                role_error: packed(DANGER_TEXT),
+                view_error: packed(VIEW_ERROR),
+                danger_bg: packed(DANGER_BG),
+                success_text: packed(VIEW_SUCCESS_TEXT),
+                success_bg: VIEW_SUCCESS_BG,
+                menu_selected_text: packed(VIEW_MENU_SELECTED_TEXT),
+                menu_selected_bg: packed(VIEW_MENU_SELECTED_BG),
+                menu_active_bg: packed(VIEW_MENU_ACTIVE_BG),
+                secondary_hover_bg: packed(0xf7faff),
+            }
+        }
+    }
+}
 
 /// One frame of the frozen assignment block, supplied by the settings logic.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -184,6 +277,8 @@ impl EventEmitter<AssignmentAction> for AssignmentView {}
 /// lifetime and calls [`AssignmentView::render_panel`] with the current panel.
 pub(crate) struct AssignmentView {
     locale: InterfaceLocale,
+    /// Colors resolved from the palette passed to the current frame.
+    colors: AssignmentColors,
     /// [row][provider / model / effort] trigger focus handles. Row 3 is web search.
     controls: [[FocusHandle; 3]; 4],
     /// Slot 0 is the disconnect retry; slots 1..=4 are the per-row catalog retry.
@@ -242,6 +337,7 @@ impl AssignmentView {
 
         Self {
             locale: InterfaceLocale::default(),
+            colors: AssignmentColors::new(&LIGHT, false),
             controls,
             retry_focus,
             restore_focus,
@@ -284,9 +380,21 @@ impl AssignmentView {
         &mut self,
         panel: AssignmentPanel,
         keyboard_focus: bool,
+        palette: &ThemePalette,
+        dark: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        self.colors = AssignmentColors::new(palette, dark);
+        let colors = self.colors;
+        let manual_text = dark.then(|| rgba(palette.settings.input_text));
+        let manual_placeholder = dark.then(|| rgba(palette.workspace.muted));
+        for input in &self.manual_inputs {
+            input.update(cx, |input, _| {
+                input.text_color = manual_text;
+                input.placeholder_color = manual_placeholder;
+            });
+        }
         if let Some(focus) = self.pending_focus.take() {
             window.focus(&focus);
         }
@@ -322,14 +430,14 @@ impl AssignmentView {
                 div()
                     .text_size(px(13.))
                     .font_weight(FontWeight(680.))
-                    .text_color(rgb(TEXT))
+                    .text_color(rgba(colors.text))
                     .child(self.locale.text(VIEW_TITLE, "Model assignments")),
             )
             .child(
                 div()
                     .text_size(px(11.))
                     .line_height(relative(1.65))
-                    .text_color(rgb(MUTED))
+                    .text_color(rgba(colors.muted))
                     .whitespace_normal()
                     .child(self.locale.text(VIEW_SUBTITLE, "Assign a provider and model to each tier. Unassigned tiers follow the default provider.")),
             );
@@ -347,8 +455,8 @@ impl AssignmentView {
             .px(px(14.))
             .rounded(px(10.))
             .border_1()
-            .border_color(rgba(LINE))
-            .bg(rgb(PANEL_MUTED));
+            .border_color(rgba(colors.line))
+            .bg(rgba(colors.panel_muted));
 
         if !narrow {
             card = card.child(
@@ -359,10 +467,10 @@ impl AssignmentView {
                     .pt(px(10.))
                     .pb(px(8.))
                     .border_b_1()
-                    .border_color(rgba(LINE))
+                    .border_color(rgba(colors.line))
                     .text_size(px(10.))
                     .font_weight(FontWeight(650.))
-                    .text_color(rgb(MUTED))
+                    .text_color(rgba(colors.muted))
                     .child(
                         div()
                             .w(px(VIEW_ROLE_WIDTH))
@@ -411,7 +519,7 @@ impl AssignmentView {
                 .px(px(2.))
                 .text_size(px(11.))
                 .line_height(relative(1.65))
-                .text_color(rgb(MUTED))
+                .text_color(rgba(colors.muted))
                 .whitespace_normal()
                 .child(self.locale.text(
                     VIEW_PRIVACY,
@@ -433,6 +541,7 @@ impl AssignmentView {
                 can_restore && !saving,
                 self.restore_focus.clone(),
                 keyboard_focus,
+                &colors,
                 cx,
                 |this, _, cx| {
                     this.manual_edit = [false; 4];
@@ -452,6 +561,7 @@ impl AssignmentView {
                 can_save && !saving,
                 self.save_focus.clone(),
                 keyboard_focus,
+                &colors,
                 cx,
                 |_, _, cx| {
                     cx.emit(AssignmentAction::Save);
@@ -466,11 +576,11 @@ impl AssignmentView {
                     .px(px(9.))
                     .py(px(3.))
                     .rounded_full()
-                    .bg(rgba(VIEW_SUCCESS_BG))
+                    .bg(rgba(colors.success_bg))
                     .text_size(px(11.))
                     .font_weight(FontWeight(600.))
                     .line_height(relative(1.5))
-                    .text_color(rgb(VIEW_SUCCESS_TEXT))
+                    .text_color(rgba(colors.success_text))
                     .child(self.locale.text(
                         VIEW_SAVED,
                         "Model assignments saved. New sessions will use this configuration.",
@@ -485,7 +595,7 @@ impl AssignmentView {
                 div()
                     .text_size(px(11.))
                     .line_height(relative(1.65))
-                    .text_color(rgb(MUTED))
+                    .text_color(rgba(colors.muted))
                     .child(self.locale.text(
                         VIEW_SCOPE,
                         "New sessions use these assignments. Running sessions are unaffected.",
@@ -497,7 +607,7 @@ impl AssignmentView {
                 div()
                     .text_size(px(11.))
                     .line_height(relative(1.55))
-                    .text_color(rgb(VIEW_ERROR))
+                    .text_color(rgba(colors.view_error))
                     .child(self.locale.text(
                         VIEW_SAVE_ERROR,
                         "Save was not confirmed. Your selections were kept; please retry.",
@@ -510,7 +620,7 @@ impl AssignmentView {
             .mt(px(22.))
             .pt(px(20.))
             .border_t_1()
-            .border_color(rgba(LINE))
+            .border_color(rgba(colors.line))
             .flex()
             .flex_col()
             .w_full()
@@ -535,13 +645,14 @@ impl AssignmentView {
         keyboard_focus: bool,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        let colors = self.colors;
         match status {
             AssignmentStatus::Ready => None,
             AssignmentStatus::Loading => Some(
                 div()
                     .text_size(px(11.))
                     .line_height(relative(1.65))
-                    .text_color(rgb(MUTED))
+                    .text_color(rgba(colors.muted))
                     .child(self.locale.text(VIEW_LOADING, "Loading model assignments…"))
                     .into_any_element(),
             ),
@@ -553,7 +664,7 @@ impl AssignmentView {
                     .gap(px(6.))
                     .text_size(px(11.))
                     .line_height(relative(1.65))
-                    .text_color(rgb(VIEW_ERROR))
+                    .text_color(rgba(colors.view_error))
                     .child(
                         self.locale
                             .text(VIEW_DISCONNECTED, "Settings service is disconnected."),
@@ -565,7 +676,7 @@ impl AssignmentView {
                 div()
                     .text_size(px(11.))
                     .line_height(relative(1.65))
-                    .text_color(rgb(MUTED))
+                    .text_color(rgba(colors.muted))
                     .child(self.locale.text(
                         VIEW_EMPTY,
                         "No providers are available. Add a provider first.",
@@ -585,6 +696,7 @@ impl AssignmentView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let colors = self.colors;
         let problem = row.problem.is_some();
         let provider = self.select_control(
             index,
@@ -632,7 +744,7 @@ impl AssignmentView {
                 div()
                     .text_size(px(10.))
                     .line_height(relative(1.5))
-                    .text_color(rgb(MUTED))
+                    .text_color(rgba(colors.muted))
                     .whitespace_normal()
                     .child(row.account.clone()),
             );
@@ -655,7 +767,11 @@ impl AssignmentView {
             .min_w_0()
             .child(effort);
 
-        let role_color = if problem { DANGER_TEXT } else { TEXT };
+        let role_color = if problem {
+            colors.role_error
+        } else {
+            colors.text
+        };
 
         let top = if narrow {
             div()
@@ -667,20 +783,23 @@ impl AssignmentView {
                         .text_size(px(12.))
                         .font_weight(FontWeight(650.))
                         .line_height(relative(1.4))
-                        .text_color(rgb(role_color))
+                        .text_color(rgba(role_color))
                         .child(row.tier),
                 )
                 .child(assignment_labeled_field(
                     self.locale.text(VIEW_HEAD_PROVIDER, "Provider / account"),
                     provider_field.into_any_element(),
+                    &colors,
                 ))
                 .child(assignment_labeled_field(
                     self.locale.text(VIEW_HEAD_MODEL, "Model"),
                     model_field.into_any_element(),
+                    &colors,
                 ))
                 .child(assignment_labeled_field(
                     self.locale.text(VIEW_HEAD_EFFORT, "Reasoning effort"),
                     effort_field.into_any_element(),
+                    &colors,
                 ))
         } else {
             div()
@@ -695,7 +814,7 @@ impl AssignmentView {
                         .text_size(px(12.))
                         .font_weight(FontWeight(650.))
                         .line_height(relative(1.4))
-                        .text_color(rgb(role_color))
+                        .text_color(rgba(role_color))
                         .child(row.tier),
                 )
                 .child(provider_field.flex_1().min_w_0())
@@ -715,7 +834,7 @@ impl AssignmentView {
                 div()
                     .text_size(px(10.))
                     .line_height(relative(1.55))
-                    .text_color(rgb(MUTED))
+                    .text_color(rgba(colors.muted))
                     .whitespace_normal()
                     .child(row.target.clone()),
             );
@@ -726,7 +845,7 @@ impl AssignmentView {
                 div()
                     .text_size(px(10.))
                     .line_height(relative(1.55))
-                    .text_color(rgb(MUTED))
+                    .text_color(rgba(colors.muted))
                     .whitespace_normal()
                     .child(note.to_owned()),
             );
@@ -749,10 +868,10 @@ impl AssignmentView {
             .gap(px(4.))
             .py(px(VIEW_ROW_PADDING_Y));
         if index < SEARCH_INDEX {
-            container = container.border_b_1().border_color(rgba(LINE));
+            container = container.border_b_1().border_color(rgba(colors.line));
         }
         if problem {
-            container = container.bg(color_alpha(DANGER_BG, 0.48));
+            container = container.bg(with_alpha(colors.danger_bg, 0.48));
         }
         container = container.child(top);
         if has_meta {
@@ -772,6 +891,7 @@ impl AssignmentView {
         keyboard_focus: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let colors = self.colors;
         let mut line = div()
             .flex()
             .items_center()
@@ -779,7 +899,7 @@ impl AssignmentView {
             .gap(px(6.))
             .text_size(px(11.))
             .line_height(relative(1.55))
-            .text_color(rgb(VIEW_ERROR))
+            .text_color(rgba(colors.view_error))
             .child(
                 div()
                     .flex_1()
@@ -804,6 +924,7 @@ impl AssignmentView {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let colors = self.colors;
         let enabled = select.enabled && !saving;
         let focus = self.controls[row][column.index()].clone();
         let open_here = self
@@ -811,7 +932,7 @@ impl AssignmentView {
             .as_ref()
             .is_some_and(|menu| menu.row == row && menu.column == column);
         let label = assignment_display_label(select);
-        let border = field_border(problem, open_here || focus.is_focused(window));
+        let border = field_border(problem, open_here || focus.is_focused(window), &colors);
 
         let mut trigger = div()
             .id(SharedString::from(format!(
@@ -828,9 +949,9 @@ impl AssignmentView {
             .rounded(px(7.))
             .border_1()
             .border_color(border)
-            .bg(rgb(PANEL))
+            .bg(rgba(colors.panel))
             .text_size(px(12.))
-            .text_color(rgb(TEXT))
+            .text_color(rgba(colors.text))
             .child(
                 div()
                     .flex_1()
@@ -840,7 +961,7 @@ impl AssignmentView {
                     .text_ellipsis()
                     .child(label),
             )
-            .child(icon("chevron-down", 12., MUTED));
+            .child(icon("chevron-down", 12., colors.muted >> 8));
 
         let bounds_cell = self.trigger_bounds.clone();
         trigger = trigger.child(
@@ -898,6 +1019,7 @@ impl AssignmentView {
         window: &Window,
         cx: &App,
     ) -> AnyElement {
+        let colors = self.colors;
         let input = self.manual_inputs[index].clone();
         let focus = input.read(cx).focus.clone();
         let invalid = row.problem.is_some();
@@ -915,10 +1037,10 @@ impl AssignmentView {
                 .px(px(9.))
                 .rounded(px(7.))
                 .border_1()
-                .border_color(field_border(invalid, false))
-                .bg(rgb(PANEL))
+                .border_color(field_border(invalid, false, &colors))
+                .bg(rgba(colors.panel))
                 .text_size(px(12.))
-                .text_color(rgb(TEXT))
+                .text_color(rgba(colors.text))
                 .opacity(0.55)
                 .child(text)
                 .into_any_element();
@@ -933,8 +1055,8 @@ impl AssignmentView {
             .px(px(9.))
             .rounded(px(7.))
             .border_1()
-            .border_color(field_border(invalid, focused))
-            .bg(rgb(PANEL))
+            .border_color(field_border(invalid, focused, &colors))
+            .bg(rgba(colors.panel))
             .cursor(CursorStyle::IBeam)
             .on_mouse_down(MouseButton::Left, {
                 let focus = focus.clone();
@@ -1218,6 +1340,7 @@ impl AssignmentView {
             self.locale.text(VIEW_RETRY, "Retry"),
             focus,
             keyboard_focus,
+            &self.colors,
             cx,
             move |_, _, cx| {
                 cx.emit(if slot == 0 {
@@ -1259,6 +1382,7 @@ impl AssignmentView {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        let colors = self.colors;
         let viewport = window.viewport_size();
         let width = f32::from(bounds.size.width)
             .max(open.column.menu_min_width())
@@ -1274,8 +1398,8 @@ impl AssignmentView {
             .p(px(4.))
             .rounded(px(8.))
             .border_1()
-            .border_color(rgba(LINE))
-            .bg(rgb(PANEL))
+            .border_color(rgba(colors.line))
+            .bg(rgba(colors.panel))
             .shadow(vec![shadow(0x1a304b, 0.16, 8., 24.)])
             .overflow_y_scroll()
             .track_scroll(&self.menu_scroll)
@@ -1286,11 +1410,11 @@ impl AssignmentView {
             let selected = option.value == open.selected;
             let active = index == open.active;
             let background = if selected {
-                VIEW_MENU_SELECTED_BG
+                colors.menu_selected_bg
             } else if active {
-                VIEW_MENU_ACTIVE_BG
+                colors.menu_active_bg
             } else {
-                PANEL
+                colors.panel
             };
             let label = if option.label.is_empty() {
                 option.value.clone()
@@ -1312,13 +1436,13 @@ impl AssignmentView {
                 .px(px(9.))
                 .rounded(px(5.))
                 .text_size(px(12.))
-                .text_color(rgb(if selected {
-                    VIEW_MENU_SELECTED_TEXT
+                .text_color(rgba(if selected {
+                    colors.menu_selected_text
                 } else {
-                    TEXT
+                    colors.text
                 }))
-                .bg(rgb(background))
-                .hover(|style| style.bg(rgb(VIEW_MENU_SELECTED_BG)))
+                .bg(rgba(background))
+                .hover(move |style| style.bg(rgba(colors.menu_selected_bg)))
                 .overflow_hidden()
                 .whitespace_nowrap()
                 .text_ellipsis()
@@ -1347,13 +1471,19 @@ impl AssignmentView {
     }
 }
 
-fn field_border(problem: bool, focused: bool) -> Rgba {
+fn with_alpha(color: u32, alpha: f32) -> Rgba {
+    let mut color = rgba(color);
+    color.a = alpha;
+    color
+}
+
+fn field_border(problem: bool, focused: bool, colors: &AssignmentColors) -> Rgba {
     if problem {
-        rgb(VIEW_ERROR)
+        rgba(colors.view_error)
     } else if focused {
-        rgb(ACCENT)
+        rgba(colors.accent)
     } else {
-        rgba(LINE_STRONG)
+        rgba(colors.line_strong)
     }
 }
 
@@ -1371,7 +1501,11 @@ fn assignment_display_label(select: &AssignmentSelect) -> String {
     select.selected.clone()
 }
 
-fn assignment_labeled_field(label: &'static str, field: AnyElement) -> Div {
+fn assignment_labeled_field(
+    label: &'static str,
+    field: AnyElement,
+    colors: &AssignmentColors,
+) -> Div {
     div()
         .flex()
         .flex_col()
@@ -1380,7 +1514,7 @@ fn assignment_labeled_field(label: &'static str, field: AnyElement) -> Div {
             div()
                 .text_size(px(10.))
                 .font_weight(FontWeight(650.))
-                .text_color(rgb(MUTED))
+                .text_color(rgba(colors.muted))
                 .child(label),
         )
         .child(field)
@@ -1393,6 +1527,7 @@ fn assignment_action_button<F>(
     enabled: bool,
     focus: FocusHandle,
     keyboard_focus: bool,
+    colors: &AssignmentColors,
     cx: &mut Context<AssignmentView>,
     activate: F,
 ) -> AnyElement
@@ -1414,13 +1549,13 @@ where
         .child(label);
 
     let button = if primary {
-        base.border_color(rgb(ACCENT))
-            .text_color(rgb(0xffffff))
-            .bg(rgb(ACCENT))
+        base.border_color(rgba(colors.primary_bg))
+            .text_color(rgba(colors.primary_text))
+            .bg(rgba(colors.primary_bg))
     } else {
-        base.border_color(rgba(LINE_STRONG))
-            .text_color(rgb(TEXT))
-            .bg(rgb(PANEL))
+        base.border_color(rgba(colors.line_strong))
+            .text_color(rgba(colors.text))
+            .bg(rgba(colors.panel))
     };
 
     if !enabled {
@@ -1432,15 +1567,15 @@ where
 
     let button = if primary {
         button
-            .hover(|style| style.bg(rgb(0x2f79df)))
+            .hover(move |style| style.bg(rgba(colors.primary_hover)))
             .cursor_pointer()
     } else {
         button
-            .hover(|style| {
+            .hover(move |style| {
                 style
-                    .border_color(rgb(ACCENT))
-                    .text_color(rgb(ACCENT))
-                    .bg(rgb(0xf7faff))
+                    .border_color(rgba(colors.accent))
+                    .text_color(rgba(colors.accent))
+                    .bg(rgba(colors.secondary_hover_bg))
             })
             .cursor_pointer()
     };
@@ -1486,6 +1621,7 @@ fn assignment_link_button<F>(
     label: &'static str,
     focus: FocusHandle,
     keyboard_focus: bool,
+    colors: &AssignmentColors,
     cx: &mut Context<AssignmentView>,
     activate: F,
 ) -> AnyElement
@@ -1505,9 +1641,9 @@ where
         .px(px(2.))
         .text_size(px(11.))
         .font_weight(FontWeight(600.))
-        .text_color(rgb(ACCENT))
+        .text_color(rgba(colors.accent))
         .cursor_pointer()
-        .hover(|style| style.text_color(rgb(0x1f6dc4)))
+        .hover(move |style| style.text_color(rgba(colors.link_hover)))
         .relative()
         .track_focus(&focus)
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {

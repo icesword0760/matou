@@ -37,7 +37,7 @@ use matou_native_desktop::provider_context_editor::{
     provider_context_window_badge, provider_switch_impact_row,
 };
 use matou_native_desktop::theme_tokens::{
-    self, AppTheme, ThemePreference, ThemeState, theme_preference_picker,
+    AppTheme, ThemePalette, ThemePreference, ThemeState, theme_preference_picker,
 };
 use matou_native_runtime::protocol::{
     ClaudeModelCatalogReply, ClaudeRoleAssignmentsReply, TimeZoneSettingsReply,
@@ -65,7 +65,6 @@ pub(super) const TEXT: u32 = 0x303744;
 pub(super) const MUTED: u32 = 0x7e8794;
 const FAINT: u32 = 0xa3aab4;
 pub(super) const ACCENT: u32 = 0x347fd6;
-const ACCENT_SOFT: u32 = 0x347fd61c; // rgba(52,127,214,.11)
 const ACCENT_LINE: u32 = 0x347fd647; // rgba(52,127,214,.28)
 pub(super) const LINE: u32 = 0x424b581a; // rgba(66,75,88,.1)
 pub(super) const LINE_STRONG: u32 = 0x424b5829; // rgba(66,75,88,.16)
@@ -101,6 +100,171 @@ const ROLE_LABELS: [&str; 3] = ["Opus", "Sonnet", "Haiku"];
 // border, so the active card needs a named 80 + 2pt outer frame.
 const ACTIVE_API_CARD_MIN_OUTER_HEIGHT: f32 = 82.;
 
+/// Resolved colors for the frozen provider setup dialog and its status cards.
+///
+/// Light keeps the literal `provider-setup.css` values (including the white
+/// input surface) so the frozen screenshot baseline does not move. Dark maps
+/// the dialog shell, labels, selects, menus, and error/confirm cards onto the
+/// active workspace/settings palette. The text fields use the same palette
+/// for their surfaces, glyphs and carets.
+#[derive(Clone, Copy)]
+struct EditorColors {
+    dialog: u32,
+    panel: u32,
+    panel_muted: u32,
+    label: u32,
+    muted: u32,
+    subtitle: u32,
+    section_title: u32,
+    header_icon: u32,
+    header_icon_hover: u32,
+    secondary_text: u32,
+    role_text: u32,
+    hint_text: u32,
+    notice_body: u32,
+    line: u32,
+    line_strong: u32,
+    header_line: u32,
+    footer_line: u32,
+    focus: u32,
+    focus_ring: u32,
+    input_background: u32,
+    input_line: u32,
+    input_text: Option<u32>,
+    input_placeholder: Option<u32>,
+    primary: u32,
+    primary_hover: u32,
+    link: u32,
+    link_hover: u32,
+    card_line: u32,
+    card_selected_line: u32,
+    card_hover_line: u32,
+    card_selected_bg: u32,
+    card_hover_bg: u32,
+    card_marker: u32,
+    check: u32,
+    icon_bg: u32,
+    icon_fg: u32,
+    info_bg: u32,
+    info_line: u32,
+    menu_selected_bg: u32,
+    error_text: u32,
+    error_border: u32,
+    error_bg: u32,
+    error_line: u32,
+    confirm_bg: u32,
+    confirm_line: u32,
+}
+
+impl EditorColors {
+    fn new(palette: &ThemePalette, dark: bool) -> Self {
+        if dark {
+            Self {
+                dialog: palette.settings.dialog,
+                panel: palette.workspace.panel,
+                panel_muted: palette.workspace.panel_muted,
+                label: palette.settings.dialog_label,
+                muted: palette.workspace.muted,
+                subtitle: palette.workspace.muted,
+                section_title: palette.workspace.muted,
+                header_icon: palette.workspace.muted,
+                header_icon_hover: palette.settings.language_button_hover,
+                secondary_text: palette.workspace.text,
+                role_text: palette.workspace.muted,
+                hint_text: palette.workspace.muted,
+                notice_body: palette.workspace.muted,
+                line: palette.workspace.line,
+                line_strong: palette.workspace.line_strong,
+                header_line: palette.workspace.line,
+                footer_line: palette.workspace.line,
+                focus: palette.settings.input_focus_line,
+                focus_ring: palette.settings.input_focus_ring,
+                input_background: palette.settings.input_background,
+                input_line: palette.workspace.line_strong,
+                input_text: Some(palette.settings.input_text),
+                input_placeholder: Some(palette.workspace.muted),
+                // The dark workspace accent is a light blue; pair primary
+                // buttons with a readable dark-blue base and white text.
+                primary: 0x2f79dfff,
+                primary_hover: 0x2274dfff,
+                link: palette.settings.language_menu_text,
+                link_hover: palette.workspace.accent,
+                card_line: palette.workspace.line_strong,
+                card_selected_line: palette.workspace.accent,
+                card_hover_line: palette.workspace.accent_line,
+                card_selected_bg: palette.settings.provider_selected,
+                card_hover_bg: palette.settings.language_button_hover,
+                card_marker: palette.workspace.faint,
+                check: palette.workspace.accent,
+                icon_bg: palette.workspace.panel_muted,
+                icon_fg: palette.workspace.muted,
+                info_bg: palette.settings.language_button_hover,
+                info_line: palette.workspace.line,
+                menu_selected_bg: palette.settings.language_menu_background,
+                error_text: palette.settings.language_error,
+                error_border: palette.settings.language_error,
+                error_bg: 0x2a1c1cff,
+                error_line: 0x4a2a28ff,
+                confirm_bg: 0x2a2418ff,
+                confirm_line: 0x5a4a2aff,
+            }
+        } else {
+            Self {
+                dialog: 0xffffffff,
+                panel: 0xffffffff,
+                panel_muted: 0xf2f5f9ff,
+                label: 0x344257ff,
+                muted: opaque(DIALOG_MUTED),
+                subtitle: 0x7c899cff,
+                section_title: 0x6f7d91ff,
+                header_icon: 0x8694a7ff,
+                header_icon_hover: 0xf0f4f8ff,
+                secondary_text: 0x3b4b60ff,
+                role_text: 0x667991ff,
+                hint_text: 0x8190a4ff,
+                notice_body: 0x596575ff,
+                line: opaque(DIALOG_BORDER),
+                line_strong: 0xd8dfe8ff,
+                header_line: opaque(DIALOG_HEADER_LINE),
+                footer_line: opaque(DIALOG_FOOTER_LINE),
+                focus: opaque(DIALOG_FOCUS),
+                focus_ring: opaque(DIALOG_FOCUS_RING),
+                input_background: 0xffffffff,
+                input_line: opaque(DIALOG_INPUT_LINE),
+                input_text: None,
+                input_placeholder: None,
+                primary: opaque(DIALOG_PRIMARY),
+                primary_hover: opaque(DIALOG_PRIMARY_HOVER),
+                link: 0x2679d8ff,
+                link_hover: 0x1f6dc4ff,
+                card_line: 0xdde4edff,
+                card_selected_line: 0x4d92f3ff,
+                card_hover_line: 0x8cb7f1ff,
+                card_selected_bg: 0xedf5ffff,
+                card_hover_bg: 0xf7faffff,
+                card_marker: 0x9aaac0ff,
+                check: 0x3284edff,
+                icon_bg: 0xedf1f6ff,
+                icon_fg: 0x52647dff,
+                info_bg: 0xf7faffff,
+                info_line: 0xdce6f4ff,
+                menu_selected_bg: 0xe4efffff,
+                error_text: 0xa13d39ff,
+                error_border: 0xb34d47ff,
+                error_bg: 0xfff2f1ff,
+                error_line: (DANGER_LINE << 8) | 0xff,
+                confirm_bg: opaque(CONFIRM_BG),
+                confirm_line: opaque(CONFIRM_LINE),
+            }
+        }
+    }
+}
+
+/// Expands a frozen 24-bit CSS color to an opaque packed RGBA value.
+const fn opaque(hex: u32) -> u32 {
+    (hex << 8) | 0xff
+}
+
 pub(super) fn color_alpha(hex: u32, alpha: f32) -> Rgba {
     let mut color = rgb(hex);
     color.a = alpha;
@@ -126,7 +290,7 @@ pub(super) fn shadow(color: u32, alpha: f32, y: f32, blur: f32) -> BoxShadow {
 
 fn outline_shadow(color: u32, spread: f32) -> BoxShadow {
     BoxShadow {
-        color: rgb(color).into(),
+        color: rgba(color).into(),
         offset: point(px(0.), px(0.)),
         blur_radius: px(0.),
         spread_radius: px(spread),
@@ -228,8 +392,8 @@ fn dialog_focus_ring(focus: FocusHandle, radius: f32, keyboard_focus: bool) -> A
     focus_ring_with(focus, radius, keyboard_focus, FocusRingStyle::Dialog)
 }
 
-fn input_focus_shadow() -> Vec<BoxShadow> {
-    vec![outline_shadow(DIALOG_FOCUS_RING, 3.)]
+fn input_focus_shadow(colors: &EditorColors) -> Vec<BoxShadow> {
+    vec![outline_shadow(colors.focus_ring, 3.)]
 }
 
 // ---------------------------------------------------------------------------
@@ -251,6 +415,10 @@ struct SecretInput {
     focus: FocusHandle,
     placeholder: SharedString,
     text: String,
+    /// Optional paint overrides for the themed settings dialog. `None` keeps
+    /// the frozen light values.
+    text_color: Option<Rgba>,
+    placeholder_color: Option<Rgba>,
     selection: Range<usize>,
     reversed: bool,
     marked: Option<Range<usize>>,
@@ -269,6 +437,8 @@ impl SecretInput {
             focus: cx.focus_handle().tab_stop(true),
             placeholder: SharedString::default(),
             text: String::new(),
+            text_color: None,
+            placeholder_color: None,
             selection: 0..0,
             reversed: false,
             marked: None,
@@ -484,14 +654,20 @@ impl SecretInput {
     ) {
         let display = self.display();
         let empty = self.text.is_empty();
+        let default_color = if empty {
+            rgba(SEARCH_PLACEHOLDER)
+        } else {
+            rgba(DIALOG_LABEL)
+        };
+        let color = if empty {
+            self.placeholder_color.unwrap_or(default_color)
+        } else {
+            self.text_color.unwrap_or(default_color)
+        };
         let run = TextRun {
             len: display.len(),
             font: window.text_style().font(),
-            color: if empty {
-                rgba(SEARCH_PLACEHOLDER).into()
-            } else {
-                rgba(DIALOG_LABEL).into()
-            },
+            color: color.into(),
             background_color: None,
             underline: None,
             strikethrough: None,
@@ -534,7 +710,7 @@ impl SecretInput {
                         point(origin.x + cursor_x, bounds.top() + px(2.)),
                         size(px(1.), bounds.size.height - px(4.)),
                     ),
-                    rgb(TEXT),
+                    self.text_color.unwrap_or_else(|| rgb(TEXT)),
                 ));
             }
         });
@@ -1712,6 +1888,8 @@ impl SettingsShell {
             .and_then(|_| format_time_zone_preview(view.effective_time_zone(), view.english));
         view.preview = preview.as_deref();
         let shell = cx.weak_entity();
+        let palette = self.theme.effective().palette();
+        let surface = rgba(palette.workspace.canvas);
         language_zone_content(
             view,
             window,
@@ -1720,6 +1898,8 @@ impl SettingsShell {
                     shell.language_zone_action(action, window, cx)
                 });
             }),
+            palette,
+            surface,
         )
     }
 
@@ -2528,8 +2708,15 @@ fn rename_field(
     height: f32,
     horizontal: f32,
     window: &Window,
-    cx: &App,
+    colors: &EditorColors,
+    cx: &mut App,
 ) -> Div {
+    let text_color = colors.input_text.map(rgba);
+    let placeholder_color = colors.input_placeholder.map(rgba);
+    input.update(cx, |input, _| {
+        input.text_color = text_color;
+        input.placeholder_color = placeholder_color;
+    });
     let focus = input.read(cx).focus.clone();
     let focused = focus.is_focused(window);
     let field = div()
@@ -2540,14 +2727,14 @@ fn rename_field(
         .px(px(horizontal))
         .rounded(px(9.))
         .border_1()
-        .border_color(rgb(if focused {
-            DIALOG_FOCUS
+        .border_color(rgba(if focused {
+            colors.focus
         } else {
-            DIALOG_INPUT_LINE
+            colors.input_line
         }))
-        .bg(rgb(0xffffff));
+        .bg(rgba(colors.input_background));
     let field = if focused {
-        field.shadow(input_focus_shadow())
+        field.shadow(input_focus_shadow(colors))
     } else {
         field
     };
@@ -2563,8 +2750,15 @@ fn secret_field(
     height: f32,
     horizontal: f32,
     window: &Window,
-    cx: &App,
+    colors: &EditorColors,
+    cx: &mut App,
 ) -> Div {
+    let text_color = colors.input_text.map(rgba);
+    let placeholder_color = colors.input_placeholder.map(rgba);
+    input.update(cx, |input, _| {
+        input.text_color = text_color;
+        input.placeholder_color = placeholder_color;
+    });
     let focus = input.read(cx).focus.clone();
     let focused = focus.is_focused(window);
     let field = div()
@@ -2575,14 +2769,14 @@ fn secret_field(
         .px(px(horizontal))
         .rounded(px(9.))
         .border_1()
-        .border_color(rgb(if focused {
-            DIALOG_FOCUS
+        .border_color(rgba(if focused {
+            colors.focus
         } else {
-            DIALOG_INPUT_LINE
+            colors.input_line
         }))
-        .bg(rgb(0xffffff));
+        .bg(rgba(colors.input_background));
     let field = if focused {
-        field.shadow(input_focus_shadow())
+        field.shadow(input_focus_shadow(colors))
     } else {
         field
     };
@@ -3255,19 +3449,20 @@ impl SettingsShell {
         self.theme.effective() == AppTheme::Dark
     }
 
-    /// Older sections still use the frozen light palette. In dark mode they
-    /// keep their exact light colors inside one clearly bounded light surface;
-    /// light mode returns the section untouched so its geometry is unchanged.
+    /// Older sections still use the frozen light palette. In dark mode the
+    /// surrounding surface follows the active palette; the inline cards below
+    /// are themed individually where they live in this module.
     fn legacy_surface(&self, content: Div) -> Div {
         if self.is_dark() {
+            let palette = self.theme.effective().palette();
             div()
                 .mt(px(14.))
                 .w_full()
                 .rounded(px(12.))
                 .border_1()
-                .border_color(rgba(theme_tokens::LIGHT.workspace.line_strong))
-                .bg(rgba(theme_tokens::LIGHT.workspace.canvas))
-                .text_color(rgb(TEXT))
+                .border_color(rgba(palette.workspace.line_strong))
+                .bg(rgba(palette.workspace.canvas))
+                .text_color(rgba(palette.workspace.text))
                 .p(px(18.))
                 .child(content)
         } else {
@@ -3276,6 +3471,7 @@ impl SettingsShell {
     }
 
     fn dispatch_content(&mut self, cx: &mut Context<Self>) -> Div {
+        let palette = *self.theme.effective().palette();
         let state = self.dispatch_panel.clone();
         let content = div().flex().flex_col().w_full();
         match state {
@@ -3285,10 +3481,10 @@ impl SettingsShell {
                     .p(px(14.))
                     .rounded(px(9.))
                     .border_1()
-                    .border_color(rgba(LINE))
-                    .bg(rgb(PANEL))
+                    .border_color(rgba(palette.workspace.line))
+                    .bg(rgba(palette.workspace.panel))
                     .text_size(px(10.))
-                    .text_color(rgb(MUTED))
+                    .text_color(rgba(palette.workspace.muted))
                     .child(
                         self.locale
                             .text("正在载入派活默认值…", "Loading dispatch defaults…"),
@@ -3300,6 +3496,19 @@ impl SettingsShell {
     }
 
     fn dispatch_error_block(&self, cx: &mut Context<Self>) -> Div {
+        let palette = self.theme.effective().palette();
+        let dark = self.is_dark();
+        let colors = EditorColors::new(palette, dark);
+        let retry_border = if dark {
+            palette.workspace.line_strong
+        } else {
+            0xa34a4433
+        };
+        let retry_hover = if dark {
+            colors.card_hover_bg
+        } else {
+            0xfff7f6ff
+        };
         let retry = wire_button(
             div()
                 .id("settings-dispatch-retry")
@@ -3309,12 +3518,12 @@ impl SettingsShell {
                 .px(px(8.))
                 .rounded(px(6.))
                 .border_1()
-                .border_color(rgba(0xa34a4433))
-                .bg(rgb(0xffffff))
+                .border_color(rgba(retry_border))
+                .bg(rgba(colors.panel))
                 .text_size(px(10.))
                 .font_weight(FontWeight(600.))
-                .text_color(rgb(DANGER_TEXT))
-                .hover(|style| style.bg(rgb(0xfff7f6)))
+                .text_color(rgba(colors.error_text))
+                .hover(move |style| style.bg(rgba(retry_hover)))
                 .child(RETRY_LABEL),
             &self.dispatch_retry_focus,
             6.,
@@ -3330,11 +3539,11 @@ impl SettingsShell {
             .p(px(12.))
             .rounded(px(8.))
             .border_1()
-            .border_color(rgb(DANGER_LINE))
-            .bg(rgb(DANGER_BG))
+            .border_color(rgba(colors.error_line))
+            .bg(rgba(colors.error_bg))
             .text_size(px(11.))
             .line_height(px(17.6))
-            .text_color(rgb(DANGER_TEXT))
+            .text_color(rgba(colors.error_text))
             .child(div().flex_1().whitespace_normal().child(LOAD_FAILED))
             .child(retry)
     }
@@ -3390,12 +3599,14 @@ impl SettingsShell {
     }
 
     fn claude_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
+        let palette = *self.theme.effective().palette();
+        let dark = self.is_dark();
         let mut content = div().flex().flex_col().w_full();
         let panel = self
             .assignments
             .panel_localized(&self.providers, self.locale);
         let assignments = self.assignment_view.update(cx, |view, cx| {
-            view.render_panel(panel, self.keyboard_focus, window, cx)
+            view.render_panel(panel, self.keyboard_focus, &palette, dark, window, cx)
         });
         if self.providers.loading() {
             return content
@@ -3405,10 +3616,10 @@ impl SettingsShell {
                         .p(px(14.))
                         .rounded(px(9.))
                         .border_1()
-                        .border_color(rgba(LINE))
-                        .bg(rgb(PANEL))
+                        .border_color(rgba(palette.workspace.line))
+                        .bg(rgba(palette.workspace.panel))
                         .text_size(px(10.))
-                        .text_color(rgb(MUTED))
+                        .text_color(rgba(palette.workspace.muted))
                         .child(
                             self.locale
                                 .text("正在载入供应商配置…", "Loading the provider configuration…"),
@@ -3443,13 +3654,29 @@ impl SettingsShell {
                 probe.labels.extend([impact.title, impact.body.to_owned()]);
             }
         });
-        content = content.child(provider_switch_impact_row(self.locale, app_name, false));
+        content = content.child(provider_switch_impact_row(self.locale, app_name, dark));
         content.child(assignments)
     }
 
     fn notice_block(&self, title: &str, body: &str, error: bool, cx: &mut Context<Self>) -> Div {
-        let accent = if error { DANGER_TEXT } else { 0x2679d8 };
-        let icon_bg = if error { 0xbc5550 } else { 0x3284ed };
+        let palette = *self.theme.effective().palette();
+        let dark = self.is_dark();
+        let colors = EditorColors::new(&palette, dark);
+        let accent = if error {
+            colors.error_text
+        } else {
+            colors.link
+        };
+        let icon_bg = if error {
+            if dark { 0x5a2a28 } else { 0xbc5550 }
+        } else {
+            colors.primary
+        };
+        let dismiss_hover = if dark {
+            palette.workspace.line
+        } else {
+            0x0000000a
+        };
         let mut dismiss = div()
             .id("settings-notice-dismiss")
             .size(px(27.))
@@ -3460,8 +3687,8 @@ impl SettingsShell {
             .rounded(px(7.))
             .text_size(px(16.))
             .line_height(relative(1.))
-            .text_color(rgb(accent))
-            .hover(|style| style.bg(rgba(0x0000000a)))
+            .text_color(rgba(accent))
+            .hover(move |style| style.bg(rgba(dismiss_hover)))
             .child("×");
         dismiss = wire_button(
             dismiss,
@@ -3479,7 +3706,11 @@ impl SettingsShell {
             div()
                 .text_size(px(13.))
                 .font_weight(FontWeight(600.))
-                .text_color(rgb(if error { DANGER_TEXT } else { TEXT }))
+                .text_color(rgba(if error {
+                    colors.error_text
+                } else {
+                    palette.workspace.text
+                }))
                 .child(title.to_owned()),
         );
         if !body.is_empty() {
@@ -3488,7 +3719,11 @@ impl SettingsShell {
                     .mt(px(6.))
                     .text_size(px(12.))
                     .line_height(px(19.2))
-                    .text_color(rgb(if error { DANGER_TEXT } else { 0x596575 }))
+                    .text_color(rgba(if error {
+                        colors.error_text
+                    } else {
+                        colors.notice_body
+                    }))
                     .whitespace_normal()
                     .child(body.to_owned()),
             );
@@ -3500,6 +3735,7 @@ impl SettingsShell {
                 &self.notice_retry_focus,
                 true,
                 FocusRingStyle::Shell,
+                &colors,
                 cx,
                 move |this, _, cx| {
                     this.providers.switch(&id);
@@ -3507,6 +3743,20 @@ impl SettingsShell {
                 },
             ));
         }
+        let border = if error {
+            colors.error_line
+        } else if dark {
+            palette.workspace.line
+        } else {
+            NOTICE_LINE
+        };
+        let background = if error {
+            colors.error_bg
+        } else if dark {
+            palette.settings.language_selected
+        } else {
+            NOTICE_BG
+        };
         div()
             .flex()
             .items_start()
@@ -3514,8 +3764,8 @@ impl SettingsShell {
             .p(px(17.))
             .rounded(px(10.))
             .border_1()
-            .border_color(rgb(if error { DANGER_LINE } else { NOTICE_LINE }))
-            .bg(rgb(if error { DANGER_BG } else { NOTICE_BG }))
+            .border_color(rgba(border))
+            .bg(rgba(background))
             .child(
                 div()
                     .size(px(27.))
@@ -3524,7 +3774,7 @@ impl SettingsShell {
                     .items_center()
                     .justify_center()
                     .rounded_full()
-                    .bg(rgb(icon_bg))
+                    .bg(rgba(icon_bg))
                     .text_size(px(13.))
                     .font_weight(FontWeight(700.))
                     .text_color(rgb(0xffffff))
@@ -3535,6 +3785,23 @@ impl SettingsShell {
     }
 
     fn provider_toolbar(&self, cx: &mut Context<Self>) -> Div {
+        let palette = *self.theme.effective().palette();
+        let dark = self.is_dark();
+        let add_bg = if dark {
+            0x2f79dfff
+        } else {
+            palette.workspace.accent
+        };
+        let add_border = if dark {
+            palette.workspace.accent_line
+        } else {
+            0x2670c52e
+        };
+        let add_hover = if dark {
+            0x2274dfff
+        } else {
+            palette.settings.language_primary_hover
+        };
         let busy = self.busy();
         let count = self.providers.providers().len();
         let mut add = div()
@@ -3546,17 +3813,17 @@ impl SettingsShell {
             .px(px(11.))
             .rounded(px(7.))
             .border_1()
-            .border_color(rgba(0x2670c52e))
+            .border_color(rgba(add_border))
             .text_size(px(12.))
             .font_weight(FontWeight(650.))
             .text_color(rgb(0xffffff))
-            .bg(rgb(ACCENT))
+            .bg(rgba(add_bg))
             .shadow(vec![shadow(0x357bcc, 0.13, 4., 11.)])
             .child(self.locale.text("＋ 新增供应商", "+ New provider"));
         if busy {
             add = add.opacity(0.55).cursor(CursorStyle::OperationNotAllowed);
         } else {
-            add = add.hover(|style| style.bg(rgb(0x2f79df)));
+            add = add.hover(move |style| style.bg(rgba(add_hover)));
             add = wire_button(
                 add,
                 &self.new_provider_focus,
@@ -3581,14 +3848,14 @@ impl SettingsShell {
                         div()
                             .text_size(px(13.))
                             .font_weight(FontWeight(650.))
-                            .text_color(rgb(TEXT))
+                            .text_color(rgba(palette.workspace.text))
                             .child(self.locale.text("服务供应商", "Providers")),
                     )
                     .child(
                         div()
                             .text_size(px(9.))
                             .font_weight(FontWeight(500.))
-                            .text_color(rgb(MUTED))
+                            .text_color(rgba(palette.workspace.muted))
                             .child(match self.locale {
                                 InterfaceLocale::Chinese => format!("{count} 个配置"),
                                 InterfaceLocale::English if count == 1 => "1 configuration".into(),
@@ -3600,6 +3867,20 @@ impl SettingsShell {
     }
 
     fn load_error_block(&self, error: &str, cx: &mut Context<Self>) -> Div {
+        let palette = *self.theme.effective().palette();
+        let dark = self.is_dark();
+        let colors = EditorColors::new(&palette, dark);
+        let retry_bg = if dark { colors.panel } else { 0xffffffff };
+        let retry_border = if dark {
+            palette.workspace.line_strong
+        } else {
+            0xa34a4433
+        };
+        let retry_hover = if dark {
+            colors.card_hover_bg
+        } else {
+            0xfff7f6ff
+        };
         let retry = wire_button(
             div()
                 .id("settings-load-retry")
@@ -3609,12 +3890,12 @@ impl SettingsShell {
                 .px(px(8.))
                 .rounded(px(6.))
                 .border_1()
-                .border_color(rgba(0xa34a4433))
-                .bg(rgb(0xffffff))
+                .border_color(rgba(retry_border))
+                .bg(rgba(retry_bg))
                 .text_size(px(10.))
                 .font_weight(FontWeight(600.))
-                .text_color(rgb(DANGER_TEXT))
-                .hover(|style| style.bg(rgb(0xfff7f6)))
+                .text_color(rgba(colors.error_text))
+                .hover(move |style| style.bg(rgba(retry_hover)))
                 .child(self.locale.text("重试", "Retry")),
             &self.load_retry_focus,
             6.,
@@ -3633,11 +3914,11 @@ impl SettingsShell {
             .p(px(12.))
             .rounded(px(8.))
             .border_1()
-            .border_color(rgb(DANGER_LINE))
-            .bg(rgb(DANGER_BG))
+            .border_color(rgba(colors.error_line))
+            .bg(rgba(colors.error_bg))
             .text_size(px(11.))
             .line_height(px(17.6))
-            .text_color(rgb(DANGER_TEXT))
+            .text_color(rgba(colors.error_text))
             .child(div().flex_1().whitespace_normal().child(error.to_owned()))
             .child(retry)
     }
@@ -3749,6 +4030,7 @@ impl SettingsShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let palette = *self.theme.effective().palette();
         let name = provider["name"].as_str().unwrap_or_default();
         let endpoint = short_endpoint(provider["endpoint"].as_str().unwrap_or_default());
         let model = provider["model"].as_str().unwrap_or(CLI_DEFAULT_MODEL);
@@ -3804,16 +4086,16 @@ impl SettingsShell {
             .px(px(10.))
             .rounded(px(6.))
             .border_1()
-            .border_color(rgba(LINE_STRONG))
+            .border_color(rgba(palette.workspace.line_strong))
             .text_size(px(12.))
             .font_weight(FontWeight(650.))
-            .text_color(rgb(0x525d6a))
-            .bg(rgba(0xffffffd1))
+            .text_color(rgba(palette.settings.provider_action_text))
+            .bg(rgba(palette.settings.provider_action_background))
             .child(self.locale.text("编辑", "Edit"));
         if busy {
             edit = edit.opacity(0.55).cursor(CursorStyle::OperationNotAllowed);
         } else {
-            edit = edit.hover(|style| style.bg(rgb(PANEL)));
+            edit = edit.hover(|style| style.bg(rgba(palette.workspace.panel)));
             edit = wire_button(
                 edit,
                 &controls[0],
@@ -3843,7 +4125,7 @@ impl SettingsShell {
             .border_color(if current || busy {
                 rgba(0x00000000)
             } else {
-                rgba(ACCENT_LINE)
+                rgba(palette.workspace.accent_line)
             })
             .text_size(px(12.))
             .font_weight(FontWeight(650.))
@@ -3857,12 +4139,12 @@ impl SettingsShell {
         if current || busy {
             switch = switch
                 .text_color(rgb(FAINT))
-                .bg(rgba(0xdee2e894))
+                .bg(rgba(palette.settings.provider_disabled_background))
                 .cursor(CursorStyle::OperationNotAllowed);
         } else {
             switch = switch
-                .text_color(rgb(ACCENT))
-                .bg(rgba(ACCENT_SOFT))
+                .text_color(rgba(palette.workspace.accent))
+                .bg(rgba(palette.workspace.accent_soft))
                 .hover(|style| style.bg(rgba(0x347fd622)));
             switch = wire_button(
                 switch,
@@ -3902,10 +4184,10 @@ impl SettingsShell {
             .rounded(px(11.))
             .overflow_hidden()
             .border_1()
-            .border_color(rgba(LINE))
-            .bg(rgb(PANEL_MUTED));
+            .border_color(rgba(palette.workspace.line))
+            .bg(rgba(palette.settings.providers));
         if !current {
-            card = card.hover(|style| style.bg(rgb(PANEL)));
+            card = card.hover(|style| style.bg(rgba(palette.workspace.panel)));
         }
         if current {
             // Active fill sits inside the 1pt border so the outer ring keeps
@@ -3915,7 +4197,7 @@ impl SettingsShell {
                     .absolute()
                     .inset_0()
                     .rounded(px(10.))
-                    .bg(rgb(0xedf5ff)),
+                    .bg(rgba(palette.settings.provider_selected)),
             );
             card = card.child(
                 div()
@@ -3924,7 +4206,7 @@ impl SettingsShell {
                     .top_0()
                     .bottom_0()
                     .w(px(2.))
-                    .bg(rgb(ACCENT)),
+                    .bg(rgba(palette.workspace.accent)),
             );
         }
         let mut header = div().flex().items_center().w_full().gap(px(11.));
@@ -3957,7 +4239,7 @@ impl SettingsShell {
                     .text_size(px(13.))
                     .line_height(px(17.55))
                     .font_weight(FontWeight(650.))
-                    .text_color(rgb(0x414a57))
+                    .text_color(rgba(palette.settings.provider_text))
                     .whitespace_normal()
                     .child(name.to_owned())
                     .when(current, |row| {
@@ -3968,8 +4250,8 @@ impl SettingsShell {
                                 .rounded_full()
                                 .text_size(px(8.))
                                 .font_weight(FontWeight(500.))
-                                .text_color(rgb(ACCENT))
-                                .bg(rgba(ACCENT_SOFT))
+                                .text_color(rgba(palette.workspace.accent))
+                                .bg(rgba(palette.workspace.accent_soft))
                                 .child(self.locale.text("使用中", "In use")),
                         )
                     })
@@ -3981,7 +4263,7 @@ impl SettingsShell {
                 div()
                     .text_size(px(11.))
                     .line_height(px(15.4))
-                    .text_color(rgb(MUTED))
+                    .text_color(rgba(palette.workspace.muted))
                     .whitespace_normal()
                     .child(endpoint),
             );
@@ -3997,7 +4279,7 @@ impl SettingsShell {
                     .text_size(px(12.))
                     .line_height(px(16.8))
                     .font_weight(FontWeight(650.))
-                    .text_color(rgb(0x414a57))
+                    .text_color(rgba(palette.settings.provider_text))
                     .whitespace_normal()
                     .child(model_name.to_owned()),
             )
@@ -4005,7 +4287,7 @@ impl SettingsShell {
                 div()
                     .text_size(px(11.))
                     .line_height(px(15.4))
-                    .text_color(rgb(MUTED))
+                    .text_color(rgba(palette.workspace.muted))
                     .whitespace_normal()
                     .child(model_sub),
             );
@@ -4057,6 +4339,7 @@ impl SettingsShell {
         is_last: bool,
         viewport_width: f32,
     ) -> AnyElement {
+        let palette = *self.theme.effective().palette();
         let subscription = &provider["subscription"];
         let account = &subscription["account"];
         let status = account["status"].as_str().unwrap_or("ready");
@@ -4111,7 +4394,7 @@ impl SettingsShell {
             .text_size(px(13.))
             .line_height(px(17.55))
             .font_weight(FontWeight(650.))
-            .text_color(rgb(0x414a57))
+            .text_color(rgba(palette.settings.provider_text))
             .whitespace_normal()
             .child(provider["name"].as_str().unwrap_or_default().to_owned());
         if current {
@@ -4122,8 +4405,8 @@ impl SettingsShell {
                     .rounded_full()
                     .text_size(px(8.))
                     .font_weight(FontWeight(500.))
-                    .text_color(rgb(ACCENT))
-                    .bg(rgba(ACCENT_SOFT))
+                    .text_color(rgba(palette.workspace.accent))
+                    .bg(rgba(palette.workspace.accent_soft))
                     .child(self.locale.text("使用中", "In use")),
             );
         }
@@ -4160,7 +4443,7 @@ impl SettingsShell {
                 div()
                     .text_size(px(11.))
                     .line_height(px(15.4))
-                    .text_color(rgb(MUTED))
+                    .text_color(rgba(palette.workspace.muted))
                     .whitespace_normal()
                     .child(account_line),
             );
@@ -4172,7 +4455,7 @@ impl SettingsShell {
                 div()
                     .text_size(px(10.))
                     .line_height(px(14.))
-                    .text_color(rgb(MUTED))
+                    .text_color(rgba(palette.workspace.muted))
                     .whitespace_normal()
                     .child(reason.to_owned()),
             );
@@ -4197,10 +4480,10 @@ impl SettingsShell {
             .rounded(px(11.))
             .overflow_hidden()
             .border_1()
-            .border_color(rgba(LINE))
-            .bg(rgb(PANEL_MUTED));
+            .border_color(rgba(palette.workspace.line))
+            .bg(rgba(palette.settings.providers));
         if !current {
-            card = card.hover(|style| style.bg(rgb(PANEL)));
+            card = card.hover(|style| style.bg(rgba(palette.workspace.panel)));
         }
         if current {
             // Active fill sits inside the 1pt border so the outer ring keeps
@@ -4210,7 +4493,7 @@ impl SettingsShell {
                     .absolute()
                     .inset_0()
                     .rounded(px(10.))
-                    .bg(rgb(0xedf5ff)),
+                    .bg(rgba(palette.settings.provider_selected)),
             );
             card = card.child(
                 div()
@@ -4219,7 +4502,7 @@ impl SettingsShell {
                     .top_0()
                     .bottom_0()
                     .w(px(2.))
-                    .bg(rgb(ACCENT)),
+                    .bg(rgba(palette.workspace.accent)),
             );
         }
         card = card
@@ -4252,7 +4535,7 @@ impl SettingsShell {
                             .text_size(px(12.))
                             .line_height(px(16.8))
                             .font_weight(FontWeight(650.))
-                            .text_color(rgb(0x414a57))
+                            .text_color(rgba(palette.settings.provider_text))
                             .whitespace_normal()
                             .child(model_name.to_owned()),
                     )
@@ -4260,7 +4543,7 @@ impl SettingsShell {
                         div()
                             .text_size(px(11.))
                             .line_height(px(15.4))
-                            .text_color(rgb(MUTED))
+                            .text_color(rgba(palette.workspace.muted))
                             .whitespace_normal()
                             .child(format!(
                                 "默认模型{}",
@@ -4475,6 +4758,8 @@ impl SettingsShell {
     }
 
     fn render_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let palette = *self.theme.effective().palette();
+        let colors = EditorColors::new(&palette, self.is_dark());
         let Some(editor) = self.editor.as_ref() else {
             return None;
         };
@@ -4515,12 +4800,12 @@ impl SettingsShell {
             .rounded(px(7.))
             .text_size(px(22.))
             .line_height(relative(1.))
-            .text_color(rgb(0x8694a7))
+            .text_color(rgba(colors.header_icon))
             .child("←");
         if busy {
             back = back.opacity(0.55);
         } else {
-            back = back.hover(|style| style.bg(rgb(0xf0f4f8)));
+            back = back.hover(move |style| style.bg(rgba(colors.header_icon_hover)));
             back = wire_dialog_button(
                 back,
                 &editor.focus.back,
@@ -4540,12 +4825,12 @@ impl SettingsShell {
             .rounded(px(7.))
             .text_size(px(24.))
             .line_height(relative(1.))
-            .text_color(rgb(0x8694a7))
+            .text_color(rgba(colors.header_icon))
             .child("×");
         if busy {
             close = close.opacity(0.55);
         } else {
-            close = close.hover(|style| style.bg(rgb(0xf0f4f8)));
+            close = close.hover(move |style| style.bg(rgba(colors.header_icon_hover)));
             close = wire_dialog_button(
                 close,
                 &editor.focus.close,
@@ -4564,7 +4849,7 @@ impl SettingsShell {
             .pt(px(24.))
             .pb(px(20.))
             .border_b_1()
-            .border_color(rgb(DIALOG_HEADER_LINE));
+            .border_color(rgba(colors.header_line));
         if !pick && !editing {
             header = header.child(back);
         }
@@ -4578,7 +4863,7 @@ impl SettingsShell {
                             .text_size(px(21.))
                             .line_height(px(28.35))
                             .font_weight(FontWeight(650.))
-                            .text_color(rgb(DIALOG_LABEL))
+                            .text_color(rgba(colors.label))
                             .child(title),
                     )
                     .child(
@@ -4586,7 +4871,7 @@ impl SettingsShell {
                             .mt(px(5.))
                             .text_size(px(12.))
                             .line_height(px(16.8))
-                            .text_color(rgb(0x7c899c))
+                            .text_color(rgba(colors.subtitle))
                             .child("用于 Claude Code"),
                     ),
             )
@@ -4616,6 +4901,7 @@ impl SettingsShell {
                 !busy,
                 &editor.focus.cancel,
                 self.keyboard_focus,
+                &colors,
                 cx,
                 |this, window, cx| this.editor_request_close(window, cx),
             );
@@ -4626,6 +4912,7 @@ impl SettingsShell {
                 editor.selection.is_some() && !busy,
                 &editor.focus.next,
                 self.keyboard_focus,
+                &colors,
                 cx,
                 |this, window, cx| this.editor_next(window, cx),
             );
@@ -4637,8 +4924,8 @@ impl SettingsShell {
                 .px(px(26.))
                 .py(px(16.))
                 .border_t_1()
-                .border_color(rgb(DIALOG_FOOTER_LINE))
-                .bg(rgb(0xffffff))
+                .border_color(rgba(colors.footer_line))
+                .bg(rgba(colors.dialog))
                 .child(div().flex_1())
                 .child(cancel)
                 .child(next)
@@ -4655,7 +4942,7 @@ impl SettingsShell {
                         .pr(px(12.))
                         .text_size(px(13.))
                         .font_weight(FontWeight(600.))
-                        .text_color(rgb(DANGER_TEXT))
+                        .text_color(rgba(colors.error_text))
                         .child(self.locale.text("删除", "Delete"));
                     if busy {
                         button
@@ -4683,6 +4970,7 @@ impl SettingsShell {
                 save_enabled,
                 &editor.focus.save,
                 self.keyboard_focus,
+                &colors,
                 cx,
                 |this, window, cx| this.editor_save(false, window, cx),
             );
@@ -4697,6 +4985,7 @@ impl SettingsShell {
                 save_enabled,
                 &editor.focus.save_switch,
                 self.keyboard_focus,
+                &colors,
                 cx,
                 |this, window, cx| this.editor_save(true, window, cx),
             );
@@ -4708,8 +4997,8 @@ impl SettingsShell {
                 .px(px(26.))
                 .py(px(16.))
                 .border_t_1()
-                .border_color(rgb(DIALOG_FOOTER_LINE))
-                .bg(rgb(0xffffff))
+                .border_color(rgba(colors.footer_line))
+                .bg(rgba(colors.dialog))
                 .children(delete)
                 .child(div().flex_1())
                 .child(save)
@@ -4726,6 +5015,7 @@ impl SettingsShell {
                 save_enabled,
                 &editor.focus.save,
                 self.keyboard_focus,
+                &colors,
                 cx,
                 |this, window, cx| this.editor_save(false, window, cx),
             );
@@ -4740,6 +5030,7 @@ impl SettingsShell {
                 save_enabled,
                 &editor.focus.save_switch,
                 self.keyboard_focus,
+                &colors,
                 cx,
                 |this, window, cx| this.editor_save(true, window, cx),
             );
@@ -4751,8 +5042,8 @@ impl SettingsShell {
                 .px(px(26.))
                 .py(px(16.))
                 .border_t_1()
-                .border_color(rgb(DIALOG_FOOTER_LINE))
-                .bg(rgb(0xffffff))
+                .border_color(rgba(colors.footer_line))
+                .bg(rgba(colors.dialog))
                 .child(div().flex_1())
                 .child(save_only)
                 .child(add_use)
@@ -4768,9 +5059,9 @@ impl SettingsShell {
             .overflow_hidden()
             .rounded(px(15.))
             .border_1()
-            .border_color(rgb(DIALOG_BORDER))
-            .bg(rgb(0xffffff))
-            .text_color(rgb(DIALOG_LABEL))
+            .border_color(rgba(colors.line))
+            .bg(rgba(colors.dialog))
+            .text_color(rgba(colors.label))
             .text_size(px(14.))
             .shadow(vec![shadow(0x1a304b, 0.19, 18., 70.)])
             .on_mouse_down(
@@ -4862,6 +5153,8 @@ impl SettingsShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Div {
+        let palette = *self.theme.effective().palette();
+        let colors = EditorColors::new(&palette, self.is_dark());
         let busy = self.providers.saving();
         let query = editor.query.read(cx).text.clone();
         let body_width = (panel_width - 2. - 52.).max(0.);
@@ -4871,15 +5164,16 @@ impl SettingsShell {
             body_width
         };
         let mut body = div().flex().flex_col().w(px(body_width));
-        body =
-            body.child(rename_field(editor.query.clone(), 44., 13., window, cx).w(px(body_width)));
+        body = body.child(
+            rename_field(editor.query.clone(), 44., 13., window, &colors, cx).w(px(body_width)),
+        );
         body = body.child(
             div()
                 .mt(px(22.))
                 .mb(px(10.))
                 .text_size(px(12.))
                 .font_weight(FontWeight(600.))
-                .text_color(rgb(0x6f7d91))
+                .text_color(rgba(colors.section_title))
                 .child(self.locale.text("API 服务", "API services")),
         );
         let mut grid = div().flex().flex_wrap().w_full().gap(px(12.));
@@ -4906,9 +5200,21 @@ impl SettingsShell {
                 .p(px(13.))
                 .rounded(px(10.))
                 .border_1()
-                .border_color(rgb(if selected { 0x4d92f3 } else { 0xdde4ed }))
-                .bg(rgb(if selected { 0xedf5ff } else { 0xffffff }))
-                .hover(|style| style.border_color(rgb(0x8cb7f1)).bg(rgb(0xf7faff)))
+                .border_color(rgba(if selected {
+                    colors.card_selected_line
+                } else {
+                    colors.card_line
+                }))
+                .bg(rgba(if selected {
+                    colors.card_selected_bg
+                } else {
+                    colors.panel
+                }))
+                .hover(move |style| {
+                    style
+                        .border_color(rgba(colors.card_hover_line))
+                        .bg(rgba(colors.card_hover_bg))
+                })
                 .child(
                     div()
                         .size(px(38.))
@@ -4933,7 +5239,7 @@ impl SettingsShell {
                             div()
                                 .text_size(px(13.))
                                 .font_weight(FontWeight(650.))
-                                .text_color(rgb(DIALOG_LABEL))
+                                .text_color(rgba(colors.label))
                                 .whitespace_normal()
                                 .child(preset.name),
                         )
@@ -4942,7 +5248,7 @@ impl SettingsShell {
                                 .mt(px(5.))
                                 .text_size(px(11.))
                                 .line_height(px(15.4))
-                                .text_color(rgb(0x8190a4))
+                                .text_color(rgba(colors.hint_text))
                                 .whitespace_normal()
                                 .child(self.locale.text("预设接入配置", "Preset configuration")),
                         ),
@@ -4950,7 +5256,11 @@ impl SettingsShell {
                 .child(
                     div()
                         .text_size(px(17.))
-                        .text_color(rgb(if selected { 0x3284ed } else { 0x9aaac0 }))
+                        .text_color(rgba(if selected {
+                            colors.check
+                        } else {
+                            colors.card_marker
+                        }))
                         .child(if selected { "✓" } else { "○" }),
                 );
             if busy {
@@ -4980,7 +5290,7 @@ impl SettingsShell {
                     .mt(px(8.))
                     .text_size(px(11.))
                     .line_height(px(18.15))
-                    .text_color(rgb(DIALOG_MUTED))
+                    .text_color(rgba(colors.muted))
                     .child(self.locale.text(
                         "没有匹配的 API 服务，试试自定义配置。",
                         "No matching service. Try a custom configuration.",
@@ -5000,9 +5310,21 @@ impl SettingsShell {
                 .p(px(13.))
                 .rounded(px(10.))
                 .border_1()
-                .border_color(rgb(if selected { 0x4d92f3 } else { 0xdde4ed }))
-                .bg(rgb(if selected { 0xedf5ff } else { 0xffffff }))
-                .hover(|style| style.border_color(rgb(0x8cb7f1)).bg(rgb(0xf7faff)))
+                .border_color(rgba(if selected {
+                    colors.card_selected_line
+                } else {
+                    colors.card_line
+                }))
+                .bg(rgba(if selected {
+                    colors.card_selected_bg
+                } else {
+                    colors.panel
+                }))
+                .hover(move |style| {
+                    style
+                        .border_color(rgba(colors.card_hover_line))
+                        .bg(rgba(colors.card_hover_bg))
+                })
                 .child(
                     div()
                         .size(px(38.))
@@ -5011,10 +5333,10 @@ impl SettingsShell {
                         .items_center()
                         .justify_center()
                         .rounded(px(9.))
-                        .bg(rgb(PRESET_ICON_BG))
+                        .bg(rgba(colors.icon_bg))
                         .text_size(px(24.))
                         .font_weight(FontWeight(650.))
-                        .text_color(rgb(PRESET_ICON_FG))
+                        .text_color(rgba(colors.icon_fg))
                         .child("＋"),
                 )
                 .child(
@@ -5027,7 +5349,7 @@ impl SettingsShell {
                             div()
                                 .text_size(px(13.))
                                 .font_weight(FontWeight(650.))
-                                .text_color(rgb(DIALOG_LABEL))
+                                .text_color(rgba(colors.label))
                                 .child(self.locale.text("自定义服务", "custom service")),
                         )
                         .child(
@@ -5035,7 +5357,7 @@ impl SettingsShell {
                                 .mt(px(5.))
                                 .text_size(px(11.))
                                 .line_height(px(15.4))
-                                .text_color(rgb(0x8190a4))
+                                .text_color(rgba(colors.hint_text))
                                 .child(self.locale.text(
                                     "使用自己的 API 地址和密钥",
                                     "Use your own API URL and key",
@@ -5045,7 +5367,11 @@ impl SettingsShell {
                 .child(
                     div()
                         .text_size(px(17.))
-                        .text_color(rgb(if selected { 0x3284ed } else { 0x9aaac0 }))
+                        .text_color(rgba(if selected {
+                            colors.check
+                        } else {
+                            colors.card_marker
+                        }))
                         .child("›"),
                 );
         if busy {
@@ -5072,7 +5398,7 @@ impl SettingsShell {
                 .mt(px(22.))
                 .text_size(px(11.))
                 .line_height(px(18.15))
-                .text_color(rgb(DIALOG_MUTED))
+                .text_color(rgba(colors.muted))
                 .child("ⓘ 选择服务后，自动填写推荐配置。预设不代表连接已验证。"),
         )
     }
@@ -5084,6 +5410,8 @@ impl SettingsShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Div {
+        let palette = *self.theme.effective().palette();
+        let colors = EditorColors::new(&palette, self.is_dark());
         let busy = self.editor_busy();
         let values = editor.values(cx);
         let editing = editor.draft.id.is_some();
@@ -5100,7 +5428,7 @@ impl SettingsShell {
             .gap(px(12.))
             .p(px(13.))
             .rounded(px(10.))
-            .bg(rgb(0xf2f5f9))
+            .bg(rgba(colors.panel_muted))
             .mb(px(22.))
             .child(
                 div()
@@ -5140,7 +5468,7 @@ impl SettingsShell {
                         div()
                             .text_size(px(13.))
                             .font_weight(FontWeight(650.))
-                            .text_color(rgb(DIALOG_LABEL))
+                            .text_color(rgba(colors.label))
                             .child(display_name.to_owned()),
                     )
                     .child(
@@ -5148,7 +5476,7 @@ impl SettingsShell {
                             .mt(px(5.))
                             .text_size(px(11.))
                             .line_height(px(15.4))
-                            .text_color(rgb(0x8190a4))
+                            .text_color(rgba(colors.hint_text))
                             .child("Anthropic Messages"),
                     ),
             );
@@ -5159,6 +5487,7 @@ impl SettingsShell {
                 &editor.focus.change,
                 self.keyboard_focus,
                 FocusRingStyle::Dialog,
+                &colors,
                 cx,
                 |this, window, cx| this.editor_go_back(window, cx),
             ));
@@ -5168,12 +5497,22 @@ impl SettingsShell {
         // API Key. The saved snapshot key is never read; the input starts empty
         // and an empty value on save keeps the existing key.
         body = body.child(
-            field_label("API Key")
-                .child(secret_field(editor.key.clone(), 44., 13., window, cx))
-                .child(help_text(self.locale.text(
-                    "密钥保存在本机，仅向你配置的服务发送。",
-                    "Stored locally and sent only to your configured service.",
-                )))
+            field_label("API Key", &colors)
+                .child(secret_field(
+                    editor.key.clone(),
+                    44.,
+                    13.,
+                    window,
+                    &colors,
+                    cx,
+                ))
+                .child(help_text(
+                    self.locale.text(
+                        "密钥保存在本机，仅向你配置的服务发送。",
+                        "Stored locally and sent only to your configured service.",
+                    ),
+                    &colors,
+                ))
                 .children(preset.filter(|_| !busy).map(|preset| {
                     link_button(
                         "provider-key-link",
@@ -5181,6 +5520,7 @@ impl SettingsShell {
                         &editor.focus.key_link,
                         self.keyboard_focus,
                         FocusRingStyle::Dialog,
+                        &colors,
                         cx,
                         move |_, _, cx| {
                             cx.emit(SettingsShellEvent::OpenProviderKeyPage(preset.key_url))
@@ -5190,10 +5530,11 @@ impl SettingsShell {
         );
 
         body = body.child(
-            field_label(self.locale.text("API 地址", "API URL"))
-                .child(rename_field(editor.endpoint.clone(), 44., 13., window, cx))
+            field_label(self.locale.text("API 地址", "API URL"), &colors)
+                .child(rename_field(editor.endpoint.clone(), 44., 13., window, &colors, cx))
                 .child(help_text(
                     self.locale.text("填写基础地址，不含 /messages 或 /responses；需支持上方协议。", "Use a base URL without /messages or /responses, supporting the protocol above."),
+                    &colors,
                 )),
         );
         if values.endpoint.starts_with("http:") {
@@ -5203,11 +5544,11 @@ impl SettingsShell {
                     .p(px(12.))
                     .rounded(px(8.))
                     .border_1()
-                    .border_color(rgb(DANGER_LINE))
-                    .bg(rgb(DANGER_BG))
+                    .border_color(rgba(colors.error_line))
+                    .bg(rgba(colors.error_bg))
                     .text_size(px(12.))
                     .line_height(px(19.2))
-                    .text_color(rgb(DANGER_TEXT))
+                    .text_color(rgba(colors.error_text))
                     .child(self.locale.text(
                         "当前为 HTTP，密钥将以明文传输。远程服务建议使用 HTTPS。",
                         "HTTP sends the key unencrypted. Use HTTPS for remote services.",
@@ -5216,24 +5557,23 @@ impl SettingsShell {
         }
 
         let metadata = editor.metadata_for(&values.model, cx);
-        let selected_model_field = field_label(self.locale.text("默认模型", "Default model"))
-            .child(rename_field(editor.model.clone(), 44., 13., window, cx));
+        let selected_model_field =
+            field_label(self.locale.text("默认模型", "Default model"), &colors).child(
+                rename_field(editor.model.clone(), 44., 13., window, &colors, cx),
+            );
         let model_block = selected_model_field.child(model_source(
             metadata.as_ref(),
             &values.model,
             preset,
             editing,
+            &colors,
         ));
         body = body.child(model_block);
 
         body = body.child(
-            field_label(self.locale.text("供应商名称", "Provider name")).child(rename_field(
-                editor.name.clone(),
-                44.,
-                13.,
-                window,
-                cx,
-            )),
+            field_label(self.locale.text("供应商名称", "Provider name"), &colors).child(
+                rename_field(editor.name.clone(), 44., 13., window, &colors, cx),
+            ),
         );
 
         let mut mapping = div().flex().flex_col().gap(px(10.)).mt(px(4.));
@@ -5263,19 +5603,19 @@ impl SettingsShell {
                 .px(px(10.))
                 .rounded(px(9.))
                 .border_1()
-                .border_color(rgb(if current_unsupported {
-                    0xb34d47
+                .border_color(rgba(if current_unsupported {
+                    colors.error_border
                 } else if editor.effort_open == Some(index) {
-                    DIALOG_FOCUS
+                    colors.focus
                 } else {
-                    DIALOG_INPUT_LINE
+                    colors.line_strong
                 }))
-                .bg(rgb(0xffffff))
+                .bg(rgba(colors.panel))
                 .text_size(px(12.))
-                .text_color(rgb(if current_unsupported {
-                    DANGER_TEXT
+                .text_color(rgba(if current_unsupported {
+                    colors.error_text
                 } else {
-                    DIALOG_LABEL
+                    colors.label
                 }))
                 .child(
                     div()
@@ -5286,7 +5626,7 @@ impl SettingsShell {
                         .text_ellipsis()
                         .child(effort_label),
                 )
-                .child(icon("chevron-down", 12., 0x78879b));
+                .child(icon("chevron-down", 12., colors.muted >> 8));
             let cell = bounds_cell.clone();
             effort_button = effort_button.child(
                 canvas(
@@ -5395,7 +5735,7 @@ impl SettingsShell {
                         .flex_none()
                         .text_size(px(12.))
                         .font_weight(FontWeight(600.))
-                        .text_color(rgb(0x667991))
+                        .text_color(rgba(colors.role_text))
                         .child(ROLE_LABELS[index]),
                 )
                 .child(div().flex_1().min_w_0().child(rename_field(
@@ -5403,6 +5743,7 @@ impl SettingsShell {
                     36.,
                     10.,
                     window,
+                    &colors,
                     cx,
                 )))
                 .child(effort_button);
@@ -5424,7 +5765,7 @@ impl SettingsShell {
                         .pl(px(68.))
                         .text_size(px(10.))
                         .line_height(px(15.))
-                        .text_color(rgb(DANGER_TEXT))
+                        .text_color(rgba(colors.error_text))
                         .child(message),
                 );
             }
@@ -5441,7 +5782,7 @@ impl SettingsShell {
                 div()
                     .text_size(px(11.))
                     .line_height(px(18.15))
-                    .text_color(rgb(DIALOG_MUTED))
+                    .text_color(rgba(colors.muted))
                     .child(self.locale.text("已获取模型的推理强度来自接口返回范围；其余模型仍为候选，待服务确认。", "Fetched models use their returned effort ranges; other models remain candidates pending service confirmation.")),
             );
         } else {
@@ -5449,7 +5790,7 @@ impl SettingsShell {
                 div()
                     .text_size(px(11.))
                     .line_height(px(18.15))
-                    .text_color(rgb(DIALOG_MUTED))
+                    .text_color(rgba(colors.muted))
                     .child(self.locale.text("推理强度选项为候选，实际可用性以供应商支持为准。", "Reasoning effort options are candidates; actual availability depends on provider support.")),
             );
         }
@@ -5460,7 +5801,7 @@ impl SettingsShell {
             div()
                 .text_size(px(11.))
                 .line_height(px(18.15))
-                .text_color(rgb(DIALOG_MUTED))
+                .text_color(rgba(colors.muted))
                 .child(if editing {
                     "ⓘ 保存修改不会重新连接运行中的会话。"
                 } else {
@@ -5476,11 +5817,11 @@ impl SettingsShell {
                 .p(px(12.))
                 .rounded(px(8.))
                 .border_1()
-                .border_color(rgb(DANGER_LINE))
-                .bg(rgb(DANGER_BG))
+                .border_color(rgba(colors.error_line))
+                .bg(rgba(colors.error_bg))
                 .text_size(px(12.))
                 .line_height(px(19.2))
-                .text_color(rgb(DANGER_TEXT))
+                .text_color(rgba(colors.error_text))
                 .whitespace_normal()
                 .child(error.to_owned());
             error_box = error_box
@@ -5528,20 +5869,20 @@ impl SettingsShell {
                 .p(px(14.))
                 .rounded(px(10.))
                 .border_1()
-                .border_color(rgb(CONFIRM_LINE))
-                .bg(rgb(CONFIRM_BG))
+                .border_color(rgba(colors.confirm_line))
+                .bg(rgba(colors.confirm_bg))
                 .text_size(px(12.))
                 .child(
                     div()
                         .font_weight(FontWeight(650.))
-                        .text_color(rgb(DIALOG_LABEL))
+                        .text_color(rgba(colors.label))
                         .child(title),
                 )
                 .child(
                     div()
                         .mt(px(6.))
                         .line_height(px(19.2))
-                        .text_color(rgb(0x596575))
+                        .text_color(rgba(colors.muted))
                         .child(description),
                 )
                 .child(
@@ -5555,6 +5896,7 @@ impl SettingsShell {
                             !self.providers.deleting(),
                             &editor.focus.keep_editing,
                             self.keyboard_focus,
+                            &colors,
                             cx,
                             |this, window, cx| this.editor_keep_editing(window, cx),
                         ))
@@ -5564,6 +5906,7 @@ impl SettingsShell {
                             !self.providers.deleting(),
                             &editor.focus.confirm_action,
                             self.keyboard_focus,
+                            &colors,
                             cx,
                             |this, window, cx| this.editor_confirm(window, cx),
                         )),
@@ -5575,6 +5918,8 @@ impl SettingsShell {
     }
 
     fn render_effort_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let palette = *self.theme.effective().palette();
+        let colors = EditorColors::new(&palette, self.is_dark());
         let editor = self.editor.as_ref()?;
         let index = editor.effort_open?;
         let bounds = (*editor.effort_bounds.borrow())[index]?;
@@ -5588,8 +5933,8 @@ impl SettingsShell {
             .p(px(4.))
             .rounded(px(8.))
             .border_1()
-            .border_color(rgb(DIALOG_BORDER))
-            .bg(rgb(0xffffff))
+            .border_color(rgba(colors.line))
+            .bg(rgba(colors.panel))
             .shadow(vec![shadow(0x1a304b, 0.16, 8., 24.)])
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_scroll_wheel(|_, _, cx| cx.stop_propagation());
@@ -5606,9 +5951,13 @@ impl SettingsShell {
                 .px(px(9.))
                 .rounded(px(5.))
                 .text_size(px(12.))
-                .text_color(rgb(if selected { 0x2679d8 } else { DIALOG_LABEL }))
-                .bg(rgb(if selected { 0xe4efff } else { 0xffffff }))
-                .hover(|style| style.bg(rgb(0xe4efff)))
+                .text_color(rgba(if selected { colors.link } else { colors.label }))
+                .bg(rgba(if selected {
+                    colors.menu_selected_bg
+                } else {
+                    colors.panel
+                }))
+                .hover(move |style| style.bg(rgba(colors.menu_selected_bg)))
                 .child(effort_name(&choice).to_owned());
             let value = choice.clone();
             item = item.on_mouse_down(MouseButton::Left, move |_, window, cx| {
@@ -5640,7 +5989,7 @@ impl SettingsShell {
     }
 }
 
-fn field_label(label: impl Into<SharedString>) -> Div {
+fn field_label(label: impl Into<SharedString>, colors: &EditorColors) -> Div {
     div()
         .flex()
         .flex_col()
@@ -5648,16 +5997,16 @@ fn field_label(label: impl Into<SharedString>) -> Div {
         .mb(px(20.))
         .text_size(px(13.))
         .font_weight(FontWeight(600.))
-        .text_color(rgb(DIALOG_LABEL))
+        .text_color(rgba(colors.label))
         .child(div().child(label.into()))
 }
 
-fn help_text(text: impl Into<SharedString>) -> Div {
+fn help_text(text: impl Into<SharedString>, colors: &EditorColors) -> Div {
     div()
         .text_size(px(11.))
         .line_height(px(18.15))
         .font_weight(FontWeight(400.))
-        .text_color(rgb(DIALOG_MUTED))
+        .text_color(rgba(colors.muted))
         .whitespace_normal()
         .child(text.into())
 }
@@ -5667,6 +6016,7 @@ fn model_source(
     model: &str,
     preset: Option<&ProviderPreset>,
     editing: bool,
+    colors: &EditorColors,
 ) -> Div {
     let mut block = div().flex().flex_col().gap(px(6.));
     if let Some(row) = metadata {
@@ -5686,33 +6036,33 @@ fn model_source(
                 .px(px(11.))
                 .rounded(px(9.))
                 .border_1()
-                .border_color(rgb(0xdce6f4))
-                .bg(rgb(0xf7faff))
+                .border_color(rgba(colors.info_line))
+                .bg(rgba(colors.info_bg))
                 .child(
                     div()
                         .text_size(px(12.))
                         .font_weight(FontWeight(650.))
-                        .text_color(rgb(DIALOG_LABEL))
+                        .text_color(rgba(colors.label))
                         .child(display.to_owned()),
                 )
                 .child(
                     div()
                         .text_size(px(10.))
                         .font_weight(FontWeight(400.))
-                        .text_color(rgb(DIALOG_MUTED))
+                        .text_color(rgba(colors.muted))
                         .child(id_line),
                 )
                 .child(
                     div()
                         .text_size(px(11.))
-                        .text_color(rgb(0x2679d8))
+                        .text_color(rgba(colors.link))
                         .child(window_text(row)),
                 )
                 .children(supported_efforts_text(row).map(|efforts| {
                     div()
                         .text_size(px(10.))
                         .font_weight(FontWeight(400.))
-                        .text_color(rgb(DIALOG_MUTED))
+                        .text_color(rgba(colors.muted))
                         .child(format!("可选强度：{efforts}"))
                 })),
         );
@@ -5720,7 +6070,7 @@ fn model_source(
             div()
                 .text_size(px(11.))
                 .line_height(px(17.6))
-                .text_color(rgb(0x667991))
+                .text_color(rgba(colors.role_text))
                 .child("显示已保存的模型信息。"),
         );
     } else {
@@ -5735,7 +6085,7 @@ fn model_source(
             div()
                 .text_size(px(11.))
                 .line_height(px(17.6))
-                .text_color(rgb(0x667991))
+                .text_color(rgba(colors.role_text))
                 .child(source),
         );
     }
@@ -5749,6 +6099,7 @@ fn dialog_button(
     enabled: bool,
     focus: &FocusHandle,
     keyboard_focus: bool,
+    colors: &EditorColors,
     cx: &mut Context<SettingsShell>,
     activate: impl Fn(&mut SettingsShell, &mut Window, &mut Context<SettingsShell>) + 'static,
 ) -> AnyElement {
@@ -5767,13 +6118,13 @@ fn dialog_button(
         .whitespace_nowrap()
         .child(label.into());
     let button = if primary {
-        base.border_color(rgb(DIALOG_PRIMARY))
+        base.border_color(rgba(colors.primary))
             .text_color(rgb(0xffffff))
-            .bg(rgb(DIALOG_PRIMARY))
+            .bg(rgba(colors.primary))
     } else {
-        base.border_color(rgb(DIALOG_INPUT_LINE))
-            .text_color(rgb(0x3b4b60))
-            .bg(rgb(0xffffff))
+        base.border_color(rgba(colors.line_strong))
+            .text_color(rgba(colors.secondary_text))
+            .bg(rgba(colors.panel))
     };
     let button = if !enabled {
         button
@@ -5781,11 +6132,11 @@ fn dialog_button(
             .cursor(CursorStyle::OperationNotAllowed)
     } else if primary {
         button
-            .hover(|style| style.bg(rgb(DIALOG_PRIMARY_HOVER)))
+            .hover(move |style| style.bg(rgba(colors.primary_hover)))
             .cursor_pointer()
     } else {
         button
-            .hover(|style| style.bg(rgb(0xf7faff)))
+            .hover(move |style| style.bg(rgba(colors.card_hover_bg)))
             .cursor_pointer()
     };
     if enabled {
@@ -5801,6 +6152,7 @@ fn link_button(
     focus: &FocusHandle,
     keyboard_focus: bool,
     ring: FocusRingStyle,
+    colors: &EditorColors,
     cx: &mut Context<SettingsShell>,
     activate: impl Fn(&mut SettingsShell, &mut Window, &mut Context<SettingsShell>) + 'static,
 ) -> AnyElement {
@@ -5811,9 +6163,9 @@ fn link_button(
         .px(px(2.))
         .text_size(px(12.))
         .font_weight(FontWeight(600.))
-        .text_color(rgb(0x2679d8))
+        .text_color(rgba(colors.link))
         .cursor_pointer()
-        .hover(|style| style.text_color(rgb(0x1f6dc4)))
+        .hover(move |style| style.text_color(rgba(colors.link_hover)))
         .child(label.into());
     wire_button_with_ring(button, focus, 4., keyboard_focus, ring, activate, cx).into_any_element()
 }
@@ -5824,6 +6176,7 @@ fn confirm_button(
     enabled: bool,
     focus: &FocusHandle,
     keyboard_focus: bool,
+    colors: &EditorColors,
     cx: &mut Context<SettingsShell>,
     activate: impl Fn(&mut SettingsShell, &mut Window, &mut Context<SettingsShell>) + 'static,
 ) -> AnyElement {
@@ -5836,15 +6189,15 @@ fn confirm_button(
         .py(px(8.))
         .rounded(px(7.))
         .border_1()
-        .border_color(rgb(DIALOG_INPUT_LINE))
-        .bg(rgb(0xffffff))
+        .border_color(rgba(colors.line_strong))
+        .bg(rgba(colors.panel))
         .text_size(px(12.))
-        .text_color(rgb(DIALOG_LABEL))
+        .text_color(rgba(colors.label))
         .child(label.into());
     if enabled {
         let button = button
             .cursor_pointer()
-            .hover(|style| style.bg(rgb(0xf7faff)));
+            .hover(move |style| style.bg(rgba(colors.card_hover_bg)));
         wire_dialog_button(button, focus, 7., keyboard_focus, activate, cx).into_any_element()
     } else {
         button
@@ -6124,13 +6477,6 @@ const VIEW_SAVE_UNCONFIRMED: &str = "保存未确认，请重试。";
 const VIEW_SAVE_UNCONFIRMED_EN: &str = "Save was not confirmed. Please retry.";
 const VIEW_TIME_ZONE_READ_ONLY: &str = "数据库只读";
 const VIEW_TIME_ZONE_READ_ONLY_EN: &str = "The database is read-only.";
-const VIEW_ERROR_COLOR: u32 = 0xb34d47;
-const VIEW_RADIO_BORDER: u32 = 0x9aa3ae;
-const VIEW_ROW_TEXT: u32 = 0x414a57;
-const VIEW_GROUP_BG: u32 = 0xf5f8fc;
-const VIEW_MENU_SELECTED_TEXT: u32 = 0x2679d8;
-const VIEW_MENU_SELECTED_BG: u32 = 0xe4efff;
-const VIEW_MENU_ACTIVE_BG: u32 = 0xeef5ff;
 const VIEW_TIME_ZONE_MAX_WIDTH: f32 = 520.;
 const VIEW_MENU_MIN_WIDTH: f32 = 240.;
 const VIEW_MENU_MAX_HEIGHT: f32 = 300.;
@@ -6174,6 +6520,16 @@ fn language_zone_id(mut element: Div, id: &'static str) -> Div {
 }
 
 #[cfg(debug_assertions)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct WorkspaceSurfaceProbe {
+    pub sidebar: Option<Rgba>,
+    pub topbar: Option<Rgba>,
+    pub footer: Option<Rgba>,
+    pub card: Option<Rgba>,
+    pub card_header: Option<Rgba>,
+}
+
+#[cfg(debug_assertions)]
 #[derive(Default)]
 pub(crate) struct LanguageZoneProbe {
     pub labels: Vec<String>,
@@ -6182,6 +6538,12 @@ pub(crate) struct LanguageZoneProbe {
     pub selected_language: String,
     pub settings_canvas: Option<Rgba>,
     pub workspace_canvas: Option<Rgba>,
+    /// Actual surfaces painted by `workspace.rs` in the same frame.
+    pub workspace_surfaces: WorkspaceSurfaceProbe,
+    /// Background behind the language/time-zone block (its outer surface).
+    pub language_zone_surface: Option<Rgba>,
+    /// Background of the language options list card.
+    pub language_zone_card: Option<Rgba>,
 }
 
 #[cfg(debug_assertions)]
@@ -6206,6 +6568,18 @@ pub(crate) fn probe_workspace_canvas(background: Rgba) {
     });
 }
 
+/// Mirrors the surfaces `workspace.rs` actually paints so probes can compare
+/// the workspace against the settings language zone without duplicating the
+/// palette constants.
+#[cfg(debug_assertions)]
+pub(crate) fn probe_workspace_surfaces(record: impl FnOnce(&mut WorkspaceSurfaceProbe)) {
+    LANGUAGE_ZONE_PROBE.with_borrow_mut(|probe| {
+        if let Some(probe) = probe {
+            record(&mut probe.workspace_surfaces);
+        }
+    });
+}
+
 fn language_zone_label<T: AsRef<str>>(text: T) -> T {
     #[cfg(debug_assertions)]
     LANGUAGE_ZONE_PROBE.with_borrow_mut(|probe| {
@@ -6216,20 +6590,20 @@ fn language_zone_label<T: AsRef<str>>(text: T) -> T {
     text
 }
 
-fn language_zone_status(id: &'static str, text: &'static str) -> Div {
+fn language_zone_status(id: &'static str, text: &'static str, palette: &ThemePalette) -> Div {
     language_zone_id(
         div()
             .min_w_0()
             .text_size(px(11.))
             .line_height(relative(1.5))
-            .text_color(rgb(MUTED))
+            .text_color(rgba(palette.workspace.muted))
             .whitespace_normal()
             .child(language_zone_label(text)),
         id,
     )
 }
 
-fn language_zone_radio(selected: bool) -> Div {
+fn language_zone_radio(selected: bool, palette: &ThemePalette) -> Div {
     let mut radio = div()
         .flex_none()
         .size(px(13.))
@@ -6238,15 +6612,33 @@ fn language_zone_radio(selected: bool) -> Div {
         .justify_center()
         .rounded_full()
         .border_1()
-        .border_color(rgb(if selected { ACCENT } else { VIEW_RADIO_BORDER }))
-        .bg(rgb(if selected { ACCENT } else { PANEL }));
+        .border_color(rgba(if selected {
+            palette.workspace.accent
+        } else {
+            palette.settings.language_radio_border
+        }))
+        .bg(rgba(if selected {
+            palette.workspace.accent
+        } else {
+            palette.workspace.panel
+        }));
     if selected {
-        radio = radio.child(div().size(px(5.)).rounded_full().bg(rgb(PANEL)));
+        radio = radio.child(
+            div()
+                .size(px(5.))
+                .rounded_full()
+                .bg(rgba(palette.workspace.panel)),
+        );
     }
     radio
 }
 
-fn language_zone_row_ring(focus: FocusHandle, keyboard_focus: bool) -> AnyElement {
+fn language_zone_row_ring(
+    focus: FocusHandle,
+    keyboard_focus: bool,
+    palette: &ThemePalette,
+) -> AnyElement {
+    let accent_line = palette.workspace.accent_line;
     canvas(
         |_, _, _| (),
         move |bounds, _, window, _| {
@@ -6254,7 +6646,7 @@ fn language_zone_row_ring(focus: FocusHandle, keyboard_focus: bool) -> AnyElemen
                 window.paint_quad(
                     outline(
                         bounds.inset(px(1.)),
-                        rgba(ACCENT_LINE),
+                        rgba(accent_line),
                         BorderStyle::default(),
                     )
                     .corner_radii(px(0.))
@@ -6278,7 +6670,9 @@ fn language_option_row(
     options: &[FocusHandle; 3],
     keyboard_focus: bool,
     on_action: Rc<dyn Fn(LanguageZoneAction, &mut Window, &mut App)>,
+    palette: &ThemePalette,
 ) -> AnyElement {
+    let palette = *palette;
     let focus = options[index].clone();
     let mut row = div()
         .id(SharedString::from(format!(
@@ -6293,10 +6687,18 @@ fn language_option_row(
         .px(px(13.))
         .text_size(px(10.))
         .font_weight(FontWeight(650.))
-        .text_color(rgb(if selected { ACCENT } else { VIEW_ROW_TEXT }))
-        .bg(rgb(if selected { VIEW_GROUP_BG } else { PANEL_MUTED }));
+        .text_color(rgba(if selected {
+            palette.workspace.accent
+        } else {
+            palette.settings.language_text
+        }))
+        .bg(rgba(if selected {
+            palette.settings.language_selected
+        } else {
+            palette.settings.language_list
+        }));
     if index < 2 {
-        row = row.border_b_1().border_color(rgba(LINE));
+        row = row.border_b_1().border_color(rgba(palette.workspace.line));
     }
     if selected {
         row = row.child(
@@ -6306,14 +6708,14 @@ fn language_option_row(
                 .bottom_0()
                 .left_0()
                 .w(px(2.))
-                .bg(rgb(ACCENT)),
+                .bg(rgba(palette.workspace.accent)),
         );
     }
     if enabled && !selected {
-        row = row.hover(|style| style.bg(rgb(PANEL)));
+        row = row.hover(move |style| style.bg(rgba(palette.settings.language_hover)));
     }
     row = row
-        .child(language_zone_radio(selected))
+        .child(language_zone_radio(selected, &palette))
         .child(language_zone_label(label));
 
     if !enabled {
@@ -6374,7 +6776,7 @@ fn language_option_row(
                 cx,
             );
         })
-        .child(language_zone_row_ring(focus, keyboard_focus))
+        .child(language_zone_row_ring(focus, keyboard_focus, &palette))
         .into_any_element()
 }
 
@@ -6387,6 +6789,7 @@ fn language_zone_action_button(
     keyboard_focus: bool,
     on_action: Rc<dyn Fn(LanguageZoneAction, &mut Window, &mut App)>,
     action: LanguageZoneAction,
+    palette: &ThemePalette,
 ) -> AnyElement {
     #[cfg(debug_assertions)]
     LANGUAGE_ZONE_PROBE.with_borrow_mut(|probe| {
@@ -6394,6 +6797,7 @@ fn language_zone_action_button(
             probe.enabled.insert(id, enabled);
         }
     });
+    let palette = *palette;
     let base = div()
         .id(id)
         .h(px(32.))
@@ -6408,13 +6812,13 @@ fn language_zone_action_button(
         .whitespace_nowrap()
         .child(language_zone_label(label));
     let button = if primary {
-        base.border_color(rgb(ACCENT))
+        base.border_color(rgba(palette.settings.language_primary))
             .text_color(rgb(0xffffff))
-            .bg(rgb(ACCENT))
+            .bg(rgba(palette.settings.language_primary))
     } else {
-        base.border_color(rgba(LINE_STRONG))
-            .text_color(rgb(TEXT))
-            .bg(rgb(PANEL))
+        base.border_color(rgba(palette.workspace.line_strong))
+            .text_color(rgba(palette.workspace.text))
+            .bg(rgba(palette.workspace.panel))
     };
     if !enabled {
         return button
@@ -6424,15 +6828,15 @@ fn language_zone_action_button(
     }
     let button = if primary {
         button
-            .hover(|style| style.bg(rgb(0x2f79df)))
+            .hover(move |style| style.bg(rgba(palette.settings.language_primary_hover)))
             .cursor_pointer()
     } else {
         button
-            .hover(|style| {
+            .hover(move |style| {
                 style
-                    .border_color(rgb(ACCENT))
-                    .text_color(rgb(ACCENT))
-                    .bg(rgb(0xf7faff))
+                    .border_color(rgba(palette.workspace.accent))
+                    .text_color(rgba(palette.workspace.accent))
+                    .bg(rgba(palette.settings.language_button_hover))
             })
             .cursor_pointer()
     };
@@ -6481,6 +6885,7 @@ fn language_zone_error_line(
     retry_enabled: bool,
     keyboard_focus: bool,
     on_action: Rc<dyn Fn(LanguageZoneAction, &mut Window, &mut App)>,
+    palette: &ThemePalette,
 ) -> Div {
     let mut line = div()
         .flex()
@@ -6490,7 +6895,7 @@ fn language_zone_error_line(
         .mt(px(14.))
         .text_size(px(11.))
         .line_height(relative(1.55))
-        .text_color(rgb(VIEW_ERROR_COLOR))
+        .text_color(rgba(palette.settings.language_error))
         .child(
             div()
                 .flex_1()
@@ -6508,6 +6913,7 @@ fn language_zone_error_line(
             keyboard_focus,
             on_action,
             action,
+            palette,
         ));
     }
     language_zone_id(line, id)
@@ -6574,6 +6980,7 @@ fn language_zone_trigger_label(view: &LanguageZoneView<'_>, choices: &[TimeZoneC
 fn language_zone_language_section(
     view: LanguageZoneView<'_>,
     on_action: Rc<dyn Fn(LanguageZoneAction, &mut Window, &mut App)>,
+    palette: &ThemePalette,
 ) -> Div {
     let english = view.english;
     let block = view.language_block;
@@ -6593,6 +7000,13 @@ fn language_zone_language_section(
         ("en", VIEW_LANGUAGE_ENGLISH),
     ];
 
+    let background = rgba(palette.settings.language_list);
+    #[cfg(debug_assertions)]
+    LANGUAGE_ZONE_PROBE.with_borrow_mut(|probe| {
+        if let Some(probe) = probe {
+            probe.language_zone_card = Some(background);
+        }
+    });
     let mut card = div()
         .flex()
         .flex_col()
@@ -6600,8 +7014,8 @@ fn language_zone_language_section(
         .overflow_hidden()
         .rounded(px(10.))
         .border_1()
-        .border_color(rgba(LINE))
-        .bg(rgb(PANEL_MUTED))
+        .border_color(rgba(palette.workspace.line))
+        .bg(background)
         .shadow(vec![shadow(0x222d3c, 0.02, 1., 2.)]);
     for (index, (value, label)) in options.into_iter().enumerate() {
         card = card.child(language_option_row(
@@ -6613,6 +7027,7 @@ fn language_zone_language_section(
             &view.focus.language_options,
             view.keyboard_focus,
             on_action.clone(),
+            palette,
         ));
     }
     card = language_zone_id(card, "settings-language-options");
@@ -6625,7 +7040,7 @@ fn language_zone_language_section(
             .mx(px(2.))
             .text_size(px(9.))
             .line_height(relative(1.5))
-            .text_color(rgb(MUTED))
+            .text_color(rgba(palette.workspace.muted))
             .whitespace_normal()
             .child(language_zone_label(language_zone_text(
                 english,
@@ -6647,7 +7062,7 @@ fn language_zone_language_section(
                 .mx(px(2.))
                 .text_size(px(9.))
                 .line_height(relative(1.5))
-                .text_color(rgb(MUTED))
+                .text_color(rgba(palette.workspace.muted))
                 .whitespace_normal()
                 .child(language_zone_label(line)),
         );
@@ -6663,6 +7078,7 @@ fn language_zone_language_section(
             !block.busy,
             view.keyboard_focus,
             on_action,
+            palette,
         ));
     }
     section
@@ -6673,6 +7089,7 @@ fn language_zone_time_zone_section(
     choices: &[TimeZoneChoice],
     menu_open: bool,
     on_action: Rc<dyn Fn(LanguageZoneAction, &mut Window, &mut App)>,
+    palette: &ThemePalette,
 ) -> Div {
     let english = view.english;
     let block = view.time_zone_block;
@@ -6707,14 +7124,14 @@ fn language_zone_time_zone_section(
         .px(px(10.))
         .rounded(px(7.))
         .border_1()
-        .border_color(if menu_open {
-            rgba(ACCENT_LINE)
+        .border_color(rgba(if menu_open {
+            palette.workspace.accent_line
         } else {
-            rgba(LINE_STRONG)
-        })
-        .bg(rgb(PANEL))
+            palette.workspace.line_strong
+        }))
+        .bg(rgba(palette.workspace.panel))
         .text_size(px(12.))
-        .text_color(rgb(TEXT))
+        .text_color(rgba(palette.workspace.text))
         .child(
             div()
                 .id("settings-time-zone-value")
@@ -6725,7 +7142,7 @@ fn language_zone_time_zone_section(
                 .text_ellipsis()
                 .child(language_zone_label(trigger_label)),
         )
-        .child(icon("chevron-down", 12., MUTED))
+        .child(icon("chevron-down", 12., palette.workspace.muted >> 8))
         .child(
             canvas(
                 |_, _, _| (),
@@ -6749,7 +7166,7 @@ fn language_zone_time_zone_section(
             .mt(px(18.))
             .text_size(px(12.))
             .font_weight(FontWeight(650.))
-            .text_color(rgb(TEXT))
+            .text_color(rgba(palette.workspace.text))
             .child(language_zone_label(language_zone_text(
                 english,
                 VIEW_TIME_ZONE_LABEL,
@@ -6762,7 +7179,7 @@ fn language_zone_time_zone_section(
             .mt(px(10.))
             .text_size(px(11.))
             .line_height(relative(1.7))
-            .text_color(rgb(MUTED))
+            .text_color(rgba(palette.workspace.muted))
             .whitespace_normal()
             .child(language_zone_label(language_zone_text(
                 english,
@@ -6892,7 +7309,7 @@ fn language_zone_time_zone_section(
                 .mt(px(8.))
                 .text_size(px(11.))
                 .line_height(relative(1.7))
-                .text_color(rgb(MUTED))
+                .text_color(rgba(palette.workspace.muted))
                 .whitespace_normal()
                 .child(language_zone_label(line)),
         );
@@ -6903,7 +7320,7 @@ fn language_zone_time_zone_section(
             .mt(px(8.))
             .text_size(px(11.))
             .line_height(relative(1.7))
-            .text_color(rgb(MUTED))
+            .text_color(rgba(palette.workspace.muted))
             .whitespace_normal()
             .child(language_zone_label(language_zone_text(
                 english,
@@ -6931,6 +7348,7 @@ fn language_zone_time_zone_section(
             view.keyboard_focus,
             on_action.clone(),
             LanguageZoneAction::ResetTimeZone,
+            palette,
         ))
         .child(language_zone_action_button(
             "settings-time-zone-cancel",
@@ -6941,6 +7359,7 @@ fn language_zone_time_zone_section(
             view.keyboard_focus,
             on_action.clone(),
             LanguageZoneAction::CancelTimeZone,
+            palette,
         ))
         .child(language_zone_action_button(
             "settings-time-zone-save",
@@ -6955,11 +7374,13 @@ fn language_zone_time_zone_section(
             view.keyboard_focus,
             on_action.clone(),
             LanguageZoneAction::SaveTimeZone,
+            palette,
         ));
     if block.available && block.saved && !dirty && !block.busy {
         actions = actions.child(language_zone_status(
             "settings-time-zone-status",
             language_zone_text(english, VIEW_TIME_ZONE_SAVED, VIEW_TIME_ZONE_SAVED_EN),
+            palette,
         ));
     }
     section = section.child(actions);
@@ -6976,6 +7397,7 @@ fn language_zone_time_zone_section(
                     VIEW_TIME_ZONE_READ_ONLY,
                     VIEW_TIME_ZONE_READ_ONLY_EN,
                 ),
+                palette,
             )
             .mt(px(14.)),
         );
@@ -7002,6 +7424,7 @@ fn language_zone_time_zone_section(
             !block.busy,
             view.keyboard_focus,
             on_action,
+            palette,
         ));
     }
     section
@@ -7040,7 +7463,9 @@ fn language_zone_menu(
     menu_scroll: &ScrollHandle,
     trigger_focus: FocusHandle,
     on_action: Rc<dyn Fn(LanguageZoneAction, &mut Window, &mut App)>,
+    palette: &ThemePalette,
 ) -> AnyElement {
+    let palette = *palette;
     let width = f32::from(bounds.size.width)
         .max(VIEW_MENU_MIN_WIDTH)
         .min((f32::from(viewport.width) - 16.).max(160.));
@@ -7056,8 +7481,8 @@ fn language_zone_menu(
         .p(px(4.))
         .rounded(px(8.))
         .border_1()
-        .border_color(rgba(LINE))
-        .bg(rgb(PANEL))
+        .border_color(rgba(palette.workspace.line))
+        .bg(rgba(palette.workspace.panel))
         .shadow(vec![shadow(0x1a304b, 0.16, 8., 24.)])
         .overflow_y_scroll()
         .track_scroll(menu_scroll)
@@ -7068,16 +7493,16 @@ fn language_zone_menu(
         let selected = choice.value.as_str() == selected_value;
         let is_active = index == active;
         let background = if selected {
-            VIEW_MENU_SELECTED_BG
+            palette.settings.language_menu_background
         } else if is_active {
-            VIEW_MENU_ACTIVE_BG
+            palette.settings.language_menu_active_background
         } else {
-            PANEL
+            palette.workspace.panel
         };
         let text_color = if selected {
-            VIEW_MENU_SELECTED_TEXT
+            palette.settings.language_menu_text
         } else {
-            TEXT
+            palette.workspace.text
         };
         let value = choice.value.clone();
         let item_focus = trigger_focus.clone();
@@ -7094,9 +7519,9 @@ fn language_zone_menu(
                 .px(px(9.))
                 .rounded(px(5.))
                 .text_size(px(12.))
-                .text_color(rgb(text_color))
-                .bg(rgb(background))
-                .hover(|style| style.bg(rgb(VIEW_MENU_SELECTED_BG)))
+                .text_color(rgba(text_color))
+                .bg(rgba(background))
+                .hover(move |style| style.bg(rgba(palette.settings.language_menu_background)))
                 .overflow_hidden()
                 .whitespace_nowrap()
                 .text_ellipsis()
@@ -7138,7 +7563,17 @@ pub fn language_zone_content(
     view: LanguageZoneView<'_>,
     window: &Window,
     on_action: Rc<dyn Fn(LanguageZoneAction, &mut Window, &mut App)>,
+    palette: &ThemePalette,
+    surface: Rgba,
 ) -> Div {
+    #[cfg(debug_assertions)]
+    LANGUAGE_ZONE_PROBE.with_borrow_mut(|probe| {
+        if let Some(probe) = probe {
+            probe.language_zone_surface = Some(surface);
+        }
+    });
+    #[cfg(not(debug_assertions))]
+    let _ = surface;
     let choices = language_zone_choices(&view);
     let menu_open = view.time_zone_menu_open
         && view.time_zone_block.available
@@ -7162,14 +7597,15 @@ pub fn language_zone_content(
         0
     };
 
-    let language = language_zone_language_section(view, on_action.clone());
+    let language = language_zone_language_section(view, on_action.clone(), palette);
     let divider = div()
         .w_full()
         .mt(px(24.))
         .pt(px(6.))
         .border_t_1()
-        .border_color(rgba(LINE));
-    let time_zone = language_zone_time_zone_section(view, &choices, menu_open, on_action.clone());
+        .border_color(rgba(palette.workspace.line));
+    let time_zone =
+        language_zone_time_zone_section(view, &choices, menu_open, on_action.clone(), palette);
 
     let mut root = div().flex().flex_col().w_full();
     root = language_zone_id(root, "settings-language-zone");
@@ -7201,6 +7637,7 @@ pub fn language_zone_content(
                 &view.focus.menu_scroll,
                 view.focus.time_zone_trigger.clone(),
                 on_action,
+                palette,
             ));
         }
     }

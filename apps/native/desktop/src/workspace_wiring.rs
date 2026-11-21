@@ -123,6 +123,7 @@ pub(super) struct WorkspaceWiring {
     overlay: Option<Overlay>,
     overlay_focus: FocusHandle,
     restore_focus: Option<FocusHandle>,
+    terminal_return: Option<(String, String)>,
     shortcuts: ShortcutPanelState,
     card_menu: Option<(String, Point<Pixels>)>,
     card_menu_index: Option<usize>,
@@ -199,6 +200,7 @@ impl WorkspaceWiring {
             overlay: None,
             overlay_focus: cx.focus_handle().tab_stop(true),
             restore_focus: None,
+            terminal_return: None,
             shortcuts: ShortcutPanelState::default(),
             card_menu: None,
             card_menu_index: None,
@@ -659,6 +661,73 @@ impl Workspace {
             && (self.hierarchy.is_some() || self.read_only.is_some())
     }
 
+    fn active_terminal_focus(&self, cx: &App) -> Option<FocusHandle> {
+        let id = self.active_level_focus()?;
+        if !self.wiring_available()
+            || self.wiring.board_open
+            || self.read_only.is_some()
+            || self.wiring.is_detached(id)
+            || !self.active_path_valid()
+            || self.recovery_blocked(id)
+            || self
+                .history_request
+                .as_ref()
+                .is_some_and(|request| request.session_id == id)
+        {
+            return None;
+        }
+        self.terminals
+            .get(id)
+            .map(|terminal| terminal.read(cx).focus.clone())
+    }
+
+    pub(super) fn return_terminal_focus(
+        &mut self,
+        scene: String,
+        id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.wiring_available() || self.read_only.is_some() {
+            return;
+        }
+        self.dismiss_wiring_overlay(window, cx);
+        if self.wiring.board_open {
+            self.toggle_board(window, cx);
+        }
+        self.wiring.terminal_return = Some((scene, id));
+        self.finish_terminal_return(window, cx);
+        if self.control_focus["graph"].is_focused(window) {
+            // Return must not reopen the graph while navigation or the terminal
+            // frame is still being applied.
+            window.blur();
+        }
+        cx.notify();
+    }
+
+    pub(super) fn finish_terminal_return(&mut self, window: &mut Window, cx: &App) {
+        let Some(target @ (scene, id)) = self.wiring.terminal_return.as_ref() else {
+            return;
+        };
+        if !self.wiring_available() || self.wiring.overlay.is_some() {
+            self.wiring.terminal_return = None;
+            return;
+        }
+        if self.active_scene_id() != Some(scene.as_str())
+            || self.active_level_focus() != Some(id.as_str())
+        {
+            // The navigation request may still be projecting a different scene or level.
+            if self.pending_focus.as_ref() != Some(target) {
+                self.wiring.terminal_return = None;
+            }
+            return;
+        }
+        if let Some(focus) = self.active_terminal_focus(cx) {
+            window.focus(&focus);
+            self.wiring.terminal_return = None;
+        }
+    }
+
     fn open_wiring_overlay(&mut self, next: Overlay, window: &mut Window, cx: &mut Context<Self>) {
         if self.wiring.overlay != Some(next) {
             self.dismiss_wiring_overlay(window, cx);
@@ -668,7 +737,16 @@ impl Workspace {
             self.tab_menu = None;
             self.hidden_tabs = None;
             self.permission_menu = None;
-            self.wiring.restore_focus = window.focused(cx);
+            let previous = window.focused(cx);
+            self.wiring.restore_focus = if next != Overlay::CardMenu
+                && previous
+                    .as_ref()
+                    .is_none_or(|focus| *focus == self.control_focus["shortcut-help"])
+            {
+                self.active_terminal_focus(cx).or(previous)
+            } else {
+                previous
+            };
             self.wiring.overlay = Some(next);
             window.focus(&self.wiring.overlay_focus);
         }
@@ -791,10 +869,11 @@ impl Workspace {
         }
         if shortcut
             && self.wiring_available()
-            && !self
-                .terminals
-                .values()
-                .any(|terminal| terminal.read(cx).focus.is_focused(window))
+            && (cfg!(target_os = "macos") && mods.platform
+                || !self
+                    .terminals
+                    .values()
+                    .any(|terminal| terminal.read(cx).focus.is_focused(window)))
         {
             self.toggle_shortcuts(window, cx);
             return true;
@@ -1620,6 +1699,14 @@ impl Workspace {
     }
 
     pub(super) fn discard_wiring_session(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self
+            .wiring
+            .terminal_return
+            .as_ref()
+            .is_some_and(|(_, target)| target == id)
+        {
+            self.wiring.terminal_return = None;
+        }
         self.wiring
             .splits
             .retain(|_, tree| !tree.close_session(id) || tree.ordered_sessions().len() > 1);
@@ -1681,15 +1768,26 @@ impl Workspace {
                 .window
                 .update(cx, |_, window, _| window.remove_window());
         }
-        if self.active_scene_id() == Some(scene_id.as_str())
-            && self.level_focus() == Some(id)
-            && self.wiring_available()
-            && !self.wiring.board_open
-            && !self.recovery_blocked(id)
-            && let Some((card, terminal)) = self.card_controls.get(id).zip(self.terminals.get(id))
-            && (card.is_focused(window) || window.focused(cx).is_none())
-        {
-            window.focus(&terminal.read(cx).focus);
+        if self.wiring_available() && self.read_only.is_none() {
+            if self.wiring.visible {
+                window.activate_window();
+            }
+            let active = self.active_scene_id() == Some(scene_id.as_str());
+            if !active || self.active_level_focus() != Some(id) {
+                if active && let Some(node) = self.graph_node(id) {
+                    let parent = session_levels::parent_id(node).map(str::to_owned);
+                    self.level_parent_by_scene.insert(scene_id.clone(), parent);
+                } else if !active {
+                    // Resolve the returned card's level from the incoming scene
+                    // projection instead of reusing that scene's old breadcrumb.
+                    self.level_parent_by_scene.remove(&scene_id);
+                }
+                self.send_card_focus(&scene_id, id, cx);
+                if active {
+                    self.refresh_level(cx);
+                }
+            }
+            self.return_terminal_focus(scene_id, id.to_owned(), window, cx);
         }
         self.sync_terminal_input(window, cx);
         cx.notify();
@@ -1740,6 +1838,7 @@ impl Workspace {
         div()
             .relative()
             .flex_none()
+            .capture_any_mouse_down(preserve_overlay_mouse_focus)
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(render_update_trigger(
                 &self.runtime_update_view(),
@@ -1942,6 +2041,7 @@ impl Workspace {
             .id("footer-egress")
             .flex_none()
             .relative()
+            .capture_any_mouse_down(preserve_overlay_mouse_focus)
             .children(footer_bounds_probe("egress"))
             .child(render_egress_chip_with_label(
                 view.as_ref(),
@@ -2431,6 +2531,12 @@ impl Workspace {
     }
 }
 
+fn preserve_overlay_mouse_focus(event: &MouseDownEvent, window: &mut Window, _: &mut App) {
+    if event.button == MouseButton::Left {
+        window.prevent_default();
+    }
+}
+
 #[cfg(debug_assertions)]
 thread_local! {
     static WIRING_PROBE: std::cell::RefCell<Option<HashMap<String, Bounds<Pixels>>>> = const {
@@ -2445,7 +2551,7 @@ pub(super) fn capture_wiring_bounds(draw: impl FnOnce()) -> HashMap<String, Boun
     WIRING_PROBE.with_borrow_mut(|capture| capture.take().unwrap_or_default())
 }
 
-fn wiring_probe_bounds(_id: String) -> Option<Canvas<()>> {
+pub(super) fn wiring_probe_bounds(_id: String) -> Option<Canvas<()>> {
     #[cfg(debug_assertions)]
     if WIRING_PROBE.with_borrow(Option::is_some) {
         return Some(
@@ -2793,9 +2899,6 @@ impl Render for DetachedCardView {
                             let _ = main.update(cx, |_, window, cx| {
                                 let _ = owner.update(cx, |this, cx| {
                                     this.return_detached_card(&target, window, cx);
-                                    if this.wiring.visible {
-                                        window.activate_window();
-                                    }
                                 });
                             });
                         });
