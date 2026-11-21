@@ -119,10 +119,12 @@ impl LaunchOptions {
     pub fn from_args(args: impl IntoIterator<Item = OsString>) -> Result<Self> {
         // The shipped runtime enters here before reading Hello. The private
         // shim mode must finish before normal options or runtime startup.
-        #[cfg(unix)]
         let args = {
             let mut args = args.into_iter().peekable();
-            if args.peek().is_some_and(|flag| flag == crate::mt_cli::MODE) {
+            if args
+                .peek()
+                .is_some_and(|flag| flag == crate::mt_cli::MODE || flag == "--internal-mt")
+            {
                 args.next();
                 std::process::exit(crate::mt_cli::run(args));
             }
@@ -3840,7 +3842,6 @@ fn run_writable(
     let mut control = if recovery_request.is_none() {
         match ControlServer::start(&data_root, generation) {
             Ok(control) => {
-                #[cfg(unix)]
                 let bin = match crate::mt_cli::install_shim(&data_root) {
                     Ok(bin) => Some(bin),
                     Err(error) => {
@@ -3848,8 +3849,6 @@ fn run_writable(
                         None
                     }
                 };
-                #[cfg(not(unix))]
-                let bin = None;
                 owner.set_run_control(control.runs(), bin);
                 Some(control)
             }
@@ -4135,7 +4134,6 @@ fn run_writable(
             }
             eligible.insert(session_id.clone());
             if !launch_preparations.contains_key(&session_id) {
-                #[cfg(unix)]
                 if let Err(error) = owner.prepare_control_fork_worktree(&session_id) {
                     completed_launches.push((session_id, Err(error)));
                     continue;
@@ -6815,7 +6813,6 @@ fn run_writable(
             }
             send.send_blocking(event)?;
         }
-        #[cfg(unix)]
         if shutdown_requested.get().is_none()
             && navigation_publications.is_empty()
             && let Some(control) = &mut control

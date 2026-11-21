@@ -1754,6 +1754,8 @@ impl Workspace {
                 ..Default::default()
             },
             |window, cx| {
+                #[cfg(target_os = "windows")]
+                matou_native_desktop::windows_theme::set_dark(window, !presentation.light);
                 cx.new(|cx| {
                     let owner_updates = owner.upgrade().map(|owner| {
                         cx.observe_in(
@@ -1765,8 +1767,16 @@ impl Workspace {
                                     if child.presentation.title != card.title {
                                         window.set_window_title(&card.title);
                                     }
-                                    child.presentation =
+                                    let presentation =
                                         owner.detached_presentation(card.title.clone());
+                                    #[cfg(target_os = "windows")]
+                                    if child.presentation.light != presentation.light {
+                                        matou_native_desktop::windows_theme::set_dark(
+                                            window,
+                                            !presentation.light,
+                                        );
+                                    }
+                                    child.presentation = presentation;
                                     cx.notify();
                                 }
                             },

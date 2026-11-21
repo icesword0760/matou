@@ -1,11 +1,10 @@
 use super::*;
-use crate::{
-    host::{
-        Command, DatabaseRecoveryAction, Event, LaunchOptions, OfflineFixtures, RuntimeHost,
-        database_recovery_request_id,
-    },
-    owner::ShellOwner,
+#[cfg(unix)]
+use crate::host::{
+    Command, DatabaseRecoveryAction, Event, LaunchOptions, OfflineFixtures, RuntimeHost,
+    database_recovery_request_id,
 };
+use crate::owner::ShellOwner;
 use matou_native_core::{
     hierarchy::{
         self, BootstrapWindowInput, HierarchyIds,
@@ -19,6 +18,8 @@ use matou_native_core::{
     storage::CommandMetadata,
 };
 use rusqlite::{params, types::Value as SqlValue};
+#[cfg(windows)]
+use std::fs;
 use std::{collections::BTreeMap, sync::atomic::AtomicI64};
 use tempfile::TempDir;
 
@@ -59,6 +60,7 @@ fn command(label: &str) -> CommandMetadata {
         correlation_id: None,
     }
 }
+#[cfg(unix)]
 fn temporary_root() -> Result<TempDir> {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
@@ -67,6 +69,11 @@ fn temporary_root() -> Result<TempDir> {
     Ok(tempfile::Builder::new()
         .prefix(".tmp-mtc-")
         .tempdir_in(repository)?)
+}
+
+#[cfg(windows)]
+fn temporary_root() -> Result<TempDir> {
+    Ok(tempfile::tempdir()?)
 }
 
 struct Harness {
@@ -361,11 +368,73 @@ fn snapshot_files(
     Ok(())
 }
 
-fn client(path: &Path) -> Result<UnixStream> {
+#[cfg(unix)]
+type TestStream = UnixStream;
+
+#[cfg(unix)]
+fn client(path: &Path) -> Result<TestStream> {
     let socket = UnixStream::connect(path)?;
     socket.set_read_timeout(Some(Duration::from_secs(3)))?;
     socket.set_write_timeout(Some(Duration::from_secs(3)))?;
     Ok(socket)
+}
+
+#[cfg(windows)]
+struct TestStream {
+    pipe: tokio::net::windows::named_pipe::NamedPipeClient,
+    runtime: tokio::runtime::Runtime,
+}
+
+#[cfg(windows)]
+fn client(path: &Path) -> Result<TestStream> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let pipe = runtime.block_on(async {
+        tokio::time::timeout(Duration::from_secs(3), connect_pipe(path)).await?
+    })?;
+    Ok(TestStream { pipe, runtime })
+}
+
+#[cfg(windows)]
+impl Read for TestStream {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    self.pipe.readable().await?;
+                    match self.pipe.try_read(buf) {
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => return Ok(0),
+                        result => return result,
+                    }
+                }
+            })
+            .await?
+        })
+    }
+}
+
+#[cfg(windows)]
+impl Write for TestStream {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    self.pipe.writable().await?;
+                    match self.pipe.try_write(buf) {
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                        result => return result,
+                    }
+                }
+            })
+            .await?
+        })
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 fn frame(body: &[u8]) -> Vec<u8> {
@@ -374,7 +443,7 @@ fn frame(body: &[u8]) -> Vec<u8> {
     bytes
 }
 
-fn receive(socket: &mut UnixStream) -> Result<Value> {
+fn receive(socket: &mut TestStream) -> Result<Value> {
     let mut prefix = [0; 4];
     socket.read_exact(&mut prefix)?;
     let len = u32::from_be_bytes(prefix) as usize;
@@ -999,6 +1068,7 @@ fn fragmented_continuous_invalid_and_large_frames() -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 #[test]
 fn endpoint_permissions_conflicts_rebind_and_shutdown() -> Result<()> {
     let root = temporary_root()?;
@@ -1218,6 +1288,7 @@ fn slow_clients_reclaim_slots_without_blocking_other_connections() -> Result<()>
     Ok(())
 }
 
+#[cfg(unix)]
 #[test]
 fn runtime_host_connects_managed_shell_and_revokes_exited_run() -> Result<()> {
     let root = temporary_root()?;
@@ -1275,7 +1346,7 @@ exit 0
     )?;
     let mut socket = client(Path::new(endpoint))?;
     let before = snapshot(&observe, &data)?;
-    let identify = |socket: &mut UnixStream| -> Result<Value> {
+    let identify = |socket: &mut TestStream| -> Result<Value> {
         let mut input = request("managed", "host.identify", token, json!({}));
         input["deadlineAt"] = json!(now_ms() + 3_000);
         socket.write_all(&frame(&serde_json::to_vec(&input)?))?;
@@ -1373,6 +1444,7 @@ fn spawn_clears_inherited_control_markers_even_when_control_is_unavailable() -> 
     Ok(())
 }
 
+#[cfg(unix)]
 fn await_runtime_event(
     host: &RuntimeHost,
     matches_event: impl Fn(&Event) -> bool,
@@ -1399,6 +1471,7 @@ fn await_runtime_event(
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn readonly_and_in_process_recovery_never_bind() -> Result<()> {
     let readonly = temporary_root()?;
@@ -1841,6 +1914,7 @@ fn writes_negotiate_scope_storage_and_confirmation_at_the_owner() -> Result<()> 
     Ok(())
 }
 
+#[cfg(unix)]
 #[test]
 fn fork_worktrees_use_the_requested_branch_and_reuse_the_existing_checkout() -> Result<()> {
     let mut harness = Harness::new(false, false, GENERATION, fixed_now, IDLE_TIMEOUT)?;
@@ -1963,6 +2037,7 @@ fn fork_worktrees_use_the_requested_branch_and_reuse_the_existing_checkout() -> 
     Ok(())
 }
 
+#[cfg(unix)]
 #[test]
 fn frozen_write_validation_and_outlet_freeze_reject_before_input() -> Result<()> {
     let mut harness = Harness::new(false, false, GENERATION, fixed_now, IDLE_TIMEOUT)?;
@@ -2054,6 +2129,7 @@ fn frozen_write_validation_and_outlet_freeze_reject_before_input() -> Result<()>
     Ok(())
 }
 
+#[cfg(unix)]
 #[test]
 fn fork_batch_replays_successes_and_retries_only_selected_failures() -> Result<()> {
     let mut harness = Harness::new(false, false, GENERATION, fixed_now, IDLE_TIMEOUT)?;

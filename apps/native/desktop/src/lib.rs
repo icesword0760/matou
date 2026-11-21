@@ -46,3 +46,6 @@ pub mod shortcut_panel;
 pub mod split_tree;
 pub mod update_popover;
 pub mod workspace_board;
+
+#[cfg(target_os = "windows")]
+pub mod windows_theme;
