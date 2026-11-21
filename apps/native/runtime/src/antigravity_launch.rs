@@ -324,36 +324,29 @@ pub fn plugin_directory(home: &Path, environment: &BTreeMap<OsString, OsString>)
     home.join(".gemini/config/plugins/matou")
 }
 
-pub(crate) fn isolated_home(data_root: &Path) -> PathBuf {
-    data_root.join("antigravity-home")
-}
-
-pub(crate) fn prepare_isolated_environment(
-    data_root: &Path,
+pub(crate) fn prepare_environment(
+    shell_home: &Path,
     environment: &mut BTreeMap<OsString, OsString>,
 ) -> Result<()> {
-    let home = isolated_home(&data_root.canonicalize()?);
-    // The CLI discovers its plugin relative to HOME. Never follow a symlink
-    // under the Runtime-owned root while preparing that home.
-    let mut path = home.clone();
-    check_owned_path(&path, true)?;
-    let mut directory = fs::DirBuilder::new();
-    directory.recursive(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        directory.mode(0o700);
-    }
-    directory.create(&home)?;
-    for name in [".gemini", "config", "plugins"] {
-        path.push(name);
-        check_owned_path(&path, true)?;
-    }
-    let plugin = plugin_directory(&home, &BTreeMap::new());
+    check_owned_path(shell_home, true)?;
+    let home = shell_home.canonicalize()?;
+    let plugin = plugin_directory(&home, environment);
+    let plugin = match plugin.strip_prefix(shell_home) {
+        Ok(relative) => home.join(relative),
+        Err(_) => plugin,
+    };
     ensure_plugin_installed(&plugin)?;
-    set_env(environment, "HOME".into(), home.clone().into_os_string());
+    set_env(
+        environment,
+        "HOME".into(),
+        shell_home.as_os_str().to_owned(),
+    );
     #[cfg(windows)]
-    set_env(environment, "USERPROFILE".into(), home.into_os_string());
+    set_env(
+        environment,
+        "USERPROFILE".into(),
+        shell_home.as_os_str().to_owned(),
+    );
     environment.retain(|key, _| !env_key_eq(key, PLUGIN_OVERRIDE));
     // The frozen plugin uses curl's environment to bypass inherited proxies
     // on loopback requests. Keep any existing exclusions.
@@ -385,7 +378,9 @@ pub fn ensure_plugin_installed(directory: &Path) -> Result<()> {
                 .any(|part| part == Component::ParentDir),
         "Invalid Antigravity plugin directory"
     );
-    check_owned_path(directory, true)?;
+    for path in directory.ancestors().filter(|path| path.is_absolute()) {
+        check_owned_path(path, true)?;
+    }
     check_owned_path(&directory.join("hooks"), true)?;
     let manifest = directory.join("plugin.json");
     for (relative, _, _) in
@@ -571,3 +566,27 @@ const PLUGIN_FILES: [(&str, &str, u32); 4] = [
 ];
 const PLUGIN_STAMP: &str =
     "1.0.0:ffadb274f2e822a844ef7f70cc133ae02a9b7ab7eeb62107c3df7d6e1d40e79a\n";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prepare_environment_honors_the_plugin_directory_override() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let home = root.path().join("shell-home");
+        fs::create_dir(&home)?;
+        let plugin = home.join("alternate-plugins/matou");
+        let mut environment = BTreeMap::from([
+            ("HOME".into(), root.path().as_os_str().to_owned()),
+            (PLUGIN_OVERRIDE.into(), plugin.clone().into_os_string()),
+        ]);
+
+        prepare_environment(&home, &mut environment)?;
+
+        assert_eq!(env_value(&environment, "HOME"), Some(home.as_os_str()));
+        assert!(plugin.join("plugin.json").is_file());
+        assert!(!home.join(".gemini").exists());
+        Ok(())
+    }
+}

@@ -179,7 +179,7 @@ while IFS= read -r line; do
 done
 "#,
         );
-        let agy_history = root.join("antigravity-home/.gemini/antigravity-cli");
+        let agy_history = shell_home.join(".gemini/antigravity-cli");
         fs::create_dir_all(agy_history.join("cache")).unwrap();
         fs::write(
             agy_history.join("cache/conversation_metadata.json"),

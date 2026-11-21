@@ -140,6 +140,7 @@ impl RunningShell {
 
 struct RunHook {
     _registration: Registration,
+    profile: LaunchProfile,
     codex: Option<codex_events::Run>,
     codex_resume: Option<CodexResume>,
     launch_metadata: Value,
@@ -590,13 +591,6 @@ impl ShellOwner {
 
     pub(crate) fn pending_antigravity_fork(&self, session_id: &str) -> Result<Option<ClaudeFork>> {
         sessions::pending_provider_fork(&self.connection, session_id, "antigravity")
-    }
-
-    pub(crate) fn antigravity_root(&self, data_root: &Path) -> PathBuf {
-        crate::antigravity_catalog::catalog_root(
-            &antigravity_launch::isolated_home(data_root),
-            &self.launch_environment(),
-        )
     }
 
     pub(crate) fn change_antigravity_restore(
@@ -2559,6 +2553,12 @@ impl ShellOwner {
                     permission,
                     binding,
                 }) => {
+                    let home = antigravity_launch::env_value(&options.launch.env, "HOME")
+                        .context("Antigravity shell home is missing")?;
+                    let catalog_root = crate::antigravity_catalog::catalog_root(
+                        Path::new(home),
+                        &options.launch.env,
+                    );
                     let run_environment = registration.antigravity_environment();
                     secrets.extend(
                         run_environment
@@ -2577,7 +2577,7 @@ impl ShellOwner {
                     antigravity = Some(AntigravityObservation {
                         run: antigravity_events::Run::new(&run_id, mode.clone(), permission),
                         binding,
-                        catalog_root: self.antigravity_root(&options.launch.data_root),
+                        catalog_root,
                         title_check: None,
                         fork_pending: matches!(mode, AntigravityMode::Fork(_)),
                         startup: Vec::new(),
@@ -2688,6 +2688,7 @@ impl ShellOwner {
                 .flatten();
             Some(RunHook {
                 _registration: registration,
+                profile,
                 codex_resume,
                 codex: (profile == LaunchProfile::Codex)
                     .then(|| codex_events::Run::new(&options.launch)),
@@ -3177,7 +3178,7 @@ impl ShellOwner {
                 }
                 events.push(OwnerEvent::ProviderIdentity(json!({
                     "result": "timed-out", "sessionId": session_id, "runId": shell.run_id,
-                    "provider": "claude-code",
+                    "provider": hook.profile.kind(),
                     "providerSessionId": hook.resume.as_ref().and_then(|resume| resume.expected_id.as_deref()),
                     "restoreState": if hook.resume.is_some() { "restoring" } else { "none" },
                     "restoreError": null, "spawnRevision": hook.launch_metadata.get("spawnRevision"),
@@ -6301,7 +6302,12 @@ mod provider_tests {
         assert!(!owner.provider_allows_derivation(session));
         assert!(
             matches!(events.last(), Some(OwnerEvent::ProviderIdentity(event))
-            if event["result"] == "timed-out" && event["restoreState"] == "restoring")
+            if event["result"] == "timed-out"
+                && event["restoreState"] == "restoring"
+                && event["provider"] == "claude-code"
+                && event["sessionId"] == session
+                && event["runId"] == resume.run_id
+                && event["providerSessionId"] == "current-id")
         );
         owner.apply_hook(
             resume.clone(),
