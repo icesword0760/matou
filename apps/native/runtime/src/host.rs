@@ -6133,6 +6133,13 @@ fn run_writable(
             }
         }
         graph_dirty |= owner.poll_codex_hud();
+        if owner.take_egress_membership_change() {
+            send.send_blocking(wiring_result(
+                "egressStatusChanged",
+                0,
+                Ok(egress_projection(owner.egress().status())),
+            ))?;
+        }
         if (graph_dirty
             || !provider_identity_events.is_empty()
             || !permission_results.is_empty()
@@ -8624,7 +8631,7 @@ mod tests {
         std::fs::create_dir_all(&home)?;
         std::fs::write(
             home.join(".zshrc"),
-            "/bin/stty raw -echo\nprintf 'MATOU_RAW_SHELL_READY\\r\\n'\nexec /bin/cat > \"$HOME/bytes\"\n",
+            "[[ -t 0 ]] || return\n/bin/stty raw -echo\nprintf 'MATOU_RAW_SHELL_READY\\r\\n'\nexec /bin/cat > \"$HOME/bytes\"\n",
         )?;
         let runtime = RuntimeHost::start_with_offline_fixtures(
             LaunchOptions {
