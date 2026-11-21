@@ -384,7 +384,6 @@ fn new_role_assignment_projects_exact_provider_model_and_effort() -> Result<()> 
         }
         assert_eq!(launch.argv, argv);
         for (name, value) in [
-            ("ANTHROPIC_API_KEY", "target-key"),
             ("ANTHROPIC_AUTH_TOKEN", "target-key"),
             ("ANTHROPIC_BASE_URL", "https://target.example.invalid"),
             ("ANTHROPIC_DEFAULT_OPUS_MODEL", "target-sonnet"),
@@ -397,6 +396,7 @@ fn new_role_assignment_projects_exact_provider_model_and_effort() -> Result<()> 
             assert_env(&launch, name, value);
         }
         for name in [
+            "ANTHROPIC_API_KEY",
             "ANTHROPIC_DEFAULT_HAIKU_MODEL",
             "ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION",
             "ANTHROPIC_MODEL",

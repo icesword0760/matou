@@ -7,8 +7,7 @@ use matou_native_core::{
             create_shell_sibling,
         },
         cards::{
-            CloseSessionCardInput, RemoveScope, RemoveSessionBranchInput, close_card,
-            close_shortcut_is_last, remove_branch,
+            CloseSessionCardInput, RemoveScope, RemoveSessionBranchInput, close_card, remove_branch,
         },
         focus_session,
         tasks::{CreateTaskInput, create_task},
@@ -625,9 +624,6 @@ fn close_last_card_can_retain_canvas_and_clear_detached_window() -> Result<()> {
          VALUES ('detached', 'detached-terminal', 'visible', 3, 3);
          UPDATE session_mounts SET scene_window_id = 'detached' WHERE session_id = 'root';",
     )?;
-    let before = fixture.snapshot()?;
-    assert!(close_shortcut_is_last(&fixture.db, SCENE, ROOT)?);
-    assert_eq!(fixture.snapshot()?, before);
     let result = fixture.close("preserve", ROOT, Some("delete-session:root"), true)?;
     assert_eq!(result["outcome"], "session-stopped-remains");
     assert_eq!(result["rebuildCanvas"], false);

@@ -64,6 +64,49 @@ impl ChangeCounts {
     }
 }
 
+/// Read the symbolic HEAD for a working directory without invoking Git or
+/// touching the index. Linked worktrees store their own HEAD behind a gitfile.
+pub fn current_branch(cwd: &Path) -> Option<String> {
+    let cwd = fs::canonicalize(cwd).ok()?;
+    if !cwd.is_dir() {
+        return None;
+    }
+    let ceilings = std::env::var_os("GIT_CEILING_DIRECTORIES");
+    for dir in cwd.ancestors() {
+        if dir != cwd
+            && ceilings
+                .as_ref()
+                .is_some_and(|paths| std::env::split_paths(paths).any(|path| path == dir))
+        {
+            return None;
+        }
+        let marker = dir.join(".git");
+        let Ok(metadata) = fs::metadata(&marker) else {
+            continue;
+        };
+        let git_dir = if metadata.is_dir() {
+            marker
+        } else {
+            let gitfile = read_small_git_file(&marker)?;
+            dir.join(gitfile.strip_prefix("gitdir: ")?.trim_end())
+        };
+        return read_small_git_file(&git_dir.join("HEAD"))?
+            .trim_end()
+            .strip_prefix("ref: refs/heads/")
+            .filter(|branch| !branch.is_empty())
+            .map(str::to_owned);
+    }
+    None
+}
+
+fn read_small_git_file(path: &Path) -> Option<String> {
+    let metadata = fs::metadata(path).ok()?;
+    if !metadata.is_file() || metadata.len() > 8192 {
+        return None;
+    }
+    fs::read_to_string(path).ok()
+}
+
 impl Repository {
     /// Probes the repository for a directory, including a subdirectory of a linked worktree.
     pub fn discover(path: &Path) -> Result<Option<Self>> {

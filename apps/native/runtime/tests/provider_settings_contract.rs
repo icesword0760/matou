@@ -43,6 +43,7 @@ impl RuntimeChild {
         let home = root.join("home");
         fs::create_dir_all(&home)?;
         let mut child = ProcessCommand::new(env!("CARGO_BIN_EXE_matou-native-runtime"))
+            .env("MATOU_DISABLE_LIVE_EGRESS", "1")
             .arg("--data-root")
             .arg(root.join("data"))
             .arg("--workspace")

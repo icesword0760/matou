@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result, bail, ensure};
 use matou_native_core::hierarchy::HierarchyResult;
-use matou_native_runtime::host::{Command, Event, LaunchOptions, RuntimeHost};
+use matou_native_runtime::host::{Command, Event, LaunchOptions, OfflineFixtures, RuntimeHost};
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{Value, json};
 use std::{
@@ -184,12 +184,15 @@ while [ ! -f "$HOME/exit.$session" ]; do /bin/sleep 0.05; done
 "#,
     )?;
     fs::set_permissions(&shell, fs::Permissions::from_mode(0o700))?;
-    let mut host = RuntimeHost::start(LaunchOptions {
-        data_root: data.clone(),
-        workspace,
-        shell_home: home.clone(),
-        shell,
-    })?;
+    let mut host = RuntimeHost::start_with_offline_fixtures(
+        LaunchOptions {
+            data_root: data.clone(),
+            workspace,
+            shell_home: home.clone(),
+            shell,
+        },
+        OfflineFixtures::default(),
+    )?;
     let Event::Ready { hierarchy, .. } =
         event(&host, |event| matches!(event, Event::Ready { .. }))?
     else {

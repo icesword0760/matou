@@ -4,6 +4,7 @@ use std::process::Command;
 
 use matou_native_core::git_repo::{
     ChangeCounts, ForkBranchError, Head, Removal, Repository, WorktreeBranch, WorktreeScope,
+    current_branch,
 };
 use tempfile::TempDir;
 
@@ -51,12 +52,17 @@ fn discovers_directory_root_unborn_branch_and_detached_head() {
         .unwrap();
     assert_eq!(repo.root(), path.canonicalize().unwrap());
     assert_eq!(repo.head().unwrap(), Head::Branch("main".into()));
+    assert_eq!(
+        current_branch(&path.join("子 目录")).as_deref(),
+        Some("main")
+    );
     assert!(repo.local_branches().unwrap().branches.is_empty());
 
     git(&path, &["commit", "--allow-empty", "-m", "initial"]);
     let revision = repo.resolve_commit("HEAD").unwrap();
     git(&path, &["checkout", "--detach", "HEAD"]);
     assert_eq!(repo.head().unwrap(), Head::Detached(revision.clone()));
+    assert_eq!(current_branch(&path), None);
     let main = &repo.worktrees().unwrap()[0];
     assert!(main.main && main.detached);
     assert_eq!(main.revision.as_deref(), Some(revision.as_str()));
@@ -79,6 +85,7 @@ fn discovers_non_git_directory() {
     }
     let dir = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
     assert!(Repository::discover(dir.path()).unwrap().is_none());
+    assert_eq!(current_branch(dir.path()), None);
 }
 
 #[test]
@@ -146,6 +153,7 @@ fn creates_lists_and_removes_scoped_worktree_without_losing_dirty_files_or_branc
 
     let child = target.join("子 folder");
     fs::create_dir(&child).unwrap();
+    assert_eq!(current_branch(&child).as_deref(), Some("feature/review"));
     let linked = Repository::discover(&child).unwrap().unwrap();
     assert!(repo.same_repository(&linked) && linked.is_linked_worktree());
     assert_eq!(
