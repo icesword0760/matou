@@ -29,6 +29,13 @@ use uuid::Uuid;
 use crate::{
     SessionEvent, SessionOptions,
     agent_hud_projection::{AgentHudProjection, HudProvider, project_teammates},
+    antigravity_catalog::Catalog as AntigravityCatalog,
+    antigravity_events::{
+        self, Outcome as AntigravityOutcome, RecoveryState as AntigravityRecovery,
+    },
+    antigravity_launch::{
+        self, LaunchMode as AntigravityMode, PermissionMode as AntigravityPermission,
+    },
     claude_request_gateway::Gateway,
     codex_events::{self, title as codex_title},
     codex_fork::{
@@ -74,7 +81,21 @@ impl DshObservation {
     }
 }
 
+struct AntigravityObservation {
+    run: antigravity_events::Run,
+    binding: Option<String>,
+    catalog_root: PathBuf,
+    title_check: Option<(Instant, Instant)>,
+    fork_pending: bool,
+    startup: Vec<(Scope, antigravity_events::Source, Value, Instant)>,
+}
+
 enum SpecialLaunch {
+    Antigravity {
+        mode: AntigravityMode,
+        permission: AntigravityPermission,
+        binding: Option<String>,
+    },
     Dsh {
         config_dump: String,
         catalog_root: Option<PathBuf>,
@@ -131,6 +152,7 @@ struct RunHook {
     pending_startup_observations: Vec<(Scope, Observation)>,
     hud: AgentHudProjection,
     dsh: Option<DshObservation>,
+    antigravity: Option<AntigravityObservation>,
     dsh_pending: Vec<(Scope, Value)>,
     fork: Option<(String, CodexForkAuthority)>,
     codex_fork_ready: bool,
@@ -461,6 +483,67 @@ impl ShellOwner {
             diagnostic(&mut self.pending, session_id, warning.into());
         }
         result
+    }
+
+    pub(crate) fn antigravity_binding(&self, session_id: &str) -> Result<Option<ProviderBinding>> {
+        sessions::antigravity_binding(&self.connection, session_id)
+    }
+
+    pub(crate) fn pending_antigravity_fork(&self, session_id: &str) -> Result<Option<ClaudeFork>> {
+        sessions::pending_provider_fork(&self.connection, session_id, "antigravity")
+    }
+
+    pub(crate) fn antigravity_root(&self, data_root: &Path) -> PathBuf {
+        crate::antigravity_catalog::catalog_root(
+            &antigravity_launch::isolated_home(data_root),
+            &self.launch_environment(),
+        )
+    }
+
+    pub(crate) fn change_antigravity_restore(
+        &mut self,
+        session_id: &str,
+        change: ClaudeRestore<'_>,
+    ) -> Result<bool> {
+        let mut events = Vec::new();
+        let changed = self.commit_antigravity_restore(session_id, change, None, &mut events)?;
+        self.pending.extend(events);
+        Ok(changed)
+    }
+
+    fn commit_antigravity_restore(
+        &mut self,
+        session_id: &str,
+        change: ClaudeRestore<'_>,
+        run_id: Option<&str>,
+        events: &mut Vec<OwnerEvent>,
+    ) -> Result<bool> {
+        let id = (self.next_id)();
+        let Some(commit) = sessions::change_antigravity_restore(
+            &mut self.connection,
+            &command(id.clone(), "session.restore-state-changed", id),
+            session_id,
+            change,
+            now(),
+        )?
+        else {
+            return Ok(false);
+        };
+        let mut result = commit.result.clone();
+        result.as_object_mut().unwrap().remove("agentNotification");
+        result["result"] = json!(match change {
+            ClaudeRestore::Begin(_) => "restoring",
+            ClaudeRestore::Retry => "retrying",
+            ClaudeRestore::Fresh => "starting-fresh",
+            ClaudeRestore::Fail { .. } => "restore-failed",
+            ClaudeRestore::PermissionFresh => unreachable!(),
+        });
+        if let Some(run_id) = run_id {
+            result["runId"] = json!(run_id);
+        }
+        events.push(OwnerEvent::ProviderIdentity(result));
+        events.push(OwnerEvent::Domain(commit));
+        Ok(true)
     }
 
     pub(crate) fn dsh_binding(&self, session_id: &str) -> Result<Option<ProviderBinding>> {
@@ -939,7 +1022,14 @@ impl ShellOwner {
         session_id: &str,
         time: i64,
     ) -> Result<Value> {
-        if !self.can_launch_provider(session_id) {
+        // An Antigravity exit is already committed when the failed fork is
+        // published. The worker thread can still be unwinding at that point.
+        if !self.can_launch_provider(session_id)
+            && !(self.shell_worker_is_retiring(session_id)
+                && self
+                    .session(session_id)?
+                    .is_some_and(|session| session.kind == "antigravity"))
+        {
             return Err(canvas::CanvasError {
                 code: "FORK_NOT_FAILED",
                 message: "当前分支无需重试".into(),
@@ -1123,13 +1213,16 @@ impl ShellOwner {
             && self.session(session_id)?.is_some_and(|session| {
                 matches!(
                     session.kind.as_str(),
-                    "shell" | "claude-code" | "codex" | "dsh"
+                    "shell" | "claude-code" | "codex" | "dsh" | "antigravity"
                 ) && session.archived_at.is_none()
                     && (start_failed || session.status == "exited")
             })
             && !sessions::has_unconfirmed_claude_fork(&self.connection, session_id)?
             && !self
                 .claude_binding(session_id)?
+                .is_some_and(|binding| binding.restore_state == "failed")
+            && !self
+                .antigravity_binding(session_id)?
                 .is_some_and(|binding| binding.restore_state == "failed"))
     }
 
@@ -1212,7 +1305,7 @@ impl ShellOwner {
              FROM sessions
              JOIN tasks ON tasks.id = sessions.task_id AND tasks.archived_at IS NULL
              JOIN workspaces ON workspaces.id = tasks.workspace_id AND workspaces.archived_at IS NULL
-             WHERE sessions.kind IN ('shell', 'claude-code', 'codex', 'dsh') AND sessions.archived_at IS NULL
+             WHERE sessions.kind IN ('shell', 'claude-code', 'codex', 'dsh', 'antigravity') AND sessions.archived_at IS NULL
                AND EXISTS (
                    SELECT 1 FROM session_mounts JOIN scenes ON scenes.id = session_mounts.scene_id
                    WHERE session_mounts.session_id = sessions.id AND scenes.archived_at IS NULL
@@ -1242,6 +1335,16 @@ impl ShellOwner {
             if kind == "shell" {
                 if has_run {
                     candidates.push((id, workspace, automatic));
+                }
+                continue;
+            }
+            if kind == "antigravity" {
+                if self.pending_antigravity_fork(&id)?.is_some()
+                    || self
+                        .antigravity_binding(&id)?
+                        .is_some_and(|binding| binding.resumable)
+                {
+                    candidates.push((id, workspace, true));
                 }
                 continue;
             }
@@ -1446,11 +1549,15 @@ impl ShellOwner {
             .get(session_id)
             .and_then(|shell| shell.hook.as_ref())
             .is_some_and(|hook| {
-                (hook.resume.is_some()
-                    || hook.codex_resume.is_some()
-                    || hook.dsh.is_some()
-                    || hook.fork.is_some())
-                    && hook.deadline.is_some()
+                hook.antigravity
+                    .as_ref()
+                    .is_some_and(|agy| agy.binding.is_some())
+                    || ((hook.resume.is_some()
+                        || hook.codex_resume.is_some()
+                        || hook.dsh.is_some()
+                        || hook.antigravity.is_some()
+                        || hook.fork.is_some())
+                        && hook.deadline.is_some())
             })
     }
 
@@ -1458,10 +1565,13 @@ impl ShellOwner {
         self.shells.get(session_id).is_some_and(|shell| {
             !shell.retiring
                 && (shell.is_shell
-                    || shell
-                        .hook
-                        .as_ref()
-                        .is_some_and(|hook| hook.last_observation.is_some()))
+                    || shell.hook.as_ref().is_some_and(|hook| {
+                        hook.last_observation.is_some()
+                            || hook
+                                .antigravity
+                                .as_ref()
+                                .is_some_and(|agy| agy.run.conversation_id().is_some())
+                    }))
         })
     }
 
@@ -1746,11 +1856,19 @@ impl ShellOwner {
         if let Some(hook) = &mut shell.hook {
             let observations = std::mem::take(&mut hook.pending_startup_observations);
             let dsh = std::mem::take(&mut hook.dsh_pending);
+            let antigravity = hook
+                .antigravity
+                .as_mut()
+                .map(|run| std::mem::take(&mut run.startup))
+                .unwrap_or_default();
             for (scope, observation) in observations {
                 self.apply_hook(scope, observation, events);
             }
             for (scope, payload) in dsh {
                 self.apply_dsh_hook(scope, &payload, events);
+            }
+            for (scope, source, payload, received_at) in antigravity {
+                self.apply_antigravity_hook(scope, source, payload, received_at, events);
             }
         }
     }
@@ -2095,6 +2213,73 @@ impl ShellOwner {
         Ok(shell.run_id.clone())
     }
 
+    pub(crate) fn launch_antigravity(
+        &mut self,
+        session_id: &str,
+        terminal: matou_native_terminal::TerminalOptions,
+        data_root: &Path,
+        plan: antigravity_launch::LaunchPlan,
+        permission: AntigravityPermission,
+        promotion: bool,
+    ) -> Result<String> {
+        let binding = match &plan.mode {
+            AntigravityMode::Resume(expected) => {
+                let binding = self
+                    .antigravity_binding(session_id)?
+                    .filter(|binding| binding.resumable && &binding.provider_session_id == expected)
+                    .context("Antigravity restore binding changed")?;
+                self.change_antigravity_restore(session_id, ClaudeRestore::Begin(&binding.id))?;
+                Some(binding)
+            }
+            AntigravityMode::Fork(parent) => {
+                ensure!(
+                    self.pending_antigravity_fork(session_id)?
+                        .is_some_and(|fork| &fork.source_id == parent),
+                    "Antigravity fork intent changed"
+                );
+                None
+            }
+            AntigravityMode::Fresh => None,
+        };
+        let metadata = json!({
+            "provider": "antigravity", "cwd": plan.cwd,
+            "permissionMode": permission.as_str(),
+            "spawnRevision": binding.as_ref().and_then(|binding| binding.metadata.get("spawnRevision")),
+        });
+        self.launch_run(
+            SessionOptions {
+                session_id: session_id.to_owned(),
+                terminal,
+                journal: Default::default(),
+                restored_history: Vec::new(),
+                collect_history: false,
+                launch: matou_native_core::pty::ShellLaunch {
+                    profile: LaunchProfile::Antigravity,
+                    executable: plan.executable,
+                    argv: os_arguments(plan.argv)?,
+                    cwd: plan.cwd,
+                    data_root: data_root.to_owned(),
+                    inherited_env: Default::default(),
+                    env: plan.environment,
+                    cols: terminal.cols,
+                    rows: terminal.rows,
+                },
+            },
+            false,
+            "",
+            Some((metadata, Vec::new(), None, None)),
+            None,
+            Some(SpecialLaunch::Antigravity {
+                mode: plan.mode,
+                permission,
+                binding: binding.map(|binding| binding.id),
+            }),
+        )?;
+        let shell = self.shells.get_mut(session_id).unwrap();
+        shell.provider_startup_pending = promotion;
+        Ok(shell.run_id.clone())
+    }
+
     fn launch_run(
         &mut self,
         mut options: SessionOptions,
@@ -2179,11 +2364,22 @@ impl ShellOwner {
             permission_starting = resume
                 .as_ref()
                 .is_some_and(|resume| resume.permission_respawn);
-            let (expected_id, fork_source_id) = match &resume {
+            let (mut expected_id, mut fork_source_id) = match &resume {
                 Some(resume) if resume.binding_id.is_some() => (resume.expected_id.clone(), None),
                 Some(resume) => (None, resume.expected_id.clone()),
                 None => (None, None),
             };
+            match &special {
+                Some(SpecialLaunch::Antigravity {
+                    mode: AntigravityMode::Resume(id),
+                    ..
+                }) => expected_id = Some(id.clone()),
+                Some(SpecialLaunch::Antigravity {
+                    mode: AntigravityMode::Fork(id),
+                    ..
+                }) => fork_source_id = Some(id.clone()),
+                _ => {}
+            }
             let identity_wait = if fork_source_id.is_some() {
                 FORK_IDENTITY_WAIT
             } else {
@@ -2219,8 +2415,38 @@ impl ShellOwner {
                 options.launch.argv.extend(argv);
             }
             let mut dsh = None;
+            let mut antigravity = None;
             let mut fork = None;
             match special {
+                Some(SpecialLaunch::Antigravity {
+                    mode,
+                    permission,
+                    binding,
+                }) => {
+                    let run_environment = registration.antigravity_environment();
+                    secrets.extend(
+                        run_environment
+                            .values()
+                            .filter_map(|value| value.to_str().map(str::to_owned)),
+                    );
+                    let settings_path = registration
+                        .settings_path
+                        .to_str()
+                        .context("Antigravity settings path is not UTF-8")?;
+                    options
+                        .launch
+                        .argv
+                        .splice(0..0, ["--settings".to_owned(), settings_path.to_owned()]);
+                    options.launch.env.extend(run_environment);
+                    antigravity = Some(AntigravityObservation {
+                        run: antigravity_events::Run::new(&run_id, mode.clone(), permission),
+                        binding,
+                        catalog_root: self.antigravity_root(&options.launch.data_root),
+                        title_check: None,
+                        fork_pending: matches!(mode, AntigravityMode::Fork(_)),
+                        startup: Vec::new(),
+                    });
+                }
                 Some(SpecialLaunch::Dsh {
                     config_dump,
                     catalog_root,
@@ -2285,10 +2511,12 @@ impl ShellOwner {
             let deadline = (profile == LaunchProfile::ClaudeCode
                 || codex_resume.is_some()
                 || matches!(dsh, Some(DshObservation::Resume(..)))
+                || antigravity.as_ref().is_some_and(|agy| agy.fork_pending)
                 || fork.is_some())
             .then(|| {
                 Instant::now()
-                    + if fork.is_some() {
+                    + if fork.is_some() || antigravity.as_ref().is_some_and(|agy| agy.fork_pending)
+                    {
                         FORK_IDENTITY_WAIT
                     } else {
                         identity_wait
@@ -2300,6 +2528,7 @@ impl ShellOwner {
                     LaunchProfile::ClaudeCode => HudProvider::ClaudeCode,
                     LaunchProfile::Codex => HudProvider::Codex,
                     LaunchProfile::Dsh => HudProvider::Dsh,
+                    LaunchProfile::Antigravity => HudProvider::Antigravity,
                     LaunchProfile::Shell => unreachable!(),
                 },
                 now() as f64,
@@ -2339,6 +2568,7 @@ impl ShellOwner {
                 claude_projects,
                 claude_transcript: None,
                 dsh,
+                antigravity,
                 dsh_pending: Vec::new(),
                 fork,
                 codex_fork_ready: false,
@@ -2636,6 +2866,13 @@ impl ShellOwner {
                         self.apply_dsh_hook(scope, &payload, events);
                     }
                 }
+                HookMessage::AntigravityObserved(scope, source, payload, received_at) => {
+                    if accepts(self, &scope, received_at) {
+                        self.apply_antigravity_hook(scope, source, payload, received_at, events);
+                    } else {
+                        reject_identity(events, &scope, "retired-run");
+                    }
+                }
                 HookMessage::Retired(scope) => reject_identity(events, &scope, "retired-run"),
             }
         }
@@ -2643,6 +2880,27 @@ impl ShellOwner {
 
     fn poll_provider_hooks(&mut self, events: &mut Vec<OwnerEvent>) {
         self.poll_provider_hook_messages(events, 64, |_, _, _| true);
+        let antigravity_timeouts: Vec<_> = self
+            .shells
+            .iter_mut()
+            .filter_map(|(id, shell)| {
+                let hook = shell.hook.as_mut()?;
+                if shell.ended
+                    || shell.retiring
+                    || !hook
+                        .deadline
+                        .is_some_and(|deadline| deadline <= Instant::now())
+                {
+                    return None;
+                }
+                let agy = hook.antigravity.as_mut()?;
+                matches!(agy.run.deadline_elapsed(), AntigravityRecovery::Failed(_))
+                    .then(|| (id.clone(), shell.run_id.clone()))
+            })
+            .collect();
+        for (id, run_id) in antigravity_timeouts {
+            self.park_fork_run(&id, &run_id, FORK_IDENTITY_TIMEOUT, events);
+        }
         let dsh_timeouts = self
             .shells
             .iter_mut()
@@ -2684,6 +2942,7 @@ impl ShellOwner {
             self.apply_codex_effect(&id, &run_id, effect, None, events);
         }
         self.poll_codex_titles(events);
+        self.poll_antigravity_titles(events);
         let expired_codex_forks = self
             .shells
             .iter()
@@ -2782,6 +3041,309 @@ impl ShellOwner {
             {
                 write_resume_input(session_id, shell, bytes, events);
             }
+        }
+    }
+
+    fn apply_antigravity_hook(
+        &mut self,
+        scope: Scope,
+        source: antigravity_events::Source,
+        payload: Value,
+        received_at: Instant,
+        events: &mut Vec<OwnerEvent>,
+    ) {
+        let Some(shell) = self.shells.get_mut(&scope.session_id).filter(|shell| {
+            !self.closing
+                && !shell.ended
+                && !shell.retiring
+                && shell.run_id == scope.run_id
+                && scope.generation == self.generation
+        }) else {
+            reject_identity(events, &scope, "retired-run");
+            return;
+        };
+        let Some(hook) = &mut shell.hook else {
+            return;
+        };
+        let Some(agy) = &mut hook.antigravity else {
+            return;
+        };
+        if shell.provider_startup_pending {
+            if agy.startup.len() < HOOK_QUEUE_CAPACITY {
+                agy.startup.push((scope, source, payload, received_at));
+            }
+            return;
+        }
+        if agy.fork_pending
+            && hook
+                .deadline
+                .is_some_and(|deadline| received_at >= deadline)
+        {
+            return;
+        }
+        let time = now();
+        let first = agy.run.conversation_id().is_none();
+        let update = match agy.run.ingest(&scope.run_id, source, &payload, time) {
+            AntigravityOutcome::Ignored => return,
+            AntigravityOutcome::SendForkCommand => {
+                let (reply, _) = mpsc::channel();
+                if shell
+                    .worker
+                    .send(WorkerCommand::Write {
+                        bytes: antigravity_events::FORK_COMMAND.as_bytes().to_vec(),
+                        reply,
+                    })
+                    .is_err()
+                {
+                    self.park_fork_run(
+                        &scope.session_id,
+                        &scope.run_id,
+                        "Could not send the Antigravity fork command",
+                        events,
+                    );
+                }
+                return;
+            }
+            AntigravityOutcome::IdentityMismatch { .. } => {
+                self.park_antigravity_restore(&scope, IDENTITY_MISMATCH, events);
+                return;
+            }
+            AntigravityOutcome::Observed(update) => update,
+        };
+        if let Some(identity) = update.identity {
+            let mut observed = serde_json::Map::new();
+            observed.insert("cwd".into(), json!(shell.cwd));
+            if let Some(model) = identity
+                .model
+                .and_then(|model| safe_hook_text(model, &hook.secrets))
+            {
+                observed.insert("model".into(), json!(model));
+            }
+            if let Some(permission) = identity.permission {
+                observed.insert("permissionMode".into(), json!(permission.as_str()));
+            }
+            if agy.run.can_fork() {
+                observed.insert("canFork".into(), json!(true));
+            }
+            let id = (self.next_id)();
+            let commit = sessions::record_antigravity_identity(
+                &mut self.connection,
+                &command(id.clone(), "provider-hook.identity", id.clone()),
+                &sessions::ProviderIdentity {
+                    binding_id: &id,
+                    session_id: &scope.session_id,
+                    run_id: &scope.run_id,
+                    generation: &scope.generation,
+                    provider_session_id: identity.conversation_id,
+                    expected_id: scope.expected_id.as_deref().filter(|_| first),
+                    launch_metadata: &hook.launch_metadata,
+                    observed_metadata: &Value::Object(observed),
+                    event_name: update.event_name.unwrap_or("statusline"),
+                    first_for_run: first,
+                },
+                time,
+            );
+            match commit {
+                Ok(commit) => {
+                    hook.deadline = None;
+                    agy.binding = None;
+                    agy.fork_pending = false;
+                    hook.hud.set_resumable(true);
+                    if first {
+                        let mut result = commit.result.clone();
+                        result["result"] = json!("confirmed");
+                        events.push(OwnerEvent::ProviderIdentity(result));
+                    }
+                    events.push(OwnerEvent::Domain(commit));
+                }
+                Err(_) => {
+                    if agy.fork_pending {
+                        self.park_fork_run(
+                            &scope.session_id,
+                            &scope.run_id,
+                            "Could not save the Antigravity fork identity",
+                            events,
+                        );
+                    } else if agy.binding.is_some() {
+                        self.park_antigravity_restore(
+                            &scope,
+                            "Could not save the Antigravity identity",
+                            events,
+                        );
+                    } else {
+                        reject_identity(events, &scope, "binding-write-failed");
+                    }
+                    return;
+                }
+            }
+        }
+        let mut hud = Value::Object(update.payload.clone());
+        redact_hud(&mut hud, &hook.secrets);
+        hook.hud.ingest_provider(&hud, time as f64);
+        let status = update
+            .work_status
+            .filter(|_| hook.last_submission.is_none_or(|sent| sent <= received_at));
+        let notification = update.notification.map(|notification| {
+            let mut payload = json!(notification);
+            redact_hud(&mut payload, &hook.secrets);
+            payload["operation"] = json!("upsert");
+            payload
+        });
+        if update.title_candidate.is_some() {
+            // The CLI can publish its title just after the Stop hook arrives.
+            let start = Instant::now();
+            agy.title_check = Some((
+                start + Duration::from_millis(250),
+                start + Duration::from_secs(4),
+            ));
+        }
+        let title_root = update
+            .title_candidate
+            .as_ref()
+            .map(|_| agy.catalog_root.clone());
+        if let Some(status) = status {
+            use antigravity_events::WorkStatus;
+            let status = match status {
+                WorkStatus::Starting => "starting",
+                WorkStatus::Idle => "idle",
+                WorkStatus::Running => "running",
+                WorkStatus::NeedsInput => "needs-input",
+                WorkStatus::Error => "error",
+            };
+            if let Err(error) = self.set_work_status(&scope.session_id, events, |_| status) {
+                diagnostic(events, &scope.session_id, format!("{error:#}"));
+            }
+        }
+        if let Some(payload) = notification {
+            let id = (self.next_id)();
+            match sessions::publish_provider_notification(
+                &mut self.connection,
+                &command(id.clone(), "agent.notification", id),
+                &scope.session_id,
+                &scope.run_id,
+                &scope.generation,
+                "antigravity",
+                payload,
+                time,
+            ) {
+                Ok(commit) => events.push(OwnerEvent::Domain(commit)),
+                Err(error) => diagnostic(events, &scope.session_id, format!("{error:#}")),
+            }
+        }
+        if let (Some(conversation), Some(data_root)) = (update.title_candidate, title_root) {
+            self.observe_antigravity_title(&scope, &conversation, &data_root, events);
+        }
+    }
+
+    fn poll_antigravity_titles(&mut self, events: &mut Vec<OwnerEvent>) {
+        let now = Instant::now();
+        let due: Vec<_> = self
+            .shells
+            .iter_mut()
+            .filter_map(|(session_id, shell)| {
+                if self.closing || shell.ended || shell.retiring {
+                    return None;
+                }
+                let agy = shell.hook.as_mut()?.antigravity.as_mut()?;
+                let (next, until) = agy.title_check?;
+                if next > now {
+                    return None;
+                }
+                agy.title_check = (now < until).then(|| (now + Duration::from_secs(1), until));
+                let conversation = agy.run.conversation_id()?.to_owned();
+                Some((
+                    session_id.clone(),
+                    shell.run_id.clone(),
+                    conversation,
+                    agy.catalog_root.clone(),
+                ))
+            })
+            .collect();
+        for (session, run, conversation, root) in due {
+            let scope = Scope {
+                session_id: session,
+                run_id: run,
+                generation: self.generation.clone(),
+                profile: LaunchProfile::Antigravity,
+                expected_id: None,
+                fork_source_id: None,
+            };
+            self.observe_antigravity_title(&scope, &conversation, &root, events);
+        }
+    }
+
+    fn observe_antigravity_title(
+        &mut self,
+        scope: &Scope,
+        conversation: &str,
+        catalog_root: &Path,
+        events: &mut Vec<OwnerEvent>,
+    ) {
+        let catalog = AntigravityCatalog::new(catalog_root);
+        let Ok(Some(title)) = catalog.latest_auto_title(conversation) else {
+            return;
+        };
+        let Some(title) = self
+            .shells
+            .get(&scope.session_id)
+            .and_then(|shell| shell.hook.as_ref())
+            .and_then(|hook| safe_hook_text(&title, &hook.secrets))
+        else {
+            return;
+        };
+        let id = (self.next_id)();
+        match sessions::observe_provider_title(
+            &mut self.connection,
+            &command(id.clone(), "provider-hook.title", id),
+            &scope.session_id,
+            &scope.run_id,
+            &scope.generation,
+            "antigravity",
+            conversation,
+            title,
+            now(),
+        ) {
+            Ok(Some(commit)) => {
+                if let Some(agy) = self
+                    .shells
+                    .get_mut(&scope.session_id)
+                    .and_then(|shell| shell.hook.as_mut())
+                    .and_then(|hook| hook.antigravity.as_mut())
+                {
+                    agy.title_check = None;
+                }
+                events.push(OwnerEvent::Domain(commit));
+            }
+            Ok(None) => {}
+            Err(error) => diagnostic(events, &scope.session_id, format!("{error:#}")),
+        }
+    }
+
+    fn park_antigravity_restore(
+        &mut self,
+        scope: &Scope,
+        reason: &str,
+        events: &mut Vec<OwnerEvent>,
+    ) {
+        let binding = self
+            .shells
+            .get_mut(&scope.session_id)
+            .and_then(|shell| shell.hook.as_mut())
+            .and_then(|hook| hook.antigravity.as_mut())
+            .and_then(|agy| agy.binding.take());
+        self.retire_sessions(std::slice::from_ref(&scope.session_id));
+        if let Some(binding_id) = binding
+            && let Err(error) = self.commit_antigravity_restore(
+                &scope.session_id,
+                ClaudeRestore::Fail {
+                    binding_id: &binding_id,
+                    error: reason,
+                },
+                Some(&scope.run_id),
+                events,
+            )
+        {
+            diagnostic(events, &scope.session_id, format!("{error:#}"));
         }
     }
 
@@ -4100,6 +4662,10 @@ impl ShellOwner {
             }
             None
         });
+        let pending_antigravity = hook
+            .as_mut()
+            .and_then(|hook| hook.antigravity.as_mut())
+            .map(|agy| (agy.binding.take(), agy.fork_pending));
         let pending_codex_fork = hook.as_mut().and_then(|hook| hook.fork.take());
         let pending_codex = hook.as_mut().and_then(|hook| hook.codex_resume.take());
         let had_identity = hook
@@ -4146,6 +4712,31 @@ impl ShellOwner {
             time,
         )?;
         events.push(OwnerEvent::Domain(commit));
+        if let Some((binding, fork)) = pending_antigravity
+            && !retiring
+            && !disposed
+            && !self.closing
+        {
+            let error = "Antigravity exited before confirming the conversation";
+            if fork {
+                self.retire_sessions(&[id.to_owned()]);
+                self.commit_fork_failure(id, Some(&run), error, events)?;
+                return Ok(());
+            }
+            if let Some(binding_id) = binding {
+                self.retire_sessions(&[id.to_owned()]);
+                self.commit_antigravity_restore(
+                    id,
+                    ClaudeRestore::Fail {
+                        binding_id: &binding_id,
+                        error,
+                    },
+                    Some(&run),
+                    events,
+                )?;
+                return Ok(());
+            }
+        }
         if let Some((key, authority)) = pending_codex_fork {
             let reason = "Codex Fork exited before confirming its child identity";
             if let Some(intent) = self.codex_forks.get_mut(&key) {

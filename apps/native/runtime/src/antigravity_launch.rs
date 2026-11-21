@@ -61,6 +61,28 @@ pub enum PermissionMode {
 }
 
 impl PermissionMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Auto => "auto",
+            Self::Ask => "ask",
+            Self::AcceptEdits => "acceptEdits",
+            Self::Plan => "plan",
+            Self::BypassPermissions => "bypassPermissions",
+        }
+    }
+
+    pub(crate) fn from_saved(mode: &str) -> Self {
+        match mode {
+            "auto" => Self::Auto,
+            "ask" => Self::Ask,
+            "acceptEdits" => Self::AcceptEdits,
+            "plan" => Self::Plan,
+            "bypassPermissions" => Self::BypassPermissions,
+            _ => Self::Default,
+        }
+    }
+
     fn args(self) -> &'static [&'static str] {
         match self {
             Self::Default | Self::Ask => &[],
@@ -300,6 +322,54 @@ pub fn plugin_directory(home: &Path, environment: &BTreeMap<OsString, OsString>)
         return path.into();
     }
     home.join(".gemini/config/plugins/matou")
+}
+
+pub(crate) fn isolated_home(data_root: &Path) -> PathBuf {
+    data_root.join("antigravity-home")
+}
+
+pub(crate) fn prepare_isolated_environment(
+    data_root: &Path,
+    environment: &mut BTreeMap<OsString, OsString>,
+) -> Result<()> {
+    let home = isolated_home(&data_root.canonicalize()?);
+    // The CLI discovers its plugin relative to HOME. Never follow a symlink
+    // under the Runtime-owned root while preparing that home.
+    let mut path = home.clone();
+    check_owned_path(&path, true)?;
+    let mut directory = fs::DirBuilder::new();
+    directory.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        directory.mode(0o700);
+    }
+    directory.create(&home)?;
+    for name in [".gemini", "config", "plugins"] {
+        path.push(name);
+        check_owned_path(&path, true)?;
+    }
+    let plugin = plugin_directory(&home, &BTreeMap::new());
+    ensure_plugin_installed(&plugin)?;
+    set_env(environment, "HOME".into(), home.clone().into_os_string());
+    #[cfg(windows)]
+    set_env(environment, "USERPROFILE".into(), home.into_os_string());
+    environment.retain(|key, _| !env_key_eq(key, PLUGIN_OVERRIDE));
+    // The frozen plugin uses curl's environment to bypass inherited proxies
+    // on loopback requests. Keep any existing exclusions.
+    let no_proxy = env_value(environment, "no_proxy")
+        .or_else(|| env_value(environment, "NO_PROXY"))
+        .unwrap_or_default()
+        .to_string_lossy();
+    let no_proxy = if no_proxy.is_empty() {
+        "127.0.0.1".to_owned()
+    } else {
+        format!("127.0.0.1,{no_proxy}")
+    };
+    set_env(environment, "NO_PROXY".into(), no_proxy.clone().into());
+    #[cfg(unix)]
+    set_env(environment, "no_proxy".into(), no_proxy.into());
+    Ok(())
 }
 
 /// Install only the five Matou-managed files. All files are replaced atomically,

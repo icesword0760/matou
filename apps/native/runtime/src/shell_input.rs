@@ -54,6 +54,13 @@ fn interactive_launch(command: &str) -> Option<InteractiveLaunch> {
         });
     }
 
+    if let Some(permission) = crate::antigravity_launch::interactive_permission(command) {
+        return Some(InteractiveLaunch {
+            profile: LaunchProfile::Antigravity,
+            mode: permission.as_str(),
+        });
+    }
+
     // Match the frozen JavaScript trim and whitespace folding.
     let mut words = command
         .split(|c: char| c == '\u{feff}' || (c.is_whitespace() && c != '\u{0085}'))
@@ -93,7 +100,6 @@ mod tests {
             ("echo claude", None),
             ("CLAUDE", None),
             ("cc", None),
-            ("agy", None),
         ] {
             assert_eq!(
                 interactive_launch(line).map(|launch| (launch.profile, launch.mode)),

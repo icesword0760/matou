@@ -489,7 +489,7 @@ pub fn create_fork_child(
                 .filter(|(_, exists)| *exists)
                 .map(|(id, _)| (id.as_str(), "derived-from")),
         };
-        if !matches!(kind.as_str(), "claude-code" | "codex") {
+        if !matches!(kind.as_str(), "claude-code" | "codex" | "antigravity") {
             return Err(not_ready());
         }
         if *worktree_mode == ForkWorktreeMode::New && kind != "codex" {
