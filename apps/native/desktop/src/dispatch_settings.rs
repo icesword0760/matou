@@ -198,6 +198,16 @@ impl DispatchSettingsPanel {
         });
     }
 
+    #[cfg(debug_assertions)]
+    pub fn probe_focus_number(&self, index: usize, window: &mut Window, cx: &App) {
+        window.focus(&self.number_inputs[index].read(cx).focus);
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn probe_focus_save(&self, window: &mut Window) {
+        window.focus(&self.save_focus);
+    }
+
     fn sync_all_numbers(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         for field in NumberField::ALL {
             self.sync_number(field, window, cx);

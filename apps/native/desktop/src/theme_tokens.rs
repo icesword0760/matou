@@ -224,9 +224,7 @@ pub struct SidebarPalette {
     pub task_hover: u32,
     pub badge_text: u32,
     pub badge_background: u32,
-    /// Sidebar surface painted above the AppKit sidebar material. Light keeps
-    /// the frozen translucent overlay; dark replaces the material with an
-    /// opaque token because the native material does not follow the theme.
+    /// Sidebar surface using the CLI palette independently of AppKit vibrancy.
     pub background: u32,
     /// Shared translucent action hover for the new-workspace row and bell.
     pub action_hover: u32,
@@ -421,8 +419,7 @@ pub const LIGHT: ThemePalette = ThemePalette {
         task_hover: 0x57657f12,
         badge_text: 0x91949eff,
         badge_background: 0xeceef3ff,
-        // Frozen native overlay over the AppKit sidebar material.
-        background: 0xfbfdff17,
+        background: 0xf2f2f5ff,
         action_hover: 0x2f35470f,
         control_hover: 0x00000014,
         icon: 0x656d76ff,

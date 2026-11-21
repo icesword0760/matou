@@ -33,8 +33,7 @@ use matou_native_core::dispatch_config::{
 use matou_native_core::sessions::{InterfaceLocale, LocalePreference};
 use matou_native_desktop::dispatch_settings::DispatchSettingsPanel;
 use matou_native_desktop::provider_context_editor::{
-    PROVIDER_BOTTOM_EDGE_WIDTH, ProviderContextEditorRow, active_provider_bottom_edge,
-    provider_context_window_badge, provider_switch_impact_row,
+    ACTIVE_PROVIDER_BOTTOM_EDGE_RGB, ProviderContextEditorRow, provider_switch_impact_row,
 };
 use matou_native_desktop::theme_tokens::{
     AppTheme, ThemePalette, ThemePreference, ThemeState, theme_preference_picker,
@@ -95,10 +94,6 @@ const SETTINGS_ANIMATION_MS: u64 = 180;
 const DIALOG_ANIMATION_MS: u64 = 160;
 const CLI_DEFAULT_MODEL: &str = "CLI 默认";
 const ROLE_LABELS: [&str; 3] = ["Opus", "Sonnet", "Haiku"];
-// Frozen CSS: the list owns the 1pt outer border and a card's 80pt min-height
-// is its fill. GPUI's min-height includes the card's own top and bottom 1pt
-// border, so the active card needs a named 80 + 2pt outer frame.
-const ACTIVE_API_CARD_MIN_OUTER_HEIGHT: f32 = 82.;
 
 /// Resolved colors for the frozen provider setup dialog and its status cards.
 ///
@@ -1062,6 +1057,7 @@ struct Editor {
     query: Entity<RenameInput>,
     selection: Option<PickChoice>,
     draft: ProviderDraft,
+    subscription: Option<Value>,
     baseline: FormBaseline,
     key: Entity<SecretInput>,
     endpoint: Entity<RenameInput>,
@@ -1248,6 +1244,7 @@ impl Editor {
             query,
             selection,
             draft,
+            subscription: existing.filter(|provider| provider["kind"] == "subscription"),
             baseline,
             key,
             endpoint,
@@ -1479,6 +1476,45 @@ fn short_endpoint(value: &str) -> String {
     value.strip_suffix('/').unwrap_or(value).to_owned()
 }
 
+fn provider_window_badge(provider: &Value, locale: InterfaceLocale) -> Div {
+    let metadata = provider["modelMetadata"]
+        .as_array()
+        .or_else(|| provider["subscription"]["modelMetadata"].as_array());
+    let model = provider["model"].as_str().unwrap_or_default();
+    let selected = metadata.and_then(|rows| {
+        rows.iter()
+            .find(|row| row["id"] == model)
+            .or_else(|| rows.iter().find(|row| row["id"] == "default"))
+            .or_else(|| rows.first())
+    });
+    let custom = provider["contextWindow"]
+        .as_u64()
+        .filter(|tokens| *tokens > 0);
+    let maximum = metadata
+        .into_iter()
+        .flatten()
+        .filter_map(|row| row["maxContextWindow"].as_u64())
+        .filter(|tokens| *tokens > 0)
+        .max();
+    let default = selected
+        .and_then(|row| row["contextWindow"].as_u64())
+        .filter(|tokens| *tokens > 0);
+    let (capacity, prefix) = if let Some(tokens) = custom.or(maximum) {
+        (Some(tokens), locale.text("最大 ", "Max "))
+    } else if let Some(tokens) = default {
+        (Some(tokens), locale.text("默认 ", "Default "))
+    } else if provider["subscription"]["provider"] == "codex" {
+        (Some(512_000), "")
+    } else {
+        (None, "")
+    };
+    let value =
+        matou_native_desktop::provider_context_editor::context_window_badge(capacity, locale);
+    matou_native_desktop::provider_context_editor::context_window_badge_view(format!(
+        "{prefix}{value}"
+    ))
+}
+
 fn provider_tone(name: &str) -> u8 {
     let lower = name.to_ascii_lowercase();
     if lower.contains("openai") {
@@ -1512,6 +1548,7 @@ fn model_label(model: &str) -> &str {
 
 pub enum SettingsShellEvent {
     Close,
+    ProviderActivated,
     SaveLocale(LocalePreference),
     SaveTheme(ThemePreference),
     OpenProviderKeyPage(&'static str),
@@ -2047,7 +2084,17 @@ impl SettingsShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let switching = self.providers.switching().map(str::to_owned);
+        let active_before = switching
+            .as_ref()
+            .and_then(|_| self.providers.active_id().map(str::to_owned));
         let update = self.providers.receive(reply);
+        if let Some(target) = switching.as_deref()
+            && self.providers.active_id() == Some(target)
+            && active_before.as_deref() != Some(target)
+        {
+            cx.emit(SettingsShellEvent::ProviderActivated);
+        }
         self.apply_update(update, window, cx);
         self.load_assignment_catalog(false, cx);
         cx.notify();
@@ -2271,7 +2318,7 @@ impl SettingsShell {
         let Some(editor) = &self.editor else {
             return;
         };
-        if editor.step != EditorStep::Form {
+        if editor.step != EditorStep::Form || editor.subscription.is_some() {
             return;
         }
         let values = editor.values(cx);
@@ -2333,6 +2380,9 @@ impl SettingsShell {
         if self.providers.saving() || self.editor.is_some() {
             return;
         }
+        if provider["kind"] != "subscription" {
+            self.provider_context_row(&provider, window, cx);
+        }
         let preset_id = preset_by_endpoint(provider["endpoint"].as_str().unwrap_or_default())
             .map(|preset| preset.id);
         let editor = Editor::new(
@@ -2346,7 +2396,11 @@ impl SettingsShell {
             window,
             cx,
         );
-        let focus = editor.focus.key.clone();
+        let focus = if editor.subscription.is_some() {
+            editor.focus.close.clone()
+        } else {
+            editor.focus.key.clone()
+        };
         self.editor = Some(editor);
         window.focus(&focus);
         cx.notify();
@@ -2442,6 +2496,33 @@ impl SettingsShell {
     #[allow(dead_code)]
     pub(crate) fn probe_language_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.select_page(SettingsPage::Language, window, cx);
+    }
+
+    #[cfg(debug_assertions)]
+    #[allow(dead_code)]
+    pub(crate) fn select_dispatch_for_probe(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_page(SettingsPage::Dispatch, window, cx);
+    }
+
+    #[cfg(debug_assertions)]
+    #[allow(dead_code)]
+    pub(crate) fn probe_dispatch_focus(&self, index: Option<usize>, window: &mut Window, cx: &App) {
+        let panel = self
+            .dispatch_panel
+            .as_ref()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .read(cx);
+        if let Some(index) = index {
+            panel.probe_focus_number(index, window, cx);
+        } else {
+            panel.probe_focus_save(window);
+        }
     }
 
     #[cfg(debug_assertions)]
@@ -2852,14 +2933,7 @@ impl SettingsShell {
             self.locale.text("AI 服务", "AI services"),
             palette.workspace.muted,
         ));
-        // Dispatch sits in the AI services group right after Claude Code; the
-        // language entry keeps its original ID and stays under General.
-        for page in [
-            SettingsPage::ClaudeCode,
-            SettingsPage::Dispatch,
-            SettingsPage::Language,
-            SettingsPage::Diagnostics,
-        ] {
+        for page in [SettingsPage::ClaudeCode, SettingsPage::Language] {
             let active = self.page == page;
             let focus = self.nav_focus[page.index()].clone();
             let icon_color = if active {
@@ -2908,9 +2982,6 @@ impl SettingsShell {
                 SettingsPage::ClaudeCode => row
                     .child(icon("settings-2", 15., icon_color))
                     .child("Claude Code"),
-                SettingsPage::Dispatch => row
-                    .child(icon("task", 15., icon_color))
-                    .child(self.locale.text("派活", "Dispatch")),
                 SettingsPage::Language => row.child(globe_icon(15., icon_color)).child(
                     // At 720 the frozen English label wraps onto two lines
                     // inside the same 33pt row; the Chinese label stays on
@@ -2923,12 +2994,10 @@ impl SettingsShell {
                         .whitespace_normal()
                         .child(language_zone_label(page.title(self.locale))),
                 ),
-                SettingsPage::Diagnostics => row
-                    .child(icon("network", 15., icon_color))
-                    .child(self.locale.text("诊断", "Diagnostics")),
+                _ => unreachable!(),
             };
             nav = nav.child(row);
-            if page == SettingsPage::Dispatch {
+            if page == SettingsPage::ClaudeCode {
                 nav = nav.child(nav_section_label(
                     self.locale.text("通用", "General"),
                     palette.workspace.muted,
@@ -3923,7 +3992,7 @@ impl SettingsShell {
             .child(retry)
     }
 
-    fn provider_cards(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
+    fn provider_cards(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Stateful<Div> {
         let providers = self.providers.providers().to_vec();
         let active = self.providers.active_id().map(str::to_owned);
         let switching = self.providers.switching().map(str::to_owned);
@@ -3938,7 +4007,17 @@ impl SettingsShell {
             28.
         };
         let container_width = (shell_width - pad_x * 2.).max(0.);
-        let mut list = div().flex().flex_col().gap(px(12.)).w_full();
+        let palette = self.theme.effective().palette();
+        let mut list = div()
+            .id("provider-list")
+            .flex()
+            .flex_col()
+            .w_full()
+            .rounded(px(10.))
+            .overflow_hidden()
+            .border_1()
+            .border_color(rgba(palette.workspace.line))
+            .bg(rgba(palette.workspace.panel));
         let card_count = providers.len();
         for (index, provider) in providers.into_iter().enumerate() {
             let id = provider["id"].as_str().unwrap_or_default().to_owned();
@@ -3951,7 +4030,16 @@ impl SettingsShell {
             let is_last = index + 1 == card_count;
             let card = if provider["kind"] == "subscription" && provider["subscription"].is_object()
             {
-                self.subscription_card(&provider, current, is_last, viewport_width)
+                self.subscription_card(
+                    &provider,
+                    current,
+                    is_last,
+                    viewport_width,
+                    switching.as_deref(),
+                    busy,
+                    &controls,
+                    cx,
+                )
             } else {
                 self.api_card(
                     &provider,
@@ -3962,7 +4050,6 @@ impl SettingsShell {
                     &controls,
                     container_width,
                     viewport_width,
-                    window,
                     cx,
                 )
             };
@@ -3980,6 +4067,7 @@ impl SettingsShell {
         let id = provider["id"].as_str().filter(|id| !id.is_empty())?;
         let saved = provider["contextWindow"].as_u64();
         let locale = self.locale;
+        let dark = self.is_dark();
         if let Some(row) = self.provider_context_rows.get(id)
             && row.read(cx).saved() == saved
         {
@@ -3992,7 +4080,7 @@ impl SettingsShell {
         let row = cx.new(|cx| {
             ProviderContextEditorRow::new(
                 saved,
-                false,
+                dark,
                 locale,
                 move |tokens, _, cx| {
                     shell
@@ -4017,61 +4105,16 @@ impl SettingsShell {
         Some(row)
     }
 
-    fn api_card(
-        &mut self,
+    fn provider_actions(
+        &self,
         provider: &Value,
         current: bool,
-        is_last: bool,
         switching: Option<&str>,
         busy: bool,
         controls: &[FocusHandle; 2],
-        container_width: f32,
-        viewport_width: f32,
-        window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let palette = *self.theme.effective().palette();
-        let name = provider["name"].as_str().unwrap_or_default();
-        let endpoint = short_endpoint(provider["endpoint"].as_str().unwrap_or_default());
-        let model = provider["model"].as_str().unwrap_or(CLI_DEFAULT_MODEL);
-        let metadata = provider["modelMetadata"]
-            .as_array()
-            .and_then(|models| models.iter().find(|row| row["id"] == model));
-        let model_name = metadata
-            .and_then(|row| row["displayName"].as_str())
-            .unwrap_or_else(|| model_label(model));
-        let model_sub = format!(
-            "{}{}{}",
-            metadata
-                .and_then(|row| row["displayName"].as_str())
-                .map(|_display| format!("{model} · "))
-                .unwrap_or_default(),
-            self.locale.text("默认模型", "Default model"),
-            if provider["hasApiKey"] == true {
-                self.locale.text(" · Key 已配置", " · Key configured")
-            } else {
-                ""
-            }
-        );
-        let tone = provider_tone(name);
-        let logo_bg = match tone {
-            1 => linear_gradient(
-                145.,
-                linear_color_stop(rgb(0x198875), 0.),
-                linear_color_stop(rgb(0x087363), 1.),
-            ),
-            2 => linear_gradient(
-                145.,
-                linear_color_stop(rgb(0xc98559), 0.),
-                linear_color_stop(rgb(0xae6740), 1.),
-            ),
-            _ => linear_gradient(
-                145.,
-                linear_color_stop(rgb(0x4a96e5), 0.),
-                linear_color_stop(rgb(0x7169df), 1.),
-            ),
-        };
-
+    ) -> (Stateful<Div>, Stateful<Div>) {
+        let palette = self.theme.effective().palette();
         let edit_provider = provider.clone();
         let edit_opener = controls[0].clone();
         let mut edit = div()
@@ -4159,56 +4202,71 @@ impl SettingsShell {
             );
         }
 
-        // The host owns reading the saved custom window. When it declines to
-        // build an editor (None), the card still shows the module badge so the
-        // read-only state is never blank.
-        let context_row = self.provider_context_row(provider, window, cx);
-        let show_context_badge = context_row.is_none();
-        let context_tokens = provider["contextWindow"].as_u64();
+        (edit, switch)
+    }
 
-        let mut card = div()
-            .id(SharedString::from(format!(
-                "provider-card-{}",
-                provider["id"].as_str().unwrap_or_default()
-            )))
-            .relative()
-            .flex()
-            .flex_col()
-            .w_full()
-            .min_h(px(if current {
-                ACTIVE_API_CARD_MIN_OUTER_HEIGHT
+    fn api_card(
+        &mut self,
+        provider: &Value,
+        current: bool,
+        is_last: bool,
+        switching: Option<&str>,
+        busy: bool,
+        controls: &[FocusHandle; 2],
+        container_width: f32,
+        viewport_width: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let palette = *self.theme.effective().palette();
+        let name = provider["name"].as_str().unwrap_or_default();
+        let endpoint = short_endpoint(provider["endpoint"].as_str().unwrap_or_default());
+        let model = provider["model"].as_str().unwrap_or(CLI_DEFAULT_MODEL);
+        let metadata = provider["modelMetadata"]
+            .as_array()
+            .and_then(|models| models.iter().find(|row| row["id"] == model));
+        let model_name = metadata
+            .and_then(|row| row["displayName"].as_str())
+            .unwrap_or_else(|| model_label(model));
+        let model_sub = format!(
+            "{}{}{}",
+            metadata
+                .and_then(|row| row["displayName"].as_str())
+                .map(|_display| format!("{model} · "))
+                .unwrap_or_default(),
+            self.locale.text("默认模型", "Default model"),
+            if provider["hasApiKey"] == true {
+                self.locale.text(" · Key 已配置", " · Key configured")
             } else {
-                80.
-            }))
-            .p(px(14.))
-            .rounded(px(11.))
-            .overflow_hidden()
-            .border_1()
-            .border_color(rgba(palette.workspace.line))
-            .bg(rgba(palette.settings.providers));
-        if !current {
-            card = card.hover(|style| style.bg(rgba(palette.workspace.panel)));
-        }
-        if current {
-            // Active fill sits inside the 1pt border so the outer ring keeps
-            // compositing `LINE` over the normal card's PANEL_MUTED background.
-            card = card.child(
-                div()
-                    .absolute()
-                    .inset_0()
-                    .rounded(px(10.))
-                    .bg(rgba(palette.settings.provider_selected)),
-            );
-            card = card.child(
-                div()
-                    .absolute()
-                    .left_0()
-                    .top_0()
-                    .bottom_0()
-                    .w(px(2.))
-                    .bg(rgba(palette.workspace.accent)),
-            );
-        }
+                ""
+            }
+        );
+        let tone = provider_tone(name);
+        let logo_bg = match tone {
+            1 => linear_gradient(
+                145.,
+                linear_color_stop(rgb(0x198875), 0.),
+                linear_color_stop(rgb(0x087363), 1.),
+            ),
+            2 => linear_gradient(
+                145.,
+                linear_color_stop(rgb(0xc98559), 0.),
+                linear_color_stop(rgb(0xae6740), 1.),
+            ),
+            _ => linear_gradient(
+                145.,
+                linear_color_stop(rgb(0x4a96e5), 0.),
+                linear_color_stop(rgb(0x7169df), 1.),
+            ),
+        };
+
+        let (edit, switch) =
+            self.provider_actions(provider, current, switching, busy, controls, cx);
+        let card = self
+            .provider_list_row(provider, current, is_last)
+            .flex_col()
+            .min_h(px(62.))
+            .px(px(12.))
+            .py(px(10.));
         let mut header = div().flex().items_center().w_full().gap(px(11.));
         header = header.child(
             div()
@@ -4255,9 +4313,7 @@ impl SettingsShell {
                                 .child(self.locale.text("使用中", "In use")),
                         )
                     })
-                    .when(show_context_badge, |row| {
-                        row.child(provider_context_window_badge(context_tokens, self.locale))
-                    }),
+                    .child(provider_window_badge(provider, self.locale)),
             )
             .child(
                 div()
@@ -4312,24 +4368,27 @@ impl SettingsShell {
                 .child(edit)
                 .child(switch),
         );
-        card = card.child(header);
-        if let Some(row) = context_row {
-            card = card.child(div().mt(px(12.)).w_full().child(row));
-        }
-        if let Some(edge) = active_provider_bottom_edge(current, is_last) {
-            // Overlay the existing 1pt divider inside the card border instead
-            // of adding a second line or changing the card's size.
-            card = card.child(
-                div()
-                    .absolute()
-                    .left_0()
-                    .right_0()
-                    .bottom_0()
-                    .h(px(PROVIDER_BOTTOM_EDGE_WIDTH))
-                    .bg(rgb(edge)),
-            );
-        }
-        card.into_any_element()
+        card.child(header).into_any_element()
+    }
+
+    fn provider_list_row(&self, provider: &Value, current: bool, is_last: bool) -> Stateful<Div> {
+        let palette = self.theme.effective().palette();
+        div()
+            .id(SharedString::from(format!(
+                "provider-card-{}",
+                provider["id"].as_str().unwrap_or_default()
+            )))
+            .flex()
+            .w_full()
+            .when(current, |row| {
+                row.rounded(px(10.))
+                    .border_1()
+                    .border_color(rgb(ACTIVE_PROVIDER_BOTTOM_EDGE_RGB))
+                    .bg(rgba(palette.settings.provider_selected))
+            })
+            .when(!current && !is_last, |row| {
+                row.border_b_1().border_color(rgba(palette.workspace.line))
+            })
     }
 
     fn subscription_card(
@@ -4338,6 +4397,10 @@ impl SettingsShell {
         current: bool,
         is_last: bool,
         viewport_width: f32,
+        switching: Option<&str>,
+        busy: bool,
+        controls: &[FocusHandle; 2],
+        cx: &mut Context<Self>,
     ) -> AnyElement {
         let palette = *self.theme.effective().palette();
         let subscription = &provider["subscription"];
@@ -4425,17 +4488,12 @@ impl SettingsShell {
                     .child(status_label),
             );
         }
-        // Subscription cards stay read-only; the verified badge is the whole
-        // context-window surface here.
-        name_row = name_row.child(provider_context_window_badge(
-            provider["contextWindow"].as_u64(),
-            self.locale,
-        ));
+        name_row = name_row.child(provider_window_badge(provider, self.locale));
         let mut details = div()
             .flex()
             .flex_col()
             .gap(px(3.))
-            .min_w(px(120.))
+            .min_w_0()
             .flex_1()
             .child(name_row);
         if !account_line.is_empty() {
@@ -4460,52 +4518,17 @@ impl SettingsShell {
                     .child(reason.to_owned()),
             );
         }
-        let mut card = div()
-            .id(SharedString::from(format!(
-                "provider-card-{}",
-                provider["id"].as_str().unwrap_or_default()
-            )))
-            .relative()
-            .flex()
+        let mut card = self
+            .provider_list_row(provider, current, is_last)
             .items_start()
-            .w_full()
             .min_h(px(if status == "account-unavailable" {
                 120.
             } else {
-                80.
+                62.
             }))
             .gap(px(11.))
-            .px(px(14.))
-            .py(px(13.))
-            .rounded(px(11.))
-            .overflow_hidden()
-            .border_1()
-            .border_color(rgba(palette.workspace.line))
-            .bg(rgba(palette.settings.providers));
-        if !current {
-            card = card.hover(|style| style.bg(rgba(palette.workspace.panel)));
-        }
-        if current {
-            // Active fill sits inside the 1pt border so the outer ring keeps
-            // compositing `LINE` over the normal card's PANEL_MUTED background.
-            card = card.child(
-                div()
-                    .absolute()
-                    .inset_0()
-                    .rounded(px(10.))
-                    .bg(rgba(palette.settings.provider_selected)),
-            );
-            card = card.child(
-                div()
-                    .absolute()
-                    .left_0()
-                    .top_0()
-                    .bottom_0()
-                    .w(px(2.))
-                    .bg(rgba(palette.workspace.accent)),
-            );
-        }
-        card = card
+            .px(px(12.))
+            .py(px(10.))
             .child(
                 div()
                     .mt(px(1.))
@@ -4552,20 +4575,28 @@ impl SettingsShell {
                     ),
             );
         }
-        if let Some(edge) = active_provider_bottom_edge(current, is_last) {
-            // Same rule as API cards: paint over the existing bottom divider
-            // inside the border without adding a second row of height.
-            card = card.child(
-                div()
-                    .absolute()
-                    .left_0()
-                    .right_0()
-                    .bottom_0()
-                    .h(px(PROVIDER_BOTTOM_EDGE_WIDTH))
-                    .bg(rgb(edge)),
-            );
-        }
-        card.into_any_element()
+        let (edit, switch) =
+            self.provider_actions(provider, current, switching, busy, controls, cx);
+        card.child(
+            div()
+                .flex()
+                .flex_none()
+                .gap(px(5.))
+                .child(
+                    div()
+                        .id("subscription-refresh-models")
+                        .flex()
+                        .items_center()
+                        .px(px(5.))
+                        .text_size(px(11.))
+                        .text_color(rgba(palette.workspace.muted))
+                        .cursor(CursorStyle::OperationNotAllowed)
+                        .child(self.locale.text("刷新模型", "Refresh models")),
+                )
+                .child(edit)
+                .child(switch),
+        )
+        .into_any_element()
     }
 
     fn shell_width(&self, window: &Window) -> f32 {
@@ -4690,6 +4721,10 @@ impl SettingsShell {
         let Some(editor) = &self.editor else {
             return;
         };
+        if editor.subscription.is_some() {
+            window.focus(&editor.focus.close);
+            return;
+        }
         let mut order: Vec<FocusHandle> = Vec::new();
         match editor.step {
             EditorStep::Pick => {
@@ -4723,6 +4758,14 @@ impl SettingsShell {
                 order.push(editor.focus.endpoint.clone());
                 order.push(editor.focus.model.clone());
                 order.push(editor.focus.name.clone());
+                if let Some(context) = editor
+                    .draft
+                    .id
+                    .as_ref()
+                    .and_then(|id| self.provider_context_rows.get(id))
+                {
+                    order.extend(context.read(cx).focus_order(cx));
+                }
                 order.extend(editor.focus.mappings.iter().cloned());
                 order.extend(editor.focus.efforts.iter().cloned());
                 if editor.confirm.is_some() {
@@ -4892,7 +4935,7 @@ impl SettingsShell {
             .track_scroll(&editor.body_scroll)
             .child(body);
 
-        let save_enabled = !busy;
+        let save_enabled = !busy && editor.subscription.is_none();
         let footer = if pick {
             let cancel = dialog_button(
                 "provider-setup-cancel",
@@ -5413,6 +5456,21 @@ impl SettingsShell {
         let palette = *self.theme.effective().palette();
         let colors = EditorColors::new(&palette, self.is_dark());
         let busy = self.editor_busy();
+        if let Some(provider) = &editor.subscription {
+            let account = &provider["subscription"]["account"];
+            return div()
+                .flex()
+                .flex_col()
+                .gap(px(12.))
+                .child(provider["name"].as_str().unwrap_or_default().to_owned())
+                .child(account["email"].as_str().unwrap_or_default().to_owned())
+                .child(account["plan"].as_str().unwrap_or_default().to_owned())
+                .child(provider_window_badge(provider, self.locale))
+                .child(self.locale.text(
+                    "当前版本暂不支持修改订阅配置。",
+                    "Subscription editing is currently unavailable.",
+                ));
+        }
         let values = editor.values(cx);
         let editing = editor.draft.id.is_some();
         let preset = preset_by_endpoint(&values.endpoint);
@@ -5575,6 +5633,15 @@ impl SettingsShell {
                 rename_field(editor.name.clone(), 44., 13., window, &colors, cx),
             ),
         );
+
+        if let Some(context) = editor
+            .draft
+            .id
+            .as_ref()
+            .and_then(|id| self.provider_context_rows.get(id))
+        {
+            body = body.child(div().mb(px(14.)).child(context.clone()));
+        }
 
         let mut mapping = div().flex().flex_col().gap(px(10.)).mt(px(4.));
         for index in 0..3 {

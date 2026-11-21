@@ -65,11 +65,33 @@ pub(super) struct CodexHud {
 impl CodexHud {
     pub(super) fn from_node(node: &Value) -> Self {
         let payload = node.get("codexHud").filter(|value| value.is_object());
-        let model = match payload {
-            Some(payload) => clean_text(&payload["model"]),
-            None => clean_text(&node["model"]),
+        let fallback = if payload.is_some() {
+            &Value::Null
+        } else {
+            node
         };
-        let effort = payload.and_then(|payload| clean_text(&payload["effort"]));
+        Self::from_projection(fallback, payload, "codex")
+    }
+
+    pub(super) fn from_live(node: &Value, payload: &Value, mode: &str) -> Self {
+        Self::from_projection(node, Some(payload), mode)
+    }
+
+    fn from_projection(node: &Value, payload: Option<&Value>, mode: &str) -> Self {
+        let mut model = payload
+            .and_then(|hud| clean_text(&hud["model"]))
+            .or_else(|| clean_text(&node["model"]));
+        if mode == "claude-code"
+            && let Some(name) = &model
+            && let Some((prefix, rest)) = name.split_once(char::is_whitespace)
+            && prefix.eq_ignore_ascii_case("claude")
+            && !rest.trim().is_empty()
+        {
+            model = Some(rest.trim().to_owned().into());
+        }
+        let effort = payload
+            .filter(|_| matches!(mode, "codex" | "dsh"))
+            .and_then(|payload| clean_text(&payload["effort"]));
         let context_percent = payload
             .and_then(|payload| payload["contextPercent"].as_f64())
             .filter(|percent| percent.is_finite() && *percent >= 0.);
@@ -126,6 +148,10 @@ impl CodexHud {
             label.push_str(&format!(" ({} context)", format_context_window(window)));
         }
         Some(label.into())
+    }
+
+    pub(super) fn has_context_window(&self) -> bool {
+        self.context_window.is_some()
     }
 
     pub(super) fn context_percent(&self) -> Option<f64> {

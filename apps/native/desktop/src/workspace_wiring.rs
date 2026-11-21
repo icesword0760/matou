@@ -47,6 +47,7 @@ enum Overlay {
     CardMenu,
     Update,
     Egress,
+    Accounts,
 }
 
 #[derive(Clone)]
@@ -155,6 +156,9 @@ pub(super) struct WorkspaceWiring {
     egress_request: Option<(u64, &'static str)>,
     egress_refresh_scheduled: bool,
     egress_error: Option<String>,
+    account_request: Option<u64>,
+    account_summary: Option<Value>,
+    account_bounds: TriggerBounds,
     hud_request: Option<(u64, String)>,
     hud: Option<(String, Value)>,
     hud_refresh_at: Option<Duration>,
@@ -254,6 +258,9 @@ impl WorkspaceWiring {
             egress_request: None,
             egress_refresh_scheduled: false,
             egress_error: None,
+            account_request: None,
+            account_summary: None,
+            account_bounds: Rc::default(),
             hud_request: None,
             hud: None,
             hud_refresh_at: None,
@@ -267,6 +274,37 @@ impl WorkspaceWiring {
     pub(super) fn is_detached(&self, id: &str) -> bool {
         self.detached.for_session(id).is_some()
     }
+}
+
+fn account_label(account: &Value) -> String {
+    if let Some(email) = trimmed_graph_text(&account["email"])
+        && let Some((prefix, _)) = email.split_once('@')
+        && !prefix.is_empty()
+    {
+        return if prefix.contains('•') {
+            prefix.chars().take(24).collect()
+        } else {
+            format!("{}•••", prefix.chars().take(2).collect::<String>())
+        };
+    }
+    let name = trimmed_graph_text(&account["name"]).or_else(|| trimmed_graph_text(&account["id"]));
+    name.map_or_else(
+        || "•••".into(),
+        |name| {
+            let prefix: String = name.chars().take(4).collect();
+            format!("{prefix}•••")
+        },
+    )
+}
+
+fn account_dot(account: &Value) -> Div {
+    let color = match account["status"].as_str() {
+        Some("active") => 0x3da66b,
+        Some("expired") => 0xcf5856,
+        Some("rate-limited") => 0xd79842,
+        _ => 0x8d99a8,
+    };
+    div().flex_none().size(px(5.)).rounded_full().bg(rgb(color))
 }
 
 impl Workspace {
@@ -609,21 +647,17 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> bool {
         let mods = stroke.modifiers;
-        if !self.wiring_available()
-            || self.wiring.board_open
-            || self.wiring.overlay.is_some()
-            || !(if cfg!(target_os = "macos") {
-                mods.platform && !mods.control
-            } else {
-                mods.control && !mods.platform
-            })
-        {
+        if !self.wiring_available() || self.wiring.board_open || self.wiring.overlay.is_some() {
             return false;
         }
         let Some(current) = self.active_level_focus().map(str::to_owned) else {
             return false;
         };
-        if stroke.key == "d" && !mods.alt && self.can_split_pane(&current) {
+        if stroke.key == "d"
+            && !mods.alt
+            && (mods.shift || self.active_split_tree().is_some())
+            && self.can_split_pane(&current)
+        {
             let direction = if mods.shift {
                 SplitDirection::Vertical
             } else {
@@ -639,10 +673,12 @@ impl Workspace {
             return false;
         }
         let target = match (mods.alt, stroke.key.as_str()) {
-            (true, "up") => tree.directional_session(&current, PaneDirection::Up),
-            (true, "down") => tree.directional_session(&current, PaneDirection::Down),
-            (true, "left") => tree.directional_session(&current, PaneDirection::Left),
-            (true, "right") => tree.directional_session(&current, PaneDirection::Right),
+            (true, "up" | "arrowup") => tree.directional_session(&current, PaneDirection::Up),
+            (true, "down" | "arrowdown") => tree.directional_session(&current, PaneDirection::Down),
+            (true, "left" | "arrowleft") => tree.directional_session(&current, PaneDirection::Left),
+            (true, "right" | "arrowright") => {
+                tree.directional_session(&current, PaneDirection::Right)
+            }
             (false, "[") => tree.adjacent_session(Some(&current), PaneStep::Previous),
             (false, "]") => tree.adjacent_session(Some(&current), PaneStep::Next),
             (false, "w") => {
@@ -657,7 +693,7 @@ impl Workspace {
         true
     }
 
-    fn wiring_dark(&self) -> bool {
+    pub(super) fn wiring_dark(&self) -> bool {
         self.theme.effective() == matou_native_desktop::theme_tokens::AppTheme::Dark
     }
 
@@ -747,11 +783,7 @@ impl Workspace {
             self.hidden_tabs = None;
             self.permission_menu = None;
             let previous = window.focused(cx);
-            self.wiring.restore_focus = if next != Overlay::CardMenu
-                && previous
-                    .as_ref()
-                    .is_none_or(|focus| *focus == self.control_focus["shortcut-help"])
-            {
+            self.wiring.restore_focus = if next != Overlay::CardMenu && previous.is_none() {
                 self.active_terminal_focus(cx).or(previous)
             } else {
                 previous
@@ -777,6 +809,7 @@ impl Workspace {
                 self.wiring.update.dispatch(UpdateAction::Dismiss);
             }
             Some(Overlay::Egress) => self.wiring.egress.open = false,
+            Some(Overlay::Accounts) => {}
             None => return,
         }
         let previous = self.wiring.restore_focus.take();
@@ -799,8 +832,12 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> bool {
         let mods = stroke.modifiers;
-        let shortcut =
-            stroke.key == "/" && (mods.platform ^ mods.control) && !mods.shift && !mods.alt;
+        let mod_key = terminal_surface::terminal_mod(mods, cfg!(target_os = "macos"));
+        let shortcut = mod_key
+            && !mods.alt
+            && (matches!(stroke.key.as_str(), "/" | "?") && !mods.shift
+                || stroke.key == "?"
+                || stroke.key_char.as_deref() == Some("?"));
         if self.wiring.overlay == Some(Overlay::Shortcuts) {
             if shortcut || stroke.key == "escape" {
                 let reason = if shortcut {
@@ -876,14 +913,7 @@ impl Workspace {
             }
             return true;
         }
-        if shortcut
-            && self.wiring_available()
-            && (cfg!(target_os = "macos") && mods.platform
-                || !self
-                    .terminals
-                    .values()
-                    .any(|terminal| terminal.read(cx).focus.is_focused(window)))
-        {
+        if shortcut && self.wiring_available() {
             self.toggle_shortcuts(window, cx);
             return true;
         }
@@ -936,7 +966,7 @@ impl Workspace {
                 .values()
                 .any(|terminal| terminal.read(cx).focus.is_focused(window))
         {
-            window.focus(&self.control_focus["board"]);
+            window.focus(&self.control_focus["sidebar-board"]);
         }
         if !self.wiring.board_open {
             self.restore_geometry = true;
@@ -1231,7 +1261,7 @@ impl Workspace {
             return;
         }
         self.toggle_board(window, cx);
-        window.focus(&self.control_focus["board"]);
+        window.focus(&self.control_focus["sidebar-board"]);
         if self.active_scene_id() == Some(target.scene.as_str())
             && self.graph_node(&target.id).is_some()
         {
@@ -1496,34 +1526,6 @@ impl Workspace {
         }
     }
 
-    pub(super) fn card_more_button(&self, id: &str, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.wiring_card_menu(id).can_open() {
-            return None;
-        }
-        let target = id.to_owned();
-        let label = self.locale.text("会话操作", "Session actions");
-        Some(
-            div()
-                .id(SharedString::from(format!("card-more-{id}")))
-                .focusable()
-                .tab_index(0)
-                .size(px(26.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(5.))
-                .text_color(rgba(self.theme_palette().workspace.muted))
-                .cursor_pointer()
-                .tooltip(move |_, cx| cx.new(|_| CardTooltip(label.into())).into())
-                .child("···")
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-                    this.open_wiring_card_menu(&target, event.position(), window, cx);
-                }))
-                .into_any_element(),
-        )
-    }
-
     pub(super) fn render_wiring_overlay(
         &self,
         window: &Window,
@@ -1598,6 +1600,7 @@ impl Workspace {
                         .into_any_element(),
                 )
             }
+            Overlay::Accounts => Some(self.render_account_panel(window, cx)),
             Overlay::Egress => {
                 let bounds = self.wiring.egress_bounds.get();
                 let position = bounds.map_or(
@@ -1734,6 +1737,13 @@ impl Workspace {
                         } else if Workspace::is_theme_shortcut(&event.keystroke) {
                             cx.stop_propagation();
                             let _ = shortcut_owner.update(cx, Workspace::toggle_theme_shortcut);
+                        } else if let Some(zoom) = terminal_surface::font_zoom_for_key(
+                            &event.keystroke,
+                            cfg!(target_os = "macos"),
+                        ) {
+                            cx.stop_propagation();
+                            let _ = shortcut_owner
+                                .update(cx, |owner, cx| owner.zoom_terminal_font(zoom, cx));
                         }
                     });
                     window.focus(&terminal.read(cx).focus);
@@ -2149,6 +2159,248 @@ impl Workspace {
         })
     }
 
+    pub(super) fn refresh_accounts_after_provider_change(&mut self, cx: &mut Context<Self>) {
+        if self.domain_ready && self.hierarchy.is_some() {
+            self.wiring.account_request = None;
+            self.refresh_accounts(cx);
+        }
+    }
+
+    fn refresh_accounts(&mut self, cx: &mut Context<Self>) {
+        if self.wiring.account_request.is_some() {
+            return;
+        }
+        let request_id = self.next_wiring_request();
+        if self
+            .commands
+            .send_at(
+                self.runtime_generation,
+                Command::GetAccountSummary { request_id },
+            )
+            .is_ok()
+        {
+            self.wiring.account_request = Some(request_id);
+            cx.notify();
+        }
+    }
+
+    fn toggle_accounts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.wiring.overlay == Some(Overlay::Accounts) {
+            self.dismiss_wiring_overlay(window, cx);
+        } else if self.wiring_available() {
+            self.open_wiring_overlay(Overlay::Accounts, window, cx);
+            if let Some(focus) = self.active_terminal_focus(cx) {
+                self.wiring.restore_focus = Some(focus);
+            }
+            self.refresh_accounts(cx);
+        }
+    }
+
+    fn accounts(&self) -> &[Value] {
+        self.wiring
+            .account_summary
+            .as_ref()
+            .and_then(|summary| summary["accounts"].as_array())
+            .map_or(&[], Vec::as_slice)
+    }
+
+    fn current_account(&self) -> Option<&Value> {
+        let id = self.wiring.account_summary.as_ref()?["currentId"].as_str()?;
+        self.accounts().iter().find(|account| account["id"] == id)
+    }
+
+    pub(super) fn footer_account_trigger(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        let palette = self.theme_palette().footer;
+        let account = self.current_account();
+        let label = account.map(account_label).unwrap_or_else(|| {
+            self.locale
+                .text(FOOTER_ACCOUNT_LABEL, "Claude accounts")
+                .into()
+        });
+        self.button(
+            div()
+                .id("footer-account")
+                .relative()
+                .flex_none()
+                .ml(px(8.))
+                .flex()
+                .items_center()
+                .gap(px(7.))
+                .px(px(8.))
+                .py(px(5.))
+                .rounded(px(5.))
+                .text_color(rgba(palette.account))
+                .whitespace_nowrap()
+                .cursor_pointer()
+                .hover(|style| style.bg(rgba(0x518ef019)))
+                .child(footer_user_icon(14., palette.account >> 8))
+                .child(
+                    div()
+                        .max_w(px(116.))
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .child(footer_text("account", label)),
+                )
+                .children(account.map(account_dot))
+                .child(ui_text("⌃"))
+                .children(footer_bounds_probe("account"))
+                .children(wiring_probe_bounds("footer-account".into()))
+                .child(measure_trigger(self.wiring.account_bounds.clone())),
+            &self.control_focus["accounts"],
+            Self::toggle_accounts,
+            cx,
+        )
+    }
+
+    fn render_account_panel(&self, window: &Window, cx: &Context<Self>) -> AnyElement {
+        let palette = self.theme_palette();
+        let locale = self.locale;
+        let width = (window.viewport_size().width - px(24.))
+            .max(px(0.))
+            .min(px(410.));
+        let position = self
+            .wiring
+            .account_bounds
+            .get()
+            .map(|bounds| bounds.top_right() - point(px(0.), px(6.)))
+            .unwrap_or_else(|| {
+                point(
+                    window.viewport_size().width - px(12.),
+                    window.viewport_size().height - px(46.),
+                )
+            });
+        let owner = cx.weak_entity();
+        let close = owner.clone();
+        let manage = owner.clone();
+        let active = self.current_account();
+        let rows = div()
+            .id("footer-account-list")
+            .flex()
+            .flex_col()
+            .max_h((window.viewport_size().height - px(160.)).max(px(44.)))
+            .overflow_y_scroll()
+            .px(px(18.))
+            .when(self.accounts().is_empty(), |rows| {
+                rows.child(
+                    div()
+                        .py(px(14.))
+                        .text_color(rgba(palette.workspace.muted))
+                        .child(if self.wiring.account_request.is_some() {
+                            locale.text("正在读取账户…", "Loading accounts…")
+                        } else {
+                            locale.text(
+                                "暂无 Claude 账户，请前往设置管理。",
+                                "No Claude accounts. Manage accounts in Settings.",
+                            )
+                        }),
+                )
+            })
+            .children(self.accounts().iter().map(|account| {
+                let status = match account["status"].as_str() {
+                    Some("active") => locale.text("使用中", "Active"),
+                    Some("expired") => locale.text("登录已失效", "Expired"),
+                    Some("rate-limited") => locale.text("限流", "Rate limited"),
+                    _ => locale.text("待启用", "Needs activation"),
+                };
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .py(px(9.))
+                    .border_t_1()
+                    .border_color(rgba(palette.workspace.line))
+                    .when(active == Some(account), |row| {
+                        row.font_weight(FontWeight::SEMIBOLD)
+                    })
+                    .child(account_dot(account))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .child(account_label(account)),
+                    )
+                    .children(trimmed_graph_text(&account["plan"]).map(str::to_owned))
+                    .child(
+                        div()
+                            .text_color(rgba(palette.workspace.muted))
+                            .child(status),
+                    )
+            }));
+        let panel = div()
+            .id("footer-account-panel")
+            .track_focus(&self.wiring.overlay_focus)
+            .w(width)
+            .flex()
+            .flex_col()
+            .rounded(px(12.))
+            .overflow_hidden()
+            .bg(rgba(palette.workspace.panel))
+            .text_color(rgba(palette.workspace.text))
+            .text_size(px(12.))
+            .border_1()
+            .border_color(rgba(palette.workspace.line))
+            .shadow(vec![shadow(0x263d61, 0.15, 16., 42.)])
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .px(px(18.))
+                    .py(px(15.))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_size(px(14.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(locale.text(FOOTER_ACCOUNT_LABEL, "Claude accounts")),
+                    )
+                    .child(
+                        div()
+                            .id("footer-accounts-close")
+                            .cursor_pointer()
+                            .child("×")
+                            .on_click(move |_, window, cx| {
+                                let _ = close
+                                    .update(cx, |this, cx| this.dismiss_wiring_overlay(window, cx));
+                            }),
+                    ),
+            )
+            .child(rows)
+            .child(
+                div()
+                    .id("footer-manage-accounts")
+                    .px(px(18.))
+                    .py(px(12.))
+                    .border_t_1()
+                    .border_color(rgba(palette.workspace.line))
+                    .text_color(rgba(palette.workspace.accent))
+                    .cursor_pointer()
+                    .focusable()
+                    .tab_index(0)
+                    .child(locale.text("前往设置管理", "Manage in Settings"))
+                    .on_click(move |_, window, cx| {
+                        let _ = manage.update(cx, |this, cx| this.toggle_settings(window, cx));
+                    }),
+            );
+        div()
+            .absolute()
+            .inset_0()
+            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                let _ = owner.update(cx, |this, cx| this.dismiss_wiring_overlay(window, cx));
+                cx.stop_propagation();
+            })
+            .child(
+                anchored()
+                    .anchor(Corner::BottomRight)
+                    .position(position)
+                    .snap_to_window()
+                    .child(panel),
+            )
+            .into_any_element()
+    }
+
     pub(super) fn egress_trigger(&self, cx: &Context<Self>) -> Stateful<Div> {
         let mut view = self.wiring.egress.chip(
             true,
@@ -2424,6 +2676,8 @@ impl Workspace {
                 self.motion_clock.elapsed(),
             );
         }
+        self.wiring.account_request = None;
+        self.wiring.account_summary = None;
         self.wiring.hud_request = None;
         self.wiring.hud = None;
         self.wiring.hud_refresh_at = None;
@@ -2471,6 +2725,9 @@ impl Workspace {
         }
         if phase == ConnectionPhase::Ready && self.domain_ready {
             self.refresh_agent_hud(cx);
+            if self.wiring.account_summary.is_none() && self.agent_hud_target().is_some() {
+                self.refresh_accounts(cx);
+            }
         }
     }
 
@@ -2589,6 +2846,11 @@ impl Workspace {
                     Err(error) => self.update_failed(stage, error.to_string(), cx),
                 },
             }
+        }
+        if kind == "accountSummaryResult" && self.wiring.account_request == Some(request_id) {
+            self.wiring.account_request = None;
+            self.wiring.account_summary = Some(reply["result"]["accountSummary"].clone());
+            cx.notify();
         }
         if kind == "agentHudResult"
             && let Some((pending, target)) = self.wiring.hud_request.as_ref()
@@ -2767,6 +3029,7 @@ impl Workspace {
             Overlay::CardMenu => "card menu",
             Overlay::Update => "update",
             Overlay::Egress => "egress",
+            Overlay::Accounts => "accounts",
         })
     }
 

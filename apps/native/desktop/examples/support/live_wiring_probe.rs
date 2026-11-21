@@ -359,7 +359,7 @@ done
                 }
                 if let Event::Diagnostic(message) = &event {
                     assert!(
-                        !message.contains("acknowledgement exceeds latest sent sequence"),
+                        !message.to_ascii_lowercase().contains("sequence"),
                         "Offline Runtime diagnostic: {message}"
                     );
                     eprintln!("Offline Runtime diagnostic: {message}");

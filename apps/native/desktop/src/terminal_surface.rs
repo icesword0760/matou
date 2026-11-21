@@ -26,7 +26,33 @@ use crate::terminal_input::{
 };
 use crate::terminal_scrollbar::ScrollbarMetrics;
 
-const FONT_SIZE: Pixels = px(11.);
+pub const DEFAULT_TERMINAL_FONT_SIZE: u8 = 11;
+pub const MIN_TERMINAL_FONT_SIZE: u8 = 10;
+pub const MAX_TERMINAL_FONT_SIZE: u8 = 24;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FontZoom {
+    In,
+    Out,
+    Reset,
+}
+pub fn terminal_mod(modifiers: gpui::Modifiers, is_mac: bool) -> bool {
+    modifiers.platform == is_mac && modifiers.control != is_mac && !modifiers.function
+}
+
+pub fn font_zoom_for_key(stroke: &gpui::Keystroke, is_mac: bool) -> Option<FontZoom> {
+    let mods = stroke.modifiers;
+    if !terminal_mod(mods, is_mac) || mods.alt {
+        return None;
+    }
+    match stroke.key.as_str() {
+        "=" | "+" => Some(FontZoom::In),
+        "-" | "_" => Some(FontZoom::Out),
+        "0" if !mods.shift => Some(FontZoom::Reset),
+        _ => None,
+    }
+}
+
 const DEFAULT_VERTICAL_INSET: Pixels = px(14.);
 const CANVAS_VERTICAL_INSET: Pixels = px(12.);
 const BLINK_INTERVAL: Duration = Duration::from_millis(500);
@@ -53,6 +79,7 @@ pub struct SurfaceEvent {
 }
 pub enum SurfaceEventKind {
     Input(Vec<u8>),
+    FontZoom(FontZoom),
     Select(SelectionAction),
     Copy {
         interrupt_if_empty: bool,
@@ -248,6 +275,7 @@ pub struct TerminalSurface {
     search: Option<matou_native_runtime::search::SearchResult>,
     pub focus: FocusHandle,
     font: Font,
+    font_size: u8,
     metrics: Metrics,
     vertical_inset: Pixels,
     last_dimensions: Option<Dimensions>,
@@ -394,23 +422,15 @@ impl TerminalSurface {
             .copied()
             .unwrap_or("monospace");
         let face = font(family);
-        let id = text.resolve_font(&face);
-        let width = text
-            .ch_advance(id, FONT_SIZE)
-            .unwrap_or_else(|_| text.bounding_box(id, FONT_SIZE).size.width);
-        // font-kit reports descenders below the baseline as a negative value.
-        // Adding it makes rows shorter than the glyphs and overlaps text.
-        let height = text.ascent(id, FONT_SIZE) - text.descent(id, FONT_SIZE);
+        let metrics = Self::measure_font(&face, DEFAULT_TERMINAL_FONT_SIZE, cx);
         Self {
             transport_generation: 0,
             transport_suspended: false,
             search: None,
             focus: cx.focus_handle().tab_stop(true),
             font: face,
-            metrics: Metrics {
-                width: width.max(px(1.)),
-                height: px(f32::from(height).ceil()).max(px(1.)),
-            },
+            font_size: DEFAULT_TERMINAL_FONT_SIZE,
+            metrics,
             vertical_inset: DEFAULT_VERTICAL_INSET,
             last_dimensions: None,
             screen: None,
@@ -629,6 +649,29 @@ impl TerminalSurface {
                     cx.notify();
                 });
             }));
+        }
+    }
+
+    fn measure_font(face: &Font, size: u8, cx: &Context<Self>) -> Metrics {
+        let text = cx.text_system();
+        let font_size = px(f32::from(size));
+        let id = text.resolve_font(face);
+        let width = text
+            .ch_advance(id, font_size)
+            .unwrap_or_else(|_| text.bounding_box(id, font_size).size.width);
+        let height = text.ascent(id, font_size) - text.descent(id, font_size);
+        Metrics {
+            width: width.max(px(1.)),
+            height: px(f32::from(height).ceil()).max(px(1.)),
+        }
+    }
+
+    pub fn set_font_size(&mut self, size: u8, cx: &mut Context<Self>) {
+        if self.font_size != size {
+            self.font_size = size;
+            self.metrics = Self::measure_font(&self.font, size, cx);
+            self.last_dimensions = None;
+            cx.notify();
         }
     }
 
@@ -1225,6 +1268,24 @@ impl TerminalSurface {
     }
 
     fn on_scroll(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
+        if terminal_mod(event.modifiers, cfg!(target_os = "macos")) && !event.modifiers.alt {
+            let delta = match event.delta {
+                gpui::ScrollDelta::Pixels(delta) => f32::from(delta.y),
+                gpui::ScrollDelta::Lines(delta) => delta.y,
+            };
+            if delta != 0. {
+                self.emit(
+                    SurfaceEventKind::FontZoom(if delta > 0. {
+                        FontZoom::In
+                    } else {
+                        FontZoom::Out
+                    }),
+                    cx,
+                );
+            }
+            cx.stop_propagation();
+            return;
+        }
         let reports_wheel = matches!(
             self.modes.mouse_protocol,
             MouseProtocol::Vt200 | MouseProtocol::Drag | MouseProtocol::Any
@@ -1438,6 +1499,7 @@ impl TerminalSurface {
         shape(
             self.composition.text.replace(['\n', '\r'], " ").into(),
             &self.font,
+            self.font_size,
             0xffffff,
             window,
         )
@@ -1533,7 +1595,13 @@ impl TerminalSurface {
                 };
                 if !cell.invisible && (!cell.blink || self.blink_visible) {
                     if !cell.text.is_empty() && cell.text != " " && !cell.text.contains('\n') {
-                        let line = shape(cell.text.clone().into(), fonts.face(cell), fg, window);
+                        let line = shape(
+                            cell.text.clone().into(),
+                            fonts.face(cell),
+                            self.font_size,
+                            fg,
+                            window,
+                        );
                         let _ = line.paint(bounds.origin, bounds.size.height, window, cx);
                     }
                     paint_decorations(cell, screen, bounds, fg, window);
@@ -1976,7 +2044,13 @@ impl CellFonts {
     }
 }
 
-fn shape(text: SharedString, face: &Font, fg: u32, window: &mut Window) -> ShapedLine {
+fn shape(
+    text: SharedString,
+    face: &Font,
+    font_size: u8,
+    fg: u32,
+    window: &mut Window,
+) -> ShapedLine {
     let run = TextRun {
         len: text.len(),
         font: face.clone(),
@@ -1987,7 +2061,7 @@ fn shape(text: SharedString, face: &Font, fg: u32, window: &mut Window) -> Shape
     };
     window
         .text_system()
-        .shape_line(text, FONT_SIZE, &[run], None)
+        .shape_line(text, px(f32::from(font_size)), &[run], None)
 }
 
 fn resolve(color: Color, default: u32, screen: &Screen) -> u32 {
@@ -2094,5 +2168,33 @@ fn paint_cursor(window: &mut Window, bounds: Bounds<Pixels>, color: u32, style: 
             vertical(window, bounds.right() - px(1.), px(1.));
         }
         CursorStyle::Block => {}
+    }
+}
+
+#[cfg(test)]
+mod shortcut_tests {
+    use super::*;
+
+    #[test]
+    fn font_shortcuts_use_command_on_mac_and_control_on_windows() {
+        let mut stroke = gpui::Keystroke::parse("cmd-=").unwrap();
+        assert_eq!(font_zoom_for_key(&stroke, true), Some(FontZoom::In));
+        assert_eq!(font_zoom_for_key(&stroke, false), None);
+
+        stroke.modifiers.platform = false;
+        stroke.modifiers.control = true;
+        for (key, action) in [
+            ("=", FontZoom::In),
+            ("+", FontZoom::In),
+            ("-", FontZoom::Out),
+            ("_", FontZoom::Out),
+            ("0", FontZoom::Reset),
+        ] {
+            stroke.key = key.into();
+            assert_eq!(font_zoom_for_key(&stroke, false), Some(action));
+            assert_eq!(font_zoom_for_key(&stroke, true), None);
+        }
+        stroke.modifiers.alt = true;
+        assert_eq!(font_zoom_for_key(&stroke, false), None);
     }
 }
