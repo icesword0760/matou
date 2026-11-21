@@ -71,11 +71,13 @@ pub struct ManualDownload {
 fn resolve_manual_download(
     files: &[ManifestFile],
     feed: &FeedConfiguration,
+    extension: &str,
 ) -> Option<ManualDownload> {
+    let suffix = format!(".{extension}");
     let file = files.iter().find(|file| {
         file.url.as_deref().is_some_and(|value| {
             let path = value.split(['?', '#']).next().unwrap_or_default();
-            path.to_ascii_lowercase().ends_with(".dmg")
+            path.to_ascii_lowercase().ends_with(&suffix)
         })
     })?;
     let base = Url::parse(&format!("{}/", feed.url.trim_end_matches('/'))).ok()?;
@@ -291,6 +293,9 @@ pub enum DownloadError {
 /// The owner supplies fetch and automatic-updater adapters on an appropriate worker.
 pub trait UpdateFetcher {
     fn check(&self, url: &Url) -> Result<Manifest, UpdateError>;
+    fn installer_extension(&self) -> &'static str {
+        "dmg"
+    }
     fn fetch(&self, request: &ManualDownload) -> io::Result<DownloadResponse>;
     fn download_automatic(
         &self,
@@ -367,12 +372,14 @@ impl UpdateFileWriter for LocalUpdateFiles {
     }
 }
 
-fn installer_filename(url: &Url) -> Result<String, String> {
+fn installer_filename(url: &Url, extension: &str) -> Result<String, String> {
+    let suffix = format!(".{extension}");
     let filename = url
         .path_segments()
         .and_then(Iterator::last)
-        .filter(|segment| !segment.is_empty())
-        .unwrap_or("Matou-update.dmg");
+        .filter(|segment| !segment.is_empty());
+    let fallback = format!("Matou-update{suffix}");
+    let filename = filename.unwrap_or(&fallback);
     let mut safe_name = percent_decode_str(filename)
         .decode_utf8()
         .map_err(|_| "Invalid installer filename encoding".to_string())?
@@ -385,8 +392,8 @@ fn installer_filename(url: &Url) -> Result<String, String> {
             }
         })
         .collect::<String>();
-    if !safe_name.to_ascii_lowercase().ends_with(".dmg") {
-        safe_name.push_str(".dmg");
+    if !safe_name.to_ascii_lowercase().ends_with(&suffix) {
+        safe_name.push_str(&suffix);
     }
     Ok(safe_name)
 }
@@ -409,7 +416,7 @@ fn download_manual(
             "The update server returned no file body",
         )
     })?;
-    let filename = installer_filename(&request.url)?;
+    let filename = installer_filename(&request.url, fetcher.installer_extension())?;
     let started_at = now();
     let mut last_progress_at = started_at;
     let mut file = files.create(&filename).map_err(|error| error.to_string())?;
@@ -500,7 +507,12 @@ impl UpdateManager {
         options: UpdateOptions,
     ) -> Result<Self, PolicyError> {
         options.feed.validate()?;
-        Ok(Self {
+        Ok(Self::new_live(current_version, options))
+    }
+
+    /// Report an invalid live feed when updates are checked, leaving startup usable.
+    pub(crate) fn new_live(current_version: CurrentVersion, options: UpdateOptions) -> Self {
+        Self {
             current_version,
             options,
             state: Mutex::new(State {
@@ -511,7 +523,7 @@ impl UpdateManager {
             }),
             operation: tokio::sync::Mutex::new(()),
             automatic_install_requested: AtomicBool::new(false),
-        })
+        }
     }
 
     pub fn preferences(&self) -> UpdatePreferences {
@@ -590,7 +602,7 @@ impl UpdateManager {
                         },
                     };
                     if available {
-                        self.accept_release(manifest, &mut publish);
+                        self.accept_release(manifest, fetcher.installer_extension(), &mut publish);
                     } else {
                         self.publish(UpdatePhase::NotAvailable, &mut publish);
                     }
@@ -611,8 +623,14 @@ impl UpdateManager {
         unreachable!("the last check attempt returns")
     }
 
-    fn accept_release(&self, manifest: Manifest, publish: &mut impl FnMut(UpdateState)) {
-        let manual_download = resolve_manual_download(&manifest.files, &self.options.feed);
+    fn accept_release(
+        &self,
+        manifest: Manifest,
+        extension: &str,
+        publish: &mut impl FnMut(UpdateState),
+    ) {
+        let manual_download =
+            resolve_manual_download(&manifest.files, &self.options.feed, extension);
         let first_size = manifest.files.iter().find_map(|file| file.size);
         let size = match self.options.install_mode {
             InstallMode::Manual => manual_download

@@ -42,7 +42,7 @@ use crate::{
     retention_policy::{self, IndexedCheckpoint, IndexedSession, RetentionQuota, SessionRetention},
     search::{SearchRequest, SearchResult},
     shell_input::{InteractiveLaunch, ShellInput},
-    subscription_launch, update_download,
+    subscription_launch, update_download, update_http,
     worker::{SelectionCopy, ShellSubmission, WorkerCommand},
     workspace_paths::WorkspacePathChecks,
 };
@@ -1401,10 +1401,70 @@ struct RuntimeWiring {
     fixtures: OfflineFixtures,
     dsh: Option<DshSessionCatalog>,
     antigravity: AntigravityCatalog,
-    update: update_download::UpdateManager,
+    update: Arc<update_download::UpdateManager>,
+    live_update: Option<LiveUpdate>,
     next_egress_attempt: u64,
     live_egress: Option<LiveEgress>,
     claude_accounts: Option<crate::claude_accounts::AccountWorker>,
+}
+
+struct LiveUpdate {
+    platform: Platform,
+    worker: Option<mpsc::Sender<(&'static str, u64)>>,
+}
+
+impl LiveUpdate {
+    fn queue(
+        &mut self,
+        kind: &'static str,
+        request_id: u64,
+        update: &Arc<update_download::UpdateManager>,
+        data_root: &Path,
+        events: &async_channel::Sender<Event>,
+    ) -> Result<()> {
+        if self.worker.is_none() {
+            let (commands, requests) = mpsc::channel();
+            let update = Arc::clone(update);
+            let events = events.clone();
+            let files = update_download::LocalUpdateFiles::new(data_root.join("updates"));
+            let platform = self.platform;
+            thread::Builder::new()
+                .name("matou-update".into())
+                .spawn(move || {
+                    let fetcher = update_http::HttpUpdateFetcher::new(platform);
+                    for (kind, request_id) in requests {
+                        let result = match &fetcher {
+                            Ok(fetcher) => {
+                                if kind == "updateCheckResult" {
+                                    update.check(
+                                        fetcher,
+                                        || now() as u64,
+                                        |ms| thread::sleep(Duration::from_millis(ms)),
+                                        |_| {},
+                                    );
+                                } else {
+                                    update.download(fetcher, &files, || now() as u64, |_| {});
+                                }
+                                Ok(json!(update.state()))
+                            }
+                            Err(error) => Err(anyhow!("Could not start update worker: {error}")),
+                        };
+                        if events
+                            .send_blocking(wiring_result(kind, request_id, result))
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                })?;
+            self.worker = Some(commands);
+        }
+        self.worker
+            .as_ref()
+            .unwrap()
+            .send((kind, request_id))
+            .context("Update worker is unavailable")
+    }
 }
 
 struct LiveEgress {
@@ -1681,36 +1741,85 @@ impl RuntimeWiring {
         {
             antigravity = antigravity.with_english_titles();
         }
-        let update = update_download::UpdateManager::new(
-            CurrentVersion::parse(env!("CARGO_PKG_VERSION"))?,
-            update_download::UpdateOptions {
-                feed: FeedConfiguration::resolve(None, None, None),
-                platform: if cfg!(target_os = "macos") {
-                    Platform::Darwin
-                } else if cfg!(windows) {
-                    Platform::Win32
-                } else {
-                    Platform::Linux
+        let platform = if cfg!(target_os = "macos") {
+            Platform::Darwin
+        } else if cfg!(windows) {
+            Platform::Win32
+        } else {
+            Platform::Linux
+        };
+        let (settings, live_update) = if fixtures.update.is_some() {
+            (
+                update_http::UpdateSettings {
+                    feed: FeedConfiguration::resolve(None, None, None),
+                    version: None,
+                    enabled: update_policy::update_checks_enabled(true, None),
                 },
+                None,
+            )
+        } else {
+            let executable = std::env::current_exe().ok();
+            let settings =
+                update_http::UpdateSettings::for_executable(executable.as_deref(), |key| {
+                    antigravity_launch::env_value(&environment, key)
+                        .and_then(|value| value.to_str())
+                        .map(String::from)
+                });
+            let live = LiveUpdate {
+                platform,
+                worker: None,
+            };
+            (settings, Some(live))
+        };
+        let version = settings
+            .version
+            .as_deref()
+            .unwrap_or(env!("CARGO_PKG_VERSION"));
+        let update = Arc::new(update_download::UpdateManager::new_live(
+            CurrentVersion::parse(version)?,
+            update_download::UpdateOptions {
+                feed: settings.feed,
+                platform,
                 arch: if cfg!(target_arch = "aarch64") {
                     Architecture::Arm64
                 } else {
                     Architecture::X64
                 },
-                enabled: update_policy::update_checks_enabled(fixtures.update.is_some(), None),
+                enabled: settings.enabled,
                 install_mode: InstallMode::Manual,
                 locale: UpdateLocale::default(),
             },
-        )?;
+        ));
         Ok(Self {
             fixtures,
             dsh,
             antigravity,
             update,
+            live_update,
             next_egress_attempt: 0,
             live_egress: None,
             claude_accounts: None,
         })
+    }
+
+    fn dispatch_live_update(
+        &mut self,
+        command: &Command,
+        data_root: &Path,
+        events: &async_channel::Sender<Event>,
+    ) -> bool {
+        let Some(live) = &mut self.live_update else {
+            return false;
+        };
+        let (kind, request_id) = match command {
+            Command::CheckForUpdate { request_id } => ("updateCheckResult", *request_id),
+            Command::DownloadUpdate { request_id } => ("updateDownloadResult", *request_id),
+            _ => return false,
+        };
+        if let Err(error) = live.queue(kind, request_id, &self.update, data_root, events) {
+            let _ = events.send_blocking(wiring_result(kind, request_id, Err(error)));
+        }
+        true
     }
 
     fn send_claude_account(
@@ -4527,6 +4636,9 @@ fn run_writable(
                         let _ = send.send_blocking(reply);
                     }
                 });
+                continue;
+            }
+            if wiring.dispatch_live_update(&command, &data_root, send) {
                 continue;
             }
             if let Some(reply) = wiring.handle(&command, &data_root, Some(&mut owner)) {

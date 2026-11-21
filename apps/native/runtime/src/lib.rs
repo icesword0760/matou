@@ -45,3 +45,5 @@ pub use model::{SessionEvent, SessionOptions, StorageFaultCode};
 mod readonly_export;
 pub mod update_download;
 pub mod workspace_paths;
+
+pub mod update_http;
