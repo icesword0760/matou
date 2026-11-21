@@ -1,3 +1,4 @@
+pub mod agent_hud_projection;
 pub mod browser_integration;
 mod claude_model_catalog;
 mod claude_request_gateway;
