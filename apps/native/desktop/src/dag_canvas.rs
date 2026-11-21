@@ -1570,6 +1570,7 @@ mod view {
         focus: FocusHandle,
         search_input: Entity<RenameInput>,
         search_subscription: Option<Subscription>,
+        toolbar_right_inset: Pixels,
         bounds: Option<Bounds<Pixels>>,
         drag: Option<DragState>,
         centering: Option<Centering>,
@@ -1621,6 +1622,7 @@ mod view {
                 focus: cx.focus_handle().tab_stop(true),
                 search_input,
                 search_subscription: None,
+                toolbar_right_inset: px(16.),
                 bounds: None,
                 drag: None,
                 centering: None,
@@ -1638,6 +1640,12 @@ mod view {
 
         pub fn canvas_mut(&mut self) -> &mut DagCanvas {
             &mut self.canvas
+        }
+
+        /// Reserve space for a host control alongside the floating toolbar.
+        pub fn with_toolbar_right_inset(mut self, inset: Pixels) -> Self {
+            self.toolbar_right_inset = inset;
+            self
         }
 
         /// Swap the projected layout without remounting the view. The transform
@@ -1819,7 +1827,7 @@ mod view {
             }
         }
 
-        fn center_node(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        pub fn center_node(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
             self.focus.focus(window);
             let from = self.display_transform();
             if self.canvas.focus_node(id) {
@@ -2003,7 +2011,7 @@ mod view {
 
             let search = div()
                 .relative()
-                .flex_none()
+                .min_w_0()
                 .w(px(search_width))
                 .child(
                     div()
@@ -2251,7 +2259,7 @@ mod view {
                 .absolute()
                 .top(px(14.))
                 .left(px(80.))
-                .right(px(16.))
+                .right(self.toolbar_right_inset)
                 .flex()
                 .items_start()
                 .justify_between()
@@ -2261,6 +2269,7 @@ mod view {
                 .child(
                     div()
                         .flex()
+                        .flex_none()
                         .items_center()
                         .gap(px(12.))
                         .child(zoom)
