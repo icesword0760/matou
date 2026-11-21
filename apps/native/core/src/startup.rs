@@ -118,6 +118,7 @@ pub fn open(data_root: &Path, runtime_generation: &str) -> Result<BootstrapResul
             // Classify a newer database before taking a lease or replacing stale
             // ownership evidence. Any inconclusive inspection follows normal startup.
             if assert_no_live_owner_read_only(&sqlite_path).is_ok()
+                && assert_wal_bundle_ready(&sqlite_path).is_ok()
                 && let Ok(connection) = open_recovery_read_only(&sqlite_path)
                 && read_schema_version(&connection).is_ok_and(|version| {
                     supported_schema_version().is_ok_and(|supported| version > supported)

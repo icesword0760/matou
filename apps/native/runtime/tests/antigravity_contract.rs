@@ -692,8 +692,8 @@ fn antigravity_catalog_replays_provider_history_fixture() -> Result<()> {
     let fixture: Value = serde_json::from_str(include_str!(
         "../../../../tooling/native-parity/fixtures/provider-history-reference.json"
     ))?;
-    let metadata = &fixture["datasets"]["antigravity-source"][0]["json"];
-    let expected = fixture["cases"]
+    let mut metadata = fixture["datasets"]["antigravity-source"][0]["json"].clone();
+    let mut expected = fixture["cases"]
         .as_array()
         .unwrap()
         .iter()
@@ -703,12 +703,38 @@ fn antigravity_catalog_replays_provider_history_fixture() -> Result<()> {
         .unwrap()
         .iter()
         .find(|step| step["provider"] == "antigravity")
-        .unwrap();
+        .unwrap()
+        .clone();
     let temp = sandbox()?;
-    write_metadata(temp.path(), metadata)?;
+    let workspace = if cfg!(windows) {
+        let workspace = temp.path().join("中文 workspace");
+        let uri = Url::from_file_path(&workspace).expect("absolute fixture workspace");
+        let conversations = metadata["conversations"].as_object_mut().unwrap();
+        for conversation in conversations.values_mut() {
+            let paths = conversation["summary"]["WorkspaceURIs"]
+                .as_array_mut()
+                .unwrap();
+            for path in paths {
+                match path.as_str().unwrap() {
+                    "file:///__fixture__/workspace" => *path = json!(uri.as_str()),
+                    "/__fixture__/workspace" => *path = json!(workspace),
+                    "/__fixture__/other" => *path = json!(temp.path().join("other")),
+                    unexpected => panic!("Unexpected fixture workspace: {unexpected}"),
+                }
+            }
+        }
+        for session in expected["sessions"].as_array_mut().unwrap() {
+            assert_eq!(session["cwd"], "/__fixture__/workspace");
+            session["cwd"] = json!(workspace);
+        }
+        workspace
+    } else {
+        PathBuf::from("/__fixture__/workspace")
+    };
+    write_metadata(temp.path(), &metadata)?;
     let mut catalog = Catalog::new(temp.path());
-    let actual = catalog.list(Path::new("/__fixture__/workspace"), ListOptions::default())?;
-    assert_eq!(serde_json::to_value(actual)?, *expected);
+    let actual = catalog.list(&workspace, ListOptions::default())?;
+    assert_eq!(serde_json::to_value(actual)?, expected);
     Ok(())
 }
 

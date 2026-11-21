@@ -1,12 +1,14 @@
 import { copyFile, cp, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
-import { basename, isAbsolute, join, parse, relative, resolve, sep, win32 } from 'node:path'
+import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep, win32 } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { isDeepStrictEqual, parseArgs } from 'node:util'
 
 const appId = 'com.matou.desktop'
 const productName = '码头'
 const runtimeExecutable = 'matou-native-runtime.exe'
+const ghosttyFilename = 'ghostty-vt.dll'
+const ghosttyVendor = fileURLToPath(new URL('../../apps/native/terminal/vendor/ghostty-vt/', import.meta.url))
 const applicationExecutable = productName + '.exe'
 const frozenVersion = '0.2.24'
 const artifactNamePattern = 'Matou-${version}-${os}-${arch}.${ext}'
@@ -338,10 +340,10 @@ async function requirePath(path, label, directory = false) {
   }
 }
 
-async function checkExecutable(path, label, arch) {
+async function checkPe(path, label, arch, dll = false) {
   await requirePath(path, label)
   const file = await open(path, 'r')
-  const invalid = () => new Error(`Expected a Windows PE executable for ${label}: ${path}`)
+  const invalid = () => new Error(`Expected a Windows PE ${dll ? 'DLL' : 'executable'} for ${label}: ${path}`)
   try {
     const dos = Buffer.alloc(64)
     if ((await file.read(dos, 0, dos.length, 0)).bytesRead !== dos.length
@@ -353,7 +355,8 @@ async function checkExecutable(path, label, arch) {
     const optionalSize = pe.readUInt16LE(20)
     const flags = pe.readUInt16LE(22)
     if (optionalSize < 2 || offset + 24 + optionalSize > (await file.stat()).size
-        || !(flags & 0x0002) || (flags & 0x2000) || pe.readUInt16LE(24) !== 0x20b) throw invalid()
+        || !(flags & 0x0002) || Boolean(flags & 0x2000) !== dll
+        || pe.readUInt16LE(24) !== 0x20b) throw invalid()
     const machine = pe.readUInt16LE(4)
     if (machine !== machines[arch]) {
       throw new Error(`${label} architecture mismatch: expected ${arch}, found PE machine 0x${machine.toString(16)} in ${path}`)
@@ -361,6 +364,19 @@ async function checkExecutable(path, label, arch) {
   } finally {
     await file.close()
   }
+}
+
+async function resolveGhosttyDll(explicit, runtimeBin, arch) {
+  if (explicit !== undefined) {
+    if (typeof explicit !== 'string' || !explicit.trim()) throw new Error('Missing Ghostty DLL path')
+    return explicit
+  }
+  const sibling = join(dirname(runtimeBin), ghosttyFilename)
+  const vendorArch = arch === 'arm64' ? 'aarch64' : 'x86_64'
+  return lstat(sibling).then(() => sibling, error => {
+    if (error.code !== 'ENOENT') throw error
+    return join(ghosttyVendor, 'windows-' + vendorArch, 'bin', ghosttyFilename)
+  })
 }
 
 async function requireEntries(directory, expected, label) {
@@ -398,7 +414,7 @@ export async function verifyWindowsDirPackage(path, options) {
     throw new Error(`Expected directory named ${plan.unpackedDirectoryName}: ${path}`)
   }
   const resources = join(path, plan.resourcesDirectory)
-  await requireEntries(path, [plan.applicationExecutable, plan.runtimeExecutable, plan.resourcesDirectory], 'unpacked package')
+  await requireEntries(path, [plan.applicationExecutable, plan.runtimeExecutable, ghosttyFilename, plan.resourcesDirectory], 'unpacked package')
   await requireEntries(resources, [plan.manifestFilename, plan.versionFilename, 'control-assets'], 'resources')
   await verifyClaudePlugin(resources)
   const { manifest, version } = packageMetadata(plan)
@@ -409,8 +425,9 @@ export async function verifyWindowsDirPackage(path, options) {
       throw new Error(`Invalid ${filename}: metadata differs from the package plan`)
     }
   }
-  await checkExecutable(join(path, plan.applicationExecutable), 'desktop binary', plan.arch)
-  await checkExecutable(join(path, plan.runtimeExecutable), 'runtime binary', plan.arch)
+  await checkPe(join(path, plan.applicationExecutable), 'desktop binary', plan.arch)
+  await checkPe(join(path, plan.runtimeExecutable), 'runtime binary', plan.arch)
+  await checkPe(join(path, ghosttyFilename), 'Ghostty DLL', plan.arch, true)
   return plan
 }
 
@@ -485,15 +502,17 @@ async function requireAbsent(path) {
   throw new Error('Output package already exists: ' + path)
 }
 
-export async function assembleWindowsDirPackage({ desktopBin, runtimeBin, outDir, ...options }) {
+export async function assembleWindowsDirPackage({ desktopBin, runtimeBin, ghosttyDll, outDir, ...options }) {
   const plan = planWindowsPackage(options)
   const output = await safeOutput(outDir)
   const destination = join(output, plan.unpackedDirectoryName)
   await requireAbsent(destination)
   for (const [path, label] of [[desktopBin, 'desktop binary'], [runtimeBin, 'runtime binary']]) {
     if (typeof path !== 'string' || !path.trim()) throw new Error('Missing ' + label)
-    await checkExecutable(path, label, plan.arch)
+    await checkPe(path, label, plan.arch)
   }
+  const dll = await resolveGhosttyDll(ghosttyDll, runtimeBin, plan.arch)
+  await checkPe(dll, 'Ghostty DLL', plan.arch, true)
 
   await mkdir(output, { recursive: true })
   if (await safeOutput(outDir) !== output) throw new Error('Output path changed during assembly')
@@ -504,6 +523,7 @@ export async function assembleWindowsDirPackage({ desktopBin, runtimeBin, outDir
     await mkdir(resources, { recursive: true })
     await copyFile(desktopBin, join(directory, plan.applicationExecutable))
     await copyFile(runtimeBin, join(directory, plan.runtimeExecutable))
+    await copyFile(dll, join(directory, ghosttyFilename))
     await cp(claudePluginSource, join(resources, 'control-assets', 'providers', 'claude-plugin'), { recursive: true })
     const { manifest, version } = packageMetadata(plan)
     await writeFile(join(resources, plan.manifestFilename), pretty(manifest) + '\n')
@@ -526,7 +546,7 @@ const requiredOptions = ['arch', 'desktop-bin', 'runtime-bin', 'out-dir', 'versi
 const usage = `Usage:
   node tooling/native-parity/package-native-win.mjs --arch <x64|arm64> [--target dir]
     --desktop-bin <file> --runtime-bin <file> --out-dir <temporary-subdirectory>
-    --version <X.Y.Z> [--update-base-url <http(s) URL>]
+    --version <X.Y.Z> [--update-base-url <http(s) URL>] [--ghostty-dll <file>]
 
 Assembles and verifies an offline Windows directory package. The approved output
 location is a subdirectory of the host temporary directory (or /tmp on POSIX).`
@@ -534,7 +554,7 @@ location is a subdirectory of the host temporary directory (or /tmp on POSIX).`
 async function main() {
   const { values } = parseArgs({
     options: {
-      ...Object.fromEntries([...requiredOptions, 'target', 'update-base-url'].map(name => [name, { type: 'string' }])),
+      ...Object.fromEntries([...requiredOptions, 'target', 'update-base-url', 'ghostty-dll'].map(name => [name, { type: 'string' }])),
       help: { type: 'boolean', short: 'h' }
     }
   })
@@ -545,6 +565,7 @@ async function main() {
   const result = await assembleWindowsDirPackage({
     arch: values.arch, target: values.target, version: values.version,
     desktopBin: values['desktop-bin'], runtimeBin: values['runtime-bin'],
+    ghosttyDll: values['ghostty-dll'],
     outDir: values['out-dir'], updateBaseUrl: values['update-base-url']
   })
   console.log(pretty(result))

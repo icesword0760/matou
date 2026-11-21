@@ -1138,7 +1138,9 @@ mod tests {
                     }
                     fs::write(&path, rows.as_bytes())?;
                     if let Some(at) = input["mtimeMs"].as_u64() {
-                        File::open(&path)?
+                        fs::OpenOptions::new()
+                            .write(true)
+                            .open(&path)?
                             .set_modified(UNIX_EPOCH + std::time::Duration::from_millis(at))?;
                     }
                     paths.push((path, rows));

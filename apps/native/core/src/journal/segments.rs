@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File},
-    io::{self, Write},
+    io::{self, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -82,7 +82,7 @@ impl SegmentJournal {
             let mut active = existing.clone();
             let repair = repair_segment_tail(&active.path, system_millis()?)?;
             active.bytes = fs::metadata(&active.path)?.len();
-            let mut handle = file_options().read(true).append(true).open(&active.path)?;
+            let mut handle = file_options().read(true).write(true).open(&active.path)?;
             restrict_file(&active.path)?;
             if active.bytes == 0 {
                 handle.write_all(MAGIC)?;
@@ -195,6 +195,7 @@ impl SegmentJournal {
             self.rotate()?;
         }
         let file = self.handle.as_mut().context("journal is closed")?;
+        file.seek(SeekFrom::End(0))?;
         let result = write_frame(file, &encoded, {
             #[cfg(test)]
             {
@@ -206,7 +207,10 @@ impl SegmentJournal {
             }
         });
         if let Err(error) = result {
-            let _ = file.set_len(self.active.bytes);
+            if let Err(rollback) = file.set_len(self.active.bytes) {
+                self.handle.take();
+                return Err(rollback).context(format!("roll back failed journal write: {error}"));
+            }
             return Err(error.into());
         }
         self.active.bytes += encoded.len() as u64;
@@ -347,7 +351,7 @@ fn new_segment(directory: &Path, index: u64) -> Segment {
 fn create_segment(path: &Path, partial_failure: bool) -> io::Result<File> {
     let mut handle = file_options()
         .read(true)
-        .append(true)
+        .write(true)
         .create_new(true)
         .open(path)?;
     let prepared = write_frame(&mut handle, MAGIC, partial_failure)

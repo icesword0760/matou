@@ -20,6 +20,9 @@ use matou_native_desktop::{
 #[cfg(target_os = "macos")]
 use matou_native_desktop::{macos, window_registry::file_url_path};
 
+#[cfg(target_os = "windows")]
+mod windows_bounds;
+
 actions!(matou_native, [Quit]);
 
 fn main() -> Result<()> {
@@ -60,6 +63,8 @@ fn main() -> Result<()> {
         }
     }
     let locale = current_interface_locale(read_locale_preference(&options.data_root));
+    #[cfg(target_os = "windows")]
+    let bounds_path = options.data_root.join("desktop-window-bounds.json");
     let runtime = Rc::new(RefCell::new(RuntimeBridge::start(options)?));
     let desktop = Rc::new(Desktop {
         instance: RefCell::new(Some(instance)),
@@ -67,6 +72,8 @@ fn main() -> Result<()> {
         quitting: Cell::new(false),
         window: Cell::new(None),
         probe,
+        #[cfg(target_os = "windows")]
+        bounds_path,
     });
     let application = Application::new().with_assets(NativeAssets);
     #[cfg(target_os = "macos")]
@@ -107,7 +114,8 @@ fn main() -> Result<()> {
             let mut cx = cx.to_async();
             if termination_hook
                 && let Err(error) = macos::defer_termination(move || {
-                    desktop.begin_quit(&mut cx);
+                    cx.update(|cx| desktop.begin_quit(cx))
+                        .unwrap_or_else(|error| eprintln!("Prepare native quit: {error:#}"));
                     desktop.runtime.borrow_mut().shutdown_async()
                 })
             {
@@ -170,17 +178,19 @@ struct Desktop {
     quitting: Cell<bool>,
     window: Cell<Option<WindowHandle<Workspace>>>,
     probe: Option<Probe>,
+    #[cfg(target_os = "windows")]
+    bounds_path: std::path::PathBuf,
 }
 
 impl Desktop {
-    fn begin_quit(&self, cx: &mut impl AppContext) {
+    fn begin_quit(&self, cx: &mut App) {
         if self.quitting.replace(true) {
             return;
         }
         if let Some(instance) = self.instance.borrow().as_ref() {
             instance.stop_forwarding();
         }
-        if let Some(window) = self.window.get()
+        if let Some(window) = self.live_window(cx)
             && let Err(error) = window.update(cx, |view, _, cx| view.flush_geometry(cx))
         {
             eprintln!("Flush native window geometry before quitting: {error:#}");
@@ -236,7 +246,46 @@ impl Desktop {
     }
 
     fn open_window(self: &Rc<Self>, cx: &mut App) -> Result<WindowHandle<Workspace>> {
-        let bounds = Bounds::centered(None, size(px(1200.), px(780.)), cx);
+        let min_size = size(px(720.), px(480.));
+        let options = WindowOptions {
+            show: self.probe.is_none(),
+            focus: self.probe.is_none(),
+            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+                None,
+                size(px(1200.), px(780.)),
+                cx,
+            ))),
+            window_min_size: Some(min_size),
+            titlebar: Some(TitlebarOptions {
+                title: Some(if cfg!(target_os = "macos") {
+                    "Matou Native".into()
+                } else {
+                    "码头".into()
+                }),
+                appears_transparent: cfg!(target_os = "macos"),
+                traffic_light_position: cfg!(target_os = "macos")
+                    .then_some(point(px(14.), px(16.))),
+            }),
+            window_background: if cfg!(target_os = "macos") {
+                WindowBackgroundAppearance::Transparent
+            } else {
+                WindowBackgroundAppearance::Opaque
+            },
+            app_id: Some("com.matou.native-parity".into()),
+            ..Default::default()
+        };
+        #[cfg(target_os = "windows")]
+        let options = if self.probe.is_none()
+            && let Some((bounds, display)) = windows_bounds::load(&self.bounds_path, min_size, cx)
+        {
+            WindowOptions {
+                window_bounds: Some(bounds),
+                display_id: Some(display),
+                ..options
+            }
+        } else {
+            options
+        };
         #[cfg(all(target_os = "macos", debug_assertions))]
         let window_diag = match std::env::var("MATOU_WINDOW_DIAG").as_deref() {
             Ok("1") => Some(false),
@@ -247,62 +296,62 @@ impl Desktop {
         if self.probe.is_none() && window_diag.is_some() {
             eprintln!("[window-diag] open_window begin");
         }
-        cx.open_window(
-            WindowOptions {
-                show: self.probe.is_none(),
-                focus: self.probe.is_none(),
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                window_min_size: Some(size(px(720.), px(480.))),
-                titlebar: Some(TitlebarOptions {
-                    title: Some("Matou Native".into()),
-                    appears_transparent: true,
-                    traffic_light_position: Some(point(px(14.), px(16.))),
-                }),
-                window_background: WindowBackgroundAppearance::Transparent,
-                app_id: Some("com.matou.native-parity".into()),
-                ..Default::default()
-            },
-            |window, cx| {
-                #[cfg(target_os = "macos")]
-                if let Err(error) = macos::apply_sidebar_material(window) {
-                    eprintln!("Apply native sidebar material: {error:#}");
-                }
-                let runtime = self.runtime.borrow();
-                let commands = runtime.commands.clone();
-                let events = runtime.events.clone();
-                let workspace = cx.new(|cx| Workspace::new(commands, events, window, cx));
-                cx.subscribe(&workspace, |_, locale: &InterfaceLocale, cx| {
-                    set_app_menu(*locale, cx)
-                })
-                .detach();
-                #[cfg(target_os = "macos")]
-                {
-                    let workspace = workspace.downgrade();
-                    let desktop = self.clone();
-                    window.on_window_should_close(cx, move |window, cx| {
-                        if desktop.quitting.get() {
-                            return !macos::termination_pending();
-                        }
-                        if let Err(error) = workspace.update(cx, |view, cx| view.flush_geometry(cx))
-                        {
-                            eprintln!("Flush native window geometry before hiding: {error:#}");
-                            return false;
-                        }
-                        if let Err(error) = macos::hide_window(window) {
-                            eprintln!("Hide native window: {error:#}");
-                        }
-                        false
-                    });
-                }
-                #[cfg(all(target_os = "macos", debug_assertions))]
-                if self.probe.is_none()
-                    && let Some(visibility_probe) = window_diag
-                {
-                    macos::window_diag::window_created(window, cx, visibility_probe);
-                }
-                workspace
-            },
-        )
+        cx.open_window(options, |window, cx| {
+            #[cfg(target_os = "macos")]
+            if let Err(error) = macos::apply_sidebar_material(window) {
+                eprintln!("Apply native sidebar material: {error:#}");
+            }
+            let runtime = self.runtime.borrow();
+            let commands = runtime.commands.clone();
+            let events = runtime.events.clone();
+            let workspace = cx.new(|cx| Workspace::new(commands, events, window, cx));
+            cx.subscribe(&workspace, |_, locale: &InterfaceLocale, cx| {
+                set_app_menu(*locale, cx)
+            })
+            .detach();
+            #[cfg(target_os = "windows")]
+            {
+                let workspace = workspace.downgrade();
+                let desktop = self.clone();
+                window.on_window_should_close(cx, move |window, cx| {
+                    if let Err(error) = workspace.update(cx, |view, cx| view.flush_geometry(cx)) {
+                        eprintln!("Flush native window geometry before closing: {error:#}");
+                    }
+                    if desktop.probe.is_none()
+                        && let Err(error) =
+                            windows_bounds::save(&desktop.bounds_path, window.window_bounds())
+                    {
+                        eprintln!("Save native window bounds: {error:#}");
+                    }
+                    true
+                });
+            }
+            #[cfg(target_os = "macos")]
+            {
+                let workspace = workspace.downgrade();
+                let desktop = self.clone();
+                window.on_window_should_close(cx, move |window, cx| {
+                    if desktop.quitting.get() {
+                        return !macos::termination_pending();
+                    }
+                    if let Err(error) = workspace.update(cx, |view, cx| view.flush_geometry(cx)) {
+                        eprintln!("Flush native window geometry before hiding: {error:#}");
+                        return false;
+                    }
+                    if let Err(error) = macos::hide_window(window) {
+                        eprintln!("Hide native window: {error:#}");
+                    }
+                    false
+                });
+            }
+            #[cfg(all(target_os = "macos", debug_assertions))]
+            if self.probe.is_none()
+                && let Some(visibility_probe) = window_diag
+            {
+                macos::window_diag::window_created(window, cx, visibility_probe);
+            }
+            workspace
+        })
     }
 
     fn focus(&self, window: WindowHandle<Workspace>, cx: &mut App) {
