@@ -31,7 +31,10 @@ use matou_native_desktop::{
         UpdateProgress, UpdateRelease, UpdateState, UpdateStatus, UpdateView,
         render_update_popover, render_update_trigger,
     },
-    workspace_board::{WorkspaceBoard, render_workspace_board_with_sessions},
+    workspace_board::{
+        BOARD_FEEDBACK_DURATION, BoardFeedback, BoardMoveRequest, BoardView, WorkspaceBoard,
+        render_workspace_board_with_sessions,
+    },
 };
 use matou_native_runtime::{
     egress_probe::{Family, RuleMode},
@@ -134,6 +137,9 @@ pub(super) struct WorkspaceWiring {
     link_in_progress: bool,
     pub(super) board_open: bool,
     board_scenes: HashMap<String, BoardScene>,
+    board_request_id: u64,
+    board_moves: Vec<(u64, BoardMoveRequest)>,
+    board_feedback: Option<(u64, String, BoardFeedback)>,
     detached: DetachedWindows,
     children: HashMap<String, DetachedCard>,
     next_child: u64,
@@ -213,6 +219,9 @@ impl WorkspaceWiring {
             link_in_progress: false,
             board_open: false,
             board_scenes: HashMap::new(),
+            board_request_id: 0,
+            board_moves: Vec::new(),
+            board_feedback: None,
             detached: DetachedWindows::default(),
             children: HashMap::new(),
             next_child: 0,
@@ -1030,13 +1039,7 @@ impl Workspace {
         self.wiring.board_scenes.remove(scene_id);
     }
 
-    pub(super) fn render_board(&self, cx: &Context<Self>) -> Option<AnyElement> {
-        if !self.wiring.board_open {
-            return None;
-        }
-        let hierarchy = self.hierarchy.as_ref()?;
-        let workspace = hierarchy.workspace.as_ref()?;
-        let active_task = hierarchy.task.as_ref().map(|task| task.id.as_str());
+    fn board_sessions(&self) -> HashMap<String, Vec<BoardSession>> {
         let active_scene = self.active_scene_id();
         let mut scenes: Vec<_> = self.wiring.board_scenes.iter().collect();
         scenes.sort_by_key(|(id, _)| (Some(id.as_str()) != active_scene, id.as_str()));
@@ -1052,22 +1055,132 @@ impl Workspace {
                 }
             }
         }
-        let view = WorkspaceBoard::from_session_tasks(
+        groups
+    }
+
+    fn board_projection(
+        &self,
+        groups: &HashMap<String, Vec<BoardSession>>,
+    ) -> Option<WorkspaceBoard> {
+        let hierarchy = self.hierarchy.as_ref()?;
+        let workspace = hierarchy.workspace.as_ref()?;
+        let active_task = hierarchy.task.as_ref().map(|task| task.id.as_str());
+        let counts = self.graph["workspaceSessionCountByTask"].as_object();
+        let mut board = WorkspaceBoard::from_session_counts(
             &workspace.id,
             &workspace.name,
             active_task,
             &self.tasks,
-            groups
-                .iter()
-                .flat_map(|(task, sessions)| sessions.iter().map(|_| task.as_str())),
-        )
-        .view(self.locale, None);
+            |task| match counts {
+                Some(counts) => counts.get(task).and_then(Value::as_u64).unwrap_or(0) as usize,
+                None => groups.get(task).map_or(0, Vec::len),
+            },
+        );
+        // Replay pending moves on each fresh projection so unrelated updates do
+        // not erase previews and a failed move never restores an old snapshot.
+        for (_, request) in &self.wiring.board_moves {
+            if let Ok(next) = board.after_drop(request) {
+                board = next;
+            }
+        }
+        Some(board)
+    }
+
+    fn move_task_on_board(&mut self, request: BoardMoveRequest, cx: &mut Context<Self>) {
+        if !self.wiring.board_open {
+            return;
+        }
+        self.wiring.board_request_id += 1;
+        let request_id = self.wiring.board_request_id;
+        self.wiring.board_feedback = None;
+        let valid_drop = self
+            .board_projection(&self.board_sessions())
+            .is_some_and(|board| board.after_drop(&request).is_ok());
+        if valid_drop
+            && self
+                .commands
+                .send_at(
+                    self.runtime_generation,
+                    Command::SetTaskStatus {
+                        request_id,
+                        workspace_id: request.workspace_id.clone(),
+                        task_id: request.task_id.clone(),
+                        status: request.status.as_str().into(),
+                        before_task_id: request.before_task_id.clone(),
+                    },
+                )
+                .is_ok()
+        {
+            self.wiring.board_moves.push((request_id, request));
+            cx.notify();
+        } else {
+            self.show_board_feedback(
+                request_id,
+                request.workspace_id,
+                BoardFeedback::SaveFailed,
+                cx,
+            );
+        }
+    }
+
+    fn show_board_feedback(
+        &mut self,
+        request_id: u64,
+        workspace_id: String,
+        feedback: BoardFeedback,
+        cx: &mut Context<Self>,
+    ) {
+        if request_id != self.wiring.board_request_id {
+            return;
+        }
+        self.wiring.board_feedback = Some((request_id, workspace_id, feedback));
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(BOARD_FEEDBACK_DURATION)
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this
+                    .wiring
+                    .board_feedback
+                    .as_ref()
+                    .is_some_and(|(id, _, _)| *id == request_id)
+                {
+                    this.wiring.board_feedback = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn board_view(&self, groups: &HashMap<String, Vec<BoardSession>>) -> Option<BoardView> {
+        let workspace = self.hierarchy.as_ref()?.workspace.as_ref()?;
+        let feedback = self
+            .wiring
+            .board_feedback
+            .as_ref()
+            .filter(|(_, owner, _)| *owner == workspace.id)
+            .map(|(_, _, feedback)| *feedback);
+        Some(self.board_projection(groups)?.view(self.locale, feedback))
+    }
+
+    pub(super) fn render_board(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        if !self.wiring.board_open {
+            return None;
+        }
+        let groups = self.board_sessions();
+        let view = self.board_view(&groups)?;
         let owner = cx.weak_entity();
+        let move_owner = owner.clone();
         let palette = self.theme_palette().workspace;
         Some(
             render_workspace_board_with_sessions(
                 &view,
                 self.wiring_dark(),
+                Rc::new(move |request, _, cx| {
+                    let _ = move_owner.update(cx, |this, cx| this.move_task_on_board(request, cx));
+                }),
                 Rc::new(move |task| {
                     groups
                         .get(task)
@@ -2281,7 +2394,16 @@ impl Workspace {
         cx.notify();
     }
 
-    pub(super) fn retire_wiring_commands(&mut self) {
+    pub(super) fn retire_wiring_commands(&mut self, cx: &mut Context<Self>) {
+        if let Some((request_id, request)) = self.wiring.board_moves.pop() {
+            self.wiring.board_moves.clear();
+            self.show_board_feedback(
+                request_id,
+                request.workspace_id,
+                BoardFeedback::SaveFailed,
+                cx,
+            );
+        }
         self.wiring.egress_request = None;
         self.wiring.egress_refresh_scheduled = false;
         self.wiring.egress.rechecking = false;
@@ -2427,6 +2549,22 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if kind == "taskStatusResult"
+            && let Some(index) = self
+                .wiring
+                .board_moves
+                .iter()
+                .position(|(id, _)| *id == request_id)
+        {
+            let (_, request) = self.wiring.board_moves.remove(index);
+            let feedback = if reply["result"].is_array() {
+                BoardFeedback::Moved(request.status)
+            } else {
+                BoardFeedback::SaveFailed
+            };
+            self.show_board_feedback(request_id, request.workspace_id, feedback, cx);
+            cx.notify();
+        }
         if self.wiring.egress_request == Some((request_id, kind)) {
             let error = self.wiring_reply_error(reply);
             self.finish_egress_request(error.clone(), cx);
@@ -2592,6 +2730,10 @@ pub(super) fn wiring_probe_bounds(_id: String) -> Option<Canvas<()>> {
 impl Workspace {
     pub(super) fn hide_wiring_children_for_probe(&mut self) {
         self.wiring.visible = false;
+    }
+
+    pub(super) fn board_view_for_probe(&self) -> Option<BoardView> {
+        self.board_view(&self.board_sessions())
     }
 
     pub(super) fn mock_external_links_for_probe(

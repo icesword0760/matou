@@ -814,8 +814,11 @@ impl ShellOwner {
         ).optional()?)
     }
 
-    pub(crate) fn scene_workspace_session_count(&self, scene_id: &str) -> Result<i64> {
-        cards::scene_workspace_session_count(&self.connection, scene_id)
+    pub(crate) fn scene_workspace_session_counts(
+        &self,
+        scene_id: &str,
+    ) -> Result<HashMap<String, i64>> {
+        cards::scene_workspace_session_counts(&self.connection, scene_id)
     }
 
     pub fn hierarchy(&self, window_id: &str) -> Result<HierarchyResult> {
@@ -999,6 +1002,15 @@ impl ShellOwner {
         committed_at: i64,
     ) -> Result<Value> {
         tasks::rename_task(&mut self.connection, command, input, committed_at)
+    }
+
+    pub(crate) fn move_task_on_board(
+        &mut self,
+        command: &CommandMetadata,
+        input: &tasks::MoveTaskOnBoardInput,
+        committed_at: i64,
+    ) -> Result<Value> {
+        tasks::move_task_on_board(&mut self.connection, command, input, committed_at)
     }
 
     pub fn set_task_pinned(
