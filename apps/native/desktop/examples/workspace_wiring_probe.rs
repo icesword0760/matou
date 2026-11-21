@@ -330,7 +330,61 @@ mod workspace {
             .unwrap()
     }
 
-    async fn verify(cx: &mut AsyncApp) {
+    fn verify_theme_shortcut(
+        window: Handle,
+        sink: &crate::runtime_bridge::ProbeReceiver,
+        cx: &mut AsyncApp,
+        root: &std::path::Path,
+    ) {
+        write_theme_preference(root, ThemePreference::Light).unwrap();
+        window
+            .update(cx, |view, window, cx| {
+                view.data_root = Some(root.to_path_buf());
+                view.theme.set_preference(ThemePreference::Light);
+                view.apply_theme_palette(cx);
+                window.focus(&view.terminals[A].read(cx).focus);
+            })
+            .unwrap();
+        while sink.try_recv().is_ok() {}
+        for (preference, expected) in [
+            (ThemePreference::Dark, AppTheme::Dark),
+            (ThemePreference::Light, AppTheme::Light),
+            (ThemePreference::Dark, AppTheme::Dark),
+            (ThemePreference::Light, AppTheme::Light),
+        ] {
+            press(window, cx, "cmd-i");
+            draw(window.into(), cx);
+            window
+                .update(cx, |view, window, cx| {
+                    assert_eq!(view.theme.effective(), expected);
+                    assert!(view.terminals[A].read(cx).focus.is_focused(window));
+                })
+                .unwrap();
+            assert_eq!(read_theme_preference(root).unwrap(), preference);
+            let commands = std::iter::from_fn(|| sink.try_recv().ok()).collect::<Vec<_>>();
+            assert!(commands.iter().any(|command| matches!(
+                command,
+                Command::Theme { session_id, theme }
+                    if session_id == A && *theme == expected.palette().terminal
+            )));
+        }
+        for key in ["cmd-shift-i", "cmd-alt-i", "ctrl-i"] {
+            press(window, cx, key);
+            assert_eq!(read_theme_preference(root).unwrap(), ThemePreference::Light);
+        }
+        assert!(
+            !std::iter::from_fn(|| sink.try_recv().ok())
+                .any(|command| matches!(command, Command::Theme { .. }))
+        );
+        window
+            .update(cx, |view, _, _| view.data_root = None)
+            .unwrap();
+        println!(
+            "theme shortcut: four Cmd+I toggles preserve terminal focus and persist theme.json"
+        );
+    }
+
+    async fn verify(cx: &mut AsyncApp, fixture_root: &std::path::Path) {
         let (window, sink) = open_probe_at(cx, 1260.);
         draw(window.into(), cx);
         for key in ["cmd-/", "ctrl-/"] {
@@ -355,6 +409,7 @@ mod workspace {
         press(window, cx, "ctrl-/");
         press(window, cx, "/");
         overlay(window, cx, None);
+        verify_theme_shortcut(window, &sink, cx, &fixture_root.join("theme-shortcut"));
         window
             .update(cx, |view, window, _| {
                 window.focus(&view.control_focus["shortcut-help"])
@@ -1269,7 +1324,7 @@ mod workspace {
         let fixture_root = live_wiring::prepare();
         Application::new().with_assets(NativeAssets).run(move |cx| {
             cx.spawn(async move |cx| {
-                verify(cx).await;
+                verify(cx, &fixture_root).await;
                 verify_splits(cx);
                 verify_links(cx).await;
                 live_wiring::verify(cx, fixture_root).await;

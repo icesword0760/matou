@@ -26,7 +26,7 @@ use crate::{
     codex_permissions,
     codex_resume::{self, Resume as CodexResume},
     dsh_catalog::{self, DshSessionCatalog},
-    egress_probe::{self, EgressMonitor, EgressSample, Family},
+    egress_probe::{self, EgressMonitor, EgressSample, Family, RuleMode},
     environment_runtime::{self, EnvironmentTarget, WorktreeExpectation},
     history_worker::{HistoryReply, HistoryRequest, HistoryWorker},
     host_control::ControlServer,
@@ -428,6 +428,18 @@ pub enum Command {
         request_id: u64,
     },
     SetEgressExemption {
+        request_id: u64,
+        family: Family,
+    },
+    SetEgressRuleMode {
+        request_id: u64,
+        mode: RuleMode,
+    },
+    SetEgressProtectionEnabled {
+        request_id: u64,
+        enabled: bool,
+    },
+    AcceptEgressBaseline {
         request_id: u64,
         family: Family,
     },
@@ -1309,6 +1321,33 @@ impl RuntimeWiring {
                 })();
                 ("egressExemptionResult", *request_id, result)
             }
+            Command::SetEgressRuleMode { request_id, mode } => {
+                let result = (|| {
+                    let owner = owner.context("Runtime is read-only")?;
+                    owner.set_egress_rule_mode(*mode)?;
+                    Ok(egress_projection(owner.egress().status()))
+                })();
+                ("egressRuleModeResult", *request_id, result)
+            }
+            Command::SetEgressProtectionEnabled {
+                request_id,
+                enabled,
+            } => {
+                let result = (|| {
+                    let owner = owner.context("Runtime is read-only")?;
+                    owner.set_egress_protection(*enabled)?;
+                    Ok(egress_projection(owner.egress().status()))
+                })();
+                ("egressProtectionEnabledResult", *request_id, result)
+            }
+            Command::AcceptEgressBaseline { request_id, family } => {
+                let result = (|| {
+                    let owner = owner.context("Runtime is read-only")?;
+                    owner.accept_egress_baseline(*family)?;
+                    Ok(egress_projection(owner.egress().status()))
+                })();
+                ("egressBaselineResult", *request_id, result)
+            }
             Command::GetBrowserDiagnostics { request_id } => (
                 "browserDiagnosticsResult",
                 *request_id,
@@ -1831,6 +1870,15 @@ pub fn storage_command_rejected(command: Command, code: &str, message: &str) -> 
         Command::RecheckEgress { request_id } => Some(("egressRecheckResult", *request_id)),
         Command::SetEgressExemption { request_id, .. } => {
             Some(("egressExemptionResult", *request_id))
+        }
+        Command::SetEgressRuleMode { request_id, .. } => {
+            Some(("egressRuleModeResult", *request_id))
+        }
+        Command::SetEgressProtectionEnabled { request_id, .. } => {
+            Some(("egressProtectionEnabledResult", *request_id))
+        }
+        Command::AcceptEgressBaseline { request_id, .. } => {
+            Some(("egressBaselineResult", *request_id))
         }
         Command::CheckForUpdate { request_id } => Some(("updateCheckResult", *request_id)),
         Command::DownloadUpdate { request_id } => Some(("updateDownloadResult", *request_id)),
@@ -4752,6 +4800,9 @@ fn run_writable(
                 | Command::GetEgressStatus { .. }
                 | Command::RecheckEgress { .. }
                 | Command::SetEgressExemption { .. }
+                | Command::SetEgressRuleMode { .. }
+                | Command::SetEgressProtectionEnabled { .. }
+                | Command::AcceptEgressBaseline { .. }
                 | Command::GetBrowserDiagnostics { .. }
                 | Command::EvaluateExternalLink { .. }
                 | Command::GetUpdateStatus { .. }
@@ -5092,6 +5143,8 @@ fn run_writable(
                         if result.get("runId").is_some() {
                             sessions.remove(id);
                             dirty.remove(id);
+                            // A retry starts with a fresh PTY output credit window.
+                            sequence.remove(id);
                             views.remove(id);
                             awaiting_ui.remove(id);
                             send.send_blocking(Event::Recovery {
@@ -5283,6 +5336,7 @@ fn run_writable(
                     owner.retire_sessions(std::slice::from_ref(&id));
                     sessions.remove(&id);
                     dirty.remove(&id);
+                    sequence.remove(&id);
                     views.remove(&id);
                     awaiting_ui.remove(&id);
                     let message = format!("{error:#}");
