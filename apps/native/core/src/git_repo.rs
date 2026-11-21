@@ -67,6 +67,14 @@ impl ChangeCounts {
 /// Read the symbolic HEAD for a working directory without invoking Git or
 /// touching the index. Linked worktrees store their own HEAD behind a gitfile.
 pub fn current_branch(cwd: &Path) -> Option<String> {
+    worktree_head(cwd)?
+        .trim_end()
+        .strip_prefix("ref: refs/heads/")
+        .filter(|branch| !branch.is_empty())
+        .map(str::to_owned)
+}
+
+fn worktree_head(cwd: &Path) -> Option<String> {
     let cwd = fs::canonicalize(cwd).ok()?;
     if !cwd.is_dir() {
         return None;
@@ -90,12 +98,63 @@ pub fn current_branch(cwd: &Path) -> Option<String> {
             let gitfile = read_small_git_file(&marker)?;
             dir.join(gitfile.strip_prefix("gitdir: ")?.trim_end())
         };
-        return read_small_git_file(&git_dir.join("HEAD"))?
-            .trim_end()
-            .strip_prefix("ref: refs/heads/")
-            .filter(|branch| !branch.is_empty())
-            .map(str::to_owned);
+        return read_small_git_file(&git_dir.join("HEAD"));
     }
+    None
+}
+
+/// Query the worktree without writing the index or waiting on a long scan.
+pub fn is_dirty(cwd: &Path) -> Option<bool> {
+    use std::{
+        io::Read,
+        process::Stdio,
+        thread,
+        time::{Duration, Instant},
+    };
+
+    if worktree_head(cwd).is_none() {
+        return Some(false);
+    }
+    let start = Instant::now();
+    let mut child = git_command(cwd)
+        .args([
+            "-c",
+            "core.fsmonitor=false",
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=normal",
+            "--ignore-submodules=none",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut stdout = child.stdout.take().expect("piped Git status");
+    let output = thread::Builder::new()
+        .name("git-status-output".into())
+        .spawn(move || {
+            let mut first = [0];
+            let dirty = stdout.read(&mut first).ok()? != 0;
+            std::io::copy(&mut stdout, &mut std::io::sink()).ok()?;
+            Some(dirty)
+        });
+    if let Ok(output) = output {
+        while start.elapsed() < Duration::from_millis(40) {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    return status
+                        .success()
+                        .then(|| output.join().ok().flatten())
+                        .flatten();
+                }
+                Ok(None) => thread::sleep(Duration::from_millis(1)),
+                Err(_) => break,
+            }
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
     None
 }
 
@@ -966,6 +1025,21 @@ mod tests {
             .clone()
             .into_iter()
             .filter(move |case| case["input"]["operation"] == operation)
+    }
+
+    #[test]
+    fn hud_git_state_tracks_untracked_and_staged_changes() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        assert_eq!(current_branch(root.path()), None);
+        assert_eq!(is_dirty(root.path()), Some(false));
+        run(root.path(), &["init", "-b", "hud-fixture"])?;
+        assert_eq!(current_branch(root.path()).as_deref(), Some("hud-fixture"));
+        assert_eq!(is_dirty(root.path()), Some(false));
+        fs::write(root.path().join("tracked.txt"), "fixture")?;
+        assert_eq!(is_dirty(root.path()), Some(true));
+        run(root.path(), &["add", "tracked.txt"])?;
+        assert_eq!(is_dirty(root.path()), Some(true));
+        Ok(())
     }
 
     #[test]

@@ -1,4 +1,5 @@
 pub mod agent_hud_projection;
+mod agent_hud_sources;
 pub mod antigravity_catalog;
 pub mod antigravity_events;
 pub mod antigravity_launch;

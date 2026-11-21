@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::{Arc, OnceLock, mpsc},
+    sync::{Arc, Mutex, OnceLock, mpsc},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -28,7 +28,8 @@ use uuid::Uuid;
 
 use crate::{
     SessionEvent, SessionOptions,
-    agent_hud_projection::{AgentHudProjection, HudProvider, project_teammates},
+    agent_hud_projection::{AgentHudProjection, ConfigCounts, HudProvider, project_teammates},
+    agent_hud_sources::{self, ExternalAgents},
     antigravity_catalog::Catalog as AntigravityCatalog,
     antigravity_events::{
         self, Outcome as AntigravityOutcome, RecoveryState as AntigravityRecovery,
@@ -86,6 +87,9 @@ struct AntigravityObservation {
     run: antigravity_events::Run,
     binding: Option<String>,
     catalog_root: PathBuf,
+    transcript: LiveTranscript,
+    transcript_path: Option<PathBuf>,
+    transcript_poll: Instant,
     title_check: Option<(Instant, Instant)>,
     fork_pending: bool,
     startup: Vec<(Scope, antigravity_events::Source, Value, Instant)>,
@@ -154,6 +158,11 @@ struct RunHook {
     reported_missing: bool,
     pending_startup_observations: Vec<(Scope, Observation)>,
     hud: AgentHudProjection,
+    gateway_context: Option<Arc<Mutex<(Option<u64>, Option<u64>)>>>,
+    external_agents: Option<(PathBuf, ExternalAgents)>,
+    antigravity_config: Vec<PathBuf>,
+    hud_config: Option<(PathBuf, Instant, Value)>,
+    git_status: Option<(PathBuf, Instant, bool)>,
     dsh: Option<DshObservation>,
     antigravity: Option<AntigravityObservation>,
     dsh_pending: Vec<(Scope, Value)>,
@@ -169,6 +178,12 @@ struct RunHook {
 }
 
 impl RunHook {
+    fn sync_gateway_context(&self) {
+        if let Some(context) = &self.gateway_context {
+            *context.lock().unwrap() = self.hud.context_usage();
+        }
+    }
+
     fn remember_claude_transcript(&mut self, payload: &Value) {
         let identity = self
             .last_observation
@@ -183,11 +198,19 @@ impl RunHook {
             && path.file_name().is_some_and(|name| {
                 name == std::ffi::OsStr::new(&format!("{}.jsonl", identity.trim()))
             })
-            && self.claude_transcript.as_deref() != Some(path)
+            && self.claude_transcript.as_deref().is_none_or(|previous| {
+                previous != path
+                    && previous
+                        .canonicalize()
+                        .ok()
+                        .zip(path.canonicalize().ok())
+                        .is_none_or(|(previous, reported)| previous != reported)
+            })
         {
             self.claude_transcript = Some(path.to_owned());
             self.claude_live = LiveTranscript::default();
-            self.hud.ingest_live_claude_row(None);
+            self.hud.ingest_live_claude_history(None);
+            self.hud.publish_transcript_context();
             self.claude_transcript_poll = Some(Instant::now());
         }
     }
@@ -751,15 +774,15 @@ impl ShellOwner {
         first_error.map_or(Ok(()), Err)
     }
 
-    pub(crate) fn agent_hud(&self, session_id: &str, data_root: &Path) -> Result<Value> {
+    pub(crate) fn agent_hud(&mut self, session_id: &str, data_root: &Path) -> Result<Value> {
         let Some(shell) = self
             .shells
-            .get(session_id)
+            .get_mut(session_id)
             .filter(|shell| !shell.ended && !shell.retiring)
         else {
             return Ok(Value::Null);
         };
-        let Some(hook) = shell.hook.as_ref() else {
+        let Some(hook) = shell.hook.as_mut() else {
             return Ok(Value::Null);
         };
         let rows = hook
@@ -771,20 +794,95 @@ impl ShellOwner {
         let locale =
             sessions::current_interface_locale(sessions::read_locale_preference(data_root));
         let teammates = project_teammates(&shell.run_id, session_id, &rows, locale);
-        let mut hud = json!(hook.hud.snapshot(now() as f64));
-        let cwd = hud["cwd"]
-            .as_str()
-            .filter(|cwd| Path::new(cwd).is_absolute())
-            .unwrap_or(&shell.cwd);
-        let branch = matou_native_core::git_repo::current_branch(Path::new(cwd));
-        let config = hook
-            .claude_projects
-            .as_deref()
-            .and_then(Path::parent)
-            .map(|config| crate::provider_hook::claude_config_counts(Path::new(cwd), config));
+        let time = now() as f64;
+        let cwd = PathBuf::from(
+            hook.hud
+                .cwd()
+                .filter(|cwd| Path::new(cwd).is_absolute())
+                .unwrap_or(&shell.cwd),
+        );
+        let branch = matou_native_core::git_repo::current_branch(&cwd);
+        let refresh_git = hook
+            .git_status
+            .as_ref()
+            .is_none_or(|(path, at, _)| path != &cwd || at.elapsed() >= Duration::from_secs(2));
+        if refresh_git {
+            let previous = hook
+                .git_status
+                .as_ref()
+                .filter(|(path, _, _)| path == &cwd)
+                .map(|(_, _, dirty)| *dirty)
+                .unwrap_or(false);
+            let dirty = matou_native_core::git_repo::is_dirty(&cwd).unwrap_or(previous);
+            hook.git_status = Some((cwd.clone(), Instant::now(), dirty));
+        }
+        let dirty = hook.git_status.as_ref().is_some_and(|(_, _, dirty)| *dirty);
+        if hook
+            .hud_config
+            .as_ref()
+            .is_none_or(|(path, at, _)| path != &cwd || at.elapsed() >= Duration::from_secs(2))
+        {
+            let legacy = match hook.profile {
+                LaunchProfile::ClaudeCode => {
+                    let config = hook
+                        .claude_projects
+                        .as_deref()
+                        .and_then(Path::parent)
+                        .map(|config| crate::provider_hook::claude_config_counts(&cwd, config));
+                    if let Some(config) = &config {
+                        let count = |key: &str| config[key].as_u64().unwrap_or_default() as usize;
+                        let names = config["hookNames"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(Value::as_str)
+                            .map(str::to_owned)
+                            .collect();
+                        hook.hud.set_config(
+                            ConfigCounts {
+                                mcps: count("mcps"),
+                                hooks: count("hooks"),
+                                claude_md: count("claudeMd"),
+                                rules: count("rules"),
+                            },
+                            names,
+                        );
+                    }
+                    config.unwrap_or_default()
+                }
+                LaunchProfile::Codex => {
+                    let (counts, events) = agent_hud_sources::codex_config(
+                        hook.codex.as_ref().and_then(|codex| codex.home()),
+                    );
+                    hook.hud.set_config(counts, events);
+                    Value::Null
+                }
+                LaunchProfile::Antigravity => {
+                    let (counts, events) =
+                        agent_hud_sources::antigravity_config(&hook.antigravity_config);
+                    hook.hud.set_config(counts, events);
+                    Value::Null
+                }
+                _ => Value::Null,
+            };
+            hook.hud_config = Some((cwd, Instant::now(), legacy));
+        }
+        if let Some((root, reader)) = &mut hook.external_agents {
+            hook.hud.set_external_agents(reader.read(root, time));
+        }
+        let agents = hook
+            .codex
+            .as_ref()
+            .map(|codex| codex.hud_agents(time))
+            .unwrap_or_default();
+        let mut hud = json!(hook.hud.snapshot_with_agents(time, agents));
         hud["gitBranch"] = json!(branch);
-        if let Some(config) = config {
-            hud["configCounts"] = config;
+        hud["gitDirty"] = json!(dirty);
+        if let Some((_, _, config)) = &hook.hud_config
+            && let Some(config) = config.as_object()
+        {
+            hud["hookNames"] = config.get("hookNames").cloned().unwrap_or_default();
+            hud["configCounts"] = json!(config);
         }
         if let Some(codex) = &hook.codex {
             let transcript =
@@ -1865,8 +1963,9 @@ impl ShellOwner {
             "archived Session permission mode cannot be modified"
         );
         let codex = session.kind == "codex";
+        let antigravity = session.kind == "antigravity";
         ensure!(
-            codex || session.kind == "claude-code",
+            codex || antigravity || session.kind == "claude-code",
             "{ACTIVE_PERMISSION_SESSION}"
         );
         let shell = self.shells.get(session_id);
@@ -1877,11 +1976,13 @@ impl ShellOwner {
         );
         let binding = if codex {
             self.codex_binding(session_id)?
+        } else if antigravity {
+            self.antigravity_binding(session_id)?
         } else {
             self.claude_binding(session_id)?
         };
         let Some(binding) = binding.filter(|binding| binding.resumable) else {
-            ensure!(!codex, "{ACTIVE_PERMISSION_SESSION}");
+            ensure!(!codex && !antigravity, "{ACTIVE_PERMISSION_SESSION}");
             ensure!(
                 !shell.is_some_and(|shell| shell.is_shell),
                 "{ACTIVE_PERMISSION_SESSION}"
@@ -1900,8 +2001,13 @@ impl ShellOwner {
         let identity = shell
             .hook
             .as_ref()
-            .and_then(|hook| hook.last_observation.as_ref())
-            .and_then(|observation| observation.identity.as_deref())
+            .and_then(|hook| {
+                if antigravity {
+                    hook.antigravity.as_ref()?.run.conversation_id()
+                } else {
+                    hook.last_observation.as_ref()?.identity.as_deref()
+                }
+            })
             .context(ACTIVE_PERMISSION_SESSION)?;
         let same_identity = if codex {
             CodexResume::from_binding(&binding)
@@ -2470,6 +2576,42 @@ impl ShellOwner {
         Ok(shell.run_id.clone())
     }
 
+    pub(crate) fn launch_antigravity_permission(
+        &mut self,
+        session_id: &str,
+        terminal: matou_native_terminal::TerminalOptions,
+        data_root: &Path,
+        plan: antigravity_launch::LaunchPlan,
+        permission: AntigravityPermission,
+    ) -> Result<String> {
+        let binding = self
+            .antigravity_binding(session_id)?
+            .context(ACTIVE_PERMISSION_SESSION)?;
+        let run_id = match self
+            .launch_antigravity(session_id, terminal, data_root, plan, permission, false)
+        {
+            Ok(run_id) => run_id,
+            Err(error) => {
+                self.change_antigravity_restore(
+                    session_id,
+                    ClaudeRestore::Fail {
+                        binding_id: &binding.id,
+                        error: "Antigravity permission restart could not start",
+                    },
+                )?;
+                return Err(error);
+            }
+        };
+        self.shells
+            .get_mut(session_id)
+            .unwrap()
+            .hook
+            .as_mut()
+            .unwrap()
+            .deadline = Some(Instant::now() + IDENTITY_TIMEOUT);
+        Ok(run_id)
+    }
+
     fn launch_run(
         &mut self,
         mut options: SessionOptions,
@@ -2550,6 +2692,7 @@ impl ShellOwner {
         };
         let mut permission_starting = false;
         let mut gateway = None;
+        let mut agent_status_directory = None;
         let hook = if let Some((launch_metadata, mut secrets, resume, gateway_plan)) = provider {
             permission_starting = resume
                 .as_ref()
@@ -2575,11 +2718,73 @@ impl ShellOwner {
             } else {
                 IDENTITY_TIMEOUT
             };
+            let claude_projects = (profile == LaunchProfile::ClaudeCode)
+                .then(|| {
+                    options
+                        .launch
+                        .env
+                        .get(std::ffi::OsStr::new("CLAUDE_CONFIG_DIR"))
+                        .map(|path| options.launch.cwd.join(path).join("projects"))
+                        .or_else(|| {
+                            options
+                                .launch
+                                .env
+                                .get(std::ffi::OsStr::new("HOME"))
+                                .map(|home| Path::new(home).join(".claude/projects"))
+                        })
+                        .or_else(crate::provider_catalog::projects_root)
+                })
+                .flatten();
+            let mut hud = AgentHudProjection::new(
+                &session_id,
+                match profile {
+                    LaunchProfile::ClaudeCode => HudProvider::ClaudeCode,
+                    LaunchProfile::Codex => HudProvider::Codex,
+                    LaunchProfile::Dsh => HudProvider::Dsh,
+                    LaunchProfile::Antigravity => HudProvider::Antigravity,
+                    LaunchProfile::Shell => unreachable!(),
+                },
+                now() as f64,
+            );
+            hud.seed_settings(
+                options.launch.cwd.to_str(),
+                launch_metadata["permissionMode"].as_str(),
+                None,
+                launch_metadata["model"].as_str(),
+                false,
+            );
+            let mut seeded_transcript = None;
+            if let (Some(plan), Some(root), Some(identity)) = (
+                gateway_plan.as_ref(),
+                claude_projects.as_deref(),
+                expected_id.as_deref(),
+            ) && plan
+                .connections()
+                .any(|connection| connection.endpoint.host_str() == Some("api.deepseek.com"))
+                && let Some(path) =
+                    crate::provider_catalog::resume_transcript(root, &options.launch.cwd, identity)
+                && let Some(rows) = read_hud_transcript(root, &path)
+            {
+                hud.seed_transcript_context(
+                    rows.iter()
+                        .filter(|row| row["sessionId"].as_str().is_none_or(|id| id == identity)),
+                );
+                seeded_transcript = Some(path);
+            }
+            let mut gateway_context = None;
             // The listener belongs to this owner generation, this session_id
             // and this run_id. Publish the environment only after bind succeeds.
             let gateway_settings = if let Some(plan) = gateway_plan {
                 let plan = Arc::new(plan);
-                let listener = Gateway::start(Arc::clone(&plan))?;
+                let context = Arc::new(Mutex::new(hud.context_usage()));
+                let read_context = Arc::clone(&context);
+                let listener = Gateway::start_with_context(
+                    Arc::clone(&plan),
+                    Some(Arc::new(move || {
+                        read_context.lock().ok().map(|usage| *usage)
+                    })),
+                )?;
+                gateway_context = Some(context);
                 let env = plan.project_environment(&mut options.launch, listener.base_url());
                 secrets.push(listener.base_url().to_owned());
                 gateway = Some(listener);
@@ -2606,6 +2811,7 @@ impl ShellOwner {
             }
             let mut dsh = None;
             let mut antigravity = None;
+            let mut antigravity_config = Vec::new();
             let mut fork = None;
             match special {
                 Some(SpecialLaunch::Antigravity {
@@ -2619,6 +2825,17 @@ impl ShellOwner {
                         Path::new(home),
                         &options.launch.env,
                     );
+                    let native_config =
+                        antigravity_launch::env_value(&options.launch.env, "ANTIGRAVITY_HOME")
+                            .filter(|path| !path.is_empty())
+                            .map(|path| options.launch.cwd.join(path));
+                    antigravity_config.extend(native_config);
+                    antigravity_config.extend([
+                        Path::new(home).join(".gemini/antigravity"),
+                        Path::new(home).join(".gemini/config"),
+                        catalog_root.clone(),
+                        options.launch.cwd.join(".gemini"),
+                    ]);
                     let run_environment = registration.antigravity_environment();
                     secrets.extend(
                         run_environment
@@ -2638,6 +2855,9 @@ impl ShellOwner {
                         run: antigravity_events::Run::new(&run_id, mode.clone(), permission),
                         binding,
                         catalog_root,
+                        transcript: LiveTranscript::default(),
+                        transcript_path: None,
+                        transcript_poll: Instant::now(),
                         title_check: None,
                         fork_pending: matches!(mode, AntigravityMode::Fork(_)),
                         startup: Vec::new(),
@@ -2718,41 +2938,29 @@ impl ShellOwner {
                         identity_wait
                     }
             });
-            let mut hud = AgentHudProjection::new(
-                &session_id,
-                match profile {
-                    LaunchProfile::ClaudeCode => HudProvider::ClaudeCode,
-                    LaunchProfile::Codex => HudProvider::Codex,
-                    LaunchProfile::Dsh => HudProvider::Dsh,
-                    LaunchProfile::Antigravity => HudProvider::Antigravity,
-                    LaunchProfile::Shell => unreachable!(),
-                },
-                now() as f64,
-            );
-            hud.seed_settings(
-                options.launch.cwd.to_str(),
-                launch_metadata["permissionMode"].as_str(),
-                None,
-                launch_metadata["model"].as_str(),
-                false,
-            );
-            let claude_projects = (profile == LaunchProfile::ClaudeCode)
-                .then(|| {
-                    options
-                        .launch
-                        .env
-                        .get(std::ffi::OsStr::new("CLAUDE_CONFIG_DIR"))
-                        .map(|path| Path::new(path).join("projects"))
-                        .or_else(|| {
-                            options
-                                .launch
-                                .env
-                                .get(std::ffi::OsStr::new("HOME"))
-                                .map(|home| Path::new(home).join(".claude/projects"))
-                        })
-                        .or_else(crate::provider_catalog::projects_root)
-                })
-                .flatten();
+            if profile != LaunchProfile::Dsh
+                && matches!(
+                    Path::new(&session_id)
+                        .components()
+                        .collect::<Vec<_>>()
+                        .as_slice(),
+                    [std::path::Component::Normal(_)]
+                )
+            {
+                let directory = options
+                    .launch
+                    .data_root
+                    .join("agent-status")
+                    .join(&session_id);
+                if std::fs::create_dir_all(&directory).is_ok()
+                    && directory.parent().is_some_and(|parent| {
+                        std::fs::symlink_metadata(parent).is_ok_and(|metadata| metadata.is_dir())
+                    })
+                    && std::fs::symlink_metadata(&directory).is_ok_and(|metadata| metadata.is_dir())
+                {
+                    agent_status_directory = Some(directory);
+                }
+            }
             Some(RunHook {
                 _registration: registration,
                 profile,
@@ -2769,10 +2977,17 @@ impl ShellOwner {
                 reported_missing: false,
                 pending_startup_observations: Vec::new(),
                 hud,
+                gateway_context,
+                external_agents: agent_status_directory
+                    .clone()
+                    .map(|path| (path, ExternalAgents::default())),
+                antigravity_config,
+                hud_config: None,
+                git_status: None,
                 claude_projects,
-                claude_transcript: None,
+                claude_transcript_poll: seeded_transcript.as_ref().map(|_| Instant::now()),
+                claude_transcript: seeded_transcript,
                 claude_live: LiveTranscript::default(),
-                claude_transcript_poll: None,
                 claude_observed_title: None,
                 dsh,
                 antigravity,
@@ -2786,6 +3001,12 @@ impl ShellOwner {
             None
         };
         clear_control_environment(&mut options.launch);
+        if let Some(directory) = agent_status_directory {
+            options
+                .launch
+                .env
+                .insert("MATOU_AGENT_STATUS_DIR".into(), directory.into_os_string());
+        }
         if let Some(control) = &self.run_control {
             match control.inject(&mut options.launch, &session_id, &run_id) {
                 Ok(()) => {
@@ -3146,12 +3367,29 @@ impl ShellOwner {
                     return None;
                 }
                 let agy = hook.antigravity.as_mut()?;
-                matches!(agy.run.deadline_elapsed(), AntigravityRecovery::Failed(_))
-                    .then(|| (id.clone(), shell.run_id.clone()))
+                (agy.binding.is_some()
+                    || matches!(agy.run.deadline_elapsed(), AntigravityRecovery::Failed(_)))
+                .then(|| (id.clone(), shell.run_id.clone(), agy.binding.is_some()))
             })
             .collect();
-        for (id, run_id) in antigravity_timeouts {
-            self.park_fork_run(&id, &run_id, FORK_IDENTITY_TIMEOUT, events);
+        for (id, run_id, resume) in antigravity_timeouts {
+            if resume {
+                let scope = Scope {
+                    profile: LaunchProfile::Antigravity,
+                    session_id: id,
+                    run_id,
+                    generation: self.generation.clone(),
+                    expected_id: None,
+                    fork_source_id: None,
+                };
+                self.park_antigravity_restore(
+                    &scope,
+                    "Antigravity restore identity timed out",
+                    events,
+                );
+            } else {
+                self.park_fork_run(&id, &run_id, FORK_IDENTITY_TIMEOUT, events);
+            }
         }
         let dsh_timeouts = self
             .shells
@@ -3196,6 +3434,7 @@ impl ShellOwner {
         self.poll_claude_transcripts(events);
         self.poll_codex_titles(events);
         self.poll_antigravity_titles(events);
+        self.poll_antigravity_transcripts();
         let expired_codex_forks = self
             .shells
             .iter()
@@ -3327,7 +3566,7 @@ impl ShellOwner {
             }
             return;
         }
-        if agy.fork_pending
+        if (agy.fork_pending || agy.binding.is_some())
             && hook
                 .deadline
                 .is_some_and(|deadline| received_at >= deadline)
@@ -3430,7 +3669,30 @@ impl ShellOwner {
                 }
             }
         }
+        if let Some(path) = update.transcript_path.map(Path::new)
+            && let Some(identity) = agy.run.conversation_id()
+            && let Some(relative) = crate::antigravity_catalog::transcript_path(identity)
+            && let Some(conversation) = relative
+                .parent()
+                .and_then(Path::parent)
+                .and_then(Path::parent)
+            && path.is_absolute()
+            && path.extension().is_some_and(|ext| ext == "jsonl")
+            && agy.transcript_path.as_deref() != Some(path)
+            && path
+                .canonicalize()
+                .ok()
+                .zip(agy.catalog_root.canonicalize().ok())
+                .is_some_and(|(path, root)| path.starts_with(root.join(conversation)))
+        {
+            agy.transcript_path = path.canonicalize().ok();
+            agy.transcript = LiveTranscript::default();
+            agy.transcript_poll = Instant::now();
+        }
         let mut hud = Value::Object(update.payload.clone());
+        if let Some(event) = update.event_name {
+            hud["hookEventName"] = json!(event);
+        }
         redact_hud(&mut hud, &hook.secrets);
         hook.hud.ingest_provider(&hud, time as f64);
         let status = update
@@ -3485,6 +3747,47 @@ impl ShellOwner {
         }
         if let (Some(conversation), Some(data_root)) = (update.title_candidate, title_root) {
             self.observe_antigravity_title(&scope, &conversation, &data_root, events);
+        }
+    }
+
+    fn poll_antigravity_transcripts(&mut self) {
+        let at = Instant::now();
+        for shell in self
+            .shells
+            .values_mut()
+            .filter(|shell| !shell.ended && !shell.retiring)
+        {
+            let Some(hook) = &mut shell.hook else {
+                continue;
+            };
+            let Some(agy) = &mut hook.antigravity else {
+                continue;
+            };
+            if agy.transcript_poll > at {
+                continue;
+            }
+            let Some(identity) = agy.run.conversation_id() else {
+                continue;
+            };
+            let Some(relative) = crate::antigravity_catalog::transcript_path(identity) else {
+                continue;
+            };
+            let path = agy
+                .transcript_path
+                .clone()
+                .unwrap_or_else(|| agy.catalog_root.join(relative));
+            let more = agy
+                .transcript
+                .poll(&agy.catalog_root, &path, identity, |row| {
+                    hook.hud.ingest_antigravity_row(row)
+                })
+                .unwrap_or_default();
+            agy.transcript_poll = at
+                + if more {
+                    Duration::from_millis(25)
+                } else {
+                    Duration::from_secs(1)
+                };
         }
     }
 
@@ -3810,15 +4113,22 @@ impl ShellOwner {
             )
             .map(|((root, path), identity)| (root, path, identity.trim()))
         else {
-            hook.claude_transcript_poll = None;
+            // A seeded resume transcript becomes readable to this run once its
+            // authenticated identity arrives.
+            hook.claude_transcript_poll = hook
+                .claude_transcript
+                .as_ref()
+                .map(|_| Instant::now() + Duration::from_millis(250));
             return;
         };
-        let backlog = hook
-            .claude_live
-            .poll(root, path, identity, |row| {
-                hook.hud.ingest_live_claude_row(row)
-            })
-            .unwrap_or_default();
+        let backlog = hook.claude_live.poll(root, path, identity, |row| {
+            hook.hud.ingest_live_claude_history(row)
+        });
+        if matches!(backlog, Ok(false)) {
+            hook.hud.publish_transcript_context();
+            hook.sync_gateway_context();
+        }
+        let backlog = backlog.unwrap_or_default();
         hook.claude_transcript_poll = Some(
             Instant::now()
                 + if backlog {
@@ -3901,6 +4211,7 @@ impl ShellOwner {
                 }
                 hook.remember_claude_transcript(&payload);
                 hook.hud.ingest_provider(&payload, now() as f64);
+                hook.sync_gateway_context();
             }
             return;
         }
@@ -4062,7 +4373,8 @@ impl ShellOwner {
                 hook.claude_transcript_poll = None;
                 hook.claude_observed_title = None;
                 hook.claude_live = LiveTranscript::default();
-                hook.hud.ingest_live_claude_row(None);
+                hook.hud.ingest_live_claude_history(None);
+                hook.hud.publish_transcript_context();
                 let mut payload = commit.result.clone();
                 payload["result"] = json!("confirmed");
                 events.push(OwnerEvent::ProviderIdentity(payload));
@@ -4073,6 +4385,7 @@ impl ShellOwner {
             hook.hud.set_resumable(true);
             hook.remember_claude_transcript(&payload);
             hook.hud.ingest_provider(&payload, now() as f64);
+            hook.sync_gateway_context();
         }
         let permission_confirmed = confirms
             && hook

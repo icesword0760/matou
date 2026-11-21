@@ -6,7 +6,12 @@ printf '%s\n' "$CODEX_HOME" "${TERM:-}" "${OPENAI_BASE_URL:-}" > "$CODEX_HOME/en
 if [ "${CODEX_FIXTURE_RESUME:-}" = 1 ]; then
     printf '%s\n' "${OPENAI_API_KEY:-}" >> "$CODEX_HOME/environment"
 fi
-test -z "${MATOU_PROVIDER_HOOK_TOKEN:-}${MATOU_AGENT_STATUS_DIR:-}${CLAUDECODE:-}"
+test -z "${MATOU_PROVIDER_HOOK_TOKEN:-}${CLAUDECODE:-}"
+test -d "${MATOU_AGENT_STATUS_DIR:?}"
+case "$MATOU_AGENT_STATUS_DIR" in
+    */agent-status/*) ;;
+    *) exit 91 ;;
+esac
 if [ "${CODEX_FIXTURE_EVENTS:-}" = 1 ]; then
     hook_command=$(/usr/bin/perl -MJSON::PP -0777 -ne '
         binmode STDOUT, ":encoding(UTF-8)";

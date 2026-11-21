@@ -5253,3 +5253,181 @@ done
     );
     Ok(())
 }
+
+#[test]
+fn antigravity_permission_command_restarts_same_conversation_and_projects_hud() -> Result<()> {
+    use matou_native_core::sessions::{antigravity_binding, list_runs};
+    use serde_json::{Value, json};
+
+    const CONVERSATION: &str = "agy-permission-fixture";
+    let temp = tempfile::tempdir()?;
+    let root = temp.path();
+    let stub = root.join("agy-fixture");
+    let catalog = root.join("catalog");
+    fs::create_dir_all(catalog.join("cache"))?;
+    fs::write(
+        &stub,
+        r#"#!/bin/sh
+set -eu
+printf '%s\n' "$@" > "$AGY_FIXTURE_ROOT/argv"
+printf '%s\n' "$MATOU_AGENT_STATUS_DIR" > "$AGY_FIXTURE_ROOT/status-path"
+printf '%s\n' "$MATOU_PROVIDER_HOOK_URL" > "$AGY_FIXTURE_ROOT/hook-url"
+printf 'ANTIGRAVITY FIXTURE READY\n'
+while IFS= read -r line; do :; done
+"#,
+    )?;
+    fs::set_permissions(&stub, fs::Permissions::from_mode(0o700))?;
+
+    let mut child = RuntimeChild::spawn_configured_with(
+        root,
+        &format!("PROMPT='{PROMPT} '\nagy() {{ :; }}\n"),
+        Path::new("/bin/zsh"),
+        None,
+        |command| {
+            command
+                .env("MATOU_ANTIGRAVITY_COMMAND", &stub)
+                .env("MATOU_ANTIGRAVITY_HOME", &catalog)
+                .env("AGY_FIXTURE_ROOT", root);
+        },
+    )?;
+    child.hello()?;
+    let cwd_uri = url::Url::from_directory_path(child.workspace.canonicalize()?)
+        .map_err(|_| anyhow::anyhow!("fixture workspace URL"))?;
+    fs::write(catalog.join("cache/conversation_metadata.json"), json!({
+        "conversations": {CONVERSATION: {"summary": {
+            "AppDataDir":"antigravity-cli", "WorkspaceURIs":[cwd_uri.as_str()], "Title":"Fixture"
+        }}}
+    }).to_string())?;
+    fs::write(
+        catalog.join("mcp_config.json"),
+        r#"{"mcpServers":{"fixture":{}}}"#,
+    )?;
+    let post = |url: &str, value: Value| -> Result<()> {
+        let status = ProcessCommand::new("/usr/bin/curl")
+            .args([
+                "--noproxy",
+                "*",
+                "--silent",
+                "--show-error",
+                "--fail",
+                "--max-time",
+                "2",
+                "--header",
+                "Content-Type: application/json",
+                "--data",
+                &value.to_string(),
+                url,
+            ])
+            .stdout(Stdio::null())
+            .status()?;
+        ensure!(status.success(), "fixture hook post failed");
+        Ok(())
+    };
+    let status = |url: &str, mode: &str| {
+        post(
+            &format!("{url}?kind=statusline"),
+            json!({
+                "conversationId": CONVERSATION, "agent_state":"idle", "cycle_mode":mode,
+                "model":{"id":"gemini-fixture"}, "quota":{"gemini-5h":{"remaining_fraction":0.75}}
+            }),
+        )
+    };
+
+    child.input("agy")?;
+    child.frame(|rows, _, _| {
+        rows.iter()
+            .any(|row| row.contains("ANTIGRAVITY FIXTURE READY"))
+    })?;
+    let old_url = fs::read_to_string(root.join("hook-url"))?;
+    status(old_url.trim(), "ask")?;
+    let db = Connection::open(child.data.join("matou.sqlite"))?;
+    let deadline = Instant::now() + TIMEOUT;
+    let binding = loop {
+        if let Some(binding) = antigravity_binding(&db, &child.session)?
+            && binding.metadata["permissionMode"] == "ask"
+        {
+            break binding;
+        }
+        ensure!(
+            Instant::now() < deadline,
+            "Antigravity binding did not observe Ask"
+        );
+        thread::sleep(Duration::from_millis(20));
+    };
+    let status_path = PathBuf::from(fs::read_to_string(root.join("status-path"))?.trim());
+    assert_eq!(
+        status_path,
+        child.data.join("agent-status").join(&child.session)
+    );
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_millis() as u64;
+    fs::write(status_path.join("reviewer.json"), json!({
+        "version":1,"label":"External reviewer","state":"running","startedAt":now,"updatedAt":now
+    }).to_string())?;
+
+    child.send(Command::GetAgentHud {
+        request_id: 55,
+        session_id: child.session.clone(),
+    })?;
+    let deadline = Instant::now() + TIMEOUT;
+    let hud = loop {
+        if let Event::Graph(graph) = child.event(deadline, true)?
+            && graph["type"] == "agentHudResult"
+            && graph["requestId"] == 55
+        {
+            break graph["result"]["hud"].clone();
+        }
+    };
+    assert_eq!(hud["permissionMode"], "ask");
+    assert_eq!(hud["usageWindows"][0]["usedPercent"], 25.0);
+    assert_eq!(hud["configCounts"]["mcps"], 1);
+    assert_eq!(hud["agents"][0]["id"], "external:reviewer");
+    assert_eq!(hud["gitBranch"], Value::Null);
+    assert_eq!(hud["gitDirty"], false);
+
+    let old_run = list_runs(&db, &child.session)?
+        .pop()
+        .context("initial run")?;
+    child.send(Command::SetProviderPermissionMode {
+        session_id: child.session.clone(),
+        mode: "plan".into(),
+    })?;
+    let deadline = Instant::now() + TIMEOUT;
+    let new_url = loop {
+        if let Ok(url) = fs::read_to_string(root.join("hook-url"))
+            && !url.trim().is_empty()
+            && url != old_url
+        {
+            break url;
+        }
+        ensure!(
+            Instant::now() < deadline,
+            "Antigravity permission restart did not launch"
+        );
+        thread::sleep(Duration::from_millis(20));
+    };
+    let args = fs::read_to_string(root.join("argv"))?;
+    assert!(args.lines().collect::<Vec<_>>().ends_with(&[
+        "--conversation",
+        CONVERSATION,
+        "--mode",
+        "plan"
+    ]));
+    status(new_url.trim(), "plan")?;
+    let response = permission_mode_result(&mut child, "plan")?;
+    assert!(response.get("error").is_none(), "{response}");
+    let confirmed = antigravity_binding(&db, &child.session)?.context("confirmed binding")?;
+    assert_eq!(confirmed.id, binding.id);
+    assert_eq!(confirmed.provider_session_id, CONVERSATION);
+    assert_eq!(confirmed.metadata["permissionMode"], "plan");
+    assert_ne!(
+        list_runs(&db, &child.session)?.pop().unwrap().id,
+        old_run.id
+    );
+    child.send(Command::Shutdown)?;
+    child.closed()?;
+    let (exit, stderr) = child.wait()?;
+    ensure!(exit.success(), "{stderr}");
+    Ok(())
+}

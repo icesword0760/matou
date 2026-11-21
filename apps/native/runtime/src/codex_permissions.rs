@@ -137,7 +137,7 @@ fn parse_default_permissions(text: &str) -> Option<((&'static str, &'static str)
     Some((selected, invalid))
 }
 
-fn next_root_statement(text: &str) -> Option<(&str, &str)> {
+pub(crate) fn next_root_statement(text: &str) -> Option<(&str, &str)> {
     let mut cursor = 0;
     let mut depth = 0usize;
     while let Some(&byte) = text.as_bytes().get(cursor) {

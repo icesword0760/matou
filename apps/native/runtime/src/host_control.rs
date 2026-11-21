@@ -51,12 +51,13 @@ use matou_native_core::{
 #[cfg(unix)]
 use terminal::{ReadKind, Reply};
 
-const CONTROL_ENV: [&str; 8] = [
+const CONTROL_ENV: [&str; 9] = [
     "MATOU_CONTROL_ENDPOINT",
     "MATOU_CONTROL_TOKEN",
     "MATOU_CONTROL_PROTOCOL",
     "MATOU_CONTROL_CALLER_SESSION",
     "MATOU_CONTROL_CALLER_RUN",
+    "MATOU_AGENT_STATUS_DIR",
     "MATOU_CONTROL_NODE_EXECUTABLE",
     "MATOU_CONTROL_ASSET_ROOT",
     "DSH_MATOU_CONTROL_TOKEN",

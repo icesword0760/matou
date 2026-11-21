@@ -254,12 +254,26 @@ impl Run {
             return Outcome::Ignored;
         }
 
-        let reported_permission = match first_text(payload, &["cycle_mode"]) {
-            Some("auto") => Some(PermissionMode::Default),
-            Some("accept-edits") => Some(PermissionMode::AcceptEdits),
+        let reported_permission = match first_text(
+            payload,
+            &[
+                "cycle_mode",
+                "cycleMode",
+                "permission_mode",
+                "permissionMode",
+            ],
+        ) {
+            Some("auto") if self.permission == PermissionMode::Auto => Some(PermissionMode::Auto),
+            Some("auto" | "default") => Some(PermissionMode::Default),
+            Some("ask") => Some(PermissionMode::Ask),
+            Some("bypassPermissions" | "bypass-permissions") => {
+                Some(PermissionMode::BypassPermissions)
+            }
+            Some("accept-edits" | "acceptEdits") => Some(PermissionMode::AcceptEdits),
             Some("plan") => Some(PermissionMode::Plan),
             None if is_statusline
                 && (payload.contains_key("cycle_mode")
+                    || payload.contains_key("cycleMode")
                     || self.observed_cycle_mode
                         && ["model", "context_window", "agent_state"]
                             .iter()
