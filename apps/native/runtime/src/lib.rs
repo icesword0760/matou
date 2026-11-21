@@ -33,6 +33,7 @@ pub mod retention_policy;
 pub mod search;
 pub mod session;
 mod shell_input;
+pub mod subscription_launch;
 pub mod worker;
 
 pub use model::{SessionEvent, SessionOptions, StorageFaultCode};
