@@ -216,6 +216,29 @@ impl CodexForkIntent {
         self.worktree_binding.as_ref()
     }
 
+    /// Rehydrate only before the first launch in this owner. The binding is
+    /// authoritative storage's already-committed checkout, under this intent.
+    pub(crate) fn resume_persisted(
+        &mut self,
+        fence: u64,
+        worktree: Option<WorktreeBinding>,
+    ) -> Result<()> {
+        ensure!(
+            self.stage == ForkStage::Queued && self.fence == 0 && self.active.is_none(),
+            "Codex Fork has already started"
+        );
+        if let Some(binding) = &worktree {
+            ensure!(
+                binding.identity == self.identity && self.worktree.is_none(),
+                "Stored Worktree does not belong to the Codex Fork"
+            );
+            binding.verify()?;
+        }
+        self.fence = fence;
+        self.worktree_binding = worktree;
+        Ok(())
+    }
+
     /// Starts a queued intent or explicitly retries a failed one. The owner
     /// launches the returned command and feeds its hooks and exit back here.
     pub fn begin(

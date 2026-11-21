@@ -47,6 +47,13 @@ impl ShellInput {
 pub(crate) const CODEX_BYPASS: &str = "--dangerously-bypass-approvals-and-sandbox";
 
 fn interactive_launch(command: &str) -> Option<InteractiveLaunch> {
+    if crate::dsh_launch::matches_shell_command(command) {
+        return Some(InteractiveLaunch {
+            profile: LaunchProfile::Dsh,
+            mode: "default",
+        });
+    }
+
     // Match the frozen JavaScript trim and whitespace folding.
     let mut words = command
         .split(|c: char| c == '\u{feff}' || (c.is_whitespace() && c != '\u{0085}'))
@@ -86,7 +93,6 @@ mod tests {
             ("echo claude", None),
             ("CLAUDE", None),
             ("cc", None),
-            ("dsh", None),
             ("agy", None),
         ] {
             assert_eq!(

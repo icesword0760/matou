@@ -69,6 +69,8 @@ pub(crate) struct Observation {
     pub cwd: Option<String>,
     pub notification: Option<(Notification, Instant)>,
     pub codex: Option<codex_events::Hook>,
+    pub hud_payload: Option<Value>,
+    pub statusline: bool,
 }
 
 impl Observation {
@@ -124,6 +126,8 @@ impl Observation {
                 .map(|event| (event, Instant::now())),
             codex: (profile == LaunchProfile::Codex)
                 .then(|| codex_events::Hook::parse(payload, event)),
+            hud_payload: None,
+            statusline: false,
         }
     }
 }
@@ -330,6 +334,7 @@ pub(crate) fn transcript_uuid(path: &str) -> Option<&str> {
 
 pub(crate) enum HookMessage {
     Observed(Scope, Observation, Instant),
+    DshObserved(Scope, Value, Instant),
     Retired(Scope),
 }
 
@@ -361,9 +366,51 @@ pub(crate) struct Registration {
     registry: Registry,
     pub settings_path: PathBuf,
     script_path: PathBuf,
+    url: String,
+    dsh_assets: Option<tempfile::TempDir>,
 }
 
 impl Registration {
+    pub fn attach_dsh(&mut self, dump: &str, run_id: &str) -> Result<PathBuf> {
+        let assets = tempfile::Builder::new()
+            .prefix("dsh-")
+            .tempdir_in(self.settings_path.parent().context("DSH hook directory")?)?;
+        let directory = assets.path().join("dsh");
+        fs::create_dir(&directory)?;
+        for (name, source) in [
+            (
+                "bridge.mjs",
+                include_str!("../../../runtime/control-assets/providers/dsh/bridge.mjs"),
+            ),
+            (
+                "hud.mjs",
+                include_str!("../../../runtime/control-assets/providers/dsh/hud.mjs"),
+            ),
+            (
+                "instructions.mjs",
+                include_str!("../../../runtime/control-assets/providers/dsh/instructions.mjs"),
+            ),
+        ] {
+            write_private(&directory.join(name), source.as_bytes(), 0o600)?;
+        }
+        write_private(
+            &assets.path().join("dsh-system-message.md"),
+            include_bytes!("../../../runtime/control-assets/providers/dsh-system-message.md"),
+            0o600,
+        )?;
+        let bridge = directory.join("bridge.mjs");
+        let patch = crate::dsh_launch::observation_patch(
+            dump,
+            bridge.to_str().context("DSH observer path is not UTF-8")?,
+            &self.url,
+            run_id,
+        )?;
+        let path = assets.path().join("observation.yml");
+        write_private(&path, patch.as_bytes(), 0o600)?;
+        self.dsh_assets = Some(assets);
+        Ok(path)
+    }
+
     pub fn attach_codex(&self, launch: &mut ShellLaunch) -> Result<()> {
         let command = json!(script_command(&self.script_path)?);
         let status = if launch
@@ -463,7 +510,9 @@ impl ProviderHookServer {
             script: directory.join(format!("{token}.statusline.sh")),
             temporary: directory.join(format!("{token}.settings.json.tmp")),
         };
-        let script = if scope.profile == LaunchProfile::Codex {
+        let script = if scope.profile == LaunchProfile::Dsh {
+            String::new()
+        } else if scope.profile == LaunchProfile::Codex {
             format!(
                 "#!/bin/sh\n/usr/bin/curl --noproxy '*' --silent --show-error --max-time 2 --request POST --header 'content-type: application/json' --data-binary @- '{url}' >/dev/null 2>&1 || true\n"
             )
@@ -497,6 +546,8 @@ impl ProviderHookServer {
             registry: Arc::clone(&self.registry),
             settings_path,
             script_path,
+            url,
+            dsh_assets: None,
         })
     }
 
@@ -811,17 +862,24 @@ fn read_request(
         }
         return Ok(());
     }
-    let mut observation = Observation::parse_for(&payload, record.scope.profile);
-    if statusline {
-        observation.event = "unknown";
-        observation.notification = None;
-        observation.codex = None;
-    }
-    match send.try_send(HookMessage::Observed(
-        record.scope.clone(),
-        observation,
-        Instant::now(),
-    )) {
+    let received_at = Instant::now();
+    let message = if record.scope.profile == LaunchProfile::Dsh {
+        if statusline {
+            return Err(BAD_REQUEST);
+        }
+        HookMessage::DshObserved(record.scope.clone(), Value::Object(payload), received_at)
+    } else {
+        let mut observation = Observation::parse_for(&payload, record.scope.profile);
+        if statusline {
+            observation.statusline = true;
+            observation.event = "unknown";
+            observation.notification = None;
+            observation.codex = None;
+        }
+        observation.hud_payload = Some(Value::Object(payload));
+        HookMessage::Observed(record.scope.clone(), observation, received_at)
+    };
+    match send.try_send(message) {
         Ok(()) => Ok(()),
         Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => {
             Err("503 Service Unavailable")
