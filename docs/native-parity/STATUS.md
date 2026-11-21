@@ -1913,3 +1913,21 @@ On 2026-11-16 the user explicitly chose `保持原样` after the concrete scenar
   - Explicit user-authorized macOS `/Applications/码头.app` replacement install + TCC continuity + Finder drop;
   - Remaining open macOS deep-dive gates (`recovery-water` strict 0-tolerance pixel gate vs product tolerance decision, visible-window `DatabaseRecoveryPage` / global read-only walkthrough).
 
+### `Command::InstallUpdate`, Windows update copy & 3-platform Release ZIPs (`a0279e8c`) (2026-11-22)
+
+- **Implementation (`a0279e8c`)**:
+  - Added `Command::InstallUpdate` / `updateInstallResult` (`runtime/src/{host.rs, update_download.rs}`, `desktop/src/workspace_wiring.rs`) enforcing `Downloaded` phase, canonical containment inside `<data_root>/updates`, regular-file & platform-extension checks (`.dmg` on macOS via `/usr/bin/open --`, `.exe` on Windows via Win32 `ShellExecuteW`), and dry-run isolation under tests/hidden probes.
+  - Updated `desktop/src/update_popover.rs` to show Windows-accurate installer copy (`下载安装包更新` / `安装包已下载完成` / `打开安装包安装` and English equivalents) while preserving macOS `DMG` wording unchanged.
+- **Verification**:
+  - **macOS host**: 80 targets / **814 passed, 0 failed** (33 ignored); 3 hidden probes green; `package-native-win.test.mjs` **58/58**; `cargo check --all-targets`, `rustfmt`, `check:identifiers`, `git diff --check`, `Cargo.lock` 0-diff all green.
+  - **Windows 11 VM (`/tmp/matou-win-vm-v4/report.md` & `shots/01..03`)**: ARM64 full workspace `cargo test` **95 targets / 617 passed, 0 failed, 0 launch-blocked** (incl. `update_http_contract` 7/7 + `InstallUpdate` contracts); visually inspected all 3 real `prlctl capture` PNGs confirming Release ARM64 loopback HTTP update check (`0.2.27` + release notes + `下载安装包更新`), real streamed SHA-512 verified download (`3,244,032` bytes matching server digest) → `安装包已下载完成` / `打开安装包安装` (placeholder `.exe` not executed), and Release x64 `win-unpacked\码头.exe` running PowerShell (`MATOU_X64_RELEASE_OK`) with exit 0 & 0 leftovers.
+- **Verified Release artifacts in `artifacts/native-parity/release/`** (all from `a0279e8c`, gitignored):
+  - `Matou-Native-0.2.26-arm64-signed.zip` (macOS ARM64, 3-tier Developer ID signed `com.matou.desktop` / `matou-native-runtime` / `matou-claude-accounts`, verified `--require-release-signature` before & after extraction): `31M`, SHA-256 `c310d6ce48cc6e095dbf996247ad639d1b3233f299da9fb27606f7e8b65d0c95`
+  - `Matou-Native-0.2.26-win-arm64.zip` (Windows ARM64 Release, `mt.exe` manifest + `ghostty-vt.dll` + `claude-plugin` + ARM64 `matou-claude-accounts.exe`): `30M`, SHA-256 `c5d6684f56af9a2649c1c801f1c3009510f8be5dd3c314ab1781893236e293c7`
+  - `Matou-Native-0.2.26-win-x64.zip` (Windows x64 Release, `mt.exe` manifest + `ghostty-vt.dll` + `claude-plugin` + x64 `matou-claude-accounts.exe`): `32M`, SHA-256 `ae7c64bbf5e57603fbdc1a7a0d3ce7e834da9a61092aa5708a7d8945ae1e2b30`
+- **Remaining open scope (externally / user-authorization gated or explicit product trade-offs)**:
+  - Refreshing user's running `/Applications/码头测试版.app` (PID `10325` still live, untouched) once user exits it, and explicit user-authorized `/Applications/码头.app` replacement install + TCC continuity + Finder drop;
+  - Real online production HTTPS update check & OAuth browser/Keychain account sign-in/switch (macOS & Windows), live Windows AI CLI runs;
+  - Windows NSIS installer packaging & Authenticode code signing (requires signing cert);
+  - Explicit product decision on `recovery-water` strict 0-tolerance pixel gate (already mounted & verified visually; quantization gap vs Chromium Ganesh documented at `N02ba`) and visible-window `DatabaseRecoveryPage` walkthrough.
+
