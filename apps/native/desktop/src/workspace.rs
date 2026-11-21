@@ -2603,6 +2603,10 @@ impl Workspace {
         for water in self.recovery_water.values() {
             water.update(cx, |water, cx| water.set_theme(theme, cx));
         }
+        if let Some(child) = self.dag_window {
+            let dark = self.theme.effective() == AppTheme::Dark;
+            let _ = child.update(cx, |view, window, cx| view.set_dark(dark, window, cx));
+        }
         cx.notify();
     }
 
@@ -6872,7 +6876,15 @@ impl Workspace {
         {
             anyhow::bail!("Injected DAG window creation failure");
         }
-        DagWindow::open(&self.graph, target, self.locale, visible, window, cx)
+        DagWindow::open(
+            &self.graph,
+            target,
+            self.locale,
+            self.theme.effective() == AppTheme::Dark,
+            visible,
+            window,
+            cx,
+        )
     }
 
     fn dismiss_dag_open_error(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -9831,20 +9843,36 @@ impl Workspace {
         );
     }
 
+    fn is_theme_shortcut(stroke: &Keystroke) -> bool {
+        let mods = stroke.modifiers;
+        let mac = cfg!(target_os = "macos");
+        stroke.key == "i"
+            && !mods.shift
+            && !mods.alt
+            && !mods.function
+            && mods.platform == mac
+            && mods.control != mac
+    }
+
+    fn toggle_theme_shortcut(&mut self, cx: &mut Context<Self>) {
+        let preference = match self.theme.effective() {
+            AppTheme::Light => ThemePreference::Dark,
+            AppTheme::Dark => ThemePreference::Light,
+        };
+        self.save_theme(preference, cx);
+    }
+
     fn workspace_shortcut(&mut self, stroke: &Keystroke, cx: &mut Context<Self>) -> bool {
+        if Self::is_theme_shortcut(stroke) {
+            self.toggle_theme_shortcut(cx);
+            return true;
+        }
         let mods = stroke.modifiers;
         let mac = cfg!(target_os = "macos");
         if mods.alt || !(if mac { mods.platform } else { mods.control }) {
             return false;
         }
         match (stroke.key.as_str(), mods.shift) {
-            ("i", false) if !mods.function && !(if mac { mods.control } else { mods.platform }) => {
-                let preference = match self.theme.effective() {
-                    AppTheme::Light => ThemePreference::Dark,
-                    AppTheme::Dark => ThemePreference::Light,
-                };
-                self.save_theme(preference, cx);
-            }
             ("d", false) => self.split_horizontal(cx),
             ("d", true) => {}
             ("t", false) => self.create_canvas(cx),

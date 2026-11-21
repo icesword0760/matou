@@ -1696,6 +1696,15 @@ mod view {
             window.focus(&self.search_input.read(cx).focus);
         }
 
+        pub fn search_focused(&self, window: &Window, cx: &App) -> bool {
+            self.search_input.read(cx).focus.is_focused(window)
+        }
+
+        #[cfg(all(target_os = "macos", debug_assertions))]
+        pub fn dark_for_probe(&self) -> bool {
+            self.dark
+        }
+
         fn ensure_search_subscription(&mut self, window: &mut Window, cx: &mut Context<Self>) {
             if self.search_subscription.is_some() {
                 return;

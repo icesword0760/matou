@@ -1609,6 +1609,16 @@ impl Workspace {
                             },
                         )
                     });
+                    let child_window = window.window_handle();
+                    let shortcut_owner = owner.clone();
+                    let keyboard = cx.intercept_keystrokes(move |event, window, cx| {
+                        if window.window_handle() == child_window
+                            && Workspace::is_theme_shortcut(&event.keystroke)
+                        {
+                            cx.stop_propagation();
+                            let _ = shortcut_owner.update(cx, Workspace::toggle_theme_shortcut);
+                        }
+                    });
                     window.focus(&terminal.read(cx).focus);
                     DetachedCardView {
                         owner,
@@ -1617,6 +1627,7 @@ impl Workspace {
                         terminal,
                         presentation,
                         _owner_updates: owner_updates,
+                        _keyboard: keyboard,
                     }
                 })
             },
@@ -2864,6 +2875,7 @@ struct DetachedCardView {
     terminal: Entity<TerminalSurface>,
     presentation: DetachedPresentation,
     _owner_updates: Option<Subscription>,
+    _keyboard: Subscription,
 }
 
 struct DetachedPresentation {

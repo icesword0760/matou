@@ -49,7 +49,7 @@ mod workspace {
     use matou_native_core::link_routing::ControlledBrowserFailure;
     use matou_native_desktop::{
         card_context_menu::CardMenuAction,
-        detach_window::probe_detached_header_left,
+        detach_window::probe_detached_header,
         egress_panel::{
             EgressFamily, EgressFamilyStatus, EgressState, EgressStatus, EgressTransition,
             EgressViolation,
@@ -132,11 +132,15 @@ mod workspace {
     }
 
     fn press(window: Handle, cx: &mut AsyncApp, key: &str) {
-        AnyWindowHandle::from(window)
+        dispatch_key(window.into(), cx, key);
+    }
+
+    fn dispatch_key(window: AnyWindowHandle, cx: &mut AsyncApp, key: &str) -> bool {
+        window
             .update(cx, |_, window, cx| {
-                window.dispatch_keystroke(Keystroke::parse(key).unwrap(), cx);
+                window.dispatch_keystroke(Keystroke::parse(key).unwrap(), cx)
             })
-            .unwrap();
+            .unwrap()
     }
 
     fn native_view(handle: AnyWindowHandle, cx: &mut AsyncApp) -> (cocoa::base::id, Size<Pixels>) {
@@ -454,6 +458,141 @@ mod workspace {
         );
     }
 
+    fn verify_detached_theme_shortcut(
+        main: Handle,
+        children: [AnyWindowHandle; 2],
+        sink: &crate::runtime_bridge::ProbeReceiver,
+        cx: &mut AsyncApp,
+        root: &std::path::Path,
+    ) {
+        write_theme_preference(root, ThemePreference::Light).unwrap();
+        let (focuses, dag) = main
+            .update(cx, |view, window, cx| {
+                view.data_root = Some(root.to_path_buf());
+                let mut graph = view.graph.clone();
+                graph["edges"] = json!([]);
+                for node in graph["nodes"].as_array_mut().unwrap() {
+                    node["cwd"] = json!(".");
+                }
+                let dag = DagWindow::open(&graph, A, view.locale, false, false, window, cx)
+                    .expect("open hidden DAG");
+                view.dag_window = Some(dag);
+                (
+                    [A, B].map(|id| view.terminals[id].read(cx).focus.clone()),
+                    dag,
+                )
+            })
+            .unwrap();
+        draw(dag.into(), cx);
+        dag.update(cx, |view, window, cx| {
+            view.probe_canvas().1.update(cx, |canvas, cx| {
+                assert!(!canvas.dark_for_probe());
+                canvas.focus_search(window, cx);
+            });
+        })
+        .unwrap();
+        for (child, focus) in children.into_iter().zip(&focuses) {
+            draw(child, cx);
+            child
+                .update(cx, |_, window, _| assert!(focus.is_focused(window)))
+                .unwrap();
+        }
+        while sink.try_recv().is_ok() {}
+        let verify_theme = |preference: ThemePreference, cx: &mut AsyncApp| {
+            let (expected, header, topbar) = if preference == ThemePreference::Dark {
+                (
+                    AppTheme::Dark,
+                    0x11151c,
+                    rgba(AppTheme::Dark.palette().tabs.bar),
+                )
+            } else {
+                (AppTheme::Light, 0xffffff, rgb(0xffffff))
+            };
+            assert_eq!(read_theme_preference(root).unwrap(), preference);
+            assert_eq!(
+                main.update(cx, |view, _, _| view.theme.effective())
+                    .unwrap(),
+                expected,
+            );
+            let chrome = crate::settings_shell::probe_language_zone(|| {
+                draw(main.into(), cx);
+            });
+            assert_eq!(chrome.workspace_surfaces.topbar, Some(topbar));
+            let terminal_theme = expected.palette().terminal;
+            for (child, focus) in children.into_iter().zip(&focuses) {
+                let background = crate::terminal_surface::probe_terminal_background(|| {
+                    let (_, color) = probe_detached_header(|| {
+                        draw(child, cx);
+                    })
+                    .expect("detached header rendered");
+                    assert_eq!(color, rgb(header));
+                });
+                assert_eq!(background, Some(terminal_theme.background));
+                child
+                    .update(cx, |_, window, _| assert!(focus.is_focused(window)))
+                    .unwrap();
+            }
+            draw(dag.into(), cx);
+            dag.update(cx, |view, window, cx| {
+                let canvas = view.probe_canvas().1;
+                let canvas = canvas.read(cx);
+                assert_eq!(canvas.dark_for_probe(), expected == AppTheme::Dark);
+                assert!(canvas.search_focused(window, cx));
+            })
+            .unwrap();
+            let commands = std::iter::from_fn(|| sink.try_recv().ok()).collect::<Vec<_>>();
+            for id in [A, B] {
+                assert!(commands.iter().any(|command| matches!(
+                    command,
+                    Command::Theme { session_id, theme } if session_id == id && *theme == terminal_theme
+                )));
+            }
+            assert!(
+                commands
+                    .iter()
+                    .all(|command| !matches!(command, Command::Input { .. }))
+            );
+        };
+        for (source, preference) in [
+            (children[0], ThemePreference::Dark),
+            (children[0], ThemePreference::Light),
+            (main.into(), ThemePreference::Dark),
+            (children[1], ThemePreference::Light),
+        ] {
+            assert!(dispatch_key(source, cx, "cmd-i"));
+            verify_theme(preference, cx);
+        }
+        assert!(!dispatch_key(children[0], cx, "cmd-shift-i"));
+        assert!(!dispatch_key(children[0], cx, "cmd-alt-i"));
+        assert_eq!(read_theme_preference(root).unwrap(), ThemePreference::Light);
+        assert!(
+            !std::iter::from_fn(|| sink.try_recv().ok())
+                .any(|command| matches!(command, Command::Theme { .. }))
+        );
+        for preference in [ThemePreference::Dark, ThemePreference::Light] {
+            main.update(cx, |view, window, cx| {
+                view.toggle_settings(window, cx);
+                view.settings.as_ref().unwrap().0.update(cx, |_, cx| {
+                    cx.emit(SettingsShellEvent::SaveTheme(preference));
+                });
+            })
+            .unwrap();
+            main.update(cx, |view, window, cx| view.close_settings(window, cx))
+                .unwrap();
+            verify_theme(preference, cx);
+        }
+        dag.update(cx, |_, window, _| window.remove_window())
+            .unwrap();
+        main.update(cx, |view, _, _| {
+            view.dag_window = None;
+            view.data_root = None;
+        })
+        .unwrap();
+        println!(
+            "detached theme shortcut: Cmd+I and Settings synchronize the main window, both child headers and terminal palettes, and DAG; focus and theme.json verified; Cmd+Shift+I/Alt+Cmd+I unhandled"
+        );
+    }
+
     async fn verify(cx: &mut AsyncApp, fixture_root: &std::path::Path) {
         let (window, sink) = open_probe_at(cx, 1260.);
         draw(window.into(), cx);
@@ -654,11 +793,18 @@ mod workspace {
             })
             .unwrap();
         assert_ne!(first.window_id(), second.window_id());
-        let left = probe_detached_header_left(|| {
+        let (left, _) = probe_detached_header(|| {
             draw(first, cx);
         })
         .expect("detached title region rendered");
         assert!(left >= px(76.), "{left:?}");
+        verify_detached_theme_shortcut(
+            window,
+            [first, second],
+            &sink,
+            cx,
+            &fixture_root.join("detached-theme-shortcut"),
+        );
         draw(second, cx);
         let mounts = draw(window.into(), cx);
         assert!(

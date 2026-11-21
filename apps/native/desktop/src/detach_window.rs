@@ -160,12 +160,12 @@ mod view {
 
     #[cfg(debug_assertions)]
     thread_local! {
-        static HEADER_PROBE: std::cell::Cell<Option<Option<Pixels>>> =
+        static HEADER_PROBE: std::cell::Cell<Option<Option<(Pixels, Rgba)>>> =
             const { std::cell::Cell::new(None) };
     }
 
     #[cfg(debug_assertions)]
-    pub fn probe_detached_header_left(draw: impl FnOnce()) -> Option<Pixels> {
+    pub fn probe_detached_header(draw: impl FnOnce()) -> Option<(Pixels, Rgba)> {
         HEADER_PROBE.set(Some(None));
         draw();
         HEADER_PROBE.take().flatten()
@@ -279,8 +279,10 @@ mod view {
         let header = div();
         #[cfg(debug_assertions)]
         let header = header.when(HEADER_PROBE.with(|probe| probe.get().is_some()), |header| {
-            header.on_children_prepainted(|children, _, _| {
-                HEADER_PROBE.set(Some(children.first().map(|bounds| bounds.left())));
+            header.on_children_prepainted(move |children, _, _| {
+                HEADER_PROBE.set(Some(
+                    children.first().map(|bounds| (bounds.left(), background)),
+                ));
             })
         });
         header
@@ -361,7 +363,7 @@ mod view {
 pub use view::{detached_placeholder, detached_window_header};
 
 #[cfg(debug_assertions)]
-pub use view::probe_detached_header_left;
+pub use view::probe_detached_header;
 
 #[cfg(test)]
 mod tests {
