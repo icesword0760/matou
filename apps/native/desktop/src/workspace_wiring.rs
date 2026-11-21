@@ -2564,6 +2564,7 @@ impl Workspace {
     }
 
     pub(super) fn retire_wiring_commands(&mut self, cx: &mut Context<Self>) {
+        self.retire_footer_git(cx);
         if let Some((request_id, request)) = self.wiring.board_moves.pop() {
             self.wiring.board_moves.clear();
             self.show_board_feedback(
@@ -2821,6 +2822,7 @@ impl Workspace {
             let interval = Duration::from_secs(2);
             let refresh_at = self.motion_clock.elapsed() + interval;
             state.refresh_at = Some(refresh_at);
+            self.release_footer_git_projection(&target, request_id, reply);
             let generation = self.runtime_generation;
             cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(interval).await;
