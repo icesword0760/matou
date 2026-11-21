@@ -19,6 +19,10 @@ const resourcesDirectory = 'resources'
 const manifestFilename = 'manifest.json'
 const versionFilename = 'version.json'
 const claudePluginSource = fileURLToPath(new URL('../../apps/runtime/control-assets/providers/claude-plugin/', import.meta.url))
+const accountsResource = 'claude-accounts'
+const accountsDirectory = 'matou-claude-accounts'
+const accountsExecutable = accountsDirectory + '.exe'
+const defaultAccountsDir = fileURLToPath(new URL('../claude-accounts/dist/matou-claude-accounts/', import.meta.url))
 const machines = { x64: 0x8664, arm64: 0xaa64 }
 const versionPattern = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/
 
@@ -379,6 +383,20 @@ async function resolveGhosttyDll(explicit, runtimeBin, arch) {
   })
 }
 
+async function optionalDirectory(path) {
+  const stat = await lstat(path).catch(error => {
+    if (error.code !== 'ENOENT') throw error
+  })
+  if (!stat) return
+  if (!stat.isDirectory()) throw new Error('Claude accounts path must be a real directory: ' + path)
+  return path
+}
+
+async function verifyAccountsDirectory(directory, arch) {
+  await requirePath(directory, 'Claude accounts onedir', true)
+  await checkPe(join(directory, accountsExecutable), 'Claude accounts executable', arch)
+}
+
 async function requireEntries(directory, expected, label) {
   await requirePath(directory, label, true)
   const entries = (await readdir(directory)).sort()
@@ -415,7 +433,14 @@ export async function verifyWindowsDirPackage(path, options) {
   }
   const resources = join(path, plan.resourcesDirectory)
   await requireEntries(path, [plan.applicationExecutable, plan.runtimeExecutable, ghosttyFilename, plan.resourcesDirectory], 'unpacked package')
-  await requireEntries(resources, [plan.manifestFilename, plan.versionFilename, 'control-assets'], 'resources')
+  const expectedResources = [plan.manifestFilename, plan.versionFilename, 'control-assets']
+  const accounts = join(resources, accountsResource)
+  if (options.accountsDir !== undefined || await optionalDirectory(accounts)) {
+    expectedResources.push(accountsResource)
+    await requireEntries(accounts, [accountsDirectory], 'Claude accounts resources')
+    await verifyAccountsDirectory(join(accounts, accountsDirectory), plan.arch)
+  }
+  await requireEntries(resources, expectedResources, 'resources')
   await verifyClaudePlugin(resources)
   const { manifest, version } = packageMetadata(plan)
   for (const [filename, expected] of [[plan.manifestFilename, manifest], [plan.versionFilename, version]]) {
@@ -513,6 +538,9 @@ export async function assembleWindowsDirPackage({ desktopBin, runtimeBin, ghostt
   }
   const dll = await resolveGhosttyDll(ghosttyDll, runtimeBin, plan.arch)
   await checkPe(dll, 'Ghostty DLL', plan.arch, true)
+  if (options.accountsDir !== undefined && (typeof options.accountsDir !== 'string' || !options.accountsDir.trim())) throw new Error('Missing Claude accounts directory')
+  const accounts = options.accountsDir ?? await optionalDirectory(defaultAccountsDir)
+  if (accounts) await verifyAccountsDirectory(accounts, plan.arch)
 
   await mkdir(output, { recursive: true })
   if (await safeOutput(outDir) !== output) throw new Error('Output path changed during assembly')
@@ -525,6 +553,9 @@ export async function assembleWindowsDirPackage({ desktopBin, runtimeBin, ghostt
     await copyFile(runtimeBin, join(directory, plan.runtimeExecutable))
     await copyFile(dll, join(directory, ghosttyFilename))
     await cp(claudePluginSource, join(resources, 'control-assets', 'providers', 'claude-plugin'), { recursive: true })
+    if (accounts) {
+      await cp(accounts, join(resources, accountsResource, accountsDirectory), { recursive: true })
+    }
     const { manifest, version } = packageMetadata(plan)
     await writeFile(join(resources, plan.manifestFilename), pretty(manifest) + '\n')
     await writeFile(join(resources, plan.versionFilename), pretty(version) + '\n')
@@ -546,7 +577,7 @@ const requiredOptions = ['arch', 'desktop-bin', 'runtime-bin', 'out-dir', 'versi
 const usage = `Usage:
   node tooling/native-parity/package-native-win.mjs --arch <x64|arm64> [--target dir]
     --desktop-bin <file> --runtime-bin <file> --out-dir <temporary-subdirectory>
-    --version <X.Y.Z> [--update-base-url <http(s) URL>] [--ghostty-dll <file>]
+    --version <X.Y.Z> [--update-base-url <http(s) URL>] [--ghostty-dll <file>] [--accounts-dir <dir>]
 
 Assembles and verifies an offline Windows directory package. The approved output
 location is a subdirectory of the host temporary directory (or /tmp on POSIX).`
@@ -554,7 +585,7 @@ location is a subdirectory of the host temporary directory (or /tmp on POSIX).`
 async function main() {
   const { values } = parseArgs({
     options: {
-      ...Object.fromEntries([...requiredOptions, 'target', 'update-base-url', 'ghostty-dll'].map(name => [name, { type: 'string' }])),
+      ...Object.fromEntries([...requiredOptions, 'target', 'update-base-url', 'ghostty-dll', 'accounts-dir'].map(name => [name, { type: 'string' }])),
       help: { type: 'boolean', short: 'h' }
     }
   })
@@ -565,7 +596,7 @@ async function main() {
   const result = await assembleWindowsDirPackage({
     arch: values.arch, target: values.target, version: values.version,
     desktopBin: values['desktop-bin'], runtimeBin: values['runtime-bin'],
-    ghosttyDll: values['ghostty-dll'],
+    ghosttyDll: values['ghostty-dll'], accountsDir: values['accounts-dir'],
     outDir: values['out-dir'], updateBaseUrl: values['update-base-url']
   })
   console.log(pretty(result))

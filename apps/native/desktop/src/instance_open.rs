@@ -470,7 +470,7 @@ mod transport {
         },
         Storage::FileSystem::{
             FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
-            PIPE_ACCESS_DUPLEX, SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT,
+            PIPE_ACCESS_DUPLEX, ReadFile, SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT,
         },
         System::{
             Pipes::{
@@ -591,7 +591,24 @@ mod transport {
 
     impl<T: std::borrow::Borrow<File>> Read for Pipe<T> {
         fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-            self.transfer(false, |mut file| file.read(buffer))
+            if buffer.is_empty() {
+                return Ok(0);
+            }
+            self.transfer(false, |file| {
+                let mut size = 0;
+                // File::read treats ERROR_NO_DATA as EOF. For PIPE_NOWAIT it
+                // means the peer has not put any bytes in the pipe yet.
+                check(unsafe {
+                    ReadFile(
+                        file.as_raw_handle(),
+                        buffer.as_mut_ptr(),
+                        buffer.len().min(u32::MAX as usize) as u32,
+                        &mut size,
+                        null_mut(),
+                    )
+                })?;
+                Ok(size as usize)
+            })
         }
     }
 
@@ -602,6 +619,34 @@ mod transport {
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
         }
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn waits_for_an_acknowledgement_on_an_empty_connected_pipe() -> Result<()> {
+        let root =
+            std::env::temp_dir().join(format!("matou-instance-open-{}", uuid::Uuid::new_v4()));
+        let endpoint = Endpoint::new(&root)?;
+        let mut server = private_pipe(&endpoint.pipe)?;
+        let mut client = endpoint.connect()?;
+        assert_eq!(
+            code(
+                &check(unsafe { ConnectNamedPipe(server.as_raw_handle(), null_mut()) })
+                    .unwrap_err()
+            ),
+            ERROR_PIPE_CONNECTED
+        );
+        thread::scope(|scope| {
+            let acknowledgement = scope.spawn(move || {
+                thread::sleep(RETRY);
+                server.write_all(&[ACK])
+            });
+            let mut reply = [0];
+            client.read_exact(&mut reply)?;
+            assert_eq!(reply, [ACK]);
+            acknowledgement.join().unwrap()?;
+            Ok(())
+        })
     }
 
     fn private_pipe(pipe: &str) -> Result<File> {

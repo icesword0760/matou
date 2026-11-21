@@ -174,6 +174,27 @@ test('verifier rejects missing or renamed companions, mismatched metadata and up
   await verifyWindowsDirPackage(path, input)
 })
 
+test('copies an accounts onedir and verifies the bundled PE32+ architecture', async () => {
+  const accountsDir = join(root, 'accounts source')
+  const executable = 'matou-claude-accounts.exe'
+  const source = join(accountsDir, executable)
+  await mkdir(join(accountsDir, '_internal'), { recursive: true })
+  const engine = peFixture(0xaa64, 'account engine')
+  await writeFile(source, engine)
+  await writeFile(join(accountsDir, '_internal', 'dependency.dll'), 'dependency')
+  const input = options('arm64', join(root, 'with accounts'), { accountsDir })
+  const { path } = await assembleWindowsDirPackage(input)
+  const installed = join(path, 'resources', 'claude-accounts', 'matou-claude-accounts')
+  assert.deepEqual(await readFile(join(installed, executable)), engine)
+  assert.equal(await readFile(join(installed, '_internal', 'dependency.dll'), 'utf8'), 'dependency')
+  await verifyWindowsDirPackage(path, { arch: 'arm64', version })
+  await assert.rejects(assembleWindowsDirPackage(options('x64', join(root, 'wrong engine'), {
+    accountsDir
+  })), /Claude accounts executable architecture mismatch/)
+  await writeFile(join(installed, executable), 'not an executable')
+  await assert.rejects(verifyWindowsDirPackage(path, input), /Expected a Windows PE executable for Claude accounts/)
+})
+
 test('rejects non-isolated, protected and invalid output paths', async () => {
   const guarded = join(root, 'guarded')
   const existingFile = join(root, 'out-file')

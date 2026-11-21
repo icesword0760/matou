@@ -28,9 +28,9 @@ uuid = { version = "1", features = ["v4"] }
 tokio = { version = "=1.54.1", features = ["net", "rt", "sync", "time"] }
 tower-service = "=0.3.3"
 tempfile = "3"
+subtle = "=2.6.1"
+sha2 = "=0.10.9"
+base64 = "=0.22.1"
 
 [target.'cfg(unix)'.dependencies]
-base64 = "=0.22.1"
 libc = "=0.2.191"
-sha2 = "=0.10.9"
-subtle = "=2.6.1"

@@ -1052,6 +1052,27 @@ mod workspace {
         println!("egress and team: trigger toggle, frozen session banner, drawn team summary");
 
         window
+            .update(cx, |view, window, cx| {
+                assert!(view.order.iter().any(|id| id == A));
+                view.apply(
+                    BridgeEvent::Runtime {
+                        generation: 1,
+                        event: Event::ScenesDisposed(vec![A.into()]),
+                    },
+                    window,
+                    cx,
+                );
+                assert!(
+                    view.graph_node(A).is_some(),
+                    "graph replacement is still pending"
+                );
+                assert!(!view.order.iter().any(|id| id == A));
+            })
+            .unwrap();
+        draw(window.into(), cx);
+        println!("card disposal: rendered between disposal and graph replacement");
+
+        window
             .update(cx, |_, window, _| window.remove_window())
             .unwrap();
         for width in [1260., 820.] {

@@ -1,5 +1,3 @@
-#![cfg(unix)]
-
 use anyhow::{Context, Result, bail, ensure};
 use matou_native_runtime::{
     host::{Event, LaunchOptions, OfflineFixtures, RuntimeHost},
@@ -7,9 +5,10 @@ use matou_native_runtime::{
 };
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{Value, json};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::{
     fs,
-    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::{Command, Output},
     thread,
@@ -28,22 +27,29 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Result<Self> {
-        let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .ancestors()
-            .find(|path| path.join(".git").exists())
-            .context("locate short worktree socket path")?;
-        let root = tempfile::Builder::new()
-            .prefix(".tmp-mtw-")
-            .tempdir_in(repo)?;
+        #[cfg(unix)]
+        let root = {
+            let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .ancestors()
+                .find(|path| path.join(".git").exists())
+                .context("locate short worktree socket path")?;
+            tempfile::Builder::new()
+                .prefix(".tmp-mtw-")
+                .tempdir_in(repo)?
+        };
+        #[cfg(windows)]
+        let root = tempfile::tempdir()?;
         let data = root.path().join("data");
         let home = root.path().join("home");
         let workspace = root.path().join("workspace");
         fs::create_dir(&home)?;
         fs::create_dir(&workspace)?;
-        let shell = root.path().join("shell");
-        fs::write(
-            &shell,
-            r#"#!/bin/sh
+        #[cfg(unix)]
+        let shell = {
+            let shell = root.path().join("shell");
+            fs::write(
+                &shell,
+                r#"#!/bin/sh
 umask 077
 /bin/stty -echo
 identity="$HOME/identity.$MATOU_CONTROL_CALLER_SESSION"
@@ -55,8 +61,13 @@ while IFS= read -r line; do
     printf 'ack<%s>\n' "$line"
 done
 "#,
-        )?;
-        fs::set_permissions(&shell, fs::Permissions::from_mode(0o700))?;
+            )?;
+            fs::set_permissions(&shell, fs::Permissions::from_mode(0o700))?;
+            shell
+        };
+        #[cfg(windows)]
+        let shell = PathBuf::from(std::env::var_os("SystemRoot").context("Windows system root")?)
+            .join("System32/WindowsPowerShell/v1.0/powershell.exe");
         let host = RuntimeHost::start_with_offline_fixtures(
             LaunchOptions {
                 data_root: data.clone(),
@@ -79,7 +90,14 @@ done
             }
             Ok(None)
         })?;
-        let token = read_token(&home, &session)?;
+        #[cfg(unix)]
+        let (endpoint, token) = (
+            data.join("control/runtime.sock"),
+            read_token(&home, &session)?,
+        );
+        #[cfg(windows)]
+        let (endpoint, token) =
+            capture_identity(&host, &data, &home, &session).context("initial Shell identity")?;
         let database = Connection::open_with_flags(
             data.join("matou.sqlite"),
             OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -87,7 +105,7 @@ done
         Ok(Self {
             _root: root,
             host,
-            endpoint: data.join("control/runtime.sock"),
+            endpoint,
             home,
             database,
             session,
@@ -100,7 +118,7 @@ done
             .env_clear()
             .env("MATOU_CONTROL_ENDPOINT", &self.endpoint)
             .env("MATOU_CONTROL_TOKEN", token)
-            .arg("--internal-mt")
+            .arg("--mt")
             .args(args)
             .arg("--json")
             .output()?)
@@ -131,11 +149,13 @@ done
     }
 
     fn expect_echo(&self, text: &str) -> Result<()> {
+        let mut last_screen = String::new();
         wait(|| {
             let screen = self.mt(&["read", "self"])?;
-            let output = str_field(&screen, "text");
-            Ok(output.lines().any(|line| line == text).then_some(()))
+            last_screen = str_field(&screen, "text").to_owned();
+            Ok(last_screen.lines().any(|line| line == text).then_some(()))
         })
+        .with_context(|| format!("expected terminal line {text:?}, last screen {last_screen:?}"))
     }
 }
 
@@ -153,6 +173,48 @@ fn wait<T>(mut probe: impl FnMut() -> Result<Option<T>>) -> Result<T> {
     }
 }
 
+#[cfg(windows)]
+fn capture_identity(
+    host: &RuntimeHost,
+    data: &Path,
+    home: &Path,
+    session: &str,
+) -> Result<(PathBuf, String)> {
+    let identity = home.join(format!("identity.{session}"));
+    let path = identity.to_string_lossy().replace('\'', "''");
+    let command = format!(
+        "function global:mtAck {{ param([string]$text) Write-Output ('ack<' + $text + '>') }}; [IO.File]::WriteAllLines('{path}', @((Get-Command mt -ErrorAction Stop).Source, $env:MATOU_CONTROL_ENDPOINT, $env:MATOU_CONTROL_TOKEN))"
+    );
+    host.commands
+        .send(matou_native_runtime::host::Command::Input {
+            session_id: session.to_owned(),
+            bytes: format!("{command}\r").into_bytes(),
+            defer_ordering: false,
+        })?;
+    wait(|| {
+        let contents = match fs::read_to_string(&identity) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let lines = contents.lines().collect::<Vec<_>>();
+        let [shim, endpoint, token] = lines.as_slice() else {
+            return Ok(None);
+        };
+        ensure!(
+            Path::new(shim) == data.join("control/bin/mt.cmd"),
+            "unexpected mt shim: {shim}"
+        );
+        ensure!(
+            endpoint.starts_with(r"\\.\pipe\matou-control-"),
+            "unexpected endpoint"
+        );
+        ensure!(!token.is_empty(), "missing managed capabilities");
+        Ok(Some((PathBuf::from(endpoint), (*token).to_owned())))
+    })
+}
+
+#[cfg(unix)]
 fn read_token(home: &Path, session: &str) -> Result<String> {
     wait(
         || match fs::read_to_string(home.join(format!("identity.{session}"))) {
@@ -172,15 +234,16 @@ fn str_field<'a>(value: &'a Value, name: &str) -> &'a str {
 #[test]
 fn sends_text_and_keys_to_a_live_pty_and_reads_exact_echo() -> Result<()> {
     let mut fixture = Fixture::new()?;
+    #[cfg(unix)]
+    let (message, draft, exit) = ("输入 λ🙂", "key submit", "__exit__");
+    #[cfg(windows)]
+    let (message, draft, exit) = ("mtAck '输入 λ🙂'", "mtAck 'key submit'", "exit");
     assert_eq!(
-        fixture.mt(&["send", "self", "输入 λ🙂", "--enter"])?,
+        fixture.mt(&["send", "self", message, "--enter"])?,
         json!({"sent": true})
     );
     fixture.expect_echo("ack<输入 λ🙂>")?;
-    assert_eq!(
-        fixture.mt(&["send", "self", "key submit"])?,
-        json!({"sent": true})
-    );
+    assert_eq!(fixture.mt(&["send", "self", draft])?, json!({"sent": true}));
     let draft = fixture.mt(&["read", "self"])?;
     assert!(!str_field(&draft, "text").contains("ack<key submit>"));
     assert_eq!(
@@ -203,7 +266,7 @@ fn sends_text_and_keys_to_a_live_pty_and_reads_exact_echo() -> Result<()> {
         )
         .unwrap_err();
     assert!(format!("{error:?}").contains("CAPABILITY_DENIED"));
-    fixture.mt(&["send", "self", "__exit__", "--enter"])?;
+    fixture.mt(&["send", "self", exit, "--enter"])?;
     wait(|| {
         let count: i64 = fixture.database.query_row(
             "SELECT COUNT(*) FROM session_runs WHERE session_id = ? AND ended_at IS NOT NULL",
@@ -211,7 +274,8 @@ fn sends_text_and_keys_to_a_live_pty_and_reads_exact_echo() -> Result<()> {
             |row| row.get(0),
         )?;
         Ok((count == 1).then_some(()))
-    })?;
+    })
+    .context("Shell exited after submitting exit command")?;
     fixture.fault(
         &fixture.token,
         &["send", "self", "after exit"],
@@ -278,7 +342,17 @@ fn creates_lists_removes_and_closes_through_the_managed_cli() -> Result<()> {
     ])?;
     let session_ref = str_field(&session, "createdRef");
     let session_id = session_ref.strip_prefix("session:").unwrap();
+    #[cfg(unix)]
     let leaf_token = read_token(&fixture.home, session_id)?;
+    #[cfg(windows)]
+    let (endpoint, leaf_token) = capture_identity(
+        &fixture.host,
+        &fixture._root.path().join("data"),
+        &fixture.home,
+        session_id,
+    )?;
+    #[cfg(windows)]
+    assert_eq!(endpoint, fixture.endpoint);
     let listing = fixture.mt(&["list", "--all"])?;
     let targets = listing["targets"].as_array().unwrap();
     let row = targets

@@ -27,7 +27,6 @@ pub mod history_worker;
 pub mod host;
 mod host_control;
 mod model;
-#[cfg(unix)]
 pub mod mt_cli;
 pub mod owner;
 pub mod protocol;
