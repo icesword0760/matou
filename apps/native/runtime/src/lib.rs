@@ -1,3 +1,4 @@
+pub mod browser_integration;
 mod claude_model_catalog;
 mod claude_request_gateway;
 mod codex_catalog;
@@ -19,6 +20,7 @@ pub mod protocol;
 mod provider_catalog;
 mod provider_hook;
 mod provider_resume;
+pub mod retention_policy;
 pub mod search;
 pub mod session;
 mod shell_input;
