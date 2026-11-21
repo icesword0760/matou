@@ -117,6 +117,8 @@ struct RunningShell {
     run_id: String,
     cwd: String,
     is_shell: bool,
+    #[cfg(unix)]
+    alias_preheat: Option<ShellInput>,
     restore_history: bool,
     cwd_tracker: CwdTracker,
     work_tracker: WorkStatusTracker,
@@ -260,6 +262,7 @@ pub struct ShellOwner {
     control_bin: Option<PathBuf>,
     closing: bool,
     egress: EgressMonitor,
+    egress_membership_changed: bool,
     pub(crate) provider_environment:
         Option<std::collections::BTreeMap<std::ffi::OsString, std::ffi::OsString>>,
     pub(crate) dsh_session_root: Option<PathBuf>,
@@ -299,6 +302,7 @@ impl ShellOwner {
             control_bin: None,
             closing: false,
             egress: EgressMonitor::default(),
+            egress_membership_changed: false,
             provider_environment: None,
             dsh_session_root: None,
             fork_worktree_root: None,
@@ -722,6 +726,10 @@ impl ShellOwner {
 
     pub(crate) fn egress(&self) -> &EgressMonitor {
         &self.egress
+    }
+
+    pub(crate) fn take_egress_membership_change(&mut self) -> bool {
+        std::mem::take(&mut self.egress_membership_changed)
     }
 
     pub(crate) fn apply_egress_sample(&mut self, sample: EgressSample) -> Result<()> {
@@ -1431,6 +1439,10 @@ impl ShellOwner {
             if let Some(shell) = self.shells.get_mut(id)
                 && !shell.retiring
             {
+                self.egress_membership_changed |= shell
+                    .hook
+                    .as_ref()
+                    .is_some_and(|hook| tracks_egress(hook.profile));
                 if let Some(control) = &self.run_control {
                     control.revoke(&shell.run_id);
                 }
@@ -1840,7 +1852,10 @@ impl ShellOwner {
                 hook.antigravity
                     .as_ref()
                     .is_some_and(|agy| agy.binding.is_some())
-                    || ((hook.resume.is_some()
+                    || ((hook
+                        .resume
+                        .as_ref()
+                        .is_some_and(ResumeMonitor::tracks_restore)
                         || hook.codex_resume.is_some()
                         || hook.dsh.is_some()
                         || hook.antigravity.is_some()
@@ -2290,9 +2305,9 @@ impl ShellOwner {
         plan: ClaudeLaunch,
         binding: Option<&ClaudeBinding>,
     ) -> Result<()> {
-        let resume = binding.filter(|binding| binding.resumable).map(|binding| {
-            ResumeMonitor::new(binding, plan.permission_mode == "bypassPermissions")
-        });
+        let resume = binding
+            .filter(|binding| binding.resumable)
+            .map(ResumeMonitor::new);
         self.launch_claude_with_monitor(
             session_id,
             terminal,
@@ -2375,7 +2390,7 @@ impl ShellOwner {
                 .is_some_and(|fork| fork.source_id == source_id),
             "Fork launch no longer owns its pending operation"
         );
-        let monitor = ResumeMonitor::for_id(source_id, plan.permission_mode == "bypassPermissions");
+        let monitor = ResumeMonitor::for_id(source_id);
         self.launch_claude_with_monitor(session_id, terminal, plan, Some(monitor), None)
     }
 
@@ -2632,15 +2647,21 @@ impl ShellOwner {
         // with our own loopback URL.
         let launch_environment = options
             .launch
-            .env
+            .inherited_env
             .iter()
+            .chain(&options.launch.env)
             .filter_map(|(key, value)| Some((key.to_str()?.to_owned(), value.to_str()?.to_owned())))
             .collect();
-        let egress_family =
-            egress_probe::launch_plan(profile.kind(), &launch_environment, None).family;
-        self.egress
-            .assert_target_allowed(egress_family)
-            .map_err(anyhow::Error::msg)?;
+        let egress_families = launch_egress_families(
+            profile,
+            &launch_environment,
+            provider.as_ref().and_then(|p| p.3.as_ref()),
+        );
+        for &family in &egress_families {
+            self.egress
+                .assert_target_allowed(Some(family))
+                .map_err(anyhow::Error::msg)?;
+        }
         if let Some(previous) = self.shells.get(&options.session_id) {
             ensure!(
                 previous.ended && !previous.retiring,
@@ -2694,6 +2715,13 @@ impl ShellOwner {
         let mut gateway = None;
         let mut agent_status_directory = None;
         let hook = if let Some((launch_metadata, mut secrets, resume, gateway_plan)) = provider {
+            let resume = resume.or_else(|| {
+                matches!(
+                    profile,
+                    LaunchProfile::ClaudeCode | LaunchProfile::Antigravity
+                )
+                .then(|| ResumeMonitor::for_fresh_trust(profile))
+            });
             permission_starting = resume
                 .as_ref()
                 .is_some_and(|resume| resume.permission_respawn);
@@ -3042,7 +3070,7 @@ impl ShellOwner {
             }
         };
         #[cfg(unix)]
-        if let Some(input) = alias_input {
+        if let Some(input) = alias_input.clone() {
             worker.restore_shell_input(input);
         }
         let time = now();
@@ -3075,9 +3103,10 @@ impl ShellOwner {
                 return Err(error);
             }
         };
-        if let Some(family) = egress_family {
+        if !egress_families.is_empty() {
             self.egress
-                .register_session(session_id.clone(), &[family], now() as u64);
+                .register_session(session_id.clone(), &egress_families, time as u64);
+            self.egress_membership_changed = true;
         }
         if hook.is_some() {
             self.summaries.remove(&session_id);
@@ -3089,6 +3118,8 @@ impl ShellOwner {
                 run_id,
                 cwd: stored.cwd,
                 is_shell,
+                #[cfg(unix)]
+                alias_preheat: alias_input,
                 restore_history,
                 cwd_tracker: CwdTracker::default(),
                 work_tracker: WorkStatusTracker::default(),
@@ -3480,7 +3511,12 @@ impl ShellOwner {
                     ));
                     continue;
                 }
-                if let Some(resume) = &mut hook.resume {
+                let restore = hook
+                    .resume
+                    .as_mut()
+                    .filter(|resume| resume.tracks_restore());
+                let restoring = restore.is_some();
+                if let Some(resume) = restore {
                     if resume.fresh_permission() {
                         hook.permission_identity_error =
                             Some(FRESH_PERMISSION_IDENTITY_TIMEOUT.into());
@@ -3507,7 +3543,7 @@ impl ShellOwner {
                     "result": "timed-out", "sessionId": session_id, "runId": shell.run_id,
                     "provider": hook.profile.kind(),
                     "providerSessionId": hook.resume.as_ref().and_then(|resume| resume.expected_id.as_deref()),
-                    "restoreState": if hook.resume.is_some() { "restoring" } else { "none" },
+                    "restoreState": if restoring { "restoring" } else { "none" },
                     "restoreError": null, "spawnRevision": hook.launch_metadata.get("spawnRevision"),
                 })));
             }
@@ -3524,12 +3560,14 @@ impl ShellOwner {
             }
         }
         for (session_id, shell) in &mut self.shells {
-            if let Some(bytes) = shell
-                .hook
-                .as_mut()
-                .filter(|hook| hook.last_observation.is_none())
-                .and_then(|hook| hook.resume.as_mut())
-                .and_then(ResumeMonitor::due_input)
+            if !self.closing
+                && !shell.ended
+                && !shell.retiring
+                && let Some(bytes) = shell
+                    .hook
+                    .as_mut()
+                    .and_then(|hook| hook.resume.as_mut())
+                    .and_then(ResumeMonitor::due_input)
             {
                 write_resume_input(session_id, shell, bytes, events);
             }
@@ -3638,6 +3676,9 @@ impl ShellOwner {
             match commit {
                 Ok(commit) => {
                     hook.deadline = None;
+                    if let Some(resume) = &mut hook.resume {
+                        resume.stop_trust();
+                    }
                     agy.binding = None;
                     agy.fork_pending = false;
                     hook.hud.set_resumable(true);
@@ -4250,7 +4291,13 @@ impl ShellOwner {
                 .resume
                 .as_ref()
                 .is_some_and(ResumeMonitor::fresh_permission);
-        if shell.provider_startup_pending && (first_fresh_identity || hook.resume.is_none()) {
+        if shell.provider_startup_pending
+            && (first_fresh_identity
+                || !hook
+                    .resume
+                    .as_ref()
+                    .is_some_and(ResumeMonitor::tracks_restore))
+        {
             // A newly launched child can send a hook and then immediately exit.
             hook.pending_startup_observations.push((scope, observation));
             return;
@@ -4367,6 +4414,9 @@ impl ShellOwner {
                 }
             };
             hook.deadline = None;
+            if let Some(resume) = &mut hook.resume {
+                resume.stop_trust();
+            }
             hook.last_observation = Some(observation);
             if confirms {
                 hook.claude_transcript = None;
@@ -5101,6 +5151,13 @@ impl ShellOwner {
         let shell = self.shells.get_mut(id).expect("registered session output");
         shell.emitted_output = true;
         shell.last_output = Some(Instant::now());
+        #[cfg(unix)]
+        if !self.closing
+            && let Some(input) = shell.alias_preheat.take()
+        {
+            // The PTY's own startup gets the first chance to run shell setup.
+            input.preheat_cc();
+        }
         if !self.closing
             && let Some(resume) = shell
                 .hook
@@ -5302,9 +5359,16 @@ impl ShellOwner {
             return Ok(());
         }
         shell.ended = true;
+        #[cfg(unix)]
+        {
+            shell.alias_preheat = None;
+        }
         self.egress.unregister_session(id, now() as u64);
         shell.gateway.take();
         let mut hook = shell.hook.take();
+        self.egress_membership_changed |= hook
+            .as_ref()
+            .is_some_and(|hook| tracks_egress(hook.profile));
         let pending_dsh = hook.as_mut().and_then(|hook| {
             if let Some(DshObservation::Resume(resume, binding)) = &mut hook.dsh
                 && resume.fail_start(&shell.run_id, ResumeFailure::ProcessExited)
@@ -5322,7 +5386,9 @@ impl ShellOwner {
         let had_identity = hook
             .as_ref()
             .is_some_and(|hook| hook.last_observation.is_some());
-        let pending_restore = hook.and_then(|hook| hook.resume).filter(|_| !had_identity);
+        let pending_restore = hook
+            .and_then(|hook| hook.resume)
+            .filter(|resume| !had_identity && resume.tracks_restore());
         shell.cwd_capture = None;
         let shutdown = disposed && self.closing && !retiring;
         let run = shell.run_id.clone();
@@ -5656,6 +5722,46 @@ fn reject_identity(events: &mut Vec<OwnerEvent>, scope: &Scope, reason: &str) {
     })));
 }
 
+fn tracks_egress(profile: LaunchProfile) -> bool {
+    matches!(
+        profile,
+        LaunchProfile::ClaudeCode | LaunchProfile::Codex | LaunchProfile::Antigravity
+    )
+}
+
+fn launch_egress_families(
+    profile: LaunchProfile,
+    environment: &std::collections::BTreeMap<String, String>,
+    gateway: Option<&ClaudeGatewayProjection>,
+) -> Vec<Family> {
+    let mut families: Vec<_> = egress_probe::launch_plan(profile.kind(), environment, None)
+        .family
+        .into_iter()
+        .collect();
+    // The effective gateway can route one Claude run to several upstreams.
+    // Classify the configured targets before the CLI sees a loopback URL.
+    for connection in gateway
+        .into_iter()
+        .flat_map(ClaudeGatewayProjection::connections)
+    {
+        let family = match connection.endpoint.host_str() {
+            Some("api.anthropic.com") => Family::Anthropic,
+            Some("api.openai.com") => Family::OpenAi,
+            Some("chatgpt.com") => Family::ChatgptSubscription,
+            Some(
+                "generativelanguage.googleapis.com"
+                | "aiplatform.googleapis.com"
+                | "cloudcode-pa.googleapis.com",
+            ) => Family::Google,
+            _ => continue,
+        };
+        if !families.contains(&family) {
+            families.push(family);
+        }
+    }
+    families
+}
+
 fn write_resume_input(
     session_id: &str,
     shell: &RunningShell,
@@ -5670,7 +5776,7 @@ fn write_resume_input(
         diagnostic(
             events,
             session_id,
-            format!("answer Claude Code restore prompt: {error:#}"),
+            format!("answer provider startup prompt: {error:#}"),
         );
     }
 }
@@ -6400,6 +6506,10 @@ mod provider_tests {
                 gateway: None,
             },
         )?;
+        assert_eq!(
+            owner.egress().status().session_families.get(session),
+            Some(&vec![Family::Anthropic])
+        );
         let registration = &owner.shells[session].hook.as_ref().unwrap()._registration;
         let settings: Value = serde_json::from_slice(&fs::read(&registration.settings_path)?)?;
         let url = url::Url::parse(

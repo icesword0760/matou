@@ -2975,6 +2975,34 @@ impl Workspace {
         self.request_egress(EgressRequest::Status, cx);
     }
 
+    pub(super) fn refresh_egress_for_graph_change(
+        &mut self,
+        graph: &Value,
+        cx: &mut Context<Self>,
+    ) {
+        let (generation, phase) = self.commands.connection();
+        if generation != self.runtime_generation
+            || phase != ConnectionPhase::Ready
+            || !self.domain_ready
+        {
+            return;
+        }
+        let modes: HashMap<_, _> = session_levels::nodes(&self.graph)
+            .iter()
+            .filter_map(|node| Some((node["sessionId"].as_str()?, node["currentMode"].as_str()?)))
+            .collect();
+        let nodes = session_levels::nodes(graph);
+        if modes.len() != nodes.len()
+            || nodes.iter().any(|node| {
+                node["sessionId"]
+                    .as_str()
+                    .is_some_and(|id| modes.get(id).copied() != node["currentMode"].as_str())
+            })
+        {
+            self.refresh_egress_status(cx);
+        }
+    }
+
     pub(super) fn refresh_live_wiring(&mut self, cx: &mut Context<Self>) {
         let (generation, phase) = self.commands.connection();
         if generation != self.runtime_generation
@@ -3097,6 +3125,12 @@ impl Workspace {
                 self.set_egress_status(status, window, cx);
                 self.refresh_frozen_egress(cx);
             }
+        } else if kind == "egressStatusChanged"
+            && request_id == 0
+            && let Some(status) = project_egress(&reply["result"])
+        {
+            self.set_egress_status(status, window, cx);
+            self.refresh_frozen_egress(cx);
         }
         if let Some((pending, expected, stage)) = self.wiring.update_request
             && pending == request_id
@@ -3353,6 +3387,38 @@ fn desktop_family(value: &Value) -> Option<EgressFamily> {
     EgressFamily::ALL
         .into_iter()
         .find(|family| value == runtime_family(*family).name())
+}
+
+#[cfg(test)]
+mod egress_tests {
+    use super::{EgressPanelState, InterfaceLocale, project_egress};
+
+    #[test]
+    fn runtime_session_families_show_the_egress_country_in_the_footer() {
+        let families = ["anthropic", "openai", "google"].map(|family| {
+            serde_json::json!({
+                "family": family, "state": "ok", "exit": {"ip": "203.0.113.1", "country": "US"},
+            })
+        });
+        let status = project_egress(&serde_json::json!({
+        "state": "ok",
+        "checkedAt": 1_700_000_000_000u64,
+        "checks": [],
+            "families": families,
+        "sessionFamilies": {"claude-card": ["anthropic"], "codex-card": ["openai"], "agy-card": ["google"]},
+    }))
+        .unwrap();
+        let panel = EgressPanelState::default();
+        for session in ["claude-card", "codex-card", "agy-card"] {
+            assert_eq!(
+                panel
+                    .chip(true, Some(&status), session, InterfaceLocale::Chinese)
+                    .unwrap()
+                    .label,
+                "🇺🇸 美国 · 出口正常"
+            );
+        }
+    }
 }
 
 fn project_egress(value: &Value) -> Option<EgressStatus> {

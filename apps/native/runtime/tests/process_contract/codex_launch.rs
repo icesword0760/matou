@@ -237,6 +237,24 @@ fn codex_launch_promotes_exact_commands_on_the_same_card() -> Result<()> {
         }
         let graph = graph.unwrap();
         assert_same_card(&child, &graph);
+        child.send(Command::GetEgressStatus { request_id: 90 })?;
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            if let Event::Graph(reply) = child.event(deadline, true)?
+                && reply["type"] == "egressStatusResult"
+                && reply["requestId"] == 90
+            {
+                assert_eq!(
+                    reply["result"]["sessionFamilies"][&child.session],
+                    if mode == "default" {
+                        json!(["openai"])
+                    } else {
+                        Value::Null
+                    }
+                );
+                break;
+            }
+        }
         assert_eq!(graph["nodes"][0]["workStatus"], "starting");
         assert_eq!(graph["nodes"][0]["canFork"], false);
         assert_eq!(mount(&db, &child.session)?, before_mount);

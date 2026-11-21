@@ -7,9 +7,9 @@ use std::{
     ffi::{OsStr, OsString},
     io::{ErrorKind, Read},
     os::{fd::AsRawFd, unix::process::CommandExt},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::{Arc, LazyLock, Mutex},
+    sync::{Arc, LazyLock, Mutex, OnceLock},
     thread,
     time::{Duration, Instant},
 };
@@ -35,7 +35,7 @@ impl ShellInput {
         self.observe_with_cc(bytes, || {
             #[cfg(unix)]
             if let Some(environment) = cc_alias {
-                return environment.resolve_cc();
+                return *environment.preheat_cc().wait();
             }
             None
         })
@@ -49,8 +49,25 @@ impl ShellInput {
             cc_alias: Some(Arc::new(ShellAliasEnvironment {
                 env,
                 cwd: launch.cwd.clone(),
+                probe: OnceLock::new(),
             })),
             ..Self::default()
+        }
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn preheat_cc(&self) {
+        if let Some(environment) = &self.cc_alias
+            && matches!(
+                Path::new(environment.shell())
+                    .file_name()
+                    .and_then(OsStr::to_str),
+                Some("zsh" | "bash" | "sh" | "dash" | "ash" | "ksh" | "mksh")
+            )
+        {
+            // A configured PTY executable may be an application or a wrapper.
+            // Launch those only if the user actually submits the alias.
+            environment.preheat_cc();
         }
     }
 
@@ -134,37 +151,73 @@ fn interactive_launch_with_cc(
 struct ShellAliasEnvironment {
     env: BTreeMap<OsString, OsString>,
     cwd: PathBuf,
+    probe: OnceLock<AliasProbe>,
 }
 
 #[cfg(unix)]
 type AliasKey = [Option<OsString>; 3];
 
 #[cfg(unix)]
-static CC_LAUNCHES: LazyLock<Mutex<HashMap<AliasKey, InteractiveLaunch>>> =
+type AliasProbe = Arc<OnceLock<Option<InteractiveLaunch>>>;
+
+#[cfg(unix)]
+static CC_LAUNCHES: LazyLock<Mutex<HashMap<AliasKey, AliasProbe>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 #[cfg(unix)]
 impl ShellAliasEnvironment {
-    fn resolve_cc(&self) -> Option<InteractiveLaunch> {
+    fn shell(&self) -> &OsStr {
+        self.env
+            .get(OsStr::new("SHELL"))
+            .map_or("/bin/zsh".as_ref(), OsString::as_os_str)
+    }
+
+    fn preheat_cc(self: &Arc<Self>) -> &AliasProbe {
+        self.probe.get_or_init(|| self.start_cc_probe())
+    }
+
+    fn start_cc_probe(self: &Arc<Self>) -> AliasProbe {
         let key = ["SHELL", "HOME", "ZDOTDIR"].map(|name| self.env.get(OsStr::new(name)).cloned());
-        if let Some(launch) = CC_LAUNCHES.lock().ok()?.get(&key).copied() {
-            return Some(launch);
+        let mut cache = CC_LAUNCHES.lock().expect("configured alias cache");
+        if let Some(probe) = cache.get(&key) {
+            return probe.clone();
         }
-        // This runs on the Shell input worker. Bound startup time and output so
-        // that a slow or noisy shell configuration cannot stall the runtime.
-        let output = self.probe(key[0].as_deref().unwrap_or("/bin/zsh".as_ref()))?;
-        let launch = parse_cc_alias(&output)?;
-        CC_LAUNCHES.lock().ok()?.insert(key, launch);
-        Some(launch)
+        let probe = AliasProbe::default();
+        let pending = probe.clone();
+        let environment = self.clone();
+        if thread::Builder::new()
+            .name("matou-cc-alias".into())
+            .spawn({
+                let key = key.clone();
+                move || {
+                    let launch = environment
+                        .probe(environment.shell())
+                        .and_then(|output| parse_cc_alias(&output));
+                    if launch.is_none() {
+                        CC_LAUNCHES
+                            .lock()
+                            .expect("configured alias cache")
+                            .remove(&key);
+                    }
+                    let _ = pending.set(launch);
+                }
+            })
+            .is_ok()
+        {
+            cache.insert(key, probe.clone());
+        } else {
+            let _ = probe.set(None);
+        }
+        probe
     }
 
     fn probe(&self, shell: &OsStr) -> Option<String> {
-        // Refuse to invoke a login shell with an implicit home directory.
+        // The alias must be resolved using the session's shell configuration.
         if self.env.get(OsStr::new("HOME"))?.is_empty() {
             return None;
         }
         let mut child = Command::new(shell)
-            .args(["-ilc", "alias cc"])
+            .args(["-ic", "alias \"$1\"", "matou-alias", "cc"])
             .current_dir(&self.cwd)
             .env_clear()
             .envs(&self.env)
@@ -181,7 +234,7 @@ impl ShellAliasEnvironment {
             if unsafe { libc::fcntl(stdout.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) } < 0 {
                 return None;
             }
-            let deadline = Instant::now() + Duration::from_millis(750);
+            let deadline = Instant::now() + Duration::from_millis(15_000);
             let mut bytes = Vec::new();
             let mut chunk = [0; 4096];
             while Instant::now() < deadline && bytes.len() <= 64 * 1024 {
@@ -283,8 +336,11 @@ mod tests {
         let second_dir = root.path().join("second");
         fs::create_dir(&dot_dir)?;
         fs::create_dir(&second_dir)?;
-        let shell = root.path().join("alias-probe");
-        fs::write(&shell, "#!/bin/sh\n/bin/cat \"$ZDOTDIR/alias.stdout\"\n")?;
+        let shell = root.path().join("zsh");
+        fs::write(
+            &shell,
+            "#!/bin/sh\n[ \"$#\" -eq 4 ] && [ \"$1\" = '-ic' ] && [ \"$2\" = 'alias \"$1\"' ] && [ \"$3\" = 'matou-alias' ] && [ \"$4\" = 'cc' ] || exit 1\n/bin/sleep 0.9\n/bin/cat \"$ZDOTDIR/alias.stdout\"\n",
+        )?;
         fs::set_permissions(&shell, fs::Permissions::from_mode(0o700))?;
         fs::write(dot_dir.join("alias.stdout"), "cc=claude\n")?;
         fs::write(
@@ -292,23 +348,25 @@ mod tests {
             "cc='claude --dangerously-skip-permissions'\n",
         )?;
         let input = |zdotdir: &std::path::Path| {
-            ShellInput::with_shell_environment(&matou_native_core::pty::ShellLaunch {
-                profile: LaunchProfile::Shell,
-                executable: shell.clone(),
-                argv: Vec::new(),
-                cwd: root.path().to_owned(),
-                data_root: root.path().to_owned(),
-                inherited_env: BTreeMap::from([
-                    ("HOME".into(), root.path().as_os_str().into()),
-                    ("SHELL".into(), shell.as_os_str().into()),
-                    ("ZDOTDIR".into(), zdotdir.as_os_str().into()),
-                ]),
-                env: BTreeMap::new(),
-                cols: 80,
-                rows: 24,
-            })
-            .observe(b"cc\r")
-            .map(|launch| launch.mode)
+            let mut input =
+                ShellInput::with_shell_environment(&matou_native_core::pty::ShellLaunch {
+                    profile: LaunchProfile::Shell,
+                    executable: shell.clone(),
+                    argv: Vec::new(),
+                    cwd: root.path().to_owned(),
+                    data_root: root.path().to_owned(),
+                    inherited_env: BTreeMap::from([
+                        ("HOME".into(), root.path().as_os_str().into()),
+                        ("SHELL".into(), shell.as_os_str().into()),
+                        ("ZDOTDIR".into(), zdotdir.as_os_str().into()),
+                    ]),
+                    env: BTreeMap::new(),
+                    cols: 80,
+                    rows: 24,
+                });
+            input.preheat_cc();
+            assert_eq!(input.observe(b"echo still interactive\r"), None);
+            input.observe(b"cc\r").map(|launch| launch.mode)
         };
         assert_eq!(input(&dot_dir), Some("default"));
         fs::remove_file(dot_dir.join("alias.stdout"))?;

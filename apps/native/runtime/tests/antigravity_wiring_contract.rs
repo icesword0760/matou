@@ -482,6 +482,16 @@ fn promotion_installs_and_repairs_plugin_and_projects_authenticated_activity() -
     let (_, session) = ready(&host)?;
     fixture.promote(&host, &session)?;
     let first = fixture.run(1)?;
+    let egress = reply(
+        &host,
+        Command::GetEgressStatus { request_id: 90 },
+        90,
+        "egressStatusResult",
+    )?;
+    assert_eq!(
+        egress["result"]["sessionFamilies"][&session],
+        json!(["google"])
+    );
     assert!(first.args.windows(2).any(|args| args == ["--mode", "plan"]));
     assert!(first.resume_arg().is_none());
     let managed_hook = plugin.join("hooks/session-start.sh");
