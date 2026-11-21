@@ -32,6 +32,8 @@ const CANVAS_VERTICAL_INSET: Pixels = px(12.);
 const BLINK_INTERVAL: Duration = Duration::from_millis(500);
 const FAMILIES: &[&str] = &["SF Mono", "Monaco", "Menlo", "Consolas", "Courier New"];
 
+type LinkHandler = dyn Fn(&str, &mut Window, &mut App);
+
 pub struct SurfaceEvent {
     pub generation: u64,
     pub kind: SurfaceEventKind,
@@ -237,6 +239,7 @@ pub struct TerminalSurface {
     vertical_inset: Pixels,
     last_dimensions: Option<Dimensions>,
     screen: Option<Screen>,
+    open_link: Option<std::rc::Rc<LinkHandler>>,
     modes: InputModes,
     theme: Theme,
     grid: Option<VisibleGrid>,
@@ -398,6 +401,7 @@ impl TerminalSurface {
             vertical_inset: DEFAULT_VERTICAL_INSET,
             last_dimensions: None,
             screen: None,
+            open_link: None,
             modes: InputModes {
                 application_cursor_keys: false,
                 bracketed_paste: false,
@@ -438,6 +442,14 @@ impl TerminalSurface {
 
     pub(crate) fn with_canvas_inset(mut self) -> Self {
         self.vertical_inset = CANVAS_VERTICAL_INSET;
+        self
+    }
+
+    pub(crate) fn with_link_handler(
+        mut self,
+        handler: impl Fn(&str, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.open_link = Some(std::rc::Rc::new(handler));
         self
     }
 
@@ -672,6 +684,79 @@ impl TerminalSurface {
         let x = f32::from((position.x - grid.bounds.left()) / self.metrics.width);
         let row = screen.scrollbar.offset as usize + row.min(grid.rows - 1);
         Some((grid, row, x))
+    }
+
+    fn link_at(&self, position: Point<Pixels>) -> Option<String> {
+        let screen = self.screen.as_ref()?;
+        let grid = self.grid.filter(|grid| grid.bounds.contains(&position))?;
+        let col = f32::from((position.x - grid.bounds.left()) / self.metrics.width) as usize;
+        let row = f32::from((position.y - grid.bounds.top()) / self.metrics.height) as usize;
+        if col >= screen.cols || row >= screen.rows {
+            return None;
+        }
+        let cells = &screen.cells;
+        let hit = row * screen.cols + col;
+        let token_cell = |index: usize| {
+            cells.get(index).is_some_and(|cell| {
+                !cell.invisible
+                    && (cell.width == 0
+                        || cell.has_content && !cell.text.chars().any(char::is_whitespace))
+            })
+        };
+        let follows = |index: usize| {
+            index % screen.cols != 0
+                || screen
+                    .row_metadata
+                    .get(index / screen.cols)
+                    .is_some_and(|row| row.wrap_continuation)
+        };
+        if !token_cell(hit) {
+            return None;
+        }
+        let mut start = hit;
+        while start > 0 && follows(start) && token_cell(start - 1) {
+            start -= 1;
+        }
+        let mut end = hit + 1;
+        while end < cells.len() && follows(end) && token_cell(end) {
+            end += 1;
+        }
+        if start == 0 && follows(start)
+            || end == cells.len() && screen.row_metadata.last().is_some_and(|row| row.wrap)
+        {
+            // Never open a partial link cut off by the terminal viewport.
+            return None;
+        }
+        let token: String = cells[start..end]
+            .iter()
+            .map(|cell| cell.text.as_str())
+            .collect();
+        let (scheme, rest) = token.split_once(':')?;
+        if !scheme.is_empty()
+            && (rest.starts_with("//")
+                || [
+                    "https",
+                    "http",
+                    "file",
+                    "javascript",
+                    "data",
+                    "cmd",
+                    "mailto",
+                ]
+                .iter()
+                .any(|known| scheme.eq_ignore_ascii_case(known)))
+        {
+            Some(token)
+        } else {
+            None
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    pub(crate) fn cell_center_for_link_probe(&self, col: usize, row: usize) -> Point<Pixels> {
+        self.metrics
+            .cell(self.grid.expect("painted grid").bounds.origin, col, row, 1)
+            .center()
     }
 
     fn update_selection(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
@@ -1500,6 +1585,24 @@ impl Render for TerminalSurface {
                         return;
                     }
                     if this.scrollbar_down(event, cx) {
+                        return;
+                    }
+                    let mods = event.modifiers;
+                    let link_modifier = if cfg!(target_os = "macos") {
+                        mods.platform && !mods.control
+                    } else {
+                        mods.control && !mods.platform
+                    };
+                    if link_modifier
+                        && !mods.alt
+                        && !mods.shift
+                        && this.modes.mouse_protocol == MouseProtocol::None
+                        && let Some(open) = &this.open_link
+                        && let Some(url) = this.link_at(event.position)
+                    {
+                        open(&url, window, cx);
+                        window.prevent_default();
+                        cx.stop_propagation();
                         return;
                     }
                     this.focus.focus(window);

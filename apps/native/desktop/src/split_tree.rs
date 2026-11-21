@@ -117,6 +117,73 @@ pub struct SplitTree {
 }
 
 impl SplitTree {
+    pub fn single(scene_id: String, session_id: &str) -> Self {
+        Self {
+            scene_id,
+            layout_revision: 0.,
+            root: Self::mount(session_id),
+            ratios: HashMap::new(),
+        }
+    }
+
+    fn mount(session_id: &str) -> SplitNode {
+        SplitNode::Mount {
+            id: format!("pane:{session_id}"),
+            mount_id: session_id.to_owned(),
+            session_id: session_id.to_owned(),
+        }
+    }
+
+    pub fn split_session(
+        &mut self,
+        source: &str,
+        session: &str,
+        direction: SplitDirection,
+    ) -> bool {
+        if self.ordered_sessions().contains(&session) {
+            return false;
+        }
+        let mut pending = vec![&mut self.root];
+        while let Some(node) = pending.pop() {
+            match node {
+                SplitNode::Mount { session_id, .. } if session_id == source => {
+                    *node = SplitNode::Split {
+                        id: format!("split:{session}"),
+                        direction,
+                        children: vec![node.clone(), Self::mount(session)],
+                    };
+                    return true;
+                }
+                SplitNode::Mount { .. } => {}
+                SplitNode::Split { children, .. } => pending.extend(children),
+            }
+        }
+        false
+    }
+
+    /// Remove the pane from the presentation and collapse its now-unary parent.
+    pub fn close_session(&mut self, session: &str) -> bool {
+        fn remove(node: &mut SplitNode, session: &str, ratios: &mut HashMap<String, f64>) -> bool {
+            let SplitNode::Split { id, children, .. } = node else {
+                return false;
+            };
+            if let Some(index) = children.iter().position(
+                |child| matches!(child, SplitNode::Mount { session_id, .. } if session_id == session),
+            ) {
+                children.remove(index);
+                if children.len() == 1 {
+                    ratios.remove(id);
+                    *node = children.pop().unwrap();
+                }
+                return true;
+            }
+            children
+                .iter_mut()
+                .any(|child| remove(child, session, ratios))
+        }
+        remove(&mut self.root, session, &mut self.ratios)
+    }
+
     /// Read the Electron scene snapshot (`scene`, `nodes`, `mounts`, `geometry`).
     /// `None` leaves the caller free to show the existing scene recovery surface.
     pub fn from_snapshot(snapshot: &Value) -> Option<Self> {

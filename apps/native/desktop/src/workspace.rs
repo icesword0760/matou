@@ -17,10 +17,12 @@ use matou_native_core::geometry::GeometryUpdate;
 use matou_native_core::hierarchy::canvas::{ForkPlacement, ForkWorktreeMode};
 use matou_native_core::hierarchy::cards::RemoveScope;
 use matou_native_core::hierarchy::{HierarchyResult, Scene, Task, Workspace as HierarchyWorkspace};
+use matou_native_core::link_routing::{LinkRejection, LinkSource, route_link};
 use matou_native_core::sessions::{
     InterfaceLocale, LocalePreference, current_interface_locale, read_locale_preference,
 };
 use matou_native_core::workspace_paths::WorkspacePathState;
+use matou_native_desktop::split_tree::{SplitDirection, SplitRect};
 use matou_native_desktop::theme_tokens::{
     ThemePalette, ThemePreference, ThemeState, read_theme_preference, write_theme_preference,
 };
@@ -2502,6 +2504,14 @@ impl Workspace {
                         this.save_interface_locale(*preference, window, cx);
                     }
                     SettingsShellEvent::SaveTheme(preference) => this.save_theme(*preference, cx),
+                    SettingsShellEvent::OpenProviderKeyPage(url) => {
+                        this.open_external_link(
+                            url,
+                            LinkSource::ProviderKeyPage { key_url: url },
+                            window,
+                            cx,
+                        );
+                    }
                 },
             );
         self.settings = Some((settings, subscription));
@@ -3512,6 +3522,7 @@ impl Workspace {
                 }
             }
             Event::StorageCommandRejected { message, .. } => {
+                self.clear_pending_split();
                 self.fail_pending_forks(&message);
                 self.fail_pending_permission_modes(&message, cx);
                 self.fail_pending_loader_commands(message);
@@ -3766,6 +3777,11 @@ impl Workspace {
                 self.replace_fork_graph(graph, window, cx);
                 self.refresh_terminals(window, cx);
                 self.sync_wiring_graph(window, cx);
+                if fresh_ready {
+                    self.clear_pending_split();
+                } else {
+                    self.finish_pane_split(window, cx);
+                }
                 if fresh_ready {
                     self.session_frames.clear();
                     self.recovery.clear();
@@ -4299,6 +4315,7 @@ impl Workspace {
                 }
             }
             Event::Diagnostic(message) => {
+                self.clear_pending_split();
                 if !self.domain_ready && message == INVALID_RECOVERY_MARKER_DIAGNOSTIC {
                     // Keep the error visible across automatic startup attempts.
                     self.invalid_recovery_marker = true;
@@ -4384,8 +4401,24 @@ impl Workspace {
             }
             let disabled = !self.active_path_valid();
             let theme = self.theme_palette().terminal;
+            let owner = cx.weak_entity();
             let terminal = cx.new(|cx| {
-                let mut surface = TerminalSurface::new(cx).with_canvas_inset();
+                let mut surface = TerminalSurface::new(cx)
+                    .with_canvas_inset()
+                    .with_link_handler(move |url, window, cx| {
+                        // Terminal output can contain either a reference or an OAuth link.
+                        let source = if matches!(
+                            route_link(Some(url), LinkSource::External),
+                            Err(LinkRejection::UntrustedDestination)
+                        ) {
+                            LinkSource::SignIn
+                        } else {
+                            LinkSource::External
+                        };
+                        let _ = owner.update(cx, |this, cx| {
+                            this.open_external_link(url, source, window, cx)
+                        });
+                    });
                 surface.set_theme(theme, cx);
                 surface.begin_transport_generation(self.runtime_generation, cx);
                 surface.set_input_disabled(disabled || self.recovery_blocked(id), cx);
@@ -4613,7 +4646,9 @@ impl Workspace {
         self.hover_baseline = None;
         self.hover_restore_at = None;
         self.hover_follow_until = None;
-        self.capture_geometry(Some(session_id.to_owned()), false, window, cx);
+        if self.active_split_tree().is_none() {
+            self.capture_geometry(Some(session_id.to_owned()), false, window, cx);
+        }
         if self.geometry_focus() == Some(session_id) {
             return;
         }
@@ -6652,42 +6687,8 @@ impl Workspace {
     }
 
     fn split_horizontal(&mut self, cx: &mut Context<Self>) {
-        if self.read_only.is_some() {
-            return;
-        }
-        if !self.active_path_valid()
-            || (self.level_focus().is_some() && self.active_level_focus().is_none())
-        {
-            return;
-        }
-        if let (Some(scene_id), Some(source_session_id)) =
-            (self.active_scene_id(), self.focused.as_ref())
-        {
-            let parent = self.level_parent();
-            // The runtime derives the structural parent from the source when
-            // parent_session_id is None. A root split needs an active root source.
-            let source_session_id = if parent.is_none() && !self.order.contains(source_session_id) {
-                let Some(source) = self.order.iter().find(|id| {
-                    self.graph_node(id)
-                        .is_some_and(|node| node["archivedAt"].is_null())
-                }) else {
-                    return;
-                };
-                source
-            } else {
-                source_session_id
-            };
-            if self.is_stopped_session(source_session_id) {
-                return;
-            }
-            self.send(
-                Command::CreateShellSibling {
-                    scene_id: scene_id.to_owned(),
-                    source_session_id: source_session_id.clone(),
-                    parent_session_id: parent.map(str::to_owned),
-                },
-                cx,
-            );
+        if let Some(source) = self.active_level_focus().map(str::to_owned) {
+            self.split_pane(&source, SplitDirection::Horizontal, cx);
         }
     }
 
@@ -9697,6 +9698,10 @@ impl Workspace {
                 cx.stop_propagation();
                 cx.notify();
             }
+            return;
+        }
+        if self.split_shortcut(stroke, window, cx) {
+            cx.stop_propagation();
             return;
         }
         if cfg!(target_os = "macos")
@@ -13564,6 +13569,18 @@ impl Render for Workspace {
         self.refresh_project_instructions(window, cx);
         let active_level_focus = self.active_level_focus().map(str::to_owned);
         let viewport_width = f64::from(f32::from(window.viewport_size().width)) - 260.;
+        let split_tree = self.active_split_tree().cloned();
+        let split_widths = split_tree.as_ref().map(|tree| {
+            tree.layout(SplitRect {
+                width: viewport_width.max(0.),
+                height: 1.,
+                ..Default::default()
+            })
+            .panes
+            .into_iter()
+            .map(|pane| (pane.session_id, pane.bounds.width as f32))
+            .collect::<HashMap<_, _>>()
+        });
         let layout = CarouselLayout::for_viewport(viewport_width);
         let narrow = layout.narrow;
         let now = self.motion_clock.elapsed().as_secs_f64() * 1000.;
@@ -13665,7 +13682,7 @@ impl Render for Workspace {
             self.advance_edge_browse(now, viewport_width, cx);
         }
         moving |= self.edge_next_at.is_some();
-        if self.restore_geometry {
+        if split_tree.is_none() && self.restore_geometry {
             self.restore_geometry = moving;
             if let Some(saved) = self
                 .carousel_owner
@@ -13688,7 +13705,9 @@ impl Render for Workspace {
                 }
             }
         }
-        if let (Some(until), Some((left, width))) = (self.hover_follow_until, preview_geometry) {
+        if split_tree.is_none()
+            && let (Some(until), Some((left, width))) = (self.hover_follow_until, preview_geometry)
+        {
             let current =
                 f64::from(-f32::from(self.carousel_scroll.offset().x)).clamp(0., max_scroll);
             let target = fully_visible_scroll(left, width, current, viewport_width, max_scroll);
@@ -13701,7 +13720,9 @@ impl Render for Workspace {
                 self.hover_follow_until = None;
             }
         }
-        if let Some(at) = self.hover_restore_at {
+        if split_tree.is_none()
+            && let Some(at) = self.hover_restore_at
+        {
             if now >= at || !moving {
                 if let Some(baseline) = self.hover_baseline.take() {
                     self.carousel_scroll
@@ -13712,7 +13733,9 @@ impl Render for Workspace {
                 moving = true;
             }
         }
-        if let (Some(until), Some((left, width))) = (self.focus_follow_until, active_geometry) {
+        if split_tree.is_none()
+            && let (Some(until), Some((left, width))) = (self.focus_follow_until, active_geometry)
+        {
             let target = centered_scroll(left, width, viewport_width, max_scroll);
             let current =
                 f64::from(-f32::from(self.carousel_scroll.offset().x)).clamp(0., max_scroll);
@@ -13726,6 +13749,7 @@ impl Render for Workspace {
             }
         }
         if !self.wiring.board_open
+            && split_tree.is_none()
             && self.hover_baseline.is_none()
             && self.hover_follow_until.is_none()
             && self.focus_follow_until.is_none()
@@ -13743,7 +13767,7 @@ impl Render for Workspace {
                 cx,
             );
         }
-        if moving {
+        if split_tree.is_none() && moving {
             window.request_animation_frame();
         }
         let mut carousel = div()
@@ -13802,15 +13826,27 @@ impl Render for Workspace {
             self.request_deferred_preview(&id);
         }
         let mut badge_tooltip = None;
+        let mut split_cards = HashMap::new();
         for id in self.order.iter().filter(|_| !self.wiring.board_open) {
             let node = session_levels::node(session_levels::nodes(&self.graph), id);
             let selected = level_focus.as_ref() == Some(id);
-            let width = widths[id] as f32;
-            let lift = -4. * self.card_motion[id].lift.value(now) as f32;
+            let width = match &split_widths {
+                Some(panes) => match panes.get(id.as_str()) {
+                    Some(width) => *width,
+                    None => continue,
+                },
+                None => widths[id] as f32,
+            };
+            let in_split = split_tree.is_some();
+            let lift = if in_split {
+                0.
+            } else {
+                -4. * self.card_motion[id].lift.value(now) as f32
+            };
             let hover_id = id.clone();
             let card = div()
                 .id(SharedString::from(format!("card-{id}")))
-                .w(px(width))
+                .when_else(in_split, |card| card.w_full(), |card| card.w(px(width)))
                 .h_full()
                 .flex_none()
                 .relative()
@@ -13838,11 +13874,11 @@ impl Render for Workspace {
                     ]
                 })
                 .on_hover(cx.listener(move |this, hovered, _, cx| {
-                    if *hovered {
+                    if *hovered && !in_split {
                         this.hover_card(Some(hover_id.clone()), cx);
                     }
                 }));
-            let compact = (narrow || self.read_only.is_some()) && !selected;
+            let compact = !in_split && (narrow || self.read_only.is_some()) && !selected;
             let title = node
                 .and_then(|node| node["title"].as_str())
                 .unwrap_or("Shell");
@@ -13851,8 +13887,12 @@ impl Render for Workspace {
                 continue;
             }
             if self.wiring.is_detached(id) {
-                carousel =
-                    carousel.child(card.child(self.render_detached_placeholder(id, title, cx)));
+                let card = card.child(self.render_detached_placeholder(id, title, cx));
+                if in_split {
+                    split_cards.insert(id.clone(), card.into_any_element());
+                } else {
+                    carousel = carousel.child(card);
+                }
                 continue;
             }
             if let Some(node) = node.filter(|node| !node["archivedAt"].is_null()) {
@@ -14217,7 +14257,11 @@ impl Render for Workspace {
             } else {
                 card
             };
-            carousel = carousel.child(card);
+            if in_split {
+                split_cards.insert(id.clone(), card.into_any_element());
+            } else {
+                carousel = carousel.child(card);
+            }
         }
         if self.order.is_empty() {
             carousel = carousel.child(
@@ -14333,7 +14377,11 @@ impl Render for Workspace {
             .relative()
             .flex()
             .when(board.is_none(), |stage| {
-                stage.child(carousel).child(indicator)
+                if let Some(tree) = &split_tree {
+                    stage.child(self.render_split_canvas(tree, split_cards, cx))
+                } else {
+                    stage.child(carousel).child(indicator)
+                }
             })
             .children(board)
             .children(carousel_overlay);

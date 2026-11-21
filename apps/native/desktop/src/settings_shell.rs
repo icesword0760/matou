@@ -731,18 +731,18 @@ struct ProviderPreset {
     id: &'static str,
     name: &'static str,
     endpoint: &'static str,
+    key_url: &'static str,
     model: &'static str,
     mapping: [&'static str; 3],
 }
 
-/// `PROVIDER_PRESETS['claude-code']` from the frozen contracts source. The
-/// external key links are not rendered because this level must not introduce a
-/// network or browser-opening path.
+/// `PROVIDER_PRESETS['claude-code']` from the frozen contracts source.
 const PRESETS: [ProviderPreset; 4] = [
     ProviderPreset {
         id: "deepseek",
         name: "DeepSeek",
         endpoint: "https://api.deepseek.com/anthropic",
+        key_url: "https://platform.deepseek.com/api_keys",
         model: "deepseek-v4-pro",
         mapping: ["deepseek-v4-pro", "deepseek-v4-pro", "deepseek-flash"],
     },
@@ -750,6 +750,7 @@ const PRESETS: [ProviderPreset; 4] = [
         id: "glm",
         name: "智谱 GLM",
         endpoint: "https://open.bigmodel.cn/api/anthropic",
+        key_url: "https://open.bigmodel.cn",
         model: "glm-5.3",
         mapping: ["glm-5.3", "glm-5.3", "glm-5.3"],
     },
@@ -757,6 +758,7 @@ const PRESETS: [ProviderPreset; 4] = [
         id: "kimi",
         name: "Kimi",
         endpoint: "https://api.moonshot.cn/anthropic",
+        key_url: "https://platform.kimi.com/console/api-keys",
         model: "kimi-k2.7-code",
         mapping: ["kimi-k2.7-code", "kimi-k2.7-code", "kimi-k2.7-code"],
     },
@@ -764,6 +766,7 @@ const PRESETS: [ProviderPreset; 4] = [
         id: "minimax",
         name: "MiniMax",
         endpoint: "https://api.minimax.cn/anthropic",
+        key_url: "https://platform.minimax.cn/subscribe/token-plan",
         model: "MiniMax-M3[1M]",
         mapping: ["MiniMax-M3[1M]", "MiniMax-M3[1M]", "MiniMax-M3[1M]"],
     },
@@ -857,6 +860,7 @@ struct EditorFocus {
     cancel: FocusHandle,
     next: FocusHandle,
     key: FocusHandle,
+    key_link: FocusHandle,
     endpoint: FocusHandle,
     model: FocusHandle,
     name: FocusHandle,
@@ -1041,6 +1045,7 @@ impl Editor {
             cancel: cx.focus_handle().tab_stop(true),
             next: cx.focus_handle().tab_stop(true),
             key: key.read(cx).focus.clone(),
+            key_link: cx.focus_handle().tab_stop(true),
             endpoint: endpoint.read(cx).focus.clone(),
             model: model.read(cx).focus.clone(),
             name: name.read(cx).focus.clone(),
@@ -1326,6 +1331,7 @@ pub enum SettingsShellEvent {
     Close,
     SaveLocale(LocalePreference),
     SaveTheme(ThemePreference),
+    OpenProviderKeyPage(&'static str),
 }
 
 impl EventEmitter<SettingsShellEvent> for SettingsShell {}
@@ -2285,6 +2291,19 @@ impl SettingsShell {
     #[allow(dead_code)]
     pub(crate) fn diagnostics_dialog(&self) -> Option<EditorStep> {
         self.editor.as_ref().map(|editor| editor.step)
+    }
+
+    #[cfg(debug_assertions)]
+    pub(crate) fn focus_provider_key_link_for_probe(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.page = SettingsPage::ClaudeCode;
+        self.open_new_editor(window, cx);
+        self.editor.as_mut().unwrap().selection = Some(PickChoice::Preset("deepseek"));
+        self.editor_next(window, cx);
+        window.focus(&self.editor.as_ref().unwrap().focus.key_link);
     }
 
     #[cfg(any(test, debug_assertions))]
@@ -3979,6 +3998,10 @@ impl SettingsShell {
                     order.push(editor.focus.change.clone());
                 }
                 order.push(editor.focus.key.clone());
+                if !self.editor_busy() && preset_by_endpoint(&editor.values(cx).endpoint).is_some()
+                {
+                    order.push(editor.focus.key_link.clone());
+                }
                 order.push(editor.focus.endpoint.clone());
                 order.push(editor.focus.model.clone());
                 order.push(editor.focus.name.clone());
@@ -4715,7 +4738,20 @@ impl SettingsShell {
                 .child(help_text(self.locale.text(
                     "密钥保存在本机，仅向你配置的服务发送。",
                     "Stored locally and sent only to your configured service.",
-                ))),
+                )))
+                .children(preset.filter(|_| !busy).map(|preset| {
+                    link_button(
+                        "provider-key-link",
+                        self.locale.text("获取 API Key ↗", "Get API key ↗"),
+                        &editor.focus.key_link,
+                        self.keyboard_focus,
+                        FocusRingStyle::Dialog,
+                        cx,
+                        move |_, _, cx| {
+                            cx.emit(SettingsShellEvent::OpenProviderKeyPage(preset.key_url))
+                        },
+                    )
+                })),
         );
 
         body = body.child(

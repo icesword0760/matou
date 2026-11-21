@@ -42,6 +42,7 @@ mod workspace {
     include!("../src/workspace.rs");
 
     use crate::assets::NativeAssets;
+    use matou_native_core::link_routing::ControlledBrowserFailure;
     use matou_native_desktop::{
         card_context_menu::CardMenuAction,
         egress_panel::{
@@ -51,7 +52,7 @@ mod workspace {
         update_popover::{UpdateInstallMode, UpdateProgress, UpdateRelease, UpdateStatus},
     };
     use serde_json::json;
-    use workspace_wiring::capture_wiring_bounds;
+    use workspace_wiring::{LinkOpenTarget, capture_wiring_bounds};
 
     const A: &str = "shell-a";
     const B: &str = "shell-b";
@@ -442,6 +443,8 @@ mod workspace {
                     [
                         CardMenuAction::Rename,
                         CardMenuAction::OpenDetached,
+                        CardMenuAction::SplitHorizontal,
+                        CardMenuAction::SplitVertical,
                         CardMenuAction::CloseSession,
                         CardMenuAction::RemoveNode
                     ]
@@ -680,10 +683,577 @@ mod workspace {
         );
     }
 
+    fn dispatch_mouse(window: Handle, cx: &mut AsyncApp, event: impl InputEvent) {
+        use cocoa::{
+            appkit::{NSEvent, NSEventModifierFlags, NSEventType},
+            base::{id, nil},
+            foundation::{NSInteger, NSPoint},
+        };
+        use objc::{msg_send, sel, sel_impl};
+        let (kind, position, modifiers) = match event.to_platform_input() {
+            PlatformInput::MouseDown(event) => (
+                NSEventType::NSLeftMouseDown,
+                event.position,
+                event.modifiers,
+            ),
+            PlatformInput::MouseUp(event) => {
+                (NSEventType::NSLeftMouseUp, event.position, event.modifiers)
+            }
+            PlatformInput::MouseMove(event) => (
+                NSEventType::NSLeftMouseDragged,
+                event.position,
+                event.modifiers,
+            ),
+            _ => unreachable!(),
+        };
+        let (view, size) = native_view(window.into(), cx);
+        let location = NSPoint::new(f64::from(position.x), f64::from(size.height - position.y));
+        let flags = if modifiers.platform {
+            NSEventModifierFlags::NSCommandKeyMask
+        } else {
+            NSEventModifierFlags::empty()
+        };
+        unsafe {
+            let native: id = msg_send![view, window];
+            let number: NSInteger = msg_send![native, windowNumber];
+            let event = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure_(
+                nil, kind, location, flags, 0., number, nil, 0, 1, 1.,
+            );
+            match kind {
+                NSEventType::NSLeftMouseDown => {
+                    let _: () = msg_send![view, mouseDown: event];
+                }
+                NSEventType::NSLeftMouseUp => {
+                    let _: () = msg_send![view, mouseUp: event];
+                }
+                NSEventType::NSLeftMouseDragged => {
+                    let _: () = msg_send![view, mouseDragged: event];
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    fn mouse_down(position: Point<Pixels>, modifiers: Modifiers) -> MouseDownEvent {
+        MouseDownEvent {
+            button: MouseButton::Left,
+            position,
+            modifiers,
+            click_count: 1,
+            first_mouse: false,
+        }
+    }
+
+    fn mouse_up(position: Point<Pixels>) -> MouseUpEvent {
+        MouseUpEvent {
+            button: MouseButton::Left,
+            position,
+            click_count: 1,
+            ..Default::default()
+        }
+    }
+
+    fn publish_shell(window: Handle, cx: &mut AsyncApp, id: &str) {
+        window
+            .update(cx, |view, window, cx| {
+                let mut hierarchy = view.hierarchy.clone().unwrap();
+                let session = hierarchy.session.as_mut().unwrap();
+                session.id = id.into();
+                session.title = id.into();
+                let mut graph = view.graph.clone();
+                graph["focusedSessionId"] = json!(id);
+                graph["nodes"].as_array_mut().unwrap().push(json!({
+                    "sessionId": id, "currentMode": "shell", "workStatus": "idle", "title": id
+                }));
+                view.session_frames.insert(id.into());
+                view.recovery.insert(id.into(), RecoveryState::Ready);
+                view.apply(
+                    BridgeEvent::Runtime {
+                        generation: 1,
+                        event: Event::Navigation {
+                            hierarchy,
+                            scenes: view.scenes.clone(),
+                            graph,
+                            geometry: vec![],
+                        },
+                    },
+                    window,
+                    cx,
+                );
+            })
+            .unwrap();
+    }
+
+    fn verify_splits(cx: &mut AsyncApp) {
+        let (window, sink) = open_probe_at(cx, 1260.);
+        const RIGHT: &str = "new-right";
+        const BOTTOM: &str = "new-bottom";
+        assert!(!draw(window.into(), cx).contains_key("split-canvas"));
+        card_action(window, cx, A, CardMenuAction::SplitHorizontal);
+        assert!(std::iter::from_fn(|| sink.try_recv().ok()).any(|command|
+            matches!(command, Command::CreateShellSibling { scene_id, source_session_id, parent_session_id: None }
+                if scene_id == "main" && source_session_id == A)));
+        publish_shell(window, cx, RIGHT);
+        let bounds = draw(window.into(), cx);
+        assert_eq!(
+            bounds["split-pane-shell-a"].right(),
+            bounds["split-pane-new-right"].left()
+        );
+        let header = bounds["split-pane-new-right"].origin + point(px(32.), px(20.));
+        click(window.into(), cx, MouseButton::Right, header);
+        overlay(window, cx, Some("card menu"));
+        window
+            .update(cx, |view, _, cx| {
+                view.select_card_menu_action_for_probe(CardMenuAction::SplitVertical, cx);
+            })
+            .unwrap();
+        draw(window.into(), cx);
+        press(window, cx, "enter");
+        assert!(std::iter::from_fn(|| sink.try_recv().ok()).any(|command|
+            matches!(command, Command::CreateShellSibling { source_session_id, .. } if source_session_id == RIGHT)));
+        publish_shell(window, cx, BOTTOM);
+        let bounds = draw(window.into(), cx);
+        assert_eq!(
+            bounds["split-pane-new-right"].bottom(),
+            bounds["split-pane-new-bottom"].top()
+        );
+        assert_eq!(
+            bounds["split-pane-new-right"].left(),
+            bounds["split-pane-new-bottom"].left()
+        );
+        assert!(!bounds.contains_key("split-pane-shell-b"));
+
+        for (theme, locale, label) in [
+            (ThemePreference::Dark, InterfaceLocale::Chinese, "关闭分屏"),
+            (
+                ThemePreference::Light,
+                InterfaceLocale::English,
+                "Close pane",
+            ),
+        ] {
+            window
+                .update(cx, |view, _, cx| {
+                    view.locale = locale;
+                    view.theme.set_preference(theme);
+                    view.apply_theme_palette(cx);
+                    assert!(
+                        view.wiring_card_menu(RIGHT)
+                            .items
+                            .iter()
+                            .any(|item| item.action == CardMenuAction::ClosePane
+                                && item.label == label)
+                    );
+                })
+                .unwrap();
+            assert_eq!(
+                draw(window.into(), cx)["split-pane-new-right"],
+                bounds["split-pane-new-right"]
+            );
+        }
+
+        // The terminal moves into the child while its placeholder keeps the split allocation.
+        click(
+            window.into(),
+            cx,
+            MouseButton::Right,
+            bounds["split-pane-shell-a"].origin + point(px(32.), px(20.)),
+        );
+        overlay(window, cx, Some("card menu"));
+        window
+            .update(cx, |view, _, cx| {
+                view.select_card_menu_action_for_probe(CardMenuAction::OpenDetached, cx)
+            })
+            .unwrap();
+        draw(window.into(), cx);
+        press(window, cx, "enter");
+        let child = window
+            .update(cx, |view, _, _| view.wiring_child_for_probe(A).unwrap())
+            .unwrap();
+        draw(child, cx);
+        assert!(draw(window.into(), cx).contains_key("detached-mount-shell-a"));
+        child
+            .update(cx, |_, window, _| window.remove_window())
+            .unwrap();
+        assert!(!draw(window.into(), cx).contains_key("detached-mount-shell-a"));
+
+        for (node, pane, horizontal) in [
+            ("new-right", "split-pane-shell-a", true),
+            ("new-bottom", "split-pane-new-right", false),
+        ] {
+            let bounds = draw(window.into(), cx);
+            let first = bounds[pane];
+            let press_at = if horizontal {
+                point(first.right() - px(1.), first.center().y)
+            } else {
+                point(first.center().x, first.bottom() - px(1.))
+            };
+            dispatch_mouse(window, cx, mouse_down(press_at, Modifiers::default()));
+            for (offset, expected) in [(-20., 0.1), (20., 0.9)] {
+                let canvas = bounds["split-canvas"];
+                let position = if horizontal {
+                    point(
+                        if offset < 0. {
+                            canvas.left()
+                        } else {
+                            canvas.right()
+                        } + px(offset),
+                        press_at.y,
+                    )
+                } else {
+                    point(
+                        press_at.x,
+                        if offset < 0. {
+                            canvas.top()
+                        } else {
+                            canvas.bottom()
+                        } + px(offset),
+                    )
+                };
+                dispatch_mouse(
+                    window,
+                    cx,
+                    MouseMoveEvent {
+                        position,
+                        pressed_button: Some(MouseButton::Left),
+                        ..Default::default()
+                    },
+                );
+                window
+                    .update(cx, |view, _, _| {
+                        assert_eq!(
+                            view.active_split_tree()
+                                .unwrap()
+                                .ratio(&format!("split:{node}")),
+                            Some(expected)
+                        );
+                    })
+                    .unwrap();
+                let painted = draw(window.into(), cx);
+                let size = if horizontal {
+                    painted[pane].size.width / painted["split-canvas"].size.width
+                } else {
+                    painted[pane].size.height / painted["split-canvas"].size.height
+                };
+                assert!((f64::from(size) - expected).abs() < 0.004, "{node} {size}");
+            }
+            dispatch_mouse(window, cx, mouse_up(press_at));
+        }
+        println!(
+            "split tree: mixed panes painted in light and dark; both dividers clamp at 10% and 90%; detached pane keeps its slot"
+        );
+
+        let focus = |cx: &mut AsyncApp, shortcut: &str, session: &str| {
+            draw(window.into(), cx);
+            press(window, cx, shortcut);
+            window
+                .update(cx, |view, window, cx| {
+                    assert_eq!(view.active_level_focus(), Some(session));
+                    assert!(view.terminals[session].read(cx).focus.is_focused(window));
+                })
+                .unwrap();
+        };
+        focus(cx, "cmd-alt-up", RIGHT);
+        focus(cx, "cmd-[", A);
+        focus(cx, "cmd-]", RIGHT);
+        focus(cx, "cmd-]", BOTTOM);
+        press(window, cx, "cmd-w");
+        let bounds = draw(window.into(), cx);
+        assert!(!bounds.contains_key("split-pane-new-bottom"));
+        assert_eq!(
+            bounds["split-pane-new-right"].size.height,
+            bounds["split-pane-shell-a"].size.height
+        );
+        press(window, cx, "cmd-w");
+        assert!(!draw(window.into(), cx).contains_key("split-canvas"));
+        assert!(card_bounds(window, cx, A).size.width > px(0.));
+        window
+            .update(cx, |view, window, _| {
+                assert!(view.graph_node(BOTTOM).is_some());
+                assert!(view.graph_node(RIGHT).is_some());
+                window.remove_window();
+            })
+            .unwrap();
+        assert!(
+            std::iter::from_fn(|| sink.try_recv().ok())
+                .all(|command| !matches!(command, Command::CloseSessionCard { .. }))
+        );
+        println!(
+            "split focus and close: directional and ordered keyboard movement, branch collapse, carousel restored, sessions preserved"
+        );
+    }
+
+    #[derive(Clone)]
+    struct PromptRecord {
+        title: String,
+        detail: Option<String>,
+        buttons: Vec<PromptButton>,
+    }
+
+    struct ProbePrompt {
+        focus: FocusHandle,
+        record: PromptRecord,
+    }
+
+    impl EventEmitter<PromptResponse> for ProbePrompt {}
+    impl Focusable for ProbePrompt {
+        fn focus_handle(&self, _: &App) -> FocusHandle {
+            self.focus.clone()
+        }
+    }
+    impl Render for ProbePrompt {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .occlude()
+                .track_focus(&self.focus)
+                .child(
+                    div()
+                        .absolute()
+                        .left(px(350.))
+                        .top(px(30.))
+                        .child(self.record.title.clone())
+                        .children(self.record.detail.clone()),
+                )
+                .child(
+                    div().absolute().left(px(30.)).top(px(30.)).children(
+                        self.record
+                            .buttons
+                            .iter()
+                            .enumerate()
+                            .map(|(index, label)| {
+                                div()
+                                    .id(index)
+                                    .w(px(300.))
+                                    .h(px(35.))
+                                    .child(label.label().clone())
+                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                        cx.emit(PromptResponse(index))
+                                    }))
+                            }),
+                    ),
+                )
+        }
+    }
+
+    async fn verify_links(cx: &mut AsyncApp) {
+        use matou_native_terminal::{Terminal, TerminalOptions};
+        use std::cell::RefCell;
+        const HTTPS: &str = "https://ip.net.coffee/";
+        const LOGIN: &str = "https://auth.openai.com/oauth/authorize?redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback";
+        const KEY_PAGE: &str = "https://platform.deepseek.com/api_keys";
+        let (window, _) = open_probe_at(cx, 1260.);
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let clips = Rc::new(RefCell::new(Vec::new()));
+        let prompts = Rc::new(RefCell::new(Vec::<PromptRecord>::new()));
+        let prompt_feed = prompts.clone();
+        cx.update(|cx| {
+            cx.set_prompt_builder(move |_, title, detail, buttons, handle, window, cx| {
+                let record = PromptRecord {
+                    title: title.into(),
+                    detail: detail.map(str::to_owned),
+                    buttons: buttons.to_vec(),
+                };
+                prompt_feed.borrow_mut().push(record.clone());
+                let prompt = cx.new(|cx| ProbePrompt {
+                    focus: cx.focus_handle(),
+                    record,
+                });
+                handle.with_view(prompt, window, cx)
+            })
+        })
+        .unwrap();
+        window
+            .update(cx, |view, _, _| {
+                let (calls, clips) = (calls.clone(), clips.clone());
+                view.mock_external_links_for_probe(
+                    move |url, target, _| {
+                        calls.borrow_mut().push((url.to_owned(), target));
+                        gpui::Task::ready(match (url, target) {
+                            (LOGIN, LinkOpenTarget::Controlled) => {
+                                Err(ControlledBrowserFailure::LaunchFailed)
+                            }
+                            (KEY_PAGE, LinkOpenTarget::Controlled) => {
+                                Err(ControlledBrowserFailure::Missing)
+                            }
+                            _ => Ok(()),
+                        })
+                    },
+                    move |url, _| clips.borrow_mut().push(url.to_owned()),
+                );
+            })
+            .unwrap();
+
+        let terminal_click = |cx: &mut AsyncApp, value: &str, col: usize, row: usize| {
+            let mut terminal = Terminal::new(TerminalOptions::new(44, 8, 9, 18)).unwrap();
+            terminal.feed(value.as_bytes());
+            window
+                .update(cx, |view, _, cx| {
+                    view.terminals[A].update(cx, |surface, cx| {
+                        surface.set_screen(
+                            terminal.screen().unwrap(),
+                            terminal.input_modes().unwrap(),
+                            None,
+                            0,
+                            cx,
+                        );
+                    });
+                })
+                .unwrap();
+            draw(window.into(), cx);
+            let hit = window
+                .update(cx, |view, _, cx| {
+                    view.terminals[A]
+                        .read(cx)
+                        .cell_center_for_link_probe(col, row)
+                })
+                .unwrap();
+            dispatch_mouse(
+                window,
+                cx,
+                mouse_down(
+                    hit,
+                    Modifiers {
+                        platform: true,
+                        ..Default::default()
+                    },
+                ),
+            );
+            dispatch_mouse(window, cx, mouse_up(hit));
+        };
+        terminal_click(cx, HTTPS, 4, 0);
+        assert_eq!(
+            *calls.borrow(),
+            [(HTTPS.into(), LinkOpenTarget::Controlled)]
+        );
+        for locale in [InterfaceLocale::Chinese, InterfaceLocale::English] {
+            window
+                .update(cx, |view, _, _| view.locale = locale)
+                .unwrap();
+            for url in [
+                "file:///tmp/file",
+                "javascript:alert(1)",
+                "data:text/plain,hi",
+                "cmd:run",
+                "http://ip.net.coffee/",
+                "https://other.invalid/",
+                "https://",
+                "https://user@ip.net.coffee/",
+            ] {
+                terminal_click(cx, url, 3, 0);
+                window
+                    .update(cx, |view, _, _| {
+                        assert_eq!(
+                            view.task_toast.as_deref(),
+                            Some(LinkRejection::Malformed.message(locale))
+                        );
+                    })
+                    .unwrap();
+            }
+        }
+        assert_eq!(calls.borrow().len(), 1);
+        assert!(prompts.borrow().is_empty());
+        wait_for_link(cx, window, false).await;
+
+        let choose = |cx: &mut AsyncApp, index: usize| {
+            draw(window.into(), cx);
+            let position = point(px(50.), px(45. + 35. * index as f32));
+            dispatch_mouse(window, cx, mouse_down(position, Modifiers::default()));
+            dispatch_mouse(window, cx, mouse_up(position));
+        };
+        for button in [1, 0] {
+            // Click a wrapped row of the OAuth URL, through the actual terminal handler.
+            terminal_click(cx, LOGIN, 10, 1);
+            for _ in 0..100 {
+                if prompts.borrow().len() >= if button == 1 { 1 } else { 2 } {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(Duration::from_millis(10))
+                    .await;
+            }
+            let prompt = prompts.borrow().last().unwrap().clone();
+            assert_eq!(prompt.title, "Mantle could not open");
+            assert_eq!(
+                prompt.detail.as_deref(),
+                Some("Mantle could not open this page.")
+            );
+            assert_eq!(prompt.buttons[0].label().as_ref(), "Open in system browser");
+            assert!(matches!(prompt.buttons[1], PromptButton::Cancel(_)));
+            assert!(
+                calls
+                    .borrow()
+                    .iter()
+                    .all(|(_, target)| *target != LinkOpenTarget::System)
+            );
+            choose(cx, button);
+            wait_for_link(cx, window, false).await;
+        }
+        assert_eq!(
+            calls.borrow().last().unwrap(),
+            &(LOGIN.into(), LinkOpenTarget::System)
+        );
+        window
+            .update(cx, |view, window, cx| {
+                view.toggle_settings(window, cx);
+                view.settings
+                    .as_ref()
+                    .unwrap()
+                    .0
+                    .clone()
+                    .update(cx, |settings, cx| {
+                        settings.focus_provider_key_link_for_probe(window, cx);
+                    });
+            })
+            .unwrap();
+        draw(window.into(), cx);
+        press(window, cx, "enter");
+        for _ in 0..100 {
+            if prompts.borrow().len() == 3 {
+                break;
+            }
+            cx.background_executor()
+                .timer(Duration::from_millis(10))
+                .await;
+        }
+        let fallback = prompts.borrow().last().unwrap().clone();
+        assert_eq!(fallback.title, format!("Open in your browser: {KEY_PAGE}"));
+        assert_eq!(fallback.buttons[0].label().as_ref(), "Copy link");
+        assert!(clips.borrow().is_empty());
+        choose(cx, 0);
+        wait_for_link(cx, window, false).await;
+        assert_eq!(*clips.borrow(), [KEY_PAGE]);
+        assert_eq!(calls.borrow().len(), 5);
+        window
+            .update(cx, |_, window, _| window.remove_window())
+            .unwrap();
+        cx.update(|cx| cx.reset_prompt_builder()).unwrap();
+        println!(
+            "links: trusted HTTPS, bilingual rejection, wrapped OAuth confirmation/cancel/explicit system open, settings key-page copy; opener and clipboard mocked"
+        );
+    }
+
+    async fn wait_for_link(cx: &mut AsyncApp, window: Handle, pending: bool) {
+        for _ in 0..100 {
+            if window
+                .update(cx, |view, _, _| view.link_in_progress_for_probe())
+                .unwrap()
+                == pending
+            {
+                return;
+            }
+            cx.background_executor()
+                .timer(Duration::from_millis(10))
+                .await;
+        }
+        panic!("link did not reach pending={pending}");
+    }
+
     pub(super) fn run() {
         Application::new().with_assets(NativeAssets).run(|cx| {
             cx.spawn(async move |cx| {
                 verify(cx).await;
+                verify_splits(cx);
+                verify_links(cx).await;
                 cx.update(|cx| cx.quit()).unwrap();
             })
             .detach();

@@ -1,8 +1,12 @@
 use super::*;
+use matou_native_core::link_routing::{
+    BROWSER_RELEASES_URL, ConfirmationAction, ControlledBrowserFailure, LinkSource, OpenFailure,
+    route_link, system_browser_confirmation,
+};
 use matou_native_desktop::{
     card_context_menu::{
-        CardMenu, CardMenuAction, CardMenuContext, CardMenuEvent, CardPresentation, ForkReadiness,
-        card_context_menu_with_selection, resolve_card_menu,
+        CardMenu, CardMenuAction, CardMenuContext, CardMenuEvent, CardMenuItem, CardPresentation,
+        ForkReadiness, card_context_menu_with_selection, resolve_card_menu,
     },
     detach_window::{
         DetachOutcome, DetachedHeaderStatus, DetachedMount, DetachedWindowAction, DetachedWindows,
@@ -16,6 +20,7 @@ use matou_native_desktop::{
         ShortcutLocale, ShortcutPanelAction, ShortcutPanelClose, ShortcutPanelEffect,
         ShortcutPanelModel, ShortcutPanelState, ShortcutPlatform, ShortcutTheme, shortcut_panel,
     },
+    split_tree::{PaneDirection, PaneStep, SplitDirection, SplitTree, split_tree_view},
     team_member_card::{
         TeamMemberActions, TeamMemberCardModel, TeamMemberWorkStatus, team_member_card,
     },
@@ -54,6 +59,59 @@ struct DetachedCard {
 
 type TriggerBounds = Rc<Cell<Option<Bounds<Pixels>>>>;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum LinkOpenTarget {
+    Controlled,
+    System,
+}
+
+#[derive(Clone, Copy)]
+enum LinkFallbackAction {
+    Install,
+    OpenSystem,
+    Copy,
+    Dismiss,
+}
+
+type LinkOpener =
+    dyn Fn(&str, LinkOpenTarget, &mut App) -> gpui::Task<Result<(), ControlledBrowserFailure>>;
+type LinkCopier = dyn Fn(&str, &mut App);
+
+fn launch_link(
+    url: &str,
+    target: LinkOpenTarget,
+    cx: &mut App,
+) -> gpui::Task<Result<(), ControlledBrowserFailure>> {
+    if target == LinkOpenTarget::System {
+        cx.open_url(url);
+        return gpui::Task::ready(Ok(()));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let url = url.to_owned();
+        cx.background_executor().spawn(async move {
+            let app = "/Applications/Mantle.app";
+            if !std::path::Path::new(app)
+                .join("Contents/MacOS/Chromium")
+                .is_file()
+            {
+                return Err(ControlledBrowserFailure::Missing);
+            }
+            let opened = std::process::Command::new("/usr/bin/open")
+                .args(["-a", app, &url])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success());
+            opened
+                .then_some(())
+                .ok_or(ControlledBrowserFailure::LaunchFailed)
+        })
+    }
+    #[cfg(not(target_os = "macos"))]
+    gpui::Task::ready(Err(ControlledBrowserFailure::Missing))
+}
+
 pub(super) struct WorkspaceWiring {
     overlay: Option<Overlay>,
     overlay_focus: FocusHandle,
@@ -61,6 +119,11 @@ pub(super) struct WorkspaceWiring {
     shortcuts: ShortcutPanelState,
     card_menu: Option<(String, Point<Pixels>)>,
     card_menu_index: Option<usize>,
+    splits: HashMap<String, SplitTree>,
+    pending_split: Option<PendingSplit>,
+    link_opener: Rc<LinkOpener>,
+    copy_link: Rc<LinkCopier>,
+    link_in_progress: bool,
     pub(super) board_open: bool,
     board_scenes: HashMap<String, BoardScene>,
     detached: DetachedWindows,
@@ -76,6 +139,13 @@ pub(super) struct WorkspaceWiring {
     banners: HashMap<String, EgressBannerState>,
     confirmation_focus: FocusHandle,
     _window_closed: Subscription,
+}
+
+struct PendingSplit {
+    owner: String,
+    source: String,
+    direction: SplitDirection,
+    existing: HashSet<String>,
 }
 
 impl WorkspaceWiring {
@@ -106,6 +176,13 @@ impl WorkspaceWiring {
             shortcuts: ShortcutPanelState::default(),
             card_menu: None,
             card_menu_index: None,
+            splits: HashMap::new(),
+            pending_split: None,
+            link_opener: Rc::new(launch_link),
+            copy_link: Rc::new(|url, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(url.to_owned()))
+            }),
+            link_in_progress: false,
             board_open: false,
             board_scenes: HashMap::new(),
             detached: DetachedWindows::default(),
@@ -147,6 +224,393 @@ impl WorkspaceWiring {
 }
 
 impl Workspace {
+    pub(super) fn open_external_link(
+        &mut self,
+        url: &str,
+        source: LinkSource<'static>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let link = match route_link(Some(url), source) {
+            Ok(link) => link,
+            Err(rejection) => {
+                self.show_toast(rejection.message(self.locale), cx);
+                return;
+            }
+        };
+        if self.wiring.link_in_progress {
+            return;
+        }
+        self.wiring.link_in_progress = true;
+        let url = link.url().to_owned();
+        let open = (self.wiring.link_opener)(&url, LinkOpenTarget::Controlled, cx);
+        cx.spawn_in(window, async move |owner, cx| {
+            if let Err(failure) = open.await {
+                let prompt = owner.update_in(cx, |this, window, cx| {
+                    this.link_failure_prompt(&url, source, failure, window, cx)
+                });
+                if let Ok(prompt) = prompt {
+                    let action = prompt.await;
+                    let _ = owner.update(cx, |this, cx| match action {
+                        LinkFallbackAction::Install => {
+                            if let Ok(releases) =
+                                route_link(Some(BROWSER_RELEASES_URL), LinkSource::External)
+                            {
+                                (this.wiring.link_opener)(
+                                    releases.url(),
+                                    LinkOpenTarget::System,
+                                    cx,
+                                )
+                                .detach();
+                            }
+                        }
+                        LinkFallbackAction::OpenSystem => {
+                            (this.wiring.link_opener)(&url, LinkOpenTarget::System, cx).detach();
+                        }
+                        LinkFallbackAction::Copy => {
+                            (this.wiring.copy_link)(&url, cx);
+                        }
+                        LinkFallbackAction::Dismiss => {}
+                    });
+                }
+            }
+            let _ = owner.update(cx, |this, _| this.wiring.link_in_progress = false);
+        })
+        .detach();
+    }
+
+    fn link_failure_prompt(
+        &self,
+        url: &str,
+        source: LinkSource<'static>,
+        failure: ControlledBrowserFailure,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::Task<LinkFallbackAction> {
+        let cancel = PromptButton::cancel(self.locale.text("取消", "Cancel"));
+        let mut actions = Vec::new();
+        let answer = if matches!(source, LinkSource::ProviderKeyPage { .. }) {
+            let fallback = route_link(Some(url), source)
+                .ok()
+                .and_then(|link| {
+                    link.copy_fallback(
+                        match failure {
+                            ControlledBrowserFailure::Missing => OpenFailure::BridgeUnavailable,
+                            ControlledBrowserFailure::LaunchFailed => {
+                                OpenFailure::BrowserDidNotOpen
+                            }
+                        },
+                        self.locale,
+                    )
+                })
+                .expect("a routed preset URL has a copy fallback");
+            actions.push(LinkFallbackAction::Copy);
+            window.prompt(
+                PromptLevel::Warning,
+                &fallback.message(),
+                None,
+                &[
+                    PromptButton::ok(self.locale.text("复制链接", "Copy link")),
+                    cancel,
+                ],
+                cx,
+            )
+        } else {
+            let confirmation = system_browser_confirmation(failure, self.locale);
+            let buttons: Vec<_> = confirmation
+                .buttons
+                .iter()
+                .enumerate()
+                .map(|(index, button)| {
+                    actions.push(match confirmation.selected_action(Some(index)) {
+                        ConfirmationAction::InstallBrowser => LinkFallbackAction::Install,
+                        ConfirmationAction::OpenSystemBrowser => LinkFallbackAction::OpenSystem,
+                        ConfirmationAction::Cancel => LinkFallbackAction::Dismiss,
+                    });
+                    if button.action == ConfirmationAction::Cancel {
+                        PromptButton::cancel(button.label)
+                    } else if index == confirmation.default_index {
+                        PromptButton::ok(button.label)
+                    } else {
+                        PromptButton::new(button.label)
+                    }
+                })
+                .collect();
+            window.prompt(
+                PromptLevel::Warning,
+                confirmation.title,
+                Some(&confirmation.detail.map_or_else(
+                    || confirmation.message.to_owned(),
+                    |detail| format!("{}\n\n{detail}", confirmation.message),
+                )),
+                &buttons,
+                cx,
+            )
+        };
+        cx.spawn(async move |_, _| {
+            answer
+                .await
+                .ok()
+                .and_then(|index| actions.get(index))
+                .copied()
+                .unwrap_or(LinkFallbackAction::Dismiss)
+        })
+    }
+
+    pub(super) fn render_split_canvas(
+        &self,
+        tree: &SplitTree,
+        mut cards: HashMap<String, AnyElement>,
+        cx: &Context<Self>,
+    ) -> Div {
+        let owner = self.carousel_owner.clone().unwrap();
+        let view = cx.weak_entity();
+        let palette = self.theme_palette();
+        div()
+            .relative()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .overflow_hidden()
+            .border_t_1()
+            .border_color(rgba(palette.chrome.divider))
+            .bg(rgba(palette.cards.canvas))
+            .children(wiring_probe_bounds("split-canvas".into()))
+            .child(split_tree_view(
+                tree,
+                owner.clone().into(),
+                rgba(palette.chrome.divider).into(),
+                |_, id| {
+                    div()
+                        .relative()
+                        .size_full()
+                        .min_h_0()
+                        .min_w_0()
+                        .children(wiring_probe_bounds(format!("split-pane-{id}")))
+                        .children(cards.remove(id))
+                        .into_any_element()
+                },
+                move |change, _, cx| {
+                    let _ = view.update(cx, |this, cx| {
+                        if this.carousel_owner.as_ref() == Some(&owner)
+                            && let Some(tree) = this.wiring.splits.get_mut(&owner)
+                            && tree.apply_ratio(change, 0).is_some()
+                        {
+                            cx.notify();
+                        }
+                    });
+                },
+            ))
+    }
+
+    pub(super) fn active_split_tree(&self) -> Option<&SplitTree> {
+        let tree = self.wiring.splits.get(self.carousel_owner.as_ref()?)?;
+        let panes = tree.ordered_sessions();
+        (self.read_only.is_none()
+            && self
+                .active_level_focus()
+                .is_some_and(|id| panes.contains(&id))
+            && panes
+                .iter()
+                .all(|id| self.order.iter().any(|card| card == id)))
+        .then_some(tree)
+    }
+
+    fn can_split_pane(&self, id: &str) -> bool {
+        self.active_path_valid()
+            && self.carousel_owner.is_some()
+            && self.wiring.pending_split.is_none()
+            && !self.wiring.is_detached(id)
+            && self.card_action_available(id)
+            && self.terminals.contains_key(id)
+            && self.order.iter().any(|card| card == id)
+    }
+
+    pub(super) fn split_pane(
+        &mut self,
+        id: &str,
+        direction: SplitDirection,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.can_split_pane(id) || !self.wiring_available() || self.wiring.board_open {
+            return;
+        }
+        let (Some(scene), Some(owner)) = (self.active_scene_id(), self.carousel_owner.clone())
+        else {
+            return;
+        };
+        let command = Command::CreateShellSibling {
+            scene_id: scene.to_owned(),
+            source_session_id: id.to_owned(),
+            parent_session_id: self.level_parent().map(str::to_owned),
+        };
+        self.flush_geometry(cx);
+        if self
+            .commands
+            .send_at(self.runtime_generation, command)
+            .is_err()
+        {
+            return;
+        }
+        self.wiring.pending_split = Some(PendingSplit {
+            owner,
+            source: id.to_owned(),
+            direction,
+            existing: self.order.iter().cloned().collect(),
+        });
+        cx.notify();
+    }
+
+    pub(super) fn clear_pending_split(&mut self) {
+        self.wiring.pending_split = None;
+    }
+
+    pub(super) fn finish_pane_split(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(request) = &self.wiring.pending_split else {
+            return;
+        };
+        if self.carousel_owner.as_ref() != Some(&request.owner) {
+            self.clear_pending_split();
+            return;
+        }
+        let Some(new) = self
+            .focused
+            .as_deref()
+            .filter(|id| {
+                !request.existing.contains(*id)
+                    && self.order.iter().any(|card| card == *id)
+                    && self
+                        .graph_node(id)
+                        .is_some_and(|node| node["currentMode"] == "shell")
+            })
+            .map(str::to_owned)
+        else {
+            return;
+        };
+        let Some(scene_id) = self.active_scene_id().map(str::to_owned) else {
+            return;
+        };
+        let request = self.wiring.pending_split.take().unwrap();
+        if !self.order.contains(&request.source)
+            || self.is_stopped_session(&request.source)
+            || self.wiring.is_detached(&request.source)
+        {
+            return;
+        }
+        let tree = self
+            .wiring
+            .splits
+            .entry(request.owner)
+            .or_insert_with(|| SplitTree::single(scene_id.clone(), &request.source));
+        if !tree.ordered_sessions().contains(&request.source.as_str()) {
+            *tree = SplitTree::single(scene_id, &request.source);
+        }
+        if tree.split_session(&request.source, &new, request.direction) {
+            self.stop_edge_browse(true);
+            if self.wiring_available()
+                && !self.wiring.board_open
+                && let Some(terminal) = self.terminals.get(&new)
+            {
+                terminal.read(cx).focus.focus(window);
+            }
+            cx.notify();
+        }
+    }
+
+    fn focus_split_pane(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.wiring.is_detached(id) {
+            self.focus_detached_card(id, cx);
+        } else if let Some(terminal) = self.terminals.get(id) {
+            terminal.read(cx).focus.focus(window);
+        }
+        if self.geometry_focus() != Some(id)
+            && let Some(scene) = self.active_scene_id().map(str::to_owned)
+        {
+            self.send_card_focus(&scene, id, cx);
+        }
+        cx.notify();
+    }
+
+    fn close_split_pane(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let current = self.geometry_focus();
+        let Some(tree) = self.active_split_tree() else {
+            return;
+        };
+        let next = (current == Some(id))
+            .then(|| tree.adjacent_session(Some(id), PaneStep::Next))
+            .flatten()
+            .map(str::to_owned);
+        let Some(owner) = &self.carousel_owner else {
+            return;
+        };
+        let Some(tree) = self.wiring.splits.get_mut(owner) else {
+            return;
+        };
+        if tree.close_session(id) && tree.ordered_sessions().len() == 1 {
+            self.wiring.splits.remove(owner);
+            self.restore_geometry = false;
+        }
+        if let Some(next) = next {
+            self.focus_split_pane(&next, window, cx);
+        }
+        cx.notify();
+    }
+
+    pub(super) fn split_shortcut(
+        &mut self,
+        stroke: &Keystroke,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let mods = stroke.modifiers;
+        if !self.wiring_available()
+            || self.wiring.board_open
+            || self.wiring.overlay.is_some()
+            || !(if cfg!(target_os = "macos") {
+                mods.platform && !mods.control
+            } else {
+                mods.control && !mods.platform
+            })
+        {
+            return false;
+        }
+        let Some(current) = self.active_level_focus().map(str::to_owned) else {
+            return false;
+        };
+        if stroke.key == "d" && !mods.alt && self.can_split_pane(&current) {
+            let direction = if mods.shift {
+                SplitDirection::Vertical
+            } else {
+                SplitDirection::Horizontal
+            };
+            self.split_pane(&current, direction, cx);
+            return true;
+        }
+        let Some(tree) = self.active_split_tree() else {
+            return false;
+        };
+        if mods.shift {
+            return false;
+        }
+        let target = match (mods.alt, stroke.key.as_str()) {
+            (true, "up") => tree.directional_session(&current, PaneDirection::Up),
+            (true, "down") => tree.directional_session(&current, PaneDirection::Down),
+            (true, "left") => tree.directional_session(&current, PaneDirection::Left),
+            (true, "right") => tree.directional_session(&current, PaneDirection::Right),
+            (false, "[") => tree.adjacent_session(Some(&current), PaneStep::Previous),
+            (false, "]") => tree.adjacent_session(Some(&current), PaneStep::Next),
+            (false, "w") => {
+                self.close_split_pane(&current, window, cx);
+                return true;
+            }
+            _ => return false,
+        };
+        if let Some(target) = target.map(str::to_owned) {
+            self.focus_split_pane(&target, window, cx);
+        }
+        true
+    }
+
     fn wiring_dark(&self) -> bool {
         self.theme.effective() == matou_native_desktop::theme_tokens::AppTheme::Dark
     }
@@ -361,6 +825,26 @@ impl Workspace {
         let graph_scene = self.graph["sceneId"].as_str();
         let active_scene = self.hierarchy.as_ref().and_then(|h| h.scene.as_ref());
         if let Some(scene) = active_scene.filter(|scene| graph_scene == Some(scene.id.as_str())) {
+            if let Some(owner) = &self.carousel_owner
+                && let Some(tree) = self.wiring.splits.get_mut(owner)
+            {
+                let nodes = session_levels::nodes(&self.graph);
+                let removed: Vec<_> = tree
+                    .ordered_sessions()
+                    .into_iter()
+                    .filter(|id| {
+                        session_levels::node(nodes, id)
+                            .is_none_or(|node| !node["archivedAt"].is_null())
+                    })
+                    .map(str::to_owned)
+                    .collect();
+                for id in removed {
+                    tree.close_session(&id);
+                }
+                if tree.ordered_sessions().len() < 2 {
+                    self.wiring.splits.remove(owner);
+                }
+            }
             let sessions = session_levels::nodes(&self.graph)
                 .iter()
                 .filter(|node| {
@@ -614,6 +1098,49 @@ impl Workspace {
                     .into(),
             );
         }
+        if self.can_split_pane(id)
+            || self
+                .active_split_tree()
+                .is_some_and(|tree| tree.ordered_sessions().contains(&id))
+        {
+            let mut actions = Vec::new();
+            if self.can_split_pane(id) {
+                actions.extend([
+                    (
+                        CardMenuAction::SplitHorizontal,
+                        self.locale.text("左右分屏", "Split left and right"),
+                    ),
+                    (
+                        CardMenuAction::SplitVertical,
+                        self.locale.text("上下分屏", "Split top and bottom"),
+                    ),
+                ]);
+            }
+            if self
+                .active_split_tree()
+                .is_some_and(|tree| tree.ordered_sessions().contains(&id))
+            {
+                actions.push((
+                    CardMenuAction::ClosePane,
+                    self.locale.text("关闭分屏", "Close pane"),
+                ));
+            }
+            let index = menu
+                .items
+                .iter()
+                .position(|item| item.danger)
+                .unwrap_or(menu.items.len());
+            menu.items.splice(
+                index..index,
+                actions.into_iter().map(|(action, label)| CardMenuItem {
+                    action,
+                    label: label.into(),
+                    disabled_reason: None,
+                    show_readiness_hint: false,
+                    danger: false,
+                }),
+            );
+        }
         menu
     }
 
@@ -688,6 +1215,13 @@ impl Workspace {
                     ),
                     CardMenuAction::Fork => self.open_fork(id, ForkPlacement::Peer, window, cx),
                     CardMenuAction::ForkWorktree => {}
+                    CardMenuAction::SplitHorizontal => {
+                        self.split_pane(id, SplitDirection::Horizontal, cx)
+                    }
+                    CardMenuAction::SplitVertical => {
+                        self.split_pane(id, SplitDirection::Vertical, cx)
+                    }
+                    CardMenuAction::ClosePane => self.close_split_pane(id, window, cx),
                     CardMenuAction::OpenDetached => self.detach_card(id, window, cx),
                     CardMenuAction::ReturnToMain => self.return_detached_card(id, window, cx),
                     CardMenuAction::ViewHistory => {
@@ -1017,6 +1551,9 @@ impl Workspace {
     }
 
     pub(super) fn discard_wiring_session(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.wiring
+            .splits
+            .retain(|_, tree| !tree.close_session(id) || tree.ordered_sessions().len() > 1);
         self.wiring.detached.discard_session(id);
         if let Some(child) = self.wiring.children.remove(id) {
             let _ = child
@@ -1374,7 +1911,9 @@ impl Workspace {
                 })
                 .detach();
             }
-            EgressAction::OpenReference(reference) => cx.open_url(reference.url()),
+            EgressAction::OpenReference(reference) => {
+                self.open_external_link(reference.url(), LinkSource::External, window, cx);
+            }
             EgressAction::Recheck
             | EgressAction::SetRule(_)
             | EgressAction::SetProtection(_)
@@ -1474,6 +2013,24 @@ fn wiring_probe_bounds(_id: String) -> Option<Canvas<()>> {
 impl Workspace {
     pub(super) fn hide_wiring_children_for_probe(&mut self) {
         self.wiring.visible = false;
+    }
+
+    pub(super) fn mock_external_links_for_probe(
+        &mut self,
+        open: impl Fn(
+            &str,
+            LinkOpenTarget,
+            &mut App,
+        ) -> gpui::Task<Result<(), ControlledBrowserFailure>>
+        + 'static,
+        copy: impl Fn(&str, &mut App) + 'static,
+    ) {
+        self.wiring.link_opener = Rc::new(open);
+        self.wiring.copy_link = Rc::new(copy);
+    }
+
+    pub(super) fn link_in_progress_for_probe(&self) -> bool {
+        self.wiring.link_in_progress
     }
 
     pub(super) fn wiring_child_for_probe(&self, id: &str) -> Option<AnyWindowHandle> {
