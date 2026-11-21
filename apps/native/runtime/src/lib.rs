@@ -7,6 +7,7 @@ mod codex_permissions;
 mod codex_resume;
 pub mod derived;
 pub mod egress_probe;
+pub mod environment_runtime;
 pub mod flow;
 pub mod history;
 pub mod history_worker;

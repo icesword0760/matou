@@ -4,6 +4,7 @@ pub mod database_recovery;
 pub mod dispatch_config;
 pub mod durability;
 pub mod geometry;
+pub mod git_repo;
 pub mod hierarchy;
 pub mod journal;
 pub mod ownership;
