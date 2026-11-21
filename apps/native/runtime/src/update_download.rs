@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
+use anyhow::Context as _;
 use matou_native_core::update_policy::{
     Architecture, CurrentVersion, DownloadChecksums, ErrorDialog, ErrorStage, FeedConfiguration,
     InstallMode, Platform, PolicyError, UpdateLocale, UpdatePreferences,
@@ -767,6 +768,58 @@ impl UpdateManager {
         }
     }
 
+    pub(crate) fn open_downloaded_installer(
+        &self,
+        data_root: &Path,
+        open: impl FnOnce(&Path) -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        let _operation = self
+            .operation
+            .try_lock()
+            .map_err(|_| anyhow::anyhow!("Another update operation is in progress"))?;
+        let path = {
+            let state = self.state.lock().unwrap();
+            anyhow::ensure!(
+                matches!(state.phase, UpdatePhase::Downloaded { .. }),
+                "No downloaded update installer is ready to open"
+            );
+            state.manual_path.clone()
+        }
+        .ok_or_else(|| anyhow::anyhow!("No downloaded installer path is available"))?;
+        let extension = match self.options.platform {
+            Platform::Darwin => "dmg",
+            Platform::Win32 => "exe",
+            _ => anyhow::bail!("Opening an update installer is unsupported on this platform"),
+        };
+
+        let root = data_root
+            .canonicalize()
+            .context("Update data directory is unavailable")?;
+        let directory = root.join("updates");
+        anyhow::ensure!(
+            directory
+                .canonicalize()
+                .context("Update directory is unavailable")?
+                == directory,
+            "Update directory resolves outside its expected location"
+        );
+        let path = path
+            .canonicalize()
+            .context("Downloaded installer path is unavailable")?;
+        anyhow::ensure!(
+            path.starts_with(&directory) && path != directory,
+            "Downloaded installer is outside the update directory"
+        );
+        anyhow::ensure!(path.is_file(), "Downloaded installer is not a regular file");
+        anyhow::ensure!(
+            path.extension()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| value.eq_ignore_ascii_case(extension)),
+            "Downloaded installer must have a .{extension} extension"
+        );
+        open(&path)
+    }
+
     pub async fn install(
         &self,
         installer: &impl UpdateInstaller,
@@ -822,6 +875,154 @@ impl UpdateManager {
         if let Err(message) = result {
             self.fail(ErrorStage::Install, message, &mut publish);
         }
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn open_installer(path: &Path) -> anyhow::Result<()> {
+    let output = std::process::Command::new("/usr/bin/open")
+        .arg("--")
+        .arg(path)
+        .output()
+        .context("Could not open the downloaded installer")?;
+    anyhow::ensure!(
+        output.status.success(),
+        "Could not open the downloaded installer: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    Ok(())
+}
+
+#[cfg(windows)]
+pub(crate) fn open_installer(path: &Path) -> anyhow::Result<()> {
+    use std::ffi::{OsString, c_void};
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use std::ptr::null;
+
+    #[link(name = "shell32")]
+    unsafe extern "system" {
+        fn ShellExecuteW(
+            window: *mut c_void,
+            operation: *const u16,
+            file: *const u16,
+            parameters: *const u16,
+            directory: *const u16,
+            show: i32,
+        ) -> isize;
+    }
+
+    // Shell paths use DOS or UNC syntax. Verify that removing the verbatim prefix
+    // still resolves to the same path before handing it to the shell.
+    let wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    let prefix = r"\\?\".encode_utf16().collect::<Vec<_>>();
+    let unc_prefix = r"\\?\UNC\".encode_utf16().collect::<Vec<_>>();
+    let mut shell_path = if let Some(unc) = wide.strip_prefix(unc_prefix.as_slice()) {
+        r"\\".encode_utf16().chain(unc.iter().copied()).collect()
+    } else {
+        wide.strip_prefix(prefix.as_slice())
+            .unwrap_or(&wide)
+            .to_vec()
+    };
+    let resolved = PathBuf::from(OsString::from_wide(&shell_path))
+        .canonicalize()
+        .context("Could not resolve installer shell path")?;
+    anyhow::ensure!(
+        resolved == path,
+        "Installer shell path resolves to a different file"
+    );
+    shell_path.push(0);
+    let operation = [b'o' as u16, b'p' as u16, b'e' as u16, b'n' as u16, 0];
+    // The shell receives one absolute file path and no argument string.
+    let result = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            operation.as_ptr(),
+            shell_path.as_ptr(),
+            null(),
+            null(),
+            1,
+        )
+    };
+    anyhow::ensure!(
+        result > 32,
+        "Could not open the downloaded installer (Windows shell error {result})"
+    );
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+pub(crate) fn open_installer(_: &Path) -> anyhow::Result<()> {
+    anyhow::bail!("Opening an update installer is unsupported on this platform")
+}
+
+#[cfg(test)]
+mod install_tests {
+    use super::*;
+
+    #[test]
+    fn opens_only_a_downloaded_file_within_the_platform_update_directory() -> anyhow::Result<()> {
+        for (platform, extension, wrong_extension) in [
+            (Platform::Darwin, "dmg", "exe"),
+            (Platform::Win32, "exe", "dmg"),
+        ] {
+            let root = tempfile::tempdir()?;
+            let updates = root.path().join("updates");
+            std::fs::create_dir(&updates)?;
+            let installer = updates.join(format!("Matou.{extension}"));
+            let wrong_format = updates.join(format!("Matou.{wrong_extension}"));
+            let sibling = root.path().join(format!("Matou.{extension}"));
+            for path in [&installer, &wrong_format, &sibling] {
+                std::fs::write(path, b"dry-run update")?;
+            }
+            let manager = UpdateManager::new(
+                CurrentVersion::parse("0.2.26")?,
+                UpdateOptions {
+                    feed: FeedConfiguration::resolve(None, None, None),
+                    platform,
+                    arch: Architecture::Arm64,
+                    enabled: true,
+                    install_mode: InstallMode::Manual,
+                    locale: UpdateLocale::default(),
+                },
+            )?;
+            manager.state.lock().unwrap().phase = UpdatePhase::Downloaded {
+                release: Release {
+                    version: "0.2.27".into(),
+                    release_notes: vec![],
+                    install_mode: InstallMode::Manual,
+                    release_date: None,
+                    size_bytes: None,
+                    manual_download_url: None,
+                },
+            };
+            for (path, reason) in [
+                (None, "No downloaded installer path"),
+                (Some(wrong_format), "extension"),
+                (Some(sibling.clone()), "outside the update directory"),
+            ] {
+                manager.state.lock().unwrap().manual_path = path;
+                let error = manager
+                    .open_downloaded_installer(root.path(), |_| panic!("invalid installer opened"))
+                    .unwrap_err();
+                assert!(error.to_string().contains(reason), "{error:#}");
+            }
+            let expected = installer.canonicalize()?;
+            manager.state.lock().unwrap().manual_path = Some(installer.clone());
+            manager.open_downloaded_installer(root.path(), |path| {
+                assert_eq!(path, expected);
+                Ok(())
+            })?;
+            #[cfg(unix)]
+            {
+                std::fs::remove_file(&installer)?;
+                std::os::unix::fs::symlink(&sibling, &installer)?;
+                let error = manager
+                    .open_downloaded_installer(root.path(), |_| panic!("escaping symlink opened"))
+                    .unwrap_err();
+                assert!(error.to_string().contains("outside the update directory"));
+            }
+        }
+        Ok(())
     }
 }
 
