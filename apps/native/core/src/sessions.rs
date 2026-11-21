@@ -2057,6 +2057,21 @@ pub fn interrupt_run(
     })
 }
 
+/// Record a deliberately retired PTY as interrupted without surfacing its exit as an error.
+pub fn interrupt_run_for_environment(
+    db: &mut Connection,
+    command: &CommandMetadata,
+    run_id: &str,
+    now: i64,
+) -> Result<DomainCommit> {
+    execute(db, command, now, |tx, events| {
+        let (run, mut event) = interrupt_run_in_transaction(tx, command, run_id, now)?;
+        event.payload["exitReason"] = json!("environment-transition");
+        events.push(event);
+        Ok(run)
+    })
+}
+
 pub(crate) fn interrupt_run_in_transaction(
     tx: &Connection,
     command: &CommandMetadata,

@@ -2409,6 +2409,168 @@ mod workspace {
         );
     }
 
+    fn verify_environment_actions(
+        cx: &mut AsyncApp,
+        window: Handle,
+        sink: &crate::runtime_bridge::ProbeReceiver,
+        cwd: &std::path::Path,
+    ) {
+        use matou_native_runtime::host::{
+            EnvironmentChangeResult, SessionEnvironmentReply, SessionEnvironmentTarget,
+        };
+        let handle = window.into();
+        let press_action = |cx: &mut AsyncApp, key| {
+            let point = draw_hud(handle, cx)[key].center();
+            click(handle, cx, MouseButton::Left, point);
+        };
+        let environment_graph = |cx: &mut AsyncApp, kind: &str, state: &str| {
+            window
+                .update(cx, |view, window, cx| {
+                    let mut graph = view.graph.clone();
+                    graph["nodes"][0]["environment"] =
+                        json!({ "kind": kind, "state": state, "path": cwd });
+                    graph["nodes"][0]["hasOwnedWorktree"] = json!(true);
+                    view.apply(
+                        BridgeEvent::Runtime {
+                            generation: 1,
+                            event: Event::Graph(graph),
+                        },
+                        window,
+                        cx,
+                    );
+                })
+                .unwrap();
+        };
+        let deliver = |cx: &mut AsyncApp, event| {
+            window
+                .update(cx, |view, window, cx| {
+                    view.apply(
+                        BridgeEvent::Runtime {
+                            generation: 1,
+                            event,
+                        },
+                        window,
+                        cx,
+                    );
+                })
+                .unwrap();
+        };
+        let reply = |request_id, result| SessionEnvironmentReply {
+            request_id,
+            session_id: A.into(),
+            result,
+        };
+        let locale = window.update(cx, |view, _, _| view.locale).unwrap();
+        let success = |active_target| EnvironmentChangeResult::Ok {
+            active_target,
+            cwd: cwd.to_str().unwrap().to_owned(),
+        };
+
+        environment_graph(cx, "worktree", "ready");
+        for (button, target, kind) in [
+            (
+                "environment-handoff-local",
+                SessionEnvironmentTarget::Local,
+                "local",
+            ),
+            (
+                "environment-handoff-worktree",
+                SessionEnvironmentTarget::Worktree,
+                "worktree",
+            ),
+        ] {
+            press_action(cx, "environment");
+            press_action(cx, button);
+            let request = std::iter::from_fn(|| sink.try_recv().ok())
+                .find_map(|command| match command {
+                    Command::HandoffSessionEnvironment {
+                        request_id,
+                        session_id,
+                        target: sent,
+                    } if session_id == A && sent == target => Some(request_id),
+                    _ => None,
+                })
+                .expect("enabled handoff sends the selected target");
+            assert!(hud_text(handle, cx, "environment-menu-feedback").is_some());
+            deliver(
+                cx,
+                Event::HandoffSessionEnvironmentResult(reply(request, success(target))),
+            );
+            environment_graph(cx, kind, "ready");
+            assert!(!draw_hud(handle, cx).contains_key("footer-environment-menu"));
+            press_action(cx, "environment");
+            assert_eq!(
+                hud_text(handle, cx, "environment-menu-title").as_deref(),
+                Some(if kind == "local" { "Local" } else { "Worktree" })
+            );
+            press(window, cx, "escape");
+        }
+
+        environment_graph(cx, "worktree", "missing");
+        assert!(draw_hud(handle, cx).contains_key("card-environment-restore"));
+        press_action(cx, "environment");
+        assert!(draw_hud(handle, cx).contains_key("environment-restore"));
+        press_action(cx, "environment-restore");
+        let restore = std::iter::from_fn(|| sink.try_recv().ok())
+            .find_map(|command| match command {
+                Command::RestoreSessionEnvironment {
+                    request_id,
+                    session_id,
+                } if session_id == A => Some(request_id),
+                _ => None,
+            })
+            .expect("enabled recovery menu sends restore");
+        assert!(!draw_hud(handle, cx).contains_key("environment-locate"));
+        deliver(
+            cx,
+            Event::RestoreSessionEnvironmentResult(reply(
+                restore,
+                EnvironmentChangeResult::Rejected {
+                    reason: "path-missing".into(),
+                },
+            )),
+        );
+        assert_eq!(
+            hud_text(handle, cx, "environment-menu-feedback").as_deref(),
+            Some(locale.text("所选目录不存在", "The selected directory does not exist"))
+        );
+
+        press(window, cx, "escape");
+        let moved = cwd.join("moved checkout");
+        window
+            .update(cx, |view, _, _| {
+                view.environment_picker_path = Some(moved.clone())
+            })
+            .unwrap();
+        press_action(cx, "card-environment-locate");
+        let locate = std::iter::from_fn(|| sink.try_recv().ok())
+            .find_map(|command| match command {
+                Command::LocateSessionEnvironment {
+                    request_id,
+                    session_id,
+                    path,
+                } if session_id == A && path == moved => Some(request_id),
+                _ => None,
+            })
+            .expect("card overlay sends the injected directory picker result");
+        deliver(
+            cx,
+            Event::LocateSessionEnvironmentResult(reply(
+                locate,
+                EnvironmentChangeResult::SwitchSession {
+                    session_id: B.into(),
+                    scene_id: Some("main".into()),
+                },
+            )),
+        );
+        assert!(std::iter::from_fn(|| sink.try_recv().ok()).any(|command| matches!(command,
+            Command::FocusSession { scene_id, session_id } if scene_id == "main" && session_id == B)));
+        environment_graph(cx, "worktree", "ready");
+        println!(
+            "environment: enabled worktree and owned Local actions, pending feedback, rejection, injected picker and session focus"
+        );
+    }
+
     async fn verify_footer_hud(cx: &mut AsyncApp, root: &std::path::Path) {
         let cwd = root.join("footer-hud");
         std::fs::create_dir(&cwd).unwrap();
@@ -2875,9 +3037,11 @@ mod workspace {
             environment["hud-menu-terminal"].center(),
         );
         assert!(!draw_hud(window.into(), cx).contains_key("footer-environment-menu"));
+        verify_environment_actions(cx, window, &sink, &cwd);
         window
             .update(cx, |view, _, cx| {
-                view.graph["nodes"][0]["environment"]["kind"] = json!("worktree");
+                view.graph["nodes"][0]["environment"] =
+                    json!({"kind":"worktree","state":"ready","path":cwd});
                 cx.notify();
             })
             .unwrap();

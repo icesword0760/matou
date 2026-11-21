@@ -154,6 +154,19 @@ impl DshResume {
             self.park(error.into());
             return BeginOutcome::Parked;
         }
+        self.begin_bound_resume(run_id)
+    }
+
+    /// The runtime already holds a validated binding for this running card.
+    /// Its catalog entry can still be indexed by the previous directory.
+    pub(crate) fn start_for_environment(&mut self, run_id: &str) -> BeginOutcome {
+        if self.state != ResumeState::Idle || !self.new_run_id(run_id) {
+            return BeginOutcome::Unavailable;
+        }
+        self.begin_bound_resume(run_id)
+    }
+
+    fn begin_bound_resume(&mut self, run_id: &str) -> BeginOutcome {
         self.binding_state = BindingState::Available;
         self.begin(
             run_id,

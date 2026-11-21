@@ -96,8 +96,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+use crate::environment_runtime::CheckedEnvironment;
+pub use crate::environment_runtime::EnvironmentChangeResult;
 pub use crate::provider_catalog::{RecentReplies, RecentReply, deferred_summary_text};
 pub use matou_native_core::hierarchy::canvas::{ForkPlacement, ForkWorktreeMode};
+pub use matou_native_core::hierarchy::session_environment::Target as SessionEnvironmentTarget;
+use matou_native_core::hierarchy::session_environment::{
+    self, Kind as EnvironmentChangeKind, Transition,
+};
 
 #[derive(Clone)]
 pub struct LaunchOptions {
@@ -567,6 +573,20 @@ pub enum Command {
     },
     RestartSession {
         session_id: String,
+    },
+    RestoreSessionEnvironment {
+        request_id: u64,
+        session_id: String,
+    },
+    LocateSessionEnvironment {
+        request_id: u64,
+        session_id: String,
+        path: PathBuf,
+    },
+    HandoffSessionEnvironment {
+        request_id: u64,
+        session_id: String,
+        target: SessionEnvironmentTarget,
     },
     RetryProviderRestore {
         session_id: String,
@@ -1195,6 +1215,13 @@ pub struct GitReply {
     pub worktree_session_counts: BTreeMap<PathBuf, usize>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionEnvironmentReply {
+    pub request_id: u64,
+    pub session_id: String,
+    pub result: EnvironmentChangeResult,
+}
+
 #[derive(Serialize, Deserialize)]
 pub enum Event {
     StartupBlocked(StartupBlock),
@@ -1205,6 +1232,9 @@ pub enum Event {
         code: String,
         message: String,
     },
+    RestoreSessionEnvironmentResult(SessionEnvironmentReply),
+    LocateSessionEnvironmentResult(SessionEnvironmentReply),
+    HandoffSessionEnvironmentResult(SessionEnvironmentReply),
     GitStatusDetail(GitReply),
     GitCheckout(GitReply),
     GitCreateBranch(GitReply),
@@ -2338,6 +2368,313 @@ struct LaunchRetry {
     fresh_codex: bool,
 }
 
+#[derive(Clone)]
+struct EnvironmentChangeRequest {
+    request_id: u64,
+    session_id: String,
+    kind: EnvironmentChangeKind,
+    target: SessionEnvironmentTarget,
+    candidate: Option<PathBuf>,
+}
+
+impl EnvironmentChangeRequest {
+    fn from_command(command: &Command) -> Option<Self> {
+        use EnvironmentChangeKind::{Handoff, Locate, Restore};
+        let (request_id, session_id, kind, target, candidate) = match command {
+            Command::RestoreSessionEnvironment {
+                request_id,
+                session_id,
+            } => (
+                request_id,
+                session_id,
+                Restore,
+                SessionEnvironmentTarget::Worktree,
+                None,
+            ),
+            Command::LocateSessionEnvironment {
+                request_id,
+                session_id,
+                path,
+            } => (
+                request_id,
+                session_id,
+                Locate,
+                SessionEnvironmentTarget::Worktree,
+                Some(path.clone()),
+            ),
+            Command::HandoffSessionEnvironment {
+                request_id,
+                session_id,
+                target,
+            } => (request_id, session_id, Handoff, *target, None),
+            _ => return None,
+        };
+        Some(Self {
+            request_id: *request_id,
+            session_id: session_id.clone(),
+            kind,
+            target,
+            candidate,
+        })
+    }
+
+    fn reply(&self, result: EnvironmentChangeResult) -> Event {
+        let reply = SessionEnvironmentReply {
+            request_id: self.request_id,
+            session_id: self.session_id.clone(),
+            result,
+        };
+        match self.kind {
+            EnvironmentChangeKind::Restore => Event::RestoreSessionEnvironmentResult(reply),
+            EnvironmentChangeKind::Locate => Event::LocateSessionEnvironmentResult(reply),
+            EnvironmentChangeKind::Handoff => Event::HandoffSessionEnvironmentResult(reply),
+        }
+    }
+
+    fn begin(
+        &self,
+        owner: &mut ShellOwner,
+    ) -> Result<Result<EnvironmentChange, EnvironmentChangeResult>> {
+        let storage = owner.environment_storage();
+        if storage.is_readonly("main")?
+            || storage.pragma_query_value(None, "query_only", |row| row.get::<_, bool>(0))?
+        {
+            return Ok(Err(EnvironmentChangeResult::rejected(STORAGE_READ_ONLY)));
+        }
+        let binding = session_environment::binding(storage, &self.session_id)?
+            .context("session-unavailable")?;
+        let owned = if self.target == SessionEnvironmentTarget::Worktree {
+            session_environment::owned_worktrees(storage)?
+        } else {
+            Vec::new()
+        };
+        if self.kind == EnvironmentChangeKind::Handoff
+            && binding.target == self.target
+            && binding.state == "ready"
+        {
+            let cwd = if self.target == SessionEnvironmentTarget::Local {
+                binding.local_path
+            } else {
+                owned
+                    .iter()
+                    .find(|item| item.session_id == self.session_id)
+                    .context("no-owned-worktree")?
+                    .path
+                    .clone()
+            };
+            return Ok(Err(EnvironmentChangeResult::Ok {
+                active_target: self.target,
+                cwd,
+            }));
+        }
+        let profile = owner
+            .session(&self.session_id)?
+            .context("session-unavailable")?
+            .kind;
+        let resume_binding = owner
+            .environment_provider_binding(&self.session_id, &profile)?
+            .filter(|binding| binding.resumable)
+            .map(|binding| binding.id);
+        let candidate = self
+            .candidate
+            .as_deref()
+            .map(|path| path.to_str().context("invalid-path"))
+            .transpose()?;
+        let operation = session_environment::begin_transition(
+            owner.environment_storage_mut(),
+            &self.session_id,
+            id(),
+            self.kind,
+            self.target,
+            candidate.map(str::to_owned),
+            now(),
+        )?;
+        let request = self.clone();
+        let worker = thread::Builder::new()
+            .name("session-environment".into())
+            .spawn(move || {
+                environment_runtime::check_change(
+                    request.kind,
+                    request.target,
+                    &request.session_id,
+                    request.candidate.as_deref(),
+                    &binding,
+                    &owned,
+                )
+            });
+        match worker {
+            Ok(worker) => Ok(Ok(EnvironmentChange {
+                request: self.clone(),
+                operation,
+                profile,
+                resume_binding,
+                phase: EnvironmentPhase::Checking(EnvironmentCheck(Some(worker))),
+            })),
+            Err(error) => {
+                session_environment::rollback_transition(
+                    owner.environment_storage_mut(),
+                    &operation,
+                    false,
+                    &error.to_string(),
+                    now(),
+                )?;
+                Err(error.into())
+            }
+        }
+    }
+}
+
+struct EnvironmentChange {
+    request: EnvironmentChangeRequest,
+    operation: Transition,
+    profile: String,
+    resume_binding: Option<String>,
+    phase: EnvironmentPhase,
+}
+
+struct EnvironmentCheck(Option<thread::JoinHandle<Result<CheckedEnvironment>>>);
+
+impl Drop for EnvironmentCheck {
+    fn drop(&mut self) {
+        // A Git write must finish before the host releases its SQLite lease.
+        if let Some(worker) = self.0.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+enum EnvironmentPhase {
+    Checking(EnvironmentCheck),
+    Stopping {
+        path: String,
+        stopped: Option<Receiver<Result<()>>>,
+    },
+    Launching {
+        failure: Option<String>,
+    },
+    Confirming {
+        failure: Option<String>,
+        started_at: Instant,
+    },
+}
+
+enum EnvironmentProgress {
+    Pending,
+    Stopping,
+    Reply(EnvironmentChangeResult),
+}
+
+impl EnvironmentChange {
+    fn advance(&mut self, owner: &mut ShellOwner, window_id: &str) -> Result<EnvironmentProgress> {
+        let id = &self.operation.session_id;
+        match &mut self.phase {
+            EnvironmentPhase::Checking(worker) => {
+                if !worker.0.as_ref().unwrap().is_finished() {
+                    return Ok(EnvironmentProgress::Pending);
+                }
+                let checked = worker
+                    .0
+                    .take()
+                    .unwrap()
+                    .join()
+                    .map_err(|_| anyhow!("environment check panicked"))??;
+                let path = match checked {
+                    CheckedEnvironment::Ready(path) => path,
+                    CheckedEnvironment::OtherSession(session_id) => {
+                        session_environment::rollback_transition(
+                            owner.environment_storage_mut(),
+                            &self.operation,
+                            false,
+                            "path-owned-by-another-session",
+                            now(),
+                        )?;
+                        let scene_id = owner.notification_scene_id(window_id, &session_id)?;
+                        return Ok(EnvironmentProgress::Reply(
+                            EnvironmentChangeResult::SwitchSession {
+                                session_id,
+                                scene_id,
+                            },
+                        ));
+                    }
+                };
+                if self.operation.kind != EnvironmentChangeKind::Handoff {
+                    session_environment::mark_transition_external_ready(
+                        owner.environment_storage(),
+                        &self.operation,
+                        now(),
+                    )?;
+                }
+                let stopped = owner.stop_for_environment_transition(id)?;
+                self.phase = EnvironmentPhase::Stopping { path, stopped };
+                Ok(EnvironmentProgress::Stopping)
+            }
+            EnvironmentPhase::Stopping { path, stopped } => {
+                if let Some(result) = stopped
+                    && poll_promotion_result(result)?.is_none()
+                {
+                    return Ok(EnvironmentProgress::Pending);
+                }
+                session_environment::complete_transition(
+                    owner.environment_storage_mut(),
+                    &self.operation,
+                    path,
+                    now(),
+                )?;
+                self.phase = EnvironmentPhase::Launching { failure: None };
+                Ok(EnvironmentProgress::Pending)
+            }
+            _ => Ok(EnvironmentProgress::Pending),
+        }
+    }
+
+    fn rollback(
+        &self,
+        owner: &mut ShellOwner,
+        committed: bool,
+        error: &anyhow::Error,
+    ) -> Result<String> {
+        let reason = environment_runtime::change_failure(self.operation.kind, error);
+        session_environment::rollback_transition(
+            owner.environment_storage_mut(),
+            &self.operation,
+            committed,
+            &reason,
+            now(),
+        )?;
+        if committed
+            && self.operation.previous_state == "ready"
+            && let Some(binding_id) = &self.resume_binding
+        {
+            owner.reset_environment_resume(
+                &self.operation.session_id,
+                &self.profile,
+                binding_id,
+            )?;
+        }
+        Ok(reason)
+    }
+
+    fn launch_result(
+        &self,
+        owner: &ShellOwner,
+        failure: Option<String>,
+    ) -> Result<EnvironmentChangeResult> {
+        if let Some(reason) = failure {
+            return Ok(EnvironmentChangeResult::rejected(reason));
+        }
+        let session = owner
+            .session(&self.operation.session_id)?
+            .filter(|session| session.archived_at.is_none());
+        Ok(match session {
+            Some(session) => EnvironmentChangeResult::Ok {
+                active_target: self.operation.target,
+                cwd: session.cwd,
+            },
+            None => EnvironmentChangeResult::rejected("session-unavailable"),
+        })
+    }
+}
+
 enum RoleAssignmentsRequest {
     Get {
         request_id: u64,
@@ -2479,6 +2816,9 @@ fn recovery_result(
 }
 
 pub fn storage_command_rejected(command: Command, code: &str, message: &str) -> Event {
+    if let Some(request) = EnvironmentChangeRequest::from_command(&command) {
+        return request.reply(EnvironmentChangeResult::rejected(code));
+    }
     if let Some((request_id, event)) = git_reply_event(&command) {
         return event(GitReply {
             request_id,
@@ -3220,6 +3560,7 @@ fn run_writable(
     .ok();
     let history = HistoryWorker::new(data_root.clone())?;
     let window_id = MAIN_WINDOW_ID;
+    environment_runtime::reconcile_transitions(&mut connection, now())?;
     let input = BootstrapWindowInput {
         window_id: window_id.into(),
         default_root_directory: options.workspace.to_string_lossy().into_owned(),
@@ -3292,6 +3633,7 @@ fn run_writable(
     pending_launch.retain(|id| !startup_deferred.contains(id));
     let mut foreground_sessions: HashSet<_> = launchable_ids(&graph).map(str::to_owned).collect();
     let mut deferred_recovery = HashSet::new();
+    let mut environment_changes = HashMap::<String, EnvironmentChange>::new();
     let mut launch_preparations = HashMap::<String, Receiver<Result<PreparedLaunch>>>::new();
     let mut recovering = HashMap::<String, String>::new();
     // A failed launch stays blocked until an explicit retry starts a worker.
@@ -3671,6 +4013,56 @@ fn run_writable(
             ))?;
         }
 
+        let changes: Vec<_> = environment_changes.keys().cloned().collect();
+        for session_id in changes {
+            let change = environment_changes.get_mut(&session_id).unwrap();
+            match change.advance(&mut owner, window_id) {
+                Ok(EnvironmentProgress::Pending) => {}
+                Ok(EnvironmentProgress::Stopping) => {
+                    send.send_blocking(Event::Recovery {
+                        session_id: session_id.clone(),
+                        state: RecoveryState::Restoring,
+                    })?;
+                    sessions.remove(&session_id);
+                    dirty.remove(&session_id);
+                    sequence.remove(&session_id);
+                    views.remove(&session_id);
+                    awaiting_ui.remove(&session_id);
+                    scroll_requests.remove(&session_id);
+                    pending_input.retain(|input| input.session_id != session_id);
+                    operations.retain(|(id, _, _)| id != &session_id);
+                    searches.retain(|(id, _, _)| id != &session_id);
+                    copies.retain(|(_, id, _, _)| id != &session_id);
+                    failed_launches.remove(&session_id);
+                    startup_deferred.remove(&session_id);
+                    deferred_recovery.remove(&session_id);
+                    graph_dirty = true;
+                }
+                Ok(EnvironmentProgress::Reply(result)) => {
+                    send.send_blocking(change.request.reply(result))?;
+                    environment_changes.remove(&session_id);
+                    graph_dirty = true;
+                }
+                Err(error) => {
+                    let stopped = matches!(change.phase, EnvironmentPhase::Stopping { .. });
+                    let reason = change.rollback(&mut owner, false, &error)?;
+                    if stopped && change.operation.previous_state == "ready" {
+                        change.phase = EnvironmentPhase::Launching {
+                            failure: Some(reason),
+                        };
+                    } else {
+                        send.send_blocking(
+                            change
+                                .request
+                                .reply(EnvironmentChangeResult::rejected(reason)),
+                        )?;
+                        environment_changes.remove(&session_id);
+                    }
+                    graph_dirty = true;
+                }
+            }
+        }
+
         let mut launch_candidates = HashSet::new();
         if launch_validated {
             launch_candidates.extend(
@@ -3695,6 +4087,12 @@ fn run_writable(
                 .filter(|(id, retry)| retry.validated && !owner.shell_worker_is_retiring(id))
                 .map(|(id, _)| id.clone()),
         );
+        launch_candidates.retain(|id| !environment_changes.contains_key(id));
+        launch_candidates.extend(environment_changes.iter().filter_map(|(id, change)| {
+            (matches!(change.phase, EnvironmentPhase::Launching { .. })
+                && !owner.shell_worker_is_retiring(id))
+            .then(|| id.clone())
+        }));
         launch_preparations.retain(|id, _| launch_candidates.contains(id));
         let mut launch_candidates: Vec<_> = launch_candidates.into_iter().collect();
         launch_candidates.sort_unstable_by(|left, right| {
@@ -3746,7 +4144,9 @@ fn run_writable(
                     &owner,
                     &options,
                     &session_id,
-                    if fresh_codex {
+                    if environment_changes.contains_key(&session_id) {
+                        LaunchIntent::Environment
+                    } else if fresh_codex {
                         LaunchIntent::FreshCodex
                     } else {
                         LaunchIntent::Start
@@ -3891,6 +4291,16 @@ fn run_writable(
             });
             match result {
                 Ok(()) => {
+                    if let Some(change) = environment_changes.get_mut(&session_id) {
+                        let EnvironmentPhase::Launching { failure } = &mut change.phase else {
+                            unreachable!("queued environment launch")
+                        };
+                        change.phase = EnvironmentPhase::Confirming {
+                            failure: failure.take(),
+                            started_at: Instant::now(),
+                        };
+                        waits_for_identity = true;
+                    }
                     failed_launches.remove(&session_id);
                     if waits_for_identity {
                         provider_starting.insert(session_id.clone(), uses_recovery_slot);
@@ -3906,6 +4316,35 @@ fn run_writable(
                     started_shell = true;
                 }
                 Err(error) => {
+                    if let Some(change) = environment_changes.get_mut(&session_id) {
+                        if let EnvironmentPhase::Launching {
+                            failure: Some(reason),
+                        } = &change.phase
+                        {
+                            send.send_blocking(
+                                change
+                                    .request
+                                    .reply(EnvironmentChangeResult::rejected(reason.clone())),
+                            )?;
+                            environment_changes.remove(&session_id);
+                        } else {
+                            let reason = change.rollback(&mut owner, true, &error)?;
+                            graph_dirty = true;
+                            if change.operation.previous_state == "ready" {
+                                change.phase = EnvironmentPhase::Launching {
+                                    failure: Some(reason),
+                                };
+                                continue;
+                            }
+                            send.send_blocking(
+                                change
+                                    .request
+                                    .reply(EnvironmentChangeResult::rejected(reason)),
+                            )?;
+                            environment_changes.remove(&session_id);
+                            continue;
+                        }
+                    }
                     claude_launch_targets.remove(&session_id);
                     pending_input.retain(|input| input.session_id != session_id);
                     let recovering = rebuilding && error.downcast_ref::<HookSetup>().is_none();
@@ -5268,6 +5707,7 @@ fn run_writable(
                         ClaudeRestore::Retry
                     };
                     let blocked = !foreground_sessions.contains(session_id)
+                        || environment_changes.contains_key(session_id)
                         || permission_changes.contains_key(session_id)
                         || shell_promotions.contains_key(session_id)
                         || catalog_loads.contains_key(session_id)
@@ -5354,13 +5794,50 @@ fn run_writable(
                     );
                     continue;
                 }
+                Command::RestoreSessionEnvironment { .. }
+                | Command::LocateSessionEnvironment { .. }
+                | Command::HandoffSessionEnvironment { .. } => {
+                    let request = EnvironmentChangeRequest::from_command(&command).unwrap();
+                    let id = &request.session_id;
+                    if environment_changes.contains_key(id)
+                        || pending_launch.contains(id)
+                        || recovering.contains_key(id)
+                        || launch_retries.contains_key(id)
+                        || owner.shell_worker_is_retiring(id)
+                        || permission_changes.contains_key(id)
+                        || shell_promotions.contains_key(id)
+                        || shell_submissions.contains_key(id)
+                        || catalog_loads.contains_key(id)
+                        || provider_starting.contains_key(id)
+                    {
+                        send.send_blocking(request.reply(EnvironmentChangeResult::rejected(
+                            "environment-transition-in-progress",
+                        )))?;
+                        continue;
+                    }
+                    let session_id = id.clone();
+                    match request.begin(&mut owner) {
+                        Ok(Ok(change)) => {
+                            environment_changes.insert(session_id, change);
+                            graph_dirty = true;
+                        }
+                        Ok(Err(result)) => send.send_blocking(request.reply(result))?,
+                        Err(error) => {
+                            send.send_blocking(request.reply(EnvironmentChangeResult::rejected(
+                                environment_runtime::change_failure(request.kind, &error),
+                            )))?
+                        }
+                    }
+                    continue;
+                }
                 Command::RetryRecovery { ref session_id }
                 | Command::RestartSession { ref session_id } => {
                     let rebuilding = matches!(command, Command::RetryRecovery { .. });
                     let codex = owner
                         .session(session_id)?
                         .is_some_and(|session| session.kind == "codex");
-                    if catalog_loads.contains_key(session_id)
+                    if environment_changes.contains_key(session_id)
+                        || catalog_loads.contains_key(session_id)
                         || permission_changes.contains_key(session_id)
                         || shell_promotions.contains_key(session_id)
                         || launch_retries.contains_key(session_id)
@@ -5919,10 +6396,12 @@ fn run_writable(
                             sequence.remove(id);
                             views.remove(id);
                             awaiting_ui.remove(id);
-                            send.send_blocking(Event::Recovery {
-                                session_id: id.to_owned(),
-                                state: RecoveryState::Failed(error.to_owned()),
-                            })?;
+                            if !environment_changes.contains_key(id) {
+                                send.send_blocking(Event::Recovery {
+                                    session_id: id.to_owned(),
+                                    state: RecoveryState::Failed(error.to_owned()),
+                                })?;
+                            }
                         }
                     }
                     provider_identity_events.push(result);
@@ -6143,11 +6622,81 @@ fn run_writable(
         }
         let released: Vec<_> = provider_starting
             .keys()
-            .filter(|id| !owner.waiting_for_provider_restore(id))
+            .filter(|id| {
+                if let Some(change) = environment_changes.get(*id)
+                    && let EnvironmentPhase::Confirming { started_at, .. } = change.phase
+                {
+                    if !owner.environment_worker_active(id) || failed_launches.contains_key(*id) {
+                        return true;
+                    }
+                    if started_at.elapsed() < *PERMISSION_STARTUP_WINDOW {
+                        return false;
+                    }
+                    if owner.waiting_for_permission_consent(id)
+                        || started_at.elapsed() >= crate::provider_hook::IDENTITY_TIMEOUT
+                    {
+                        return true;
+                    }
+                }
+                !owner.waiting_for_provider_restore(id)
+            })
             .cloned()
             .collect();
         for session_id in released {
             provider_starting.remove(&session_id);
+            if let Some(change) = environment_changes.get_mut(&session_id)
+                && let EnvironmentPhase::Confirming { failure, .. } = &mut change.phase
+            {
+                let original_failure = failure.take();
+                let startup_error = failed_launches
+                    .get(&session_id)
+                    .and_then(|failure| match failure {
+                        RecoveryState::Failed(error) | RecoveryState::StartFailed(error) => {
+                            Some(error.clone())
+                        }
+                        _ => None,
+                    })
+                    .or_else(|| {
+                        (!owner.environment_worker_active(&session_id)).then(|| {
+                            "process exited before confirming the restored session".to_owned()
+                        })
+                    });
+                let startup_error = startup_error.or_else(|| {
+                    (owner.waiting_for_provider_restore(&session_id)
+                        && !owner.waiting_for_permission_consent(&session_id))
+                    .then(|| "provider identity confirmation timed out".to_owned())
+                });
+                let result = if let Some(error) = startup_error {
+                    owner.retire_sessions(std::slice::from_ref(&session_id));
+                    sessions.remove(&session_id);
+                    dirty.remove(&session_id);
+                    sequence.remove(&session_id);
+                    views.remove(&session_id);
+                    awaiting_ui.remove(&session_id);
+                    scroll_requests.remove(&session_id);
+                    pending_input.retain(|input| input.session_id != session_id);
+                    graph_dirty = true;
+                    if let Some(reason) = original_failure {
+                        let failure = report_launch_failure(send, &session_id, true, error)?;
+                        failed_launches.insert(session_id.clone(), failure);
+                        EnvironmentChangeResult::rejected(reason)
+                    } else {
+                        let reason = change.rollback(&mut owner, true, &anyhow!(error))?;
+                        if change.operation.previous_state == "ready" {
+                            change.phase = EnvironmentPhase::Launching {
+                                failure: Some(reason),
+                            };
+                            continue;
+                        }
+                        EnvironmentChangeResult::rejected(reason)
+                    }
+                } else {
+                    change.launch_result(&owner, original_failure)?
+                };
+                send.send_blocking(change.request.reply(result))?;
+                environment_changes.remove(&session_id);
+                graph_dirty = true;
+            }
             if !failed_launches.contains_key(&session_id) && sessions.contains(&session_id) {
                 send.send_blocking(Event::Recovery {
                     session_id,
@@ -6530,6 +7079,7 @@ fn run_writable(
             dirty.remove(&session_id);
         }
     };
+    drop(environment_changes);
     drop(wiring.live_egress.take());
     drop(control);
     shell_promotions.retain(|id, promotion| !promotion.started_at_shutdown(&mut owner, id));
@@ -7600,7 +8150,11 @@ fn unstarted_sessions(
     sessions: &HashSet<String>,
 ) -> Result<HashSet<String>> {
     let mut pending = HashSet::new();
-    for node in launchable_nodes(graph) {
+    for node in launchable_nodes(graph).filter(|node| {
+        node["environment"]["state"]
+            .as_str()
+            .is_none_or(|state| state == "ready")
+    }) {
         let Some(id) = node["sessionId"]
             .as_str()
             .filter(|id| !sessions.contains(*id))
@@ -7701,6 +8255,7 @@ fn claude_target_metadata(plan: &ClaudeLaunch) -> Value {
 
 enum LaunchIntent<'a> {
     Start,
+    Environment,
     FreshCodex,
     ShellPromotion(InteractiveLaunch),
     PermissionRestart {
@@ -7858,7 +8413,11 @@ fn prepare_launch(
     let (send, receive) = mpsc::channel();
     match session.kind.as_str() {
         "shell" => {
-            let candidates = owner.shell_directory_candidates(session_id, &options.shell_home)?;
+            let candidates = if matches!(intent, LaunchIntent::Environment) {
+                vec![session.cwd]
+            } else {
+                owner.shell_directory_candidates(session_id, &options.shell_home)?
+            };
             thread::Builder::new()
                 .name("shell-directory".into())
                 .spawn(move || {
@@ -7922,7 +8481,9 @@ fn prepare_launch(
                 && resume_id.is_none()
                 && matches!(
                     intent,
-                    LaunchIntent::Start | LaunchIntent::ShellPromotion(_)
+                    LaunchIntent::Start
+                        | LaunchIntent::Environment
+                        | LaunchIntent::ShellPromotion(_)
                 );
             let (reply, role_preferences) = mpsc::channel();
             // Every new PTY captures its own preferences. Use the save queue
@@ -8023,10 +8584,11 @@ fn prepare_launch(
                     _ => (AntigravityMode::Fresh, Value::Null),
                 }
             };
+            let environment_handoff = matches!(intent, LaunchIntent::Environment);
             thread::Builder::new().name("antigravity-launch".into()).spawn(move || {
                 let result = (|| {
                     let cwd = Path::new(&session.cwd);
-                    if let AntigravityMode::Resume(id) = &mode {
+                    if !environment_handoff && let AntigravityMode::Resume(id) = &mode {
                         let mut catalog = AntigravityCatalog::new(catalog_root);
                         ensure!(
                             matches!(catalog.recovery_candidate(cwd, id), Ok(RecoveryCandidate::AwaitingIdentity(_))),
@@ -8058,6 +8620,7 @@ fn prepare_launch(
                     .dsh_binding(session_id)?
                     .filter(|binding| binding.resumable)
             };
+            let environment_handoff = matches!(intent, LaunchIntent::Environment);
             thread::Builder::new()
                 .name("dsh-launch".into())
                 .spawn(move || {
@@ -8076,6 +8639,7 @@ fn prepare_launch(
                             plan,
                             config_dump,
                             catalog_root,
+                            environment_handoff,
                         }))
                     })();
                     let _ = send.send(result);
@@ -8094,19 +8658,21 @@ fn prepare_launch(
                     mode,
                 }) => Some(mode),
                 LaunchIntent::Start
+                | LaunchIntent::Environment
                 | LaunchIntent::FreshCodex
                 | LaunchIntent::PermissionRestart {
                     fresh_mode: None, ..
                 } => None,
                 _ => bail!("unsupported Codex launch intent"),
             };
-            let fresh = matches!(intent, LaunchIntent::FreshCodex)
-                || owner.fresh_control_session(session_id)?;
             let binding = if promotion.is_none() {
                 owner.codex_binding(session_id)?
             } else {
                 None
             };
+            let fresh = matches!(intent, LaunchIntent::FreshCodex)
+                || (matches!(intent, LaunchIntent::Environment) && binding.is_none())
+                || owner.fresh_control_session(session_id)?;
             thread::Builder::new()
                 .name("codex-launch".into())
                 .spawn(move || {
