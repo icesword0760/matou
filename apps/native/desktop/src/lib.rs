@@ -33,4 +33,7 @@ pub mod recovery_water;
 #[cfg(target_os = "macos")]
 pub mod recovery_water_macos;
 
+pub mod egress_panel;
 pub mod recovery_water_view;
+pub mod update_popover;
+pub mod workspace_board;
