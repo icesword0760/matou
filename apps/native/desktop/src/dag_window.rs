@@ -24,6 +24,7 @@ pub(super) struct DagWindow {
     canvas_events: Subscription,
     target: String,
     locale: InterfaceLocale,
+    dark: bool,
     content_focus: FocusHandle,
     close_focus: FocusHandle,
 }
@@ -33,6 +34,7 @@ impl DagWindow {
         graph: &Value,
         target: &str,
         locale: InterfaceLocale,
+        dark: bool,
         visible: bool,
         owner: &Window,
         cx: &mut App,
@@ -84,7 +86,7 @@ impl DagWindow {
             |window, cx| {
                 cx.new(|cx| {
                     let content_focus = cx.focus_handle();
-                    let canvas = cx.new(|cx| Self::canvas_view(state, locale, cx));
+                    let canvas = cx.new(|cx| Self::canvas_view(state, locale, dark, cx));
                     window.focus(&canvas.read(cx).canvas_focus());
                     let canvas_events = cx.subscribe_in(&canvas, window, Self::canvas_event);
                     Self {
@@ -95,6 +97,7 @@ impl DagWindow {
                         canvas_events,
                         target: target.to_owned(),
                         locale,
+                        dark,
                         content_focus,
                         close_focus: cx.focus_handle().tab_stop(true),
                     }
@@ -110,10 +113,23 @@ impl DagWindow {
     fn canvas_view(
         state: DagCanvas,
         locale: InterfaceLocale,
+        dark: bool,
         cx: &mut Context<DagCanvasView>,
     ) -> DagCanvasView {
-        DagCanvasView::new_light(state, locale, cx)
+        DagCanvasView::new_with_dark(state, locale, dark, cx)
             .with_toolbar_right_inset(px(CLOSE_INSET + CLOSE_WIDTH + 12.))
+    }
+
+    pub(super) fn set_dark(&mut self, dark: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.dark = dark;
+        self.canvas.update(cx, |view, cx| {
+            let search_focused = view.search_focused(window, cx);
+            view.set_dark(dark, cx);
+            if search_focused {
+                view.focus_search(window, cx);
+            }
+        });
+        cx.notify();
     }
 
     pub(super) fn retarget(
@@ -129,7 +145,7 @@ impl DagWindow {
             match layout {
                 Ok(layout) => {
                     let state = DagCanvas::new(layout, target, None);
-                    let canvas = cx.new(|cx| Self::canvas_view(state, locale, cx));
+                    let canvas = cx.new(|cx| Self::canvas_view(state, locale, self.dark, cx));
                     window.focus(&canvas.read(cx).canvas_focus());
                     self.canvas_events = cx.subscribe_in(&canvas, window, Self::canvas_event);
                     self.canvas = canvas;
@@ -257,7 +273,7 @@ impl DagWindow {
 
 impl Render for DagWindow {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        let close = close_button(self.locale, true)
+        let close = close_button(self.locale, !self.dark)
             .track_focus(&self.close_focus)
             .on_click(|_, window, cx| {
                 cx.stop_propagation();

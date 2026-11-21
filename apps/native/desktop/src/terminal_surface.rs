@@ -32,6 +32,19 @@ const CANVAS_VERTICAL_INSET: Pixels = px(12.);
 const BLINK_INTERVAL: Duration = Duration::from_millis(500);
 const FAMILIES: &[&str] = &["SF Mono", "Monaco", "Menlo", "Consolas", "Courier New"];
 
+#[cfg(all(target_os = "macos", debug_assertions))]
+thread_local! {
+    static BACKGROUND_PROBE: std::cell::Cell<Option<Option<u32>>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(all(target_os = "macos", debug_assertions))]
+pub(crate) fn probe_terminal_background(draw: impl FnOnce()) -> Option<u32> {
+    BACKGROUND_PROBE.set(Some(None));
+    draw();
+    BACKGROUND_PROBE.take().flatten()
+}
+
 type LinkHandler = dyn Fn(&str, &mut Window, &mut App);
 
 pub struct SurfaceEvent {
@@ -1303,6 +1316,10 @@ impl TerminalSurface {
         let focused = self.focus.is_focused(window) && window.is_window_active();
         let screen = self.screen.as_ref();
         let background = screen.map_or(self.theme.background, |screen| screen.background);
+        #[cfg(all(target_os = "macos", debug_assertions))]
+        if BACKGROUND_PROBE.get().is_some() {
+            BACKGROUND_PROBE.set(Some(Some(background)));
+        }
         window.paint_quad(fill(bounds, rgb(background)));
         let (cols, rows) = screen.map_or((0, 0), |screen| {
             (
