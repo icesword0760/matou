@@ -2,7 +2,7 @@ use super::*;
 use crate::mt_cli::{Client, run_with};
 
 fn cli(
-    harness: &Harness,
+    harness: &mut Harness,
     token: &str,
     args: &[&str],
     expected: (i32, &str, &str),
@@ -37,12 +37,12 @@ fn pretty_line(value: &Value) -> String {
 
 #[test]
 fn real_control_discovery_matches_frozen_text_and_ordered_json() -> Result<()> {
-    let base = Harness::new(false, false, GENERATION, fixed_now, IDLE_TIMEOUT)?;
+    let mut base = Harness::new(false, false, GENERATION, fixed_now, IDLE_TIMEOUT)?;
     let token = base.token(RUN, MANAGED_SCOPES, NOW)?;
     let identity = frozen_case("cli-identify-text");
     let text = identity["expected_response"]["stdout"][0].as_str().unwrap();
     cli(
-        &base,
+        &mut base,
         &token,
         &["identify"],
         (0, &format!("{text}\n"), ""),
@@ -51,14 +51,14 @@ fn real_control_discovery_matches_frozen_text_and_ordered_json() -> Result<()> {
     let fixture = frozen_case("identify-caller");
     let identity = &fixture["expected_response"]["frames"][0]["result"];
     cli(
-        &base,
+        &mut base,
         &token,
         &["identify", "--json"],
         (0, &pretty_line(identity), ""),
         "cli-identify-json",
     )?;
 
-    let graph = Harness::new(true, false, GENERATION, fixed_now, IDLE_TIMEOUT)?;
+    let mut graph = Harness::new(true, false, GENERATION, fixed_now, IDLE_TIMEOUT)?;
     let token = graph.token(RUN, MANAGED_SCOPES, NOW)?;
     let fixture = frozen_case("list-scopes");
     let expected = &fixture["expected_response"]["frames"];
@@ -67,14 +67,14 @@ fn real_control_discovery_matches_frozen_text_and_ordered_json() -> Result<()> {
         "target": expected[0]["result"]["targets"][0],
     });
     cli(
-        &graph,
+        &mut graph,
         &token,
         &["identify", "--json"],
         (0, &pretty_line(&identity_on_graph), ""),
         "cli-identify-json-on-two-layer-graph",
     )?;
     cli(
-        &graph,
+        &mut graph,
         &token,
         &["identify"],
         (0, &format!("{text}\n"), ""),
@@ -97,7 +97,7 @@ fn real_control_discovery_matches_frozen_text_and_ordered_json() -> Result<()> {
         let mut args = vec!["list"];
         args.extend(flags);
         cli(
-            &graph,
+            &mut graph,
             &token,
             &args,
             (0, text, ""),
@@ -105,7 +105,7 @@ fn real_control_discovery_matches_frozen_text_and_ordered_json() -> Result<()> {
         )?;
         args.push("--json");
         cli(
-            &graph,
+            &mut graph,
             &token,
             &args,
             (0, &pretty_line(&expected[frame]["result"]), ""),
@@ -117,11 +117,11 @@ fn real_control_discovery_matches_frozen_text_and_ordered_json() -> Result<()> {
 
 #[test]
 fn real_control_lists_other_workspaces_and_denies_revoked_token() -> Result<()> {
-    let graph = Harness::new(true, true, GENERATION, fixed_now, IDLE_TIMEOUT)?;
+    let mut graph = Harness::new(true, true, GENERATION, fixed_now, IDLE_TIMEOUT)?;
     let token = graph.token(RUN, MANAGED_SCOPES, NOW)?;
-    let endpoint = &graph.server.endpoint.path;
+    let endpoint = graph.server.endpoint.path.clone();
     let all = graph.drive(|| {
-        let result = Client::new(endpoint, &token)
+        let result = Client::new(&endpoint, &token)
             .unwrap()
             .request("host.list", json!({"scope": "all"}))
             .unwrap();
@@ -137,7 +137,7 @@ fn real_control_lists_other_workspaces_and_denies_revoked_token() -> Result<()> 
         1
     );
     cli(
-        &graph,
+        &mut graph,
         &token,
         &["list", "--all", "--json"],
         (0, &pretty_line(&all), ""),
@@ -147,7 +147,7 @@ fn real_control_lists_other_workspaces_and_denies_revoked_token() -> Result<()> 
     let fixture = frozen_case("wire-run-token-revoked");
     let error = &fixture["expected_response"]["frames"][1]["error"];
     cli(
-        &graph,
+        &mut graph,
         &token,
         &["list", "--all", "--json"],
         (4, "", &pretty_line(error)),
@@ -170,10 +170,10 @@ fn real_control_round_trips_encoded_selectors_and_public_errors() -> Result<()> 
     let peer = issue("peer-run", 16)?;
     let child = issue("child-run", 25)?;
     let before = snapshot(&graph.observe, graph.root.path())?;
-    let endpoint = &graph.server.endpoint.path;
-    let resolve = |token: &str, target: &str| {
+    let endpoint = graph.server.endpoint.path.clone();
+    let mut resolve = |token: &str, target: &str| {
         graph.drive(|| {
-            let client = Client::new(endpoint, token).unwrap();
+            let client = Client::new(&endpoint, token).unwrap();
             let selector = client.terminal_selector(target).unwrap();
             Ok(client.request(READ, screen_params(selector)))
         })
@@ -212,14 +212,12 @@ fn real_control_round_trips_encoded_selectors_and_public_errors() -> Result<()> 
     }
     let stale_fixture = frozen_case("stale-terminal-sibling");
     let stale = graph.drive(|| {
-        let client = Client::new(endpoint, &main).unwrap();
+        let client = Client::new(&endpoint, &main).unwrap();
         let mut selector = client
             .terminal_selector(&format!("session:{}", fixture_id(25)))
             .unwrap();
         selector["projectionRevision"] = json!("older-revision");
-        Ok(client
-            .request(READ, screen_params(selector))
-            .unwrap_err())
+        Ok(client.request(READ, screen_params(selector)).unwrap_err())
     })?;
     assert_eq!(stale.exit_code(), 3);
     assert_eq!(
@@ -236,11 +234,9 @@ fn real_control_round_trips_encoded_selectors_and_public_errors() -> Result<()> 
         }
     });
     let ambiguous = graph.drive(|| {
-        let client = Client::new(endpoint, &main).unwrap();
+        let client = Client::new(&endpoint, &main).unwrap();
         let selector = client.terminal_selector("legacy:shared").unwrap();
-        Ok(client
-            .request(READ, screen_params(selector))
-            .unwrap_err())
+        Ok(client.request(READ, screen_params(selector)).unwrap_err())
     })?;
     let fixture = frozen_case("selector-legacy-ref-ambiguity");
     let expected = &fixture["expected_response"]["frames"][0]["error"];
