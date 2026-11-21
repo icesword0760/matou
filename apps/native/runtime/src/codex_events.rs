@@ -5,7 +5,7 @@ use std::{
     fs::{self, File},
     hash::{DefaultHasher, Hash, Hasher},
     io::{self, BufRead, BufReader, Read},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::{Arc, mpsc},
     thread,
     time::{Duration, Instant, SystemTime},
@@ -41,6 +41,7 @@ const ROLLOUT_TAIL_BYTES: u64 = 64 * 1024;
 pub(crate) struct Hook {
     transcript: Option<PathBuf>,
     has_transcript_field: bool,
+    invalid_transcript_field: bool,
     turn: Option<String>,
     fingerprint: Option<String>,
     hud_tool: Option<HookTool>,
@@ -74,6 +75,9 @@ impl Hook {
         Self {
             transcript: text(&paths).map(PathBuf::from),
             has_transcript_field: paths.iter().any(|key| payload.contains_key(*key)),
+            invalid_transcript_field: paths
+                .iter()
+                .any(|key| payload.get(*key).is_some_and(|value| !value.is_string())),
             turn,
             fingerprint: fingerprint.clone(),
             hud_tool: matches!(event, "PreToolUse" | "PostToolUse")
@@ -109,6 +113,7 @@ struct Turn {
 pub(crate) struct Run {
     home: Option<PathBuf>,
     rollout: Option<(PathBuf, Arc<File>)>,
+    next_rollout_poll: Instant,
     hud: Hud,
     pub title: Option<title::Watch>,
     turns_seen: HashSet<String>,
@@ -125,6 +130,7 @@ impl Run {
         Self {
             home: home.map(|home| launch.cwd.join(home)),
             rollout: None,
+            next_rollout_poll: Instant::now(),
             hud: Hud::default(),
             title: None,
             turns_seen: HashSet::new(),
@@ -150,46 +156,148 @@ impl Run {
             .collect()
     }
 
-    pub fn start_rollout(&self, hook: &Hook, identity: Uuid) -> Option<(PathBuf, File)> {
-        let home = self.home.as_ref()?.canonicalize().ok()?;
-        let path = hook.transcript.as_ref()?;
-        if !path.is_absolute() {
-            return None;
+    pub fn start_rollout(
+        &self,
+        hook: &Hook,
+        identity: Uuid,
+        resuming: bool,
+    ) -> Result<Option<(PathBuf, File)>, &'static str> {
+        if hook.invalid_transcript_field {
+            return Err("invalid transcript field");
         }
-        let path = path.canonicalize().ok()?;
-        if !path.starts_with(home)
-            || path.extension().and_then(OsStr::to_str) != Some("jsonl")
-            || transcript_uuid(path.file_name()?.to_str()?)
-                .and_then(|id| Uuid::parse_str(id).ok())
-                .is_some_and(|id| id != identity)
-            || !path.is_file()
-        {
-            return None;
-        }
-        let file = File::open(&path).ok()?;
-        file.metadata().ok()?.is_file().then_some((path, file))
+        hook.transcript.as_ref().map_or(Ok(None), |path| {
+            self.open_transcript(path, identity, resuming)
+        })
     }
 
-    pub fn confirm(&mut self, rollout: (PathBuf, File), identity: String) {
+    fn open_transcript(
+        &self,
+        path: &Path,
+        identity: Uuid,
+        allow_pending: bool,
+    ) -> Result<Option<(PathBuf, File)>, &'static str> {
+        let home = self
+            .home()
+            .and_then(|home| home.canonicalize().ok())
+            .ok_or("unavailable Codex home")?;
+        let valid_name = |path: &Path| {
+            path.extension().and_then(OsStr::to_str) == Some("jsonl")
+                && rollout_identity(path).is_none_or(|id| id == identity)
+        };
+        if !path.is_absolute()
+            || path.components().any(|part| part == Component::ParentDir)
+            || !valid_name(path)
+        {
+            return Err("invalid transcript path");
+        }
+        let resolved = match path.canonicalize() {
+            Ok(path) => path,
+            Err(error)
+                if allow_pending
+                    && error.kind() == io::ErrorKind::NotFound
+                    && rollout_identity(path) == Some(identity) =>
+            {
+                // A file the CLI has yet to create is safe only if its
+                // nearest existing ancestor resolves inside this Codex home.
+                for ancestor in path.ancestors() {
+                    match fs::symlink_metadata(ancestor) {
+                        Ok(_) => {
+                            if ancestor
+                                .canonicalize()
+                                .is_ok_and(|path| path.starts_with(&home))
+                            {
+                                return Ok(None);
+                            }
+                            break;
+                        }
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                        Err(_) => break,
+                    }
+                }
+                return Err("transcript path leaves Codex home");
+            }
+            Err(_) => return Err("unavailable transcript path"),
+        };
+        if !resolved.starts_with(home) || !valid_name(&resolved) || !resolved.is_file() {
+            return Err("invalid transcript path");
+        }
+        let Ok(file) = File::open(&resolved) else {
+            return Ok(None);
+        };
+        if !file.metadata().is_ok_and(|metadata| metadata.is_file()) {
+            return Err("invalid transcript file");
+        }
+        Ok(Some((resolved, file)))
+    }
+
+    pub fn find_rollout(&self, identity: Uuid) -> Option<(PathBuf, File)> {
+        let home = self.home()?.canonicalize().ok()?;
+        let sessions = home.join("sessions").canonicalize().ok()?;
+        if !sessions.starts_with(&home) {
+            return None;
+        }
+        let mut directories = vec![sessions.clone()];
+        while let Some(directory) = directories.pop() {
+            let Ok(entries) = fs::read_dir(directory) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let Ok(kind) = entry.file_type() else {
+                    continue;
+                };
+                let path = entry.path();
+                if kind.is_dir() {
+                    directories.push(path);
+                } else if kind.is_file()
+                    && entry.file_name().to_str().is_some_and(|name| {
+                        name.starts_with("rollout-")
+                            && name.ends_with(".jsonl")
+                            && rollout_identity(&path) == Some(identity)
+                    })
+                    && let Ok(Some(rollout)) = self.open_transcript(&path, identity, false)
+                    && rollout.0.starts_with(&sessions)
+                {
+                    return Some(rollout);
+                }
+            }
+        }
+        None
+    }
+
+    pub fn confirm(&mut self, rollout: Option<(PathBuf, File)>, identity: String) {
         self.title = self
             .home
             .as_ref()
             .map(|home| title::Watch::new(home.clone(), identity));
-        self.rollout = Some((rollout.0, Arc::new(rollout.1)));
+        self.rollout = rollout.map(|(path, file)| (path, Arc::new(file)));
         self.hud = Hud::default();
     }
 
-    pub fn admits_hook(&self, hook: &Hook) -> bool {
-        !self.ended
-            && self.rollout.as_ref().is_some_and(|(rollout, _)| {
-                !hook.has_transcript_field
-                    || hook
-                        .transcript
-                        .as_ref()
-                        .and_then(|path| path.canonicalize().ok())
-                        .as_ref()
-                        == Some(rollout)
-            })
+    pub fn admits_hook(&mut self, hook: &Hook, identity: Uuid) -> bool {
+        if self.ended || hook.invalid_transcript_field {
+            return false;
+        }
+        if !hook.has_transcript_field {
+            return true;
+        }
+        if let Some((rollout, _)) = &self.rollout {
+            return hook
+                .transcript
+                .as_ref()
+                .and_then(|path| path.canonicalize().ok())
+                .as_ref()
+                == Some(rollout);
+        }
+        let Some(path) = &hook.transcript else {
+            return true;
+        };
+        match self.open_transcript(path, identity, true) {
+            Ok(rollout) => {
+                self.rollout = rollout.map(|(path, file)| (path, Arc::new(file)));
+                true
+            }
+            Err(_) => false,
+        }
     }
 
     pub fn apply_admitted(&mut self, event: &'static str, hook: Hook, cwd: &str) -> Option<Effect> {
@@ -269,9 +377,21 @@ impl Run {
     }
 
     pub fn poll_error(&mut self, cwd: &str, flush: bool) -> Option<Effect> {
+        let now = Instant::now();
+        if self.rollout.is_none()
+            && !self.ended
+            && (flush || now >= self.next_rollout_poll)
+            && let Some(watch) = self.title.as_ref()
+            && (flush || watch.ready(now))
+            && let Ok(identity) = watch.identity.parse()
+        {
+            self.next_rollout_poll = now + Duration::from_secs(1);
+            self.rollout = self
+                .find_rollout(identity)
+                .map(|(path, file)| (path, Arc::new(file)));
+        }
         let turn = self.turn.as_mut()?;
         let id = turn.id.as_deref()?;
-        let now = Instant::now();
         if !flush && now < turn.next_poll {
             return None;
         }
@@ -333,6 +453,10 @@ impl Run {
             self.hud.accept(reply);
         }
     }
+}
+
+fn rollout_identity(path: &Path) -> Option<Uuid> {
+    transcript_uuid(path.file_name()?.to_str()?)?.parse().ok()
 }
 
 fn read_error(file: &File, size: u64, turn: &str) -> Option<String> {

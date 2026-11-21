@@ -36,6 +36,7 @@ if [ "${CODEX_FIXTURE_RESUME:-}" = 1 ]; then
         shift
     done
     if [ -n "$target" ]; then
+        if [ -f "$CODEX_HOME/silent-resume" ]; then exec /bin/sleep 60; fi
         material="$CODEX_HOME/sessions/rollout-fixture-$target.jsonl"
         if [ -f "$CODEX_HOME/early-exit" ]; then exit 23; fi
         if [ -f "$CODEX_HOME/background" ]; then
@@ -48,6 +49,7 @@ if [ "${CODEX_FIXTURE_RESUME:-}" = 1 ]; then
             printf 'Invalid session %s\n' "$target"
         else
             printf 'FIXTURE CODEX RESUME\n'
+            : > "$CODEX_HOME/resume-screen-ready"
         fi
     fi
 fi

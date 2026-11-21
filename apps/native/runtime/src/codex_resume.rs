@@ -11,6 +11,8 @@ use crate::codex_launch::{self, CodexLaunch};
 
 pub(crate) const MISSING: &str = "provider session not found";
 
+static ANSI: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\x1b\[[0-?]*[ -/]*[@-~]").unwrap());
+
 pub(crate) fn identity_mismatch() -> &'static str {
     if english() {
         crate::provider_resume::IDENTITY_MISMATCH
@@ -64,9 +66,13 @@ impl Resume {
         })
     }
 
+    pub fn has_visible_output(&self) -> bool {
+        ANSI.replace_all(&self.recent, "")
+            .chars()
+            .any(|ch| !ch.is_control() && !ch.is_whitespace())
+    }
+
     pub fn ingest(&mut self, data: &str) -> Option<&'static str> {
-        static ANSI: LazyLock<Regex> =
-            LazyLock::new(|| Regex::new(r"\x1b\[[0-?]*[ -/]*[@-~]").unwrap());
         static FAILURE: LazyLock<Regex> = LazyLock::new(|| {
             Regex::new(r"no session.{0,96}found|session.{0,96}not found|no conversation.{0,96}found|invalid session|failed to resume").unwrap()
         });

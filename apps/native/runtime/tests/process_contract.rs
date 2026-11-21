@@ -3505,6 +3505,7 @@ fn claude_restore_uses_binding_and_start_fresh_survives_deleted_provider() -> Re
 for arg in "$@"; do
     if [ "$arg" = '--resume' ]; then
         printf '%s\n' "$@" > "$0.resume-argv"
+        /bin/cp "$2" "$0.resume-settings"
         exit 23
     fi
 done
@@ -3530,6 +3531,16 @@ exec /bin/sleep 60
         }
     }
     let argv = fs::read_to_string(stub.with_extension("resume-argv"))?;
+    let settings: serde_json::Value =
+        serde_json::from_slice(&fs::read(stub.with_extension("resume-settings"))?)?;
+    assert_eq!(
+        settings["hooks"]["SessionStart"][0]["hooks"][0]["type"],
+        "command"
+    );
+    assert_eq!(
+        settings["hooks"]["UserPromptSubmit"][0]["hooks"][0]["type"],
+        "http"
+    );
     assert_eq!(
         argv.lines().skip(2).collect::<Vec<_>>(),
         [

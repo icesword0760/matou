@@ -679,7 +679,7 @@ impl ShellOwner {
             ClaudeRestore::Retry => "retrying",
             ClaudeRestore::Fresh => "starting-fresh",
             ClaudeRestore::Fail { .. } => "restore-failed",
-            ClaudeRestore::PermissionFresh => unreachable!(),
+            ClaudeRestore::PermissionFresh | ClaudeRestore::Ready { .. } => unreachable!(),
         });
         if let Some(run_id) = run_id {
             result["runId"] = json!(run_id);
@@ -1712,6 +1712,7 @@ impl ShellOwner {
             ClaudeRestore::Fail { error, .. } => ("restore-failed", error == IDENTITY_MISMATCH),
             ClaudeRestore::Retry => ("retrying", false),
             ClaudeRestore::Fresh | ClaudeRestore::PermissionFresh => ("starting-fresh", false),
+            ClaudeRestore::Ready { .. } => unreachable!(),
         };
         let id = (self.next_id)();
         let Some(commit) = sessions::change_claude_restore(
@@ -1784,6 +1785,7 @@ impl ShellOwner {
     ) -> Result<bool> {
         let result = match change {
             ClaudeRestore::Begin(_) => "restoring",
+            ClaudeRestore::Ready { .. } => "timed-out",
             ClaudeRestore::Fail { .. } => "restore-failed",
             ClaudeRestore::Retry => "retrying",
             ClaudeRestore::Fresh => "starting-fresh",
@@ -2817,9 +2819,10 @@ impl ShellOwner {
                 .register_hook(
                     &mut options,
                     &run_id,
+                    permission_starting
+                        || (profile == LaunchProfile::ClaudeCode && expected_id.is_some()),
                     expected_id,
                     fork_source_id,
-                    permission_starting,
                 )
                 .context(HookSetup)?;
             if let Some(argv) = fork_argv {
@@ -3133,9 +3136,9 @@ impl ShellOwner {
         &mut self,
         options: &mut SessionOptions,
         run_id: &str,
+        command_session_start: bool,
         expected_id: Option<String>,
         fork_source_id: Option<String>,
-        permission_respawn: bool,
     ) -> Result<Registration> {
         if self.hook_server.is_none() {
             self.hook_server = Some(ProviderHookServer::start()?);
@@ -3150,7 +3153,7 @@ impl ShellOwner {
                 expected_id,
                 fork_source_id,
             },
-            permission_respawn,
+            command_session_start,
         )?;
         if options.launch.profile == LaunchProfile::Codex {
             registration.attach_codex(&mut options.launch)?;
@@ -3478,8 +3481,12 @@ impl ShellOwner {
         }
         let mut expired_forks = Vec::new();
         let mut expired_permission_restores = Vec::new();
+        let mut expired_codex_restores = Vec::new();
         for (session_id, shell) in &mut self.shells {
-            if let Some(hook) = &mut shell.hook
+            if !self.closing
+                && !shell.ended
+                && !shell.retiring
+                && let Some(hook) = &mut shell.hook
                 && !hook
                     .resume
                     .as_ref()
@@ -3489,15 +3496,28 @@ impl ShellOwner {
                     .is_some_and(|deadline| deadline <= Instant::now())
             {
                 hook.deadline = None;
-                if let Some(resume) = &hook.codex_resume
-                    && resume.permission_respawn
-                {
-                    expired_permission_restores.push((
-                        session_id.clone(),
-                        shell.run_id.clone(),
-                        resume.binding_id.clone(),
-                        true,
-                    ));
+                if let Some(resume) = &hook.codex_resume {
+                    if resume.permission_respawn {
+                        expired_permission_restores.push((
+                            session_id.clone(),
+                            shell.run_id.clone(),
+                            resume.binding_id.clone(),
+                            true,
+                        ));
+                    } else {
+                        let ready = !shell.worker.is_finished()
+                            && (resume.has_visible_output()
+                                || shell.emitted_output
+                                    && hook.codex.as_ref().is_some_and(|codex| {
+                                        codex.find_rollout(resume.identity).is_some()
+                                    }));
+                        expired_codex_restores.push((
+                            session_id.clone(),
+                            shell.run_id.clone(),
+                            resume.binding_id.clone(),
+                            ready,
+                        ));
+                    }
                     continue;
                 }
                 let restore = hook
@@ -3539,6 +3559,42 @@ impl ShellOwner {
         }
         for (session_id, run_id) in expired_forks {
             self.park_fork_run(&session_id, &run_id, FORK_IDENTITY_TIMEOUT, events);
+        }
+        for (session_id, run_id, binding_id, ready) in expired_codex_restores {
+            if ready {
+                // Keep the identity and failure monitor armed for a late
+                // SessionStart or an error after the CLI's interactive screen.
+                if let Err(error) = self.commit_codex_restore(
+                    &session_id,
+                    ClaudeRestore::Ready {
+                        binding_id: &binding_id,
+                        run_id: &run_id,
+                    },
+                    Some(&run_id),
+                    events,
+                ) {
+                    diagnostic(
+                        events,
+                        &session_id,
+                        format!("Clear Codex restore: {error:#}"),
+                    );
+                    if let Some(hook) = self
+                        .shells
+                        .get_mut(&session_id)
+                        .and_then(|shell| shell.hook.as_mut())
+                    {
+                        hook.deadline = Some(Instant::now() + IDENTITY_TIMEOUT);
+                    }
+                }
+            } else {
+                self.park_codex_run(
+                    &session_id,
+                    &run_id,
+                    &binding_id,
+                    "provider resume identity confirmation timed out",
+                    events,
+                );
+            }
         }
         for (session_id, run_id, binding_id, codex) in expired_permission_restores {
             let error = "provider resume identity confirmation timed out";
@@ -4539,7 +4595,7 @@ impl ShellOwner {
         let payload = observation.codex.take().expect("Codex payload");
         if let Some(confirmed) = &hook.last_observation {
             if confirmed.identity.as_deref() != Some(identity_text.as_str())
-                || !codex.admits_hook(&payload)
+                || !codex.admits_hook(&payload, identity)
             {
                 return;
             }
@@ -4595,10 +4651,14 @@ impl ShellOwner {
         if observation.event != "SessionStart" || shell.worker.is_finished() {
             return;
         }
-        let Some(rollout) = codex.start_rollout(&payload, identity) else {
+        let Ok(rollout) = codex.start_rollout(&payload, identity, hook.codex_resume.is_some())
+        else {
             return;
         };
         if let Some((key, authority)) = hook.fork.clone() {
+            let Some(rollout) = rollout else {
+                return;
+            };
             let Some(intent) = self.codex_forks.get_mut(&key) else {
                 return;
             };
@@ -4660,7 +4720,7 @@ impl ShellOwner {
                     let commit = commit.expect("Codex Fork committed its identity");
                     let mut confirmed = commit.result.clone();
                     confirmed["result"] = json!("confirmed");
-                    codex.confirm(rollout, identity_text.clone());
+                    codex.confirm(Some(rollout), identity_text.clone());
                     hook.deadline = None;
                     hook.fork = None;
                     observation.identity = Some(identity_text);

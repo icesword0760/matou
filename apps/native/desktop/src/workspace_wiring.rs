@@ -286,6 +286,14 @@ impl WorkspaceWiring {
 }
 
 impl Workspace {
+    pub(super) fn wiring_overlay_open(&self, window: &Window) -> bool {
+        self.wiring.overlay.is_some()
+            && self
+                .wiring
+                .overlay_window
+                .is_none_or(|handle| handle == window.window_handle())
+    }
+
     pub(super) fn open_external_link(
         &mut self,
         url: &str,

@@ -1506,6 +1506,192 @@ mod workspace {
         }
     }
 
+    async fn verify_carousel_focus(cx: &mut AsyncApp) {
+        use crate::carousel_motion::WidthRule;
+
+        let (window, sink) = open_probe_at(cx, 1260.);
+        let publish_focus = |cx: &mut AsyncApp, id: &str| {
+            window
+                .update(cx, |view, window, cx| {
+                    let mut hierarchy = view.hierarchy.clone().unwrap();
+                    hierarchy.session.as_mut().unwrap().id = id.to_owned();
+                    let mut graph = view.graph.clone();
+                    graph["nodes"][2]["currentMode"] = json!("shell");
+                    if graph["nodes"].as_array().unwrap().len() == 3 {
+                        // Keep room beyond the preview so the old card can
+                        // shrink without clamping the saved viewport position.
+                        graph["nodes"].as_array_mut().unwrap().push(json!({
+                            "sessionId": "carousel-tail", "currentMode": "shell",
+                            "workStatus": "idle", "title": "Tail"
+                        }));
+                    }
+                    graph["focusedSessionId"] = json!(id);
+                    view.apply(
+                        BridgeEvent::Runtime {
+                            generation: 1,
+                            event: Event::Navigation {
+                                hierarchy,
+                                scenes: view.scenes.clone(),
+                                graph,
+                                geometry: vec![],
+                            },
+                        },
+                        window,
+                        cx,
+                    );
+                })
+                .unwrap();
+        };
+        publish_focus(cx, A);
+        draw(window.into(), cx);
+        let move_at = |cx: &mut AsyncApp, position| {
+            dispatch_mouse(
+                window,
+                cx,
+                MouseMoveEvent {
+                    position,
+                    ..Default::default()
+                },
+            );
+        };
+        let offset = |cx: &mut AsyncApp| {
+            window
+                .update(cx, |view, _, _| view.carousel_scroll.offset().x)
+                .unwrap()
+        };
+        let hover = |cx: &mut AsyncApp, expected: Option<&str>| {
+            window
+                .update(cx, |view, _, _| {
+                    assert_eq!(view.hovered.as_deref(), expected)
+                })
+                .unwrap();
+        };
+        let width_rule = |cx: &mut AsyncApp, id: &str| {
+            window
+                .update(cx, |view, _, _| {
+                    view.card_motion[id].width.as_ref().unwrap().target_rule()
+                })
+                .unwrap()
+        };
+        let initial = offset(cx);
+        let base_width = card_bounds(window, cx, B).size.width;
+        let b = card_header(window, cx, B);
+        move_at(cx, b);
+        hover(cx, Some(B));
+        draw(window.into(), cx);
+        assert!(width_rule(cx, B) == WidthRule::WideExpanded);
+        cx.background_executor()
+            .timer(Duration::from_millis(400))
+            .await;
+        draw(window.into(), cx);
+        let b = card_bounds(window, cx, B);
+        assert!(b.size.width > base_width + px(20.));
+        let a = card_bounds(window, cx, A);
+        move_at(cx, point((a.right() + b.left()) / 2., b.center().y));
+        hover(cx, Some(B));
+        let viewport = window
+            .update(cx, |view, _, _| view.carousel_scroll.bounds())
+            .unwrap();
+        move_at(cx, point(b.center().x, viewport.top() + px(1.)));
+        hover(cx, None);
+        draw(window.into(), cx);
+        assert!(width_rule(cx, B) == WidthRule::Columns(3));
+        assert_eq!(offset(cx), initial);
+        cx.background_executor()
+            .timer(Duration::from_millis(400))
+            .await;
+        draw(window.into(), cx);
+        assert!((card_bounds(window, cx, B).size.width - base_width).abs() <= px(1.));
+
+        let third = card_header(window, cx, TEAM);
+        move_at(cx, third);
+        hover(cx, Some(TEAM));
+        for _ in 0..20 {
+            draw(window.into(), cx);
+            cx.background_executor()
+                .timer(Duration::from_millis(22))
+                .await;
+        }
+        draw(window.into(), cx);
+        let preview_scroll = offset(cx);
+        assert!(preview_scroll < initial - px(20.));
+        let click_at = card_header(window, cx, TEAM);
+        dispatch_mouse(window, cx, mouse_down(click_at, Modifiers::default()));
+        window
+            .update(cx, |view, _, _| {
+                assert_eq!(view.focused.as_deref(), Some(A));
+                assert_eq!(view.level_focus(), Some(TEAM));
+                assert!(view.hovered.is_none());
+                assert!(view.hover_baseline.is_none());
+                assert!(view.hover_restore_at.is_none());
+                assert!(view.hover_follow_until.is_none());
+                assert!(view.focus_follow_until.is_none());
+                let geometry = &view.geometry[view.carousel_owner.as_ref().unwrap()].geometry;
+                assert_eq!(geometry["anchorSessionId"], TEAM);
+                assert_eq!(geometry["scrollLeft"], json!(-f32::from(preview_scroll)));
+            })
+            .unwrap();
+        draw(window.into(), cx);
+        assert!(width_rule(cx, A) == WidthRule::Columns(3));
+        assert!(width_rule(cx, B) == WidthRule::Columns(3));
+        assert!(width_rule(cx, TEAM) == WidthRule::WideExpanded);
+        assert_eq!(offset(cx), preview_scroll);
+        dispatch_mouse(window, cx, mouse_up(click_at));
+        publish_focus(cx, TEAM);
+        draw(window.into(), cx);
+        assert_eq!(offset(cx), preview_scroll);
+        window
+            .update(cx, |view, _, _| assert!(view.focus_follow_until.is_none()))
+            .unwrap();
+
+        while sink.try_recv().is_ok() {}
+        press(window, cx, "cmd-[");
+        assert!(std::iter::from_fn(|| sink.try_recv().ok()).any(|command| {
+            matches!(command, Command::FocusSession { session_id, .. } if session_id == B)
+        }));
+        publish_focus(cx, B);
+        let before = offset(cx);
+        draw(window.into(), cx);
+        let first_step = (offset(cx) - before).abs();
+        assert!(first_step > px(0.) && first_step <= px(28.));
+        window
+            .update(cx, |view, _, _| {
+                assert_eq!(view.level_focus(), Some(B));
+                assert!(view.focus_follow_until.is_some());
+            })
+            .unwrap();
+        let grab = point(viewport.center().x, viewport.top() + px(1.));
+        let dragged = grab + point(px(-36.), px(0.));
+        let before_drag = offset(cx);
+        dispatch_mouse(window, cx, mouse_down(grab, Modifiers::default()));
+        dispatch_mouse(
+            window,
+            cx,
+            MouseMoveEvent {
+                position: dragged,
+                pressed_button: Some(MouseButton::Left),
+                ..Default::default()
+            },
+        );
+        dispatch_mouse(window, cx, mouse_up(dragged));
+        window
+            .update(cx, |view, _, _| {
+                assert!(view.focus_follow_until.is_none());
+                assert!(view.hover_follow_until.is_none());
+                assert!(view.hover_baseline.is_none());
+                assert!(view.hover_restore_at.is_none());
+                assert!(view.edge_next_at.is_none());
+            })
+            .unwrap();
+        assert_eq!(offset(cx), before_drag - px(36.));
+        window
+            .update(cx, |_, window, _| window.remove_window())
+            .unwrap();
+        println!(
+            "carousel focus: gap, blank, optimistic preview activation, saved scroll, keyboard follow, and manual drag"
+        );
+    }
+
     async fn verify_carousel_and_zoom(cx: &mut AsyncApp, root: &std::path::Path) {
         let (window, sink) = open_probe_at(cx, 1260.);
         let toolbar = draw(window.into(), cx)["create-shell"].center();
@@ -2843,6 +3029,7 @@ mod workspace {
                 verify_footer_hud(cx, &fixture_root).await;
                 verify_horizontal_divider_drag(cx);
                 verify_splits(cx);
+                verify_carousel_focus(cx).await;
                 verify_carousel_and_zoom(cx, &fixture_root.join("font-zoom")).await;
                 verify_links(cx).await;
                 live_wiring::verify(cx, fixture_root.clone()).await;

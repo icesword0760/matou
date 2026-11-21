@@ -815,6 +815,7 @@ fn codex_resume_cold_start_preserves_card_binding_and_legacy_material() -> Resul
                         && event["runId"] == new.id
                     {
                         assert_eq!(event["provider"], "codex");
+                        assert_eq!(event["restoreState"], "none");
                         timed_out = true;
                     }
                 }
@@ -822,11 +823,8 @@ fn codex_resume_cold_start_preserves_card_binding_and_legacy_material() -> Resul
             _ => {}
         }
     }
-    assert_eq!(
-        codex_binding(&db, &session)?.unwrap().restore_state,
-        "restoring"
-    );
-    println!("identity timeout released the queue slot; late SessionStart still owns the run");
+    assert_eq!(codex_binding(&db, &session)?.unwrap().restore_state, "none");
+    println!("identity timeout cleared the banner; late SessionStart still owns the run");
     emit(&mut child, &home, "restored-start", started(UUID, &rollout))?;
     let graph = confirmed(&mut child, UUID)?;
     assert_eq!(
@@ -863,6 +861,123 @@ fn codex_resume_cold_start_preserves_card_binding_and_legacy_material() -> Resul
     println!(
         "cold restart: same session/scene/binding/UUID, prior PID reaped, new generation/run/PID, old data and hook state/notification verified"
     );
+    shutdown(child)
+}
+
+#[test]
+fn codex_resume_confirms_without_a_rollout_and_attaches_it_later() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let (mut child, home, rollout, db) = establish(root.path())?;
+    let session = child.session.clone();
+    let binding_id = codex_binding(&db, &session)?.unwrap().id;
+    let ready = home.join("resume-screen-ready");
+    for with_missing_path in [false, true] {
+        if ready.exists() {
+            fs::remove_file(&ready)?;
+        }
+        restart(&mut child)?;
+        // The terminal replays earlier frames. Wait for this CLI instance
+        // to read the file before simulating a transcript that arrives late.
+        let deadline = Instant::now() + TIMEOUT;
+        while !ready.exists() {
+            ensure!(Instant::now() < deadline, "fresh resume screen not ready");
+            thread::sleep(Duration::from_millis(10));
+        }
+        first_screen(&mut child, &home, Some(UUID), true)?;
+        let url = current_hook_url(&home)?;
+        let foreign = material(&home, FOREIGN)?;
+        let outside = root.path().join(rollout.file_name().unwrap());
+        fs::copy(&rollout, &outside)?;
+        for path in [foreign, outside] {
+            assert_eq!(post_hook(&url, started(UUID, &path))?, 200);
+        }
+        assert_eq!(
+            codex_binding(&db, &session)?.unwrap().restore_state,
+            "restoring"
+        );
+
+        let mut start = json!({"hook_event_name": "SessionStart", "session_id": UUID});
+        if with_missing_path {
+            fs::remove_file(&rollout)?;
+            start["transcript_path"] = json!(rollout);
+        }
+        assert_eq!(post_hook(&url, start)?, 200);
+        confirmed(&mut child, UUID)?;
+        let binding = codex_binding(&db, &session)?.unwrap();
+        assert_eq!(binding.restore_state, "none");
+        assert_eq!(binding.id, binding_id);
+
+        let turn = "late-rollout-turn";
+        assert_eq!(
+            post_hook(
+                &url,
+                json!({
+                    "hook_event_name": "UserPromptSubmit", "session_id": UUID, "turn_id": turn,
+                })
+            )?,
+            200
+        );
+        graph(
+            &mut child,
+            "prompt accepted before rollout attachment",
+            |_, card| card["workStatus"] == "running",
+        )?;
+        if with_missing_path {
+            material(&home, UUID)?;
+        }
+        let mut file = fs::OpenOptions::new().append(true).open(&rollout)?;
+        writeln!(
+            file,
+            "{}",
+            json!({
+                "type": "event_msg",
+                "payload": {
+                    "type": "task_complete", "turn_id": turn,
+                    "error": {"message": "fixture late rollout error"}
+                }
+            })
+        )?;
+        graph(
+            &mut child,
+            "error read from recovered rollout",
+            |_, card| card["workStatus"] == "error",
+        )?;
+    }
+    shutdown(child)
+}
+
+#[test]
+fn codex_resume_silent_timeout_parks_the_card_for_retry() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let (mut child, home, _, db) = establish(root.path())?;
+    let session = child.session.clone();
+    let binding_id = codex_binding(&db, &session)?.unwrap().id;
+    fs::write(home.join("silent-resume"), "")?;
+    restart(&mut child)?;
+    let deadline = Instant::now() + Duration::from_secs(14);
+    loop {
+        if let Event::Graph(graph) = child.event(deadline, true)?
+            && let Some(card) = node(&graph, &session)
+            && card["providerRestoreState"] == "failed"
+        {
+            assert_eq!(card["workStatus"], "error");
+            assert_eq!(
+                card["providerRestoreError"],
+                "provider resume identity confirmation timed out"
+            );
+            assert!(
+                graph["providerIdentityEvents"]
+                    .as_array()
+                    .is_some_and(|events| events
+                        .iter()
+                        .any(|event| event["result"] == "restore-failed"))
+            );
+            break;
+        }
+    }
+    let binding = codex_binding(&db, &session)?.unwrap();
+    assert_eq!(binding.restore_state, "failed");
+    assert_eq!(binding.id, binding_id);
     shutdown(child)
 }
 
