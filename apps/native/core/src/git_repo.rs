@@ -644,6 +644,100 @@ impl Repository {
         Ok(entries)
     }
 
+    pub fn registered_worktree_path(path: &Path) -> Result<PathBuf> {
+        canonicalize_missing(path)
+    }
+
+    /// Read the checkout's Git registration, even if it has been moved on disk.
+    pub fn linked_worktree_registration(&self) -> Result<PathBuf> {
+        ensure!(self.is_linked_worktree(), "path is not a linked worktree");
+        let registration = fs::read(self.git_dir.join("gitdir"))?;
+        let marker = self.git_dir.join(git_path(line(&registration)));
+        canonicalize_missing(
+            marker
+                .parent()
+                .context("missing registered worktree path")?,
+        )
+    }
+
+    /// Restore only the exact missing registration. Never prune unrelated worktrees.
+    pub fn restore_managed_worktree(
+        &self,
+        path: &Path,
+        head: &Head,
+        base: Option<&str>,
+    ) -> Result<()> {
+        let scope = checkout_scope(self, path)?;
+        scope.verify_repository()?;
+        let path = scope.target_path(path)?;
+        ensure!(
+            path_is_missing(&path)?,
+            "original worktree path still exists"
+        );
+        let entries = self.worktrees()?;
+        require_separate_target(&entries, &path)?;
+        let branch = match head {
+            Head::Branch(name) if self.local_branch_exists(name)? => {
+                if let Some(base) = base {
+                    ensure!(
+                        self.resolve_commit(&format!("refs/heads/{name}"))?
+                            == self.resolve_commit(base)?,
+                        "wrong-head"
+                    );
+                }
+                WorktreeBranch::Existing(name)
+            }
+            Head::Branch(name) => WorktreeBranch::New {
+                name,
+                base_ref: base.unwrap_or("HEAD"),
+            },
+            Head::Detached(revision) => WorktreeBranch::Detached(revision),
+        };
+        if let Some(entry) = entries.iter().find(|entry| entry.path == path) {
+            ensure!(
+                !entry.main && !entry.bare && !entry.locked && worktree_has_head(entry, head),
+                "original registration has a different identity or is locked"
+            );
+            scope.remove_registered(&path)?;
+        }
+        fs::create_dir_all(path.parent().context("worktree needs a parent")?)?;
+        scope.create(&path, branch)?;
+        Ok(())
+    }
+
+    /// Repair a moved linked checkout without redirecting another checkout's registration.
+    pub fn repair_managed_worktree(&self, original: &Path, path: &Path, head: &Head) -> Result<()> {
+        let original = canonicalize_missing(original)?;
+        let scope = checkout_scope(self, path)?;
+        scope.verify_repository()?;
+        let path = scope.target_path(path)?;
+        let checkout = scope.linked_repository(&path)?;
+        ensure!(
+            checkout.linked_worktree_registration()? == original
+                && checkout.head()? == *head
+                && (path == original || path_is_missing(&original)?),
+            "candidate belongs to another worktree or the original still exists"
+        );
+        let entries = self.worktrees()?;
+        if path == original
+            && entries
+                .iter()
+                .any(|entry| entry.path == path && !entry.main)
+        {
+            return scope.require_registered_target(&path);
+        }
+        ensure!(
+            !entries.iter().any(|entry| overlaps(&entry.path, &path)),
+            "worktree path conflicts with a registered worktree"
+        );
+        scope.run(&[
+            OsStr::new("worktree"),
+            OsStr::new("repair"),
+            path.as_os_str(),
+        ])?;
+        scope.require_registered_target(&path)
+    }
+
     /// Returns the innermost worktree containing an existing path.
     pub fn worktree_for_path(&self, path: &Path) -> Result<Option<Worktree>> {
         let path = fs::canonicalize(path)?;
@@ -849,6 +943,7 @@ pub fn check_branch_reservations(
 pub enum WorktreeBranch<'a> {
     New { name: &'a str, base_ref: &'a str },
     Existing(&'a str),
+    Detached(&'a str),
 }
 
 /// Scopes checkout writes to a directory and a verified repository identity.
@@ -898,7 +993,7 @@ impl WorktreeScope {
             "worktree path conflicts with a registered worktree: {}",
             path.display()
         );
-        let (name, revision, create_branch) = match branch {
+        let (head, revision, create_branch) = match branch {
             WorktreeBranch::New { name, base_ref } => {
                 self.repository.check_fork_branch(name)?;
                 let base_ref = trim_js(base_ref);
@@ -907,7 +1002,11 @@ impl WorktreeScope {
                 } else {
                     base_ref
                 };
-                (name, self.repository.resolve_commit(base_ref)?, true)
+                (
+                    Head::Branch(name.into()),
+                    self.repository.resolve_commit(base_ref)?,
+                    true,
+                )
             }
             WorktreeBranch::Existing(name) => {
                 let name = manual_branch_name(name).map_err(|_| anyhow!("invalid branch name"))?;
@@ -922,32 +1021,49 @@ impl WorktreeScope {
                     "branch already checked out: {name}"
                 );
                 let reference = format!("refs/heads/{name}");
-                (name, self.repository.resolve_commit(&reference)?, false)
+                (
+                    Head::Branch(name.into()),
+                    self.repository.resolve_commit(&reference)?,
+                    false,
+                )
+            }
+            WorktreeBranch::Detached(revision) => {
+                let revision = self.repository.resolve_commit(revision)?;
+                (Head::Detached(revision.clone()), revision, false)
             }
         };
         // An atomic directory reservation ensures we never clean up a pre-existing path.
         fs::create_dir(&path).with_context(|| format!("reserve {}", path.display()))?;
-        let reference = format!("refs/heads/{name}");
+        let reference = match &head {
+            Head::Branch(name) => format!("refs/heads/{name}"),
+            Head::Detached(_) => String::new(),
+        };
         let mut owns_branch = false;
         let result = (|| {
             if create_branch {
                 self.run(&["update-ref", "--no-deref", &reference, &revision, ""])?;
                 owns_branch = true;
             }
-            self.run(&[
+            let mut args = vec![
                 OsStr::new("worktree"),
                 OsStr::new("add"),
                 OsStr::new("--no-guess-remote"),
-                OsStr::new("--"),
-                path.as_os_str(),
-                OsStr::new(name),
-            ])?;
+            ];
+            let checkout_ref = match &head {
+                Head::Branch(name) => name,
+                Head::Detached(revision) => {
+                    args.push(OsStr::new("--detach"));
+                    revision
+                }
+            };
+            args.extend([OsStr::new("--"), path.as_os_str(), OsStr::new(checkout_ref)]);
+            self.run(&args)?;
             let checkout = self.linked_repository(&path)?;
             ensure!(
                 self.registered_path(&checkout)? == path
-                    && checkout.head()? == Head::Branch(name.into())
+                    && checkout.head()? == head
                     && checkout.resolve_commit("HEAD")? == revision,
-                "worktree did not check out {name} at {revision}"
+                "worktree did not check out at {revision}"
             );
             let entries = self.repository.worktrees()?;
             require_separate_target(&entries, &path)?;
@@ -958,7 +1074,7 @@ impl WorktreeScope {
         })();
         match result {
             Ok(worktree) => Ok(worktree),
-            Err(error) => match self.rollback(&path, name, &reference, &revision, owns_branch) {
+            Err(error) => match self.rollback(&path, &head, &reference, &revision, owns_branch) {
                 Ok(()) => Err(error),
                 Err(cleanup) => {
                     Err(error.context(format!("worktree rollback failed: {cleanup:#}")))
@@ -1134,7 +1250,7 @@ impl WorktreeScope {
     fn rollback(
         &self,
         path: &Path,
-        branch: &str,
+        head: &Head,
         reference: &str,
         revision: &str,
         owns_branch: bool,
@@ -1144,7 +1260,7 @@ impl WorktreeScope {
         let entries = self.repository.worktrees()?;
         if let Some(entry) = entries.iter().find(|entry| entry.path == path) {
             ensure!(
-                !entry.main && entry.branch.as_deref() == Some(branch),
+                !entry.main && worktree_has_head(entry, head),
                 "worktree registration changed during creation"
             );
             require_separate_target(&entries, path)?;
@@ -1158,13 +1274,13 @@ impl WorktreeScope {
             // Git cleans its checkout on failure. Only remove our empty reservation.
             fs::remove_dir(path)?;
         }
-        if owns_branch {
+        if owns_branch && let Head::Branch(branch) = head {
             ensure!(
                 !self
                     .repository
                     .worktrees()?
                     .iter()
-                    .any(|entry| entry.branch.as_deref() == Some(branch)),
+                    .any(|entry| entry.branch.as_deref() == Some(branch.as_str())),
                 "branch is now checked out"
             );
             self.run(&["update-ref", "--no-deref", "-d", reference, revision])?;
@@ -1206,6 +1322,13 @@ fn require_separate_target(entries: &[Worktree], path: &Path) -> Result<()> {
         path.display()
     );
     Ok(())
+}
+
+pub fn worktree_has_head(entry: &Worktree, head: &Head) -> bool {
+    match head {
+        Head::Branch(name) => entry.branch.as_deref() == Some(name),
+        Head::Detached(revision) => entry.detached && entry.revision.as_deref() == Some(revision),
+    }
 }
 
 fn path_is_missing(path: &Path) -> Result<bool> {
