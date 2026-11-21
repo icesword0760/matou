@@ -35,6 +35,9 @@ fn start_fixture(root: &Path, mode: &str) -> Result<(RuntimeChild, u32, Option<u
         "nested" => format!("printf '%s' \"$$\" > '{root_arg}/shell-pid'\n{run}\n"),
         _ => format!("exec {run}\n"),
     };
+    // The foreground-process fixture requires the PTY; an alias lookup
+    // sources the same rc file without one.
+    let shell = format!("[[ -t 0 ]] || return\n{shell}");
     let mut child = RuntimeChild::spawn_with_zshrc(root, &shell)?;
     child.ready()?;
     if mode == "baseline" {

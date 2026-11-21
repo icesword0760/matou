@@ -4510,7 +4510,7 @@ impl Workspace {
                 .entry(id.to_owned())
                 .or_insert_with(|| cx.focus_handle().tab_stop(true));
             if node["archivedAt"].is_null()
-                && (node["currentMode"] == "claude-code"
+                && (card_history_provider(node).is_some()
                     || session_levels::parent_id(node).is_some()
                     || fork_failure_copy(node).is_some())
             {
@@ -4554,7 +4554,7 @@ impl Workspace {
                 self.resize_revisions.remove(id);
                 continue;
             }
-            if node["currentMode"] == "claude-code" {
+            if card_history_provider(node).is_some() {
                 self.card_history_controls
                     .entry(id.to_owned())
                     .or_insert_with(|| cx.focus_handle().tab_stop(true));
@@ -7686,42 +7686,44 @@ impl Workspace {
         if !node["archivedAt"].is_null() || !node["detachedWindowId"].is_null() {
             return None;
         }
-        let readiness = if placement == ForkPlacement::Sibling {
-            let parent = self.graph_node(session_levels::parent_id(node)?)?;
-            if parent["canFork"] != true || !parent["archivedAt"].is_null() {
-                return None;
-            }
-            None
+        let source = if placement == ForkPlacement::Sibling {
+            self.graph_node(session_levels::parent_id(node)?)?
         } else {
-            match node["currentMode"].as_str() {
-                Some("claude-code" | "codex") => {}
-                Some("antigravity")
-                    if placement == ForkPlacement::Peer && fork_failure_copy(node).is_none() => {}
-                _ => return None,
-            }
-            (node["canFork"] != true).then(|| {
-                if matches!(
-                    node["workStatus"].as_str(),
-                    Some("running" | "starting" | "needs-input")
-                ) {
-                    "当前回复完成后即可 Fork"
-                } else {
-                    if node["currentMode"] == "codex" {
-                        self.locale.text(
-                            "在当前会话输入一次，并等待 Codex 完成回复后，即可创建分支",
-                            "Send a message and wait for Codex to finish replying before forking.",
-                        )
-                    } else if node["currentMode"] == "antigravity" {
-                        self.locale.text(
-                            "在当前会话输入一次，并等待 Antigravity 完成回复后，即可创建分支",
-                            "Send a message and wait for Antigravity to finish replying before forking.",
-                        )
-                    } else {
-                        "在当前会话输入一次，并等待 Claude Code 完成回复后，即可创建分支"
-                    }
-                }
-            })
+            node
         };
+        if !source["archivedAt"].is_null()
+            || (placement != ForkPlacement::Sibling && card_history_provider(source).is_none())
+            || (placement == ForkPlacement::Peer
+                && source["currentMode"] == "antigravity"
+                && fork_failure_copy(source).is_some())
+        {
+            return None;
+        }
+        let readiness = (source["canFork"] != true).then(|| {
+            if placement == ForkPlacement::Sibling {
+                self.locale.text(
+                    "父会话完成首轮回复后即可创建兄弟分支",
+                    "Wait for the parent session to finish its first reply before forking.",
+                )
+            } else if matches!(
+                source["workStatus"].as_str(),
+                Some("running" | "starting" | "needs-input")
+            ) {
+                "当前回复完成后即可 Fork"
+            } else {
+                match source["currentMode"].as_str() {
+                    Some("codex") => self.locale.text(
+                        "在当前会话输入一次，并等待 Codex 完成回复后，即可创建分支",
+                        "Send a message and wait for Codex to finish replying before forking.",
+                    ),
+                    Some("antigravity") => self.locale.text(
+                        "在当前会话输入一次，并等待 Antigravity 完成回复后，即可创建分支",
+                        "Send a message and wait for Antigravity to finish replying before forking.",
+                    ),
+                    _ => "在当前会话输入一次，并等待 Claude Code 完成回复后，即可创建分支",
+                }
+            }
+        });
         Some(ForkAccess {
             blocked: self
                 .fork_connection_blocked_reason()
@@ -7954,6 +7956,7 @@ impl Workspace {
             .as_object_mut()
             .and_then(|object| object.remove("providerPermissionModeResults"));
         self.update_notifications(&mut graph);
+        self.refresh_egress_for_graph_change(&graph, cx);
         self.graph = graph;
         if let Some(child) = self.dag_window
             && child
@@ -8064,7 +8067,7 @@ impl Workspace {
         let Some((scene_id, node)) = self.active_scene_id().zip(self.graph_node(id)) else {
             return;
         };
-        let history_provider = deferred_history_provider(node);
+        let history_provider = card_history_provider(node);
         if !self.order.iter().any(|card| card == id)
             || !node["archivedAt"].is_null()
             || if history {
@@ -8094,6 +8097,8 @@ impl Workspace {
             .then(|| trimmed_graph_text(&node["historyProviderSessionId"]))
             .flatten()
             .map(str::to_owned);
+        // Until a provider has a history ID, open its workspace catalog.
+        let history = history && (provider == "claude-code" || selected.is_some());
         let scene_id = scene_id.to_owned();
         let cwd = cwd.to_owned();
         let filter_placeholder = self.locale.text(
@@ -10642,6 +10647,7 @@ impl Workspace {
             .flex()
             .items_center()
             .bg(background)
+            .children(workspace_wiring::wiring_probe_bounds("scene-bar".into()))
             .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
             .child(tabs)
             .when(self.tab_overflow, |bar| bar.child(overflow_actions))
@@ -10935,8 +10941,6 @@ impl Workspace {
             .flex()
             .items_center()
             .bg(background)
-            .border_b_1()
-            .border_color(rgba(palette.footer.top_line))
             .text_color(rgba(palette.cards.title))
             .child(
                 // The percentage resolves against the space left after the actions.
@@ -10953,6 +10957,37 @@ impl Workspace {
                 ),
             )
             .child(actions)
+    }
+
+    fn session_card_header_shadow(dark: bool) -> Canvas<()> {
+        let (color, opacity) = if dark {
+            (0x000000, 0.38)
+        } else {
+            (0x2f3f52, 0.25)
+        };
+        let shadow = BoxShadow {
+            spread_radius: px(-7.),
+            // GPUI takes the Gaussian standard deviation. CSS blur is twice that.
+            ..shadow(color, opacity, 5., 4.5)
+        };
+        // Paint the outer shadow after the terminal, clipped to the area below the header.
+        canvas(
+            |_, _, _| (),
+            move |bounds, _, window, _| {
+                let header = Bounds::new(
+                    bounds.origin - point(px(0.), px(42.)),
+                    size(bounds.size.width, px(42.)),
+                );
+                window.with_content_mask(Some(ContentMask { bounds }), |window| {
+                    window.paint_shadows(header, Corners::default(), std::slice::from_ref(&shadow));
+                });
+            },
+        )
+        .absolute()
+        .left_0()
+        .right_0()
+        .top(px(42.))
+        .h(px(12.))
     }
 
     fn session_card_actions() -> Div {
@@ -11141,11 +11176,7 @@ impl Workspace {
         }
     }
 
-    fn claude_card_history_button(
-        &self,
-        id: &str,
-        cx: &mut Context<Self>,
-    ) -> Option<Stateful<Div>> {
+    fn card_history_button(&self, id: &str, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
         let focus = self.card_history_controls.get(id)?;
         let target = id.to_owned();
         let palette = self.theme_palette().cards;
@@ -11163,6 +11194,9 @@ impl Workspace {
                     .cursor_pointer()
                     .hover(move |style| style.bg(rgba(palette.action_hover)))
                     .child(icon("history", 16., rgba(palette.action_text)))
+                    .children(workspace_wiring::wiring_probe_bounds(format!(
+                        "session-history-open-{id}"
+                    )))
                     .tooltip(move |_, cx| cx.new(|_| CardTooltip(label.into())).into()),
                 focus,
                 move |this, window, cx| this.open_session_loader_mode(&target, true, window, cx),
@@ -11200,6 +11234,9 @@ impl Workspace {
             .justify_center()
             .rounded(px(5.))
             .child(glyph)
+            .children(workspace_wiring::wiring_probe_bounds(format!(
+                "session-loader-open-{id}"
+            )))
             .tooltip(move |_, cx| cx.new(|_| CardTooltip(tooltip.into())).into());
         if enabled {
             let session_id = id.to_owned();
@@ -12656,9 +12693,6 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Option<Stateful<Div>> {
         let sibling = placement == ForkPlacement::Sibling;
-        if !sibling && self.graph_node(id)?["currentMode"] == "codex" {
-            return None;
-        }
         let access = self.fork_access(id, placement)?;
         let (role, title) = if sibling {
             ("sibling", "从共同父会话 Fork 兄弟分支")
@@ -12673,7 +12707,10 @@ impl Workspace {
             access.blocked.is_some(),
             tooltip.into(),
             self.theme_palette().cards,
-        );
+        )
+        .children(workspace_wiring::wiring_probe_bounds(format!(
+            "fork-{role}-{id}"
+        )));
         Some(if access.blocked.is_some() {
             button.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         } else {
@@ -14603,8 +14640,6 @@ impl Render for Workspace {
             .flex()
             .gap(px(12.))
             .p(px(10.))
-            .border_t_1()
-            .border_color(rgba(palette.chrome.divider))
             .overflow_x_scroll()
             .track_scroll(&self.carousel_scroll)
             .overflow_y_hidden()
@@ -14988,34 +15023,38 @@ impl Render for Workspace {
                 )
                 .child(Self::compact_session_summary_themed(node, title, &palette))
             } else {
+                let mut actions = Self::session_card_actions().children(badge);
+                if let Some(node) = node {
+                    actions = actions.children(
+                        card_header_actions(node, self.scene_membership_count() > 1).filter_map(
+                            |action| match action {
+                                CardHeaderAction::History => self.card_history_button(id, cx),
+                                CardHeaderAction::Load => {
+                                    Some(self.session_loader_button(id, node, cx))
+                                }
+                                CardHeaderAction::ForkChild => {
+                                    self.render_fork_header(id, ForkPlacement::Child, cx)
+                                }
+                                CardHeaderAction::ForkSibling => {
+                                    self.render_fork_header(id, ForkPlacement::Sibling, cx)
+                                }
+                                CardHeaderAction::Remove => {
+                                    Some(self.remove_card_button(id, node, cx))
+                                }
+                            },
+                        ),
+                    );
+                }
                 card.child(
                     Self::session_card_header_themed(
                         ui_text(title.replace(['\r', '\n'], " ")),
-                        Self::session_card_actions()
-                            .children(badge)
-                            .children(
-                                node.filter(|node| node["currentMode"] == "claude-code")
-                                    .and_then(|_| self.claude_card_history_button(id, cx)),
-                            )
-                            .children(node.map(|node| self.session_loader_button(id, node, cx)))
-                            .children(self.render_fork_header(id, ForkPlacement::Child, cx))
-                            .children(
-                                node.filter(|node| node["currentMode"] != "claude-code")
-                                    .and_then(|_| {
-                                        self.render_fork_header(id, ForkPlacement::Sibling, cx)
-                                    }),
-                            )
-                            .children(
-                                node.filter(|node| {
-                                    node["archivedAt"].is_null()
-                                        && session_levels::nodes(&self.graph).len()
-                                            > self.removal_branch_impact(node).sessions
-                                })
-                                .map(|node| self.remove_card_button(id, node, cx)),
-                            ),
+                        actions,
                         &palette,
                     )
                     .id(SharedString::from(format!("session-header-{id}")))
+                    .children(workspace_wiring::wiring_probe_bounds(format!(
+                        "session-header-{id}"
+                    )))
                     .on_mouse_down(
                         MouseButton::Right,
                         cx.listener({
@@ -15085,26 +15124,7 @@ impl Render for Workspace {
                     let body = body.when(water.is_some(), |body| body.opacity(0.));
                     body
                 })
-                .child(
-                    div()
-                        .absolute()
-                        .left_0()
-                        .right_0()
-                        .top(px(42.))
-                        .h(px(4.))
-                        .bg(linear_gradient(
-                            180.,
-                            linear_color_stop(
-                                rgba(if self.wiring_dark() {
-                                    0x00000030
-                                } else {
-                                    0x26384f13
-                                }),
-                                0.,
-                            ),
-                            linear_color_stop(rgba(0x00000000), 1.),
-                        )),
-                )
+                .child(Self::session_card_header_shadow(self.wiring_dark()))
             };
             #[cfg(target_os = "macos")]
             let card = card.children(water);
@@ -16810,11 +16830,48 @@ fn loader_permission_label(mode: &str, locale: InterfaceLocale) -> &str {
 fn deferred_history_provider(node: &Value) -> Option<&'static str> {
     match node["currentMode"].as_str() {
         Some("claude-code") => Some("claude-code"),
-        Some("codex") if trimmed_graph_text(&node["historyProviderSessionId"]).is_some() => {
-            Some("codex")
+        Some("codex" | "antigravity")
+            if trimmed_graph_text(&node["historyProviderSessionId"]).is_some() =>
+        {
+            card_history_provider(node)
         }
         _ => None,
     }
+}
+
+fn card_history_provider(node: &Value) -> Option<&'static str> {
+    match node["currentMode"].as_str() {
+        Some("claude-code") => Some("claude-code"),
+        Some("codex") => Some("codex"),
+        Some("antigravity") => Some("antigravity"),
+        _ => None,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CardHeaderAction {
+    History,
+    Load,
+    ForkChild,
+    ForkSibling,
+    Remove,
+}
+
+fn card_header_actions(
+    node: &Value,
+    multiple_cards: bool,
+) -> impl Iterator<Item = CardHeaderAction> {
+    let provider = card_history_provider(node).is_some();
+    let sibling = node["currentMode"] != "shell" && session_levels::parent_id(node).is_some();
+    [
+        provider.then_some(CardHeaderAction::History),
+        Some(CardHeaderAction::Load),
+        provider.then_some(CardHeaderAction::ForkChild),
+        sibling.then_some(CardHeaderAction::ForkSibling),
+        (multiple_cards && node["archivedAt"].is_null()).then_some(CardHeaderAction::Remove),
+    ]
+    .into_iter()
+    .flatten()
 }
 
 fn last_tab_body(locale: InterfaceLocale) -> &'static str {
@@ -16872,6 +16929,38 @@ fn icon(name: &str, size: f32, color: Rgba) -> Svg {
 #[cfg(test)]
 mod icon_tests {
     use gpui::{Styled, rgb, rgba};
+    use serde_json::json;
+
+    #[test]
+    fn card_headers_show_the_expected_actions_by_mode_and_level() {
+        use super::{CardHeaderAction::*, card_header_actions};
+
+        for mode in ["claude-code", "codex", "antigravity"] {
+            let mut node = json!({"currentMode": mode});
+            assert_eq!(
+                card_header_actions(&node, true).collect::<Vec<_>>(),
+                [History, Load, ForkChild, Remove],
+            );
+            assert_eq!(
+                card_header_actions(&node, false).collect::<Vec<_>>(),
+                [History, Load, ForkChild],
+            );
+            node["parentSessionId"] = json!("parent");
+            assert_eq!(
+                card_header_actions(&node, true).collect::<Vec<_>>(),
+                [History, Load, ForkChild, ForkSibling, Remove],
+            );
+        }
+        let shell = json!({"currentMode": "shell", "parentSessionId": "parent"});
+        assert_eq!(
+            card_header_actions(&shell, false).collect::<Vec<_>>(),
+            [Load]
+        );
+        assert_eq!(
+            card_header_actions(&shell, true).collect::<Vec<_>>(),
+            [Load, Remove]
+        );
+    }
 
     #[test]
     fn workspace_icons_preserve_channels_and_theme_alpha() {
