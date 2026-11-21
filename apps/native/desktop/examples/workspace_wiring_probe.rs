@@ -1,4 +1,4 @@
-//! Hidden GPUI interaction probe for the seven Workspace entries.
+//! Hidden GPUI interaction and offline Runtime wiring probe.
 #[cfg(all(target_os = "macos", debug_assertions))]
 pub use matou_native_desktop::{
     assets, macos, recovery_water_view, rename_input, tab_dialog_style, workspace_drag,
@@ -41,6 +41,10 @@ mod ui_text;
 mod workspace {
     include!("../src/workspace.rs");
 
+    mod live_wiring {
+        include!("support/live_wiring_probe.rs");
+    }
+
     use crate::assets::NativeAssets;
     use matou_native_core::link_routing::ControlledBrowserFailure;
     use matou_native_desktop::{
@@ -49,7 +53,9 @@ mod workspace {
             EgressFamily, EgressFamilyStatus, EgressState, EgressStatus, EgressTransition,
             EgressViolation,
         },
-        update_popover::{UpdateInstallMode, UpdateProgress, UpdateRelease, UpdateStatus},
+        update_popover::{
+            UpdateAction, UpdateInstallMode, UpdateProgress, UpdateRelease, UpdateStatus,
+        },
     };
     use serde_json::json;
     use workspace_wiring::{LinkOpenTarget, capture_wiring_bounds};
@@ -553,16 +559,27 @@ mod workspace {
                         .iter()
                         .any(|button| button.enabled)
                 );
-                view.request_offline_update_check_for_probe(window, cx);
+                view.request_update_action_for_probe(UpdateAction::Check, window, cx);
                 assert!(!view.update_view_for_probe().error);
             })
             .unwrap();
         draw(window.into(), cx);
-        cx.background_executor()
-            .timer(Duration::from_millis(400))
-            .await;
+        let request_id = std::iter::from_fn(|| sink.try_recv().ok())
+            .find_map(|command| match command {
+                Command::CheckForUpdate { request_id } => Some(request_id),
+                _ => None,
+            })
+            .expect("update check command");
         window
-            .update(cx, |view, _, _| assert!(view.update_view_for_probe().error))
+            .update(cx, |view, window, cx| {
+                view.apply(BridgeEvent::Runtime {
+                    generation: 1,
+                    event: Event::Graph(json!({
+                        "type": "updateCheckResult", "requestId": request_id, "error": "fixture error"
+                    })),
+                }, window, cx);
+                assert!(view.update_view_for_probe().error);
+            })
             .unwrap();
         window
             .update(cx, |view, _, cx| {
@@ -1254,6 +1271,7 @@ mod workspace {
                 verify(cx).await;
                 verify_splits(cx);
                 verify_links(cx).await;
+                live_wiring::verify(cx).await;
                 cx.update(|cx| cx.quit()).unwrap();
             })
             .detach();

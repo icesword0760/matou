@@ -789,6 +789,7 @@ pub(crate) enum SettingsPage {
     ClaudeCode,
     Language,
     Dispatch,
+    Diagnostics,
 }
 
 impl SettingsPage {
@@ -797,6 +798,7 @@ impl SettingsPage {
             Self::ClaudeCode => "Claude Code",
             Self::Language => locale.text("语言与时区", "Language & time zone"),
             Self::Dispatch => locale.text("派活", "Dispatch"),
+            Self::Diagnostics => locale.text("诊断", "Diagnostics"),
         }
     }
 
@@ -810,6 +812,10 @@ impl SettingsPage {
                 "设置新派任务的全局默认执行者、模型、时限与重试次数。",
                 "Set the global defaults for new dispatched tasks: executor, model, time limits and retries.",
             ),
+            Self::Diagnostics => locale.text(
+                "只读查看账号订阅、运行环境与受控浏览器状态，并手动运行保留清理。",
+                "Read-only account subscription, runtime environment and controlled browser status, with a manual retention cleanup.",
+            ),
         }
     }
 
@@ -818,6 +824,7 @@ impl SettingsPage {
             Self::ClaudeCode => 0,
             Self::Language => 1,
             Self::Dispatch => 2,
+            Self::Diagnostics => 3,
         }
     }
 }
@@ -1337,6 +1344,13 @@ pub enum SettingsShellEvent {
 impl EventEmitter<SettingsShellEvent> for SettingsShell {}
 
 static NEXT_TIME_ZONE_REQUEST: AtomicU64 = AtomicU64::new(1);
+static NEXT_DIAGNOSTIC_REQUEST: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Default)]
+struct RuntimeDiagnostic {
+    pending: Option<(u64, u64)>,
+    result: Option<Result<serde_json::Value, String>>,
+}
 
 pub struct SettingsShell {
     commands: RuntimeCommands,
@@ -1362,7 +1376,11 @@ pub struct SettingsShell {
     theme_error: Option<String>,
     keyboard_focus: bool,
     scroll: ScrollHandle,
-    nav_focus: [FocusHandle; 3],
+    nav_focus: [FocusHandle; 4],
+    diagnostics_cleanup_focus: FocusHandle,
+    diagnostics_cwd: Option<std::path::PathBuf>,
+    diagnostics_generation: Option<u64>,
+    runtime_diagnostics: HashMap<&'static str, RuntimeDiagnostic>,
     close_focus: FocusHandle,
     notice_close_focus: FocusHandle,
     notice_retry_focus: FocusHandle,
@@ -1413,6 +1431,10 @@ impl SettingsShell {
             keyboard_focus: false,
             scroll: ScrollHandle::new(),
             nav_focus: std::array::from_fn(|_| cx.focus_handle().tab_stop(true)),
+            diagnostics_cleanup_focus: cx.focus_handle().tab_stop(true),
+            diagnostics_cwd: None,
+            diagnostics_generation: None,
+            runtime_diagnostics: HashMap::new(),
             close_focus: cx.focus_handle().tab_stop(true),
             notice_close_focus: cx.focus_handle().tab_stop(true),
             notice_retry_focus: cx.focus_handle().tab_stop(true),
@@ -1859,6 +1881,20 @@ impl SettingsShell {
             .connection_changed(self.page == SettingsPage::ClaudeCode);
         self.watch_assignment_reply(request, cx);
         self.load_assignment_catalog(false, cx);
+        if self.page == SettingsPage::Diagnostics {
+            let (generation, phase) = self.commands.connection();
+            if matches!(
+                phase,
+                ConnectionPhase::Ready | ConnectionPhase::ReadOnly { .. }
+            ) {
+                if self.diagnostics_generation != Some(generation) {
+                    self.refresh_runtime_diagnostics(cx);
+                }
+            } else {
+                self.diagnostics_generation = None;
+                self.runtime_diagnostics.clear();
+            }
+        }
         if self.page == SettingsPage::Language {
             let (generation, phase) = self.commands.connection();
             let ready = matches!(phase, ConnectionPhase::Ready);
@@ -2177,6 +2213,11 @@ impl SettingsShell {
                 if self.dispatch_panel.is_none() {
                     self.load_dispatch(cx);
                 }
+            }
+            SettingsPage::Diagnostics => {
+                // Entering the page asks the host for fresh read-only
+                // account, environment and browser projections.
+                self.refresh_runtime_diagnostics(cx);
             }
         }
         let focus = self.nav_focus[page.index()].clone();
@@ -2623,6 +2664,7 @@ impl SettingsShell {
             SettingsPage::ClaudeCode,
             SettingsPage::Dispatch,
             SettingsPage::Language,
+            SettingsPage::Diagnostics,
         ] {
             let active = self.page == page;
             let focus = self.nav_focus[page.index()].clone();
@@ -2687,6 +2729,9 @@ impl SettingsShell {
                         .whitespace_normal()
                         .child(language_zone_label(page.title(self.locale))),
                 ),
+                SettingsPage::Diagnostics => row
+                    .child(icon("network", 15., icon_color))
+                    .child(self.locale.text("诊断", "Diagnostics")),
             };
             nav = nav.child(row);
             if page == SettingsPage::Dispatch {
@@ -2812,8 +2857,398 @@ impl SettingsShell {
                 let content = self.dispatch_content(cx);
                 body = body.child(self.legacy_surface(content));
             }
+            SettingsPage::Diagnostics => {
+                let content = self.diagnostics_content(cx);
+                body = body.child(content);
+            }
         }
         div().flex().flex_col().w_full().child(header).child(body)
+    }
+
+    /// Read-only diagnostics page. Each block owns a title and one agreed
+    /// status string; the host supplies the strings after its Runtime reads
+    /// complete, so this view never invents or caches diagnostic data.
+    fn diagnostics_content(&mut self, cx: &mut Context<Self>) -> Div {
+        let mut content = div().flex().flex_col().w_full();
+        content = content.child(self.diagnostic_section(
+            self.locale.text("账号摘要", "Account summary"),
+            "accountSummaryResult",
+            true,
+        ));
+        content = content.child(self.diagnostic_section(
+            self.locale.text("运行环境", "Runtime environment"),
+            "environmentDiagnosticsResult",
+            false,
+        ));
+        content = content.child(self.diagnostic_section(
+            self.locale.text("受控浏览器", "Controlled browser"),
+            "browserDiagnosticsResult",
+            false,
+        ));
+        content.child(self.retention_cleanup_section(cx))
+    }
+
+    fn diagnostic_section(&self, title: &str, key: &str, first: bool) -> Div {
+        self.diagnostic_section_frame(title, first)
+            .child(self.diagnostic_status_panel(key))
+    }
+
+    fn diagnostic_section_frame(&self, title: &str, first: bool) -> Div {
+        let palette = *self.theme.effective().palette();
+        let mut section = div().flex().flex_col().w_full();
+        if first {
+            section = section.mt(px(20.));
+        } else {
+            section = section
+                .mt(px(24.))
+                .pt(px(18.))
+                .border_t_1()
+                .border_color(rgba(palette.workspace.line));
+        }
+        section.child(
+            div()
+                .text_size(px(12.))
+                .font_weight(FontWeight(650.))
+                .text_color(rgba(palette.workspace.text))
+                .child(title.to_owned()),
+        )
+    }
+
+    fn diagnostic_status_panel(&self, key: &str) -> Div {
+        let palette = *self.theme.effective().palette();
+        div()
+            .mt(px(9.))
+            .w_full()
+            .min_h(px(44.))
+            .p(px(12.))
+            .rounded(px(9.))
+            .border_1()
+            .border_color(rgba(palette.workspace.line))
+            .bg(rgba(palette.settings.providers))
+            .text_size(px(11.))
+            .line_height(px(17.6))
+            .text_color(rgba(palette.workspace.text))
+            .whitespace_normal()
+            .child(self.runtime_diagnostic_text(key))
+    }
+
+    fn retention_cleanup_section(&self, cx: &mut Context<Self>) -> Div {
+        self.diagnostic_section_frame(self.locale.text("保留清理", "Retention cleanup"), false)
+            .child(self.diagnostic_status_panel("retentionCleanupResult"))
+            .child(self.retention_cleanup_button(cx))
+    }
+
+    fn retention_cleanup_button(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        let palette = *self.theme.effective().palette();
+        let can_run = self.can_run_runtime_retention_cleanup();
+        let mut button = div()
+            .id("settings-run-retention-cleanup")
+            .mt(px(10.))
+            .h(px(30.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .px(px(12.))
+            .rounded(px(7.))
+            .border_1()
+            .text_size(px(11.))
+            .font_weight(FontWeight(650.))
+            .child(self.locale.text("运行保留清理", "Run retention cleanup"));
+        if can_run {
+            let hover_bg = palette.workspace.panel_muted;
+            let hover_text = palette.workspace.text;
+            button = button
+                .border_color(rgba(palette.workspace.line_strong))
+                .bg(rgba(palette.settings.provider_action_background))
+                .text_color(rgba(palette.settings.provider_action_text))
+                .cursor_pointer()
+                .hover(move |style| style.bg(rgba(hover_bg)).text_color(rgba(hover_text)));
+            wire_button(
+                button,
+                &self.diagnostics_cleanup_focus,
+                7.,
+                self.keyboard_focus,
+                |this, _, cx| {
+                    this.run_runtime_retention_cleanup(cx);
+                    cx.notify();
+                },
+                cx,
+            )
+        } else {
+            button
+                .opacity(0.55)
+                .cursor(CursorStyle::OperationNotAllowed)
+                .border_color(rgba(palette.workspace.line))
+                .bg(rgba(palette.settings.provider_disabled_background))
+                .text_color(rgba(palette.settings.provider_disabled_text))
+        }
+    }
+
+    pub(crate) fn configure_diagnostics_cwd(&mut self, cwd: Option<std::path::PathBuf>) {
+        self.diagnostics_cwd = cwd;
+    }
+
+    fn refresh_runtime_diagnostics(&mut self, cx: &mut Context<Self>) {
+        let (generation, phase) = self.commands.connection();
+        if !matches!(
+            phase,
+            ConnectionPhase::Ready | ConnectionPhase::ReadOnly { .. }
+        ) {
+            return;
+        }
+        if self.diagnostics_generation != Some(generation) {
+            self.runtime_diagnostics.clear();
+            self.diagnostics_generation = Some(generation);
+        }
+        self.request_runtime_diagnostic("accountSummaryResult", |request_id| {
+            Command::GetAccountSummary { request_id }
+        });
+        if let Some(cwd) = self.diagnostics_cwd.clone() {
+            self.request_runtime_diagnostic("environmentDiagnosticsResult", |request_id| {
+                Command::GetEnvironmentDiagnostics {
+                    request_id,
+                    cwd,
+                    repair: None,
+                }
+            });
+        }
+        self.request_runtime_diagnostic("browserDiagnosticsResult", |request_id| {
+            Command::GetBrowserDiagnostics { request_id }
+        });
+        cx.notify();
+    }
+
+    fn request_runtime_diagnostic(
+        &mut self,
+        key: &'static str,
+        command: impl FnOnce(u64) -> Command,
+    ) {
+        let (generation, _) = self.commands.connection();
+        let request_id = NEXT_DIAGNOSTIC_REQUEST.fetch_add(1, Ordering::Relaxed);
+        let diagnostic = self.runtime_diagnostics.entry(key).or_default();
+        diagnostic.pending = None;
+        match self.commands.send_at(generation, command(request_id)) {
+            Ok(()) => diagnostic.pending = Some((generation, request_id)),
+            Err(error) => diagnostic.result = Some(Err(error.to_string())),
+        }
+    }
+
+    pub(crate) fn receive_runtime_diagnostic(
+        &mut self,
+        key: &str,
+        request_id: u64,
+        reply: &serde_json::Value,
+        cx: &mut Context<Self>,
+    ) {
+        let (generation, _) = self.commands.connection();
+        let Some(diagnostic) = self.runtime_diagnostics.get_mut(key) else {
+            return;
+        };
+        if diagnostic.pending != Some((generation, request_id)) {
+            return;
+        }
+        diagnostic.pending = None;
+        diagnostic.result = Some(if let Some(error) = reply["error"].as_str() {
+            Err(if reply["code"] == "STORAGE_READ_ONLY" {
+                self.locale
+                    .text(
+                        "数据库处于只读恢复模式",
+                        "The database is in read-only recovery mode",
+                    )
+                    .into()
+            } else {
+                error.into()
+            })
+        } else {
+            Ok(reply["result"].clone())
+        });
+        cx.notify();
+    }
+
+    fn runtime_diagnostic_text(&self, key: &str) -> String {
+        let locale = self.locale;
+        let (_, phase) = self.commands.connection();
+        if key == "retentionCleanupResult" && matches!(phase, ConnectionPhase::ReadOnly { .. }) {
+            return locale
+                .text(
+                    "数据库处于只读恢复模式，无法运行保留清理。",
+                    "Retention cleanup is unavailable in read-only recovery mode.",
+                )
+                .into();
+        }
+        if !matches!(
+            phase,
+            ConnectionPhase::Ready | ConnectionPhase::ReadOnly { .. }
+        ) {
+            return locale
+                .text("正在等待运行时连接…", "Waiting for the runtime…")
+                .into();
+        }
+        let diagnostic = self.runtime_diagnostics.get(key);
+        if diagnostic.is_some_and(|entry| entry.pending.is_some()) {
+            return if key == "retentionCleanupResult" {
+                locale.text("正在清理…", "Running cleanup…")
+            } else {
+                locale.text("正在读取…", "Loading…")
+            }
+            .into();
+        }
+        let Some(result) = diagnostic.and_then(|entry| entry.result.as_ref()) else {
+            return if key == "retentionCleanupResult" {
+                locale.text("尚未运行保留清理。", "Retention cleanup has not run yet.")
+            } else {
+                locale.text("暂无诊断信息。", "No diagnostic information yet.")
+            }
+            .into();
+        };
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => return error.clone(),
+        };
+        match key {
+            "accountSummaryResult" => {
+                let mut lines = Vec::new();
+                let account_summary = &result["accountSummary"];
+                for account in account_summary["accounts"].as_array().into_iter().flatten() {
+                    let status = match account["status"].as_str() {
+                        Some("active") => locale.text("有效", "Active"),
+                        Some("expired") => locale.text("已过期", "Expired"),
+                        Some("needs-activation") => locale.text("待激活", "Needs activation"),
+                        Some("rate-limited") => locale.text("已达限额", "Rate limited"),
+                        _ => locale.text("未知", "Unknown"),
+                    };
+                    let current =
+                        account["id"].is_string() && account["id"] == account_summary["currentId"];
+                    let plan = account["plan"]
+                        .as_str()
+                        .filter(|plan| !plan.is_empty())
+                        .unwrap_or_else(|| locale.text("未知套餐", "Unknown plan"));
+                    lines.push(if current {
+                        format!(
+                            "{plan} · {status} · {}",
+                            locale.text("当前账号", "Current account")
+                        )
+                    } else {
+                        format!("{plan} · {status}")
+                    });
+                }
+                if lines.is_empty() {
+                    lines.push(if result["loadState"] == "corrupt" {
+                        locale
+                            .text(
+                                "无法读取本地账号摘要。",
+                                "The local account summary could not be read.",
+                            )
+                            .into()
+                    } else {
+                        locale
+                            .text("暂无官方账号记录。", "No official account records.")
+                            .into()
+                    });
+                }
+                if result["subscriptionSupported"] == false {
+                    lines.push(
+                        locale
+                            .text(
+                                "此设备暂不支持订阅启动。",
+                                "Subscription launch is unavailable on this device.",
+                            )
+                            .into(),
+                    );
+                }
+                lines.join(
+                    "
+",
+                )
+            }
+            "environmentDiagnosticsResult" => {
+                let state = match result["state"].as_str() {
+                    Some("ready") => locale.text("就绪", "Ready"),
+                    Some("missing") => locale.text("目录缺失", "Directory missing"),
+                    _ => locale.text("环境不可用", "Environment unavailable"),
+                };
+                let mut lines = vec![state.to_owned()];
+                lines.extend(result["cwd"].as_str().map(str::to_owned));
+                if result["git"]["isRepository"] == true {
+                    let head = &result["git"]["head"];
+                    if let Some(branch) = head["branch"]
+                        .as_str()
+                        .or_else(|| head["revision"].as_str())
+                    {
+                        lines.push(format!("Git · {branch}"));
+                    }
+                }
+                lines.extend(result["reason"].as_str().map(str::to_owned));
+                lines.join(
+                    "
+",
+                )
+            }
+            "browserDiagnosticsResult" => {
+                let status = &result["status"];
+                if status["installed"] == true {
+                    let label = locale.text("已安装", "Installed");
+                    status["version"]
+                        .as_str()
+                        .map_or_else(|| label.into(), |version| format!("{label} · {version}"))
+                } else {
+                    match status["diagnostic"].as_str() {
+                        Some("Missing") => locale.text("未安装", "Missing"),
+                        Some("NotExecutable") => {
+                            locale.text("浏览器不可执行", "Browser is not executable")
+                        }
+                        _ => locale.text("浏览器不可用", "Browser unavailable"),
+                    }
+                    .into()
+                }
+            }
+            "retentionCleanupResult" => {
+                let actions = result["actions"].as_array().map_or(0, Vec::len);
+                let bytes = result["reclaimedBytes"].as_u64().unwrap_or_default();
+                if locale == InterfaceLocale::Chinese {
+                    format!("清理完成 · 移除 {actions} 项 · 释放 {bytes} 字节")
+                } else {
+                    format!("Cleanup complete · {actions} removed · {bytes} bytes freed")
+                }
+            }
+            _ => String::new(),
+        }
+    }
+
+    fn run_runtime_retention_cleanup(&mut self, cx: &mut Context<Self>) {
+        if self.can_run_runtime_retention_cleanup() {
+            self.request_runtime_diagnostic("retentionCleanupResult", |request_id| {
+                Command::RunRetentionCleanup { request_id }
+            });
+            cx.notify();
+        }
+    }
+
+    fn can_run_runtime_retention_cleanup(&self) -> bool {
+        matches!(self.commands.connection().1, ConnectionPhase::Ready)
+            && !self
+                .runtime_diagnostics
+                .get("retentionCleanupResult")
+                .is_some_and(|entry| entry.pending.is_some())
+    }
+
+    #[cfg(debug_assertions)]
+    pub(crate) fn select_diagnostics_for_probe(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_page(SettingsPage::Diagnostics, window, cx);
+    }
+
+    #[cfg(debug_assertions)]
+    pub(crate) fn diagnostics_text_for_probe(&self, key: &str) -> String {
+        self.runtime_diagnostic_text(key)
+    }
+
+    #[cfg(debug_assertions)]
+    pub(crate) fn cleanup_for_probe(&mut self, cx: &mut Context<Self>) {
+        self.run_runtime_retention_cleanup(cx);
     }
 
     fn is_dark(&self) -> bool {

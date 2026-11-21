@@ -102,6 +102,22 @@ mod workspace {
             );
         }
 
+        pub(super) fn diagnostic_reply_for_probe(
+            &mut self,
+            reply: Value,
+            window: &mut Window,
+            cx: &mut Context<Self>,
+        ) {
+            self.apply(
+                BridgeEvent::Runtime {
+                    generation: 1,
+                    event: Event::Graph(reply),
+                },
+                window,
+                cx,
+            );
+        }
+
         pub(super) fn model_catalog_reply(
             &mut self,
             reply: Value,
@@ -402,7 +418,10 @@ mod probe {
     fn press(window: WindowHandle<Workspace>, key: &str, cx: &mut AsyncApp) {
         AnyWindowHandle::from(window)
             .update(cx, |_, window, cx| {
-                assert!(window.dispatch_keystroke(Keystroke::parse(key).unwrap(), cx));
+                assert!(
+                    window.dispatch_keystroke(Keystroke::parse(key).unwrap(), cx),
+                    "hidden settings window did not handle {key}"
+                );
             })
             .unwrap();
     }
@@ -530,7 +549,7 @@ mod probe {
         update_shell(window, cx, |shell, window, _| {
             shell.probe_settings_nav_focus(SettingsPage::Dispatch, window);
         });
-        for _ in 0..6 {
+        for _ in 0..7 {
             press(window, "tab", cx);
         }
         let edit_number = |cx: &mut AsyncApp, digits: &[&str]| {
@@ -570,7 +589,7 @@ mod probe {
         select_dispatch(cx);
         // The freshly mounted form should still show 13. Changing a different
         // number and saving verifies that 13 was restored into the draft.
-        for _ in 0..7 {
+        for _ in 0..8 {
             press(window, "tab", cx);
         }
         edit_number(cx, &["4", "9"]);
@@ -892,7 +911,7 @@ mod probe {
         window
             .update(cx, |view, window, _| view.arm_settings_entry(window))
             .unwrap();
-        // The navigation tabs run Claude Code, Dispatch, then Language.
+        // The navigation tabs run Claude Code, Dispatch, Language, then Diagnostics.
         // Group labels never enter the tab order.
         press(window, "tab", cx);
         press(window, "enter", cx);
@@ -936,7 +955,7 @@ mod probe {
         window
             .update(cx, |view, window, _| view.arm_settings_entry(window))
             .unwrap();
-        for _ in 0..6 {
+        for _ in 0..7 {
             press(window, "tab", cx);
         }
         press(window, "enter", cx);
@@ -1871,6 +1890,60 @@ mod probe {
         std::fs::remove_dir(root).unwrap();
     }
 
+    fn verify_retention_receipt(cx: &mut AsyncApp) {
+        let (window, sink) = cx.update(|cx| open_window_at(None, 720., cx)).unwrap();
+        window
+            .update(cx, |view, window, cx| {
+                assert!(!crate::macos::is_window_visible(window).unwrap());
+                view.open_settings(window, cx);
+                view.settings_entity().unwrap().update(cx, |settings, cx| {
+                    settings.select_diagnostics_for_probe(window, cx);
+                    settings.cleanup_for_probe(cx);
+                });
+            })
+            .unwrap();
+        let request_id = std::iter::from_fn(|| sink.try_recv().ok())
+            .find_map(|command| {
+                if let Command::RunRetentionCleanup { request_id } = command {
+                    Some(request_id)
+                } else {
+                    None
+                }
+            })
+            .expect("cleanup dispatched");
+        let receipt = |request_id, reclaimed| {
+            json!({
+                "type": "retentionCleanupResult", "requestId": request_id,
+                "result": {"reclaimedBytes": reclaimed, "actions": [{"generation":1}]}
+            })
+        };
+        let update = |cx: &mut AsyncApp, request, reclaimed| {
+            window
+                .update(cx, |view, window, cx| {
+                    view.diagnostic_reply_for_probe(receipt(request, reclaimed), window, cx);
+                    view.settings_entity()
+                        .unwrap()
+                        .read(cx)
+                        .diagnostics_text_for_probe("retentionCleanupResult")
+                })
+                .unwrap()
+        };
+        let loading = update(cx, request_id + 1, 999);
+        assert!(!loading.contains("999"));
+        let success = update(cx, request_id, 128);
+        assert!(
+            success.contains("128")
+                && (success.contains("1 removed") || success.contains("移除 1 项"))
+        );
+        draw(window, cx);
+        window
+            .update(cx, |_, window, _| window.remove_window())
+            .unwrap();
+        println!(
+            "Hidden GPUI diagnostics: stale cleanup reply ignored and successful receipt shows one removal and 128 bytes freed"
+        );
+    }
+
     pub(super) fn run() {
         let args = std::env::args().skip(1).collect::<Vec<_>>();
         let state = match args.as_slice() {
@@ -1918,6 +1991,7 @@ mod probe {
                     verify_delete_window(cx);
                     verify_assignments_window(cx);
                     verify_model_catalog_window(cx);
+                    verify_retention_receipt(cx);
                     for width in [720., 900., 1200.] {
                         verify_language_zone_window(cx, width).await;
                     }
