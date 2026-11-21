@@ -24,6 +24,7 @@ const SOURCE: &str = "agy-source-fixture";
 const OTHER: &str = "agy-other-fixture";
 const CHILD: &str = "agy-child-fixture";
 const TIMEOUT: Duration = Duration::from_secs(12);
+const SETTINGS: &str = r#"{"fixture":"existing settings"}"#;
 
 struct Fixture {
     _root: TempDir,
@@ -52,11 +53,14 @@ impl Fixture {
             fs::create_dir_all(directory)?;
         }
         fs::write(fixture.shell_home.join(".zshrc"), "PROMPT='FIXTURE> '\n")?;
+        fs::create_dir(fixture.shell_home.join(".gemini"))?;
+        fs::write(fixture.shell_home.join(".gemini/settings.json"), SETTINGS)?;
         fs::write(
             &fixture.executable,
             r#"#!/bin/sh
 set -eu
 [ -z "${CLAUDECODE:-}" ] && [ -z "${MATOU_ANTIGRAVITY_SYSTEM_MESSAGE_FILE:-}" ]
+[ -f "$HOME/.gemini/settings.json" ]
 trace="$AGY_TEST_TRACES/$MATOU_PROVIDER_HOOK_TOKEN"
 mkdir "$trace"
 printf '%s\n' "$@" > "$trace/args"
@@ -73,16 +77,12 @@ done
         Ok(fixture)
     }
 
-    fn home(&self) -> PathBuf {
-        self.data.join("antigravity-home")
-    }
-
     fn plugin(&self) -> PathBuf {
-        self.home().join(".gemini/config/plugins/matou")
+        self.shell_home.join(".gemini/config/plugins/matou")
     }
 
     fn history_file(&self) -> PathBuf {
-        self.home()
+        self.shell_home
             .join(".gemini/antigravity-cli/cache/conversation_metadata.json")
     }
 
@@ -128,7 +128,7 @@ done
                 provider_environment: Some(
                     [
                         ("PATH".into(), "/usr/bin:/bin".into()),
-                        ("HOME".into(), self.shell_home.clone().into_os_string()),
+                        ("HOME".into(), self.traces.clone().into_os_string()),
                         (
                             "MATOU_ANTIGRAVITY_COMMAND".into(),
                             self.executable.clone().into_os_string(),
@@ -173,7 +173,7 @@ done
         .with_context(|| format!("waiting for fixture PTY run {count}"))?;
         let launch = fs::read_to_string(trace.join("launch"))?;
         let mut lines = launch.lines();
-        assert_eq!(lines.next(), self.home().to_str());
+        assert_eq!(lines.next(), self.shell_home.to_str());
         let endpoint = lines
             .next()
             .context("Missing fixture hook endpoint")?
@@ -472,17 +472,30 @@ fn browse(fixture: &Fixture, host: &RuntimeHost) -> Result<()> {
 fn promotion_installs_and_repairs_plugin_and_projects_authenticated_activity() -> Result<()> {
     let fixture = Fixture::new()?;
     fixture.write_history("Observed title")?;
+    let plugin = fixture.plugin();
+    let third_party = plugin.with_file_name("third-party");
+    fs::create_dir_all(&third_party)?;
+    let third_party_manifest = third_party.join("plugin.json");
+    let third_party_contents = r#"{"name":"third-party"}"#;
+    fs::write(&third_party_manifest, third_party_contents)?;
     let mut host = fixture.start()?;
     let (_, session) = ready(&host)?;
     fixture.promote(&host, &session)?;
     let first = fixture.run(1)?;
     assert!(first.args.windows(2).any(|args| args == ["--mode", "plan"]));
     assert!(first.resume_arg().is_none());
-    let plugin = fixture.plugin();
     let managed_hook = plugin.join("hooks/session-start.sh");
     let contents = fs::read(&managed_hook)?;
     let version = fs::metadata(plugin.join("plugin.json"))?.modified()?;
-    assert!(!fixture.shell_home.join(".gemini").exists());
+    assert_eq!(
+        fs::read_to_string(fixture.shell_home.join(".gemini/settings.json"))?,
+        SETTINGS
+    );
+    assert_eq!(
+        fs::read_to_string(third_party_manifest)?,
+        third_party_contents
+    );
+    assert!(!fixture.traces.join(".gemini").exists());
 
     let mut start = Process::new(&managed_hook)
         .env_clear()

@@ -797,14 +797,29 @@ fn codex_resume_cold_start_preserves_card_binding_and_legacy_material() -> Resul
         "restoring"
     );
     let deadline = Instant::now() + Duration::from_secs(14);
-    loop {
-        if let Event::Recovery {
-            session_id,
-            state: matou_native_runtime::host::RecoveryState::Ready,
-        } = child.event(deadline, true)?
-            && session_id == session
-        {
-            break;
+    let (mut ready, mut timed_out) = (false, false);
+    while !ready || !timed_out {
+        match child.event(deadline, true)? {
+            Event::Recovery {
+                session_id,
+                state: matou_native_runtime::host::RecoveryState::Ready,
+            } if session_id == session => ready = true,
+            Event::Graph(graph) => {
+                for event in graph["providerIdentityEvents"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                {
+                    if event["result"] == "timed-out"
+                        && event["sessionId"] == session
+                        && event["runId"] == new.id
+                    {
+                        assert_eq!(event["provider"], "codex");
+                        timed_out = true;
+                    }
+                }
+            }
+            _ => {}
         }
     }
     assert_eq!(

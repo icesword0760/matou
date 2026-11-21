@@ -365,6 +365,9 @@ fn antigravity_plugin_rejects_symlink_targets() -> Result<()> {
     fs::create_dir(&other)?;
     let outside = other.join("matou-hook.sh");
     fs::write(&outside, "outside")?;
+    let parent = temp.path().join("plugins");
+    symlink(&other, &parent)?;
+    assert!(ensure_plugin_installed(&parent.join("matou")).is_err());
     symlink(&other, &plugin)?;
     assert!(ensure_plugin_installed(&plugin).is_err());
     fs::remove_file(&plugin)?;

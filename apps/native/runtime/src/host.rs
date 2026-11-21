@@ -1064,7 +1064,7 @@ fn with_graph_projection(reply: Event, mut projection: Value) -> Event {
 }
 
 impl RuntimeWiring {
-    fn new(fixtures: OfflineFixtures, data_root: &Path) -> Result<Self> {
+    fn new(fixtures: OfflineFixtures, shell_home: &Path) -> Result<Self> {
         let dsh = fixtures
             .dsh_session_root
             .clone()
@@ -1074,10 +1074,8 @@ impl RuntimeWiring {
             .provider_environment
             .clone()
             .unwrap_or_else(|| std::env::vars_os().collect());
-        let mut antigravity = AntigravityCatalog::new(antigravity_catalog::catalog_root(
-            &antigravity_launch::isolated_home(data_root),
-            &environment,
-        ));
+        let mut antigravity =
+            AntigravityCatalog::new(antigravity_catalog::catalog_root(shell_home, &environment));
         if antigravity_launch::env_value(&environment, "MATOU_LOCALE")
             .is_some_and(|value| value == "en")
         {
@@ -2127,7 +2125,7 @@ fn run(
     shutdown_requested: &OnceLock<bool>,
     fixtures: OfflineFixtures,
 ) -> Result<()> {
-    let mut wiring = RuntimeWiring::new(fixtures, &options.data_root)?;
+    let mut wiring = RuntimeWiring::new(fixtures, &options.shell_home)?;
     let generation = id();
     let bootstrap = match startup::open(&options.data_root, &generation) {
         Ok(value) => value,
@@ -2721,7 +2719,7 @@ fn run_writable(
     let (catalog_requests, catalog_replies) = start_provider_catalog(
         owner.dsh_session_root.clone(),
         owner.codex_session_root(),
-        owner.antigravity_root(&data_root),
+        antigravity_catalog::catalog_root(&options.shell_home, &owner.launch_environment()),
     )?;
     let (model_catalog_requests, model_catalog_commands) = mpsc::channel();
     let (model_catalog_results, model_catalog_replies) = mpsc::channel();
@@ -7229,8 +7227,8 @@ fn prepare_launch(
         }
         "antigravity" => {
             let mut environment = owner.launch_environment();
-            let catalog_root = owner.antigravity_root(&options.data_root);
-            let data_root = options.data_root.clone();
+            let shell_home = options.shell_home.clone();
+            let catalog_root = antigravity_catalog::catalog_root(&shell_home, &environment);
             let (mode, metadata) = if let LaunchIntent::ShellPromotion(launch) = intent {
                 (
                     AntigravityMode::Fresh,
@@ -7260,7 +7258,7 @@ fn prepare_launch(
                             "Antigravity session history is unavailable in this working directory"
                         );
                     }
-                    antigravity_launch::prepare_isolated_environment(&data_root, &mut environment)?;
+                    antigravity_launch::prepare_environment(&shell_home, &mut environment)?;
                     let permission = AntigravityPermission::from_saved(metadata["permissionMode"].as_str().unwrap_or_default());
                     let launch = antigravity_launch::prepare(antigravity_launch::LaunchInput {
                         cwd, settings_path: None, model: metadata["model"].as_str(), permission, mode,
