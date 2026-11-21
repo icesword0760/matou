@@ -190,10 +190,10 @@ impl UpdateControl {
         self.install_when_idle()
     }
 
-    /// Call when the request to open the DMG completes, on success or failure.
-    pub fn manual_install_finished(&mut self) {
-        if self.installing == Some(UpdateInstallMode::Manual) {
+    pub fn finish_install(&mut self, ok: bool) {
+        if !ok || self.installing == Some(UpdateInstallMode::Manual) {
             self.installing = None;
+            self.waiting_for_idle = false;
         }
     }
 
@@ -203,7 +203,7 @@ impl UpdateControl {
             UpdateAction::Dismiss => self.open = false,
             _ if !self.open
                 || !self
-                    .buttons(InterfaceLocale::English)
+                    .buttons(InterfaceLocale::English, cfg!(target_os = "windows"))
                     .iter()
                     .any(|button| button.action == action && button.enabled) =>
             {
@@ -239,7 +239,7 @@ impl UpdateControl {
         Some(UpdateEffect::Install)
     }
 
-    fn buttons(&self, locale: InterfaceLocale) -> Vec<UpdateButton> {
+    fn buttons(&self, locale: InterfaceLocale, windows: bool) -> Vec<UpdateButton> {
         use UpdateAction::*;
         use UpdateButtonStyle::*;
         let installing = self.installing.is_some();
@@ -261,13 +261,21 @@ impl UpdateControl {
                 manual_download_available: true,
                 ..
             } => vec![
-                primary("下载 DMG 更新", "Download DMG update", Download),
+                if windows {
+                    primary("下载安装包更新", "Download installer update", Download)
+                } else {
+                    primary("下载 DMG 更新", "Download DMG update", Download)
+                },
                 button("重新检查", "Check again", Check, Quiet, true, false),
             ],
             UpdateStatus::Error { .. } => vec![primary("重新检查", "Check again", Check)],
             UpdateStatus::Available(release) => vec![
                 if release.install_mode == UpdateInstallMode::Manual {
-                    primary("下载更新", "Download update", Download)
+                    if windows {
+                        primary("下载安装包更新", "Download installer update", Download)
+                    } else {
+                        primary("下载更新", "Download update", Download)
+                    }
                 } else {
                     primary("后台下载", "Download in background", Download)
                 },
@@ -282,6 +290,8 @@ impl UpdateControl {
                 vec![
                     if installing {
                         button("正在打开…", "Opening…", Install, Primary, false, false)
+                    } else if windows {
+                        primary("打开安装包安装", "Open installer", Install)
                     } else {
                         primary("打开 DMG 安装", "Open DMG installer", Install)
                     },
@@ -337,6 +347,15 @@ impl UpdateControl {
     }
 
     pub fn view(&self, locale: InterfaceLocale, now: Duration) -> UpdateView {
+        self.view_for_platform(locale, now, cfg!(target_os = "windows"))
+    }
+
+    fn view_for_platform(
+        &self,
+        locale: InterfaceLocale,
+        now: Duration,
+        windows: bool,
+    ) -> UpdateView {
         let popover_label = locale.text("Matou 应用更新", "Matou app update");
         let fallback_version = if self.state.current_version.is_empty() {
             "—"
@@ -363,7 +382,7 @@ impl UpdateControl {
             progress: None,
             active_sessions: None,
             scheduled: None,
-            buttons: self.buttons(locale),
+            buttons: self.buttons(locale, windows),
             toast: self.toast_until.filter(|until| now < *until).map(|_| {
                 (
                     format!(
@@ -424,7 +443,7 @@ impl UpdateControl {
                     view.title
                 );
                 view.error = true;
-                view.message = Some(friendly_error(*stage, message, locale));
+                view.message = Some(friendly_error(*stage, message, locale, windows));
             }
             UpdateStatus::Available(release) => {
                 let version = &release.version;
@@ -440,10 +459,17 @@ impl UpdateControl {
                 view.highlight = true;
                 view.notes = release.notes.iter().take(3).cloned().collect();
                 if release.install_mode == UpdateInstallMode::Manual {
-                    view.notice = Some(locale.text(
-                        "当前体验包将通过应用内下载 DMG 更新。",
-                        "This build updates through an in-app DMG download.",
-                    ));
+                    view.notice = Some(if windows {
+                        locale.text(
+                            "当前体验包将通过应用内下载安装包更新。",
+                            "This build updates by downloading an installer in the app.",
+                        )
+                    } else {
+                        locale.text(
+                            "当前体验包将通过应用内下载 DMG 更新。",
+                            "This build updates through an in-app DMG download.",
+                        )
+                    });
                 }
             }
             UpdateStatus::Downloading(release, progress) => {
@@ -462,7 +488,9 @@ impl UpdateControl {
             }
             UpdateStatus::Downloaded(release) => {
                 let manual = release.install_mode == UpdateInstallMode::Manual;
-                view.title = if manual {
+                view.title = if manual && windows {
+                    locale.text("安装包已下载完成", "Installer downloaded")
+                } else if manual {
                     locale.text("DMG 已下载完成", "DMG downloaded")
                 } else {
                     locale.text("更新已准备好", "Update ready")
@@ -575,7 +603,12 @@ fn error_title(stage: UpdateErrorStage, locale: InterfaceLocale) -> &'static str
     }
 }
 
-fn friendly_error(stage: UpdateErrorStage, message: &str, locale: InterfaceLocale) -> String {
+fn friendly_error(
+    stage: UpdateErrorStage,
+    message: &str,
+    locale: InterfaceLocale,
+    windows: bool,
+) -> String {
     let message = message.to_ascii_lowercase();
     let contains = |patterns: &[&str]| patterns.iter().any(|pattern| message.contains(pattern));
     let dns = || {
@@ -598,7 +631,12 @@ fn friendly_error(stage: UpdateErrorStage, message: &str, locale: InterfaceLocal
                 .is_some_and(|index| word[index + 6..].contains(".yml"))
         })
     };
-    let text = if stage == UpdateErrorStage::Verify {
+    let text = if stage == UpdateErrorStage::Verify && windows {
+        locale.text(
+            "更新安装包未通过完整性校验，请重新检查更新。",
+            "The update installer failed its integrity check. Please check for updates again.",
+        )
+    } else if stage == UpdateErrorStage::Verify {
         locale.text("当前安装包缺少 Apple 发布签名，改用应用内 DMG 下载继续更新。",
             "This installer has no Apple release signature. Matou will continue with the in-app DMG download.")
     } else if stage == UpdateErrorStage::Install {
@@ -1684,9 +1722,24 @@ mod tests {
             assert!(view.open && view.highlight && view.dot && view.notice.is_none());
             assert_eq!(view.notes, ["One", "Two", "Three"]);
             assert!(view.buttons.iter().all(|button| button.enabled));
-            let manual_view = manual.view(locale, NOW);
+            let manual_view = manual.view_for_platform(locale, NOW, false);
             assert_eq!(labels(&manual_view), [download, later]);
             assert_eq!(manual_view.notice, Some(notice));
+            let windows_view = manual.view_for_platform(locale, NOW, true);
+            assert_eq!(
+                labels(&windows_view),
+                [
+                    locale.text("下载安装包更新", "Download installer update"),
+                    later
+                ]
+            );
+            assert_eq!(
+                windows_view.notice,
+                Some(locale.text(
+                    "当前体验包将通过应用内下载安装包更新。",
+                    "This build updates by downloading an installer in the app.",
+                ))
+            );
         }
 
         let mut downloading = control(UpdateStatus::Downloading(
@@ -1756,11 +1809,20 @@ mod tests {
                 "Install later",
             ),
         ] {
-            let view = control.view(locale, NOW);
+            let view = control.view_for_platform(locale, NOW, false);
             assert_eq!((&*view.label, &*view.title), (label, title));
             assert!(view.dot && view.highlight && view.open && view.active_sessions.is_none());
             assert_eq!(labels(&view), [open, later]);
             assert!(view.buttons.iter().all(|button| button.enabled));
+            let windows_view = control.view_for_platform(locale, NOW, true);
+            assert_eq!(
+                windows_view.title,
+                locale.text("安装包已下载完成", "Installer downloaded")
+            );
+            assert_eq!(
+                labels(&windows_view),
+                [locale.text("打开安装包安装", "Open installer"), later]
+            );
         }
         assert_eq!(
             control.dispatch(UpdateAction::Install),
@@ -1772,10 +1834,28 @@ mod tests {
             assert_eq!(buttons[0].label, opening);
             assert!(!buttons[0].enabled && buttons[1].enabled);
         }
-        control.manual_install_finished();
+        control.finish_install(true);
         assert_eq!(
             control.dispatch(UpdateAction::Install),
             Some(UpdateEffect::Install)
+        );
+        control.finish_install(false);
+        control.accept(
+            UpdateState {
+                current_version: "1.2.2".into(),
+                status: UpdateStatus::Error {
+                    stage: UpdateErrorStage::Install,
+                    message: "Could not open installer".into(),
+                    manual_download_available: false,
+                },
+            },
+            NOW,
+        );
+        assert!(control.view(English, NOW).error);
+        assert_eq!(control.dispatch(UpdateAction::Install), None);
+        assert_eq!(
+            control.dispatch(UpdateAction::Check),
+            Some(UpdateEffect::Check)
         );
     }
 
@@ -1923,7 +2003,7 @@ mod tests {
                         "Check again",
                     ),
                 ] {
-                    let view = control.view(locale, NOW);
+                    let view = control.view_for_platform(locale, NOW, false);
                     assert_eq!(view.label, format!("{prefix}{title}"));
                     assert_eq!(view.title, title);
                     assert_eq!(view.message.as_deref(), Some(detail));
@@ -1936,6 +2016,17 @@ mod tests {
                             vec![recheck]
                         }
                     );
+                    let windows_view = control.view_for_platform(locale, NOW, true);
+                    assert!(!windows_view.message.as_deref().unwrap().contains("DMG"));
+                    if fallback {
+                        assert_eq!(
+                            labels(&windows_view),
+                            [
+                                locale.text("下载安装包更新", "Download installer update"),
+                                recheck
+                            ]
+                        );
+                    }
                     assert!(view.buttons.iter().all(|button| button.enabled));
                 }
             }
@@ -1992,8 +2083,8 @@ mod tests {
                 "Matou could not reach the update server. Check your network and try again.",
             ),
         ] {
-            assert_eq!(friendly_error(Check, message, Chinese), zh);
-            assert_eq!(friendly_error(Check, message, English), en);
+            assert_eq!(friendly_error(Check, message, Chinese, false), zh);
+            assert_eq!(friendly_error(Check, message, English, false), en);
         }
     }
 

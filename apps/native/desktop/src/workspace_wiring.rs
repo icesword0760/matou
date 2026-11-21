@@ -2196,11 +2196,8 @@ impl Workspace {
                 self.request_update("updateDownloadResult", UpdateErrorStage::Download, cx);
             }
             Some(UpdateEffect::Install) => {
-                let message = self.locale.text(
-                    "当前运行时尚未提供安装操作。",
-                    "Installation is unavailable in the current runtime.",
-                );
-                self.update_failed(UpdateErrorStage::Install, message.into(), cx);
+                self.request_update("updateInstallResult", UpdateErrorStage::Install, cx);
+                cx.notify();
             }
             None => {}
         }
@@ -2216,6 +2213,7 @@ impl Workspace {
         let command = match kind {
             "updateCheckResult" => Command::CheckForUpdate { request_id },
             "updateDownloadResult" => Command::DownloadUpdate { request_id },
+            "updateInstallResult" => Command::InstallUpdate { request_id },
             _ => Command::GetUpdateStatus { request_id },
         };
         self.wiring.update_request = None;
@@ -2237,6 +2235,9 @@ impl Workspace {
     }
 
     fn update_failed(&mut self, stage: UpdateErrorStage, message: String, cx: &mut Context<Self>) {
+        if stage == UpdateErrorStage::Install {
+            self.wiring.update.finish_install(false);
+        }
         self.accept_update_status(
             UpdateStatus::Error {
                 stage,
@@ -2275,7 +2276,6 @@ impl Workspace {
         if self.wiring.overlay != Some(Overlay::Update) {
             self.wiring.update.dispatch(UpdateAction::Dismiss);
         }
-        self.wiring.update.manual_install_finished();
         cx.notify();
     }
 
@@ -2598,6 +2598,9 @@ impl Workspace {
             banner.override_finished();
         }
         if let Some((_, _, stage)) = self.wiring.update_request.take() {
+            if stage == UpdateErrorStage::Install {
+                self.wiring.update.finish_install(false);
+            }
             self.wiring.update.accept(
                 UpdateState {
                     current_version: self.wiring.update.current_version().to_owned(),
@@ -2813,6 +2816,18 @@ impl Workspace {
             self.wiring.update_request = None;
             match self.wiring_reply_error(reply) {
                 Some(error) => self.update_failed(stage, error, cx),
+                None if kind == "updateInstallResult" => {
+                    if reply["result"]["ok"] == true {
+                        self.wiring.update.finish_install(true);
+                        cx.notify();
+                    } else {
+                        let message = self.locale.text(
+                            "运行时未确认打开安装包。",
+                            "The runtime did not confirm that the installer opened.",
+                        );
+                        self.update_failed(stage, message.into(), cx);
+                    }
+                }
                 None => match serde_json::from_value::<update_download::UpdateState>(
                     reply["result"].clone(),
                 ) {
