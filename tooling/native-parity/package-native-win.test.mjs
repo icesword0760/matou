@@ -16,10 +16,11 @@ const script = fileURLToPath(new URL('./package-native-win.mjs', import.meta.url
 const version = '0.2.24'
 const desktopName = '码头.exe'
 const runtimeName = 'matou-native-runtime.exe'
+const ghosttyName = 'ghostty-vt.dll'
 let root
 const binaries = {}
 
-function peFixture(machine, payload) {
+function peFixture(machine, payload, dll = false) {
   // A DOS and PE32+ header with a marker payload. The file cannot run.
   const dos = Buffer.alloc(64)
   dos.write('MZ')
@@ -28,7 +29,7 @@ function peFixture(machine, payload) {
   pe.write('PE\0\0')
   pe.writeUInt16LE(machine, 4)
   pe.writeUInt16LE(0xf0, 20)
-  pe.writeUInt16LE(0x0002, 22)
+  pe.writeUInt16LE(dll ? 0x2002 : 0x0002, 22)
   pe.writeUInt16LE(0x020b, 24)
   return Buffer.concat([dos, pe, Buffer.from(payload)])
 }
@@ -36,10 +37,14 @@ function peFixture(machine, payload) {
 before(async () => {
   root = await mkdtemp(join(tmpdir(), 'matou-native-win-test-'))
   for (const [arch, machine] of [['x64', 0x8664], ['arm64', 0xaa64]]) {
-    const desktopBin = join(root, `desktop-${arch}.exe`)
-    const runtimeBin = join(root, `runtime-${arch}.exe`)
+    const directory = join(root, arch)
+    await mkdir(directory)
+    const desktopBin = join(directory, 'desktop.exe')
+    const runtimeBin = join(directory, 'runtime.exe')
+    const ghosttyDll = join(directory, ghosttyName)
     await writeFile(desktopBin, peFixture(machine, 'desktop'))
     await writeFile(runtimeBin, peFixture(machine, 'runtime'))
+    await writeFile(ghosttyDll, peFixture(machine, 'ghostty', true))
     binaries[arch] = { desktopBin, runtimeBin }
   }
 })
@@ -79,9 +84,10 @@ for (const [arch, unpacked] of [['x64', 'win-unpacked'], ['arm64', 'win-arm64-un
     assert.equal(basename(packageResult.path), unpacked)
     assert.equal(packageResult.unpackedDirectory, 'release/' + unpacked)
     assert.deepEqual(await readdir(packageResult.path).then(names => names.sort()),
-      [desktopName, runtimeName, 'resources'].sort())
+      [desktopName, runtimeName, ghosttyName, 'resources'].sort())
     assert.deepEqual(await readFile(join(packageResult.path, desktopName)), await readFile(input.desktopBin))
     assert.deepEqual(await readFile(join(packageResult.path, runtimeName)), await readFile(input.runtimeBin))
+    assert.deepEqual(await readFile(join(packageResult.path, ghosttyName)), await readFile(join(root, arch, ghosttyName)))
     const resources = join(packageResult.path, 'resources')
     assert.deepEqual(await readdir(resources).then(names => names.sort()), ['control-assets', 'manifest.json', 'version.json'])
     const plugin = join(resources, 'control-assets', 'providers', 'claude-plugin')
@@ -115,11 +121,26 @@ test('rejects missing, empty, non-PE or wrong-architecture inputs before writing
     [{ runtimeBin: empty }, /non-empty regular file/],
     [{ desktopBin: invalid }, /Expected a Windows PE executable for desktop binary/],
     [{ desktopBin: binaries.arm64.desktopBin }, /desktop binary architecture mismatch: expected x64/],
-    [{ runtimeBin: binaries.arm64.runtimeBin }, /runtime binary architecture mismatch: expected x64/]
+    [{ runtimeBin: binaries.arm64.runtimeBin }, /runtime binary architecture mismatch: expected x64/],
+    [{ ghosttyDll: join(root, 'missing.dll') }, /Missing Ghostty DLL/],
+    [{ ghosttyDll: binaries.x64.runtimeBin }, /Expected a Windows PE DLL for Ghostty DLL/],
+    [{ ghosttyDll: join(root, 'arm64', ghosttyName) }, /Ghostty DLL architecture mismatch: expected x64/]
   ]) {
     await assert.rejects(assembleWindowsDirPackage(options('x64', outDir, extra)), error)
   }
   await assert.rejects(readdir(outDir), { code: 'ENOENT' })
+})
+
+test('verifier rejects a missing Ghostty DLL, an executable or a DLL for the wrong architecture', async () => {
+  const input = options('x64', join(root, 'verify-ghostty-dll'))
+  const { path } = await assembleWindowsDirPackage(input)
+  const dll = join(path, ghosttyName)
+  await rm(dll)
+  await assert.rejects(verifyWindowsDirPackage(path, input), /Invalid unpacked package entries/)
+  await writeFile(dll, await readFile(binaries.x64.runtimeBin))
+  await assert.rejects(verifyWindowsDirPackage(path, input), /Expected a Windows PE DLL/)
+  await writeFile(dll, await readFile(join(root, 'arm64', ghosttyName)))
+  await assert.rejects(verifyWindowsDirPackage(path, input), /Ghostty DLL architecture mismatch/)
 })
 
 test('verifier rejects missing or renamed companions, mismatched metadata and updater files', async () => {
@@ -232,14 +253,18 @@ test('CLI assembles from all supported options and prints the verification resul
   const outDir = join(root, 'from CLI')
   const updateBaseUrl = 'https://feed.example.invalid/cli'
   const { desktopBin, runtimeBin } = binaries.arm64
+  const ghosttyDll = join(root, 'explicit.dll')
+  const explicitBytes = peFixture(0xaa64, 'explicit Ghostty', true)
+  await writeFile(ghosttyDll, explicitBytes)
   const result = cli([
     '--arch', 'arm64', '--target', 'dir', '--desktop-bin', desktopBin, '--runtime-bin', runtimeBin,
-    '--out-dir', outDir, '--version', version, '--update-base-url', updateBaseUrl
+    '--out-dir', outDir, '--version', version, '--update-base-url', updateBaseUrl, '--ghostty-dll', ghosttyDll
   ])
   assert.equal(result.status, 0, result.stderr)
   const assembled = JSON.parse(result.stdout)
   assert.equal(assembled.updateBaseUrl, updateBaseUrl)
   assert.equal(basename(assembled.path), 'win-arm64-unpacked')
+  assert.deepEqual(await readFile(join(assembled.path, ghosttyName)), explicitBytes)
   await verifyWindowsDirPackage(assembled.path, options('arm64', outDir, { updateBaseUrl }))
 })
 
