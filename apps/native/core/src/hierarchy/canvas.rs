@@ -248,6 +248,36 @@ pub fn create_shell_sibling(
     messages: &CanvasMessages<'_>,
     committed_at: i64,
 ) -> Result<Value> {
+    create_session_sibling(
+        connection,
+        command,
+        input,
+        ids,
+        messages,
+        committed_at,
+        &SessionSiblingProfile {
+            kind: crate::pty::LaunchProfile::Shell,
+            cwd: None,
+            permission_mode: None,
+        },
+    )
+}
+
+pub struct SessionSiblingProfile<'a> {
+    pub kind: crate::pty::LaunchProfile,
+    pub cwd: Option<&'a str>,
+    pub permission_mode: Option<&'a str>,
+}
+
+pub fn create_session_sibling(
+    connection: &mut Connection,
+    command: &CommandMetadata,
+    input: &CreateShellSiblingInput,
+    ids: &CanvasIds,
+    messages: &CanvasMessages<'_>,
+    committed_at: i64,
+    profile: &SessionSiblingProfile<'_>,
+) -> Result<Value> {
     let commit = execute(connection, command, committed_at, |tx, events| {
         let window_id = &input.window_id;
         let scene_id = &input.scene_id;
@@ -326,7 +356,16 @@ pub fn create_shell_sibling(
             };
         let (title, title_source) = match &input.title {
             Some(title) => (required_title(title, "Session title")?, "manual"),
-            None => ("Shell", "default"),
+            None => (
+                match profile.kind {
+                    crate::pty::LaunchProfile::Shell => "Shell",
+                    crate::pty::LaunchProfile::ClaudeCode => "Claude",
+                    crate::pty::LaunchProfile::Codex => "Codex",
+                    crate::pty::LaunchProfile::Dsh => "DSH",
+                    crate::pty::LaunchProfile::Antigravity => "Antigravity",
+                },
+                "default",
+            ),
         };
 
         insert_horizontal_mount(tx, ids, scene_id, &source_node, now)?;
@@ -334,19 +373,38 @@ pub fn create_shell_sibling(
             "INSERT INTO sessions (
                id, task_id, execution_context_id, kind, status, title, title_source, cwd,
                created_at, updated_at, last_activity_at, version
-             ) VALUES (?, ?, ?, 'shell', 'created', ?, ?, ?, ?, ?, ?, 1)",
+             ) VALUES (?, ?, ?, ?, 'created', ?, ?, ?, ?, ?, ?, 1)",
             params![
                 ids.session_id,
                 task_id,
                 execution_context_id,
+                profile.kind.kind(),
                 title,
                 title_source,
-                cwd,
+                profile.cwd.unwrap_or(&cwd),
                 now,
                 now,
                 now
             ],
         )?;
+        if profile.kind != crate::pty::LaunchProfile::Shell
+            && let Some(mode) = profile.permission_mode
+        {
+            tx.execute(
+                "INSERT INTO provider_bindings (id, session_id, provider, provider_session_id,
+                   resume_state, metadata_json, created_at, updated_at)
+                 VALUES (?, ?, ?, ?, 'unknown', ?, ?, ?)",
+                params![
+                    format!("pending:{}", ids.session_id),
+                    ids.session_id,
+                    profile.kind.kind(),
+                    format!("pending-{}", ids.session_id),
+                    json!({"permissionMode": mode}).to_string(),
+                    now,
+                    now
+                ],
+            )?;
+        }
         mount_session(tx, ids, scene_id, now)?;
         activate_session_in_transaction(tx, window_id, &ids.session_id, now)?;
         let created = read_created_path(tx, &ids.session_id)?;
@@ -399,6 +457,34 @@ pub fn create_fork_child(
     ids: &CanvasIds,
     messages: &CanvasMessages<'_>,
     committed_at: i64,
+) -> Result<Value> {
+    create_fork_in_environment(
+        connection,
+        command,
+        input,
+        ids,
+        messages,
+        committed_at,
+        &ForkEnvironment::Current,
+        false,
+    )
+}
+
+pub enum ForkEnvironment<'a> {
+    Current,
+    Existing { id: &'a str, branch: &'a str },
+    New { branch: &'a str },
+}
+
+pub fn create_fork_in_environment(
+    connection: &mut Connection,
+    command: &CommandMetadata,
+    input: &ForkSessionInput,
+    ids: &CanvasIds,
+    messages: &CanvasMessages<'_>,
+    committed_at: i64,
+    environment: &ForkEnvironment<'_>,
+    preserve_navigation: bool,
 ) -> Result<Value> {
     let commit = execute(connection, command, committed_at, |tx, events| {
         let ForkSessionInput {
@@ -492,7 +578,10 @@ pub fn create_fork_child(
         if !matches!(kind.as_str(), "claude-code" | "codex" | "antigravity") {
             return Err(not_ready());
         }
-        if *worktree_mode == ForkWorktreeMode::New && kind != "codex" {
+        if *worktree_mode == ForkWorktreeMode::New
+            && kind != "codex"
+            && !matches!(environment, ForkEnvironment::New { .. })
+        {
             return Err(fork_error(
                 "FORK_WORKTREE_MODE_NOT_IMPLEMENTED",
                 "当前仅支持在当前工作树创建分支",
@@ -527,6 +616,23 @@ pub fn create_fork_child(
         {
             return Err(not_ready());
         }
+        let (execution_context, cwd, existing_worktree, branch_name) = match environment {
+            ForkEnvironment::Current => (execution_context, cwd, None, None),
+            ForkEnvironment::New { branch } => (execution_context, cwd, None, Some(*branch)),
+            ForkEnvironment::Existing { id, branch } => {
+                let (context, cwd) = tx.query_row(
+                    "SELECT context.id, worktree.worktree_path FROM worktrees AS worktree
+                     JOIN execution_contexts AS context ON context.id = worktree.execution_context_id
+                     JOIN execution_context_git_states AS git ON git.execution_context_id = context.id
+                     WHERE worktree.id = ? AND worktree.branch_name = ? AND context.workspace_id = ?
+                       AND context.archived_at IS NULL AND worktree.state IN ('ready', 'dirty', 'retained')
+                       AND git.state = 'ready' AND git.branch = ?",
+                    params![id, branch, workspace_id, branch],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                ).optional()?.ok_or_else(|| fork_error("WORKTREE_CONFLICT", "指定 Worktree 不可用"))?;
+                (context, cwd, Some(*id), Some(*branch))
+            }
+        };
         let name = trim_display_name(name);
         if name.is_empty() {
             return Err(fork_error("EMPTY_NAME", "请输入分支名称"));
@@ -556,6 +662,10 @@ pub fn create_fork_child(
             _ => "default",
         };
         register_window(tx, window_id, now)?;
+        let navigation = preserve_navigation
+            .then(|| read_hierarchy(tx, window_id))
+            .transpose()?
+            .map(|hierarchy| hierarchy.navigation);
         insert_horizontal_mount(tx, ids, scene_id, &source_node, now)?;
         tx.execute(
             "INSERT INTO sessions (
@@ -579,8 +689,9 @@ pub fn create_fork_child(
             "INSERT INTO session_fork_intents (
                session_id, source_session_id, source_provider, source_provider_session_id,
                state, stage, display_name, worktree_mode, operation_id, submission_key,
-               permission_mode, total_steps, created_at, updated_at
-             ) VALUES (?, ?, ?, ?, 'pending', 'queued', ?, ?, ?, ?, ?, ?, ?, ?)",
+               permission_mode, total_steps, created_at, updated_at, worktree_id,
+               target_execution_context_id, worktree_path, branch_name
+             ) VALUES (?, ?, ?, ?, 'pending', 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
                 ids.session_id,
                 fork_source_id,
@@ -594,6 +705,10 @@ pub fn create_fork_child(
                 if mode == "new" { 5 } else { 2 },
                 now,
                 now,
+                Option::<&str>::None,
+                existing_worktree.map(|_| &execution_context),
+                existing_worktree.map(|_| &cwd),
+                branch_name,
             ],
         )?;
         let context = CreationEvents {
@@ -606,6 +721,9 @@ pub fn create_fork_child(
         };
         activate_session_in_transaction(tx, window_id, &ids.session_id, now)?;
         let created = read_created_path(tx, &ids.session_id)?;
+        if let Some(navigation) = navigation {
+            restore_navigation_in_transaction(tx, &navigation, now)?;
+        }
         context.emit_session_creation(events, &created, read_membership(tx, &ids.session_id)?);
         if let Some((parent_id, relation_kind)) = structural_parent {
             context.create_relation(
@@ -644,6 +762,7 @@ pub struct NativeFork {
     pub source_provider_session_id: String,
     pub worktree_mode: String,
     pub display_name: String,
+    pub branch_name: Option<String>,
     pub lease_fence: i64,
     pub worktree: Option<NativeForkWorktree>,
 }
@@ -669,16 +788,18 @@ pub fn native_codex_fork(connection: &Connection, session_id: &str) -> Result<Op
         "SELECT fork.operation_id, fork.submission_key, fork.source_session_id,
                 fork.source_provider_session_id, fork.worktree_mode, fork.display_name, fork.lease_fence,
                 worktree.id, worktree.execution_context_id, worktree.repository_root,
-                worktree.worktree_path, worktree.branch_name, COALESCE(worktree.base_revision, worktree.base_ref)
+                worktree.worktree_path, worktree.branch_name, COALESCE(worktree.base_revision, worktree.base_ref, ''), fork.branch_name
          FROM session_fork_intents AS fork
          LEFT JOIN worktrees AS worktree ON worktree.id = fork.worktree_id
+            OR (fork.worktree_mode = 'current' AND fork.worktree_id IS NULL
+                AND worktree.execution_context_id = fork.target_execution_context_id)
          WHERE fork.session_id = ? AND fork.source_provider = 'codex'
            AND fork.state IN ('pending', 'starting')",
         [session_id],
         |row| Ok(NativeFork {
             operation_id: row.get(0)?, submission_key: row.get(1)?, source_session_id: row.get(2)?,
             source_provider_session_id: row.get(3)?, worktree_mode: row.get(4)?,
-            display_name: row.get(5)?, lease_fence: row.get(6)?,
+            display_name: row.get(5)?, lease_fence: row.get(6)?, branch_name: row.get(13)?,
             worktree: match row.get::<_, Option<String>>(7)? {
                 Some(id) => Some(NativeForkWorktree {
                     id, execution_context_id: row.get(8)?, repository_root: row.get(9)?,
@@ -749,49 +870,13 @@ pub fn checkpoint_codex_fork(
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?;
         if let Some(worktree) = worktree {
-            tx.execute(
-                "INSERT INTO execution_contexts(id, workspace_id, kind, cwd, created_at)
-                 VALUES (?, ?, 'git-worktree', ?, ?)",
-                params![
-                    worktree.execution_context_id,
-                    workspace_id,
-                    worktree.cwd,
-                    now
-                ],
-            )?;
-            tx.execute(
-                "INSERT INTO worktrees(id, execution_context_id, repository_root, worktree_path,
-                   branch_name, base_revision, state, created_at, updated_at)
-                 VALUES (?, ?, ?, ?, ?, ?, 'ready', ?, ?)",
-                params![
-                    worktree.id,
-                    worktree.execution_context_id,
-                    worktree.repository_root,
-                    worktree.cwd,
-                    worktree.branch,
-                    worktree.base_revision,
-                    now,
-                    now
-                ],
-            )?;
-            ensure!(tx.execute(
-                "UPDATE session_environment_bindings SET managed_worktree_id = ?, active_target = 'worktree',
-                   state = 'ready', updated_at = ? WHERE session_id = ? AND local_execution_context_id = ?
-                   AND managed_worktree_id IS NULL",
-                params![worktree.id, now, session_id, local_context],
-            )? == 1, "Codex Fork environment no longer belongs to its lease");
-            tx.execute("UPDATE sessions SET execution_context_id = ?, cwd = ?, updated_at = ?, version = version + 1 WHERE id = ?",
-                params![worktree.execution_context_id, worktree.cwd, now, session_id])?;
-            tx.execute(
-                "UPDATE session_fork_intents SET worktree_id = ?, target_execution_context_id = ?,
-                   worktree_path = ?, branch_name = ? WHERE session_id = ?",
-                params![
-                    worktree.id,
-                    worktree.execution_context_id,
-                    worktree.cwd,
-                    worktree.branch,
-                    session_id
-                ],
+            bind_native_fork_worktree(
+                tx,
+                session_id,
+                &local_context,
+                &workspace_id,
+                worktree,
+                now,
             )?;
         }
         let created = read_created_path(tx, session_id)?;
@@ -816,12 +901,104 @@ pub fn checkpoint_codex_fork(
     })
 }
 
+/// Bind a checkout created by the control plane before the non-Codex provider
+/// launch. The existing launch path still owns the transition out of queued.
+pub fn bind_control_fork_worktree(
+    connection: &mut Connection,
+    command: &CommandMetadata,
+    session_id: &str,
+    worktree: &NativeForkWorktree,
+    now: i64,
+) -> Result<crate::storage::DomainCommit> {
+    execute(connection, command, now, |tx, _| {
+        let (local_context, workspace): (String, String) = tx.query_row(
+            "SELECT sessions.execution_context_id, tasks.workspace_id
+             FROM session_fork_intents AS fork
+             JOIN sessions ON sessions.id = fork.session_id AND sessions.archived_at IS NULL
+             JOIN tasks ON tasks.id = sessions.task_id AND tasks.archived_at IS NULL
+             WHERE session_id = ? AND fork.source_provider IN ('claude-code', 'antigravity')
+               AND fork.state = 'pending' AND fork.stage = 'queued'
+               AND fork.worktree_mode = 'new' AND fork.worktree_id IS NULL AND fork.branch_name = ?",
+            params![session_id, worktree.branch],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        bind_native_fork_worktree(tx, session_id, &local_context, &workspace, worktree, now)?;
+        Ok(json!({"worktreeId": worktree.id}))
+    })
+}
+
+fn bind_native_fork_worktree(
+    tx: &Connection,
+    session_id: &str,
+    local_context: &str,
+    workspace_id: &str,
+    worktree: &NativeForkWorktree,
+    now: i64,
+) -> Result<()> {
+    tx.execute(
+        "INSERT INTO execution_contexts(id, workspace_id, kind, cwd, created_at)
+                 VALUES (?, ?, 'git-worktree', ?, ?)",
+        params![
+            worktree.execution_context_id,
+            workspace_id,
+            worktree.cwd,
+            now
+        ],
+    )?;
+    tx.execute(
+        "INSERT INTO worktrees(id, execution_context_id, repository_root, worktree_path,
+                   branch_name, base_revision, state, created_at, updated_at)
+                 VALUES (?, ?, ?, ?, ?, ?, 'ready', ?, ?)",
+        params![
+            worktree.id,
+            worktree.execution_context_id,
+            worktree.repository_root,
+            worktree.cwd,
+            worktree.branch,
+            worktree.base_revision,
+            now,
+            now
+        ],
+    )?;
+    ensure!(tx.execute(
+                "UPDATE session_environment_bindings SET managed_worktree_id = ?, active_target = 'worktree',
+                   state = 'ready', updated_at = ? WHERE session_id = ? AND local_execution_context_id = ?
+                   AND managed_worktree_id IS NULL",
+                params![worktree.id, now, session_id, local_context],
+            )? == 1, "Codex Fork environment no longer belongs to its lease");
+    tx.execute("UPDATE sessions SET execution_context_id = ?, cwd = ?, updated_at = ?, version = version + 1 WHERE id = ?",
+                params![worktree.execution_context_id, worktree.cwd, now, session_id])?;
+    tx.execute(
+        "UPDATE session_fork_intents SET worktree_id = ?, target_execution_context_id = ?,
+                   worktree_path = ?, branch_name = ? WHERE session_id = ?",
+        params![
+            worktree.id,
+            worktree.execution_context_id,
+            worktree.cwd,
+            worktree.branch,
+            session_id
+        ],
+    )?;
+    Ok(())
+}
+
 pub fn retry_fork(
     connection: &mut Connection,
     command: &CommandMetadata,
     window_id: &str,
     session_id: &str,
     now: i64,
+) -> Result<Value> {
+    retry_fork_with_navigation(connection, command, window_id, session_id, now, false)
+}
+
+pub fn retry_fork_with_navigation(
+    connection: &mut Connection,
+    command: &CommandMetadata,
+    window_id: &str,
+    session_id: &str,
+    now: i64,
+    preserve_navigation: bool,
 ) -> Result<Value> {
     let commit = execute(connection, command, now, |tx, events| {
         let submission_key: String = tx
@@ -850,7 +1027,9 @@ pub fn retry_fork(
             params![now, session_id],
         )?;
         register_window(tx, window_id, now)?;
-        activate_session_in_transaction(tx, window_id, session_id, now)?;
+        if !preserve_navigation {
+            activate_session_in_transaction(tx, window_id, session_id, now)?;
+        }
         let created = read_created_path(tx, session_id)?;
         let context = CreationEvents {
             command_id: &command.command_id,

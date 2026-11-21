@@ -116,6 +116,7 @@ struct RunningShell {
     cwd_tracker: CwdTracker,
     work_tracker: WorkStatusTracker,
     emitted_output: bool,
+    last_output: Option<Instant>,
     ended: bool,
     exit_error: Option<String>,
     retiring: bool,
@@ -307,6 +308,90 @@ impl ShellOwner {
             })
     }
 
+    #[cfg(unix)]
+    pub(crate) fn prepare_control_fork_worktree(&mut self, session_id: &str) -> Result<()> {
+        let pending: Option<(String, String, String, String, String)> = self
+            .connection
+            .query_row(
+                "SELECT fork.operation_id, fork.submission_key, fork.source_session_id,
+                    source.cwd, fork.branch_name FROM session_fork_intents AS fork
+             JOIN sessions AS source ON source.id = fork.source_session_id
+             WHERE fork.session_id = ? AND fork.source_provider IN ('claude-code', 'antigravity')
+               AND fork.state = 'pending' AND fork.stage = 'queued' AND fork.worktree_mode = 'new'
+               AND fork.branch_name IS NOT NULL AND fork.worktree_id IS NULL",
+                [session_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((operation_id, submission_key, source_session_id, source_cwd, branch)) = pending
+        else {
+            return Ok(());
+        };
+        let root = self
+            .fork_worktree_root
+            .as_ref()
+            .context("An isolated worktree root is required")?;
+        let plan = crate::fork_worktree::ForkWorktreePlan::reserve(
+            ForkIdentity {
+                operation_id: operation_id.clone(),
+                submission_key,
+                source_session_id,
+                session_id: session_id.into(),
+            },
+            Path::new(&source_cwd),
+            NewWorktree {
+                path: root.join(format!("fork-{session_id}")),
+                isolation_root: root.clone(),
+                branch,
+                worktree_id: format!("fork-{session_id}"),
+                execution_context_id: format!("fork-context-{session_id}"),
+            },
+            &[],
+        )?;
+        // This preparation runs to completion on the serialized owner. The
+        // plan rolls back its owned checkout if the durable binding fails.
+        let lease = ForkLease {
+            operation_id,
+            token: uuid::Uuid::new_v4(),
+            fence: 1,
+        };
+        plan.execute(
+            &lease,
+            |_, _| Ok(()),
+            |binding, _| {
+                self.fork_setup
+                    .as_ref()
+                    .map_or(Ok(()), |setup| setup(&binding.cwd))
+            },
+            |binding, _| {
+                let time = now();
+                let metadata = command(
+                    format!("control-fork-worktree:{session_id}"),
+                    "session.fork-worktree-bound",
+                    binding.worktree_id.clone(),
+                );
+                let commit = canvas::bind_control_fork_worktree(
+                    &mut self.connection,
+                    &metadata,
+                    session_id,
+                    &core_worktree(binding)?,
+                    time,
+                )?;
+                self.pending.push(OwnerEvent::Domain(commit));
+                Ok(())
+            },
+        )?;
+        Ok(())
+    }
+
     pub(crate) fn pending_codex_fork(
         &self,
         session_id: &str,
@@ -363,10 +448,12 @@ impl ShellOwner {
                 CodexForkTarget::NewWorktree(NewWorktree {
                     path: root.join(format!("fork-{session_id}")),
                     isolation_root: root.clone(),
-                    branch: matou_native_core::git_repo::create_git_branch_name(
-                        &record.display_name,
-                        session_id,
-                    ),
+                    branch: record.branch_name.unwrap_or_else(|| {
+                        matou_native_core::git_repo::create_git_branch_name(
+                            &record.display_name,
+                            session_id,
+                        )
+                    }),
                     worktree_id: format!("fork-{session_id}"),
                     execution_context_id: format!("fork-context-{session_id}"),
                 })
@@ -483,6 +570,18 @@ impl ShellOwner {
             diagnostic(&mut self.pending, session_id, warning.into());
         }
         result
+    }
+
+    pub(crate) fn fresh_control_session(&self, session_id: &str) -> Result<bool> {
+        Ok(self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM domain_events AS event
+             JOIN command_deduplication AS command ON command.command_id = event.command_id
+             JOIN sessions AS session ON session.id = event.session_id
+             WHERE session.id = ? AND session.status = 'created' AND session.archived_at IS NULL
+               AND event.event_type = 'session.created' AND command.command_type = 'structure.create.session'
+               AND NOT EXISTS (SELECT 1 FROM session_runs WHERE session_id = session.id))",
+            [session_id], |row| row.get(0),
+        )?)
     }
 
     pub(crate) fn antigravity_binding(&self, session_id: &str) -> Result<Option<ProviderBinding>> {
@@ -1054,7 +1153,14 @@ impl ShellOwner {
             }
             .into());
         }
-        canvas::retry_fork(&mut self.connection, command, window_id, session_id, time)
+        canvas::retry_fork_with_navigation(
+            &mut self.connection,
+            command,
+            window_id,
+            session_id,
+            time,
+            command.command_type == "structure.fork.children",
+        )
     }
 
     pub fn rename_scene(
@@ -2677,6 +2783,7 @@ impl ShellOwner {
                 cwd_tracker: CwdTracker::default(),
                 work_tracker: WorkStatusTracker::default(),
                 emitted_output: false,
+                last_output: None,
                 ended: false,
                 exit_error: None,
                 retiring: false,
@@ -2740,6 +2847,33 @@ impl ShellOwner {
             .worker
             .send(WorkerCommand::ReadCurrentScreen { reply })?;
         Ok(Some(result))
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn control_terminal(&self, session_id: &str) -> Option<(&str, Option<Instant>)> {
+        self.shells
+            .get(session_id)
+            .filter(|shell| !shell.ended && !shell.retiring)
+            .filter(|_| {
+                self.connection.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ? AND archived_at IS NULL)",
+                    [session_id], |row| row.get(0),
+                ).unwrap_or(false)
+            })
+            .map(|shell| (shell.run_id.as_str(), shell.last_output))
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn control_storage(&mut self) -> &mut Connection {
+        &mut self.connection
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn control_is_read_only(&self) -> Result<bool> {
+        Ok(self.connection.is_readonly("main")?
+            || self
+                .connection
+                .pragma_query_value(None, "query_only", |row| row.get(0))?)
     }
 
     pub fn send(&self, session_id: &str, command: WorkerCommand) -> Result<()> {
@@ -4468,6 +4602,7 @@ impl ShellOwner {
     ) {
         let shell = self.shells.get_mut(id).expect("registered session output");
         shell.emitted_output = true;
+        shell.last_output = Some(Instant::now());
         if !self.closing
             && let Some(resume) = shell
                 .hook
