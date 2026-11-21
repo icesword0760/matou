@@ -16,4 +16,5 @@ pub mod startup;
 pub mod storage;
 
 pub mod session_graph;
+pub mod update_policy;
 pub mod workspace_paths;
