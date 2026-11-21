@@ -177,6 +177,17 @@ impl RenameInput {
         input.session_loader_search_style = true;
         input
     }
+    pub fn clear(&mut self, cx: &mut Context<Self>) {
+        self.replace(0..self.text.len(), "", false, cx);
+    }
+
+    pub fn clear_sensitive(&mut self, cx: &mut Context<Self>) {
+        self.clear(cx);
+        self.before_composition = None;
+        self.undo.clear();
+        self.redo.clear();
+    }
+
     pub fn composing(&self) -> bool {
         self.marked.is_some()
     }

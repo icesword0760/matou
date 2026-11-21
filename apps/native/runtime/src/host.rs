@@ -733,6 +733,13 @@ pub enum Command {
     RunRetentionCleanup {
         request_id: u64,
     },
+    GetClaudeAccounts {
+        request_id: u64,
+    },
+    ClaudeAccountCommand {
+        request_id: u64,
+        action: crate::claude_accounts::ClaudeAccountCommand,
+    },
     GetAccountSummary {
         request_id: u64,
     },
@@ -1257,6 +1264,7 @@ pub struct OfflineFixtures {
     pub fork_worktree_root: Option<PathBuf>,
     pub fork_setup: Option<Box<dyn Fn(&Path) -> Result<()> + Send>>,
     pub browser_executable: Option<PathBuf>,
+    pub claude_accounts_engine: Option<PathBuf>,
     pub update: Option<OfflineUpdate>,
     pub retention: Option<OfflineRetention>,
 }
@@ -1309,6 +1317,7 @@ struct RuntimeWiring {
     update: update_download::UpdateManager,
     next_egress_attempt: u64,
     live_egress: Option<LiveEgress>,
+    claude_accounts: Option<crate::claude_accounts::AccountWorker>,
 }
 
 struct LiveEgress {
@@ -1485,7 +1494,30 @@ impl RuntimeWiring {
             update,
             next_egress_attempt: 0,
             live_egress: None,
+            claude_accounts: None,
         })
+    }
+
+    fn send_claude_account(
+        &self,
+        request_id: u64,
+        action: crate::claude_accounts::ClaudeAccountCommand,
+        send: &async_channel::Sender<Event>,
+        projection: impl FnOnce() -> Result<Value>,
+    ) -> Result<()> {
+        if !self
+            .claude_accounts
+            .as_ref()
+            .is_some_and(|worker| worker.send(request_id, action))
+        {
+            let reply = wiring_result(
+                "claudeAccountsResult",
+                request_id,
+                Err(anyhow::anyhow!("runtime")),
+            );
+            send.send_blocking(with_graph_projection(reply, projection()?))?;
+        }
+        Ok(())
     }
 
     fn catalog(&mut self) -> Result<&mut DshSessionCatalog> {
@@ -1668,7 +1700,23 @@ impl RuntimeWiring {
             Command::CheckGitRepo { request_id, cwd } => (
                 "gitRepoResult",
                 *request_id,
-                Repository::discover(cwd).map(git_projection),
+                Repository::discover(cwd).and_then(|repo| {
+                    let branches = repo.as_ref().and_then(|repo| repo.local_branches().ok());
+                    let mut value = git_projection(repo);
+                    if let Some(branches) = branches {
+                        value["branches"] = json!(
+                            branches
+                                .branches
+                                .into_iter()
+                                .map(|branch| json!({
+                                    "name": branch.name, "current": branch.current,
+                                    "checkedOutPath": branch.checked_out_path,
+                                }))
+                                .collect::<Vec<_>>()
+                        );
+                    }
+                    Ok(value)
+                }),
             ),
             Command::GetEgressStatus { request_id } => {
                 let status = owner.map_or_else(
@@ -2260,6 +2308,10 @@ pub fn storage_command_rejected(command: Command, code: &str, message: &str) -> 
         return Event::History(request.failed(message.into()));
     }
     let wiring_request = match &command {
+        Command::GetClaudeAccounts { request_id }
+        | Command::ClaudeAccountCommand { request_id, .. } => {
+            Some(("claudeAccountsResult", *request_id))
+        }
         Command::SetTaskStatus { request_id, .. } => Some(("taskStatusResult", *request_id)),
         Command::LoadDshSession { request_id, .. } => Some(("dshSessionLoadResult", *request_id)),
         Command::LoadAntigravitySession { request_id, .. } => {
@@ -2962,6 +3014,12 @@ fn run_writable(
             return Err(error.into());
         }
     }
+    wiring.claude_accounts = crate::claude_accounts::AccountWorker::start(
+        &data_root,
+        live_egress,
+        wiring.fixtures.claude_accounts_engine.take(),
+    )
+    .ok();
     let history = HistoryWorker::new(data_root.clone())?;
     let window_id = MAIN_WINDOW_ID;
     let input = BootstrapWindowInput {
@@ -3769,6 +3827,14 @@ fn run_writable(
                 wiring.live_egress = None;
             }
         }
+        if let Some(accounts) = &wiring.claude_accounts {
+            for (request_id, state) in accounts.replies.try_iter() {
+                let reply = wiring_result("claudeAccountsResult", request_id, Ok(json!(state)));
+                let projection =
+                    active_graph(&owner, scene_id.as_deref(), window_id, &startup_deferred)?;
+                send.send_blocking(with_graph_projection(reply, projection))?;
+            }
+        }
         for _ in 0..128 {
             // Resolve Ctrl+C before a subsequent focus/shutdown can overtake its
             // control interaction. Ordinary copy does not hold this queue.
@@ -3791,6 +3857,24 @@ fn run_writable(
                 ))?;
                 continue;
             }
+            let command = match command {
+                Command::GetClaudeAccounts { request_id } => {
+                    wiring.send_claude_account(
+                        request_id,
+                        crate::claude_accounts::ClaudeAccountCommand::List,
+                        send,
+                        || active_graph(&owner, scene_id.as_deref(), window_id, &startup_deferred),
+                    )?;
+                    continue;
+                }
+                Command::ClaudeAccountCommand { request_id, action } => {
+                    wiring.send_claude_account(request_id, action, send, || {
+                        active_graph(&owner, scene_id.as_deref(), window_id, &startup_deferred)
+                    })?;
+                    continue;
+                }
+                command => command,
+            };
             if wiring
                 .live_egress
                 .as_mut()
@@ -5281,6 +5365,8 @@ fn run_writable(
                 | Command::DownloadUpdate { .. }
                 | Command::RunRetentionCleanup { .. }
                 | Command::GetAccountSummary { .. }
+                | Command::GetClaudeAccounts { .. }
+                | Command::ClaudeAccountCommand { .. }
                 | Command::GetAgentHud { .. } => {
                     unreachable!("Runtime wiring command handled above")
                 }

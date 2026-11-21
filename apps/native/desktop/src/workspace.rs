@@ -2601,9 +2601,7 @@ impl Workspace {
                     SettingsShellEvent::SaveLocale(preference) => {
                         this.save_interface_locale(*preference, window, cx);
                     }
-                    SettingsShellEvent::ProviderActivated => {
-                        this.refresh_accounts_after_provider_change(cx);
-                    }
+                    SettingsShellEvent::ProviderActivated => {}
                     SettingsShellEvent::SaveTheme(preference) => this.save_theme(*preference, cx),
                     SettingsShellEvent::OpenProviderKeyPage(url) => {
                         this.open_external_link(
@@ -16160,6 +16158,10 @@ fn notification_now() -> u64 {
 }
 
 fn notification_time(timestamp: u64) -> String {
+    local_date_time(timestamp).1
+}
+
+fn local_date_time(timestamp: u64) -> (String, String) {
     // Use the system's local zone, including its offset at the event time.
     #[repr(C)]
     #[derive(Default)]
@@ -16194,9 +16196,15 @@ fn notification_time(timestamp: u64) -> String {
     #[cfg(target_os = "windows")]
     let valid = unsafe { _localtime64_s(&mut local, &seconds) == 0 };
     if valid {
-        format!("{:02}:{:02}", local.hour, local.minute)
+        (
+            format!("{:02}/{:02}", local.month + 1, local.day),
+            format!("{:02}:{:02}", local.hour, local.minute),
+        )
     } else {
-        format!("{:02}:{:02}", seconds / 3_600 % 24, seconds / 60 % 60)
+        (
+            "—".into(),
+            format!("{:02}:{:02}", seconds / 3_600 % 24, seconds / 60 % 60),
+        )
     }
 }
 

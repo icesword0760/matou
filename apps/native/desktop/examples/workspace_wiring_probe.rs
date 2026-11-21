@@ -672,20 +672,88 @@ mod workspace {
         overlay(window, cx, Some("accounts"));
         let request_id = std::iter::from_fn(|| sink.try_recv().ok())
             .find_map(|command| match command {
-                Command::GetAccountSummary { request_id } => Some(request_id),
+                Command::GetClaudeAccounts { request_id } => Some(request_id),
                 _ => None,
             })
-            .expect("accounts opens the runtime summary");
-        window.update(cx, |view, window, cx| {
-            view.receive_wiring_reply("accountSummaryResult", request_id,
-                &json!({"result":{"accountSummary":{"currentId":"probe","accounts":[{"id":"probe","email":"gm•••@example.invalid","name":"fixture","plan":"Pro","status":"active"}]}}}),
-                window, cx);
-        }).unwrap();
-        draw(window.into(), cx);
+            .expect("accounts open the dedicated local roster");
+        let mut state = json!({
+            "currentId":"first", "accounts":[
+                {"id":"first","name":"001","email":"aa•••@example.invalid","needsLogin":true},
+                {"id":"second","name":"gmail","email":"gm•••@example.invalid","needsLogin":false,
+                 "usage":{"checkedAt":1800000000000_u64,"stale":true,
+                    "fiveHour":{"used":90,"resetsAt":"2099-01-01T00:00:00Z"}}}
+            ], "rememberScope":true, "renewedIds":[], "loginCodeSubmitted":false, "switched":false
+        });
+        let supply = |window: Handle, cx: &mut AsyncApp, request_id, state: &Value| {
+            window
+                .update(cx, |view, window, cx| {
+                    view.receive_wiring_reply(
+                        "claudeAccountsResult",
+                        request_id,
+                        &json!({"result":state}),
+                        window,
+                        cx,
+                    );
+                })
+                .unwrap();
+        };
+        supply(window, cx, request_id, &state);
+        let view = draw(window.into(), cx);
+        assert_eq!(view["footer-account-panel"].size.width, px(410.));
+        assert!(
+            view["claude-account-card-first"].bottom() < view["claude-account-card-second"].top()
+        );
+        assert!(view.contains_key("claude-account-reauth-first"));
+
+        click(
+            window.into(),
+            cx,
+            MouseButton::Left,
+            view["claude-account-refresh"].center(),
+        );
+        let refresh = std::iter::from_fn(|| sink.try_recv().ok())
+            .find_map(|command| match command {
+                Command::ClaudeAccountCommand {
+                    request_id,
+                    action:
+                        matou_native_runtime::claude_accounts::ClaudeAccountCommand::RefreshUsage,
+                } => Some(request_id),
+                _ => None,
+            })
+            .expect("refresh routes to Claude usage");
+        supply(window, cx, refresh, &state);
+
+        let switch = draw(window.into(), cx)["claude-account-switch-second"].center();
+        click(window.into(), cx, MouseButton::Left, switch);
+        let switched = std::iter::from_fn(|| sink.try_recv().ok())
+            .find_map(|command| match command {
+                Command::ClaudeAccountCommand {
+                    request_id,
+                    action:
+                        matou_native_runtime::claude_accounts::ClaudeAccountCommand::Switch {
+                            id,
+                            remember_scope: true,
+                        },
+                } if id == "second" => Some(request_id),
+                _ => None,
+            })
+            .expect("switch routes to the selected Claude account");
+        state["currentId"] = json!("second");
+        state["switched"] = json!(true);
+        supply(window, cx, switched, &state);
+        let manage = draw(window.into(), cx)["footer-manage-accounts"].center();
+        click(window.into(), cx, MouseButton::Left, manage);
+        assert!(draw(window.into(), cx).contains_key("claude-account-edit-second"));
         press(window, cx, "escape");
         overlay(window, cx, None);
-        assert_terminal_input(window, &sink, cx, A);
-        println!("accounts: click, isolated account summary, Escape and restored terminal focus");
+        window
+            .update(cx, |view, window, _| {
+                assert!(view.control_focus["accounts"].is_focused(window));
+            })
+            .unwrap();
+        println!(
+            "accounts: dedicated roster, expired sign-in and quota cards, refresh, switch, manage, Escape and restored trigger focus"
+        );
 
         window
             .update(cx, |view, window, cx| {
@@ -2010,6 +2078,19 @@ mod workspace {
         })
     }
 
+    fn hud_text(window: AnyWindowHandle, cx: &mut AsyncApp, key: &'static str) -> Option<String> {
+        FOOTER_READINGS.with_borrow_mut(|slot| *slot = Some(FooterReadings::default()));
+        draw(window, cx);
+        FOOTER_READINGS.with_borrow_mut(|slot| {
+            let readings = slot.take().unwrap();
+            readings
+                .text
+                .borrow_mut()
+                .remove(key)
+                .map(|(text, _)| text.to_string())
+        })
+    }
+
     async fn wait_for_hud_element(
         window: AnyWindowHandle,
         cx: &mut AsyncApp,
@@ -2270,6 +2351,8 @@ mod workspace {
         click(window.into(), cx, MouseButton::Left, bounds["git"].center());
         let git_menu = draw_hud(window.into(), cx);
         assert!(git_menu["footer-git-menu"].bottom() <= bounds["git"].top());
+        assert_eq!(git_menu["footer-git-menu"].size.width, px(316.));
+        assert!(git_menu.contains_key("hud-menu-git-search"));
         let git_request = std::iter::from_fn(|| sink.try_recv().ok())
             .find_map(|command| match command {
                 Command::CheckGitRepo {
@@ -2284,7 +2367,10 @@ mod workspace {
                 view.receive_wiring_reply(
                     "gitRepoResult",
                     git_request,
-                    &json!({"result":{"isRepository":true,"root":cwd}}),
+                    &json!({"result":{"isRepository":true,"root":cwd,"branches":[
+                        {"name":"review/live","current":true},
+                        {"name":"fix/popup","current":false}
+                    ]}}),
                     window,
                     cx,
                 )
@@ -2306,6 +2392,12 @@ mod workspace {
             &json!({"result":{"state":"ready","cwd":cwd,"git":{"root":cwd,"head":{"branch":"review/live"},"changes":{"staged":1}}}}),
             window, cx
         )).unwrap();
+        press(window, cx, "f");
+        assert_eq!(
+            hud_text(window.into(), cx, "git-menu-other").as_deref(),
+            Some("fix/popup")
+        );
+        assert!(hud_text(window.into(), cx, "git-menu-current").is_none());
         press(window, cx, "escape");
         assert!(!draw_hud(window.into(), cx).contains_key("footer-git-menu"));
         window
@@ -2320,8 +2412,39 @@ mod workspace {
             MouseButton::Left,
             bounds["environment"].center(),
         );
+        assert_eq!(
+            hud_text(window.into(), cx, "environment-menu-title").as_deref(),
+            Some("Worktree")
+        );
+        press(window, cx, "escape");
+        window
+            .update(cx, |view, _, cx| {
+                view.graph["nodes"][0]["environment"]["kind"] = json!("local");
+                cx.notify();
+            })
+            .unwrap();
+        let local_trigger = draw_hud(window.into(), cx)["environment"];
+        click(window.into(), cx, MouseButton::Left, local_trigger.center());
         let environment = draw_hud(window.into(), cx);
-        assert!(environment["footer-environment-menu"].bottom() <= bounds["environment"].top());
+        assert!(environment["footer-environment-menu"].bottom() <= local_trigger.top());
+        assert_eq!(environment["footer-environment-menu"].size.width, px(360.));
+        assert!(environment.contains_key("hud-menu-environment-title"));
+        assert!(environment.contains_key("hud-menu-environment-path"));
+        assert_eq!(
+            hud_text(window.into(), cx, "environment-menu-title").as_deref(),
+            Some("Local")
+        );
+        assert_eq!(
+            hud_text(window.into(), cx, "environment-menu-path").as_deref(),
+            cwd.to_str()
+        );
+        assert!(!environment.contains_key("hud-menu-refresh"));
+        let reveal = environment["hud-menu-reveal"];
+        let terminal = environment["hud-menu-terminal"];
+        assert_eq!(reveal.size, terminal.size);
+        assert_eq!(reveal.top(), terminal.top());
+        // Bounds are recorded inside the two 1px button borders.
+        assert_eq!(terminal.left() - reveal.right() - px(2.), px(7.));
         assert!(
             std::iter::from_fn(|| sink.try_recv().ok()).any(|command| matches!(command,
             Command::GetEnvironmentDiagnostics { cwd: path, repair: None, .. } if path == cwd))
@@ -2333,6 +2456,13 @@ mod workspace {
             environment["hud-menu-terminal"].center(),
         );
         assert!(!draw_hud(window.into(), cx).contains_key("footer-environment-menu"));
+        window
+            .update(cx, |view, _, cx| {
+                view.graph["nodes"][0]["environment"]["kind"] = json!("worktree");
+                cx.notify();
+            })
+            .unwrap();
+        draw_hud(window.into(), cx);
 
         click(
             window.into(),

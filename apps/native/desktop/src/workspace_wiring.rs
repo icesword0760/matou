@@ -1,4 +1,8 @@
 use super::*;
+
+#[path = "footer_claude_accounts.rs"]
+mod footer_claude_accounts;
+use footer_claude_accounts::AccountUi;
 use matou_native_core::link_routing::{
     BROWSER_RELEASES_URL, ConfirmationAction, ControlledBrowserFailure, LinkSource, OpenFailure,
     route_link, system_browser_confirmation,
@@ -158,8 +162,7 @@ pub(super) struct WorkspaceWiring {
     egress_request: Option<(u64, &'static str)>,
     egress_refresh_scheduled: bool,
     egress_error: Option<String>,
-    account_request: Option<u64>,
-    account_summary: Option<Value>,
+    accounts: AccountUi,
     #[cfg(debug_assertions)]
     egress_probe_bounds: TriggerBounds,
     hud: HashMap<String, LiveHud>,
@@ -267,8 +270,7 @@ impl WorkspaceWiring {
             egress_request: None,
             egress_refresh_scheduled: false,
             egress_error: None,
-            account_request: None,
-            account_summary: None,
+            accounts: AccountUi::default(),
             #[cfg(debug_assertions)]
             egress_probe_bounds: TriggerBounds::default(),
             hud: HashMap::new(),
@@ -281,37 +283,6 @@ impl WorkspaceWiring {
     pub(super) fn is_detached(&self, id: &str) -> bool {
         self.detached.for_session(id).is_some()
     }
-}
-
-fn account_label(account: &Value) -> String {
-    if let Some(email) = trimmed_graph_text(&account["email"])
-        && let Some((prefix, _)) = email.split_once('@')
-        && !prefix.is_empty()
-    {
-        return if prefix.contains('•') {
-            prefix.chars().take(24).collect()
-        } else {
-            format!("{}•••", prefix.chars().take(2).collect::<String>())
-        };
-    }
-    let name = trimmed_graph_text(&account["name"]).or_else(|| trimmed_graph_text(&account["id"]));
-    name.map_or_else(
-        || "•••".into(),
-        |name| {
-            let prefix: String = name.chars().take(4).collect();
-            format!("{prefix}•••")
-        },
-    )
-}
-
-fn account_dot(account: &Value) -> Div {
-    let color = match account["status"].as_str() {
-        Some("active") => 0x3da66b,
-        Some("expired") => 0xcf5856,
-        Some("rate-limited") => 0xd79842,
-        _ => 0x8d99a8,
-    };
-    div().flex_none().size(px(5.)).rounded_full().bg(rgb(color))
 }
 
 impl Workspace {
@@ -843,8 +814,13 @@ impl Workspace {
             return;
         }
         if self.wiring.overlay.is_some() {
+            let accounts = self.wiring.overlay == Some(Overlay::Accounts);
             let previous = self.reset_wiring_overlay();
-            restore_wiring_focus(window, cx, &self.wiring.overlay_focus, previous);
+            if accounts && self.account_footer_visible(window) {
+                window.focus(&self.control_focus["accounts"]);
+            } else {
+                restore_wiring_focus(window, cx, &self.wiring.overlay_focus, previous);
+            }
             cx.notify();
         }
     }
@@ -865,7 +841,7 @@ impl Workspace {
                 self.wiring.update.dispatch(UpdateAction::Dismiss);
             }
             Some(Overlay::Egress) => self.wiring.egress.open = false,
-            Some(Overlay::Accounts) => {}
+            Some(Overlay::Accounts) => self.wiring.accounts.input = None,
             None => {}
         }
         self.wiring.restore_focus.take()
@@ -906,6 +882,9 @@ impl Workspace {
         if stroke.key == "escape" && self.wiring.overlay.is_some() {
             self.dismiss_wiring_overlay(window, cx);
             return true;
+        }
+        if self.wiring.overlay == Some(Overlay::Accounts) {
+            return self.claude_accounts_key(stroke, window, cx);
         }
         if let Some((id, _)) = self.wiring.card_menu.clone() {
             let menu = self.wiring_card_menu(&id);
@@ -2313,327 +2292,6 @@ impl Workspace {
         })
     }
 
-    pub(super) fn refresh_accounts_after_provider_change(&mut self, cx: &mut Context<Self>) {
-        if self.domain_ready && self.hierarchy.is_some() {
-            self.wiring.account_request = None;
-            self.refresh_accounts(cx);
-        }
-    }
-
-    fn refresh_accounts(&mut self, cx: &mut Context<Self>) {
-        if self.wiring.account_request.is_some() {
-            return;
-        }
-        let request_id = self.next_wiring_request();
-        if self
-            .commands
-            .send_at(
-                self.runtime_generation,
-                Command::GetAccountSummary { request_id },
-            )
-            .is_ok()
-        {
-            self.wiring.account_request = Some(request_id);
-            cx.notify();
-        }
-    }
-
-    fn account_footer_visible(&self, window: &Window) -> bool {
-        self.footer_session(window)
-            .and_then(|id| self.hud_node(id))
-            .and_then(|node| node["currentMode"].as_str())
-            .is_some_and(footer_shows_account)
-    }
-
-    fn dismiss_ineligible_account_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.wiring.overlay == Some(Overlay::Accounts)
-            && self.wiring.overlay_window == Some(window.window_handle())
-            && !self.account_footer_visible(window)
-        {
-            self.dismiss_wiring_overlay(window, cx);
-        }
-    }
-
-    fn toggle_accounts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.wiring.overlay == Some(Overlay::Accounts)
-            && self.wiring.overlay_window == Some(window.window_handle())
-        {
-            self.dismiss_wiring_overlay(window, cx);
-        } else if self.hud_wiring_available(window) && self.account_footer_visible(window) {
-            self.open_wiring_overlay(Overlay::Accounts, window, cx);
-            let restore = if let Some(id) = self.detached_session_for_window(window.window_handle())
-            {
-                self.terminals
-                    .get(id)
-                    .map(|terminal| terminal.read(cx).focus.clone())
-            } else {
-                self.active_terminal_focus(cx)
-            };
-            if let Some(focus) = restore {
-                self.wiring.restore_focus = Some(focus);
-            }
-            self.refresh_accounts(cx);
-        }
-    }
-
-    fn accounts(&self) -> &[Value] {
-        self.wiring
-            .account_summary
-            .as_ref()
-            .and_then(|summary| summary["accounts"].as_array())
-            .map_or(&[], Vec::as_slice)
-    }
-
-    fn current_account(&self) -> Option<&Value> {
-        let id = self.wiring.account_summary.as_ref()?["currentId"].as_str()?;
-        self.accounts().iter().find(|account| account["id"] == id)
-    }
-
-    pub(super) fn footer_account_trigger(
-        &self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Stateful<Div> {
-        let palette = self.theme_palette().footer;
-        let bounds = self.account_anchor(window, cx);
-        let account = self.current_account();
-        let locale = self.locale;
-        let label = account.map(account_label).unwrap_or_else(|| {
-            self.locale
-                .text(FOOTER_ACCOUNT_LABEL, "Claude accounts")
-                .into()
-        });
-        self.button(
-            div()
-                .id("footer-account")
-                .relative()
-                .flex_none()
-                .ml(px(8.))
-                .flex()
-                .items_center()
-                .gap(px(7.))
-                .px(px(8.))
-                .py(px(5.))
-                .rounded(px(5.))
-                .text_color(rgba(palette.account))
-                .whitespace_nowrap()
-                .cursor_pointer()
-                .hover(|style| style.bg(rgba(0x518ef019)))
-                .tooltip(move |_, cx| {
-                    cx.new(|_| {
-                        CardTooltip(
-                            locale
-                                .text("本机默认 Claude 账户", "Device default Claude account")
-                                .into(),
-                        )
-                    })
-                    .into()
-                })
-                .child(footer_user_icon(14., rgba(palette.account)))
-                .child(
-                    div()
-                        .max_w(px(116.))
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .child(footer_text("account", label)),
-                )
-                .children(account.map(account_dot))
-                .child(ui_text("⌃"))
-                .children(footer_bounds_probe("account"))
-                .children(wiring_probe_bounds("footer-account".into()))
-                .child(measure_trigger(bounds)),
-            &self.control_focus["accounts"],
-            Self::toggle_accounts,
-            cx,
-        )
-    }
-
-    fn account_anchor(&self, window: &mut Window, cx: &mut Context<Self>) -> TriggerBounds {
-        window
-            .use_keyed_state("footer-account-anchor", cx, |_, _| TriggerBounds::default())
-            .read(cx)
-            .clone()
-    }
-
-    fn open_account_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(id) = self.detached_session_for_window(window.window_handle())
-            && let Some(child) = self.wiring.children.get(id)
-            && let Ok(view) = child.window.read(cx)
-        {
-            let main = view.main;
-            let owner = cx.weak_entity();
-            self.dismiss_wiring_overlay(window, cx);
-            cx.defer(move |cx| {
-                let _ = main.update(cx, |_, window, cx| {
-                    let _ = owner.update(cx, |this, cx| {
-                        if this.settings.is_none() {
-                            this.toggle_settings(window, cx);
-                        }
-                        if this.wiring.visible {
-                            window.activate_window();
-                        }
-                    });
-                });
-            });
-        } else {
-            self.toggle_settings(window, cx);
-        }
-    }
-
-    fn render_account_panel(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let palette = self.theme_palette();
-        let locale = self.locale;
-        let width = (window.viewport_size().width - px(24.))
-            .max(px(0.))
-            .min(px(410.));
-        let position = self
-            .account_anchor(window, cx)
-            .get()
-            .map(|bounds| bounds.top_right() - point(px(0.), px(6.)))
-            .unwrap_or_else(|| {
-                point(
-                    window.viewport_size().width - px(12.),
-                    window.viewport_size().height - px(46.),
-                )
-            });
-        let owner = cx.weak_entity();
-        let close = owner.clone();
-        let manage = owner.clone();
-        let active = self.current_account();
-        let rows = div()
-            .id("footer-account-list")
-            .flex()
-            .flex_col()
-            .max_h((window.viewport_size().height - px(160.)).max(px(44.)))
-            .overflow_y_scroll()
-            .px(px(18.))
-            .when(self.accounts().is_empty(), |rows| {
-                rows.child(
-                    div()
-                        .py(px(14.))
-                        .text_color(rgba(palette.workspace.muted))
-                        .child(if self.wiring.account_request.is_some() {
-                            locale.text("正在读取账户…", "Loading accounts…")
-                        } else {
-                            locale.text(
-                                "暂无 Claude 账户，请前往设置管理。",
-                                "No Claude accounts. Manage accounts in Settings.",
-                            )
-                        }),
-                )
-            })
-            .children(self.accounts().iter().map(|account| {
-                let status = match account["status"].as_str() {
-                    Some("active") => locale.text("使用中", "Active"),
-                    Some("expired") => locale.text("登录已失效", "Expired"),
-                    Some("rate-limited") => locale.text("限流", "Rate limited"),
-                    _ => locale.text("待启用", "Needs activation"),
-                };
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .py(px(9.))
-                    .border_t_1()
-                    .border_color(rgba(palette.workspace.line))
-                    .when(active == Some(account), |row| {
-                        row.font_weight(FontWeight::SEMIBOLD)
-                    })
-                    .child(account_dot(account))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .child(account_label(account)),
-                    )
-                    .children(trimmed_graph_text(&account["plan"]).map(str::to_owned))
-                    .children((active == Some(account)).then(|| {
-                        div()
-                            .text_color(rgba(palette.workspace.accent))
-                            .child(locale.text("本机默认", "Default"))
-                    }))
-                    .child(
-                        div()
-                            .text_color(rgba(palette.workspace.muted))
-                            .child(status),
-                    )
-            }));
-        let panel = div()
-            .id("footer-account-panel")
-            .track_focus(&self.wiring.overlay_focus)
-            .w(width)
-            .flex()
-            .flex_col()
-            .rounded(px(12.))
-            .overflow_hidden()
-            .bg(rgba(palette.workspace.panel))
-            .text_color(rgba(palette.workspace.text))
-            .text_size(px(12.))
-            .border_1()
-            .border_color(rgba(palette.workspace.line))
-            .shadow(vec![shadow(0x263d61, 0.15, 16., 42.)])
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(
-                div()
-                    .px(px(18.))
-                    .py(px(15.))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .text_size(px(14.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(locale.text(FOOTER_ACCOUNT_LABEL, "Claude accounts")),
-                    )
-                    .child(
-                        div()
-                            .id("footer-accounts-close")
-                            .cursor_pointer()
-                            .child("×")
-                            .on_click(move |_, window, cx| {
-                                let _ = close
-                                    .update(cx, |this, cx| this.dismiss_wiring_overlay(window, cx));
-                            }),
-                    ),
-            )
-            .child(rows)
-            .child(
-                div()
-                    .id("footer-manage-accounts")
-                    .px(px(18.))
-                    .py(px(12.))
-                    .border_t_1()
-                    .border_color(rgba(palette.workspace.line))
-                    .text_color(rgba(palette.workspace.accent))
-                    .cursor_pointer()
-                    .focusable()
-                    .tab_index(0)
-                    .child(locale.text("前往设置管理", "Manage in Settings"))
-                    .on_click(move |_, window, cx| {
-                        let _ =
-                            manage.update(cx, |this, cx| this.open_account_settings(window, cx));
-                    }),
-            );
-        div()
-            .absolute()
-            .inset_0()
-            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                let _ = owner.update(cx, |this, cx| this.dismiss_wiring_overlay(window, cx));
-                cx.stop_propagation();
-            })
-            .child(
-                anchored()
-                    .anchor(Corner::BottomRight)
-                    .position(position)
-                    .snap_to_window()
-                    .child(panel),
-            )
-            .into_any_element()
-    }
-
     fn egress_anchor(&self, window: &mut Window, cx: &mut Context<Self>) -> TriggerBounds {
         window
             .use_keyed_state("footer-egress-anchor", cx, |_, _| TriggerBounds::default())
@@ -2935,8 +2593,7 @@ impl Workspace {
                 self.motion_clock.elapsed(),
             );
         }
-        self.wiring.account_request = None;
-        self.wiring.account_summary = None;
+        self.wiring.accounts = AccountUi::default();
         self.wiring.hud.clear();
     }
 
@@ -3031,13 +2688,13 @@ impl Workspace {
                 .collect::<Vec<_>>(),
         );
         self.wiring.hud.retain(|id, _| targets.contains(id));
-        if self.wiring.account_summary.is_none()
+        if !self.wiring.accounts.requested
             && targets.iter().any(|id| {
                 self.hud_node(id)
                     .is_some_and(|node| node["currentMode"] == "claude-code")
             })
         {
-            self.refresh_accounts(cx);
+            self.load_claude_accounts(cx);
         }
         let now = self.motion_clock.elapsed();
         for session_id in targets {
@@ -3147,10 +2804,8 @@ impl Workspace {
                 },
             }
         }
-        if kind == "accountSummaryResult" && self.wiring.account_request == Some(request_id) {
-            self.wiring.account_request = None;
-            self.wiring.account_summary = Some(reply["result"]["accountSummary"].clone());
-            cx.notify();
+        if kind == "claudeAccountsResult" {
+            self.receive_claude_accounts(request_id, reply, cx);
         }
         self.receive_footer_diagnostics(kind, request_id, reply, cx);
         if kind == "agentHudResult"
