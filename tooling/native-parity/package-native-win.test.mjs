@@ -83,7 +83,10 @@ for (const [arch, unpacked] of [['x64', 'win-unpacked'], ['arm64', 'win-arm64-un
     assert.deepEqual(await readFile(join(packageResult.path, desktopName)), await readFile(input.desktopBin))
     assert.deepEqual(await readFile(join(packageResult.path, runtimeName)), await readFile(input.runtimeBin))
     const resources = join(packageResult.path, 'resources')
-    assert.deepEqual(await readdir(resources).then(names => names.sort()), ['manifest.json', 'version.json'])
+    assert.deepEqual(await readdir(resources).then(names => names.sort()), ['control-assets', 'manifest.json', 'version.json'])
+    const plugin = join(resources, 'control-assets', 'providers', 'claude-plugin')
+    assert.deepEqual(await readdir(plugin).then(names => names.sort()), ['.claude-plugin', 'hooks', 'skills'])
+    assert.ok(JSON.parse(await readFile(join(plugin, '.claude-plugin', 'plugin.json'), 'utf8')).name)
     const load = async filename => JSON.parse(await readFile(join(resources, filename), 'utf8'))
     assert.deepEqual(await load('manifest.json'), {
       target: 'dir', arch, applicationExecutable: desktopName, runtimeExecutable: runtimeName,
@@ -167,6 +170,19 @@ test('rejects non-isolated, protected and invalid output paths', async () => {
   }
   assert.equal(await readFile(existingFile, 'utf8'), 'keep')
   await assert.rejects(readdir(guarded), { code: 'ENOENT' })
+})
+
+test('verifier rejects a missing Claude plugin manifest or a changed hook', async () => {
+  const input = options('x64', join(root, 'verify-claude-plugin'))
+  const { path } = await assembleWindowsDirPackage(input)
+  const plugin = join(path, 'resources', 'control-assets', 'providers', 'claude-plugin')
+  const manifest = join(plugin, '.claude-plugin', 'plugin.json')
+  const original = await readFile(manifest)
+  await rm(manifest)
+  await assert.rejects(verifyWindowsDirPackage(path, input), /Missing Claude plugin asset/)
+  await writeFile(manifest, original)
+  await writeFile(join(plugin, 'hooks', 'session-start.mjs'), 'changed')
+  await assert.rejects(verifyWindowsDirPackage(path, input), /Claude plugin asset differs from source/)
 })
 
 test('rejects output links and Windows junctions without writing through them', async () => {

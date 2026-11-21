@@ -426,7 +426,7 @@ impl Registration {
     }
 
     pub fn attach_codex(&self, launch: &mut ShellLaunch) -> Result<()> {
-        let command = json!(script_command(&self.script_path)?);
+        let command = json!(callback_command(&self.url, &self.script_path)?);
         let status = if launch
             .env
             .get(std::ffi::OsStr::new("MATOU_LOCALE"))
@@ -524,11 +524,10 @@ impl ProviderHookServer {
             script: directory.join(format!("{token}.statusline.sh")),
             temporary: directory.join(format!("{token}.settings.json.tmp")),
         };
-        let script = if scope.profile == LaunchProfile::Dsh {
-            String::new()
-        } else if scope.profile == LaunchProfile::Antigravity {
+        if scope.profile == LaunchProfile::Antigravity {
             let settings = json!({"statusLine": {
-                "type": "command", "command": script_command(&files.script)?, "stack_with_default": true,
+                "type": "command", "command": callback_command(&format!("{url}?kind=statusline"), &files.script)?,
+                "stack_with_default": true,
             }});
             write_private(
                 &files.temporary,
@@ -536,14 +535,7 @@ impl ProviderHookServer {
                 0o600,
             )?;
             fs::rename(&files.temporary, &files.settings)?;
-            format!(
-                "#!/bin/sh\npayload=$(cat)\n(printf '%s' \"$payload\" | /usr/bin/curl --noproxy '*' --silent --max-time 2 --request POST --header 'content-type: application/json' --data-binary @- '{url}?kind=statusline') </dev/null >/dev/null 2>&1 &\n"
-            )
-        } else if scope.profile == LaunchProfile::Codex {
-            format!(
-                "#!/bin/sh\n/usr/bin/curl --noproxy '*' --silent --show-error --max-time 2 --request POST --header 'content-type: application/json' --data-binary @- '{url}' >/dev/null 2>&1 || true\n"
-            )
-        } else {
+        } else if !matches!(scope.profile, LaunchProfile::Dsh | LaunchProfile::Codex) {
             let settings = settings(&url, &files.script, permission_respawn)?;
             write_private(
                 &files.temporary,
@@ -553,10 +545,22 @@ impl ProviderHookServer {
             .context("write provider settings")?;
             fs::rename(&files.temporary, &files.settings).context("publish provider settings")?;
             File::open(&files.settings).context("read provider settings")?;
-            status_script(&url)
-        };
-        write_private(&files.script, script.as_bytes(), 0o700)
-            .context("write provider hook script")?;
+        }
+        #[cfg(not(windows))]
+        {
+            let script = match scope.profile {
+                LaunchProfile::Dsh => String::new(),
+                LaunchProfile::Antigravity => format!(
+                    "#!/bin/sh\npayload=$(cat)\n(printf '%s' \"$payload\" | /usr/bin/curl --noproxy '*' --silent --max-time 2 --request POST --header 'content-type: application/json' --data-binary @- '{url}?kind=statusline') </dev/null >/dev/null 2>&1 &\n"
+                ),
+                LaunchProfile::Codex => format!(
+                    "#!/bin/sh\n/usr/bin/curl --noproxy '*' --silent --show-error --max-time 2 --request POST --header 'content-type: application/json' --data-binary @- '{url}' >/dev/null 2>&1 || true\n"
+                ),
+                _ => status_script(&url),
+            };
+            write_private(&files.script, script.as_bytes(), 0o700)
+                .context("write provider hook script")?;
+        }
         let settings_path = files.settings.clone();
         let script_path = files.script.clone();
         self.registry.lock().unwrap().insert(
@@ -623,11 +627,17 @@ fn write_private(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
     set_mode(path, mode)
 }
 
-fn script_command(script: &Path) -> Result<String> {
+fn callback_command(url: &str, script: &Path) -> Result<String> {
+    callback_command_for_platform(url, script, cfg!(windows))
+}
+
+fn callback_command_for_platform(url: &str, script: &Path, windows: bool) -> Result<String> {
+    if windows {
+        return Ok(windows_callback_command(url));
+    }
     let script = script
         .to_str()
         .context("provider statusline path is not UTF-8")?;
-    #[cfg(unix)]
     let command = if script
         .bytes()
         .all(|byte| byte.is_ascii_alphanumeric() || b"/._-".contains(&byte))
@@ -636,18 +646,33 @@ fn script_command(script: &Path) -> Result<String> {
     } else {
         format!("'{}'", script.replace('\'', "'\\''"))
     };
-    #[cfg(not(unix))]
-    let command = script.to_owned();
     Ok(command)
 }
 
+fn windows_callback_command(url: &str) -> String {
+    // The URL is generated from the loopback port, token and optional callback kind.
+    // Double quotes work in both cmd and PowerShell. curl reads the original stdin.
+    format!(
+        r#"curl.exe --disable --silent --noproxy "*" --max-time 2 --output NUL --request POST --header "content-type: application/json" --data-binary "@-" "{url}""#
+    )
+}
+
 pub(crate) fn bundled_claude_plugin(executable: &Path) -> Option<PathBuf> {
-    let macos = executable.parent()?;
-    let contents = macos.parent()?;
-    if macos.file_name()?.to_str()? != "MacOS" || contents.file_name()?.to_str()? != "Contents" {
-        return None;
-    }
-    let plugin = contents.join("Resources/control-assets/providers/claude-plugin");
+    let executable_dir = executable.parent()?;
+    let resources = if executable
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("exe"))
+    {
+        executable_dir.join("resources")
+    } else {
+        let contents = executable_dir.parent()?;
+        if executable_dir.file_name()? != "MacOS" || contents.file_name()? != "Contents" {
+            return None;
+        }
+        contents.join("Resources")
+    };
+    let plugin = resources.join("control-assets/providers/claude-plugin");
     plugin
         .join(".claude-plugin/plugin.json")
         .is_file()
@@ -750,7 +775,7 @@ pub(crate) fn claude_config_counts(cwd: &Path, config: &Path) -> Value {
 }
 
 fn settings(url: &str, script: &Path, permission_respawn: bool) -> Result<Value> {
-    let command = script_command(script)?;
+    let command = callback_command(&format!("{url}?kind=statusline"), script)?;
     let mut hooks: Map<String, Value> = EVENTS
         .into_iter()
         .map(|(event, timeout)| {
@@ -764,13 +789,13 @@ fn settings(url: &str, script: &Path, permission_respawn: bool) -> Result<Value>
         // Some CLI versions skip HTTP SessionStart hooks. This switch holds
         // input until identity is known, so the startup event must reach the
         // same run-scoped listener without a user prompt.
-        #[cfg(unix)]
-        let (curl, sink) = ("/usr/bin/curl", "/dev/null");
-        #[cfg(not(unix))]
-        let (curl, sink) = ("curl.exe", "NUL");
-        let command = format!(
-            "{curl} --silent --noproxy '*' --max-time 2 --output {sink} --header 'content-type: application/json' --data-binary @- '{url}'"
-        );
+        let command = if cfg!(windows) {
+            windows_callback_command(url)
+        } else {
+            format!(
+                "/usr/bin/curl --silent --noproxy '*' --max-time 2 --output /dev/null --header 'content-type: application/json' --data-binary @- '{url}'"
+            )
+        };
         hooks.insert(
             "SessionStart".into(),
             json!([{
@@ -784,6 +809,7 @@ fn settings(url: &str, script: &Path, permission_respawn: bool) -> Result<Value>
     }))
 }
 
+#[cfg(not(windows))]
 fn status_script(url: &str) -> String {
     format!(
         "#!/bin/sh\n/usr/bin/curl --silent --show-error --max-time 2 --request POST --header 'content-type: application/json' --data-binary @- '{url}?kind=statusline' >/dev/null 2>&1 || true\n"
@@ -1170,6 +1196,46 @@ mod tests {
     }
 
     #[test]
+    fn windows_callbacks_use_raw_stdin_and_need_no_script_path() -> Result<()> {
+        let script = Path::new("C:/Matou data & tools/provider-hooks/ignored.sh");
+        let endpoint = "http://127.0.0.1:9000/hooks/token";
+        for url in [endpoint.to_owned(), format!("{endpoint}?kind=statusline")] {
+            let command = callback_command_for_platform(&url, script, true)?;
+            assert_eq!(
+                command,
+                format!(
+                    r#"curl.exe --disable --silent --noproxy "*" --max-time 2 --output NUL --request POST --header "content-type: application/json" --data-binary "@-" "{url}""#
+                )
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn bundled_claude_plugin_resolves_both_package_layouts() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        for (executable, plugin) in [
+            (
+                root.path().join("Matou package/matou-native-runtime.exe"),
+                root.path().join("Matou package/resources"),
+            ),
+            (
+                root.path()
+                    .join("Matou.app/Contents/MacOS/matou-native-runtime"),
+                root.path().join("Matou.app/Contents/Resources"),
+            ),
+        ] {
+            let plugin = plugin.join("control-assets/providers/claude-plugin");
+            let metadata = plugin.join(".claude-plugin");
+            fs::create_dir_all(&metadata)?;
+            assert_eq!(bundled_claude_plugin(&executable), None);
+            fs::write(metadata.join("plugin.json"), "{}")?;
+            assert_eq!(bundled_claude_plugin(&executable), Some(plugin));
+        }
+        Ok(())
+    }
+
+    #[test]
     fn files_and_ingress_match_contract() -> Result<()> {
         let root = tempfile::tempdir()?;
         let server = ProviderHookServer::start()?;
@@ -1203,23 +1269,34 @@ mod tests {
                 json!([{"hooks": [{"type": "http", "url": url, "timeout": timeout}]}])
             );
         }
-        assert_eq!(
-            config["statusLine"],
-            json!({"type": "command", "command": script, "padding": 0})
-        );
-        assert_eq!(
-            fs::read_to_string(&script)?,
-            format!(
-                "#!/bin/sh\n/usr/bin/curl --silent --show-error --max-time 2 --request POST --header 'content-type: application/json' --data-binary @- '{url}?kind=statusline' >/dev/null 2>&1 || true\n"
-            )
-        );
-        let directory = script.parent().unwrap();
-        assert_eq!(fs::read_dir(directory)?.count(), 2);
+        #[cfg(not(windows))]
+        {
+            assert_eq!(
+                config["statusLine"],
+                json!({"type": "command", "command": script, "padding": 0})
+            );
+            assert_eq!(
+                fs::read_to_string(&script)?,
+                format!(
+                    "#!/bin/sh\n/usr/bin/curl --silent --show-error --max-time 2 --request POST --header 'content-type: application/json' --data-binary @- '{url}?kind=statusline' >/dev/null 2>&1 || true\n"
+                )
+            );
+            assert_eq!(fs::read_dir(script.parent().unwrap())?.count(), 2);
+        }
+        #[cfg(windows)]
+        {
+            assert_eq!(
+                config["statusLine"],
+                json!({"type": "command", "command": windows_callback_command(&format!("{url}?kind=statusline")), "padding": 0})
+            );
+            assert!(!script.exists());
+            assert_eq!(fs::read_dir(script.parent().unwrap())?.count(), 1);
+        }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             for (path, expected) in [
-                (directory, 0o700),
+                (script.parent().unwrap(), 0o700),
                 (&run.settings_path, 0o600),
                 (&script, 0o700),
             ] {

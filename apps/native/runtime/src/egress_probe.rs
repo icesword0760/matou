@@ -420,6 +420,7 @@ impl HostPair {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct EgressSample {
     hosts: BTreeMap<Family, HostPair>,
+    live_trace_only: bool,
     pub browser_login: Option<HostSample>,
     pub agent_has_proxy_env: bool,
     pub system_proxy_enabled: bool,
@@ -617,24 +618,37 @@ fn matches_no_proxy(rule: &str, host: &str, port: u16) -> bool {
 fn proxy_environment() -> ProxyEnvironment {
     PROXY_KEYS
         .into_iter()
-        .flatten()
-        .filter_map(|key| std::env::var(key).ok().map(|value| (key, value)))
+        .filter_map(|[lower, upper]| {
+            std::env::var(lower)
+                .or_else(|_| std::env::var(upper))
+                .ok()
+                .map(|value| (lower, value))
+        })
         .collect()
 }
 
 fn anthropic_proxy_environment(mut env: ProxyEnvironment) -> ProxyEnvironment {
-    let Some(home) = std::env::home_dir() else {
+    // Use the same Claude directory as the session catalog, including overrides.
+    let Some(mut config) = crate::provider_catalog::projects_root() else {
         return env;
     };
-    let settings = std::fs::File::open(home.join(".claude").join("settings.json"))
+    config.pop();
+    let settings = std::fs::File::open(config.join("settings.json"))
         .ok()
         .and_then(|file| {
             serde_json::from_reader::<_, serde_json::Value>(io::BufReader::new(file)).ok()
         });
-    if let Some(settings) = settings {
-        for key in PROXY_KEYS.into_iter().flatten() {
-            if let Some(value) = settings["env"][key].as_str() {
-                env.insert(key, value.to_owned());
+    if let Some(overrides) = settings
+        .as_ref()
+        .and_then(|settings| settings["env"].as_object())
+    {
+        for (key, value) in overrides {
+            if let Some(value) = value.as_str()
+                && let Some([lower, _]) = PROXY_KEYS
+                    .into_iter()
+                    .find(|[lower, _]| key.eq_ignore_ascii_case(lower))
+            {
+                env.insert(lower, value.to_owned());
             }
         }
     }
@@ -756,14 +770,15 @@ fn sample_trace_batch(base: Option<&Url>, incoming: &mpsc::Receiver<()>) -> Opti
         }
     }
     let mut sample = plan.collect_full(samples);
-    sample.agent_has_proxy_env = [HTTPS_PROXY_KEYS, HTTP_PROXY_KEYS, ALL_PROXY_KEYS]
-        .into_iter()
-        .flatten()
-        .any(|key| {
-            anthropic
-                .get(key)
-                .is_some_and(|value| !value.trim().is_empty())
-        });
+    sample.live_trace_only = true;
+    sample.agent_has_proxy_env =
+        ["https_proxy", "http_proxy", "all_proxy"]
+            .into_iter()
+            .any(|key| {
+                anthropic
+                    .get(key)
+                    .is_some_and(|value| !value.trim().is_empty())
+            });
     Some(sample)
 }
 
@@ -1056,15 +1071,29 @@ pub fn evaluate_egress(sample: &EgressSample, rule: &EgressRule) -> Evaluation {
         families.push(evaluation);
         checks.extend(family_checks);
     }
-    checks.extend([
-        global_check(
-            CheckId::AgentProxyPath,
-            sample.system_proxy_enabled && !sample.agent_has_proxy_env && !sample.tun_detected,
-        ),
-        browser_check(sample),
-        global_check(CheckId::TimeZone, sample.agent_time_zone_mainland),
-        global_check(CheckId::Ipv6, sample.ipv6_bypass),
-    ]);
+    if sample.live_trace_only {
+        checks.extend(
+            [
+                CheckId::AgentProxyPath,
+                CheckId::BrowserPath,
+                CheckId::TimeZone,
+                CheckId::Ipv6,
+            ]
+            .map(|id| {
+                Check::new(id, None, CheckResult::Unknown).facts([("reason", "notCollected")])
+            }),
+        );
+    } else {
+        checks.extend([
+            global_check(
+                CheckId::AgentProxyPath,
+                sample.system_proxy_enabled && !sample.agent_has_proxy_env && !sample.tun_detected,
+            ),
+            browser_check(sample),
+            global_check(CheckId::TimeZone, sample.agent_time_zone_mainland),
+            global_check(CheckId::Ipv6, sample.ipv6_bypass),
+        ]);
+    }
     let state = if families
         .iter()
         .any(|family| family.state == State::Abnormal)
@@ -1075,7 +1104,12 @@ pub fn evaluate_egress(sample: &EgressSample, rule: &EgressRule) -> Evaluation {
         .any(|family| matches!(family.state, State::Unknown | State::Warning))
         || checks.iter().any(|check| {
             check.result == CheckResult::Warn
-                || (check.result == CheckResult::Unknown && check.id != CheckId::LoginApiMatch)
+                || (check.result == CheckResult::Unknown
+                    && check.id != CheckId::LoginApiMatch
+                    && check
+                        .facts
+                        .get("reason")
+                        .is_none_or(|reason| reason != "notCollected"))
         })
     {
         State::Warning
@@ -1917,6 +1951,9 @@ where
         let fact = |key| check.facts.get(key).map(String::as_str).unwrap_or_default();
         let host = fact("host");
         let detail = match check.result {
+            CheckResult::Unknown if fact("reason") == "notCollected" => {
+                Some(self.locale.text("本次未采集", "Not collected in this check").into())
+            }
             CheckResult::Unknown => {
                 let target = if host.is_empty() { String::new() } else { format!("{host} ") };
                 let reason = match fact("error") {
@@ -2183,6 +2220,78 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claude_proxy_overrides_replace_inherited_keys_without_case_duplicates() {
+        const CHILD: &str = "MATOU_TEST_CLAUDE_PROXY_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let fixture = tempfile::tempdir().unwrap();
+            let config = fixture.path().join("custom Claude config");
+            std::fs::create_dir(&config).unwrap();
+            std::fs::write(
+                config.join("settings.json"),
+                r#"{"env":{"HTTPS_PROXY":"new:443","nO_pRoXy":"example.invalid","OTHER":"ignored"}}"#,
+            )
+            .unwrap();
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "egress_probe::tests::claude_proxy_overrides_replace_inherited_keys_without_case_duplicates",
+                ])
+                .env(CHILD, "1")
+                .env("CLAUDE_CONFIG_DIR", config)
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains("1 passed"),
+                "{stdout}"
+            );
+            return;
+        }
+        let env = anthropic_proxy_environment(BTreeMap::from([
+            ("https_proxy", "old:443".into()),
+            ("http_proxy", "plain:80".into()),
+        ]));
+        assert_eq!(
+            env,
+            BTreeMap::from([
+                ("http_proxy", "plain:80".into()),
+                ("https_proxy", "new:443".into()),
+                ("no_proxy", "example.invalid".into()),
+            ])
+        );
+    }
+
+    #[test]
+    fn live_trace_reports_uncollected_signals_without_changing_host_health() {
+        let (api, login) = Family::Anthropic.hosts();
+        let exit = Exit {
+            ip: "203.0.113.7".into(),
+            country: "US".into(),
+        };
+        let mut sample = EgressSample::new(BTreeMap::from([(
+            Family::Anthropic,
+            HostPair::new(
+                Family::Anthropic,
+                HostSample::success(api, exit.clone()),
+                HostSample::success(login, exit),
+            ),
+        )]));
+        sample.live_trace_only = true;
+        let evaluation = evaluate_egress(&sample, &EgressRule::default());
+        assert_eq!(evaluation.state, State::Ok);
+        let checks: Vec<_> = evaluation
+            .checks
+            .iter()
+            .filter(|check| check.family.is_none())
+            .collect();
+        assert_eq!(checks.len(), 4);
+        for check in checks {
+            assert_eq!(check.result, CheckResult::Unknown, "{check:?}");
+            assert_eq!(check.facts["reason"], "notCollected");
+        }
+    }
 
     #[test]
     fn live_trace_proxy_matches_frozen_precedence_and_bypass() {
