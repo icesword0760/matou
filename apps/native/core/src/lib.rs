@@ -7,6 +7,7 @@ pub mod geometry;
 pub mod git_repo;
 pub mod hierarchy;
 pub mod journal;
+pub mod link_routing;
 pub mod ownership;
 pub mod provider_config;
 pub mod provider_launch;
