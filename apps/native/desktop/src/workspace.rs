@@ -49,6 +49,10 @@ pub mod database_recovery_page;
 mod dag_window;
 use dag_window::DagWindow;
 
+#[path = "workspace_wiring.rs"]
+mod workspace_wiring;
+use workspace_wiring::WorkspaceWiring;
+
 #[cfg(all(target_os = "macos", debug_assertions))]
 #[path = "../tests/support/dag_window_probe.rs"]
 mod dag_window_probe;
@@ -867,6 +871,8 @@ const CONTROLS: &[&str] = &[
     "notifications",
     "task-menu",
     "board",
+    "sidebar-board",
+    "shortcut-help",
     "settings",
     "add-tab",
     "tab-overflow",
@@ -874,7 +880,6 @@ const CONTROLS: &[&str] = &[
     "dag-open-retry",
     "dag-open-dismiss",
     "split",
-    "update",
     "project-instructions",
     "project-instructions-close",
     "project-instructions-preview",
@@ -1308,8 +1313,8 @@ pub struct Workspace {
     card_controls: HashMap<String, FocusHandle>,
     remove_card_controls: HashMap<String, FocusHandle>,
     fork_controls: HashMap<String, [FocusHandle; 4]>,
-    fork_menu: Option<(String, Point<Pixels>, FocusHandle, FocusHandle)>,
-    fork_readiness: Option<&'static str>,
+    wiring: WorkspaceWiring,
+    fork_readiness: Option<String>,
     fork_readiness_generation: u64,
     fork_retries: HashMap<String, ForkRetry>,
     keyboard_focus: bool,
@@ -2357,7 +2362,7 @@ impl Workspace {
             card_controls: HashMap::new(),
             remove_card_controls: HashMap::new(),
             fork_controls: HashMap::new(),
-            fork_menu: None,
+            wiring: WorkspaceWiring::new(window, cx),
             fork_readiness: None,
             fork_readiness_generation: 0,
             fork_retries: HashMap::new(),
@@ -2474,7 +2479,7 @@ impl Workspace {
         self.task_menu = None;
         self.tab_menu = None;
         self.hidden_tabs = None;
-        self.fork_menu = None;
+        self.dismiss_wiring_overlay(window, cx);
         self.permission_menu = None;
         let commands = self.commands.clone();
         let settings = cx.new(|cx| {
@@ -3164,7 +3169,7 @@ impl Workspace {
                 !self.scenes.iter().any(|s| &s.id == scene_id)
             }
             TabDialog::RenameSession { session_id, .. } => {
-                self.codex_title_card(session_id).is_none()
+                self.renameable_card(session_id).is_none()
             }
             TabDialog::CloseSession {
                 scene_id,
@@ -3436,6 +3441,7 @@ impl Workspace {
                         self.apply_tasks(Vec::new(), cx);
                         self.replace_fork_graph(Value::Null, window, cx);
                         self.refresh_terminals(window, cx);
+                        self.sync_wiring_graph(window, cx);
                         cx.notify();
                         return;
                     }
@@ -3759,6 +3765,7 @@ impl Workspace {
                 self.finish_card_action(&graph["sessionCardAction"]);
                 self.replace_fork_graph(graph, window, cx);
                 self.refresh_terminals(window, cx);
+                self.sync_wiring_graph(window, cx);
                 if fresh_ready {
                     self.session_frames.clear();
                     self.recovery.clear();
@@ -3822,6 +3829,11 @@ impl Workspace {
                         || notification_focus.is_some())
                     && self.dialog.is_none()
                     && self.settings.is_none()
+                    && !self.wiring.board_open
+                    && self
+                        .focused
+                        .as_deref()
+                        .is_none_or(|id| !self.wiring.is_detached(id))
                     && self.active_path_valid()
                     && (return_to_terminal
                         || self
@@ -3861,6 +3873,9 @@ impl Workspace {
                 }
             }
             Event::ScenesDisposed(ids) => {
+                for id in &ids {
+                    self.forget_board_scene(id);
+                }
                 if self
                     .history_request
                     .as_ref()
@@ -3869,6 +3884,7 @@ impl Workspace {
                     self.dismiss_history_context(cx);
                 }
                 for id in ids {
+                    self.discard_wiring_session(&id, cx);
                     for (_, sessions) in self.notification_scene_sessions.values_mut() {
                         sessions.remove(&id);
                     }
@@ -4056,6 +4072,7 @@ impl Workspace {
                 });
                 self.replace_fork_graph(graph, window, cx);
                 self.refresh_terminals(window, cx);
+                self.sync_wiring_graph(window, cx);
                 if self.dialog.as_ref().is_some_and(TabDialog::is_session_card) {
                     self.close_invalid_dialog(window, cx);
                 }
@@ -4154,6 +4171,8 @@ impl Workspace {
                         && self.order.contains(&session_id)
                         && self.dialog.is_none()
                         && self.settings.is_none()
+                        && !self.wiring.board_open
+                        && !self.wiring.is_detached(&session_id)
                         && self.active_path_valid()
                         && !self.recovery_blocked(&session_id)
                         && window.focused(cx).is_none()
@@ -4252,6 +4271,11 @@ impl Workspace {
                     && self.active_level_focus() == Some(session_id.as_str())
                     && self.dialog.is_none()
                     && self.settings.is_none()
+                    && !self.wiring.board_open
+                    && self
+                        .focused
+                        .as_deref()
+                        .is_none_or(|id| !self.wiring.is_detached(id))
                     && self.active_path_valid()
                     && !self.recovery_blocked(&session_id)
                     && window.focused(cx).is_none()
@@ -4355,7 +4379,7 @@ impl Workspace {
                 self.resize_revisions.remove(id);
                 continue;
             }
-            if self.terminals.contains_key(id) {
+            if Self::team_member_node(node) || self.terminals.contains_key(id) {
                 continue;
             }
             let disabled = !self.active_path_valid();
@@ -4961,10 +4985,12 @@ impl Workspace {
             let blocked = self.recovery_blocked(id);
             #[cfg(target_os = "macos")]
             let blocked = blocked || self.recovery_water_covers_terminal(id);
-            let disabled = disabled
+            let disabled = self.database_recovery.is_some()
+                || self.detached_path_invalid(id).unwrap_or(disabled)
                 || self.read_only.is_some()
                 || blocked
-                || self.settings.is_some()
+                || (self.settings.is_some() && !self.wiring.is_detached(id))
+                || self.egress_frozen(id)
                 || self
                     .history_request
                     .as_ref()
@@ -5981,16 +6007,24 @@ impl Workspace {
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgb(0x989da7))
                     .child(
-                        self.control(
+                        self.button(
                             div()
+                                .id("sidebar-board")
+                                .cursor_pointer()
                                 .h(px(30.))
                                 .px(px(10.))
                                 .flex()
                                 .items_center()
                                 .gap(px(7.))
                                 .child(icon("columns-3", 16., 0x989da7))
-                                .child(self.locale.text("看板", "Board")),
-                            "board",
+                                .child(if self.wiring.board_open {
+                                    self.locale.text("画布", "Canvas")
+                                } else {
+                                    self.locale.text("看板", "Board")
+                                }),
+                            &self.control_focus["sidebar-board"],
+                            Self::toggle_board,
+                            cx,
                         ),
                     )
                     .child(self.button(
@@ -6417,15 +6451,17 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let Some(title) = self
-            .codex_title_card(&session_id)
+            .renameable_card(&session_id)
             .and_then(|node| node["title"].as_str())
             .map(str::to_owned)
         else {
             return;
         };
-        self.fork_menu = None;
+        self.dismiss_wiring_overlay(window, cx);
         let input = self.open_title_input(title, window, cx);
-        input.update(cx, |input, _| input.placeholder = "会话名称".into());
+        input.update(cx, |input, _| {
+            input.placeholder = self.locale.text("会话名称", "Session name").into();
+        });
         self.dialog = Some(TabDialog::RenameSession {
             session_id,
             input,
@@ -6502,7 +6538,7 @@ impl Workspace {
         {
             let text = input.read(cx);
             let title = trim_name(&text.text);
-            if !text.composing() && !title.is_empty() && self.codex_title_card(session_id).is_some()
+            if !text.composing() && !title.is_empty() && self.renameable_card(session_id).is_some()
             {
                 self.send(
                     Command::SetSessionTitle {
@@ -6836,7 +6872,7 @@ impl Workspace {
             self.workspace_menu = None;
             self.task_menu = None;
             self.tab_menu = None;
-            self.fork_menu = None;
+            self.dismiss_wiring_overlay(window, cx);
             self.hidden_tabs = None;
             cx.notify();
         }
@@ -7070,9 +7106,9 @@ impl Workspace {
         })
     }
 
-    fn codex_title_card(&self, id: &str) -> Option<&Value> {
+    fn renameable_card(&self, id: &str) -> Option<&Value> {
         self.graph_node(id).filter(|node| {
-            node["currentMode"] == "codex"
+            !Self::team_member_node(node)
                 && node["archivedAt"].is_null()
                 && self.card_mutation_blocked_reason(id, node).is_none()
         })
@@ -7270,8 +7306,8 @@ impl Workspace {
             })
     }
 
-    fn show_fork_readiness(&mut self, message: &'static str, cx: &mut Context<Self>) {
-        self.fork_readiness = Some(message);
+    fn show_fork_readiness(&mut self, message: impl Into<String>, cx: &mut Context<Self>) {
+        self.fork_readiness = Some(message.into());
         self.fork_readiness_generation += 1;
         let generation = self.fork_readiness_generation;
         cx.spawn(async move |this, cx| {
@@ -7289,28 +7325,6 @@ impl Workspace {
         cx.notify();
     }
 
-    fn open_fork_menu(&mut self, id: &str, position: Point<Pixels>, cx: &mut Context<Self>) {
-        if self.dialog.is_some()
-            || (self.codex_title_card(id).is_none()
-                && self
-                    .fork_access(id, ForkPlacement::Peer)
-                    .is_none_or(|access| access.blocked.is_some()))
-        {
-            return;
-        }
-        self.workspace_menu = None;
-        self.task_menu = None;
-        self.tab_menu = None;
-        self.hidden_tabs = None;
-        self.fork_menu = Some((
-            id.to_owned(),
-            position,
-            cx.focus_handle().tab_stop(true),
-            cx.focus_handle().tab_stop(true),
-        ));
-        cx.notify();
-    }
-
     fn open_fork(
         &mut self,
         id: &str,
@@ -7318,7 +7332,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.fork_menu = None;
+        self.dismiss_wiring_overlay(window, cx);
         cx.notify();
         if self.dialog.is_some() {
             return;
@@ -7505,12 +7519,6 @@ impl Workspace {
                 .map_or(&[], Vec::as_slice),
             cx,
         );
-        if self.fork_menu.as_ref().is_some_and(|(id, _, _, _)| {
-            self.codex_title_card(id).is_none()
-                && self.fork_access(id, ForkPlacement::Peer).is_none()
-        }) {
-            self.fork_menu = None;
-        }
         if let Some(result) = result {
             let error = result["error"].as_str();
             if let Some(TabDialog::Branch(state)) = &mut self.dialog
@@ -8720,6 +8728,17 @@ impl Workspace {
     }
 
     fn request_close_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = self.active_level_focus().map(str::to_owned) {
+            self.request_close_session_by_id(&id, window, cx);
+        }
+    }
+
+    fn request_close_session_by_id(
+        &mut self,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.read_only.is_some() {
             return;
         }
@@ -8729,7 +8748,7 @@ impl Workspace {
         {
             return;
         }
-        let (Some(scene_id), Some(id)) = (self.active_scene_id(), self.active_level_focus()) else {
+        let Some(scene_id) = self.active_scene_id() else {
             return;
         };
         if !self.card_action_available(id) {
@@ -9556,6 +9575,10 @@ impl Workspace {
             }
             return;
         }
+        if self.wiring_key(stroke, window, cx) {
+            cx.stop_propagation();
+            return;
+        }
         let mods = stroke.modifiers;
         if self.project_instructions_preview.is_some() {
             self.project_instructions_key(stroke, window, cx);
@@ -9626,11 +9649,7 @@ impl Workspace {
             }
             return;
         }
-        if stroke.key == "escape" && self.fork_menu.take().is_some() {
-            cx.notify();
-            cx.stop_propagation();
-            return;
-        }
+
         if stroke.key == "escape" && self.permission_menu.is_some() {
             self.dismiss_permission_menu(window, cx);
             cx.stop_propagation();
@@ -9819,10 +9838,6 @@ impl Workspace {
             .inset_0()
             .size_full(),
         )
-    }
-
-    fn control(&self, element: Div, id: &str) -> Div {
-        self.focus_control(element, &self.control_focus[id])
     }
 
     fn button<E: StatefulInteractiveElement + ParentElement + Styled>(
@@ -10118,6 +10133,60 @@ impl Workspace {
             .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
             .child(tabs)
             .when(self.tab_overflow, |bar| bar.child(overflow_actions))
+            .when(
+                self.hierarchy
+                    .as_ref()
+                    .is_some_and(|hierarchy| hierarchy.workspace.is_some()),
+                |bar| {
+                    let palette = self.theme_palette().workspace;
+                    bar.child(
+                        self.button(
+                            div()
+                                .id("workspace-board-toggle")
+                                .flex_none()
+                                .px(px(7.))
+                                .py(px(4.))
+                                .rounded(px(5.))
+                                .cursor_pointer()
+                                .text_size(px(11.))
+                                .text_color(rgba(palette.text))
+                                .bg(rgba(palette.panel))
+                                .hover(move |style| style.bg(rgba(palette.accent_soft)))
+                                .child(if self.wiring.board_open {
+                                    self.locale.text("画布", "Canvas")
+                                } else {
+                                    self.locale.text("看板", "Board")
+                                }),
+                            &self.control_focus["board"],
+                            Self::toggle_board,
+                            cx,
+                        ),
+                    )
+                },
+            )
+            .child(
+                self.button(
+                    div()
+                        .id("shortcut-help")
+                        .size(px(28.))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(5.))
+                        .text_color(rgba(self.theme_palette().workspace.muted))
+                        .bg(rgba(self.theme_palette().workspace.panel))
+                        .cursor_pointer()
+                        .tooltip({
+                            let label = self.locale.text("快捷键", "Keyboard shortcuts");
+                            move |_, cx| cx.new(|_| CardTooltip(label.into())).into()
+                        })
+                        .child("?"),
+                    &self.control_focus["shortcut-help"],
+                    Self::toggle_shortcuts,
+                    cx,
+                ),
+            )
             .child(
                 self.button(
                     div()
@@ -10165,21 +10234,7 @@ impl Workspace {
                     .into_any_element()
                 }
             })
-            .child(
-                self.control(
-                    div()
-                        .size(px(30.))
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(icon("upload", 16., 0x747b88).with_transformation(
-                            Transformation::rotate(Radians(std::f32::consts::PI)),
-                        )),
-                    "update",
-                )
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()),
-            )
+            .child(self.update_trigger(cx))
     }
 
     fn remove_scope_choice(
@@ -12129,83 +12184,6 @@ impl Workspace {
             .into_any_element()
     }
 
-    fn render_fork_menu(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (id, position, focus, restore_focus) = self.fork_menu.as_ref()?;
-        let mut menu = tabs_ui::context_menu("fork-card-menu")
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
-        let mut width = px(132.);
-        let mut height = px(36.);
-        if let Some(node) = self.codex_title_card(id) {
-            let rename_id = id.clone();
-            menu = menu.child(self.mutation_button(
-                tabs_ui::menu_item("session-rename-menu", "重命名…"),
-                focus,
-                move |this, window, cx| this.open_session_rename(rename_id.clone(), window, cx),
-                cx,
-            ));
-            if node["titleSource"] == "manual" {
-                width = px(156.);
-                height += px(28.);
-                let session_id = id.clone();
-                menu = menu.child(self.mutation_button(
-                    tabs_ui::menu_item("session-restore-title-menu", "恢复 Codex 自动标题"),
-                    restore_focus,
-                    move |this, _, cx| {
-                        this.fork_menu = None;
-                        this.send(
-                            Command::SetSessionTitle {
-                                session_id: session_id.clone(),
-                                title: None,
-                            },
-                            cx,
-                        );
-                        cx.notify();
-                    },
-                    cx,
-                ));
-            }
-        } else {
-            let access = self.fork_access(id, ForkPlacement::Peer)?;
-            if access.blocked.is_some() {
-                return None;
-            }
-            let tooltip = access.readiness.unwrap_or("创建 Fork 会话");
-            let item = tabs_ui::menu_item("fork-menu-peer", "⑂ Fork 会话")
-                .when(access.readiness.is_some(), |item| item.opacity(0.38))
-                .tooltip(move |_, cx| cx.new(|_| CardTooltip(tooltip.into())).into());
-            let id = id.clone();
-            menu = menu.child(self.button(
-                item,
-                focus,
-                move |this, window, cx| this.open_fork(&id, ForkPlacement::Peer, window, cx),
-                cx,
-            ));
-        }
-        let viewport = window.viewport_size();
-        let position = point(
-            position.x.min((viewport.width - width).max(px(0.))),
-            position.y.min((viewport.height - height).max(px(0.))),
-        );
-        let menu = menu.w(width).left(position.x).top(position.y);
-        let dismiss =
-            |this: &mut Self, _: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>| {
-                this.fork_menu = None;
-                cx.stop_propagation();
-                cx.notify();
-            };
-        Some(
-            div()
-                .id("fork-menu-overlay")
-                .absolute()
-                .inset_0()
-                .occlude()
-                .on_mouse_down(MouseButton::Left, cx.listener(dismiss))
-                .on_mouse_down(MouseButton::Right, cx.listener(dismiss))
-                .child(menu)
-                .into_any_element(),
-        )
-    }
-
     fn tab_overlay(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         if let Some(TabDialog::Branch(state)) = &self.dialog {
             return Some(self.render_branch_dialog(state, window, cx));
@@ -12268,9 +12246,17 @@ impl Workspace {
                     let value = trim_name(&input.read(cx).text);
                     let mut body = tabs_ui::dialog_body().child(input.clone());
                     if failure.as_deref() == Some(value) {
-                        body = body.child(tabs_ui::dialog_error("重命名失败，请稍后重试"));
+                        body = body.child(tabs_ui::dialog_error(self.locale.text(
+                            "重命名失败，请稍后重试", "Could not rename the session. Try again."
+                        )));
                     }
-                    ("重命名会话".into(), body, "确定".into(), true, value.is_empty())
+                    (
+                        self.locale.text("重命名会话", "Rename session").into(),
+                        body,
+                        self.locale.text("确定", "Confirm").into(),
+                        true,
+                        value.is_empty(),
+                    )
                 }
                 TabDialog::Close {
                     scene_id,
@@ -13076,7 +13062,7 @@ impl Workspace {
             .text_color(rgb(0x606572))
             .when(self.graph.is_object(), |footer| footer.child(breadcrumb));
         if chip.is_none() && fields.is_none() {
-            return footer;
+            return footer.child(div().ml_auto().child(self.egress_trigger(cx)));
         }
         // The dismiss layer is mounted before the status area so the chip and
         // the deferred menu keep their own input handling above it.
@@ -13219,7 +13205,7 @@ impl Workspace {
                     );
                 }
             }
-            fixed = fixed.child(footer_egress(locale));
+            fixed = fixed.child(self.egress_trigger(cx));
             if fields.account {
                 fixed = fixed.child(footer_account(locale));
             }
@@ -13298,6 +13284,8 @@ impl Workspace {
                 }
             }
             status = status.child(optional).child(fixed);
+        } else {
+            status = status.child(div().ml_auto().child(self.egress_trigger(cx)));
         }
         status = status.child(
             // Measure the real status and optional boxes after layout. The next
@@ -13737,7 +13725,8 @@ impl Render for Workspace {
                 self.focus_follow_until = None;
             }
         }
-        if self.hover_baseline.is_none()
+        if !self.wiring.board_open
+            && self.hover_baseline.is_none()
             && self.hover_follow_until.is_none()
             && self.focus_follow_until.is_none()
             && !self.restore_geometry
@@ -13790,8 +13779,9 @@ impl Render for Workspace {
             }));
         let path_valid = self.active_path_valid();
         #[cfg(target_os = "macos")]
-        let recovery_water_available =
-            self.read_only.is_none() && self.recovery_water_available(window);
+        let recovery_water_available = !self.wiring.board_open
+            && self.read_only.is_none()
+            && self.recovery_water_available(window);
         let carousel_left =
             f64::from(-f32::from(self.carousel_scroll.offset().x)).clamp(0., max_scroll);
         #[cfg(target_os = "macos")]
@@ -13799,6 +13789,7 @@ impl Render for Workspace {
         let visible_deferred: Vec<_> = self
             .order
             .iter()
+            .filter(|_| !self.wiring.board_open)
             .filter(|&id| {
                 self.is_deferred(id)
                     && (!narrow || level_focus.as_ref() == Some(id))
@@ -13811,7 +13802,7 @@ impl Render for Workspace {
             self.request_deferred_preview(&id);
         }
         let mut badge_tooltip = None;
-        for id in &self.order {
+        for id in self.order.iter().filter(|_| !self.wiring.board_open) {
             let node = session_levels::node(session_levels::nodes(&self.graph), id);
             let selected = level_focus.as_ref() == Some(id);
             let width = widths[id] as f32;
@@ -13855,6 +13846,15 @@ impl Render for Workspace {
             let title = node
                 .and_then(|node| node["title"].as_str())
                 .unwrap_or("Shell");
+            if let Some(node) = node.filter(|node| Self::team_member_node(node)) {
+                carousel = carousel.child(card.child(self.render_team_member(id, node)));
+                continue;
+            }
+            if self.wiring.is_detached(id) {
+                carousel =
+                    carousel.child(card.child(self.render_detached_placeholder(id, title, cx)));
+                continue;
+            }
             if let Some(node) = node.filter(|node| !node["archivedAt"].is_null()) {
                 let card = if compact {
                     card.child(Self::compact_session_summary(Some(node), title))
@@ -14105,7 +14105,15 @@ impl Render for Workspace {
                 )
                 .children(badge.map(|badge| badge.absolute().top(px(8.)).right(px(8.))))
             } else if compact {
-                card.child(Self::compact_session_summary(node, title))
+                let target = id.clone();
+                card.on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                        this.open_wiring_card_menu(&target, event.position, window, cx);
+                        cx.stop_propagation();
+                    }),
+                )
+                .child(Self::compact_session_summary(node, title))
             } else {
                 card.child(
                     Self::session_card_header(
@@ -14115,6 +14123,7 @@ impl Render for Workspace {
                             .children(node.map(|node| self.session_loader_button(id, node, cx)))
                             .children(self.render_fork_header(id, ForkPlacement::Child, cx))
                             .children(self.render_fork_header(id, ForkPlacement::Sibling, cx))
+                            .children(self.card_more_button(id, cx))
                             .children(
                                 node.filter(|node| node["archivedAt"].is_null())
                                     .map(|node| self.remove_card_button(id, node, cx)),
@@ -14125,8 +14134,8 @@ impl Render for Workspace {
                         MouseButton::Right,
                         cx.listener({
                             let id = id.clone();
-                            move |this, event: &MouseDownEvent, _, cx| {
-                                this.open_fork_menu(&id, event.position, cx);
+                            move |this, event: &MouseDownEvent, window, cx| {
+                                this.open_wiring_card_menu(&id, event.position, window, cx);
                                 cx.stop_propagation();
                             }
                         }),
@@ -14146,6 +14155,7 @@ impl Render for Workspace {
                             .child(self.workspace_path_unavailable()),
                     )
                 })
+                .children(self.render_card_egress(id, cx))
                 .children(provider_banner.map(|banner| {
                     self.render_provider_restore_banner(id, banner, palette.terminal, cx)
                 }))
@@ -14310,21 +14320,22 @@ impl Render for Workspace {
         .absolute()
         .size_full();
         let canvas_dialog = matches!(self.dialog, Some(TabDialog::RemoveSession { .. }));
-        let overlay = self
-            .tab_overlay(window, cx)
-            .or_else(|| self.render_fork_menu(window, cx));
+        let overlay = self.tab_overlay(window, cx);
         let (carousel_overlay, window_overlay) = if canvas_dialog {
             (overlay, None)
         } else {
             (None, overlay)
         };
+        let board = self.render_board(cx);
         let carousel = div()
             .flex_1()
             .min_h_0()
             .relative()
             .flex()
-            .child(carousel)
-            .child(indicator)
+            .when(board.is_none(), |stage| {
+                stage.child(carousel).child(indicator)
+            })
+            .children(board)
             .children(carousel_overlay);
         let toast = self.task_toast.as_ref().map(|text| {
             div()
@@ -14459,11 +14470,13 @@ impl Render for Workspace {
             .children(toast)
             .children(
                 self.fork_readiness
+                    .as_deref()
                     .filter(|_| self.dialog.is_none())
                     .map(fork_readiness_toast),
             )
             .children(window_overlay)
             .children(self.project_instructions_overlay(window, cx))
+            .children(self.render_wiring_overlay(window, cx))
             .children(permission_toast);
         workspace_frame(root)
     }
@@ -15423,7 +15436,6 @@ const FOOTER_CWD_HIDE_BELOW: f32 = 440.;
 /// after tail ellipsis, so the whole field is hidden instead of left-clipped.
 const FOOTER_CWD_MIN_WIDTH: f32 = 64.;
 const FOOTER_SIDEBAR_WIDTH: f32 = 260.;
-const FOOTER_EGRESS_LABEL: &str = "出口";
 const FOOTER_ACCOUNT_LABEL: &str = "Claude 账户";
 
 /// Measured cwd/model/context visibility for the current window width and
@@ -15669,42 +15681,6 @@ fn footer_text_estimate(text: &str) -> f32 {
             _ => 11.,
         })
         .sum()
-}
-
-/// Neutral, non-interactive egress slot: frozen 5px dot, 10px label, 5px gap,
-/// 2px/7px padding and 5px radius. It never reports health or egress state.
-fn footer_egress(locale: InterfaceLocale) -> Stateful<Div> {
-    div()
-        .children(footer_bounds_probe("egress"))
-        .id("footer-egress")
-        .flex_none()
-        .child(
-            div()
-                .flex_none()
-                .flex()
-                .items_center()
-                .gap(px(5.))
-                .px(px(7.))
-                .py(px(2.))
-                .border_1()
-                .border_color(rgba(0x00000000))
-                .rounded(px(5.))
-                .text_color(rgb(0x606572))
-                .text_size(px(10.))
-                .line_height(px(14.))
-                .whitespace_nowrap()
-                .child(
-                    div()
-                        .flex_none()
-                        .size(px(5.))
-                        .rounded_full()
-                        .bg(rgb(0x606572)),
-                )
-                .child(div().overflow_hidden().text_ellipsis().child(footer_text(
-                    "egress",
-                    locale.text(FOOTER_EGRESS_LABEL, "Exit"),
-                ))),
-        )
 }
 
 /// Frozen `.ca-trigger` without an account name: 14px line user icon, "Claude
@@ -16587,7 +16563,7 @@ fn fork_progress_body(progress: ForkProgressCopy, now: f64) -> Stateful<Div> {
 
 /// `.fork-readiness-toast` (frozen light-surface variant): fixed below the card
 /// head, horizontally centered, max 420px. The host owns the 2.8s dismissal.
-fn fork_readiness_toast(message: &'static str) -> Div {
+fn fork_readiness_toast(message: &str) -> Div {
     div()
         .absolute()
         .top(px(72.))
@@ -16609,6 +16585,6 @@ fn fork_readiness_toast(message: &'static str) -> Div {
                 .shadow(vec![shadow(0x314660, 0.18, 10., 28.)])
                 .text_size(px(12.))
                 .line_height(relative(1.45))
-                .child(ui_text(message)),
+                .child(ui_text(message.to_owned())),
         )
 }

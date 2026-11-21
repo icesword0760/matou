@@ -153,6 +153,7 @@ mod view {
     pub fn detached_placeholder(
         title: impl Into<SharedString>,
         locale: InterfaceLocale,
+        light: bool,
         on_action: impl Fn(DetachedWindowAction, &mut Window, &mut App) + 'static,
     ) -> gpui::AnyElement {
         let title: SharedString = title.into();
@@ -168,8 +169,8 @@ mod view {
             .flex_col()
             .items_center()
             .justify_center()
-            .bg(rgb(0x10141b))
-            .text_color(rgb(0x8792a6))
+            .bg(rgb(if light { 0xf1f4f9 } else { 0x10141b }))
+            .text_color(rgb(if light { 0x526078 } else { 0x8792a6 }))
             .text_size(px(16.))
             .text_center()
             .cursor_pointer()
@@ -188,8 +189,8 @@ mod view {
                             .px(px(6.))
                             .py(px(3.))
                             .rounded(px(999.))
-                            .bg(rgb(0x202b42))
-                            .text_color(rgb(0xaac0ed))
+                            .bg(rgb(if light { 0xdbe7fb } else { 0x202b42 }))
+                            .text_color(rgb(if light { 0x375482 } else { 0xaac0ed }))
                             .text_size(px(10.))
                             .child(ui_text(copy.badge)),
                     ),
@@ -208,10 +209,10 @@ mod view {
                     .px(px(10.))
                     .py(px(6.))
                     .border_1()
-                    .border_color(rgb(0x35415a))
+                    .border_color(rgb(if light { 0xbfccdf } else { 0x35415a }))
                     .rounded(px(6.))
-                    .bg(rgb(0x1a2333))
-                    .text_color(rgb(0xcbd8f1))
+                    .bg(rgb(if light { 0xe8eef8 } else { 0x1a2333 }))
+                    .text_color(rgb(if light { 0x354b70 } else { 0xcbd8f1 }))
                     .cursor_pointer()
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())

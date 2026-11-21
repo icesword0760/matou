@@ -15,6 +15,7 @@ pub enum CardMenuAction {
     ReturnToMain,
     ViewHistory,
     RemoveNode,
+    CloseSession,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -54,6 +55,7 @@ pub struct CardMenuContext<'a> {
     pub can_view_history: bool,
     /// The hierarchy has approved removal for this node and its descendants.
     pub can_remove_node: bool,
+    pub can_close_session: bool,
     pub read_only: bool,
     pub storage_fault: bool,
     pub environment_unavailable: bool,
@@ -123,7 +125,7 @@ pub fn resolve_card_menu(context: CardMenuContext<'_>, locale: InterfaceLocale) 
             label,
             disabled_reason: blocked.map(str::to_owned).or(reason),
             show_readiness_hint: blocked.is_none() && show_readiness_hint,
-            danger: action == RemoveNode,
+            danger: matches!(action, RemoveNode | CloseSession),
         });
     };
     match context.presentation {
@@ -216,6 +218,14 @@ pub fn resolve_card_menu(context: CardMenuContext<'_>, locale: InterfaceLocale) 
                     false,
                 );
             }
+            if context.can_close_session {
+                add(
+                    CloseSession,
+                    locale.text("关闭会话…", "Close session…").into(),
+                    None,
+                    false,
+                );
+            }
             if context.can_remove_node {
                 add(
                     RemoveNode,
@@ -298,6 +308,18 @@ mod view {
         viewport: gpui::Size<gpui::Pixels>,
         focus: &gpui::FocusHandle,
         light: bool,
+        handler: impl Fn(CardMenuEvent, &mut gpui::Window, &mut gpui::App) + 'static,
+    ) -> Option<gpui::AnyElement> {
+        card_context_menu_with_selection(menu, position, viewport, focus, light, None, handler)
+    }
+
+    pub fn card_context_menu_with_selection(
+        menu: &CardMenu,
+        position: gpui::Point<gpui::Pixels>,
+        viewport: gpui::Size<gpui::Pixels>,
+        focus: &gpui::FocusHandle,
+        light: bool,
+        selected: Option<usize>,
         handler: impl Fn(CardMenuEvent, &mut gpui::Window, &mut gpui::App) + 'static,
     ) -> Option<gpui::AnyElement> {
         if !menu.can_open() {
@@ -385,6 +407,7 @@ mod view {
                 danger_border,
                 handler.clone(),
             )
+            .when(selected == Some(index), |row| row.bg(hover_background))
         }));
 
         Some(
@@ -511,7 +534,7 @@ mod view {
     }
 }
 
-pub use view::card_context_menu;
+pub use view::{card_context_menu, card_context_menu_with_selection};
 
 #[cfg(test)]
 mod tests {

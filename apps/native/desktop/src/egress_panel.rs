@@ -1424,6 +1424,15 @@ mod egress_ui {
         dark: bool,
         on_action: Rc<dyn Fn(EgressAction, &mut Window, &mut App)>,
     ) -> AnyElement {
+        render_egress_chip_with_label(view, dark, view.map(|view| view.label.clone()), on_action)
+    }
+
+    pub fn render_egress_chip_with_label(
+        view: Option<&EgressChipView>,
+        dark: bool,
+        label: Option<impl IntoElement>,
+        on_action: Rc<dyn Fn(EgressAction, &mut Window, &mut App)>,
+    ) -> AnyElement {
         let Some(view) = view else {
             return Empty.into_any_element();
         };
@@ -1450,13 +1459,7 @@ mod egress_ui {
             .max_w(px(220.))
             .cursor_pointer()
             .child(div().size(px(5.)).flex_none().rounded_full().bg(dot))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.))
-                    .truncate()
-                    .child(view.label.clone()),
-            )
+            .child(div().flex_1().min_w(px(0.)).truncate().children(label))
             .on_click(move |_, window, cx| {
                 on_action(EgressAction::TogglePanel, window, cx);
             })
@@ -2439,7 +2442,9 @@ mod egress_ui {
     }
 }
 
-pub use egress_ui::{render_egress_banner, render_egress_chip, render_egress_panel};
+pub use egress_ui::{
+    render_egress_banner, render_egress_chip, render_egress_chip_with_label, render_egress_panel,
+};
 
 #[cfg(test)]
 mod tests {
