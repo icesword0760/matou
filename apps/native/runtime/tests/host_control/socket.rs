@@ -200,7 +200,8 @@ impl Harness {
                 root.path(),
                 25,
                 frozen_case("terminal-child-default")["request"]["stub_output"]
-                    .as_str().unwrap(),
+                    .as_str()
+                    .unwrap(),
             )?;
         }
         if secondary_workspace {
@@ -265,11 +266,11 @@ impl Harness {
         Ok(reply)
     }
 
-    fn drive<T: Send>(&self, client_task: impl FnOnce() -> Result<T> + Send) -> Result<T> {
+    fn drive<T: Send>(&mut self, client_task: impl FnOnce() -> Result<T> + Send) -> Result<T> {
         thread::scope(|scope| {
             let worker = scope.spawn(client_task);
             while !worker.is_finished() {
-                self.server.poll(&self.owner);
+                self.server.poll(&mut self.owner, WINDOW);
                 thread::sleep(Duration::from_millis(1));
             }
             worker.join().unwrap()
@@ -282,17 +283,23 @@ fn screen_params(target: Value) -> Value {
 }
 
 fn seed_screen(root: &Path, session: u64, text: &str) -> Result<()> {
-    seed_journal(root, session, [Frame::Output {
-        sequence: 1,
-        data: text.as_bytes().to_vec(),
-    }])
+    seed_journal(
+        root,
+        session,
+        [Frame::Output {
+            sequence: 1,
+            data: text.as_bytes().to_vec(),
+        }],
+    )
 }
 
 fn seed_journal(root: &Path, session: u64, frames: impl IntoIterator<Item = Frame>) -> Result<()> {
-    let mut journal =
-        SegmentJournal::open(root, &fixture_id(session), JournalOptions::default())?;
+    let mut journal = SegmentJournal::open(root, &fixture_id(session), JournalOptions::default())?;
     for frame in frames {
-        journal.append(&Record { timestamp: NOW, frame })?;
+        journal.append(&Record {
+            timestamp: NOW,
+            frame,
+        })?;
     }
     journal.close()
 }
@@ -436,7 +443,7 @@ fn wire_rejections_precede_topology_and_match_public_envelope() -> Result<()> {
     let managed_canary = format!("canary-{token}");
     let expired = harness.token("expired", MANAGED_SCOPES, NOW - 1)?;
     let weak = harness.token("weak", &["host.identify"], NOW)?;
-    let unsupported = harness.token("unused", &["structure.create.workspace"], NOW)?;
+
     let revoked1 = harness.token(RUN, MANAGED_SCOPES, NOW)?;
     let revoked2 = harness.token(RUN, MANAGED_SCOPES, NOW)?;
     harness.server.runs().revoke(RUN);
@@ -460,9 +467,9 @@ fn wire_rejections_precede_topology_and_match_public_envelope() -> Result<()> {
             "CAPABILITY_DENIED",
         ),
         (
-            "production-terminal-write-disabled",
+            "missing-terminal-write-scope",
             "terminal.send-text",
-            token.as_str(),
+            weak.as_str(),
             "CAPABILITY_DENIED",
         ),
         (
@@ -476,12 +483,6 @@ fn wire_rejections_precede_topology_and_match_public_envelope() -> Result<()> {
             "host.list",
             revoked2.as_str(),
             "CAPABILITY_DENIED",
-        ),
-        (
-            "authorized-disabled",
-            "structure.create.workspace",
-            unsupported.as_str(),
-            "UNSUPPORTED",
         ),
     ] {
         let response = harness.verify(
@@ -1102,10 +1103,10 @@ fn bounded_queue_rechecks_revocation_and_deadline_on_owner() -> Result<()> {
     let mut harness = Harness::new(false, false, GENERATION, queue_now, IDLE_TIMEOUT)?;
     let before = snapshot(&harness.observe, harness.root.path())?;
     let token = harness.token(RUN, MANAGED_SCOPES, NOW + 1000)?;
-    let path = &harness.server.endpoint.path;
+    let path = harness.server.endpoint.path.clone();
     let mut clients = Vec::new();
     for index in 0..OWNER_QUEUE_CAPACITY {
-        let mut socket = client(path)?;
+        let mut socket = client(&path)?;
         let id = format!("queued-{index}");
         socket.write_all(&frame(&serde_json::to_vec(&request(
             &id,
@@ -1118,7 +1119,7 @@ fn bounded_queue_rechecks_revocation_and_deadline_on_owner() -> Result<()> {
     // The owner is deliberately paused. Once a request gets the full-queue fault the others
     // cannot be processed until the owner runs.
     thread::sleep(Duration::from_millis(100));
-    let mut overflow = client(path)?;
+    let mut overflow = client(&path)?;
     overflow.write_all(&frame(&serde_json::to_vec(&request(
         "overflow",
         "host.identify",
@@ -1128,13 +1129,13 @@ fn bounded_queue_rechecks_revocation_and_deadline_on_owner() -> Result<()> {
     check_reply(&receive(&mut overflow)?, "overflow", Some(TIMEOUT));
     harness.server.runs().revoke(RUN);
     for _ in 0..OWNER_QUEUE_CAPACITY.div_ceil(OWNER_BATCH) {
-        harness.server.poll(&harness.owner);
+        harness.server.poll(&mut harness.owner, WINDOW);
     }
     for (mut socket, id) in clients {
         check_reply(&receive(&mut socket)?, &id, Some("CAPABILITY_DENIED"));
     }
     let token = harness.token("live", MANAGED_SCOPES, NOW + 1000)?;
-    let mut socket = client(path)?;
+    let mut socket = client(&path)?;
     socket.write_all(&frame(&serde_json::to_vec(&request(
         "timeout-while-queued",
         "host.list",
@@ -1287,15 +1288,28 @@ exit 0
 
     for (method, params) in [
         (READ, screen_params(json!({"kind":"self"}))),
-        ("terminal.read-history", screen_params(json!({"kind":"self"}))),
-        ("terminal.read-commands", json!({"target":{"kind":"self"},"limit":1})),
-        ("terminal.send-text", json!({"target":{"kind":"self"},"text":"should never arrive"})),
+        (
+            "terminal.read-history",
+            screen_params(json!({"kind":"self"})),
+        ),
+        (
+            "terminal.read-commands",
+            json!({"target":{"kind":"self"},"limit":1}),
+        ),
+        (
+            "task.status.write",
+            json!({"taskId":"outside-scope","key":"phase","value":"denied"}),
+        ),
     ] {
         let mut input = request("managed-read", method, token, params);
         input["deadlineAt"] = json!(now_ms() + 3_000);
         socket.write_all(&frame(&serde_json::to_vec(&input)?))?;
         let reply = receive(&mut socket)?;
-        let expected = if method == "terminal.send-text" { Some("CAPABILITY_DENIED") } else { None };
+        let expected = if method == "task.status.write" {
+            Some("CAPABILITY_DENIED")
+        } else {
+            None
+        };
         check_reply(&reply, "managed-read", expected);
     }
     assert_eq!(snapshot(&observe, &data)?, before);
@@ -1461,7 +1475,8 @@ fn read_only_terminal_wire_contract() -> Result<()> {
         let expected = &case["expected_response"]["frames"][0];
         let id = envelope["requestId"].as_str().unwrap().to_owned();
         let code = expected["error"]["code"].as_str();
-        let mut reply = harness.verify(name, envelope, &id, code, 1, usize::from(code.is_none()))?;
+        let mut reply =
+            harness.verify(name, envelope, &id, code, 1, usize::from(code.is_none()))?;
         if code.is_none() {
             // The frozen fixture stubs the backend's result down to { text }.
             let result = reply["result"].as_object_mut().unwrap();
@@ -1475,17 +1490,46 @@ fn read_only_terminal_wire_contract() -> Result<()> {
 
     let session = 46;
     seed_journal(
-        harness.root.path(), session, [
-            Frame::Resize { sequence: 2, cols: 40, rows: 8 },
-            Frame::Reset { sequence: 3, screen_epoch: 1 },
-            Frame::Output { sequence: 4, data: b"first\r\n".to_vec() },
-            Frame::Output { sequence: 5, data: b"terminal\r\n".to_vec() },
-            Frame::Output { sequence: 6, data: b"\x1b[31m".to_vec() },
-            Frame::Output { sequence: 7, data: "尾🙂".as_bytes()[..2].to_vec() },
-            Frame::Output { sequence: 8, data: "尾🙂".as_bytes()[2..].to_vec() },
+        harness.root.path(),
+        session,
+        [
+            Frame::Resize {
+                sequence: 2,
+                cols: 40,
+                rows: 8,
+            },
+            Frame::Reset {
+                sequence: 3,
+                screen_epoch: 1,
+            },
+            Frame::Output {
+                sequence: 4,
+                data: b"first\r\n".to_vec(),
+            },
+            Frame::Output {
+                sequence: 5,
+                data: b"terminal\r\n".to_vec(),
+            },
+            Frame::Output {
+                sequence: 6,
+                data: b"\x1b[31m".to_vec(),
+            },
+            Frame::Output {
+                sequence: 7,
+                data: "尾🙂".as_bytes()[..2].to_vec(),
+            },
+            Frame::Output {
+                sequence: 8,
+                data: "尾🙂".as_bytes()[2..].to_vec(),
+            },
         ],
     )?;
-    let index = harness.root.path().join("journal").join(fixture_id(session)).join("range-index.json");
+    let index = harness
+        .root
+        .path()
+        .join("journal")
+        .join(fixture_id(session))
+        .join("range-index.json");
     if index.exists() {
         fs::remove_file(&index)?;
     }
@@ -1506,29 +1550,55 @@ fn read_only_terminal_wire_contract() -> Result<()> {
         "createdAt":12,"updatedAt":13
     });
     for (id, method, params, expected) in [
-        ("grid-and-line-tail", READ,
-         json!({"maxLines":2,"maxBytes":100}),
-         json!({"text":"terminal\n尾🙂","cols":40,"rows":8,"truncated":true,"source":"screen"})),
-        ("grid-multibyte-tail", READ,
-         json!({"maxLines":5000,"maxBytes":6}),
-         json!({"text":"🙂","cols":40,"rows":8,"truncated":true,"source":"screen"})),
-        ("history-range", "terminal.read-history",
-         json!({"fromSequence":5,"throughSequence":8,"maxLines":2,"maxBytes":12}),
-         json!({"text":"\x1b[31m尾🙂","truncated":true,"firstSequence":5,"lastSequence":8,"source":"journal"})),
-        ("history-non-output-cursors", "terminal.read-history",
-         json!({"fromSequence":2,"throughSequence":3,"maxLines":1,"maxBytes":1}),
-         json!({"text":"","truncated":false,"firstSequence":2,"lastSequence":3,"source":"journal"})),
-        ("history-empty-range", "terminal.read-history",
-         json!({"fromSequence":9,"maxLines":50,"maxBytes":100}),
-         json!({"text":"","truncated":false,"firstSequence":0,"lastSequence":0,"source":"journal"})),
-        ("history-line-limit", "terminal.read-history",
-         json!({"fromSequence":4,"throughSequence":5,"maxLines":1,"maxBytes":100}),
-         json!({"text":"","truncated":true,"firstSequence":4,"lastSequence":5,"source":"journal"})),
-        ("commands-omit-unavailable-fields", "terminal.read-commands",
-         json!({"limit":1000}),
-         json!([{"commandId":"earlier","sessionId":fixture_id(session),
-                  "startedSequence":4,"executedSequence":5,"createdAt":10,"updatedAt":11}, last])),
-        ("commands-newest", "terminal.read-commands", json!({"limit":1}), json!([last])),
+        (
+            "grid-and-line-tail",
+            READ,
+            json!({"maxLines":2,"maxBytes":100}),
+            json!({"text":"terminal\n尾🙂","cols":40,"rows":8,"truncated":true,"source":"screen"}),
+        ),
+        (
+            "grid-multibyte-tail",
+            READ,
+            json!({"maxLines":5000,"maxBytes":6}),
+            json!({"text":"🙂","cols":40,"rows":8,"truncated":true,"source":"screen"}),
+        ),
+        (
+            "history-range",
+            "terminal.read-history",
+            json!({"fromSequence":5,"throughSequence":8,"maxLines":2,"maxBytes":12}),
+            json!({"text":"\x1b[31m尾🙂","truncated":true,"firstSequence":5,"lastSequence":8,"source":"journal"}),
+        ),
+        (
+            "history-non-output-cursors",
+            "terminal.read-history",
+            json!({"fromSequence":2,"throughSequence":3,"maxLines":1,"maxBytes":1}),
+            json!({"text":"","truncated":false,"firstSequence":2,"lastSequence":3,"source":"journal"}),
+        ),
+        (
+            "history-empty-range",
+            "terminal.read-history",
+            json!({"fromSequence":9,"maxLines":50,"maxBytes":100}),
+            json!({"text":"","truncated":false,"firstSequence":0,"lastSequence":0,"source":"journal"}),
+        ),
+        (
+            "history-line-limit",
+            "terminal.read-history",
+            json!({"fromSequence":4,"throughSequence":5,"maxLines":1,"maxBytes":100}),
+            json!({"text":"","truncated":true,"firstSequence":4,"lastSequence":5,"source":"journal"}),
+        ),
+        (
+            "commands-omit-unavailable-fields",
+            "terminal.read-commands",
+            json!({"limit":1000}),
+            json!([{"commandId":"earlier","sessionId":fixture_id(session),
+                  "startedSequence":4,"executedSequence":5,"createdAt":10,"updatedAt":11}, last]),
+        ),
+        (
+            "commands-newest",
+            "terminal.read-commands",
+            json!({"limit":1}),
+            json!([last]),
+        ),
     ] {
         let mut params = params;
         params["target"] = target.clone();
@@ -1538,19 +1608,517 @@ fn read_only_terminal_wire_contract() -> Result<()> {
     assert!(!index.exists());
 
     for (id, method, params, message) in [
-        ("read-required-lines", READ, json!({"maxBytes":1}), "maxLines must be between 1 and 5000"),
-        ("read-zero-lines", READ, json!({"maxLines":0,"maxBytes":1}), "maxLines must be between 1 and 5000"),
-        ("read-too-many-bytes", READ, json!({"maxLines":1,"maxBytes":1_048_577}), "maxBytes must be between 1 and 1048576"),
-        ("history-fraction", "terminal.read-history", json!({"maxLines":0.5,"maxBytes":1}), "maxLines must be between 1 and 5000"),
-        ("history-non-numeric", "terminal.read-history", json!({"maxLines":1,"maxBytes":"10"}), "maxBytes must be between 1 and 1048576"),
-        ("history-bad-sequence", "terminal.read-history", json!({"maxLines":1,"maxBytes":1,"fromSequence":-1}), "fromSequence must be a non-negative integer"),
-        ("history-reversed-range", "terminal.read-history", json!({"maxLines":1,"maxBytes":1,"fromSequence":5,"throughSequence":4}), "throughSequence must be at least fromSequence"),
-        ("commands-limit", "terminal.read-commands", json!({"limit":1001}), "limit must be between 1 and 1000"),
+        (
+            "read-required-lines",
+            READ,
+            json!({"maxBytes":1}),
+            "maxLines must be between 1 and 5000",
+        ),
+        (
+            "read-zero-lines",
+            READ,
+            json!({"maxLines":0,"maxBytes":1}),
+            "maxLines must be between 1 and 5000",
+        ),
+        (
+            "read-too-many-bytes",
+            READ,
+            json!({"maxLines":1,"maxBytes":1_048_577}),
+            "maxBytes must be between 1 and 1048576",
+        ),
+        (
+            "history-fraction",
+            "terminal.read-history",
+            json!({"maxLines":0.5,"maxBytes":1}),
+            "maxLines must be between 1 and 5000",
+        ),
+        (
+            "history-non-numeric",
+            "terminal.read-history",
+            json!({"maxLines":1,"maxBytes":"10"}),
+            "maxBytes must be between 1 and 1048576",
+        ),
+        (
+            "history-bad-sequence",
+            "terminal.read-history",
+            json!({"maxLines":1,"maxBytes":1,"fromSequence":-1}),
+            "fromSequence must be a non-negative integer",
+        ),
+        (
+            "history-reversed-range",
+            "terminal.read-history",
+            json!({"maxLines":1,"maxBytes":1,"fromSequence":5,"throughSequence":4}),
+            "throughSequence must be at least fromSequence",
+        ),
+        (
+            "commands-limit",
+            "terminal.read-commands",
+            json!({"limit":1001}),
+            "limit must be between 1 and 1000",
+        ),
     ] {
         let mut params = params;
         params["target"] = target.clone();
-        let reply = harness.verify(id, request(id, method, &token, params), id, Some(INVALID), 1, 0)?;
-        assert_eq!(reply["error"], json!({"code":"INVALID_REQUEST","message":message}));
+        let reply = harness.verify(
+            id,
+            request(id, method, &token, params),
+            id,
+            Some(INVALID),
+            1,
+            0,
+        )?;
+        assert_eq!(
+            reply["error"],
+            json!({"code":"INVALID_REQUEST","message":message})
+        );
     }
+    Ok(())
+}
+
+#[test]
+fn writes_negotiate_scope_storage_and_confirmation_at_the_owner() -> Result<()> {
+    static WRITE_CLOCK: AtomicI64 = AtomicI64::new(NOW);
+    fn write_now() -> i64 {
+        WRITE_CLOCK.load(Ordering::SeqCst)
+    }
+    let mut harness = Harness::new(true, false, GENERATION, write_now, IDLE_TIMEOUT)?;
+    let token = harness.token(RUN, MANAGED_SCOPES, NOW + 200_000)?;
+    let telemetry = harness.token("telemetry-run", OTHER_METHODS, NOW + 200_000)?;
+    let path = harness.server.endpoint.path.clone();
+    let call = |harness: &mut Harness, method: &str, token: &str, params: Value| {
+        let input = frame(
+            &serde_json::to_vec(&json!({
+                "version": 1, "requestId": "write", "method": method, "token": token,
+                "params": params, "deadlineAt": NOW + 180_000,
+            }))
+            .unwrap(),
+        );
+        harness.drive(|| {
+            let mut socket = client(&path)?;
+            socket.write_all(&input)?;
+            receive(&mut socket)
+        })
+    };
+    let task = fixture_id(4);
+    let status = json!({"taskId": task, "key": "phase", "value": "running"});
+    let result = call(&mut harness, "task.status.write", &token, status.clone())?;
+    check_reply(&result, "write", Some("CAPABILITY_DENIED"));
+    let result = call(&mut harness, "task.status.write", &telemetry, status)?;
+    check_reply(&result, "write", None);
+    assert_eq!(result["result"], json!({"written": true}));
+    let result = call(
+        &mut harness,
+        "task.progress.write",
+        &telemetry,
+        json!({
+            "taskId": task, "progress": 120, "label": "done",
+        }),
+    )?;
+    check_reply(&result, "write", None);
+    let result = call(
+        &mut harness,
+        "task.log.append",
+        &telemetry,
+        json!({
+            "taskId": task, "level": "info", "source": "fixture", "message": "persisted",
+        }),
+    )?;
+    assert_eq!(result["result"], json!({"appended": true}));
+    let values: (String, f64, String, String) = harness.observe.query_row(
+        "SELECT entry.value, progress.progress, progress.label, log.message
+         FROM task_status_entries AS entry
+         JOIN task_progress AS progress USING(task_id)
+         JOIN task_logs AS log USING(task_id) WHERE task_id = ?",
+        [&task],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    )?;
+    assert_eq!(
+        values,
+        ("running".into(), 100.0, "done".into(), "persisted".into())
+    );
+    let removed = call(
+        &mut harness,
+        "task.status.write",
+        &telemetry,
+        json!({
+            "taskId": task, "key":"phase", "value":null,
+        }),
+    )?;
+    check_reply(&removed, "write", None);
+    let count: i64 = harness.observe.query_row(
+        "SELECT COUNT(*) FROM task_status_entries WHERE task_id = ?",
+        [&task],
+        |row| row.get(0),
+    )?;
+    assert_eq!(count, 0);
+
+    let moved = call(
+        &mut harness,
+        "task.move-to-window",
+        &telemetry,
+        json!({
+            "taskId": task, "migrationId":"attempt", "sourceWindowId": WINDOW, "targetWindowId":"missing-window",
+        }),
+    )?;
+    check_reply(&moved, "write", Some("CONFLICT"));
+    let preview_params = json!({"target":{"kind":"current","entity":"canvas"}});
+    let preview = call(
+        &mut harness,
+        "structure.canvas-close.preview",
+        &token,
+        preview_params.clone(),
+    )?;
+    let reference = json!({"confirmationRef": preview["result"]["confirmationRef"]});
+    WRITE_CLOCK.store(NOW + 120_000, Ordering::SeqCst);
+    let expired = call(
+        &mut harness,
+        "structure.canvas-close.commit",
+        &token,
+        reference.clone(),
+    )?;
+    check_reply(&expired, "write", Some("CONFIRMATION_EXPIRED"));
+    let replayed = call(
+        &mut harness,
+        "structure.canvas-close.commit",
+        &token,
+        reference,
+    )?;
+    check_reply(&replayed, "write", Some("CONFIRMATION_REQUIRED"));
+
+    let preview = call(
+        &mut harness,
+        "structure.canvas-close.preview",
+        &token,
+        preview_params,
+    )?;
+    let reference = json!({"confirmationRef": preview["result"]["confirmationRef"]});
+    harness
+        .owner
+        .control_storage()
+        .pragma_update(None, "query_only", true)?;
+    let before = snapshot(&harness.observe, harness.root.path())?;
+    for (method, token, params) in [
+        ("structure.canvas-close.commit", &token, reference),
+        (
+            "structure.create.task",
+            &token,
+            json!({
+                "workspace":{"kind":"current","entity":"workspace"}, "submissionKey":"readonly"
+            }),
+        ),
+        (
+            "terminal.send-text",
+            &token,
+            json!({"target":{"kind":"self"},"text":"never"}),
+        ),
+        (
+            "task.progress.write",
+            &telemetry,
+            json!({"taskId":task,"progress":1}),
+        ),
+    ] {
+        let result = call(&mut harness, method, token, params)?;
+        check_reply(&result, "write", Some("STORAGE_READ_ONLY"));
+    }
+    assert_eq!(snapshot(&harness.observe, harness.root.path())?, before);
+    harness.server.runs().revoke(RUN);
+    let result = call(
+        &mut harness,
+        "terminal.send-text",
+        &token,
+        json!({"target":{"kind":"self"},"text":"never"}),
+    )?;
+    check_reply(&result, "write", Some("CAPABILITY_DENIED"));
+    Ok(())
+}
+
+#[test]
+fn fork_worktrees_use_the_requested_branch_and_reuse_the_existing_checkout() -> Result<()> {
+    let mut harness = Harness::new(false, false, GENERATION, fixed_now, IDLE_TIMEOUT)?;
+    let isolated = harness.root.path().join("isolated");
+    let repo = isolated.join("repo");
+    fs::create_dir_all(&repo)?;
+    let git = |args: &[&str]| -> Result<String> {
+        let result = std::process::Command::new("/usr/bin/git")
+            .env_clear()
+            .env("HOME", &isolated)
+            .current_dir(&repo)
+            .args(args)
+            .output()?;
+        ensure!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        Ok(String::from_utf8(result.stdout)?.trim_end().into())
+    };
+    git(&["init", "-b", "main"])?;
+    git(&[
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@invalid.test",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "base",
+    ])?;
+    let source = fixture_id(8);
+    let repo_text = repo.to_str().unwrap();
+    let connection = harness.owner.control_storage();
+    connection.execute(
+        "UPDATE sessions SET kind = 'claude-code', cwd = ? WHERE id = ?",
+        params![repo_text, source],
+    )?;
+    connection.execute(
+        "INSERT INTO provider_bindings (id, session_id, provider, provider_session_id, resume_state,
+           metadata_json, created_at, updated_at, validated_at)
+         VALUES ('test-fork-source', ?, 'claude-code', ?, 'available', '{\"canFork\":true}', ?, ?, ?)",
+        params![source, fixture_id(313), NOW, NOW, NOW],
+    )?;
+
+    let token = harness.token(RUN, MANAGED_SCOPES, NOW)?;
+    let path = harness.server.endpoint.path.clone();
+    let call = |harness: &mut Harness, method: &str, params: Value| -> Result<Value> {
+        let request = request("fork", method, &token, params);
+        harness.drive(|| {
+            let mut socket = client(&path)?;
+            socket.write_all(&frame(&serde_json::to_vec(&request)?))?;
+            receive(&mut socket)
+        })
+    };
+    let create = json!({
+        "source":{"kind":"self"}, "title":"New checkout",
+        "environment":{"mode":"new-worktree","branch":"fixture/exact-branch"},
+        "submissionKey":"new-worktree",
+    });
+    let blocked = call(&mut harness, "structure.fork.child", create.clone())?;
+    check_reply(&blocked, "fork", Some("WORKTREE_CONFLICT"));
+    harness.owner.fork_worktree_root = Some(isolated.clone());
+    let child = call(&mut harness, "structure.fork.child", create.clone())?;
+    check_reply(&child, "fork", None);
+    let child_ref = child["result"]["sessionRef"].as_str().unwrap();
+    let child_id = child_ref.strip_prefix("session:").unwrap();
+    assert_eq!(child["result"]["state"], "created");
+    assert_eq!(child["result"]["environment"], create["environment"]);
+    assert_eq!(child, call(&mut harness, "structure.fork.child", create)?);
+
+    harness.owner.prepare_control_fork_worktree(child_id)?;
+    assert_eq!(
+        git(&["branch", "--list", "fixture/exact-branch"])?,
+        "+ fixture/exact-branch"
+    );
+    let (worktree, context, checkout, repository): (String, String, String, String) = harness.observe.query_row(
+        "SELECT id, execution_context_id, worktree_path, repository_root FROM worktrees WHERE branch_name = ?",
+        ["fixture/exact-branch"], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    )?;
+    assert!(Path::new(&checkout).join(".git").is_file());
+    harness.owner.control_storage().execute(
+        "INSERT INTO execution_context_git_states (execution_context_id, repository_root, state, branch, dirty, updated_at)
+         VALUES (?, ?, 'ready', 'fixture/exact-branch', 0, ?)",
+        params![context, repository, NOW],
+    )?;
+    let environment = json!({
+        "mode":"existing-worktree", "worktreeRef":format!("worktree:{worktree}"), "branch":"fixture/exact-branch",
+    });
+    let sibling = call(
+        &mut harness,
+        "structure.fork.sibling",
+        json!({
+            "source":{"kind":"session","sessionId":child_id}, "title":"Borrowed checkout",
+            "environment":environment, "submissionKey":"existing-worktree",
+        }),
+    )?;
+    check_reply(&sibling, "fork", None);
+    assert_eq!(sibling["result"]["environment"], environment);
+    let sibling = sibling["result"]["sessionRef"]
+        .as_str()
+        .unwrap()
+        .strip_prefix("session:")
+        .unwrap();
+    let (cwd, parent, target_context, owned): (String, String, String, Option<String>) = harness.observe.query_row(
+        "SELECT sessions.cwd, fork.source_session_id, fork.target_execution_context_id, fork.worktree_id
+         FROM sessions JOIN session_fork_intents AS fork ON fork.session_id = sessions.id WHERE sessions.id = ?",
+        [sibling], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    )?;
+    assert_eq!(
+        (cwd, parent, target_context, owned),
+        (checkout, source, context, None)
+    );
+    assert_eq!(
+        git(&["worktree", "list", "--porcelain"])?
+            .matches("worktree ")
+            .count(),
+        2
+    );
+    Ok(())
+}
+
+#[test]
+fn frozen_write_validation_and_outlet_freeze_reject_before_input() -> Result<()> {
+    let mut harness = Harness::new(false, false, GENERATION, fixed_now, IDLE_TIMEOUT)?;
+    let token = harness.token(RUN, MANAGED_SCOPES, NOW)?;
+    for id in ["wire-structural-fields-strict", "send-text-invalid-params"] {
+        let case = frozen_case(id);
+        for (call, expected) in case["request"]["calls"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .zip(case["expected_response"]["frames"].as_array().unwrap())
+            .filter(|(_, expected)| expected["ok"] == false)
+        {
+            let mut input = call["envelope"].clone();
+            input["token"] = json!(&token);
+            let path = harness.server.endpoint.path.clone();
+            let actual = harness.drive(|| {
+                let mut socket = client(&path)?;
+                socket.write_all(&frame(&serde_json::to_vec(&input)?))?;
+                receive(&mut socket)
+            })?;
+            assert_eq!(&actual, expected);
+        }
+    }
+
+    let root = harness.root.path().to_owned();
+    let session = fixture_id(8);
+    harness
+        .owner
+        .set_shell_launch_directory(&session, root.to_str().unwrap())?;
+    harness.owner.launch(
+        crate::SessionOptions {
+            session_id: session.clone(),
+            terminal: matou_native_terminal::TerminalOptions::new(80, 24, 8, 16),
+            launch: ShellLaunch {
+                profile: LaunchProfile::Shell,
+                executable: "/bin/sh".into(),
+                argv: vec![
+                    "-c".into(),
+                    "IFS= read -r line; printf 'unexpected:<%s>\\n' \"$line\"".into(),
+                ],
+                cwd: root.clone(),
+                data_root: root.clone(),
+                inherited_env: BTreeMap::from([("HOME".into(), root.into_os_string())]),
+                env: BTreeMap::new(),
+                cols: 80,
+                rows: 24,
+            },
+            journal: Default::default(),
+            restored_history: Vec::new(),
+            collect_history: false,
+        },
+        false,
+        "",
+    )?;
+    let (reply, result) = mpsc::channel();
+    harness.owner.send(
+        &session,
+        crate::worker::WorkerCommand::SetEgressFrozen {
+            frozen: true,
+            reply,
+        },
+    )?;
+    result.recv_timeout(Duration::from_secs(2))??;
+    let path = harness.server.endpoint.path.clone();
+    for (method, params) in [
+        (
+            "terminal.send-text",
+            json!({"target":{"kind":"self"},"text":"never","submit":true}),
+        ),
+        (
+            "terminal.send-key",
+            json!({"target":{"kind":"self"},"key":"Enter"}),
+        ),
+    ] {
+        let input = request("frozen", method, &token, params);
+        let actual = harness.drive(|| {
+            let mut socket = client(&path)?;
+            socket.write_all(&frame(&serde_json::to_vec(&input)?))?;
+            receive(&mut socket)
+        })?;
+        check_reply(&actual, "frozen", Some("TARGET_NOT_READY"));
+        assert_eq!(
+            actual["error"]["message"],
+            "session is paused because the network exit failed a safety check"
+        );
+    }
+    harness.owner.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn fork_batch_replays_successes_and_retries_only_selected_failures() -> Result<()> {
+    let mut harness = Harness::new(false, false, GENERATION, fixed_now, IDLE_TIMEOUT)?;
+    let source = fixture_id(8);
+    harness.owner.control_storage().execute(
+        "UPDATE sessions SET kind = 'claude-code', title = 'Collision' WHERE id = ?",
+        [&source],
+    )?;
+    harness.owner.control_storage().execute(
+        "INSERT INTO provider_bindings (id, session_id, provider, provider_session_id, resume_state,
+           metadata_json, created_at, updated_at, validated_at)
+         VALUES ('test-batch-source', ?, 'claude-code', ?, 'available', '{\"canFork\":true}', ?, ?, ?)",
+        params![source, fixture_id(313), NOW, NOW, NOW],
+    )?;
+    let token = harness.token(RUN, MANAGED_SCOPES, NOW)?;
+    let path = harness.server.endpoint.path.clone();
+    let call = |harness: &mut Harness, params: Value| -> Result<Value> {
+        let input = request("batch", "structure.fork.children", &token, params);
+        thread::scope(|scope| {
+            let worker = scope.spawn(|| -> Result<Value> {
+                let mut socket = client(&path)?;
+                socket.write_all(&frame(&serde_json::to_vec(&input)?))?;
+                receive(&mut socket)
+            });
+            while !worker.is_finished() {
+                if let Some(ControlUpdate::Changed(_, launches)) =
+                    harness.server.poll(&mut harness.owner, WINDOW)
+                {
+                    // Stand in for provider readiness after the real owner
+                    // has accepted and persisted each branch.
+                    for session in launches {
+                        harness.owner.control_storage().execute(
+                            "UPDATE session_fork_intents SET state = 'succeeded', stage = 'succeeded'
+                             WHERE session_id = ?", [session],
+                        )?;
+                    }
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+            worker.join().unwrap()
+        })
+    };
+    let params = json!({
+        "source":{"kind":"self"}, "batchKey":"mixed", "items":[
+            {"itemKey":"a","title":"Keep","environment":{"mode":"current"}},
+            {"itemKey":"b","title":"Collision","environment":{"mode":"current"}},
+        ],
+    });
+    let first = call(&mut harness, params.clone())?;
+    check_reply(&first, "batch", None);
+    assert_eq!(first["result"]["succeeded"], 1);
+    assert_eq!(first["result"]["failed"], 1);
+    assert_eq!(first["result"]["retry"]["itemKeys"], json!(["b"]));
+    assert_eq!(first, call(&mut harness, params.clone())?);
+    let mut altered = params.clone();
+    altered["items"][0]["title"] = json!("Changed");
+    check_reply(
+        &call(&mut harness, altered)?,
+        "batch",
+        Some("PATH_CONFLICT"),
+    );
+
+    harness.owner.control_storage().execute(
+        "UPDATE sessions SET title = 'Source' WHERE id = ?",
+        [&source],
+    )?;
+    let mut retry = params;
+    retry["retryItemKeys"] = json!(["b"]);
+    let second = call(&mut harness, retry.clone())?;
+    check_reply(&second, "batch", None);
+    assert_eq!(second["result"]["failed"], 0);
+    assert_eq!(second["result"]["items"][0], first["result"]["items"][0]);
+    assert_eq!(second["result"]["items"][1]["state"], "ready");
+    assert_eq!(second, call(&mut harness, retry)?);
+    assert_eq!(harness.owner.hierarchy(WINDOW)?.session.unwrap().id, source);
     Ok(())
 }
