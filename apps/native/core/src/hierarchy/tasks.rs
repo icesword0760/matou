@@ -34,6 +34,16 @@ pub struct RenameTaskInput {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct MoveTaskOnBoardInput {
+    pub workspace_id: String,
+    pub task_id: String,
+    pub status: String,
+    pub before_task_id: Option<String>,
+    pub now: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ReorderTaskInput {
     pub window_id: String,
     pub workspace_id: String,
@@ -173,6 +183,86 @@ pub fn rename_task(
             input.now,
         ));
         Ok(serde_json::to_value(task)?)
+    })?;
+    Ok(commit.result)
+}
+
+pub fn move_task_on_board(
+    connection: &mut Connection,
+    command: &CommandMetadata,
+    input: &MoveTaskOnBoardInput,
+    committed_at: i64,
+) -> Result<Value> {
+    ensure!(
+        matches!(
+            input.status.as_str(),
+            "planned" | "active" | "blocked" | "completed"
+        ),
+        "Invalid board status"
+    );
+    let commit = execute(connection, command, committed_at, |tx, events| {
+        let mut source = require_task(tx, &input.task_id)?;
+        ensure!(
+            source.workspace_id == input.workspace_id,
+            "Task must belong to the Workspace"
+        );
+        let mut query = tx.prepare(
+            "SELECT * FROM tasks WHERE workspace_id = ? AND archived_at IS NULL AND id <> ?
+             AND status IN (?, ?) ORDER BY sort_key, created_at, id",
+        )?;
+        let (mut destination, mut origin): (Vec<Task>, Vec<Task>) = query
+            .query_map(
+                params![
+                    input.workspace_id,
+                    input.task_id,
+                    input.status,
+                    source.status
+                ],
+                Task::from_row,
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .into_iter()
+            .partition(|task| task.status == input.status);
+        let index = match &input.before_task_id {
+            Some(before) => destination
+                .iter()
+                .position(|task| &task.id == before)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Board destination must belong to the target column")
+                })?,
+            None => destination.len(),
+        };
+        source.status.clone_from(&input.status);
+        destination.insert(index, source);
+
+        for column in [&mut origin, &mut destination] {
+            for (index, task) in column.iter_mut().enumerate() {
+                task.sort_key = sort_key(index);
+                task.updated_at = input.now;
+                task.version += 1;
+                tx.execute(
+                    "UPDATE tasks SET status = ?, sort_key = ?, updated_at = ?, version = ?
+                     WHERE id = ?",
+                    params![
+                        task.status,
+                        task.sort_key,
+                        task.updated_at,
+                        task.version,
+                        task.id
+                    ],
+                )?;
+                events.push(task_event(
+                    command,
+                    task,
+                    &format!("task-board:{}", task.id),
+                    "task.updated",
+                    serde_json::to_value(&*task)?,
+                    input.now,
+                ));
+            }
+        }
+        origin.extend(destination);
+        Ok(serde_json::to_value(origin)?)
     })?;
     Ok(commit.result)
 }

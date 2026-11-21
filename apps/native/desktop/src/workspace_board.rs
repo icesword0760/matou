@@ -148,7 +148,22 @@ impl WorkspaceBoard {
         for task_id in session_tasks {
             *counts.entry(task_id).or_insert(0) += 1;
         }
+        Self::from_session_counts(
+            workspace_id,
+            workspace_name,
+            active_task_id,
+            tasks,
+            |task| counts.get(task).copied().unwrap_or(0),
+        )
+    }
 
+    pub fn from_session_counts(
+        workspace_id: &str,
+        workspace_name: &str,
+        active_task_id: Option<&str>,
+        tasks: &[Task],
+        session_count: impl Fn(&str) -> usize,
+    ) -> Self {
         let mut tasks: Vec<_> = tasks
             .iter()
             .filter(|task| task.workspace_id == workspace_id)
@@ -158,7 +173,7 @@ impl WorkspaceBoard {
                 status: BoardStatus::from_task_status(&task.status),
                 sort_key: task.sort_key.clone(),
                 created_at: task.created_at,
-                sessions: counts.get(task.id.as_str()).copied().unwrap_or(0),
+                sessions: session_count(&task.id),
             })
             .collect();
         tasks.sort_by(|left, right| {
@@ -297,6 +312,43 @@ mod workspace_board_ui {
     const BOARD_GAP: f32 = 11.;
     const BOARD_MIN_WIDTH: f32 = 840.;
     const BOARD_COLUMN_MIN_WIDTH: f32 = 192.;
+
+    #[cfg(debug_assertions)]
+    thread_local! {
+        static BOARD_BOUNDS: std::cell::RefCell<Option<HashMap<String, Bounds<Pixels>>>> = const {
+            std::cell::RefCell::new(None)
+        };
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn capture_board_bounds(draw: impl FnOnce()) -> HashMap<String, Bounds<Pixels>> {
+        BOARD_BOUNDS.with_borrow_mut(|bounds| *bounds = Some(HashMap::new()));
+        draw();
+        BOARD_BOUNDS.with_borrow_mut(|bounds| bounds.take().unwrap_or_default())
+    }
+
+    fn board_probe_bounds(_id: &str) -> Option<Canvas<()>> {
+        #[cfg(debug_assertions)]
+        if BOARD_BOUNDS.with_borrow(Option::is_some) {
+            let id = _id.to_owned();
+            return Some(
+                canvas(
+                    |_, _, _| (),
+                    move |bounds, _, _, _| {
+                        BOARD_BOUNDS.with_borrow_mut(|capture| {
+                            if let Some(capture) = capture {
+                                capture.insert(id.clone(), bounds);
+                            }
+                        });
+                    },
+                )
+                .absolute()
+                .inset_0()
+                .size_full(),
+            );
+        }
+        None
+    }
 
     /// Typed drag payload. The board only accepts payloads from its own workspace.
     struct BoardDrag {
@@ -444,9 +496,10 @@ mod workspace_board_ui {
     pub fn render_workspace_board_with_sessions(
         view: &BoardView,
         dark: bool,
+        on_move: MoveHandler,
         session_rows: SessionRows,
     ) -> impl IntoElement {
-        render_board(view, dark, None, Some(session_rows))
+        render_board(view, dark, Some(on_move), Some(session_rows))
     }
 
     fn render_board(
@@ -559,6 +612,8 @@ mod workspace_board_ui {
                         .justify_center()
                         .child(
                             div()
+                                .relative()
+                                .children(board_probe_bounds("board-feedback"))
                                 .px(px(11.))
                                 .py(px(8.))
                                 .rounded(px(8.))
@@ -637,7 +692,9 @@ mod workspace_board_ui {
         halo.a = 0.13;
 
         let mut header = div()
+            .children(board_probe_bounds(&header_id))
             .id(header_id)
+            .relative()
             .h(px(42.))
             .flex_none()
             .flex()
@@ -881,6 +938,7 @@ mod workspace_board_ui {
             let drag_status = self.status;
 
             let card = div()
+                .children(board_probe_bounds(&card_id))
                 .id(card_id)
                 .relative()
                 .mb(px(7.))
@@ -997,6 +1055,8 @@ mod workspace_board_ui {
     }
 }
 
+#[cfg(debug_assertions)]
+pub use workspace_board_ui::capture_board_bounds;
 pub use workspace_board_ui::{render_workspace_board, render_workspace_board_with_sessions};
 
 #[cfg(test)]

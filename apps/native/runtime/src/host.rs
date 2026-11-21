@@ -517,6 +517,13 @@ pub enum Command {
         session_id: String,
         title: Option<String>,
     },
+    SetTaskStatus {
+        request_id: u64,
+        workspace_id: String,
+        task_id: String,
+        status: String,
+        before_task_id: Option<String>,
+    },
     SetTaskPinned {
         task_id: String,
         pinned: bool,
@@ -1863,6 +1870,7 @@ pub fn storage_command_rejected(command: Command, code: &str, message: &str) -> 
         return Event::History(request.failed(message.into()));
     }
     let wiring_request = match &command {
+        Command::SetTaskStatus { request_id, .. } => Some(("taskStatusResult", *request_id)),
         Command::LoadDshSession { request_id, .. } => Some(("dshSessionLoadResult", *request_id)),
         Command::LoadAntigravitySession { request_id, .. } => {
             Some(("antigravitySessionLoadResult", *request_id))
@@ -2486,11 +2494,12 @@ impl<'a> ReadOnlyWorkspace<'a> {
                         &scene.id,
                         None,
                     )?;
-                    graph["workspaceSessionCount"] =
-                        json!(hierarchy::cards::scene_workspace_session_count(
-                            self.connection,
-                            &scene.id
-                        )?);
+                    let counts = hierarchy::cards::scene_workspace_session_counts(
+                        self.connection,
+                        &scene.id,
+                    )?;
+                    graph["workspaceSessionCount"] = json!(counts.values().sum::<i64>());
+                    graph["workspaceSessionCountByTask"] = json!(counts);
                     let ids = graph["nodes"]
                         .as_array()
                         .into_iter()
@@ -3731,6 +3740,46 @@ fn run_writable(
             }
             let (reply, result) = mpsc::channel();
             let (session_id, request, refresh) = match command {
+                Command::SetTaskStatus {
+                    request_id,
+                    workspace_id,
+                    task_id,
+                    status,
+                    before_task_id,
+                } => {
+                    let time = self::now();
+                    let input = tasks::MoveTaskOnBoardInput {
+                        workspace_id,
+                        task_id,
+                        status,
+                        before_task_id,
+                        now: time,
+                    };
+                    let result = owner.move_task_on_board(
+                        &metadata(
+                            "hierarchy.move-task-on-board",
+                            &serde_json::to_value(&input)?,
+                        ),
+                        &input,
+                        time,
+                    );
+                    let workspaces = owner.workspaces()?;
+                    send.send_blocking(Event::Tasks(sidebar_tasks(
+                        &owner,
+                        window_id,
+                        &workspaces,
+                    )?))?;
+                    if result.is_ok() {
+                        send.send_blocking(Event::Graph(active_graph(
+                            &owner,
+                            scene_id.as_deref(),
+                            window_id,
+                            &startup_deferred,
+                        )?))?;
+                    }
+                    send.send_blocking(wiring_result("taskStatusResult", request_id, result))?;
+                    continue;
+                }
                 Command::DatabaseRecovery { .. } | Command::ReadOnlyQuery { .. } => {
                     unreachable!("storage-only commands cannot pass the writable gate");
                 }
@@ -7433,7 +7482,9 @@ fn active_graph(
     match scene_id {
         Some(scene_id) => {
             let mut graph = owner.graph(scene_id, Some(window_id))?;
-            graph["workspaceSessionCount"] = json!(owner.scene_workspace_session_count(scene_id)?);
+            let counts = owner.scene_workspace_session_counts(scene_id)?;
+            graph["workspaceSessionCount"] = json!(counts.values().sum::<i64>());
+            graph["workspaceSessionCountByTask"] = json!(counts);
             if let Some(nodes) = graph["nodes"].as_array_mut() {
                 for node in nodes {
                     let Some(id) = node["sessionId"].as_str() else {
@@ -7479,13 +7530,22 @@ fn send_sidebar(
 ) -> Result<()> {
     let mut workspaces = owner.workspaces()?;
     sort_workspaces(&mut workspaces);
-    let mut tasks = Vec::new();
-    for workspace in &workspaces {
-        tasks.extend(owner.tasks(window_id, &workspace.id)?);
-    }
+    let tasks = sidebar_tasks(owner, window_id, &workspaces)?;
     send.send_blocking(Event::Workspaces(workspaces))?;
     send.send_blocking(Event::Tasks(tasks))?;
     Ok(())
+}
+
+fn sidebar_tasks(
+    owner: &ShellOwner,
+    window_id: &str,
+    workspaces: &[Workspace],
+) -> Result<Vec<Task>> {
+    let mut tasks = Vec::new();
+    for workspace in workspaces {
+        tasks.extend(owner.tasks(window_id, &workspace.id)?);
+    }
+    Ok(tasks)
 }
 
 fn sort_workspaces(workspaces: &mut [Workspace]) {
@@ -7527,6 +7587,16 @@ enum NavigationAction {
     Fork(Value),
 }
 
+fn metadata(kind: &str, input: &Value) -> CommandMetadata {
+    CommandMetadata {
+        command_id: id(),
+        command_type: kind.into(),
+        request_hash: input.to_string(),
+        causation_id: None,
+        correlation_id: None,
+    }
+}
+
 fn navigate(
     owner: &mut ShellOwner,
     window_id: &str,
@@ -7546,13 +7616,6 @@ fn navigate(
         duplicate_scene_name: "当前事项下已存在同名页签",
         workspace_path_invalid: WORKSPACE_PATH_INVALID,
         detached_session_must_return: "独立窗口中的会话需要先回到原会话列表",
-    };
-    let metadata = |kind: &str, input: &Value| CommandMetadata {
-        command_id: id(),
-        command_type: kind.into(),
-        request_hash: input.to_string(),
-        causation_id: None,
-        correlation_id: None,
     };
     match command {
         Command::CreateWorkspace { root_directory } => {

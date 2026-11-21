@@ -1135,6 +1135,34 @@ mod workspace {
         }
     }
 
+    fn draw_board(window: Handle, cx: &mut AsyncApp) -> HashMap<String, Bounds<Pixels>> {
+        matou_native_desktop::workspace_board::capture_board_bounds(|| {
+            draw(window.into(), cx);
+        })
+    }
+
+    fn drag_board_card(window: Handle, cx: &mut AsyncApp, source: &str, destination: &str) {
+        let bounds = draw_board(window, cx);
+        let from = bounds[source].origin + point(px(18.), px(16.));
+        let to = bounds[destination].center();
+        dispatch_mouse(window, cx, mouse_down(from, Modifiers::default()));
+        for position in [from + point(px(10.), px(0.)), to] {
+            dispatch_mouse(
+                window,
+                cx,
+                MouseMoveEvent {
+                    position,
+                    pressed_button: Some(MouseButton::Left),
+                    modifiers: Modifiers::default(),
+                },
+            );
+            draw_board(window, cx);
+        }
+        assert!(window.update(cx, |_, _, cx| cx.has_active_drag()).unwrap());
+        dispatch_mouse(window, cx, mouse_up(to));
+        assert!(!window.update(cx, |_, _, cx| cx.has_active_drag()).unwrap());
+    }
+
     fn publish_shell(window: Handle, cx: &mut AsyncApp, id: &str) {
         window
             .update(cx, |view, window, cx| {
@@ -1814,7 +1842,8 @@ mod workspace {
                 verify_horizontal_divider_drag(cx);
                 verify_splits(cx);
                 verify_links(cx).await;
-                live_wiring::verify(cx, fixture_root).await;
+                live_wiring::verify(cx, fixture_root.clone()).await;
+                live_wiring::verify_board(cx, fixture_root.join("board")).await;
                 cx.update(|cx| cx.quit()).unwrap();
             })
             .detach();
