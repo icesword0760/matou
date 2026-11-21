@@ -10,7 +10,7 @@ use std::{
 use anyhow::{Context, Result, ensure};
 use matou_native_core::{
     provider_launch::{EFFORTS, validate_cwd},
-    pty::{LaunchProfile, ShellLaunch},
+    pty::{LaunchProfile, ShellLaunch, get_var},
 };
 use serde_json::{Value, json};
 
@@ -62,17 +62,15 @@ pub(crate) fn prepare(
     rows: u16,
 ) -> Result<CodexLaunch> {
     validate_cwd(cwd)?;
-    let command = environment
-        .get(OsStr::new("MATOU_CODEX_COMMAND"))
+    let command = get_var(&environment, "MATOU_CODEX_COMMAND")
         .filter(|value| !value.is_empty())
-        .map_or(OsStr::new("codex"), OsString::as_os_str);
+        .unwrap_or(OsStr::new("codex"));
     let path = Path::new(command);
     let cwd = std::path::absolute(cwd)?;
     let executable = if path.file_name() != Some(command) {
         executable_at(cwd.join(path))
     } else {
-        environment
-            .get(OsStr::new("PATH"))
+        get_var(&environment, "PATH")
             .into_iter()
             .flat_map(std::env::split_paths)
             .filter(|dir| !dir.as_os_str().is_empty())
@@ -134,6 +132,18 @@ pub(crate) fn prepare(
         permission_mode,
         permission_warning,
     })
+}
+
+pub(crate) fn config_root<'a>(get: impl Fn(&str) -> Option<&'a OsStr>) -> Option<PathBuf> {
+    let get = |key| get(key).filter(|value| !value.is_empty());
+    if let Some(root) = get("CODEX_HOME") {
+        return Some(PathBuf::from(root));
+    }
+    #[cfg(windows)]
+    let home = get("USERPROFILE").or_else(|| get("HOME"));
+    #[cfg(not(windows))]
+    let home = get("HOME");
+    home.map(|home| Path::new(home).join(".codex"))
 }
 
 fn active_provider(data_root: &Path) -> Result<Value> {
