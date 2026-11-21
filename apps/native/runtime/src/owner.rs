@@ -14,7 +14,7 @@ use matou_native_core::{
     },
     ownership::DatabaseOwner,
     provider_launch::{ClaudeGatewayProjection, ClaudeLaunch, EFFORTS, attach_claude_settings},
-    pty::LaunchProfile,
+    pty::{LaunchProfile, get_var, set_var},
     session_graph,
     sessions::{
         self, ClaudeBinding, ClaudeFork, ClaudeRestore, ProviderBinding, SessionRun, StartRunInput,
@@ -117,7 +117,7 @@ struct RunningShell {
     run_id: String,
     cwd: String,
     is_shell: bool,
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     alias_preheat: Option<ShellInput>,
     restore_history: bool,
     cwd_tracker: CwdTracker,
@@ -356,13 +356,7 @@ impl ShellOwner {
         let Some(env) = &self.provider_environment else {
             return crate::codex_catalog::root();
         };
-        env.get(std::ffi::OsStr::new("CODEX_HOME"))
-            .map(PathBuf::from)
-            .or_else(|| {
-                let key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
-                env.get(std::ffi::OsStr::new(key))
-                    .map(|home| Path::new(home).join(".codex"))
-            })
+        crate::codex_launch::config_root(|key| get_var(env, key))
     }
 
     #[cfg(unix)]
@@ -2748,16 +2742,10 @@ impl ShellOwner {
             };
             let claude_projects = (profile == LaunchProfile::ClaudeCode)
                 .then(|| {
-                    options
-                        .launch
-                        .env
-                        .get(std::ffi::OsStr::new("CLAUDE_CONFIG_DIR"))
+                    get_var(&options.launch.env, "CLAUDE_CONFIG_DIR")
                         .map(|path| options.launch.cwd.join(path).join("projects"))
                         .or_else(|| {
-                            options
-                                .launch
-                                .env
-                                .get(std::ffi::OsStr::new("HOME"))
+                            get_var(&options.launch.env, "HOME")
                                 .map(|home| Path::new(home).join(".claude/projects"))
                         })
                         .or_else(crate::provider_catalog::projects_root)
@@ -2847,16 +2835,19 @@ impl ShellOwner {
                     permission,
                     binding,
                 }) => {
-                    let home = antigravity_launch::env_value(&options.launch.env, "HOME")
-                        .context("Antigravity shell home is missing")?;
+                    let home = get_var(&options.launch.env, "HOME").filter(|home| !home.is_empty());
+                    #[cfg(windows)]
+                    let home = home.or_else(|| {
+                        get_var(&options.launch.env, "USERPROFILE").filter(|home| !home.is_empty())
+                    });
+                    let home = home.context("Antigravity shell home is missing")?;
                     let catalog_root = crate::antigravity_catalog::catalog_root(
                         Path::new(home),
                         &options.launch.env,
                     );
-                    let native_config =
-                        antigravity_launch::env_value(&options.launch.env, "ANTIGRAVITY_HOME")
-                            .filter(|path| !path.is_empty())
-                            .map(|path| options.launch.cwd.join(path));
+                    let native_config = get_var(&options.launch.env, "ANTIGRAVITY_HOME")
+                        .filter(|path| !path.is_empty())
+                        .map(|path| options.launch.cwd.join(path));
                     antigravity_config.extend(native_config);
                     antigravity_config.extend([
                         Path::new(home).join(".gemini/antigravity"),
@@ -3040,14 +3031,12 @@ impl ShellOwner {
                 Ok(()) => {
                     if let Some(bin) = &self.control_bin {
                         let launch = &mut options.launch;
-                        let path = launch
-                            .env
-                            .get(std::ffi::OsStr::new("PATH"))
-                            .or_else(|| launch.inherited_env.get(std::ffi::OsStr::new("PATH")));
+                        let path = get_var(&launch.env, "PATH")
+                            .or_else(|| get_var(&launch.inherited_env, "PATH"));
                         let entries = path.into_iter().flat_map(std::env::split_paths);
                         match std::env::join_paths(std::iter::once(bin.clone()).chain(entries)) {
                             Ok(path) => {
-                                launch.env.insert("PATH".into(), path);
+                                set_var(&mut launch.env, "PATH".into(), path);
                             }
                             Err(error) => {
                                 eprintln!("[host-control] could not prepend mt to PATH: {error}")
@@ -3058,7 +3047,7 @@ impl ShellOwner {
                 Err(error) => eprintln!("[host-control] {error:#}"),
             }
         }
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         let alias_input = is_shell.then(|| ShellInput::with_shell_environment(&options.launch));
         let mut worker = match SessionWorker::spawn(options, self.send.clone(), run_id.clone()) {
             Ok(worker) => worker,
@@ -3069,7 +3058,7 @@ impl ShellOwner {
                 return Err(error);
             }
         };
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         if let Some(input) = alias_input.clone() {
             worker.restore_shell_input(input);
         }
@@ -3118,7 +3107,7 @@ impl ShellOwner {
                 run_id,
                 cwd: stored.cwd,
                 is_shell,
-                #[cfg(unix)]
+                #[cfg(any(unix, windows))]
                 alias_preheat: alias_input,
                 restore_history,
                 cwd_tracker: CwdTracker::default(),
@@ -5151,7 +5140,7 @@ impl ShellOwner {
         let shell = self.shells.get_mut(id).expect("registered session output");
         shell.emitted_output = true;
         shell.last_output = Some(Instant::now());
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         if !self.closing
             && let Some(input) = shell.alias_preheat.take()
         {
@@ -5359,7 +5348,7 @@ impl ShellOwner {
             return Ok(());
         }
         shell.ended = true;
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         {
             shell.alias_preheat = None;
         }

@@ -11,7 +11,7 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-use matou_native_core::pty::ShellLaunch;
+use matou_native_core::pty::{ShellLaunch, get_var};
 use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
@@ -119,16 +119,8 @@ pub(crate) struct Run {
 
 impl Run {
     pub fn new(launch: &ShellLaunch) -> Self {
-        let env = |key: &str| {
-            launch
-                .env
-                .get(OsStr::new(key))
-                .or_else(|| launch.inherited_env.get(OsStr::new(key)))
-                .filter(|value| !value.is_empty())
-        };
-        let home = env("CODEX_HOME").map(PathBuf::from).or_else(|| {
-            let home_key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
-            env(home_key).map(|home| Path::new(home).join(".codex"))
+        let home = crate::codex_launch::config_root(|key| {
+            get_var(&launch.env, key).or_else(|| get_var(&launch.inherited_env, key))
         });
         Self {
             home: home.map(|home| launch.cwd.join(home)),

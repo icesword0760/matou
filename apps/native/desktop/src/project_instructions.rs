@@ -441,17 +441,80 @@ fn save(path: &Path, original: &str, text: &str) -> io::Result<()> {
         file.set_permissions(permissions)?;
         file.write_all(text.as_bytes())?;
         file.sync_all()?;
+        drop(file);
         if destination != path.canonicalize()? || read(&destination)? != original {
             return Err(io::Error::other(
                 "The instruction file changed on disk. Reopen it before saving.",
             ));
         }
+        #[cfg(windows)]
+        return replace_preserving_dacl(&temp, &destination);
+        #[cfg(not(windows))]
         std::fs::rename(&temp, &destination)
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&temp);
     }
     result
+}
+
+#[cfg(windows)]
+fn replace_preserving_dacl(temp: &Path, destination: &Path) -> io::Result<()> {
+    use std::{ffi::c_void, os::windows::ffi::OsStrExt, ptr::null_mut};
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn ReplaceFileW(
+            replaced: *const u16,
+            replacement: *const u16,
+            backup: *const u16,
+            flags: u32,
+            exclude: *mut c_void,
+            reserved: *mut c_void,
+        ) -> i32;
+        fn MoveFileExW(existing: *const u16, new: *const u16, flags: u32) -> i32;
+    }
+
+    let backup = temp.with_extension("bak");
+    let wide = |path: &Path| {
+        path.as_os_str()
+            .encode_wide()
+            .chain([0])
+            .collect::<Vec<_>>()
+    };
+    let replaced = wide(destination);
+    let replacement = wide(temp);
+    let backup_name = wide(&backup);
+    // Use no ignore flags so Windows must preserve the destination's DACL.
+    // Supply a backup name so a failed rename cannot discard the original.
+    let ok = unsafe {
+        ReplaceFileW(
+            replaced.as_ptr(),
+            replacement.as_ptr(),
+            backup_name.as_ptr(),
+            0,
+            null_mut(),
+            null_mut(),
+        )
+    };
+    if ok != 0 {
+        let _ = std::fs::remove_file(&backup);
+        return Ok(());
+    }
+    let error = io::Error::last_os_error();
+    const ERROR_UNABLE_TO_MOVE_REPLACEMENT_2: i32 = 1177;
+    // On this failure Windows has already moved the original to the backup.
+    // Restore it only if no other writer has since created the destination.
+    if error.raw_os_error() == Some(ERROR_UNABLE_TO_MOVE_REPLACEMENT_2)
+        && unsafe { MoveFileExW(backup_name.as_ptr(), replaced.as_ptr(), 0) } == 0
+    {
+        return Err(io::Error::other(format!(
+            "{error}. Original instruction file retained at {} ({})",
+            backup.display(),
+            io::Error::last_os_error()
+        )));
+    }
+    Err(error)
 }
 
 impl Workspace {
